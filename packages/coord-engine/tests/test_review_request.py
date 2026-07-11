@@ -834,3 +834,130 @@ def test_fold_role_doc_none_but_listed_degrades_visibly(capsys):
     got = json.loads(capsys.readouterr().out)
     assert [g for g in got if g.get("type") == "review-role-degraded"], \
         "doc-None on a LISTED role doc must degrade visibly, not silently non-role"
+
+
+# --- tombstone ontology: EMPTY review dir carries zero information ------------
+#
+# The store's deletes are SOFT: an archived/deleted review leaves its `<slug>/`
+# prefix behind forever. Fail-closed folding would surface each such ghost as a
+# forever-unknown orphan/[?] row in EVERY briefing — correct fail-closed behavior
+# over the WRONG ontology. An EMPTY review dir (no verdict shards) must fold as a
+# TOMBSTONE: silently skipped. The three-way is: doc -> normal, verdicts-no-doc ->
+# orphan (surface), empty/`.settled`-only -> tombstone (skip), listing-raise ->
+# UNKNOWN-degraded (never assume tombstone on transport failure).
+
+def test_empty_review_dir_folds_as_tombstone_invisible(capsys):
+    # A `<slug>/` dir with NO verdict `.md` shards and no `<slug>.md` doc is a
+    # soft-delete ghost: it must NOT surface as review-orphan, a [?] pending row,
+    # or a degraded marker. A real orphan (verdicts present) and a real pending
+    # review are untouched.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-live", "--of", "url",
+              "--reviewer", "alice"], transport=t)               # real pending
+    t.put("team/r/review/pr-orphan/verdicts/x.md",              # real orphan
+          "---\ntype: Verdict\nreviewer: x\nverdict: approve\n---\n")
+    t.put("team/r/review/pr-empty/", "")                        # empty tombstone
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    kinds = {(r.get("type"), r.get("name")) for r in out}
+    assert ("review-orphan", "pr-empty") not in kinds, "empty dir must not surface as orphan"
+    assert not any(r.get("name") == "pr-empty" for r in out), "tombstone must be invisible"
+    assert any(r.get("type") == "review-orphan" and r.get("name") == "pr-orphan" for r in out)
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-live" for r in out)
+    assert not any(r.get("type") == "review-fold-degraded" for r in out), \
+        "a tombstone is not a degraded scan"
+
+
+def test_settled_only_review_dir_folds_as_tombstone(capsys):
+    # A dir holding ONLY a stale `.settled` marker (the review doc is gone) is a
+    # tombstone: the marker is stale cache, not a live settle. Skip it silently.
+    t = FakeTransport()
+    t.put("team/r/review/pr-stale/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert not any(r.get("name") == "pr-stale" for r in out), \
+        "`.settled`-only dir is a tombstone, not an orphan"
+
+
+def test_orphan_dir_verdicts_listing_raise_is_degraded_not_tombstone(capsys):
+    # Fail-closed outranks tombstone-skip: a verdicts LISTING that RAISES means the
+    # dir's contents are UNKNOWN — never assume it is empty (a tombstone). Surface
+    # a degraded marker; do NOT silently skip.
+    class OrphanListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-unknown/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OrphanListFails()
+    t.put("team/r/review/pr-unknown/", "")  # dir-only, but verdicts listing raises
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert any(r.get("type") == "review-orphan-degraded" and r.get("name") == "pr-unknown"
+               for r in out), "a raised verdicts listing must degrade VISIBLY, not tombstone"
+
+
+def test_needs_me_tombstone_absent_orphan_degraded_present(capsys):
+    # End-to-end through needs-me text: a tombstone prints nothing; a degraded
+    # classification prints a visible line.
+    class OrphanListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-unk/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OrphanListFails()
+    t.put("team/r/review/pr-tomb/", "")   # tombstone -> invisible
+    t.put("team/r/review/pr-unk/", "")    # degraded  -> visible
+    capsys.readouterr()
+    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "pr-tomb" not in out, "tombstone must never print"
+    assert "pr-unk" in out, "a degraded orphan classification must print"
+
+
+def test_dir_classification_runs_under_the_fold_budget(capsys):
+    # Pre-budget seam (coordinator review): the dir-classification loop and its
+    # per-dir verdicts listings must run UNDER the fold's own deadline — 15
+    # tombstones on a degraded transport must never buy N x timeout of unbudgeted
+    # listings AHEAD of the budget. Classification is capped at a RESERVED half of
+    # the fold budget (visibility-only work must never starve the load-bearing doc
+    # scan — the reconcile reserved-budget pattern). On breach the remaining
+    # unclassified dirs roll into ONE aggregate degraded row ({unclassified: k})
+    # and the fold proceeds to the doc scan with the reserved remainder — a real
+    # pending review is still served.
+    class SlowGhostListings(CountingTransport):
+        def list_dir(self, prefix):
+            if "/verdicts/" in prefix and "ghost-" in prefix:
+                time.sleep(0.03)  # a degraded transport's slow dir listing
+            return super().list_dir(prefix)
+
+    t = SlowGhostListings()
+    cli.main(["review", "request", "r", "pr-live", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    for i in range(6):
+        t.put(f"team/r/review/ghost-{i}/", "")  # six soft-delete ghosts
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
+    agg = [r for r in out if r.get("type") == "review-orphan-degraded"
+           and r.get("unclassified")]
+    assert len(agg) == 1 and agg[0]["unclassified"] >= 1, \
+        f"breach must emit ONE aggregate unclassified row, got {out}"
+    ghost_lists = [p for p in t.lists if "/verdicts/" in p and "ghost-" in p]
+    assert len(ghost_lists) < 6, "classification must stop at the deadline, not run out"
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-live"
+               for r in out), "doc-scan rows must still be served after the breach"
+
+
+def test_review_status_on_tombstone_says_tombstone_not_retry(capsys):
+    # `review status` on a doc-less, verdict-less slug: keep rc 1 but say tombstone
+    # (a retry will never help), not the generic "unknown, retry".
+    t = FakeTransport()
+    t.put("team/r/review/pr-ghost/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-ghost"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "tombstone" in cap.err, cap.err
+    assert "retry" not in cap.err, "a tombstone retry never helps — do not say retry"

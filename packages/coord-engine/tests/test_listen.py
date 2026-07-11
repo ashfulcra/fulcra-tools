@@ -7,6 +7,7 @@ disciplines that this week's incidents made binding.
 
 import argparse
 import json
+import time
 
 import pytest
 
@@ -816,6 +817,85 @@ def test_orphan_review_dir_emits_one_listen_event_cached(capsys):
     events2, _ = cli._run_listen_tick(t, TEAM, "me", state,
                                       json_mode=False, verbose=False)
     assert not [e for e in events2 if e.get("type") == "orphan"]
+
+
+def test_empty_review_dir_is_tombstone_no_listen_orphan_or_degrade(capsys):
+    # A `<slug>/` dir with NO verdict shards and no doc is a soft-delete ghost:
+    # listen must NOT emit an orphan event, must NOT degrade, and must NOT cache it
+    # (it carries zero information). A `.settled`-only dir is the same tombstone.
+    t = FakeTransport()
+    t.put("team/r/review/pr-empty/", "")                        # empty tombstone
+    t.put("team/r/review/pr-stale/verdicts/.settled",          # stale-marker tombstone
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    assert not [e for e in events if e.get("type") == "orphan"], "tombstones emit no orphan"
+    assert failures == {}, "a tombstone is not a degraded source"
+    assert state["orphan_slugs"] == [], "a tombstone must never be cached as an orphan"
+
+
+def test_orphan_dir_listing_raise_degrades_listen_not_tombstone(capsys):
+    # Fail-closed outranks tombstone-skip: a verdicts LISTING that RAISES is
+    # UNKNOWN — surface a degraded `verdicts` source, never a silent tombstone.
+    class OrphanListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-unk/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OrphanListFails()
+    t.put("team/r/review/pr-unk/", "")  # dir-only, verdicts listing raises
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    assert not [e for e in events if e.get("type") == "orphan"], "unknown is not an orphan event"
+    assert "verdicts" in failures, "a raised listing must degrade VISIBLY"
+    assert state["orphan_slugs"] == [], "an unknown dir must not be cached as seen"
+
+
+def test_listen_dir_classification_bounded_by_budget(capsys, monkeypatch):
+    # Codex P1: the dir-only set is PERMANENT and growing (soft deletes), unlike
+    # the my-unsettled-slugs set bounding the source's other listings — so the
+    # listener's classification pass must run under its own small time budget
+    # (COORD_LISTEN_CLASSIFY_BUDGET). Adversarial: several tombstones + slow
+    # listings + a tiny budget -> the tick returns BEFORE visiting them all, the
+    # `verdicts` source degrades (existing streak), NO classification knowledge is
+    # cached for the unvisited (no ORPHAN events, no orphan_slugs entries — unknown
+    # is not classified), and a recovery tick classifies correctly.
+    monkeypatch.setenv("COORD_LISTEN_CLASSIFY_BUDGET", "0.05")
+
+    class SlowGhostListings(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.slow = True
+
+        def list_dir(self, prefix):
+            if self.slow and "/verdicts/" in prefix and "ghost-" in prefix:
+                time.sleep(0.03)  # degraded transport: each dir listing crawls
+            return super().list_dir(prefix)
+
+    t = SlowGhostListings()
+    for i in range(5):
+        t.put(f"team/r/review/ghost-{i}/", "")  # permanent soft-delete ghosts
+    # the LAST dir (sorted) is a real orphan — only classifiable after recovery
+    t.put("team/r/review/ghost-5/verdicts/x.md",
+          "---\ntype: Verdict\nreviewer: x\nverdict: approve\n---\n")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    assert "verdicts" in failures, "budget exhaustion must degrade the verdicts source"
+    assert not [e for e in events if e.get("type") == "orphan"], \
+        "unvisited dirs must emit no ORPHAN events"
+    assert state["orphan_slugs"] == [], \
+        "no classification knowledge may persist for unvisited dirs"
+    # recovery: fast transport -> next tick classifies ALL, finds the real orphan
+    t.slow = False
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "me", state,
+                                              json_mode=False, verbose=False)
+    assert [e["slug"] for e in events2 if e.get("type") == "orphan"] == ["ghost-5"]
+    assert "verdicts" not in failures2, "recovered tick must not stay degraded"
+    assert state["orphan_slugs"] == ["ghost-5"]
 
 
 def test_pinned_roles_streak_does_not_mask_fresh_inbox_outage(capsys):

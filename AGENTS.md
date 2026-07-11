@@ -215,9 +215,25 @@ it (not on PyPI).
   emits). **Role-expansion asymmetry (deliberate — know which verb expands what):** `listen` expands
   role-held DIRECTIVES; `needs-me`/`briefing` expand roles for pending REVIEWS only (a review whose
   `pending_required` names a role you hold); `inbox` and briefing's inbox section expand nothing (agent
-  id and `*` only). The verdicts source also surfaces **orphan review dirs** (a `<slug>/` verdicts dir
-  with no `<slug>.md` doc): one cached `ORPHAN <slug>` event, visibility only — repair is a
-  human/maintainer action (`needs-me` shows the same slugs as `review-orphan` rows every pass). One
+  id and `*` only). The verdicts source also classifies **dir-only review slugs** (a `<slug>/` dir with no
+  `<slug>.md` doc) by a **tombstone three-way** (one verdicts listing apiece, so zero extra ops):
+  a dir with real verdict `.md` shards is an **orphan** — one cached `ORPHAN <slug>` event / a
+  `review-orphan` row every `needs-me`/`briefing` pass, visibility only (repair is a human/maintainer
+  action, never auto-delete); an **empty** dir (no shards, or only a stale `.settled` marker whose doc
+  is gone) is a soft-delete **tombstone** carrying zero information — silently skipped by the fold,
+  listen, and `[?]`/orphan emission (an orphan row here is the wrong ontology, not a pending
+  obligation); a verdicts listing that **raises** is **unknown** — fail closed and surface it visibly
+  (`review-orphan-degraded` / a degraded `verdicts` source), never assume tombstone on transport
+  failure. Classification is budgeted everywhere it runs — the dir-only set is permanent and growing
+  (soft deletes), unlike the my-unsettled-slugs set bounding the source's other listings: in the fold
+  it runs under a reserved half of the review-fold budget (a visibility-only pass must never starve
+  the load-bearing doc scan; on breach the remaining dirs emit one aggregate `review-orphan-degraded
+  {unclassified: k}` row and the doc scan proceeds on the reserved remainder), and in `listen` under
+  a per-tick cap (`COORD_LISTEN_CLASSIFY_BUDGET`, default 10s; on exhaustion the `verdicts` source
+  degrades, nothing is cached for unvisited dirs, and the next tick retries). `review status <slug>`
+  on a tombstone stays rc 1 but says *tombstone (archived/deleted
+  review) — no doc, no verdicts* instead of the generic "unknown, retry" (a retry never resurrects a
+  gone doc). One
   event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`), `--json` for
   one object per line; a quiet tick prints NOTHING
   (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
