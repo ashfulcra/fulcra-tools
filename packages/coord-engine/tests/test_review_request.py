@@ -834,3 +834,97 @@ def test_fold_role_doc_none_but_listed_degrades_visibly(capsys):
     got = json.loads(capsys.readouterr().out)
     assert [g for g in got if g.get("type") == "review-role-degraded"], \
         "doc-None on a LISTED role doc must degrade visibly, not silently non-role"
+
+
+# --- tombstone ontology: EMPTY review dir carries zero information ------------
+#
+# The store's deletes are SOFT: an archived/deleted review leaves its `<slug>/`
+# prefix behind forever. Fail-closed folding would surface each such ghost as a
+# forever-unknown orphan/[?] row in EVERY briefing — correct fail-closed behavior
+# over the WRONG ontology. An EMPTY review dir (no verdict shards) must fold as a
+# TOMBSTONE: silently skipped. The three-way is: doc -> normal, verdicts-no-doc ->
+# orphan (surface), empty/`.settled`-only -> tombstone (skip), listing-raise ->
+# UNKNOWN-degraded (never assume tombstone on transport failure).
+
+def test_empty_review_dir_folds_as_tombstone_invisible(capsys):
+    # A `<slug>/` dir with NO verdict `.md` shards and no `<slug>.md` doc is a
+    # soft-delete ghost: it must NOT surface as review-orphan, a [?] pending row,
+    # or a degraded marker. A real orphan (verdicts present) and a real pending
+    # review are untouched.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-live", "--of", "url",
+              "--reviewer", "alice"], transport=t)               # real pending
+    t.put("team/r/review/pr-orphan/verdicts/x.md",              # real orphan
+          "---\ntype: Verdict\nreviewer: x\nverdict: approve\n---\n")
+    t.put("team/r/review/pr-empty/", "")                        # empty tombstone
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    kinds = {(r.get("type"), r.get("name")) for r in out}
+    assert ("review-orphan", "pr-empty") not in kinds, "empty dir must not surface as orphan"
+    assert not any(r.get("name") == "pr-empty" for r in out), "tombstone must be invisible"
+    assert any(r.get("type") == "review-orphan" and r.get("name") == "pr-orphan" for r in out)
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-live" for r in out)
+    assert not any(r.get("type") == "review-fold-degraded" for r in out), \
+        "a tombstone is not a degraded scan"
+
+
+def test_settled_only_review_dir_folds_as_tombstone(capsys):
+    # A dir holding ONLY a stale `.settled` marker (the review doc is gone) is a
+    # tombstone: the marker is stale cache, not a live settle. Skip it silently.
+    t = FakeTransport()
+    t.put("team/r/review/pr-stale/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert not any(r.get("name") == "pr-stale" for r in out), \
+        "`.settled`-only dir is a tombstone, not an orphan"
+
+
+def test_orphan_dir_verdicts_listing_raise_is_degraded_not_tombstone(capsys):
+    # Fail-closed outranks tombstone-skip: a verdicts LISTING that RAISES means the
+    # dir's contents are UNKNOWN — never assume it is empty (a tombstone). Surface
+    # a degraded marker; do NOT silently skip.
+    class OrphanListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-unknown/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OrphanListFails()
+    t.put("team/r/review/pr-unknown/", "")  # dir-only, but verdicts listing raises
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert any(r.get("type") == "review-orphan-degraded" and r.get("name") == "pr-unknown"
+               for r in out), "a raised verdicts listing must degrade VISIBLY, not tombstone"
+
+
+def test_needs_me_tombstone_absent_orphan_degraded_present(capsys):
+    # End-to-end through needs-me text: a tombstone prints nothing; a degraded
+    # classification prints a visible line.
+    class OrphanListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-unk/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OrphanListFails()
+    t.put("team/r/review/pr-tomb/", "")   # tombstone -> invisible
+    t.put("team/r/review/pr-unk/", "")    # degraded  -> visible
+    capsys.readouterr()
+    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "pr-tomb" not in out, "tombstone must never print"
+    assert "pr-unk" in out, "a degraded orphan classification must print"
+
+
+def test_review_status_on_tombstone_says_tombstone_not_retry(capsys):
+    # `review status` on a doc-less, verdict-less slug: keep rc 1 but say tombstone
+    # (a retry will never help), not the generic "unknown, retry".
+    t = FakeTransport()
+    t.put("team/r/review/pr-ghost/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-ghost"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "tombstone" in cap.err, cap.err
+    assert "retry" not in cap.err, "a tombstone retry never helps — do not say retry"

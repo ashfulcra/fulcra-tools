@@ -340,6 +340,9 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             elif r.get("type") == "review-orphan":
                 print(f"  [REVIEW] orphan review dir (verdicts, no doc): "
                       f"{r['name']} — needs maintainer repair")
+            elif r.get("type") == "review-orphan-degraded":
+                print(f"  [REVIEW] orphan dir classification degraded: "
+                      f"{r['name']} — verdicts listing unreadable, retry")
             elif r.get("type") == "review-role-degraded":
                 print(f"  review role resolution degraded: "
                       f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
@@ -801,6 +804,33 @@ def _review_tally(
     return tally, raw is not None, vok, listing_ok
 
 
+def _classify_orphan_dir(transport: Any, team: str, slug: str) -> str:
+    """Classify a dir-only review slug — a ``<slug>/`` prefix under the review root
+    with NO ``<slug>.md`` doc — via ONE listing of its verdicts prefix (the same
+    listing the orphan feature needs, so classification is zero extra ops). The
+    store's deletes are SOFT: an archived/deleted review leaves its dir prefix
+    behind forever, so the three-way tells a live orphan from that ghost:
+
+    - ``"orphan"``    — at least one verdict ``.md`` shard is present: real
+      verdicts, no doc. Surface for maintainer repair (unchanged behavior).
+    - ``"tombstone"`` — no verdict ``.md`` shards (empty, or only a stale
+      ``.settled`` marker whose review doc is gone). The dir carries ZERO
+      information; fold it away silently — an orphan/[?] row here is the WRONG
+      ontology, not a real pending obligation, and a retry never resurrects a doc.
+    - ``"unknown"``   — the verdicts listing RAISED (degraded transport). NEVER
+      assume tombstone on a transport failure: the fail-closed rule outranks
+      tombstone-skip, so this stays VISIBLY degraded and is retried."""
+    try:
+        ventries = transport.list_dir(_verdicts_prefix(team, slug))
+    except TransportError:
+        return "unknown"
+    for x in ventries:
+        n = x.get("name") or ""
+        if not x.get("is_dir") and n.endswith(".md"):
+            return "orphan"
+    return "tombstone"
+
+
 def _roles_listing_names(transport: Any, team: str) -> Optional[set[str]]:
     """Entry names under ``team/<team>/roles/``, or None if the listing itself
     raised (membership UNKNOWN). The disambiguator for a role-doc ``read`` that
@@ -923,16 +953,27 @@ def _pending_reviews_for(
         e for e in entries
         if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
     ]
-    # Orphan review dirs (visibility only): a `<slug>/` dir with verdicts but no
-    # `<slug>.md` doc is invisible to the doc-keyed scan below. Surface each as a
-    # `review-orphan` row EVERY pass (repair stays a human/maintainer action).
+    # Dir-only review slugs (a `<slug>/` dir with no `<slug>.md` doc) are invisible
+    # to the doc-keyed scan below. Classify each via the tombstone three-way (one
+    # verdicts listing apiece): a dir with real verdict shards is an ORPHAN (surface
+    # a `review-orphan` row EVERY pass — repair stays a human/maintainer action); an
+    # EMPTY dir (no shards, or only a stale `.settled` marker) is a soft-delete
+    # TOMBSTONE carrying zero information — skip it silently (no orphan, no [?] row);
+    # a verdicts listing that RAISES is UNKNOWN — fail closed, surface a
+    # `review-orphan-degraded` row (never assume tombstone on transport failure).
     doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
     for e in entries:
         if not e.get("is_dir"):
             continue
         oslug = (e.get("name") or "").rstrip("/")
-        if oslug and oslug not in doc_slugs:
+        if not oslug or oslug in doc_slugs:
+            continue
+        kind = _classify_orphan_dir(transport, team, oslug)
+        if kind == "orphan":
             out.append({"type": "review-orphan", "name": oslug})
+        elif kind == "unknown":
+            out.append({"type": "review-orphan-degraded", "name": oslug})
+        # tombstone -> silently skipped
     total = len(slug_entries)
     scanned = 0
     skipped = 0
@@ -1424,11 +1465,23 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
     result, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
     if not doc_ok:
-        # The doc read returned None: missing slug OR transport failure —
-        # indistinguishable, and either way the tally is UNKNOWN. Without the
-        # required list, one readable approval verdict tallies as a clean
-        # APPROVED with pending:[] — printing that (or caching it) under a
-        # transient timeout would durably hide a pending review. Fail loud.
+        # The doc read returned None: no doc. If the verdicts dir is also empty
+        # (or holds only a stale `.settled` marker), this is a TOMBSTONE — an
+        # archived/deleted review whose dir prefix soft-deletes lingered. Keep rc 1
+        # (still non-clean for a caller sweep), but say tombstone: a retry never
+        # resurrects a gone doc, so the generic "unknown, retry" would be dishonest.
+        # A dir with real verdict shards (orphan) or a verdicts listing that RAISED
+        # (unknown) is NOT a tombstone — fall through to the generic fail-closed
+        # message, where a retry may genuinely help.
+        if _classify_orphan_dir(transport, team, slug) == "tombstone":
+            print(f"review status: {slug} in team/{team} is a tombstone "
+                  f"(archived/deleted review) — no doc, no verdicts",
+                  file=sys.stderr)
+            return 1
+        # Missing slug OR transport failure — indistinguishable, and either way the
+        # tally is UNKNOWN. Without the required list, one readable approval verdict
+        # tallies as a clean APPROVED with pending:[] — printing that (or caching
+        # it) under a transient timeout would durably hide a pending review. Fail loud.
         print(f"review status failed: {_review_doc_path(team, slug)} unreadable "
               f"(missing slug or degraded transport) — tally unknown, retry",
               file=sys.stderr)
@@ -2189,12 +2242,17 @@ def _listen_tick(transport: Any, team: str, agent: str,
                            "state": review.APPROVED})
             settled_reviews.add(slug)
 
-    # Orphan review dirs (visibility only): a `<slug>/` dir with verdicts but no
-    # `<slug>.md` doc is skipped by the doc-keyed scan above and would never be
-    # seen. Surface each ONCE (cached in `orphan_slugs`) so a listener learns the
-    # slug exists — repair stays a human/maintainer action, never auto-delete.
-    # Skipped entirely when the review listing failed (rentries is None): an
-    # unreadable root is UNKNOWN, not an absence of docs.
+    # Dir-only review slugs: a `<slug>/` dir with no `<slug>.md` doc is skipped by
+    # the doc-keyed scan above. Classify each via the tombstone three-way (one
+    # verdicts listing apiece): a dir with real verdict shards is an ORPHAN —
+    # surface it ONCE (cached in `orphan_slugs`) so a listener learns the slug
+    # exists (repair stays human/maintainer, never auto-delete); an EMPTY dir (no
+    # shards, or only a stale `.settled` marker) is a soft-delete TOMBSTONE carrying
+    # zero information — skip it silently and NEVER cache it; a verdicts listing
+    # that RAISES is UNKNOWN — fail closed, degrade the `verdicts` source visibly
+    # and do not cache (never assume tombstone on transport failure). Skipped
+    # entirely when the review listing failed (rentries is None): an unreadable
+    # root is UNKNOWN, not an absence of docs.
     orphan_slugs = set(state.get("orphan_slugs") or [])
     if rentries is not None:
         doc_names = {(e.get("name") or "")[:-3] for e in rentries
@@ -2203,9 +2261,16 @@ def _listen_tick(transport: Any, team: str, agent: str,
             if not e.get("is_dir"):
                 continue
             oslug = (e.get("name") or "").rstrip("/")
-            if oslug and oslug not in doc_names and oslug not in orphan_slugs:
+            if not oslug or oslug in doc_names or oslug in orphan_slugs:
+                continue
+            kind = _classify_orphan_dir(transport, team, oslug)
+            if kind == "orphan":
                 events.append({"type": "orphan", "slug": oslug})
                 orphan_slugs.add(oslug)
+            elif kind == "unknown":
+                _fail("verdicts", f"orphan dir {oslug} unclassifiable "
+                      f"(verdicts listing unreadable)")
+            # tombstone -> silently skipped, never cached
 
     state["inbox_ids"] = sorted(inbox_ids)
     state["response_keys"] = sorted(response_keys)

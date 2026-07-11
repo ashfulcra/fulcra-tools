@@ -818,6 +818,41 @@ def test_orphan_review_dir_emits_one_listen_event_cached(capsys):
     assert not [e for e in events2 if e.get("type") == "orphan"]
 
 
+def test_empty_review_dir_is_tombstone_no_listen_orphan_or_degrade(capsys):
+    # A `<slug>/` dir with NO verdict shards and no doc is a soft-delete ghost:
+    # listen must NOT emit an orphan event, must NOT degrade, and must NOT cache it
+    # (it carries zero information). A `.settled`-only dir is the same tombstone.
+    t = FakeTransport()
+    t.put("team/r/review/pr-empty/", "")                        # empty tombstone
+    t.put("team/r/review/pr-stale/verdicts/.settled",          # stale-marker tombstone
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    assert not [e for e in events if e.get("type") == "orphan"], "tombstones emit no orphan"
+    assert failures == {}, "a tombstone is not a degraded source"
+    assert state["orphan_slugs"] == [], "a tombstone must never be cached as an orphan"
+
+
+def test_orphan_dir_listing_raise_degrades_listen_not_tombstone(capsys):
+    # Fail-closed outranks tombstone-skip: a verdicts LISTING that RAISES is
+    # UNKNOWN — surface a degraded `verdicts` source, never a silent tombstone.
+    class OrphanListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-unk/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OrphanListFails()
+    t.put("team/r/review/pr-unk/", "")  # dir-only, verdicts listing raises
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    assert not [e for e in events if e.get("type") == "orphan"], "unknown is not an orphan event"
+    assert "verdicts" in failures, "a raised listing must degrade VISIBLY"
+    assert state["orphan_slugs"] == [], "an unknown dir must not be cached as seen"
+
+
 def test_pinned_roles_streak_does_not_mask_fresh_inbox_outage(capsys):
     # Review fix (MEDIUM): role-lease-unknown is its OWN degraded source ("roles"),
     # not folded into `inbox` — a chronic role degradation must not pin the inbox
