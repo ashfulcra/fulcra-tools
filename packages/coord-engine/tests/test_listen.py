@@ -69,7 +69,7 @@ def _fresh_state():
     return {"inbox_ids": [], "response_keys": [], "slug_owned": {},
             "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
             "degraded": {"inbox": False, "responses": False, "orphans": False,
-                         "verdicts": False}}
+                         "verdicts": False, "roles": False}}
 
 
 # --- Source 1: inbox directives -------------------------------------------
@@ -357,12 +357,13 @@ def test_legacy_single_bool_degraded_migrates_to_per_source(tmp_path):
                               "slug_owned": {}, "degraded": True}), encoding="utf-8")
     state = cli._load_listen_state(path)
     assert state["degraded"] == {"inbox": True, "responses": True,
-                                 "orphans": True, "verdicts": True}
+                                 "orphans": True, "verdicts": True, "roles": True}
     assert state["inbox_ids"] == ["x"]
 
     path.write_text(_j.dumps({"degraded": False}), encoding="utf-8")
     assert cli._load_listen_state(path)["degraded"] == {
-        "inbox": False, "responses": False, "orphans": False, "verdicts": False}
+        "inbox": False, "responses": False, "orphans": False, "verdicts": False,
+        "roles": False}
 
 
 def test_verbose_heartbeat_only_on_quiet_tick_and_only_stderr(capsys):
@@ -623,7 +624,8 @@ def test_load_state_tolerates_corrupt_file(tmp_path):
                      "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
                      "orphan_slugs": [],
                      "degraded": {"inbox": False, "responses": False,
-                                  "orphans": False, "verdicts": False}}
+                                  "orphans": False, "verdicts": False,
+                                  "roles": False}}
 
 
 def test_cmd_listen_once_exits_zero(tmp_path, monkeypatch, capsys):
@@ -787,10 +789,12 @@ def test_role_lease_read_degraded_is_visible_not_crash(capsys):
     state = _fresh_state()
     events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
                                             json_mode=False, verbose=False)
-    # no crash; directive not falsely emitted; degradation surfaced on inbox source
+    # no crash; directive not falsely emitted; degradation surfaced on its OWN
+    # "roles" source (not inbox — independent streaks, see the masking test below)
     assert not [e for e in events if e.get("slug") == "role-do-5"]
-    assert "inbox" in failures
-    assert state["degraded"]["inbox"] is True
+    assert "roles" in failures
+    assert state["degraded"]["roles"] is True
+    assert state["degraded"]["inbox"] is False
 
 
 def test_orphan_review_dir_emits_one_listen_event_cached(capsys):
@@ -812,3 +816,48 @@ def test_orphan_review_dir_emits_one_listen_event_cached(capsys):
     events2, _ = cli._run_listen_tick(t, TEAM, "me", state,
                                       json_mode=False, verbose=False)
     assert not [e for e in events2 if e.get("type") == "orphan"]
+
+
+def test_pinned_roles_streak_does_not_mask_fresh_inbox_outage(capsys):
+    # Review fix (MEDIUM): role-lease-unknown is its OWN degraded source ("roles"),
+    # not folded into `inbox` — a chronic role degradation must not pin the inbox
+    # streak and mask a fresh summaries outage (the independent-streak invariant).
+    class LeaseListFails(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.fail_summaries = False
+
+        def read(self, path):
+            if self.fail_summaries and path.endswith("summaries.json"):
+                raise TransportError("summaries boom")
+            return super().read(path)
+
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("lease boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put(cli._role_doc_path(TEAM, "reviewer"),
+          "---\ntype: Role\npolicy: shared\nsla_hours: 8760000\n---\n")
+    _put_directive(t, "role-do-m", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    state = _fresh_state()
+    # tick 1: chronic role degradation alarms once, on ITS OWN "roles" streak
+    _, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                       json_mode=False, verbose=False)
+    err1 = capsys.readouterr().err
+    assert "roles" in failures and "inbox" not in failures
+    assert state["degraded"]["roles"] is True
+    assert state["degraded"]["inbox"] is False
+    assert "LISTEN DEGRADED" in err1
+    # tick 2: roles STILL degraded (suppressed) AND a fresh summaries outage —
+    # the inbox source must still alarm.
+    t.fail_summaries = True
+    _, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                        json_mode=False, verbose=False)
+    err2 = capsys.readouterr().err
+    assert "inbox" in failures2
+    assert state["degraded"]["inbox"] is True
+    assert "LISTEN DEGRADED" in err2 and "summaries index unreadable" in err2
+    assert "lease unknown" not in err2, "pinned roles streak must stay suppressed"

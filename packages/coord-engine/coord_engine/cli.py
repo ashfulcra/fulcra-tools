@@ -247,6 +247,13 @@ def _escalation_marker_path(team: str, role: str, date: str) -> str:
 def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     team, role = args.team, args.role
     now = _iso(_now())
+    # A None role-doc read here falls back to defaults DELIBERATELY: this is a
+    # single direct read with no prior listing, so absent-vs-transport-failed is
+    # genuinely ambiguous (read() returns None for both) and disambiguating would
+    # cost an extra parent listing on every healthy query. Contrast cmd_escalate,
+    # which HAS just listed roles/ — there a None doc read is knowably transient-
+    # or-deleted and fails closed (skip) instead. The acting path is protected;
+    # this reporting path tolerates the ambiguity.
     reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, role))) or {}
     policy = reg.get("policy") or "shared"
     try:
@@ -1655,10 +1662,11 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 #      the await leg of `review request`, now that a verb-opened review notifies
 #      its reviewers atomically (so the `await verdicts` breadcrumb is genuine).
 #
-# Four failure SOURCES are tracked independently — inbox (summaries index),
+# Five failure SOURCES are tracked independently — inbox (summaries index),
 # responses (the responses subtree transport), orphans (a response whose owning
-# directive doc won't resolve), and verdicts (the review root / a review doc /
-# a verdict shard unreadable). Each is its own degraded streak.
+# directive doc won't resolve), verdicts (the review root / a review doc /
+# a verdict shard unreadable), and roles (a role-lease listing unreadable while
+# resolving role-routed directives). Each is its own degraded streak.
 #
 # Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
 #   * No false advance — a failed/None read during a tick must NOT mark unknown
@@ -1681,7 +1689,11 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 
 
 # The independent degraded streaks. Each source alarms once per its own streak.
-_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts")
+# `roles` (role-lease resolution for role-routed directives) is its own source:
+# folding it into `inbox` would let a chronic role degradation pin that streak
+# and mask a fresh summaries outage — the independent-streak invariant. Legacy
+# state files lack the key; _coerce_degraded defaults it False (free migration).
+_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles")
 
 
 def _fresh_degraded() -> dict[str, bool]:
@@ -1748,7 +1760,7 @@ def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
 def _listen_tick(transport: Any, team: str, agent: str,
                  state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
-    degraded SOURCE (``inbox`` / ``responses`` / ``orphans``) to its messages, and
+    degraded SOURCE (see ``_LISTEN_SOURCES``) to its messages, and
     mutates ``state`` with ONLY affirmatively-processed ids (add-only — see the
     section note): a failed read/list adds nothing, so it can never mark unknown
     data as seen."""
@@ -1770,11 +1782,20 @@ def _listen_tick(transport: Any, team: str, agent: str,
     if not inbox_ok:
         _fail("inbox", "summaries index unreadable")
     # Role expansion (contract gap): resolve fresh-lease holders ONLY for
-    # role-shaped assignees on UNSEEN open directives — one role-doc+lease read per
-    # distinct such role, cached in this per-tick dict (NOT persistent state: leases
-    # change). id-diff is unchanged (the directive slug is the id regardless of the
-    # route), so a new role holder sees a directive iff its id is unseen in THEIR
-    # OWN state file (state is per-agent) — the holder-change semantics fall out.
+    # role-shaped assignees on UNSEEN open directives — one role-doc(+lease) read
+    # per distinct such assignee, deduped per tick (NOT persistent state: leases
+    # change). HONEST BOUND: a directive assigned to ANOTHER literal agent never
+    # enters this agent's inbox_ids, so its assignee is re-probed every tick (one
+    # role-doc read resolving to "not a role", no lease reads) for as long as the
+    # directive stays open — per-tick cost is O(distinct foreign assignees on open
+    # directives), small in practice. A persistent negative "not-a-role" cache was
+    # considered and REJECTED: read() can't distinguish absent from failed, and a
+    # name later registered as a role would be silently unroutable forever (a
+    # staleness hole worse than the read cost). Revisit only with a roles/-listing
+    # invalidation if fleets grow. id-diff is unchanged (the directive slug is the
+    # id regardless of the route), so a new role holder sees a directive iff its id
+    # is unseen in THEIR OWN state file (state is per-agent) — the holder-change
+    # semantics fall out.
     candidate_roles: set[str] = set()
     for r in rows:
         if r.get("status") not in directives.OPEN_STATUSES:
@@ -1790,10 +1811,12 @@ def _listen_tick(transport: Any, team: str, agent: str,
     for role in sorted(candidate_roles):
         holders, ok = _role_fresh_holders(transport, team, role, now=now_iso)
         if not ok:
-            # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent may
-            # miss role-routed work) via the inbox source, and never crash — do NOT
-            # treat unknown as "not a holder" silently.
-            _fail("inbox", f"role lease unknown for {role}")
+            # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent
+            # may miss role-routed work) on the DEDICATED `roles` source — never
+            # crash, never treat unknown as "not a holder" silently. Its own
+            # source is load-bearing: a chronic role degradation must not pin the
+            # inbox streak and mask a fresh summaries outage.
+            _fail("roles", f"role lease unknown for {role}")
             continue
         if agent in holders:
             held_roles.add(role)
@@ -2882,7 +2905,21 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
             continue
         role = n[:-3]; checked += 1
-        reg = okf.parse_frontmatter(transport.read(_role_doc_path(args.team, role))) or {}
+        doc = transport.read(_role_doc_path(args.team, role))
+        if doc is None:
+            # FAIL CLOSED (review fix): this doc was JUST LISTED by the parent
+            # roles/ scan, so a None read is knowably transient-or-deleted — never
+            # a live role to judge under DEFAULT_SLA_HOURS. Falling through with
+            # the 24h default would collapse a longer-SLA role's window and fire a
+            # false VACANT escalation (the incident vector, on the acting path).
+            # Skip: transient -> retried next sweep (correct); deleted -> role
+            # gone (also correct). `roles status` differs deliberately: a single
+            # direct read with NO prior listing cannot disambiguate absent from
+            # failed, so it keeps its default-SLA fallback (see cmd_roles_status).
+            print(f"escalate: role doc unreadable for {role} — state unknown, "
+                  f"skipped (degraded transport, retry)", file=sys.stderr)
+            continue
+        reg = okf.parse_frontmatter(doc) or {}
         try:
             sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
         except (TypeError, ValueError):

@@ -1383,3 +1383,31 @@ def test_escalate_does_not_escalate_on_unknown_lease(capsys):
     assert "0 escalated" in out
     assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store)
     assert not any("escalations/" in p for p in t.store)
+
+
+def test_escalate_skips_role_on_transient_doc_read_failure(capsys):
+    # Review fix (HIGH): the role doc was JUST LISTED by the parent roles/ scan, so
+    # a None doc read is knowably transient-or-deleted — NOT a role with default
+    # SLA. Falling through with DEFAULT_SLA_HOURS=24 would collapse a >24h-SLA
+    # role's window and fire a false VACANT escalation (the incident vector, on the
+    # acting path). Fix: doc-None after listing -> UNKNOWN -> skip.
+    class RoleDocReadFails(FakeTransport):
+        def read(self, path):
+            if path == "team/r/roles/patient.md":
+                return None  # transient read failure on a just-listed doc
+            return super().read(path)
+
+    t = RoleDocReadFails()
+    # 72h-SLA role; lease 30h old: fresh per its doc, stale per the 24h default
+    t.put("team/r/roles/patient.md",
+          "---\ntype: Role\nsla_hours: 72\nmaintainer: ash\n---\n")
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat().replace("+00:00", "Z")
+    t.put("team/r/roles/patient/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {ts}\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "0 escalated" in out
+    assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store), \
+        "a transient role-doc read failure must never fire a VACANT escalation"
+    assert not any("escalations/" in p for p in t.store)

@@ -125,18 +125,29 @@ skills. Subagent-only work stays OFF the bus.
   tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
-  against a per-agent state file — new inbox directives (the same fold `inbox` shows), new **responses
-  to directives you own** (the reply leg `respond` writes but nothing used to surface), and new
-  **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
+  against a per-agent state file — new inbox directives **plus directives routed to a role you hold a
+  fresh lease on** (a strict SUPERSET of the `inbox` fold; role holders are resolved per tick, only for
+  role-shaped assignees on unseen directives, so a lease handoff re-routes the very next tick and the id
+  is the directive slug regardless of route — a new holder sees it iff it's unseen in THEIR state), new
+  **responses to directives you own** (the reply leg `respond` writes but nothing used to surface), and
+  new **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
   bounded: one review-root listing per tick, requester cached; a `.settled` review first emits its
   unseen verdicts plus one terminal `SETTLED <slug>: APPROVED` line, then is dropped so it is never
   listed again — the settling tick is the standard single-reviewer flow, so the final verdict always
-  emits). One event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`), `--json` for
+  emits). **Role-expansion asymmetry (deliberate — know which verb expands what):** `listen` expands
+  role-held DIRECTIVES; `needs-me`/`briefing` expand roles for pending REVIEWS only (a review whose
+  `pending_required` names a role you hold); `inbox` and briefing's inbox section expand nothing (agent
+  id and `*` only). The verdicts source also surfaces **orphan review dirs** (a `<slug>/` verdicts dir
+  with no `<slug>.md` doc): one cached `ORPHAN <slug>` event, visibility only — repair is a
+  human/maintainer action (`needs-me` shows the same slugs as `review-orphan` rows every pass). One
+  event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`), `--json` for
   one object per line; a quiet tick prints NOTHING
   (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
   the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** —
   the `inbox` (summaries index), `responses` (responses subtree), `orphans` (a response whose owning
-  directive won't resolve), and `verdicts` (review root / review doc / verdict shard unreadable) streaks
+  directive won't resolve), `verdicts` (review root / review doc / verdict shard unreadable), and `roles`
+  (a role-lease listing unreadable while resolving role-routed directives — you may be missing role
+  work; the engine never reads a failed lease listing as "no holders", see `roles status` rc 1) streaks
   are independent, so a permanent orphan can't pin the flag and silence a fresh transport outage. `--once` **always exits 0** (a tick never fails the schedule; no output means
   nothing new, not an error) — run it on a scheduler, or run bare for a poll loop (`--interval`,
   SIGINT-clean). Every send verb arms you: `tell`/`broadcast`/`remind` print `replies: coord-engine listen
