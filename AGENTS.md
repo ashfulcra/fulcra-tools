@@ -235,6 +235,34 @@ it (not on PyPI).
   audience (durable, visible on the `board`, spams no inbox); route it later
   with the ordinary assignment verbs. Backlog in session memory alone dies at
   compaction.
+- **Intent-capture doctrine — a spoken commitment is filed the SAME turn.** When
+  Ash states an intent to ANY agent ("later today", "I'll enumerate that list",
+  any commitment he owns), that agent captures it immediately with
+  `coord-engine intent fulcra "<text>" --for ash [--by <when>]` — an uncaptured
+  commitment is the drop nobody can see. Two surfaces back this:
+  - **`coord-engine intent <team> "<text>" --for ash [--by <when>]`** — sugar over
+    the directive path (writes an `intent:ash` item, `intent_by` frontmatter,
+    hash-slug delivery + read-back inherited). Identity is **text + assignee
+    only** — `--by` is EXCLUDED. So an identical restatement dedupes (rc 0 `intent
+    already captured`), while a restatement with a DIFFERENT `--by` is a verified
+    in-place window update on the same doc (rc 0 `intent window updated`,
+    read-back-checked; unverifiable → rc 1, retry — never a stale deadline, never
+    a forked item). A relative `--by` (`5d`/`36h`/`10m`) re-resolves from now on
+    each restatement.
+  - **`coord-engine threads <team> --for <principal> [--json]`** — the dropped-work
+    fold, three mutually-exclusive modes (first match wins):
+    **started-then-silent** — an item Ash owns/last-touched whose activity is older
+    than `--silence-days` (default 3); **blocked-on-ash** — progress waits on Ash
+    (`assignee: ash`, `blocked-on:ash` tag, or a `needs:human` block naming him),
+    surfaced immediately, no aging; **intent-never-started** — an `intent:ash` item
+    past its window (`intent_by` if declared, else capture + `--intent-grace-hours`,
+    default 48) and not followed up (status advanced, a response shard, or a
+    `followed-up-by:` tag each discharge it). Windows: `--silence-days` /
+    `--intent-grace-hours`, env `COORD_THREADS_SILENCE_DAYS` /
+    `COORD_THREADS_INTENT_GRACE_HOURS`. A **`threads-degraded` row** (a JSON object
+    under `--json`; a stderr notice in text mode) means the fold saw only PART of
+    the store — sweep or wait, **never trust it as complete**. coord-boss runs
+    `threads fulcra --for ash --json` in its loop and owns the curation/push call.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
   `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
   model that covers the work, and log the outcome after:
