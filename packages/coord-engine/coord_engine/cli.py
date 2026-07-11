@@ -629,6 +629,7 @@ SETTLED_MARKER = ".settled"
 
 DEFAULT_REVIEW_FOLD_BUDGET = 45.0
 DEFAULT_BRIEFING_BUDGET = 60.0
+DEFAULT_LISTEN_CLASSIFY_BUDGET = 10.0
 
 
 def _settled_marker_path(team: str, slug: str) -> str:
@@ -672,6 +673,31 @@ def _briefing_budget() -> float:
         return DEFAULT_BRIEFING_BUDGET
     if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
         return DEFAULT_BRIEFING_BUDGET
+    return v
+
+
+def _listen_classify_budget() -> float:
+    """Per-tick bound (seconds) for the listener's dir-only review-slug
+    classification pass (codex P1 on the tombstone ontology). The cost class is
+    NOT the source's other listings: those are bounded by MY-unsettled-slugs
+    (small, shrinking), while the dir-only set is PERMANENT and growing (the
+    store's deletes are soft — every archived review leaves its dir forever), so
+    an unbudgeted pass could spend N x transport-timeout on a degraded tick, on
+    the listener whose tick latency is load-bearing. Default 10s: a bounded
+    fraction of the default 60s poll interval with room for a few slow listings
+    (transport timeout is 30s, so even ONE stalled listing overshoots — the
+    budget's job is to stop the pass from stacking them). Env override
+    ``COORD_LISTEN_CLASSIFY_BUDGET``; anything unparseable, non-positive, or inf
+    falls back to the default (a bad env value must never disable the bound)."""
+    raw = os.environ.get("COORD_LISTEN_CLASSIFY_BUDGET")
+    if raw is None:
+        return DEFAULT_LISTEN_CLASSIFY_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_LISTEN_CLASSIFY_BUDGET
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_LISTEN_CLASSIFY_BUDGET
     return v
 
 
@@ -2285,16 +2311,34 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # and do not cache (never assume tombstone on transport failure). Skipped
     # entirely when the review listing failed (rentries is None): an unreadable
     # root is UNKNOWN, not an absence of docs.
+    #
+    # BUDGETED (codex P1): unlike the source's other listings — bounded by
+    # MY-unsettled-slugs, a small shrinking set — the dir-only set is PERMANENT
+    # and growing (soft deletes), so an unbudgeted pass spends up to
+    # N x transport-timeout on a degraded tick, on the listener whose tick
+    # latency is load-bearing. The pass runs under ``_listen_classify_budget()``
+    # (default 10s, env COORD_LISTEN_CLASSIFY_BUDGET), checked before each
+    # classification listing (equivalently after the previous one — adjacent
+    # iterations — so an overrunning listing is detected immediately; overshoot
+    # is bounded by ONE listing, whose completed result is definitive and kept).
+    # On exhaustion: degrade the `verdicts` source (its existing streak), cache
+    # NOTHING for the unvisited slugs (unknown != classified — no false
+    # orphan/tombstone knowledge may persist), and stop — the next tick retries.
     orphan_slugs = set(state.get("orphan_slugs") or [])
     if rentries is not None:
         doc_names = {(e.get("name") or "")[:-3] for e in rentries
                      if not e.get("is_dir") and (e.get("name") or "").endswith(".md")}
+        classify_deadline = time.monotonic() + _listen_classify_budget()
         for e in rentries:
             if not e.get("is_dir"):
                 continue
             oslug = (e.get("name") or "").rstrip("/")
             if not oslug or oslug in doc_names or oslug in orphan_slugs:
                 continue
+            if time.monotonic() >= classify_deadline:
+                _fail("verdicts", "dir classification budget spent — "
+                      "unclassified review dirs remain, retried next tick")
+                break
             kind = _classify_orphan_dir(transport, team, oslug)
             if kind == "orphan":
                 events.append({"type": "orphan", "slug": oslug})
