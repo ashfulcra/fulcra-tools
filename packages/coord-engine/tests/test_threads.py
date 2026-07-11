@@ -15,9 +15,24 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from coord_engine import cli, threads
+from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
 NOW = "2026-07-11T12:00:00Z"
+
+
+class _FailReadTransport(FakeTransport):
+    """FakeTransport whose ``read`` RAISES for paths in ``fail_reads`` — the
+    transport-exception leg of the unreadable-intent-window contract."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_reads: set[str] = set()
+
+    def read(self, path):
+        if path in self.fail_reads:
+            raise TransportError("boom")
+        return super().read(path)
 
 
 # --------------------------------------------------------------------------
@@ -410,6 +425,142 @@ def test_verb_text_render_grouped(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "old" in out and "blk" in out
+
+
+# --------------------------------------------------------------------------
+# BLOCKING (review r1): an unreadable intent window must NEVER silently fall
+# back to capture+grace — that manufactures a false mode-3 drop with
+# degraded:False (the nagging-sensitive failure the spec forbids verbatim).
+# Contract: read MISSES (raise OR None) -> ripeness UNKNOWN -> the intent is
+# excluded from this pass AND a threads-degraded row surfaces; it returns,
+# correctly windowed, when readable again. A doc that reads fine but genuinely
+# lacks intent_by stays the legitimate capture+grace fallback.
+# --------------------------------------------------------------------------
+
+def test_verb_intent_window_read_raises_degraded_not_surfaced(capsys):
+    # Reviewer repro: intent_by 2999 (unripe) + doc read RAISES. Without the fix
+    # the missing window silently falls back to capture+grace and the ancient
+    # capture ts surfaces it as mode 3 with no degraded row.
+    t = _FailReadTransport()
+    _put_task(t, "future", assignee="ash", tags=["intent:ash"],
+              status="proposed", timestamp=_ancient(),
+              intent_by="2999-01-01T00:00:00Z")
+    _reconcile(t)
+    t.fail_reads.add("team/x/task/future.md")
+    rc, out = _run_threads(t, capsys)
+    assert rc == 0  # never crash
+    objs = _json_objs(out)
+    assert [o for o in objs if o.get("type") != "threads-degraded"] == []
+    degraded = [o for o in objs if o.get("type") == "threads-degraded"]
+    assert degraded and "intent window unreadable" in degraded[0]["reason"]
+    assert "future" in degraded[0]["reason"]
+    # RECOVERY: doc readable again -> real window honored (2999 unripe -> absent,
+    # and the degraded row is gone).
+    t.fail_reads.clear()
+    rc, out = _run_threads(t, capsys)
+    assert _json_objs(out) == []
+
+
+def test_verb_intent_window_read_none_degraded_then_recovers(capsys):
+    # The None leg: doc listed in summaries but read returns None. Ripeness is
+    # UNKNOWN -> excluded + degraded. On recovery the REAL (past) window makes
+    # it mode 3.
+    t = FakeTransport()
+    _put_task(t, "later", assignee="ash", tags=["intent:ash"],
+              status="proposed", timestamp=_ancient(), intent_by=_ancient())
+    _reconcile(t)
+    doc = t.store.pop("team/x/task/later.md")
+    rc, out = _run_threads(t, capsys)
+    assert rc == 0
+    objs = _json_objs(out)
+    assert [o for o in objs if o.get("type") != "threads-degraded"] == []
+    assert any(o.get("type") == "threads-degraded"
+               and "intent window unreadable" in o.get("reason", "")
+               for o in objs)
+    # RECOVERY: readable again -> surfaces with its real, ripe window.
+    t.store["team/x/task/later.md"] = doc
+    rc, out = _run_threads(t, capsys)
+    objs = _json_objs(out)
+    assert [o["mode"] for o in objs if o.get("type") != "threads-degraded"] == [3]
+    assert not any(o.get("type") == "threads-degraded" for o in objs)
+
+
+def test_verb_intent_genuinely_undeclared_window_grace_fallback_stands(capsys):
+    # A doc that READS FINE but lacks intent_by is legitimately undeclared:
+    # capture+grace fallback stands (ancient capture -> ripe -> mode 3, clean).
+    t = FakeTransport()
+    _put_task(t, "nodate", assignee="ash", tags=["intent:ash"],
+              status="proposed", timestamp=_ancient())
+    _reconcile(t)
+    rc, out = _run_threads(t, capsys)
+    objs = _json_objs(out)
+    assert [o["mode"] for o in objs if o.get("type") != "threads-degraded"] == [3]
+    assert not any(o.get("type") == "threads-degraded" for o in objs)
+
+
+# --------------------------------------------------------------------------
+# review r1 should-fix test gaps
+# --------------------------------------------------------------------------
+
+def test_classify_terminal_status_excluded():
+    # (1a) pure layer: a closed item is never a dropped thread — not mode 1
+    # (aged silence) and not mode 2 (blocked signals on a done/abandoned item).
+    aged_done = _row(id="d", status="done", ash_activity_ts=_iso_days_ago(30))
+    blocked_abandoned = _row(id="a", status="abandoned", blocked_on_principal=True,
+                             blocked_signal="assignee: ash")
+    assert _classify([aged_done, blocked_abandoned]) == []
+
+
+def test_verb_terminal_status_excluded(capsys):
+    # (1b) adapter layer: same exclusion end-to-end.
+    t = FakeTransport()
+    _put_task(t, "shipped", owner="ash", status="done", timestamp=_ancient())
+    _put_task(t, "dropped-for-good", assignee="ash", status="abandoned",
+              timestamp=_ancient())
+    _reconcile(t)
+    rc, out = _run_threads(t, capsys)
+    assert [o for o in _json_objs(out) if o.get("type") != "threads-degraded"] == []
+
+
+def test_verb_text_degraded_on_stderr_list_on_stdout(capsys):
+    # (2) text-mode degraded output pinned: the notice goes to STDERR, stdout
+    # stays the clean thread list (here the empty-state line).
+    t = FakeTransport()
+    _put_task(t, "old", owner="ash", timestamp=_ancient())
+    t.store["team/x/_coord/summaries.json"] = "{ this is not json"
+    t.fail_list = True
+    capsys.readouterr()
+    rc = cli.main(["threads", "x", "--for", "ash"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "threads degraded" in cap.err
+    assert "degraded" not in cap.out
+    assert "nothing dropped" in cap.out
+
+
+def test_verb_fresh_intent_visible_via_overlay(capsys):
+    # (3) an intent written AFTER the last reconcile (absent from summaries) is
+    # visible through the freshness overlay — no reconcile needed.
+    t = FakeTransport()
+    _put_task(t, "seed", owner="bob", assignee="bob")
+    _reconcile(t)
+    _put_task(t, "fresh-intent", assignee="ash", tags=["intent:ash"],
+              status="proposed", timestamp=_ancient(), intent_by=_ancient())
+    rc, out = _run_threads(t, capsys)
+    objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
+    assert [(o["mode"], o["id"]) for o in objs] == [(3, "fresh-intent")]
+
+
+def test_verb_needs_human_block_is_mode2(capsys):
+    # (4) the needs:human + principal signal (spec mode 2, third signal) pinned.
+    t = FakeTransport()
+    _put_task(t, "ask", owner="ash", status="blocked", tags=["needs:human"],
+              timestamp=NOW)
+    _reconcile(t)
+    rc, out = _run_threads(t, capsys)
+    objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
+    assert [o["mode"] for o in objs] == [2]
+    assert "needs:human" in objs[0]["evidence"]
 
 
 def test_verb_silence_days_flag_and_env(capsys, monkeypatch):

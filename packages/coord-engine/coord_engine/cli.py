@@ -3608,6 +3608,14 @@ def _threads_candidate_rows(
     budget_hit = False
     rows: list[dict[str, Any]] = []
     for r in summary_rows:
+        if time.monotonic() > deadline:
+            # After-op discipline, checked at the TOP of each candidate: the
+            # PREVIOUS candidate's reads breached the budget — detected before
+            # any further reads (and a breach on the FINAL candidate, with
+            # nothing left to read, never false-degrades). Stop, serve what we
+            # have, degrade visibly.
+            budget_hit = True
+            break
         if not isinstance(r, dict):
             continue
         tags = [str(t) for t in (r.get("tags") or []) if isinstance(r.get("tags"), list)]
@@ -3623,12 +3631,25 @@ def _threads_candidate_rows(
         attributed = True
         source = ""
         if is_intent:
-            # Intent needs intent_by (summaries lack it) — one doc read.
+            # Intent needs intent_by (summaries lack it) — one doc read. A
+            # MISSED read (raise OR None) — or a doc that reads but parses to
+            # garbage — means the window is UNKNOWN: ripeness cannot be decided,
+            # so this intent is EXCLUDED from this pass (silently windowing it
+            # to capture+grace would manufacture a false mode-3 drop with a
+            # clean degraded flag — the nagging-sensitive failure the spec
+            # forbids) AND the fold degrades visibly. It returns, correctly
+            # windowed, once readable. Only a doc that reads+parses fine and
+            # GENUINELY lacks intent_by is legitimately undeclared — the
+            # capture+grace fallback below stands for that case alone.
             try:
                 doc = transport.read(_task_path(team, slug))
             except Exception:
                 doc = None
-            fm = okf.parse_frontmatter(doc) or {}
+            fm = okf.parse_frontmatter(doc) if doc is not None else None
+            if fm is None:
+                ok = False
+                reason = reason or f"intent window unreadable: {slug}"
+                continue
             declared_window = fm.get("intent_by")
         else:
             # Mode-1/2 candidates: attribute ash-activity from shards.
@@ -3656,9 +3677,6 @@ def _threads_candidate_rows(
                 "followup_ref": followup_ref,
             },
         })
-        if time.monotonic() > deadline:
-            budget_hit = True
-            break
 
     if budget_hit:
         ok = False
@@ -3696,6 +3714,10 @@ def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
         return 0
 
     if not ok:
+        # Degraded notice on STDERR: stdout stays the clean, pipeable thread
+        # list (a consumer grepping/parsing stdout never confuses a degradation
+        # notice for a thread), while the degradation is still impossible to
+        # miss interactively — the house stdout/stderr split.
         print(f"threads degraded (partial): {reason or 'source unreadable'}",
               file=sys.stderr)
     labels = {1: "started-then-silent", 2: "blocked-on-ash", 3: "intent-never-started"}
@@ -3703,6 +3725,8 @@ def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
         print(f"threads — {principal}: nothing dropped")
         return 0
     print(f"threads — {principal}: {len(dropped)} dropped")
+    # DELIBERATE divergence from --json: text orders groups 2,3,1 (awaited-now
+    # first for the human eye); --json stays mode-ascending (classify's order).
     for mode in (2, 3, 1):  # awaited-now first, then commitments, then silence
         group = [o for o in dropped if o["mode"] == mode]
         if not group:
