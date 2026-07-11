@@ -134,9 +134,12 @@ skills. Subagent-only work stays OFF the bus.
   a failed overlay listing — visible, never silent, with the index rows still served. Cost: one extra
   `list_dir` per row load plus one read per genuinely-new (new-since-reconcile) slug, **capped at
   `COORD_OVERLAY_CAP` (default 16)** so a sustained reconcile outage can't make every surface-read do
-  unbounded doc reads fleet-wide; when capped, the served subset is deterministic (sorted by name, all
-  agents converge) and the truncation itself degrades the `inbox` source with `{served, absent_total}`
-  counts — capped-but-visible, never silent truncation. A fresh team (no summaries yet) is unchanged —
+  unbounded doc reads fleet-wide; when capped, the served subset is deterministic (sorted by name, so
+  every agent converges on the same subset) — the cut is arbitrary with respect to age or priority (it
+  does not surface newest- or highest-priority-first), only stable and reproducible — and the truncation
+  itself degrades the `inbox` source with `{served, absent_total}` counts — capped-but-visible, never
+  silent truncation. The next reconcile folds the whole set back into the index, so the cap only bites
+  during a sustained outage. A fresh team (no summaries yet) is unchanged —
   the overlay only runs once an index exists.
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources

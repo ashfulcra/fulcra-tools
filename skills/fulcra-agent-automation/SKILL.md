@@ -90,13 +90,22 @@ standing rule ([`AGENTS.md` → Fulcra platform surface](../../AGENTS.md)) alrea
 Projection is the sanctioned replacement; do not switch the legacy writer back on to get timeline
 annotations — turn projection on instead.
 
-## 2. Listener — await new directives + responses (the reply leg)
+## 2. Listener — await new directives, responses, and verdicts (the reply leg)
 Every agent that sends an ask (`tell`/`broadcast`/`remind`/`review request`) should **arm a listener**:
 the send verbs now print the exact `listen` line to run for replies. `listen` is the engine-owned await
 leg — one implementation of the diff/notify logic that the launchd tick, live sessions, Codex, and
-headless all delegate to. Each tick surfaces two id-diff'd sources: **new inbox directives** for the
-agent, and **responses to directives the agent owns** (the return of `respond`). Quiet ticks print
-nothing; a transport failure prints `LISTEN DEGRADED: <what>` to stderr once per source per streak.
+headless all delegate to. Each tick id-diffs three sources against a per-agent state file: **new inbox
+directives** for the agent — including directives routed to a **role you hold a fresh lease on** (a
+strict superset of the bare `inbox` fold); **responses to directives you own** (the return of
+`respond`); and **new verdicts on reviews you requested** (the await leg of `review request`, including
+the terminal `SETTLED <slug>` line when a review closes). It also surfaces **orphan review dirs** (a
+`<slug>/` verdicts dir with no `<slug>.md` doc) as a one-time `ORPHAN` event — visibility only, repair
+stays a maintainer action. One line per new item — `DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`,
+or one JSON object per line under `--json`. Quiet ticks print nothing. A transport failure prints
+`LISTEN DEGRADED: <what>` to stderr **once per source per streak** across five independent sources —
+`inbox`, `responses`, `orphans`, `verdicts`, and `roles` (an unreadable role-lease listing while
+resolving role-routed directives; independent so a chronic role failure can't mask a fresh inbox
+outage). A degraded read never advances state, so the pending event re-surfaces on recovery.
 
 ```
 coord-engine listen <team> --agent <agent> [--interval N=60] [--once] [--json] [--verbose]
@@ -118,9 +127,10 @@ seconds and exits cleanly on SIGINT.
   acknowledgement — only use it when that consent was already given. Hardened like the heartbeat:
   validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent project's wake
   silently 401'd on exactly this), `plutil` lint, install-time self-test.
-- **Claude Code live session:** wrap the loop in the harness's background monitor so `DIRECTIVE`/
-  `RESPONSE` lines surface into the session as they arrive (this closes the live-session gap where an
-  agent waiting on a reply hand-rolled a watcher):
+- **Claude Code live session:** THE one command is `coord-engine listen` wrapped in the harness's
+  background monitor — no hand-rolled watcher. The monitor surfaces each event line
+  (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`) into the session as it arrives, closing the
+  live-session gap where an agent waiting on a reply used to poll by hand:
   ```bash
   coord-engine listen <team> --agent <agent> --interval 60
   ```
@@ -132,6 +142,14 @@ seconds and exits cleanly on SIGINT.
   ```bash
   coord-engine listen <team> --agent <agent>
   ```
+
+**Single-flight — one watcher identity per agent.** Run exactly one listener per `<agent>` on a host:
+the per-agent state file is not a concurrency lock, so two listeners for the same agent (or a canonical
+listener running alongside a legacy alias listener for the same identity) race the state and double-fire
+or drop events. Serialize ticks (`--once` on a scheduler, or a single long-running `--interval` loop —
+never both), coalesce overlapping schedules onto one cadence rather than stacking timers, and retire any
+legacy alias listener before arming the canonical one (the scheduling-overlap P1). Distinct agents get
+distinct state files and run independently; the constraint is per-identity.
 
 ## 3. Harness adapters — lifecycle wiring
 The listener (§2) delivers inbox notifications, but the **lifecycle contract** — resume-on-wake,
