@@ -39,11 +39,19 @@ under `skills/`, each package with its own README, build, and tests.
 - **`packages/gmail`** (`fulcra-gmail`) — the local Gmail relay (rebuild of
   ArcBot's unrecoverable MVP). Multi-account, read-only (`gmail.readonly`),
   keyed by opaque `account_id` (email is metadata, never a path/key segment).
-  Task 1 ships the client + OAuth account registry only: `GmailClient` (Gmail
+  Task 1 ships the client + OAuth account registry: `GmailClient` (Gmail
   REST v1 httpx wrapper, refresh-on-401, fail-soft `invalid_grant`) and the
   `AccountRegistry` (keychain secrets via collect's `credentials` helpers +
   a JSON registry doc; B4 single-use OAuth `state`-nonce → `users.getProfile`
-  account binding). Rules/ledger/Files-writer/plugin land in later tasks.
+  account binding). Task 2 adds the pure-local processing layer (no daemon,
+  no network): `rules` (parse rules, server-`q` builder with 24h overlap /
+  7d-or-backfill first-run, and the post-filter effective-match decision with
+  privacy-safe reason codes — B2: no subject/from/body ever logged),
+  `convert` (Gmail `messages.get(full)` payload → deterministic selected-email
+  JSON; attachments = metadata only, bytes deferred to v2), and `ledger`
+  (append-only per-account JSONL, fsync per append, torn-line tolerance,
+  processed-set keyed by `(message_id, rule_id, rule_version)`, deterministic
+  relay outbox key). Files-writer/relay-emitter/plugin land in Task 3.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent

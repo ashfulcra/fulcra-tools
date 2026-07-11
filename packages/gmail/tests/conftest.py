@@ -9,6 +9,7 @@ in-memory here; the network is faked with ``httpx.MockTransport``.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 
@@ -16,6 +17,54 @@ import httpx
 import pytest
 
 from fulcra_gmail.accounts import AccountRegistry
+
+
+# ---------------------------------------------------------------------------
+# Synthetic Gmail messages.get(full) payload builders (rules/convert/ledger)
+# ---------------------------------------------------------------------------
+
+
+def b64url(text: str) -> str:
+    """Gmail-style URL-safe base64 with the padding STRIPPED (as the API
+    returns it) so the converter's padding logic is exercised."""
+    raw = base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii")
+    return raw.rstrip("=")
+
+
+def header(name: str, value: str) -> dict:
+    return {"name": name, "value": value}
+
+
+def text_part(mime: str, body_text: str) -> dict:
+    return {"mimeType": mime, "body": {"data": b64url(body_text)}}
+
+
+def attachment_part(
+    filename: str, mime: str, attachment_id: str, size: int
+) -> dict:
+    """An attachment part: metadata + attachmentId, NO inline ``data`` bytes
+    (Gmail omits ``data`` for attachment parts; you fetch bytes separately)."""
+    return {
+        "mimeType": mime,
+        "filename": filename,
+        "body": {"attachmentId": attachment_id, "size": size},
+    }
+
+
+def make_message(
+    *,
+    msg_id: str = "m1",
+    thread_id: str = "t1",
+    headers: list[dict] | None = None,
+    payload: dict | None = None,
+) -> dict:
+    """A synthetic ``messages.get(format=full)`` envelope."""
+    if payload is None:
+        payload = {"headers": headers or [], "mimeType": "text/plain",
+                   "body": {"data": b64url("")}}
+    elif headers is not None:
+        payload = {**payload, "headers": headers}
+    return {"id": msg_id, "threadId": thread_id, "payload": payload}
 
 
 class FakeKeychain:
