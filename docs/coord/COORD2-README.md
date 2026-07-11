@@ -1,6 +1,6 @@
 > **Historical document** — this is the README of the original `ashfulcra/coord2` repo,
 > preserved for provenance. Its install instructions are superseded: the canonical home is
-> THIS repo (`packages/coord-engine` + `skills/`); see `docs/coord-DESIGN.md`.
+> THIS repo (`packages/coord-engine` + `skills/`); see [`../coord-DESIGN.md`](../coord-DESIGN.md).
 
 # coord2
 
@@ -29,7 +29,7 @@ the layers they want. OKF v0.1 explicitly permits the typed frontmatter and synt
 Each capability is a **skill** (agent-facing interface + genuinely-conventional prose); the
 consistency-critical folds live in the shared **`coord-engine`** tool the skills invoke via
 `uv tool run coord-engine …` (the same way skills already invoke `fulcra-api`). Decision + rationale:
-[`docs/proposals/teams-convergence/03-packaging-decision.md`](docs/proposals/teams-convergence/03-packaging-decision.md).
+[`proposals/teams-convergence/03-packaging-decision.md`](proposals/teams-convergence/03-packaging-decision.md).
 
 | Layer | Skill | Engine command(s) | Adds |
 |---|---|---|---|

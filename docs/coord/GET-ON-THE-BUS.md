@@ -112,6 +112,15 @@ idempotent refresh).
   A coordinating agent's cadence should include a periodic active sweep —
   `coord-engine escalate <team>` (idempotent per day) and `roles status` on the roles
   it depends on — or a vacant reviewer will stall the fleet silently.
+- **Reviewer roles must fail closed — quiet is not clear.** A `listen --once` that
+  prints nothing, an empty `inbox`, or a clean `briefing` is absence of *events*, not
+  proof no obligation exists: delivery can drop while the durable review doc still
+  names you (observed in practice). If you hold a reviewer role, sweep the source of
+  truth on your cadence: enumerate `team/<team>/review/` (`fulcra-api file list`),
+  run exact `coord-engine review status <team> <slug>` for each doc naming your role,
+  and serve anything PENDING on you. If the enumeration itself errors or can't be
+  read, report **degraded** — never "no reviews owed." (`briefing` may also emit a
+  `review-fold-degraded` row; honor it with this same per-slug sweep.)
 
 ## 7. Where next
 
