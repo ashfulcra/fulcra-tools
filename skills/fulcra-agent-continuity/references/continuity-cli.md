@@ -5,7 +5,7 @@ description: "coord-engine continuity snapshot/resume commands + the snapshot sc
 
 # Fulcra Agent Continuity — CLI reference
 
-Both commands are `uv tool run coord-engine continuity …` (the engine writes/reads structured JSON via
+Both commands are `coord-engine continuity …` (the engine writes/reads structured JSON via
 `fulcra-api file`; needs `fulcra-api auth login`).
 
 ## Snapshot

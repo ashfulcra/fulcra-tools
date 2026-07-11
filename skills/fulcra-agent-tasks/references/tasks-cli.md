@@ -5,7 +5,7 @@ description: "coord-engine task lifecycle commands + the OKF Task frontmatter sh
 
 # Fulcra Agent Tasks — CLI reference
 
-All commands are `uv tool run coord-engine task …` (needs `fulcra-api auth login`). The engine
+All commands are `coord-engine task …` (needs `fulcra-api auth login`). The engine
 parses→validates→writes the OKF Task doc; it never lets an illegal status transition through.
 
 ## Commands

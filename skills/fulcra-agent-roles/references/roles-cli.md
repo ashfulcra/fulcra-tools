@@ -11,18 +11,19 @@ naming. Role establishment and escalation remain raw `fulcra-api file` calls aga
 
 ## Establish a role
 ```bash
-# roles/<name>.md — type: Role, with policy / sla_hours / maintainer in frontmatter
+# roles/<name>.md — type: Role, with policy / sla_hours / maintainer in frontmatter;
+# complete worked examples live in ../examples/
 uv tool run fulcra-api file upload /tmp/reviewer.md "team/<team>/roles/reviewer.md"
-# add it to the roles index
-uv tool run fulcra-api file upload /tmp/roles-index.md "team/<team>/roles/index.md"
 ```
+(A `roles/index.md` is optional — the engine folds role status from the directory
+listing; add one only as human courtesy.)
 
 ## Claim / refresh a lease
 ```bash
 # Re-run to REFRESH (new timestamp) each time you act in the role; this is the liveness signal.
 # Echoes the lease shard filename (slug + 6-char hash) — note it so you can inspect your exact
 # shard (e.g. raw-read it and check the timestamp is one you wrote) or delete it by hand if needed.
-uv tool run coord-engine roles claim <team> reviewer [--agent <your-id>]
+coord-engine roles claim <team> reviewer [--agent <your-id>]
 ```
 Never hand-write lease files: the engine names shards `<slug>-<hash6>.md` via `agent_key`, so a
 hand-named `leases/<your-agent>.md` creates a SECOND shard for the same id — spurious CONTESTED on
@@ -31,18 +32,21 @@ exclusive roles.
 ## Read role status (the fold) — deterministic, via coord-engine
 Do NOT classify by eyeballing timestamps. The engine folds policy + lease freshness:
 ```bash
-uv tool run coord-engine roles status "<team>" "reviewer" --json
+coord-engine roles status "<team>" "reviewer" --json
 # -> {status: HELD|VACANT|CONTESTED|UNKNOWN, policy, sla_hours, holders, fresh_holders, escalation_due}
 ```
 
 ## Release
 ```bash
-uv tool run coord-engine roles release <team> reviewer [--agent <your-id>]
+coord-engine roles release <team> reviewer [--agent <your-id>]
 ```
 (Deletes your engine-named shard. A raw `fulcra-api file delete` of a hand-guessed filename silently
 misses the real shard — the lease then goes stale instead of released.)
 
 ## Escalate a vacancy (at most once per day)
+`coord-engine escalate <team>` performs this whole sweep for every registered role
+(computes `escalation_due`, writes the daily marker, notifies each maintainer) — prefer
+it. The raw per-role equivalent:
 ```bash
 # 1. first-writer-wins daily marker (dedupe)
 uv tool run fulcra-api file upload /tmp/escalation.md \

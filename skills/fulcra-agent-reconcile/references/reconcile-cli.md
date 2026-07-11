@@ -13,19 +13,19 @@ for all storage I/O, so `fulcra-api` must be authenticated (`fulcra-api auth log
 Install once (like `fulcra-api`), then invoke via `uv tool run`:
 ```bash
 uv tool install coord-engine            # or, from source: uv tool install <fulcra-tools>/packages/coord-engine
-uv tool run coord-engine reconcile <team>
+coord-engine reconcile <team>
 ```
 
 ## Commands
 ```bash
 # Scan team/<team>/task/*.md -> heal task/index.md + task/log.md -> write _coord/summaries.json
-uv tool run coord-engine reconcile <team>
+coord-engine reconcile <team>
 
 # Read views (one aggregate download each; run reconcile first):
-uv tool run coord-engine status   <team> [--json]          # counts by status
-uv tool run coord-engine board    <team> [--json]          # open work grouped active/waiting/blocked/proposed
-uv tool run coord-engine needs-me <team> --agent <id> [--json]  # assigned-to / blocking <id>, gated on not_before; PLUS pending-required reviews for <id> or any role it holds (rows with type: review-pending)
-uv tool run coord-engine search   <team> <query> [--json]  # substring over id/title/description/tags
+coord-engine status   <team> [--json]          # counts by status
+coord-engine board    <team> [--json]          # open work grouped active/waiting/blocked/proposed
+coord-engine needs-me <team> --agent <id> [--json]  # assigned-to / blocking <id>, gated on not_before; PLUS pending-required reviews for <id> or any role it holds (rows with type: review-pending)
+coord-engine search   <team> <query> [--json]  # substring over id/title/description/tags
 ```
 
 ## Environment

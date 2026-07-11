@@ -24,9 +24,9 @@ state:
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see Usage / fulcra-agent-reconcile) — do NOT write tasks against a broken engine |
-| Aggregate fresh? | `uv tool run coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint) | run `uv tool run coord-engine reconcile <team>` to build the aggregate, then re-probe |
-| Work for me? | `uv tool run coord-engine needs-me <team> --agent <id>` | prints `0 item(s) need <id>:` (a non-zero count means work is waiting — enter there) — read the rows (including any `[REVIEW] pending verdict` review-pending rows) before starting new work | pick up the listed items (transition them via `task update`/`task done`) before creating more |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see Usage / fulcra-agent-reconcile) — do NOT write tasks against a broken engine |
+| Aggregate fresh? | `coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint) | run `coord-engine reconcile <team>` to build the aggregate, then re-probe |
+| Work for me? | `coord-engine needs-me <team> --agent <id>` | prints `0 item(s) need <id>:` (a non-zero count means work is waiting — enter there) — read the rows (including any `[REVIEW] pending verdict` review-pending rows) before starting new work | pick up the listed items (transition them via `task update`/`task done`) before creating more |
 
 All probes pass with nothing needing you → the engine is healthy, views are fresh, and your queue is
 clear; proceed to create or advance tasks below.
@@ -54,19 +54,19 @@ Needs `fulcra-api` authenticated and `coord-engine` installed — standalone:
 coord skill brings the same engine; installing once serves all).
 ```bash
 # create a task doc at team/<team>/task/<slug>.md
-uv tool run coord-engine task start <team> "Fix the widget" \
+coord-engine task start <team> "Fix the widget" \
     --workstream web --priority P1 --status proposed --assignee ash --summary "one-liner"
 
 # move it through the machine (illegal transitions are rejected with a clear error)
-uv tool run coord-engine task update <team> fix-the-widget --status active --next "write the test"
-uv tool run coord-engine task update <team> fix-the-widget --status blocked --blocked-on "waiting on review"
+coord-engine task update <team> fix-the-widget --status active --next "write the test"
+coord-engine task update <team> fix-the-widget --status blocked --blocked-on "waiting on review"
 
 # finish it — evidence is required
-uv tool run coord-engine task done <team> fix-the-widget --evidence "PR #42 merged"
+coord-engine task done <team> fix-the-widget --evidence "PR #42 merged"
 ```
 Each write stamps `timestamp` and appends a dated note to the task body; the Fulcra File Store versions
 every write, so the full history is preserved. After changing tasks, run
-`uv tool run coord-engine reconcile <team>` to refresh the index and views (or let a scheduled reconcile
+`coord-engine reconcile <team>` to refresh the index and views (or let a scheduled reconcile
 do it).
 
 See [`references/tasks-cli.md`](references/tasks-cli.md) for the full flag list and the OKF Task shape.

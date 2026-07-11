@@ -1,6 +1,6 @@
 > **Historical document** — this is the README of the original `ashfulcra/coord2` repo,
 > preserved for provenance. Its install instructions are superseded: the canonical home is
-> THIS repo (`packages/coord-engine` + `skills/`); see `docs/coord2-DESIGN.md`.
+> THIS repo (`packages/coord-engine` + `skills/`); see `docs/coord-DESIGN.md`.
 
 # coord2
 

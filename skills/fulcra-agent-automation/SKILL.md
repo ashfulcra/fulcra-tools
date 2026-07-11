@@ -23,11 +23,11 @@ fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`):
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine usable? | `uv tool run coord-engine doctor <team>` | exits 0 and last line is `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT install jobs on a broken engine |
+| Engine usable? | `coord-engine doctor <team>` | exits 0 and last line is `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT install jobs on a broken engine |
 | Heartbeat installed? | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.heartbeat.<team>.plist` (macOS) or `crontab -l \| grep coord-engine.heartbeat.<team>` (Linux) | file/line exists | §1 (install the heartbeat) |
 | Heartbeat loaded? | `launchctl list \| grep coord-engine.heartbeat.<team>` (macOS only) | a line appears | reinstall via §1 (plist exists but is not loaded — a reboot-era failure mode) |
 | Listener installed + loaded? | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.listener.<team>.*.plist` and `launchctl list \| grep coord-engine.listener.<team>.` | file matches AND a launchctl line appears — then confirm the plist's `ProgramArguments` names the intended `<agent>` (the suffix is sanitized-agent+checksum; a wildcard can match a DIFFERENT agent's listener; never grep the raw id — colons sanitize to dashes) | §2 (install the listener) |
-| Views actually fresh? | `uv tool run coord-engine health <team>` | this host's row shows a recent `last reconcile` | jobs exist but are not ticking — check `log show` / cron mail, then reinstall |
+| Views actually fresh? | `coord-engine health <team>` | this host's row shows a recent `last reconcile` | jobs exist but are not ticking — check `log show` / cron mail, then reinstall |
 | Claude Code hooks installed? | `ls ~/.claude/fulcra-agent-hooks/` | 3 scripts | §3 (install-claude-code.sh) |
 | Codex watch coord-first? | `grep -l "coord watch" ~/.codex/hooks.json` | file matches | §3 (install_codex_watch.py) |
 | OpenClaw block present? | `grep "fulcra-agent:begin" <workspace>/HEARTBEAT.md` | one match | §3 (install_openclaw.py) |
@@ -52,7 +52,7 @@ agent is actively working.
 It runs `coord-engine reconcile <team>`; needs `coord-engine` + an authenticated `fulcra-api` on PATH.
 
 **OpenClaw / other runtimes:** add a line to your `HEARTBEAT.md` (or a native cron job, per
-`fulcra-agent-teams`' automation section) that runs `uv tool run coord-engine reconcile <team>` on your
+`fulcra-agent-teams`' automation section) that runs `coord-engine reconcile <team>` on your
 chosen cadence. Prefer a longer interval or an external loop over waking the model every tick.
 
 ### Projection — task transitions onto your Fulcra timeline (model-free)
@@ -220,7 +220,7 @@ routine belongs with an agent on a host tier.
 When a cron/heartbeat wakes an agent to do team work, the wake payload should **resume continuity first**
 (this is the structured version of `fulcra-agent-teams`' "read progress.md before acting" rule):
 ```bash
-uv tool run coord-engine continuity resume <team> <agent>
+coord-engine continuity resume <team> <agent>
 ```
 Then process the team inbox and, before concluding, snapshot again
 (`coord-engine continuity snapshot …`) and let the next reconcile heal the views.

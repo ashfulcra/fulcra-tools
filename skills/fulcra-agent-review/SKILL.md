@@ -24,9 +24,9 @@ supersedes it), so re-entry never corrupts the tally:
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT tally against a broken engine |
-| Any reviews owed me? | `uv tool run coord-engine needs-me <team> --agent <me>` | NO `[REVIEW] pending verdict:` row prints for you — no `pending_required` entry names you (NON-mutating read) | **Leave a verdict** — each printed `[REVIEW] pending verdict: <slug> (required: …)` row is an open obligation on you; write your verdict at the echoed path `team/<team>/review/<slug>/verdicts/<me>.md`, then verify + ack per [Lifecycle](#lifecycle) step 2 |
-| Known artifact's handshake state settled? | `uv tool run coord-engine review status <team> <slug>` | prints a line beginning `review <slug> in team/<team>:` ending in `APPROVED` or `CHANGES` (deterministic fold — never tally by hand) | if it prints `PENDING`, the review is not settled — chase the `awaiting required:` reviewers per [Lifecycle](#lifecycle) step 3 |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT tally against a broken engine |
+| Any reviews owed me? | `coord-engine needs-me <team> --agent <me>` | NO `[REVIEW] pending verdict:` row prints for you — no `pending_required` entry names you (NON-mutating read) | **Leave a verdict** — each printed `[REVIEW] pending verdict: <slug> (required: …)` row is an open obligation on you; write your verdict at the echoed path `team/<team>/review/<slug>/verdicts/<me>.md`, then verify + ack per [Lifecycle](#lifecycle) step 2 |
+| Known artifact's handshake state settled? | `coord-engine review status <team> <slug>` | prints a line beginning `review <slug> in team/<team>:` ending in `APPROVED` or `CHANGES` (deterministic fold — never tally by hand) | if it prints `PENDING`, the review is not settled — chase the `awaiting required:` reviewers per [Lifecycle](#lifecycle) step 3 |
 
 All probes clean → nothing is blocked on your verdict and any artifact you name is at its folded state;
 proceed to request a new review or advance an existing one below.
@@ -59,7 +59,7 @@ proceed to request a new review or advance an existing one below.
 ## Lifecycle
 1. **Request** (author) — one command, never a hand-written doc and never a bare `tell`:
    ```bash
-   uv tool run coord-engine review request <team> <slug-or-title> \
+   coord-engine review request <team> <slug-or-title> \
        --of <artifact> --reviewer <role> [--reviewer <role> …] [--from <me>]
    ```
    `<slug-or-title>` slugs exactly the way a `tell` title does (an already-slug-like arg round-trips
@@ -90,7 +90,7 @@ proceed to request a new review or advance an existing one below.
    re-affirm.
 3. **Check state** (anyone) — deterministic fold, do not tally by hand:
    ```bash
-   uv tool run coord-engine review status <team> <slug> --json
+   coord-engine review status <team> <slug> --json
    # -> {state: APPROVED|CHANGES|PENDING, approvals, changes, required, pending_required}
    ```
    **CHANGES** if any reviewer requests changes; **APPROVED** if there's an approval, no outstanding

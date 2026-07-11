@@ -58,8 +58,8 @@ re-entry is always safe:
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
-| Resumable snapshot for me? | `uv tool run coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
+| Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
 | Latest snapshot fresh? | `coord-engine continuity resume <team> <agent>` | header timestamp < your work cadence | write one now (rule 2) |
 | Am I continuity-stale? | `coord-engine health <team>` | your agent row has no `continuity-stale` flag | rules 2–3, then re-check |
 
@@ -84,22 +84,22 @@ form folds to the newest across all your tasks. Both are pure reads — safe to 
 ## Usage
 ```bash
 # take a snapshot (e.g. before context runs out, at a natural stopping point, or on session end)
-uv tool run coord-engine continuity snapshot <team> <agent> <task> \
+coord-engine continuity snapshot <team> <agent> <task> \
     --objective "ship the continuity layer" \
     --next "land the PR" --next "write the skill" \
     --open-question "fold across tasks or per-task?" \
     --decision "chose structured json" --context-percent 40
 
 # on waking (fresh session / cron), get a resume brief — deterministic, not a prose re-read
-uv tool run coord-engine continuity resume <team> <agent> <task>
-uv tool run coord-engine continuity resume <team> <agent>          # newest across all the agent's tasks
+coord-engine continuity resume <team> <agent> <task>
+coord-engine continuity resume <team> <agent>          # newest across all the agent's tasks
 ```
 
 ## Role checkpoints, park, and briefing (A6)
 ```bash
-uv tool run coord-engine continuity checkpoint <team> --role <r> [--ref PATH]  # get/set the role's durable resume point
-uv tool run coord-engine continuity park <team> [--agent X] [--objective "…"]  # session exit: snapshot EVERY held role + set its checkpoint_ref
-uv tool run coord-engine briefing <team> [--agent X] [--json]                  # session start: presence + board + inbox + needs-me + pending reviews + latest snapshot in ONE call
+coord-engine continuity checkpoint <team> --role <r> [--ref PATH]  # get/set the role's durable resume point
+coord-engine continuity park <team> [--agent X] [--objective "…"]  # session exit: snapshot EVERY held role + set its checkpoint_ref
+coord-engine briefing <team> [--agent X] [--json]                  # session start: presence + board + inbox + needs-me + pending reviews + latest snapshot in ONE call
 ```
 - `park` is the session-exit verb: each role you hold (fresh lease) gets a snapshot and the role doc's
   `checkpoint_ref` points at it — the next holder (or your next session) resumes from there via
