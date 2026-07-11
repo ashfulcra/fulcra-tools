@@ -114,7 +114,12 @@ skills. Subagent-only work stays OFF the bus.
   row when their pending-review scan exceeds `COORD_REVIEW_FOLD_BUDGET` (default 45s, enforced *within* a
   slug too — checked after each verdict/doc read, so one stalled read can't return a clean row) — honor it
   with a per-slug `review status` sweep;
-  never read the fold as complete. That sweep itself **fails closed**: `review status` returns rc 1
+  never read the fold as complete. The team-global **forge-feedback** section is bounded the same way:
+  `briefing`/`needs-me` emit a `forge-degraded` row `{scanned, total, skipped}` when the forge fan-out
+  exceeds the shared `COORD_BRIEFING_BUDGET` (default 60s, opened once for the whole add-on stack and spent
+  cumulatively; a raised feedback listing counts as `skipped`) — honor it with a `forge feedback` sweep,
+  never read the section as complete.
+  That review sweep itself **fails closed**: `review status` returns rc 1
   (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
   rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
   tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.

@@ -1196,3 +1196,128 @@ def test_answer_rejects_terminal_task_with_stale_needs_human(capsys):
           "---\ntype: Task\ntitle: O\nstatus: done\nowner: a\ntags: [needs:human]\n---\n")
     assert cli.main(["answer", "r", "oldie", "--with", "hi"], transport=t) == 1
     assert "not a waiting-for-operator ask" in capsys.readouterr().err
+
+
+# --- forge-feedback section budget (the briefing/needs-me forge hang) ---------
+#
+# `_forge_responsible`/`_forge_feedback_for` did unbounded, team-global per-PR
+# transport reads with no budget: under a degraded transport `briefing` hung in
+# the FORGE-FEEDBACK section. These cover the shared briefing deadline
+# (COORD_BRIEFING_BUDGET) that now bounds the forge section, mirroring the
+# review-fold budget: breach/failure -> a `forge-degraded` row (json passthrough
+# + one text line), never a hang or a silent drop.
+
+import time as _time  # noqa: E402
+from coord_engine import forge as _forge  # noqa: E402
+from coord_engine.transport import TransportError as _TransportError  # noqa: E402
+
+_PR_URLS = ["https://github.com/o/r/pull/1",
+            "https://github.com/o/r/pull/2",
+            "https://github.com/o/r/pull/3"]
+
+
+def _seed_forge(t, agent="bob", urls=_PR_URLS):
+    """Watch each PR for `agent` and drop one unacked feedback shard per PR, so
+    the agent is responsible for len(urls) PRs each carrying one feedback item."""
+    for u in urls:
+        slug = _forge.pr_slug(u)
+        t.put(f"team/r/_coord/forge/watch/{slug}.md",
+              f"---\ntype: Watch\nurl: {u}\nagent: {agent}\nts: 2026-07-08T12:00:00Z\n---\n")
+        t.put(f"team/r/_coord/forge/feedback/{slug}/review-PRR_1.md",
+              "---\ntype: ForgeFeedback\nauthor: rev\nbody: fix it\n---\n")
+
+
+class _SlowFeedbackTransport(FakeTransport):
+    """Sleeps only on forge-feedback prefix ops — responsibility building stays
+    fast (so `total` is deterministic) while the per-PR feedback scan is slow."""
+
+    def __init__(self, delay=0.03):
+        super().__init__()
+        self.delay = delay
+
+    def _slow(self, path):
+        if "/forge/feedback/" in path:
+            _time.sleep(self.delay)
+
+    def read(self, path):
+        self._slow(path)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        self._slow(prefix)
+        return super().list_dir(prefix)
+
+
+def test_forge_feedback_budget_emits_degraded_marker(capsys):
+    t = _SlowFeedbackTransport(delay=0.03)
+    _seed_forge(t, agent="bob")
+    capsys.readouterr()
+    start = _time.monotonic()
+    out = cli._forge_feedback_for(t, "r", "bob", deadline=_time.monotonic() + 0.05)
+    elapsed = _time.monotonic() - start
+    deg = [r for r in out if r.get("type") == "forge-degraded"]
+    assert len(deg) == 1, f"budget breach must append exactly one degraded marker: {out}"
+    assert deg[0]["total"] == 3, deg[0]
+    assert 0 <= deg[0]["scanned"] <= 3, deg[0]
+    assert elapsed < 1.0, "the fold must not read every PR unbounded"
+
+
+def test_forge_feedback_healthy_no_degraded_row(capsys):
+    # Healthy transport: no budget breach, real feedback rows, NO degraded marker.
+    t = FakeTransport()
+    _seed_forge(t, agent="bob")
+    out = cli._forge_feedback_for(t, "r", "bob", deadline=_time.monotonic() + 60)
+    assert [r for r in out if r.get("type") == "forge-degraded"] == []
+    fb = [r for r in out if r.get("type") == "forge-feedback"]
+    assert len(fb) == 3 and all(r["count"] == 1 for r in fb)
+    # deadline=None (the un-budgeted path) is byte-identical
+    assert cli._forge_feedback_for(t, "r", "bob") == out
+
+
+def test_forge_feedback_listing_raises_degraded_not_crash(capsys):
+    # The forge feedback listing for a responsible PR raises: surface a degraded
+    # row (skipped), never crash, never silently drop.
+    class _FeedbackListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if "/forge/feedback/" in prefix:
+                raise _TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = _FeedbackListFails()
+    _seed_forge(t, agent="bob")
+    out = cli._forge_feedback_for(t, "r", "bob")
+    deg = [r for r in out if r.get("type") == "forge-degraded"]
+    assert len(deg) == 1 and deg[0]["skipped"] == 3, out
+    assert [r for r in out if r.get("type") == "forge-feedback"] == []
+
+
+def test_briefing_forge_degraded_exits_zero_other_sections_intact(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
+    t = _SlowFeedbackTransport(delay=0.03)
+    _seed_forge(t, agent="bob")
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+
+    assert cli.main(["briefing", "r", "--agent", "bob"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "forge fold degraded" in out
+    assert "board:" in out and "needs-me:" in out  # other sections still rendered
+
+    assert cli.main(["briefing", "r", "--agent", "bob", "--json"], transport=t) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "forge-degraded" for r in doc["forge_feedback"]), \
+        "json path must surface the forge-degraded marker as-is"
+    assert "board" in doc and "needs_me" in doc and "presence" in doc
+
+
+def test_needs_me_forge_degraded_exits_zero(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
+    t = _SlowFeedbackTransport(delay=0.03)
+    _seed_forge(t, agent="bob")
+    capsys.readouterr()
+    assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 0
+    assert "forge fold degraded" in capsys.readouterr().out
+    assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "forge-degraded" for r in got)

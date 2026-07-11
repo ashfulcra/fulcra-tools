@@ -160,8 +160,12 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     rows = _load_rows(transport, args.team)
     got = query.needs_me(rows, args.agent, now=_iso(_now()))
+    # Shared add-on deadline (see _briefing_budget): opened here so the forge
+    # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
+    # own independent, already-shipped budget.
+    deadline = time.monotonic() + _briefing_budget()
     got += _pending_reviews_for(transport, args.team, args.agent)
-    got += _forge_feedback_for(transport, args.team, args.agent)
+    got += _forge_feedback_for(transport, args.team, args.agent, deadline=deadline)
     if args.json:
         print(json.dumps(got, indent=2))
     else:
@@ -174,6 +178,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_review_degraded_line(r))
             elif r.get("type") == "forge-feedback":
                 print(_forge_feedback_line(r))
+            elif r.get("type") == "forge-degraded":
+                print(_forge_degraded_line(r))
             else:
                 print(_line(r))
     return 0
@@ -419,6 +425,7 @@ def _verdicts_prefix(team: str, slug: str) -> str:
 SETTLED_MARKER = ".settled"
 
 DEFAULT_REVIEW_FOLD_BUDGET = 45.0
+DEFAULT_BRIEFING_BUDGET = 60.0
 
 
 def _settled_marker_path(team: str, slug: str) -> str:
@@ -438,6 +445,30 @@ def _review_fold_budget() -> float:
         return DEFAULT_REVIEW_FOLD_BUDGET
     if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
         return DEFAULT_REVIEW_FOLD_BUDGET
+    return v
+
+
+def _briefing_budget() -> float:
+    """Aggregate deadline (seconds) for the transport-heavy briefing/needs-me
+    add-on sections — chiefly the team-global forge-feedback fan-out, which did
+    unbounded per-PR reads and hung the whole bundle under a degraded transport.
+    ONE budget opens when the add-on stack begins and is spent cumulatively: an
+    absolute ``time.monotonic()`` deadline is computed at that point and passed
+    to each transport-heavy section, so time already burned by an earlier section
+    shrinks what the next one gets (pending-reviews keeps its own, independent and
+    already-shipped ``COORD_REVIEW_FOLD_BUDGET``; whichever bound is sooner wins).
+    Env override ``COORD_BRIEFING_BUDGET``; anything unparseable, non-positive, or
+    inf falls back to the default (a bad env value must never disable the bound or
+    make the fold hang)."""
+    raw = os.environ.get("COORD_BRIEFING_BUDGET")
+    if raw is None:
+        return DEFAULT_BRIEFING_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_BRIEFING_BUDGET
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_BRIEFING_BUDGET
     return v
 
 
@@ -735,74 +766,174 @@ def _review_degraded_line(r: dict[str, Any]) -> str:
     return line
 
 
-def _forge_responsible(transport: Any, team: str) -> dict[str, set]:
-    """{pr_slug: {responsible agents}}. Responsibility comes from two sources,
-    unioned: the watch registry (its ``agent``) and, for review-artifact PRs,
-    the review's ``requested_by``. Best-effort — any listing failure is skipped
-    so needs-me/briefing never fail because the forge add-on is absent."""
+def _forge_responsible(
+    transport: Any, team: str, *, deadline: Optional[float] = None
+) -> tuple[dict[str, set], bool]:
+    """``({pr_slug: {responsible agents}}, ok)``. Responsibility comes from two
+    sources, unioned: the watch registry (its ``agent``) and, for review-artifact
+    PRs, the review's ``requested_by``. Best-effort — any listing failure is
+    skipped so needs-me/briefing never fail because the forge add-on is absent.
+
+    BOUNDED. Both sources are team-global fan-outs (list + one read per entry);
+    ``deadline`` (an absolute ``time.monotonic()`` instant, or None for no bound)
+    is checked BEFORE and AFTER each blocking op, mirroring the review fold — so a
+    degraded transport can no longer turn discovery into an unbounded hang. ``ok``
+    is False when a source listing raised OR the budget expired mid-scan: the map
+    is then a FLOOR (partial), and the caller must surface a degraded row rather
+    than treat the partial responsibility set as complete. A cheap zero-read skip
+    for "this agent has no forge responsibility" is NOT possible from one listing:
+    responsibility lives in per-file frontmatter across TWO sources, so the budget
+    is the guard (the empty-store case already costs only the two empty listings).
+    """
     resp: dict[str, set] = {}
+    ok = True
+
+    def _expired() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
     watch_prefix = f"team/{team}/_coord/forge/watch/"
     try:
-        for e in transport.list_dir(watch_prefix):
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md"):
-                continue
-            fm = okf.parse_frontmatter(transport.read(watch_prefix + n)) or {}
-            slug = forge_mod.pr_slug(fm.get("url")) or n[:-3]
-            a = fm.get("agent")
-            if a:
-                resp.setdefault(slug, set()).add(str(a))
+        watch_entries = transport.list_dir(watch_prefix)
     except TransportError:
-        pass
+        watch_entries = []
+        ok = False
+    for e in watch_entries:
+        if _expired():
+            ok = False
+            break
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        raw = transport.read(watch_prefix + n)
+        if _expired():  # the read pushed us over budget — detect it immediately
+            ok = False
+            break
+        fm = okf.parse_frontmatter(raw) or {}
+        slug = forge_mod.pr_slug(fm.get("url")) or n[:-3]
+        a = fm.get("agent")
+        if a:
+            resp.setdefault(slug, set()).add(str(a))
     review_prefix = f"team/{team}/review/"
     try:
-        for e in transport.list_dir(review_prefix):
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
-                continue
-            fm = okf.parse_frontmatter(transport.read(review_prefix + n)) or {}
-            slug = forge_mod.pr_slug(forge_mod.review_artifact(fm))
-            who = fm.get("requested_by")
-            if slug and who:
-                resp.setdefault(slug, set()).add(str(who))
+        review_entries = transport.list_dir(review_prefix)
     except TransportError:
-        pass
-    return resp
+        review_entries = []
+        ok = False
+    for e in review_entries:
+        if _expired():
+            ok = False
+            break
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
+            continue
+        raw = transport.read(review_prefix + n)
+        if _expired():
+            ok = False
+            break
+        fm = okf.parse_frontmatter(raw) or {}
+        slug = forge_mod.pr_slug(forge_mod.review_artifact(fm))
+        who = fm.get("requested_by")
+        if slug and who:
+            resp.setdefault(slug, set()).add(str(who))
+    return resp, ok
 
 
-def _forge_feedback_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+def _forge_slug_feedback(
+    transport: Any, team: str, agent: str, slug: str,
+    entries: list[dict[str, Any]], prefix: str, deadline: Optional[float],
+) -> tuple[Optional[dict[str, Any]], bool]:
+    """Feedback row for ONE PR from its already-listed feedback dir, ->
+    ``(row_or_None, fully_scanned)``. ``fully_scanned`` is False when the budget
+    expired mid-scan (checked before AND after each blocking read): a single PR
+    with many shards would otherwise read them all unbounded. A truncated scan is
+    UNTRUSTED — the caller discards the partial row and counts the slug skipped,
+    exactly as the review fold discards a mid-slug tally."""
+    items: list[str] = []
+    authors: list[str] = []
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, False
+        stem = n[:-3]
+        acked = transport.read(_ack_path(team, stem, agent))
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, False
+        if acked is not None:
+            continue  # acked by this agent — hidden
+        raw = transport.read(prefix + n)
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, False
+        items.append(stem)
+        fm = okf.parse_frontmatter(raw) or {}
+        a = fm.get("author")
+        if a and str(a) not in authors:
+            authors.append(str(a))
+    if items:
+        return ({"type": "forge-feedback", "pr_slug": slug, "count": len(items),
+                 "authors": sorted(authors), "items": sorted(items)}, True)
+    return None, True
+
+
+def _forge_feedback_for(
+    transport: Any, team: str, agent: str, *, deadline: Optional[float] = None
+) -> list[dict[str, Any]]:
     """Unacked forge-feedback shards on PRs the agent is responsible for, one
     row per PR: ``{type, pr_slug, count, authors, items}``. Ack state reuses the
     directive ack namespace (``_coord/acks/<item-id>/<agent>.md``) — acked items
-    drop; a new node id (new shard) re-surfaces. Best-effort; never raises."""
+    drop; a new node id (new shard) re-surfaces. Best-effort; never raises.
+
+    BOUNDED by the shared briefing ``deadline`` (absolute ``time.monotonic()``,
+    None = unbounded/legacy). On any breach — the responsibility scan truncating,
+    a per-PR feedback listing raising, or the per-PR shard scan overrunning — a
+    single ``forge-degraded`` row ``{scanned, total, skipped}`` is appended (same
+    shape/discipline as ``review-fold-degraded``): partial forge knowledge stays
+    VISIBLE, the section never hangs the entry fold and never dies silently.
+    ``total`` is the count of PRs the agent is responsible for (a floor if the
+    responsibility scan itself was truncated); ``scanned`` counts those reached;
+    ``skipped`` counts those reached-but-unreadable/cut."""
     out: list[dict[str, Any]] = []
-    resp = _forge_responsible(transport, team)
-    for slug, agents in sorted(resp.items()):
-        if agent not in agents:
-            continue
+    resp, resp_ok = _forge_responsible(transport, team, deadline=deadline)
+    mine = sorted(slug for slug, agents in resp.items() if agent in agents)
+    total = len(mine)
+    scanned = 0
+    skipped = 0
+    degraded = not resp_ok  # a truncated/failed responsibility scan is already degraded
+    for slug in mine:
+        if deadline is not None and time.monotonic() >= deadline:
+            degraded = True
+            break
+        scanned += 1
         prefix = f"team/{team}/_coord/forge/feedback/{slug}/"
-        items: list[str] = []
-        authors: list[str] = []
         try:
             entries = transport.list_dir(prefix)
         except TransportError:
+            # This PR's feedback is UNKNOWN (listing raised): count it skipped and
+            # keep scanning the rest — never let one PR sink the whole section.
+            skipped += 1
+            degraded = True
             continue
-        for e in entries:
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md"):
-                continue
-            stem = n[:-3]
-            if transport.read(_ack_path(team, stem, agent)) is not None:
-                continue  # acked by this agent — hidden
-            items.append(stem)
-            fm = okf.parse_frontmatter(transport.read(prefix + n)) or {}
-            a = fm.get("author")
-            if a and str(a) not in authors:
-                authors.append(str(a))
-        if items:
-            out.append({"type": "forge-feedback", "pr_slug": slug,
-                        "count": len(items), "authors": sorted(authors),
-                        "items": sorted(items)})
+        if deadline is not None and time.monotonic() >= deadline:
+            # The listing itself pushed us over budget: this PR is unscanned.
+            skipped += 1
+            degraded = True
+            break
+        row, fully = _forge_slug_feedback(transport, team, agent, slug, entries, prefix, deadline)
+        if not fully:
+            # Budget expired mid-shard: the partial row is untrusted, discard it,
+            # count the PR skipped, and stop — the budget is spent.
+            skipped += 1
+            degraded = True
+            break
+        if row:
+            out.append(row)
+    if degraded:
+        marker: dict[str, Any] = {"type": "forge-degraded", "scanned": scanned,
+                                  "total": total}
+        if skipped:
+            marker["skipped"] = skipped
+        out.append(marker)
     return out
 
 
@@ -810,6 +941,14 @@ def _forge_feedback_line(r: dict[str, Any]) -> str:
     who = ", ".join(r.get("authors") or []) or "?"
     return (f"  [FORGE] feedback on {r.get('pr_slug')}: "
             f"{r.get('count')} item(s) from {who}")
+
+
+def _forge_degraded_line(r: dict[str, Any]) -> str:
+    line = (f"  forge fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
+            f"before budget — run forge feedback for the rest")
+    if r.get("skipped"):
+        line += f" ({r['skipped']} PR(s) skipped on transport error)"
+    return line
 
 
 def _normalize_required(required: Any) -> list[str]:
@@ -1921,13 +2060,20 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
+    # One shared add-on deadline (see _briefing_budget), opened before the
+    # transport-heavy sections and spent cumulatively: time burned by
+    # pending-reviews shrinks the window the forge fan-out gets, so the whole
+    # add-on stack is bounded, not each section independently. pending-reviews
+    # keeps its own tighter, already-shipped budget (whichever bound is sooner).
+    add_on_deadline = time.monotonic() + _briefing_budget()
     try:
         out["pending_reviews"] = _pending_reviews_for(transport, args.team, agent)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
     try:
-        out["forge_feedback"] = _forge_feedback_for(transport, args.team, agent)
+        out["forge_feedback"] = _forge_feedback_for(
+            transport, args.team, agent, deadline=add_on_deadline)
     except Exception as e:
         print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
         out["forge_feedback"] = []
@@ -1967,9 +2113,14 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(_line(r))
     for r in degraded_rows:  # always shown — a degraded fold must never hide
         print(_review_degraded_line(r))
-    print(f"  forge feedback: {len(out.get('forge_feedback') or [])} PR(s)")
-    for r in (out.get("forge_feedback") or [])[:5]:
+    forge_rows = out.get("forge_feedback") or []
+    forge_fb = [r for r in forge_rows if r.get("type") != "forge-degraded"]
+    forge_deg = [r for r in forge_rows if r.get("type") == "forge-degraded"]
+    print(f"  forge feedback: {len(forge_fb)} PR(s)")
+    for r in forge_fb[:5]:
         print(_forge_feedback_line(r))
+    for r in forge_deg:  # always shown — a degraded fold must never hide
+        print(_forge_degraded_line(r))
     print(continuity.render_resume(out["resume"]))
     return 0
 
