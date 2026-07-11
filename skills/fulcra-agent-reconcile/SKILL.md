@@ -74,8 +74,8 @@ and degraded-safe — so re-running it never corrupts state and re-entry is alwa
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first — a `✗` line names the broken leg (launcher not on PATH, or File Store unreachable → `fulcra-api auth login`); do NOT reconcile against a broken engine |
-| Aggregate present + fresh? | `uv tool run coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint, printed only when no aggregate has been built) | **Reconcile** — run `uv tool run coord-engine reconcile <team>` (see [Usage](#usage)) to scan the task docs and build/heal the aggregate, then re-probe |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first — a `✗` line names the broken leg (launcher not on PATH, or File Store unreachable → `fulcra-api auth login`); do NOT reconcile against a broken engine |
+| Aggregate present + fresh? | `coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint, printed only when no aggregate has been built) | **Reconcile** — run `coord-engine reconcile <team>` (see [Usage](#usage)) to scan the task docs and build/heal the aggregate, then re-probe |
 
 Both probes pass → the engine is healthy and the aggregate exists, so `status`/`board`/`needs-me`/`search`
 read the fresh view; reconcile again on your cadence (or heartbeat) to keep it healed as tasks change.
@@ -86,7 +86,7 @@ invokes `fulcra-api` (`uv tool run …`), so the skill itself stays pure prose +
 code). Needs `fulcra-api` authenticated and `coord-engine` installed (`uv tool install coord-engine`, or
 from source: `uv tool install <fulcra-tools>/packages/coord-engine`). See [`references/reconcile-cli.md`](references/reconcile-cli.md).
 ```bash
-uv tool run coord-engine reconcile <team>            # scan + heal index/log + write the aggregate
-uv tool run coord-engine board    <team>
-uv tool run coord-engine needs-me <team> --agent <id>
+coord-engine reconcile <team>            # scan + heal index/log + write the aggregate
+coord-engine board    <team>
+coord-engine needs-me <team> --agent <id>
 ```

@@ -23,9 +23,9 @@ safely re-runnable (a beat is a single-file overwrite, a claim is a refresh):
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT beat against a broken engine |
-| Own shard live? | `uv tool run coord-engine presence show <team>` | a row for your agent id shows liveness `[live ]` (the `<1h` bucket) | **Beat** — run `presence beat <team>` (see Usage) to write/refresh your shard |
-| If identity=role, lease held? | `uv tool run coord-engine roles status <team> <role>` | prints `role <role> in team/<team>: HELD` for the role you act as | **Claim** — run `roles claim <team> <role>` (skip this probe entirely if you are not acting under a role identity) |
+| Engine usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT beat against a broken engine |
+| Own shard live? | `coord-engine presence show <team>` | a row for your agent id shows liveness `[live ]` (the `<1h` bucket) | **Beat** — run `presence beat <team>` (see Usage) to write/refresh your shard |
+| If identity=role, lease held? | `coord-engine roles status <team> <role>` | prints `role <role> in team/<team>: HELD` for the role you act as | **Claim** — run `roles claim <team> <role>` (skip this probe entirely if you are not acting under a role identity) |
 
 All probes pass → you are present and (if role-scoped) holding your lease; just keep beating on your
 cadence. A brand-new session fails the first or second probe and enters at Beat.
@@ -43,11 +43,11 @@ cadence. A brand-new session fails the first or second probe and enters at Beat.
 
 ## Usage
 ```bash
-uv tool run coord-engine presence beat <team> [--agent X] [-w workstream]... [-s "one-liner"]
-uv tool run coord-engine presence show <team> [--json]
-uv tool run coord-engine agents <team> [--json]
-uv tool run coord-engine roles claim <team> <role> [--agent X]     # refresh = re-run
-uv tool run coord-engine roles release <team> <role> [--agent X]
+coord-engine presence beat <team> [--agent X] [-w workstream]... [-s "one-liner"]
+coord-engine presence show <team> [--json]
+coord-engine agents <team> [--json]
+coord-engine roles claim <team> <role> [--agent X]     # refresh = re-run
+coord-engine roles release <team> <role> [--agent X]
 ```
 `--agent` defaults to `$FULCRA_COORD_AGENT` (or a derived host id). Stale shards drop out of the
 presence fold's `[live]` view by age; the shard FILES are not currently garbage-collected (reconcile's

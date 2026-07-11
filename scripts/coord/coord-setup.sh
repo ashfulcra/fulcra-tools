@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # coord-setup.sh — install coord standalone from a checkout of this repo:
-#   1. install the `coord-engine` tool from ./engine (so the engine + skills are
-#      the SAME version by construction), and
+#   1. install the `coord-engine` tool from packages/coord-engine (so the engine +
+#      skills are the SAME version by construction), and
 #   2. install the 6 fulcra-agent-* skills into your agent's skills directory.
 #
 # Matches how upstream fulcradynamics/agent-skills says to install (copy the skill
@@ -9,8 +9,8 @@
 # convenience (a `git pull` then updates the skills in place).
 #
 # Usage:
-#   scripts/coord-setup.sh [--symlink] [--skills-dir DIR] [--engine-only] [--skills-only] [--yes]
-#   scripts/coord-setup.sh --uninstall [--skills-dir DIR] [--yes]
+#   scripts/coord/coord-setup.sh [--symlink] [--skills-dir DIR] [--engine-only] [--skills-only] [--yes]
+#   scripts/coord/coord-setup.sh --uninstall [--skills-dir DIR] [--yes]
 #
 # Defaults: copy; skills dir = ~/.claude/skills (Claude Code — verified discovery path).
 # For another agent, pass --skills-dir (e.g. an OpenClaw skills dir).
@@ -54,7 +54,7 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 3
 fi
 if [[ "$DO_ENGINE" == "1" && ! -d "$ENGINE_SRC" ]]; then
-  echo "error: engine/ not found next to this script — run from a coord checkout." >&2; exit 3
+  echo "error: packages/coord-engine not found — run from a fulcra-tools checkout." >&2; exit 3
 fi
 
 if [[ "$DO_ENGINE" == "1" ]]; then

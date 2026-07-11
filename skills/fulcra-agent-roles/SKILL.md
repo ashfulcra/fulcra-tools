@@ -25,7 +25,7 @@ Before claiming, escalating, or reading a role's status, probe where this role s
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Role doc registered? | `uv tool run fulcra-api file download team/<team>/roles/<role>.md -` | prints a doc with `type: Role` (NON-mutating — do not probe registration via `roles claim`: claiming writes your lease before you've read the prior one, destroying same-id takeover evidence per "Role-as-identity" below) | **Establish a role** — write `roles/<role>.md` (`type: Role` + policy/SLA/maintainer) |
-| Lease held by you? | `uv tool run coord-engine roles status <team> <role>` | prints `role <role> in team/<team>: HELD` and your agent id is among the `fresh holders:` line | **Claim / hold** — run `roles claim <team> <role>` to write/refresh your lease shard |
+| Lease held by you? | `coord-engine roles status <team> <role>` | prints `role <role> in team/<team>: HELD` and your agent id is among the `fresh holders:` line | **Claim / hold** — run `roles claim <team> <role>` to write/refresh your lease shard |
 | Today's escalation clear? | `uv tool run fulcra-api file download team/<team>/roles/<role>/escalations/$(date -u +%Y-%m-%d).md -` | download FAILS (no marker) — the role is not sitting escalated today | **Escalate a vacancy** — a marker present means a vacancy already fired today; drain it per "Escalate a vacancy" below |
 
 All probes pass → the role is registered, you hold a fresh lease, and no vacancy escalation is
@@ -73,17 +73,21 @@ outstanding for today; just re-claim on your cadence to keep the lease fresh.
 ## Lifecycle
 
 ### Establish a role (once)
-Write `roles/<name>.md` with `type: Role` + policy/SLA/maintainer, and list it in the team `roles/index.md`.
+Write `roles/<name>.md` with `type: Role` + policy/SLA/maintainer — complete worked
+examples (exclusive maintainer, shared reviewer, shared multi-host monitor) are in
+[`examples/`](examples/). A `roles/index.md` is optional human courtesy: the engine
+folds role status from the directory listing, and the reference deployment does not
+maintain one.
 
 ### Claim / hold
-`uv tool run coord-engine roles claim <team> <name>` writes your lease shard (engine-named `<slug>-<hash6>.md`;
+`coord-engine roles claim <team> <name>` writes your lease shard (engine-named `<slug>-<hash6>.md`;
 the command echoes the filename). **Re-run it** whenever you do work in the role — the refreshed
 `timestamp` is what keeps the role "held". Never hand-upload a lease file: a hand-named shard makes a
 SECOND lease for your id (spurious CONTESTED on exclusive roles). The Fulcra File Store versions every
 write, so the lease's history is an audit trail of your tenure.
 
 ### Release
-`uv tool run coord-engine roles release <team> <name>` deletes your engine-named shard. (Deletion is intentional
+`coord-engine roles release <team> <name>` deletes your engine-named shard. (Deletion is intentional
 and not undoable — correct for releasing.)
 
 ### Determine role status (the fold) — **use the engine, do not eyeball timestamps**
@@ -91,7 +95,7 @@ Classifying a role from many lease files is a *fold* over derived state: two age
 whether a role is vacant before one escalates. Eyeballing timestamps drifts (the exact failure coord
 exists to prevent), so this is a deterministic **`coord-engine`** command, not a prose instruction:
 ```bash
-uv tool run coord-engine roles status <team> <role> --json
+coord-engine roles status <team> <role> --json
 ```
 It reads the role's `policy`/`sla_hours`, folds the leases, and returns:
 - `status` — **HELD** (≥1 fresh lease) / **VACANT** (none) / **CONTESTED** (`exclusive` + ≥2 fresh) / **UNKNOWN** (unreadable),
@@ -142,7 +146,7 @@ The engine already computed `escalation_due` above. When it is **true**, perform
 - Making sure a critical function (on-call, maintainer) is never silently unattended.
 
 ## Efficiency (per the teams OKF directive)
-List roles in `roles/index.md`, but do **not** index every lease or escalation marker — describe the
+If you keep a `roles/index.md` (optional — see "Establish a role"), do **not** index every lease or escalation marker — describe the
 `leases/` and `escalations/` directories as a whole. Keep the team `log.md` for role *creation* and
 *handoff* milestones, not every lease refresh.
 

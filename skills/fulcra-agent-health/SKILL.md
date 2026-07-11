@@ -40,10 +40,10 @@ today's marker doesn't exist, it writes the marker and files a **P1 directive to
 
 ## Usage
 ```bash
-uv tool run coord-engine doctor <team>          # preflight; exit 0 = healthy
-uv tool run coord-engine health <team> [--json] # fleet fold; exit 1 if no fresh reconciler
-uv tool run coord-engine digest <team> [--human H] [--json] [--store]
-uv tool run coord-engine escalate <team>        # vacancy sweep (heartbeat-safe)
+coord-engine doctor <team>          # preflight; exit 0 = healthy
+coord-engine health <team> [--json] # fleet fold; exit 1 if no fresh reconciler
+coord-engine digest <team> [--human H] [--json] [--store]
+coord-engine escalate <team>        # vacancy sweep (heartbeat-safe)
 ```
 
 ## When to use

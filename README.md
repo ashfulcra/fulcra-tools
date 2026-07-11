@@ -24,7 +24,7 @@ detail.
 
 | Project | What it is | Start here |
 |---|---|---|
-| **coord** | The agent-coordination layer, second generation: judgment stays in prose (skills), bookkeeping is deterministic code (a stdlib-only CLI, [`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenClaw, Hermes, CI — coordinate durable tasks over Fulcra Files as a bus: a cross-agent inbox with directives and broadcasts, role-based identity with leases, a review handshake where the obligation persists until the verdict file exists (no ack can clear it), continuity checkpoints, and `briefing`/`needs-me` as the single entry fold for a waking agent. The twelve `fulcra-agent-*` skills under [`skills/`](skills) are how an agent actually uses it; per-platform watch/wake installers (Codex app automations, Claude Code hooks, OpenClaw heartbeat blocks) live in [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md). Design and pitch docs: [`docs/coord/`](docs/coord). | [`README.md`](packages/coord-engine/README.md) · [`skills/`](skills) (agents) |
+| **coord** | The agent-coordination layer, second generation: judgment stays in prose (skills), bookkeeping is deterministic code (a stdlib-only CLI, [`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenClaw, Hermes, CI — coordinate durable tasks over Fulcra Files as a bus: a cross-agent inbox with directives and broadcasts, role-based identity with leases, a review handshake where the obligation persists until the verdict file exists (no ack can clear it), continuity checkpoints, and `briefing`/`needs-me` as the single entry fold for a waking agent. The twelve `fulcra-agent-*` skills under [`skills/`](skills) are how an agent actually uses it; per-platform watch/wake installers (Codex app automations, Claude Code hooks, OpenClaw heartbeat blocks) live in [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md). Design and pitch docs: [`docs/coord/`](docs/coord). | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [`README.md`](packages/coord-engine/README.md) · [`skills/`](skills) (agents) · [pitch](docs/coord/pitch/one-pager.md) |
 | **ATC** | Air-traffic control for a fleet running on subscription caps — capability-matched model routing. A versioned capability map ships in the engine (current Claude/GPT/Gemini/Grok lineups + the local OSS tier); `coord-engine route <team> --needs code,long-context` ranks the cheapest capable model on the account with headroom, agents log usage and outcomes after each dispatch (`usage log`), and three bad outcomes demote a model for that kind of work. `coord-engine atc init` gets a solo operator from zero to routed dispatch in one command — no team concepts required; `atc report` and `atc dash` (localhost) show the tier mix and estimated frontier-cap days preserved. | [`SKILL.md`](skills/fulcra-agent-atc/SKILL.md) · [design](docs/coord/atc-DESIGN.md) |
 | **Fulcra FDE** | A forward-deployed engineer as a skill: bring a business plan, deck, or idea; it interviews you to surface goals and assumptions, maps the product onto Fulcra primitives (with an honest gap register), builds a verification prototype — including a deployment rehearsal — and only then the real thing. Engagement state lives in your own Fulcra file store; judgment is prose ([`skills/fulcra-fde`](skills/fulcra-fde/SKILL.md)), bookkeeping is a stdlib-only engine ([`packages/fde-engine`](packages/fde-engine)). | [`SKILL.md`](skills/fulcra-fde/SKILL.md) · [`README.md`](packages/fde-engine/README.md) |
 | **Fulcra Continuity** | Turns a long-running agent task into a structured checkpoint (objective, decisions, artifacts, open questions, next actions) that another session or agent can resume from without guessing. A standalone library + CLI (`checkpoint` / `resume`) that pairs with coord without depending on it: `coord-engine continuity resume/snapshot/park` read and write the same shape, and the [continuity skill](skills/fulcra-agent-continuity/SKILL.md) carries the cross-harness lifecycle contract (resume on wake, snapshot on change, park before context loss) with installers for each harness. | [`README.md`](packages/fulcra-continuity/README.md) |
@@ -62,7 +62,7 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 `uv run fulcra-collect doctor`. The coord engine installs on its own:
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.4.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.5.0#subdirectory=packages/coord-engine"
 ```
 
 and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
@@ -80,7 +80,11 @@ and Prefs install independently — see their READMEs.
 
 [`AGENTS.md`](AGENTS.md) is your entry point. It documents the non-obvious
 environment — the required `uv` extras, the launchd daemon, the PATH/keychain
-gotchas — plus the coordination and backlog conventions. Coordinate durable
+gotchas — plus the coordination and backlog conventions. Joining the coord bus
+for the first time — especially from a **remote or sandboxed environment**
+(Claude Code cloud, CI) — start with the
+[get-on-the-bus quickstart](docs/coord/GET-ON-THE-BUS.md): team bootstrap from
+zero, egress/auth requirements, and the join sequence. Coordinate durable
 work on the bus via the [coord skills](skills): on wake, `coord-engine
 briefing <team> --agent <you>` is the one command that surfaces your inbox,
 your roles' inboxes, and every review you owe — start there, not with a

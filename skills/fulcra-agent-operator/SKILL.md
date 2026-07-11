@@ -23,8 +23,8 @@ idempotent write, so re-entry never corrupts state:
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT surface asks against a broken engine |
-| Any asks waiting on the operator? | `uv tool run coord-engine asks <team> [--human <id>]` | the header line reads `asks — 0 waiting on <id> (oldest first)` — nothing to surface (NON-mutating read) | **The orchestrator's duty** — a non-zero count means asks are rotting; surface the oldest to the operator and relay the answer per party 2 below |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT surface asks against a broken engine |
+| Any asks waiting on the operator? | `coord-engine asks <team> [--human <id>]` | the header line reads `asks — 0 waiting on <id> (oldest first)` — nothing to surface (NON-mutating read) | **The orchestrator's duty** — a non-zero count means asks are rotting; surface the oldest to the operator and relay the answer per party 2 below |
 
 Both probes clean → the engine is healthy and no ask is waiting; keep polling on your heartbeat.
 
@@ -32,7 +32,7 @@ Both probes clean → the engine is healthy and no ask is waiting; keep polling 
 
 ### 1. Any agent — raising an ask (when you're stuck on the operator)
 ```bash
-uv tool run coord-engine task block <team> <slug> --on-user "<the ask>"
+coord-engine task block <team> <slug> --on-user "<the ask>"
 ```
 Rules for a GOOD ask (this is the part that makes the loop work):
 - **Self-contained**: someone reading only the ask text can answer it. Include the options
@@ -43,7 +43,7 @@ Rules for a GOOD ask (this is the part that makes the loop work):
 
 ### 2. The orchestrator — never letting an ask rot (heartbeat/loop duty)
 ```bash
-uv tool run coord-engine asks <team> [--human <handle>] [--json]   # oldest first, with age_hours
+coord-engine asks <team> [--human <handle>] [--json]   # oldest first, with age_hours
 ```
 On every heartbeat: pull `asks --json`, diff against what you last surfaced, and
 - surface **new** asks to the operator immediately (notification, chat, digest),
@@ -57,7 +57,7 @@ On every heartbeat: pull `asks --json`, diff against what you last surfaced, and
 
 ### 3. The operator's answer — one atomic return leg
 ```bash
-uv tool run coord-engine answer <team> <slug> --with "<the answer>"
+coord-engine answer <team> <slug> --with "<the answer>"
 ```
 In ONE write: records the answer (`next_action: OPERATOR ANSWER: …` + body note), unblocks
 (`blocked → active`), hands the task back to its **owner** (their inbox + listener fire), and strips

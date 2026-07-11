@@ -82,6 +82,14 @@ Durable work — anything another session or agent must see — lives on the coo
 bus (Fulcra Files), driven through `coord-engine` and the `fulcra-agent-*`
 skills. Subagent-only work stays OFF the bus.
 
+First time on the bus, or joining from a **remote/sandboxed session** (Claude
+Code cloud, CI)? Follow [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md)
+— it covers the egress allowlist (`fulcra.us.auth0.com`, `api.fulcradynamics.com`),
+headless device-flow auth (and the `fulcra auth login` HTTPS_PROXY caveat), team
+bootstrap from zero, and the join sequence. The canonical invocation is the bare
+`coord-engine` binary after `uv tool install` — `uvx`/`uv tool run` cannot resolve
+it (not on PyPI).
+
 - **On wake, `coord-engine briefing <team> --agent <you>` is THE entry fold.**
   One call surfaces your identity, your roles' inboxes, and everything that
   needs you including reviews you owe. Start there — never watch a narrower

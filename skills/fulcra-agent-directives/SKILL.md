@@ -25,15 +25,15 @@ safe:
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT direct/ack against a broken engine |
-| Inbox clear for me? | `uv tool run coord-engine inbox <team> -a <id>` | the header line ends `0 item(s)` (the fold found nothing open + unacked for you) — NON-mutating read | **Work your inbox** — the header names a non-zero count and each following line is an open directive; act on / ack it (`inbox <team> --agent <id> --ack <slug>`) via [Verbs](#verbs) before directing new work |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT direct/ack against a broken engine |
+| Inbox clear for me? | `coord-engine inbox <team> -a <id>` | the header line ends `0 item(s)` (the fold found nothing open + unacked for you) — NON-mutating read | **Work your inbox** — the header names a non-zero count and each following line is an open directive; act on / ack it (`inbox <team> --agent <id> --ack <slug>`) via [Verbs](#verbs) before directing new work |
 
 Inbox clear → nothing is assigned to you and unacked; proceed to `tell` / `broadcast` / `remind` others,
 or capture backlog with `later`. (Add `--all` to also surface `@backlog` items in the count.)
 
 ## Verbs
 
-All verbs below run as `uv tool run coord-engine <verb> …`:
+All verbs below run as `coord-engine <verb> …`:
 
 ```bash
 tell      <team> <assignee> <title> [-p P0..P3] [-s summary] [-n next] [--from me]   # direct work

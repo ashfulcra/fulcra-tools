@@ -27,17 +27,17 @@ is the only write, and it's idempotent):
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT mirror against a broken engine |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT mirror against a broken engine |
 | GitHub reachable? | `gh auth status` | exits 0 (an authenticated `gh` is installed) | authenticate the GitHub CLI: `gh auth login` — without it `forge mirror` is a clean no-op (exit 0) and no evidence is written, so review status stays stale |
-| Watching my authored PRs? | `uv tool run coord-engine needs-me <team> --agent <me>` | a PR you authored or requested review on surfaces as a `[FORGE]` item (feedback is reaching you) | it isn't a swept target — register it: `forge watch <team> <pr-url> --agent <me>`, then sweep (see [PR feedback lives on three surfaces](#pr-feedback-lives-on-three-surfaces)) |
-| Feedback swept? | `uv tool run coord-engine forge feedback <team>` | exits 0 — a sweep pass over all three surfaces completed (new shards, if any, written) | authenticate `gh` first (the row above); an unauthenticated sweep is a clean no-op |
+| Watching my authored PRs? | `coord-engine needs-me <team> --agent <me>` | a PR you authored or requested review on surfaces as a `[FORGE]` item (feedback is reaching you) | it isn't a swept target — register it: `forge watch <team> <pr-url> --agent <me>`, then sweep (see [PR feedback lives on three surfaces](#pr-feedback-lives-on-three-surfaces)) |
+| Feedback swept? | `coord-engine forge feedback <team>` | exits 0 — a sweep pass over all three surfaces completed (new shards, if any, written) | authenticate `gh` first (the row above); an unauthenticated sweep is a clean no-op |
 
 All probes clean → run one mirror pass to fold current PR state into review evidence and sweep feedback (see
 [Usage](#usage)); re-run on your heartbeat alongside `reconcile`.
 
 ## Usage
 ```bash
-uv tool run coord-engine forge mirror <team>   # one pass over all PR-backed reviews
+coord-engine forge mirror <team>   # one pass over all PR-backed reviews
 ```
 Run it ad hoc, or on the heartbeat alongside `reconcile`. **Requires the GitHub CLI (`gh`) authenticated**;
 without it the command is a clear no-op (exit 0) — the skill degrades, nothing breaks.
@@ -59,9 +59,9 @@ so the sweep notes it on stderr.
 **Watch PRs the review flow doesn't already cover.** A PR that backs a review artifact is swept
 automatically; an authored or upstream PR with no review doc is not, until you register it:
 ```bash
-uv tool run coord-engine forge watch   <team> <pr-url> [--agent <responsible>]  # register; default responsible = caller
-uv tool run coord-engine forge unwatch <team> <pr-url>                          # deregister
-uv tool run coord-engine forge feedback <team>                                  # sweep all three surfaces now
+coord-engine forge watch   <team> <pr-url> [--agent <responsible>]  # register; default responsible = caller
+coord-engine forge unwatch <team> <pr-url>                          # deregister
+coord-engine forge feedback <team>                                  # sweep all three surfaces now
 ```
 Discovery reads the review doc's `of:` first, falling back to `artifact:`; a watched PR joins that same
 target set.
@@ -69,9 +69,9 @@ target set.
 **The needs-me guarantee.** Swept feedback on a PR you're responsible for surfaces as a `[FORGE]` item in
 `needs-me` and `briefing` for that agent, and **persists until you ack it** — it does not age out. Acking is
 two steps (non-obvious, so spell it out):
-1. `uv tool run coord-engine needs-me <team> --agent <me> --json` — each `forge-feedback` row carries an
+1. `coord-engine needs-me <team> --agent <me> --json` — each `forge-feedback` row carries an
    `items` array; those stems are the ack ids.
-2. `uv tool run coord-engine inbox <team> --ack <item-id> --agent <me>` — ack each stem. A later sweep that finds a
+2. `coord-engine inbox <team> --ack <item-id> --agent <me>` — ack each stem. A later sweep that finds a
    *new* node id writes a new shard, which re-surfaces — you silence only what you've already seen.
 
 ## Notes

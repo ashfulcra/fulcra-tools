@@ -27,7 +27,7 @@ uv tool run fulcra-api file upload /tmp/verdict.md \
 
 ## Check state (deterministic — do not tally by hand)
 ```bash
-uv tool run coord-engine review status <team> pr-42 --json
+coord-engine review status <team> pr-42 --json
 # {state: APPROVED|CHANGES|PENDING, approvals:[...], changes:[...], required:[...], pending_required:[...]}
 ```
 - **CHANGES** — any reviewer requested changes (a single blocker dominates).
