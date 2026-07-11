@@ -26,7 +26,7 @@ def _rejected_candidate():
     """A message that hit the server q but every local post-filter rejects."""
     (rule,) = rules.parse_rules([{
         "id": "r1", "version": 1, "name": "n", "match": "subject:statement",
-        "actions": ["file", "relay"],
+        "actions": ["file", "relay"], "relay_to": "agent:claude",
         # None of these will match the message → guaranteed reject.
         "from_regex": r".*@allowed\.example\.com",
         "subject_regex": r"(?i)receipt",

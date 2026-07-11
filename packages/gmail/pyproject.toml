@@ -14,6 +14,9 @@ dependencies = [
     "fulcra-collect",  # keychain/credential helpers + config dir + PluginState store
 ]
 
+[project.entry-points."fulcra_collect.plugins"]
+gmail = "fulcra_gmail.collect_plugin:PLUGIN"
+
 [tool.uv.sources]
 # Resolve the sibling packages from the workspace, not PyPI.
 fulcra-common = { workspace = true }

@@ -51,7 +51,30 @@ under `skills/`, each package with its own README, build, and tests.
   JSON; attachments = metadata only, bytes deferred to v2), and `ledger`
   (append-only per-account JSONL, fsync per append, torn-line tolerance,
   processed-set keyed by `(message_id, rule_id, rule_version)`, deterministic
-  relay outbox key). Files-writer/relay-emitter/plugin land in Task 3.
+  relay outbox key). Task 3 ships the daemon layer: `files_writer` (selected
+  email → Fulcra Files at `/collect/gmail/<account_id>/<yyyy-mm>/<message_id>
+  .json`; same id → same path, post-crash rewrite is a same-content overwrite),
+  `relay` (B3 exactly-once-visible bus relay — a byte-stable coord directive
+  keyed by the ledger `outbox_key`, emitted + readback-verified via
+  `coord-engine tell`/`search` so retries converge on one visible directive;
+  the installed engine's deterministic slug + readback satisfy the B3 version
+  pin), `cursors` (per-`(account, rule)` contiguous-frontier watermark),
+  `pipeline` (the crash-safe poll: fully paginate → refine to effective matches
+  → order oldest-first by `(internalDate, id)` → `file → ledger → relay →
+  ledger` → advance the watermark only through the contiguous done prefix), and
+  `collect_plugin` (scheduled 15-min plugin; Cloud-Console-clickpath +
+  repeatable add-account wizard; per-account health; registered via entry point
+  + `_bundled_plugins`), and `collect_routes` (the Gmail-specific add-account
+  OAuth endpoints: a start endpoint that mints a nonce + PKCE and 302-redirects
+  to Google consent, and the `/api/oauth/callback` endpoint that consumes the
+  nonce once, exchanges the code, getProfile-binds, and writes the registry row
+  + keychain token — a B4 flow the generic single-namespace oauth route can't
+  model; wired optionally into `collect/web.py` and linked from the wizard).
+  Codex P1 hardening: an unresolved candidate fetch is a frontier hole (cursor
+  never advances past a candidate it couldn't look at); `parse_rules` rejects a
+  `relay` action with no `relay_to`, and a relay a rule requires is never
+  silently completed when no relay backend is configured (the message stays
+  incomplete). Only live OAuth-credential verification is deferred to Task 4.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent

@@ -382,6 +382,16 @@ def build_app(daemon) -> FastAPI:
     ):
         module.register(app, ctx)
 
+    # The Gmail relay plugin ships its own add-account OAuth routes (a B4
+    # nonce+getProfile flow that the generic oauth route can't model). Wire them
+    # in when the plugin is installed; collect works fine without it.
+    try:
+        from fulcra_gmail import collect_routes as gmail_routes
+    except Exception:  # noqa: BLE001 — plugin not installed / import error
+        gmail_routes = None
+    if gmail_routes is not None:
+        gmail_routes.register(app, ctx)
+
     return app
 
 
