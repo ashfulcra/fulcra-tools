@@ -767,3 +767,49 @@ def test_request_rejects_whitespace_only_reviewer(capsys):
         transport=t,
     ) == 2
     assert t.read("team/r/review/pr-9.md") is None, "must write no doc when gating on nothing"
+
+
+# --- Task 2: orphan review dirs + fail-closed role resolution ----------------
+
+def test_fold_emits_review_orphan_row_each_pass(capsys):
+    # A review-root <slug>/ dir with no <slug>.md doc is an ORPHAN: the fold
+    # surfaces a `review-orphan` row naming it (visibility only, no repair). A
+    # doc-ful review is unaffected; the row reappears every pass (not one-shot).
+    t = FakeTransport()
+    # doc-ful pending review for the agent
+    cli.main(["review", "request", "r", "pr-ok", "--of", "url",
+              "--reviewer", "me"], transport=t)
+    # orphan: verdicts dir exists, no team/r/review/pr-orphan.md
+    t.put("team/r/review/pr-orphan/verdicts/x.md",
+          "---\ntype: Verdict\nreviewer: x\nverdict: approve\n---\n")
+    capsys.readouterr()
+    for _ in range(2):  # emitted EACH pass, not cached in the fold
+        assert cli.main(["needs-me", "r", "--agent", "me", "--json"], transport=t) == 0
+        got = json.loads(capsys.readouterr().out)
+        orphans = [g for g in got if g.get("type") == "review-orphan"]
+        assert [o["name"] for o in orphans] == ["pr-orphan"]
+        # doc-ful review still tallies normally
+        assert any(g.get("name") == "pr-ok" for g in got
+                   if g.get("type") == "review-pending")
+
+
+def test_fold_role_lease_listing_degraded_is_visible_not_vacant(capsys):
+    # A review whose pending_required names a ROLE whose lease LISTING raises must
+    # NOT silently read as "no holders" (dropping the obligation). The fold
+    # surfaces a role-degraded marker and never crashes; exit 0.
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put("team/r/review/pr-role.md",
+          "---\ntype: Review\nrequired: reviewer\n---\n")
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
+    t.put("team/r/roles/reviewer/leases/amy.md",
+          "---\ntype: Lease\nagent: amy\ntimestamp: 2026-07-01T00:00:00Z\n---\n")
+    assert cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert [g for g in got if g.get("type") == "review-role-degraded"], \
+        "a degraded role lease read must be VISIBLE, not a silent vacancy"

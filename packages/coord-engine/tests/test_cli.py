@@ -1321,3 +1321,65 @@ def test_needs_me_forge_degraded_exits_zero(capsys, monkeypatch):
     assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
     got = json.loads(capsys.readouterr().out)
     assert any(r.get("type") == "forge-degraded" for r in got)
+
+
+# --- Task 2: fail-closed roles/vacancy fold ----------------------------------
+
+def test_roles_status_lease_listing_unknown_rc1_no_vacancy(capsys):
+    # ADDED SCOPE (fail-closed): a lease LISTING that raises must read as UNKNOWN,
+    # never VACANT — a degraded transport must not assert vacancy and fire a false
+    # SLA escalation. rc 1, same "unknown, retry" register as review status.
+    from coord_engine.transport import TransportError
+
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    rc = cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t)
+    assert rc == 1
+    cap = capsys.readouterr()
+    res = json.loads(cap.out)
+    assert res["status"] == "UNKNOWN"
+    assert res["escalation_due"] is not True  # unknown never escalates
+    assert "unknown" in cap.err.lower()
+
+
+def test_roles_status_lease_listing_unknown_text_mode_rc1(capsys):
+    from coord_engine.transport import TransportError
+
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer"], transport=t) == 1
+    err = capsys.readouterr().err
+    assert "unknown" in err.lower() and "retry" in err.lower()
+
+
+def test_escalate_does_not_escalate_on_unknown_lease(capsys):
+    # The vacancy sweep must not escalate when the lease state is UNKNOWN (listing
+    # raised) — only a proven VACANT past SLA escalates.
+    from coord_engine.transport import TransportError
+
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put("team/r/roles/reviewer.md",
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "0 escalated" in out
+    assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store)
+    assert not any("escalations/" in p for p in t.store)

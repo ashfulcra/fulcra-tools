@@ -176,6 +176,12 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                       f"(required: {', '.join(r['pending_required'])})")
             elif r.get("type") == "review-fold-degraded":
                 print(_review_degraded_line(r))
+            elif r.get("type") == "review-orphan":
+                print(f"  [REVIEW] orphan review dir (verdicts, no doc): "
+                      f"{r['name']} — needs maintainer repair")
+            elif r.get("type") == "review-role-degraded":
+                print(f"  review role resolution degraded: "
+                      f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
             elif r.get("type") == "forge-feedback":
                 print(_forge_feedback_line(r))
             elif r.get("type") == "forge-degraded":
@@ -277,6 +283,14 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
             print("  fresh holders: " + ", ".join(str(l.get("agent")) for l in fresh))
         if esc:
             print("  ESCALATION DUE — vacant past SLA, no marker today")
+    if status == roles.UNKNOWN:
+        # FAIL CLOSED (2026-07-11): the lease listing was unreadable, so the role's
+        # state is UNKNOWN — NOT vacant. A degraded transport must not let a caller
+        # read this as VACANT and fire a false SLA escalation. rc 1, same register
+        # as `review status`'s "tally unknown" (leases dropped/None never asserts).
+        print(f"lease state unknown for role {role} in team/{team} — "
+              f"degraded transport, retry", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -605,17 +619,26 @@ def _review_tally(
     return tally, raw is not None, vok, listing_ok
 
 
-def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
+def _role_fresh_holders(
+    transport: Any, team: str, name: str, *, now: str
+) -> tuple[list[str], bool]:
     """Fresh lease holders of role name per the CANONICAL fold: the role
     doc's own sla_hours (falling back to the default) fed to
     roles.fresh_holders — the same fold roles status uses, so the two
-    can never disagree about a lease. A name that is not a role (no role doc)
-    or contains a path separator returns []."""
+    can never disagree about a lease.
+
+    Returns ``(holders, ok)``. FAIL CLOSED (2026-07-11 defensive scope): ``ok`` is
+    False ONLY when the lease LISTING raises ``TransportError`` — the role exists
+    but its lease state is UNKNOWN, and a degraded transport must NOT read as "no
+    holders" (which would let it assert vacancy / drop role-routed work). A name
+    that is not a role (no role doc) or contains a path separator returns
+    ``([], True)``: a legitimately-empty, non-degraded result (e.g. a
+    pending_required entry that is a literal agent id, not a role)."""
     if "/" in name:
-        return []  # a role name is a single path segment; anything else is not a role
+        return [], True  # a role name is a single path segment; anything else is not a role
     reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, name)))
     if reg is None:
-        return []
+        return [], True  # not a role -> empty, but NOT degraded
     try:
         sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
     except (TypeError, ValueError):
@@ -630,8 +653,9 @@ def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> li
             leases.append({"agent": fm.get("agent") or fn[:-3],
                            "timestamp": fm.get("timestamp")})
     except TransportError:
-        return []
-    return [str(l.get("agent")) for l in roles.fresh_holders(leases, now=now, sla_hours=sla)]
+        return [], False  # lease state UNKNOWN -> fail closed, never assert vacant
+    return [str(l.get("agent"))
+            for l in roles.fresh_holders(leases, now=now, sla_hours=sla)], True
 
 
 def _pending_reviews_for(
@@ -668,6 +692,7 @@ def _pending_reviews_for(
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
+    degraded_roles: set[str] = set()  # roles whose lease read was UNKNOWN (fail-closed)
     try:
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
@@ -676,6 +701,16 @@ def _pending_reviews_for(
         e for e in entries
         if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
     ]
+    # Orphan review dirs (visibility only): a `<slug>/` dir with verdicts but no
+    # `<slug>.md` doc is invisible to the doc-keyed scan below. Surface each as a
+    # `review-orphan` row EVERY pass (repair stays a human/maintainer action).
+    doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
+    for e in entries:
+        if not e.get("is_dir"):
+            continue
+        oslug = (e.get("name") or "").rstrip("/")
+        if oslug and oslug not in doc_slugs:
+            out.append({"type": "review-orphan", "name": oslug})
     total = len(slug_entries)
     scanned = 0
     skipped = 0
@@ -746,10 +781,21 @@ def _pending_reviews_for(
         if agent not in pending:  # direct hit needs no role folding at all
             for r in pending:
                 if r not in role_holders:
-                    role_holders[r] = _role_fresh_holders(transport, team, r, now=now)
+                    holders, ok = _role_fresh_holders(transport, team, r, now=now)
+                    role_holders[r] = holders
+                    if not ok:
+                        # Fail-closed: the role's lease read is UNKNOWN. Do NOT let
+                        # it read as "no holders" (a silently dropped obligation) —
+                        # record it so a degraded marker surfaces below.
+                        degraded_roles.add(r)
         if review.is_pending_for(pending, agent, role_holders):
             out.append({"type": "review-pending", "name": slug,
                         "state": "PENDING", "pending_required": pending})
+    if degraded_roles:
+        # A role's lease read degraded: the agent might be a holder we couldn't
+        # resolve, so a role-routed obligation may be missing. Make it VISIBLE.
+        out.append({"type": "review-role-degraded",
+                    "roles": sorted(degraded_roles)})
     if skipped:
         # Completed inside budget but some slugs were unreadable: partial
         # knowledge must be visible, so emit the degraded marker anyway.
@@ -1508,6 +1554,33 @@ def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _directed_inbox(transport: Any, team: str, agent: str,
+                    rows: list[dict[str, Any]], *,
+                    held_roles: "Optional[set[str]]" = None,
+                    include_backlog: bool = False) -> list[dict[str, Any]]:
+    """The open-directive fold over ALREADY-LOADED ``rows`` — directives assigned
+    to ``agent``, ``*``, or a role in ``held_roles`` (role routing), with the same
+    ack + read-your-write gating `inbox` applies. Split out from
+    ``_inbox_rows_status`` so `listen` can resolve held roles from the rows FIRST
+    (bounding the lease reads to role-shaped assignees on unseen directives) and
+    then fold once, without re-reading the summaries index."""
+    now = _iso(_now())
+    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
+    stale_visible = directives.inbox(rows, acks, agent, now=now,
+                                     include_backlog=include_backlog,
+                                     held_roles=held_roles)
+    for r in stale_visible:
+        slug = str(r.get("name") or "")
+        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(team, slug, agent)):
+            acks.setdefault(slug, []).append(agent)
+    got = directives.inbox(rows, acks, agent, now=now,
+                           include_backlog=include_backlog, held_roles=held_roles)
+    # read-your-write: an ack written since the last reconcile hides the item
+    # for the acking agent immediately (live shard check, only for shown items).
+    return [r for r in got
+            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None]
+
+
 def _inbox_rows_status(transport: Any, team: str, agent: str, *,
                        include_backlog: bool = False) -> tuple[list[dict[str, Any]], bool]:
     """The open-directive fold `inbox` surfaces for `agent`, plus whether the
@@ -1516,20 +1589,9 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
     drift. Never raises: an unreadable summaries read folds to an empty list, but
     now with ``ok=False`` so a listener can surface the degradation rather than
     mistake it for an empty inbox."""
-    now = _iso(_now())
     rows, ok = _load_rows_status(transport, team)
-    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
-    stale_visible = directives.inbox(rows, acks, agent, now=now,
-                                     include_backlog=include_backlog)
-    for r in stale_visible:
-        slug = str(r.get("name") or "")
-        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(team, slug, agent)):
-            acks.setdefault(slug, []).append(agent)
-    got = directives.inbox(rows, acks, agent, now=now, include_backlog=include_backlog)
-    # read-your-write: an ack written since the last reconcile hides the item
-    # for the acking agent immediately (live shard check, only for shown items).
-    return [r for r in got
-            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None], ok
+    return _directed_inbox(transport, team, agent, rows,
+                           include_backlog=include_backlog), ok
 
 
 def _inbox_rows(transport: Any, team: str, agent: str, *,
@@ -1666,6 +1728,9 @@ def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
         "verdict_keys": list(data.get("verdict_keys") or []),
         "review_requested": dict(data.get("review_requested") or {}),
         "settled_reviews": list(data.get("settled_reviews") or []),
+        # Orphan review dirs already reported (verdicts dir, no doc) — cached so
+        # each is surfaced ONCE; legacy files lack the key and default empty.
+        "orphan_slugs": list(data.get("orphan_slugs") or []),
         "degraded": _coerce_degraded(data.get("degraded")),
     }
 
@@ -1697,11 +1762,43 @@ def _listen_tick(transport: Any, team: str, agent: str,
     response_keys = set(state["response_keys"])
     slug_owned: dict[str, Any] = dict(state["slug_owned"])
 
-    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces). An
-    # unreadable summaries index is degraded, NOT a legitimately-empty inbox.
-    inbox, inbox_ok = _inbox_rows_status(transport, team, agent)
+    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces), PLUS
+    # directives routed to a fresh-lease ROLE this agent holds. An unreadable
+    # summaries index is degraded, NOT a legitimately-empty inbox.
+    now_iso = _iso(_now())
+    rows, inbox_ok = _load_rows_status(transport, team)
     if not inbox_ok:
         _fail("inbox", "summaries index unreadable")
+    # Role expansion (contract gap): resolve fresh-lease holders ONLY for
+    # role-shaped assignees on UNSEEN open directives — one role-doc+lease read per
+    # distinct such role, cached in this per-tick dict (NOT persistent state: leases
+    # change). id-diff is unchanged (the directive slug is the id regardless of the
+    # route), so a new role holder sees a directive iff its id is unseen in THEIR
+    # OWN state file (state is per-agent) — the holder-change semantics fall out.
+    candidate_roles: set[str] = set()
+    for r in rows:
+        if r.get("status") not in directives.OPEN_STATUSES:
+            continue
+        a = str(r.get("assignee") or "")
+        if not a or a in (agent, "*", directives.BACKLOG) or "/" in a:
+            continue
+        slug = str(r.get("name") or "")
+        if not slug or slug in inbox_ids:
+            continue  # already seen -> zero role-resolution cost
+        candidate_roles.add(a)
+    held_roles: set[str] = set()
+    for role in sorted(candidate_roles):
+        holders, ok = _role_fresh_holders(transport, team, role, now=now_iso)
+        if not ok:
+            # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent may
+            # miss role-routed work) via the inbox source, and never crash — do NOT
+            # treat unknown as "not a holder" silently.
+            _fail("inbox", f"role lease unknown for {role}")
+            continue
+        if agent in holders:
+            held_roles.add(role)
+    inbox = _directed_inbox(transport, team, agent, rows,
+                            held_roles=held_roles or None)
     for r in inbox:
         slug = str(r.get("name") or "")
         if not slug or slug in inbox_ids:
@@ -1848,12 +1945,31 @@ def _listen_tick(transport: Any, team: str, agent: str,
                            "state": review.APPROVED})
             settled_reviews.add(slug)
 
+    # Orphan review dirs (visibility only): a `<slug>/` dir with verdicts but no
+    # `<slug>.md` doc is skipped by the doc-keyed scan above and would never be
+    # seen. Surface each ONCE (cached in `orphan_slugs`) so a listener learns the
+    # slug exists — repair stays a human/maintainer action, never auto-delete.
+    # Skipped entirely when the review listing failed (rentries is None): an
+    # unreadable root is UNKNOWN, not an absence of docs.
+    orphan_slugs = set(state.get("orphan_slugs") or [])
+    if rentries is not None:
+        doc_names = {(e.get("name") or "")[:-3] for e in rentries
+                     if not e.get("is_dir") and (e.get("name") or "").endswith(".md")}
+        for e in rentries:
+            if not e.get("is_dir"):
+                continue
+            oslug = (e.get("name") or "").rstrip("/")
+            if oslug and oslug not in doc_names and oslug not in orphan_slugs:
+                events.append({"type": "orphan", "slug": oslug})
+                orphan_slugs.add(oslug)
+
     state["inbox_ids"] = sorted(inbox_ids)
     state["response_keys"] = sorted(response_keys)
     state["slug_owned"] = slug_owned
     state["verdict_keys"] = sorted(verdict_keys)
     state["review_requested"] = review_requested
     state["settled_reviews"] = sorted(settled_reviews)
+    state["orphan_slugs"] = sorted(orphan_slugs)
     return events, failures
 
 
@@ -1864,6 +1980,8 @@ def _format_listen_event(ev: dict[str, Any]) -> str:
         return f"VERDICT {ev['slug']} by {ev['reviewer']}: {ev['verdict']}"
     if ev["type"] == "settled":
         return f"SETTLED {ev['slug']}: {ev['state']}"
+    if ev["type"] == "orphan":
+        return f"ORPHAN {ev['slug']} (verdicts dir, no review doc — needs repair)"
     return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
 
 
