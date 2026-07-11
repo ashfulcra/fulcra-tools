@@ -14,8 +14,9 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 from typing import Any, Callable, Optional
+
+from . import transport as _transport
 
 _PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 _SLUG = re.compile(r"[^a-z0-9]+")
@@ -61,12 +62,16 @@ def parse_pr_url(artifact: Optional[str], *, repo: Optional[str] = None) -> Opti
 
 
 def default_runner(args: list[str]) -> Optional[str]:
-    """Run gh; None on any failure (missing binary, non-zero, timeout)."""
+    """Run gh; None on any failure (missing binary, non-zero, timeout).
+
+    Uses the hard-bounded runner (own process group + group SIGKILL on timeout)
+    so a ``gh`` that spawns a wedged helper can't stretch the call past the
+    bound — the same descendant-leak/drain hole ``transport`` closes."""
     if not shutil.which(args[0]):
         return None
     try:
-        cp = subprocess.run(args, capture_output=True, text=True, timeout=30)
-        return cp.stdout if cp.returncode == 0 else None
+        rc, out, _err = _transport.run_bounded(args, 30.0)
+        return out if rc == 0 else None
     except Exception:
         return None
 

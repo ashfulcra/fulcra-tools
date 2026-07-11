@@ -13,11 +13,105 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import subprocess
 import tempfile
 from typing import Any, Optional
 
 DEFAULT_COMMAND = ("fulcra-api",)
+
+#: Per-op HARD upper bound (seconds). Overridable via ``COORD_TRANSPORT_TIMEOUT``
+#: or the constructor arg (which wins). Watchers run this tight (e.g. 8s) so the
+#: engine's fold budgets buy real responsiveness instead of soft promises.
+DEFAULT_TRANSPORT_TIMEOUT = 30.0
+
+#: After the op timeout fires we SIGKILL the child's whole group, then give the
+#: drain this long to complete; if it still won't, we abandon the pipes rather
+#: than block. Keeps the effective bound at ``timeout`` + this small constant.
+_TRANSPORT_GRACE = 2.0
+
+
+def _transport_timeout() -> float:
+    """Default per-op timeout, seconds. Env override ``COORD_TRANSPORT_TIMEOUT``
+    — same parse-hardening as the fold budgets: unparseable, non-positive, NaN,
+    or inf falls back to the default (a bad env value must never disable the
+    bound or make an op hang). The constructor arg still takes precedence."""
+    raw = os.environ.get("COORD_TRANSPORT_TIMEOUT")
+    if raw is None:
+        return DEFAULT_TRANSPORT_TIMEOUT
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TRANSPORT_TIMEOUT
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_TRANSPORT_TIMEOUT
+    return v
+
+
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """SIGKILL the child's WHOLE process group so a grandchild that inherited
+    the stdout/stderr pipes dies with it (``start_new_session`` gave the child
+    its own group). Guards the ``getpgid`` race (child already reaped) and the
+    non-POSIX case (no ``killpg``): falls back to killing the direct child so we
+    never leave it running."""
+    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass  # race/perms — fall through to a direct kill
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def run_bounded(
+    argv: list[str], timeout: float, **popen_kw: Any
+) -> "tuple[int, str, str]":
+    """Run ``argv`` with a HARD upper bound of ``timeout`` + ``_TRANSPORT_GRACE``,
+    no matter what the child's descendant tree does. Returns
+    ``(returncode, stdout, stderr)``.
+
+    ``subprocess.run(timeout=)`` is NOT enough: on ``TimeoutExpired`` it kills
+    only the DIRECT child and (on POSIX) ``wait()``s on it alone, so a grandchild
+    that inherited the pipes is left running — a leaked tree still holding the
+    fds — and on non-POSIX the post-kill drain can block on it indefinitely. We
+    put the child in its own session/process group and, on timeout, SIGKILL the
+    whole group, then drain under a short grace; if even the grace drain won't
+    complete we abandon the pipes rather than block. Raises the original
+    ``TimeoutExpired`` on timeout and ``OSError`` if the binary can't be spawned
+    — callers convert both to their documented failure mode."""
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,  # child gets its OWN process group
+        **popen_kw,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_group(proc)
+        try:
+            proc.communicate(timeout=_TRANSPORT_GRACE)
+        except subprocess.TimeoutExpired:
+            # A descendant is still wedged holding the pipes: abandon the drain
+            # rather than let it hang the caller past the bound. The group has
+            # already had SIGKILL; the OS reclaims it.
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+        raise exc
 
 
 def _split_command() -> list[str]:
@@ -91,30 +185,40 @@ def parse_stat_output(text: str) -> dict[str, Any]:
 class FulcraFileTransport:
     """Real transport backed by the ``fulcra-api file`` CLI."""
 
-    def __init__(self, command: Optional[list[str]] = None, *, timeout: float = 30.0):
+    def __init__(
+        self, command: Optional[list[str]] = None, *, timeout: Optional[float] = None
+    ):
         self.command = command or _split_command()
-        self.timeout = timeout
+        # constructor arg wins (tests pin it); else the env-hardened default.
+        self.timeout = timeout if timeout is not None else _transport_timeout()
 
     def updates(self, period: str) -> Optional[list]:
         """File-change feed via ``fulcra-api data-updates`` — the reconcile fast
         path's evidence source. Never raises: any failure returns None, which
-        callers treat as "no evidence, do the full pass"."""
+        callers treat as "no evidence, do the full pass". The run is hard-bounded
+        (``run_bounded``): a hung child tree returns None within the timeout, it
+        cannot stall the fast path."""
         import json as _json
         try:
-            proc = subprocess.run(
-                [*self.command, "data-updates", period],
-                capture_output=True, text=True, timeout=self.timeout,
+            rc, out, _err = run_bounded(
+                [*self.command, "data-updates", period], self.timeout
             )
-            if proc.returncode != 0:
+            if rc != 0:
                 return None
-            data = _json.loads(proc.stdout)
+            data = _json.loads(out)
             changes = data.get("file_changes")
             return changes if isinstance(changes, list) else None
         except Exception:
             return None
 
     def _run(self, args: list[str], **kw: Any) -> subprocess.CompletedProcess:
-        """Invoke ``fulcra-api file <args>``.
+        """Invoke ``fulcra-api file <args>``, HARD-bounded by ``self.timeout``.
+
+        The call runs through ``run_bounded``: the child gets its own process
+        group and, on timeout, the whole group is SIGKILLed and the drain is
+        grace-bounded, so no descendant of a hung ``fulcra-api`` can stretch the
+        op past ``timeout`` + a small constant. Every fold budget in the engine
+        depends on that per-op boundedness.
 
         A hung CLI call must not escape as a raw ``subprocess.TimeoutExpired`` —
         that bypasses the ``except TransportError`` guards in the folds and crashes
@@ -124,11 +228,9 @@ class FulcraFileTransport:
         transport methods raise ``TransportError`` or honor their documented
         soft-failure return, and nothing else escapes.
         """
+        argv = [*self.command, "file", *args]
         try:
-            return subprocess.run(
-                [*self.command, "file", *args],
-                capture_output=True, text=True, timeout=self.timeout, **kw,
-            )
+            rc, out, err = run_bounded(argv, self.timeout, **kw)
         except subprocess.TimeoutExpired as exc:
             raise TransportError(
                 f"timeout after {self.timeout}s: file {' '.join(args)}"
@@ -138,6 +240,7 @@ class FulcraFileTransport:
             raise TransportError(
                 f"exec failed: file {' '.join(args)}: {exc}"
             ) from exc
+        return subprocess.CompletedProcess(argv, rc, out, err)
 
     def list_dir(self, prefix: str) -> list[dict[str, Any]]:
         # contract: raises TransportError on any failure (incl. timeout/exec error,
