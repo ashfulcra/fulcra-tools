@@ -932,3 +932,78 @@ def test_listen_overlay_listing_failure_degraded_not_silent(capsys):
     assert "summaries index unreadable" not in err
     assert state["degraded"]["inbox"] is True
     assert [e["slug"] for e in events] == ["anchor-0"]   # index rows still served
+
+
+# --- Codex P1: fail-open holes in _role_fresh_holders ----------------------
+
+def test_role_doc_none_but_listed_degrades_roles_then_recovers(capsys):
+    # A role-doc read that returns None for a name PRESENT in the roles/ listing
+    # is a transport failure, NOT a non-role: the directive must not be silently
+    # unrouted with zero degradation. Roles source degrades; the id must NOT enter
+    # state (no false advance); the recovery tick fires the directive.
+    class RoleDocReadFails(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.fail_doc = True
+
+        def read(self, path):
+            if self.fail_doc and path == cli._role_doc_path(TEAM, "reviewer"):
+                return None
+            return super().read(path)
+
+    t = RoleDocReadFails()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")
+    _put_directive(t, "role-do-t", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert "roles" in failures, "doc-None on a LISTED role must degrade, not non-role"
+    assert not [e for e in events if e.get("slug") == "role-do-t"]
+    assert "role-do-t" not in state["inbox_ids"], \
+        "id must never enter state while holders were unknown"
+    # recovery: doc readable again -> the deferred directive fires
+    t.fail_doc = False
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                              json_mode=False, verbose=False)
+    assert [e["slug"] for e in events2 if e["type"] == "directive"] == ["role-do-t"]
+    assert "role-do-t" in state["inbox_ids"]
+    assert "roles" not in failures2
+
+
+def test_listed_lease_read_none_is_unknown_not_stale():
+    # A JUST-LISTED lease shard whose read returns None must not parse as {} and
+    # get silently folded out as stale (fail-open vacancy inside the fold).
+    class LeaseReadFails(FakeTransport):
+        def read(self, path):
+            if "/leases/" in path:
+                return None
+            return super().read(path)
+
+    t = LeaseReadFails()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")  # fresh lease; only its shard READ fails
+    holders, ok = cli._role_fresh_holders(t, TEAM, "reviewer", now=NOW)
+    assert ok is False, "listed-lease read-None is UNKNOWN, never dropped-as-stale"
+    assert holders == []
+
+
+def test_absent_role_doc_unchanged_nonrole():
+    # Genuinely-absent role doc (name not in the roles/ listing): still a plain
+    # non-role — the literal-agent-id case must not degrade.
+    t = FakeTransport()
+    holders, ok = cli._role_fresh_holders(t, TEAM, "just-an-agent", now=NOW)
+    assert (holders, ok) == ([], True)
+
+
+def test_foreign_literal_assignee_no_roles_degradation(capsys):
+    # A directive assigned to another literal agent (no role doc anywhere) must
+    # not produce a roles failure while listening as a third party.
+    t = FakeTransport()
+    _put_directive(t, "for-carol", "Carol's job", owner="alice", assignee="carol")
+    _reconcile(t)
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
+                                            json_mode=False, verbose=False)
+    assert events == [] and failures == {}

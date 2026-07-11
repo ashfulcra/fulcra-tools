@@ -408,14 +408,23 @@ def _escalation_marker_path(team: str, role: str, date: str) -> str:
 def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     team, role = args.team, args.role
     now = _iso(_now())
-    # A None role-doc read here falls back to defaults DELIBERATELY: this is a
-    # single direct read with no prior listing, so absent-vs-transport-failed is
-    # genuinely ambiguous (read() returns None for both) and disambiguating would
-    # cost an extra parent listing on every healthy query. Contrast cmd_escalate,
-    # which HAS just listed roles/ — there a None doc read is knowably transient-
-    # or-deleted and fails closed (skip) instead. The acting path is protected;
-    # this reporting path tolerates the ambiguity.
-    reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, role))) or {}
+    # A None role-doc read is DISAMBIGUATED with one roles/ listing (fetched only
+    # on the None path, so healthy queries pay nothing): doc listed-but-unreadable
+    # = transport failure = UNKNOWN rc 1 — a transient doc-read failure must not
+    # collapse a long-SLA role onto the 24h default and print a false VACANT.
+    # Doc genuinely ABSENT keeps the default-SLA fallback: querying an
+    # unregistered role (leases without a doc — `roles claim` supports it) still
+    # works. This supersedes the earlier single-read-ambiguity rationale: the
+    # disambiguator (`_roles_listing_names`) now exists and its cost lands only
+    # on the already-degraded path.
+    raw_doc = transport.read(_role_doc_path(team, role))
+    if raw_doc is None:
+        names = _roles_listing_names(transport, team)
+        if names is None or f"{role}.md" in names:
+            print(f"role doc unreadable for {role} in team/{team} — "
+                  f"state unknown, degraded transport, retry", file=sys.stderr)
+            return 1
+    reg = okf.parse_frontmatter(raw_doc) or {}
     policy = reg.get("policy") or "shared"
     try:
         sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
@@ -428,7 +437,12 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
             n = e.get("name") or ""
             if e.get("is_dir") or not n.endswith(".md"):
                 continue
-            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, role) + n)) or {}
+            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, role) + n))
+            if fm is None:
+                # A JUST-LISTED lease shard read None/unparseable: folding it out
+                # as `{}` (timestamp lost -> stale) would be a hidden vacancy.
+                leases = None  # UNKNOWN
+                break
             leases.append({"agent": fm.get("agent") or n[:-3], "timestamp": fm.get("timestamp")})
     except TransportError:
         leases = None  # unreadable -> UNKNOWN
@@ -787,26 +801,61 @@ def _review_tally(
     return tally, raw is not None, vok, listing_ok
 
 
+def _roles_listing_names(transport: Any, team: str) -> Optional[set[str]]:
+    """Entry names under ``team/<team>/roles/``, or None if the listing itself
+    raised (membership UNKNOWN). The disambiguator for a role-doc ``read`` that
+    returned None: listed-but-unreadable = transport failure; absent = genuinely
+    not a role."""
+    try:
+        return {(e.get("name") or "") for e in transport.list_dir(f"team/{team}/roles/")}
+    except TransportError:
+        return None
+
+
 def _role_fresh_holders(
-    transport: Any, team: str, name: str, *, now: str
+    transport: Any, team: str, name: str, *, now: str,
+    listing_cache: Optional[dict[str, Any]] = None,
 ) -> tuple[list[str], bool]:
     """Fresh lease holders of role name per the CANONICAL fold: the role
     doc's own sla_hours (falling back to the default) fed to
     roles.fresh_holders — the same fold roles status uses, so the two
     can never disagree about a lease.
 
-    Returns ``(holders, ok)``. FAIL CLOSED (2026-07-11 defensive scope): ``ok`` is
-    False ONLY when the lease LISTING raises ``TransportError`` — the role exists
-    but its lease state is UNKNOWN, and a degraded transport must NOT read as "no
-    holders" (which would let it assert vacancy / drop role-routed work). A name
-    that is not a role (no role doc) or contains a path separator returns
-    ``([], True)``: a legitimately-empty, non-degraded result (e.g. a
-    pending_required entry that is a literal agent id, not a role)."""
+    Returns ``(holders, ok)``. FAIL CLOSED (2026-07-11, tightened per codex P1):
+    ``ok`` is False whenever the lease state is UNKNOWN — never let a degraded
+    transport read as "no holders" (asserting vacancy / silently dropping
+    role-routed work). UNKNOWN cases:
+
+    - the lease LISTING raises ``TransportError``;
+    - a JUST-LISTED lease shard reads None or unparseable (previously ``or {}``
+      dropped its timestamp and silently folded the holder out as stale — a
+      fail-open vacancy INSIDE the fold);
+    - the role-doc read returns None while the name IS present in the roles/
+      listing (or that listing itself raised): listed-but-unreadable is a
+      transport failure, not a non-role.
+
+    A doc-read None with the name ABSENT from the listing is a genuine non-role
+    (``([], True)``) — the literal-agent-id case stays non-degraded, as does a
+    doc that reads fine but isn't frontmatter (affirmative knowledge: not a
+    role). ``listing_cache`` (a per-tick/per-fold dict) memoizes the one roles/
+    listing across role-shaped assignees; pass the same dict for every call in
+    a pass."""
     if "/" in name:
         return [], True  # a role name is a single path segment; anything else is not a role
-    reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, name)))
+    raw_doc = transport.read(_role_doc_path(team, name))
+    reg = okf.parse_frontmatter(raw_doc)
     if reg is None:
-        return [], True  # not a role -> empty, but NOT degraded
+        if raw_doc is not None:
+            return [], True  # read fine, just not a role doc -> affirmative non-role
+        cache = listing_cache if listing_cache is not None else {}
+        if "names" not in cache:
+            cache["names"] = _roles_listing_names(transport, team)
+        names = cache["names"]
+        if names is None or f"{name}.md" in names:
+            # roles/ listing unreadable (membership unknown) OR the doc is listed
+            # yet unreadable (transport failure): UNKNOWN, fail closed.
+            return [], False
+        return [], True  # genuinely absent -> not a role (literal agent id case)
     try:
         sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
     except (TypeError, ValueError):
@@ -817,7 +866,11 @@ def _role_fresh_holders(
             fn = f.get("name") or ""
             if f.get("is_dir") or not fn.endswith(".md"):
                 continue
-            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn)) or {}
+            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn))
+            if fm is None:
+                # Listed shard, failed/unparseable read: this lease's freshness is
+                # UNKNOWN — folding it out as stale would be a hidden vacancy.
+                return [], False
             leases.append({"agent": fm.get("agent") or fn[:-3],
                            "timestamp": fm.get("timestamp")})
     except TransportError:
@@ -861,6 +914,7 @@ def _pending_reviews_for(
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
     degraded_roles: set[str] = set()  # roles whose lease read was UNKNOWN (fail-closed)
+    roles_listing_cache: dict[str, Any] = {}  # one roles/ listing per pass (doc-None disambiguation)
     try:
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
@@ -949,7 +1003,9 @@ def _pending_reviews_for(
         if agent not in pending:  # direct hit needs no role folding at all
             for r in pending:
                 if r not in role_holders:
-                    holders, ok = _role_fresh_holders(transport, team, r, now=now)
+                    holders, ok = _role_fresh_holders(
+                        transport, team, r, now=now,
+                        listing_cache=roles_listing_cache)
                     role_holders[r] = holders
                     if not ok:
                         # Fail-closed: the role's lease read is UNKNOWN. Do NOT let
@@ -1971,8 +2027,10 @@ def _listen_tick(transport: Any, team: str, agent: str,
             continue  # already seen -> zero role-resolution cost
         candidate_roles.add(a)
     held_roles: set[str] = set()
+    roles_listing_cache: dict[str, Any] = {}  # one roles/ listing per tick (doc-None disambiguation)
     for role in sorted(candidate_roles):
-        holders, ok = _role_fresh_holders(transport, team, role, now=now_iso)
+        holders, ok = _role_fresh_holders(transport, team, role, now=now_iso,
+                                          listing_cache=roles_listing_cache)
         if not ok:
             # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent
             # may miss role-routed work) on the DEDICATED `roles` source — never
@@ -3076,9 +3134,9 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             # the 24h default would collapse a longer-SLA role's window and fire a
             # false VACANT escalation (the incident vector, on the acting path).
             # Skip: transient -> retried next sweep (correct); deleted -> role
-            # gone (also correct). `roles status` differs deliberately: a single
-            # direct read with NO prior listing cannot disambiguate absent from
-            # failed, so it keeps its default-SLA fallback (see cmd_roles_status).
+            # gone (also correct). `roles status` now applies the same
+            # disambiguation on its doc-None path (via _roles_listing_names) —
+            # both surfaces agree that listed-but-unreadable is UNKNOWN.
             print(f"escalate: role doc unreadable for {role} — state unknown, "
                   f"skipped (degraded transport, retry)", file=sys.stderr)
             continue
@@ -3093,7 +3151,16 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                 fn = f.get("name") or ""
                 if not f.get("is_dir") and fn.endswith(".md"):
                     fm = okf.parse_frontmatter(
-                        transport.read(_leases_prefix(args.team, role) + fn)) or {}
+                        transport.read(_leases_prefix(args.team, role) + fn))
+                    if fm is None:
+                        # A JUST-LISTED lease shard read None/unparseable: `or {}`
+                        # here dropped the timestamp and silently folded the holder
+                        # out as stale — a fail-open VACANCY on the ACTING path
+                        # (same class as the codex P1). UNKNOWN: never escalate.
+                        print(f"escalate: lease shard unreadable for {role} — "
+                              f"state unknown, skipped", file=sys.stderr)
+                        leases = None
+                        break
                     leases.append({"agent": fm.get("agent") or fn[:-3],
                                    "timestamp": fm.get("timestamp")})
         except TransportError:

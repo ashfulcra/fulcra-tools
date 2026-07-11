@@ -813,3 +813,24 @@ def test_fold_role_lease_listing_degraded_is_visible_not_vacant(capsys):
     got = json.loads(capsys.readouterr().out)
     assert [g for g in got if g.get("type") == "review-role-degraded"], \
         "a degraded role lease read must be VISIBLE, not a silent vacancy"
+
+
+def test_fold_role_doc_none_but_listed_degrades_visibly(capsys):
+    # needs-me's role expansion: a pending_required ROLE whose doc read returns
+    # None while the roles/ listing shows the doc is UNKNOWN — the obligation must
+    # not be silently dropped as "not a role"; a review-role-degraded marker shows.
+    class RoleDocReadFails(FakeTransport):
+        def read(self, path):
+            if path == "team/r/roles/reviewer.md":
+                return None
+            return super().read(path)
+
+    t = RoleDocReadFails()
+    t.put("team/r/review/pr-rd.md", "---\ntype: Review\nrequired: reviewer\n---\n")
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
+    t.put("team/r/roles/reviewer/leases/amy.md",
+          "---\ntype: Lease\nagent: amy\ntimestamp: 2026-07-01T00:00:00Z\n---\n")
+    assert cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert [g for g in got if g.get("type") == "review-role-degraded"], \
+        "doc-None on a LISTED role doc must degrade visibly, not silently non-role"

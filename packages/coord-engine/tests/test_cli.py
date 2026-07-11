@@ -1629,3 +1629,74 @@ def test_escalate_skips_role_on_transient_doc_read_failure(capsys):
     assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store), \
         "a transient role-doc read failure must never fire a VACANT escalation"
     assert not any("escalations/" in p for p in t.store)
+
+
+def test_roles_status_doc_none_but_listed_unknown_rc1(capsys):
+    # Codex P1 follow-through: roles status can now disambiguate a None role-doc
+    # read with the parent roles/ listing — doc listed but unreadable = transport
+    # failure = UNKNOWN rc 1 (never a default-SLA VACANT on the reporting path).
+    class RoleDocReadFails(FakeTransport):
+        def read(self, path):
+            if path == "team/r/roles/patient.md":
+                return None
+            return super().read(path)
+
+    t = RoleDocReadFails()
+    t.put("team/r/roles/patient.md", "---\ntype: Role\nsla_hours: 72\n---\n")
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat().replace("+00:00", "Z")
+    t.put("team/r/roles/patient/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {ts}\n---\n")
+    assert cli.main(["roles", "status", "r", "patient", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "unknown" in cap.err.lower() and "retry" in cap.err.lower()
+    assert "VACANT" not in cap.out
+
+
+def test_roles_status_unregistered_role_still_works(capsys):
+    # Doc genuinely ABSENT (not in the roles/ listing): the unregistered-role flow
+    # keeps its default-SLA behavior — claim-without-doc still reads HELD.
+    t = FakeTransport()
+    assert cli.main(["roles", "claim", "r", "adhoc", "--agent", "amy"], transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["roles", "status", "r", "adhoc", "--json"], transport=t) == 0
+    import json as _j
+    assert _j.loads(capsys.readouterr().out)["status"] == "HELD"
+
+
+def test_roles_status_listed_lease_shard_unreadable_unknown_rc1(capsys):
+    # A listed lease shard whose read returns None must be UNKNOWN (rc 1), never
+    # parsed as {} -> timestamp lost -> silently stale -> false VACANT.
+    class LeaseReadFails(FakeTransport):
+        def read(self, path):
+            if "/leases/" in path:
+                return None
+            return super().read(path)
+
+    t = LeaseReadFails()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    t.put("team/r/roles/reviewer/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {_now_iso()}\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert json.loads(cap.out)["status"] == "UNKNOWN"
+    assert "unknown" in cap.err.lower()
+
+
+def test_escalate_skips_role_on_lease_shard_read_failure(capsys):
+    # Same class on the ACTING path: a listed lease shard read-None must not fold
+    # to {} -> stale -> false VACANT escalation. Skip as unknown.
+    class LeaseReadFails(FakeTransport):
+        def read(self, path):
+            if "/leases/" in path:
+                return None
+            return super().read(path)
+
+    t = LeaseReadFails()
+    t.put("team/r/roles/reviewer.md",
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
+    t.put("team/r/roles/reviewer/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {_now_iso()}\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert "0 escalated" in capsys.readouterr().out
+    assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store)
