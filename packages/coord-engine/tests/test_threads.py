@@ -578,3 +578,201 @@ def test_verb_silence_days_flag_and_env(capsys, monkeypatch):
     monkeypatch.setenv("COORD_THREADS_SILENCE_DAYS", "1")
     _, out = _run_threads(t, capsys)
     assert [o["mode"] for o in _json_objs(out) if o.get("type") != "threads-degraded"] == [1]
+
+
+# --------------------------------------------------------------------------
+# `intent` capture verb (Task 2) — FakeTransport, real directive-delivery path.
+#   Identity deviation: text + assignee ONLY (intent_by EXCLUDED from identity,
+#   given a VERIFIED in-place update path). Restatement never forks a 2nd item.
+# --------------------------------------------------------------------------
+
+PAST = "2020-01-01T00:00:00Z"       # a ripe intent window
+FUTURE = "2999-01-01T00:00:00Z"     # an unripe intent window
+FUTURE2 = "2998-06-01T00:00:00Z"    # a DIFFERENT unripe window (for update tests)
+
+
+class _LosingWriteTransport(FakeTransport):
+    """``write`` claims success but stores nothing (silent write loss) — proves
+    the update path's read-back verification catches a write that did not land
+    and refuses to claim it, leaving the original window intact."""
+
+    def write(self, path, content):
+        return True  # lie: nothing persisted
+
+
+class _BlindReadTransport(FakeTransport):
+    """``read`` always returns None while ``list_dir`` still lists the slot —
+    the present-but-unreadable case (I1): the verb must NOT overwrite a slot it
+    cannot read."""
+
+    def read(self, path):
+        return None
+
+
+def _intent(t, text, *extra, principal="ash"):
+    return cli.main(["intent", "x", text, "--for", principal, *extra], transport=t)
+
+
+def _task_docs(t):
+    # Only real task docs — exclude reconcile's engine-owned index.md / log.md.
+    return sorted(p for p in t.store
+                  if p.startswith("team/x/task/") and p.endswith(".md")
+                  and p.rsplit("/", 1)[1] not in ("index.md", "log.md"))
+
+
+def test_intent_capture_round_trip(capsys):
+    # Capture through the real delivery path; a ripe (past-window) intent then
+    # surfaces as mode 3 through Task 1's fold. Doc carries the capture doctrine:
+    # intent:<principal> tag + assignee + intent_by.
+    t = FakeTransport()
+    rc = _intent(t, "enumerate the tools list", "--by", PAST)
+    assert rc == 0
+    docs = _task_docs(t)
+    assert len(docs) == 1
+    doc = t.store[docs[0]]
+    assert "intent:ash" in doc
+    assert "assignee: ash" in doc
+    assert f"intent_by: {PAST}" in doc
+    capsys.readouterr()
+    _reconcile(t)
+    rc2, out = _run_threads(t, capsys)
+    assert rc2 == 0
+    objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
+    assert [o["mode"] for o in objs] == [3]
+
+
+def test_intent_identical_restatement_dedupes(capsys):
+    # Same text + same window -> pure dedup: rc 0, "already captured", NO fork.
+    t = FakeTransport()
+    _intent(t, "ship the demo", "--by", FUTURE)
+    before = _task_docs(t)
+    capsys.readouterr()
+    rc = _intent(t, "ship the demo", "--by", FUTURE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already captured" in out
+    assert _task_docs(t) == before  # one item, never forked
+
+
+def test_intent_restatement_without_by_dedupes(capsys):
+    # Restating with NO --by is dedup, not a window wipe: rc 0, window preserved.
+    t = FakeTransport()
+    _intent(t, "ship the demo", "--by", FUTURE)
+    before = _task_docs(t)
+    capsys.readouterr()
+    rc = _intent(t, "ship the demo")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already captured" in out
+    assert _task_docs(t) == before
+    assert f"intent_by: {FUTURE}" in t.store[before[0]]  # window intact
+
+
+def test_intent_different_by_updates_window_in_place(capsys):
+    # A revised deadline updates the SAME doc in place (no fork), read-back verified.
+    t = FakeTransport()
+    _intent(t, "ship the demo", "--by", FUTURE)
+    before = _task_docs(t)
+    capsys.readouterr()
+    rc = _intent(t, "ship the demo", "--by", FUTURE2)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "window updated" in out
+    after = _task_docs(t)
+    assert after == before  # same single doc
+    doc = t.store[after[0]]
+    assert f"intent_by: {FUTURE2}" in doc
+    assert FUTURE not in doc  # stale deadline gone (the false-drop case)
+    # identity fields untouched -> a later identical restatement STILL dedupes.
+    capsys.readouterr()
+    rc2 = _intent(t, "ship the demo", "--by", FUTURE2)
+    assert rc2 == 0
+    assert "already captured" in capsys.readouterr().out
+    assert _task_docs(t) == before
+
+
+def test_intent_window_update_read_back_verified(capsys):
+    # Update path writes, then reads back and compares intent_by. A silently-lost
+    # write (read-back still shows the OLD window) -> rc 1 unverifiable, retry;
+    # the original window is NEVER left in a claimed-but-false state.
+    t = FakeTransport()
+    _intent(t, "ship the demo", "--by", FUTURE)
+    lt = _LosingWriteTransport()
+    lt.store = dict(t.store)
+    lt.mtimes = dict(t.mtimes)
+    capsys.readouterr()
+    rc = _intent(lt, "ship the demo", "--by", FUTURE2)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "retry" in err.lower()
+    # No overwrite claimed: the persisted doc still holds the ORIGINAL window.
+    doc = lt.store[_task_docs(lt)[0]]
+    assert f"intent_by: {FUTURE}" in doc
+    assert FUTURE2 not in doc
+
+
+def test_intent_unreadable_slot_no_overwrite(capsys):
+    # A present-but-unreadable slot (read None, listing shows it) must NOT be
+    # overwritten: rc 1 cannot-verify, store unchanged (I1 never-write-blind).
+    t = FakeTransport()
+    _intent(t, "ship the demo", "--by", FUTURE)
+    bt = _BlindReadTransport()
+    bt.store = dict(t.store)
+    bt.mtimes = dict(t.mtimes)
+    snapshot = dict(bt.store)
+    capsys.readouterr()
+    rc = _intent(bt, "ship the demo", "--by", FUTURE2)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "retry" in err.lower()
+    assert bt.store == snapshot  # never overwrote the slot it could not read
+
+
+def test_intent_ripe_unripe_interplay_with_fold(capsys):
+    # Integration through the REAL fold: a future-window intent is invisible;
+    # updating the window into the past makes the SAME item surface as mode 3.
+    t = FakeTransport()
+    _intent(t, "wire up the adapter", "--by", FUTURE)
+    _reconcile(t)
+    _, out = _run_threads(t, capsys)
+    assert [o for o in _json_objs(out) if o.get("type") != "threads-degraded"] == []
+    # revise the deadline into the past -> in-place update -> now ripe.
+    _intent(t, "wire up the adapter", "--by", PAST)
+    _reconcile(t)
+    _, out = _run_threads(t, capsys)
+    objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
+    assert [o["mode"] for o in objs] == [3]
+    assert len(_task_docs(t)) == 1  # updated in place, never forked
+
+
+def test_intent_undeclared_window_ripens_via_capture_grace(capsys, monkeypatch):
+    # No --by -> NO intent_by written -> the fold windows it by capture+grace.
+    # Time-travel proves the ripening: unripe within the grace, mode 3 past it.
+    t = FakeTransport()
+    captured_at = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "_now", lambda: captured_at)
+    rc = _intent(t, "follow up on that list")
+    assert rc == 0
+    assert "intent_by" not in t.store[_task_docs(t)[0]]  # genuinely undeclared
+    _reconcile(t)
+    # +24h, default 48h grace -> still unripe -> absent.
+    monkeypatch.setattr(cli, "_now", lambda: captured_at + timedelta(hours=24))
+    _, out = _run_threads(t, capsys)
+    assert [o for o in _json_objs(out) if o.get("type") != "threads-degraded"] == []
+    # +72h, past the 48h grace -> ripe -> mode 3.
+    monkeypatch.setattr(cli, "_now", lambda: captured_at + timedelta(hours=72))
+    _, out = _run_threads(t, capsys)
+    objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
+    assert [o["mode"] for o in objs] == [3]
+
+
+def test_intent_unparseable_by_rc1(capsys):
+    # An unparseable --by fails loud (rc 1), never captures a windowless-but-meant-
+    # -to-be-windowed intent.
+    t = FakeTransport()
+    capsys.readouterr()
+    rc = _intent(t, "do the thing", "--by", "whenever-ish")
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "--by" in err
+    assert _task_docs(t) == []  # nothing written

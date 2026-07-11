@@ -1774,6 +1774,132 @@ def cmd_later(args: argparse.Namespace, transport: Any) -> int:
     return _create_directive(args, transport, assignee=directives.BACKLOG)
 
 
+def _update_intent_window(transport: Any, path: str, existing: str, *, slug: str,
+                          intent_by: str) -> int:
+    """Rewrite ONLY ``intent_by`` on an existing intent doc, in place, then verify
+    by read-back — the trust-eroding-false-drop guard from Surface 2.
+
+    THE SEAM (deliberate divergence from ``_write_directive``'s read-back): the
+    generic write-verification compares ``_doc_payload`` — title/summary/next/
+    assignee — and ``intent_by`` is NOT in that tuple. So a window change is
+    INVISIBLE to the generic read-back (it would pass a stale-window write as
+    verified). The update therefore does its OWN ``intent_by``-specific read-back:
+    None/unparseable/mismatch all mean "cannot confirm the new window landed" ->
+    rc 1 retry, never a claimed-but-false deadline. Identity fields (title/
+    assignee) are untouched, so the slot keeps its identity and later identical
+    restatements still dedupe onto it.
+    """
+    split = okf.split_frontmatter(existing)
+    fm = okf.parse_frontmatter(existing)
+    if split is None or fm is None:  # defensive: caller already parsed, but never write blind
+        print(f"intent {slug}: doc unparseable, cannot verify, retry", file=sys.stderr)
+        return 1
+    fm["intent_by"] = intent_by
+    content = okf.render_frontmatter(fm) + "\n" + split[1]
+    if not transport.write(path, content):
+        print("intent window update failed (transport)", file=sys.stderr)
+        return 1
+    # intent_by-SPECIFIC read-back (the seam): confirm the NEW window is on the bus.
+    readback = transport.read(path)
+    if readback is None:
+        print(f"intent {slug}: window update unverifiable "
+              f"(read-back failed, transport degraded), retry", file=sys.stderr)
+        return 1
+    rb = okf.parse_frontmatter(readback)
+    if rb is None or str(rb.get("intent_by") or "") != str(intent_by or ""):
+        print(f"intent {slug}: window update unverifiable "
+              f"(read-back mismatch, transport degraded), retry", file=sys.stderr)
+        return 1
+    print("intent window updated")
+    return 0
+
+
+def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
+    """Capture a spoken commitment as an ``intent:<principal>`` directive.
+
+    DELIBERATE IDENTITY DEVIATION from the plain directive path: an intent's
+    identity is ``text + assignee ONLY`` — ``intent_by`` (the declared window) is
+    EXCLUDED from the hash-slug. Restating the SAME commitment with a revised
+    deadline must NOT fork a second item, so the window cannot be part of identity;
+    but the plain path's "metadata outside identity dedupes onto the original doc"
+    rule would then silently PRESERVE a stale deadline on restatement (the
+    trust-eroding false-drop). So intent_by gets a VERIFIED in-place update path
+    instead (see ``_update_intent_window``). Identity = ``_directive_payload(text,
+    None, None, principal)`` — summary/next_action are constant-empty, so the hash
+    ranges over text + assignee exactly.
+
+    Delivery reuses the directive machinery: a genuinely-new capture goes through
+    ``_write_directive`` (its absence-confirmation, write, and write-verification
+    guards — no second delivery implementation). Only the two intent-specific
+    outcomes are handled here: identical restatement -> rc 0 "intent already
+    captured"; a different ``--by`` -> in-place window update.
+    """
+    principal = args.principal
+    text = args.title
+    now_iso = _iso(_now())
+    intent_by: Optional[str] = None
+    by = getattr(args, "by", None)
+    if by:
+        intent_by = directives.parse_when(by, now=now_iso)
+        if intent_by is None:
+            print(f"intent failed: cannot parse --by {by!r} (ISO or 5d/36h/10m)",
+                  file=sys.stderr)
+            return 1
+
+    # Identity: text + assignee ONLY (intent_by excluded — see docstring).
+    payload = _directive_payload(text, None, None, principal)
+    slug = f"{tasks.slugify(text)}-{_payload_hash(payload)}"
+    path = _task_path(args.team, slug)
+
+    existing = transport.read(path)
+    if existing is not None:
+        # Present + readable at our hash slot. Confirm it IS our message (identity
+        # match); a payload mismatch/unparseable means corruption or a hash
+        # collision — never overwrite, fail loud (mirrors _write_directive).
+        doc_payload = _doc_payload(existing)
+        if doc_payload is None or doc_payload != payload:
+            print(f"intent {slug}: slot holds unverifiable content, "
+                  f"cannot verify, retry", file=sys.stderr)
+            return 1
+        # Our intent already exists. Same window (or no --by) -> pure dedup.
+        existing_by = (okf.parse_frontmatter(existing) or {}).get("intent_by")
+        if intent_by is None or str(existing_by or "") == str(intent_by or ""):
+            print("intent already captured")
+            return 0
+        # A revised deadline: verified in-place window update, never a fork.
+        return _update_intent_window(transport, path, existing, slug=slug,
+                                     intent_by=intent_by)
+
+    # existing is None -> absent OR present-but-unreadable (I1). Reuse
+    # _write_directive's guards: it re-confirms absence via a directory listing
+    # (present-but-unreadable -> rc 1 cannot-verify, no overwrite) then writes +
+    # verifies. Build the doc with the capture doctrine: intent:<principal> tag +
+    # intent_by frontmatter (both invisible to the payload identity).
+    try:
+        _, base = tasks.new_task_doc(
+            text, now=now_iso, status="proposed",
+            priority=getattr(args, "priority", None) or "P2",
+            owner=getattr(args, "sender", None) or _host(), assignee=principal,
+            summary="", next_action=None, kind="directive", slug=slug,
+        )
+    except tasks.TaskError as e:
+        print(f"intent failed: {e}", file=sys.stderr)
+        return 1
+    fm = okf.parse_frontmatter(base)
+    split = okf.split_frontmatter(base)
+    if fm is None or split is None:  # unreachable (we just rendered it), never write blind
+        print("intent failed: could not build doc", file=sys.stderr)
+        return 1
+    tags = fm.get("tags") or []
+    if not isinstance(tags, list):
+        tags = [str(tags)]
+    fm["tags"] = tags + [f"intent:{principal}"]
+    fm["intent_by"] = intent_by  # None omitted by render_frontmatter (undeclared)
+    content = okf.render_frontmatter(fm) + "\n" + split[1]
+    return _write_directive(transport, args, slug=slug, content=content,
+                            payload=payload, assignee=principal, not_before=None)
+
+
 def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
     """Atomic handoff: checkpoint ref + assignee land in ONE task write."""
     path = _task_path(args.team, args.name)
@@ -3809,6 +3935,13 @@ def build_parser() -> argparse.ArgumentParser:
     lt = sub.add_parser("later", help="capture a backlog idea (@backlog)")
     lt.add_argument("team"); lt.add_argument("title")
     add_directive_flags(lt); lt.set_defaults(func=cmd_later)
+    it = sub.add_parser("intent", help="capture a spoken commitment (intent:<principal>); restatement never forks, a new --by updates the window in place")
+    it.add_argument("team"); it.add_argument("title", help="the commitment text")
+    it.add_argument("--for", dest="principal", required=True, help="the principal who owes the commitment (e.g. ash)")
+    it.add_argument("--by", help="declared window (ISO or 5d/36h/10m); absent = undeclared -> fold uses capture+grace")
+    it.add_argument("--from", dest="sender", help="capturing agent (records ownership)")
+    it.add_argument("--priority", "-p", default="P2")
+    it.set_defaults(func=cmd_intent)
     ho = sub.add_parser("handoff", help="atomic handoff: assignee + checkpoint ref in one write")
     ho.add_argument("team"); ho.add_argument("name"); ho.add_argument("--to", required=True)
     ho.add_argument("--checkpoint"); ho.add_argument("--next", "-n")
