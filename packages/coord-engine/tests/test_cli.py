@@ -543,6 +543,81 @@ def test_cli_inbox_ack_hides_immediately_pre_reconcile(capsys):
     assert _j.loads(capsys.readouterr().out) == []
 
 
+# --- Task 2.5: live-freshness overlay (the PR348 between-reconciles false-clear) ---
+
+def test_cli_inbox_overlay_surfaces_fresh_directive_before_reconcile(capsys):
+    """The exact repro: a directive delivered BETWEEN reconciles (task doc present,
+    summaries index stale) is surfaced by inbox immediately via the overlay — no
+    heartbeat rebuild required."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Old news", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)            # summaries now has old-news
+    # NEW directive between reconciles: task doc written, index NOT rebuilt
+    cli.main(["tell", "r", "amy", "Fresh work", "--from", "boss"], transport=t)
+    fresh = _dslug("Fresh work", assignee="amy")
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    assert fresh in names                                # overlay surfaced it, no reconcile
+
+
+def test_cli_inbox_overlay_no_duplicate_for_indexed_doc(capsys):
+    """A doc present in BOTH the index and the task dir yields exactly one row —
+    the index row wins, the overlay never re-reads it."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Do it", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)            # now in index AND task dir
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    names = [r["name"] for r in json.loads(capsys.readouterr().out)]
+    assert names.count(_dslug("Do it", assignee="amy")) == 1
+
+
+def test_cli_inbox_overlay_skips_unparseable_doc(capsys):
+    """A fresh doc that won't parse as a Task is skipped-not-fatal; other fresh docs
+    are still served."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Anchor", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    cli.main(["tell", "r", "amy", "Fresh good", "--from", "boss"], transport=t)
+    good = _dslug("Fresh good", assignee="amy")
+    t.put("team/r/task/broken.md", "no frontmatter fence here — unparseable")
+    capsys.readouterr()
+    assert cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t) == 0  # no crash
+    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    assert good in names and "broken" not in names
+
+
+def test_load_rows_overlay_listing_failure_degrades_not_silent():
+    """Overlay task-dir listing raises while the summaries read succeeds: the index
+    rows are STILL served and ``ok`` flips False so the caller surfaces the
+    degradation (never a silent empty)."""
+    from coord_engine.transport import TransportError
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Indexed", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    indexed = _dslug("Indexed", assignee="amy")
+    orig_list = t.list_dir
+    def boom_on_task(prefix):
+        if prefix == "team/r/task/":
+            raise TransportError("overlay boom")
+        return orig_list(prefix)
+    t.list_dir = boom_on_task
+    rows, ok = cli._load_rows_status(t, "r")
+    assert ok is False                                   # degraded, not silent
+    assert {r["name"] for r in rows} == {indexed}        # index rows still served
+
+
+def test_load_rows_no_summaries_is_unchanged_no_overlay():
+    """A fresh team (no summaries yet) keeps the existing full-listing fallback: the
+    overlay only runs when the index is present — absent index stays empty+readable,
+    the reconcile-first contract unchanged."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "No index yet", "--from", "boss"], transport=t)
+    rows, ok = cli._load_rows_status(t, "r")             # NO reconcile: index absent
+    assert rows == [] and ok is True                     # unchanged: absence != failure
+
+
 def test_parse_when_date_only_gates_until_end_of_day():
     from coord_engine import directives
     assert directives.parse_when("2026-07-02", now="2026-07-02T12:00:00Z") == "2026-07-02T23:59:59Z"

@@ -861,3 +861,71 @@ def test_pinned_roles_streak_does_not_mask_fresh_inbox_outage(capsys):
     assert state["degraded"]["inbox"] is True
     assert "LISTEN DEGRADED" in err2 and "summaries index unreadable" in err2
     assert "lease unknown" not in err2, "pinned roles streak must stay suppressed"
+
+
+# --- Task 2.5: live-freshness overlay in the listen inbox source -----------
+
+def test_listen_overlay_fires_fresh_directive_before_reconcile(capsys):
+    """A directive delivered BETWEEN reconciles (task doc present, summaries index
+    stale) fires the holder's listen immediately via the freshness overlay — no
+    heartbeat rebuild required. Re-tick is quiet (id-diff seen)."""
+    t = FakeTransport()
+    _put_directive(t, "anchor-0", "Anchor", owner="alice", assignee="bob")
+    _reconcile(t)                                  # summaries present, has anchor-0
+    state = _fresh_state()
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    capsys.readouterr()                            # anchor consumed
+    # fresh directive: task doc written, index NOT rebuilt
+    _put_directive(t, "fresh-1", "Fresh work", owner="alice", assignee="bob")
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    out = capsys.readouterr().out
+    assert failures == {}
+    assert [e["slug"] for e in events] == ["fresh-1"]
+    assert "DIRECTIVE fresh-1" in out
+    # re-tick: same id, no reconcile -> quiet
+    events2, _ = cli._run_listen_tick(t, TEAM, "bob", state,
+                                      json_mode=False, verbose=False)
+    assert events2 == []
+
+
+def test_listen_overlay_no_duplicate_after_reconcile(capsys):
+    """Once reconcile folds the fresh doc into the index, it lives in BOTH the index
+    and the task dir — the overlay skips it (index row wins), so no second fire."""
+    t = FakeTransport()
+    _reconcile(t)                                  # summaries present (empty)
+    state = _fresh_state()
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    # fresh directive surfaced by the overlay
+    _put_directive(t, "once-1", "Once", owner="alice", assignee="bob")
+    ev1, _ = cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert [e["slug"] for e in ev1] == ["once-1"]
+    # now reconcile folds it into the index; it must NOT re-fire (id seen + no dup row)
+    _reconcile(t)
+    ev2, _ = cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    assert ev2 == []
+
+
+def test_listen_overlay_listing_failure_degraded_not_silent(capsys):
+    """The overlay task-dir listing raises while the summaries read succeeds: the
+    inbox source degrades VISIBLY (never silent) AND the index rows are still served
+    — a directive already in the index still fires despite the overlay outage."""
+    t = FakeTransport()
+    _put_directive(t, "anchor-0", "Anchor", owner="alice", assignee="bob")
+    _reconcile(t)                                  # anchor-0 in the index
+    orig_list = t.list_dir
+    def boom_on_task(prefix):
+        if prefix == reconcile.task_prefix(TEAM):
+            raise TransportError("overlay boom")
+        return orig_list(prefix)
+    t.list_dir = boom_on_task
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    err = capsys.readouterr().err
+    assert "inbox" in failures                     # degraded, attributed to inbox source
+    assert "LISTEN DEGRADED" in err                # not silent
+    assert state["degraded"]["inbox"] is True
+    assert [e["slug"] for e in events] == ["anchor-0"]   # index rows still served

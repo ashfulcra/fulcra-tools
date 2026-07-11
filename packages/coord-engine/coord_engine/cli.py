@@ -65,6 +65,52 @@ def _replies_breadcrumb(team: str, sender: str) -> str:
     return f"replies: coord-engine listen {team} --agent {sender}"
 
 
+def _fresh_overlay_rows(
+    transport: Any, team: str, index_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], bool]:
+    """Freshness overlay (Task 2.5, the PR348 false-clear).
+
+    ``inbox``/``listen``/every canonical surface read the reconcile-built summaries
+    index, so a task/directive doc written BETWEEN reconciles is invisible to all of
+    them until the next heartbeat rebuild (live-repro'd: delivered 14:05:29Z, raw-
+    file-visible 14:07Z, inbox-visible 14:11Z — a watcher polling the canonical
+    surface misses fresh work for up to a reconcile period). When the index is
+    present+readable we ALSO list the task dir once and parse ONLY docs whose slug is
+    ABSENT from the index (bounded by new-since-reconcile items — typically zero or a
+    handful), unioning them into the fold. Rows already in the index are NOT re-read:
+    the index row wins, so this is behavior-preserving for every summarized doc.
+
+    Returns ``(overlay_rows, ok)``. ``ok`` is False iff the task-dir LISTING raised —
+    the caller surfaces that as the (existing) inbox source degrading, never silent,
+    while still serving the index rows. A single overlay doc's read/parse failure is
+    skipped-not-fatal (others are still served). Cost: one extra ``list_dir`` per row
+    load, plus one ``read`` per genuinely-new (unsummarized) slug."""
+    prefix = rec.task_prefix(team)
+    try:
+        listing = transport.list_dir(prefix)
+    except Exception:
+        return [], False  # listing unknown -> degraded (caller surfaces it), never silent
+    from . import model
+    known = {str(r.get("name")) for r in index_rows if isinstance(r, dict)}
+    overlay: list[dict[str, Any]] = []
+    for entry in listing:
+        name = entry.get("name") or ""
+        if entry.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
+            continue
+        slug = name[:-3]
+        if slug in known:
+            continue  # index row wins — never re-read an already-summarized doc
+        try:
+            fm = okf.parse_frontmatter(transport.read(f"{prefix}{name}"))
+            if not model.is_task(fm):
+                continue  # unparseable OR not a Task concept -> skip, not fatal
+            overlay.append(model.row_from_frontmatter(
+                fm, name=slug, path=f"task/{name}", mtime=entry.get("mtime")))
+        except Exception:
+            continue  # one doc's read/parse failure is skipped; others still served
+    return overlay, True
+
+
 def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool]:
     """Summaries rows plus whether the index was READABLE. ``ok`` is False only for
     an index we could not read as intended — present-but-unparseable, or a read/
@@ -84,9 +130,14 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
         return [], False
     if raw:
         try:
-            return aggregate.aggregate_rows(json.loads(raw)), True
+            rows = aggregate.aggregate_rows(json.loads(raw))
         except Exception:
             return [], False  # index present but corrupt -> unreadable, surface it
+        # Live-freshness overlay: union in task docs written since the last
+        # reconcile (absent from this index). A listing failure flips ``ok`` so the
+        # inbox source degrades visibly; the index rows are still served.
+        overlay, overlay_ok = _fresh_overlay_rows(transport, team, rows)
+        return rows + overlay, overlay_ok
     parent, entry = path.rsplit("/", 1)
     try:
         names = {e.get("name") for e in transport.list_dir(parent + "/")}
