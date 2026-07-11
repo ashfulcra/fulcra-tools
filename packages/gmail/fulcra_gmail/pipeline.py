@@ -64,17 +64,12 @@ def internal_seconds(message: dict) -> int:
 def required_actions(rule: Rule) -> list[str]:
     """The effect actions a rule requires, in canonical (file-before-relay) order.
 
-    Drops ``relay`` when the rule has no ``relay_to`` (a misconfiguration): the
-    cursor keeps advancing on the ``file`` effect instead of blocking forever on
-    an un-routable relay. Logged (opaque rule id only)."""
-    acts = [a for a in _CANONICAL_ACTIONS if a in rule.actions]
-    if ACTION_RELAY in acts and not rule.relay_to:
-        _log.warning(
-            "gmail: rule %s requests relay but sets no relay_to — relay skipped",
-            rule.id,
-        )
-        acts = [a for a in acts if a != ACTION_RELAY]
-    return acts
+    A ``relay`` action always carries a ``relay_to`` (enforced at
+    :func:`fulcra_gmail.rules.parse_rules`), so nothing is dropped here — the
+    required set is exactly the rule's actions. A relay a rule requires is NEVER
+    silently completed: if the backend is unavailable the message stays
+    incomplete (see :func:`process_message`)."""
+    return [a for a in _CANONICAL_ACTIONS if a in rule.actions]
 
 
 def process_message(
@@ -97,11 +92,6 @@ def process_message(
     message_id = str(message.get("id"))
     rid, rver = rule.id, rule.version
     required = required_actions(rule)
-    if relay_emitter is None:
-        # No relay backend (no coord team configured) — file-only. The cursor
-        # still advances on the file effect rather than blocking on a relay it
-        # cannot deliver.
-        required = [a for a in required if a != ACTION_RELAY]
     remaining = ledger.remaining_actions(message_id, rid, rver, required)
     if not remaining:
         return True
@@ -120,6 +110,19 @@ def process_message(
         _crash(crash, "after_file_done")
 
     if ACTION_RELAY in remaining:
+        if relay_emitter is None:
+            # The rule requires a relay but no backend is available (no coord
+            # team configured). The message is INCOMPLETE — never marked done —
+            # so the cursor does not advance past it. Once a relay backend is
+            # configured, the next poll relays it and the frontier advances.
+            # (File-only behavior requires a rule whose actions are only
+            # ["file"]; a ["file","relay"] rule always needs a working relay.)
+            _log.warning(
+                "gmail: rule %s requires relay but no relay backend is "
+                "configured — message held incomplete (configure relay_team)",
+                rid,
+            )
+            return False
         key = outbox_key(account_id, message_id, rid, rver)
         ledger.append(LedgerEntry.relay_pending(
             account_id=account_id, message_id=message_id, rule_id=rid,
@@ -158,6 +161,8 @@ class PollResult:
     processed: int
     blocked: bool
     cursor: int | None
+    #: Candidate ids that could not be fetched this run (frontier holes).
+    unresolved: int = 0
 
 
 def poll_account_rule(
@@ -189,10 +194,22 @@ def poll_account_rule(
     ids = client.list_message_ids(q)
 
     # Refine candidates → effective matches (rejected ones vanish here).
+    # A candidate id we could NOT resolve (get_message returned None or raised —
+    # a transient per-message failure or a mid-run auth failure) is a FRONTIER
+    # HOLE: we can't evaluate it, so we can't know whether it should have been
+    # exported. We have no internalDate to place it in the sorted order, so any
+    # unresolved candidate blocks the whole cursor advance for this run — the
+    # watermark must never move past a candidate we never looked at. The 24h
+    # overlap keeps the id inside the next run's window so it is re-attempted.
     effective: list[dict] = []
+    unresolved = 0
     for message_id in ids:
-        message = client.get_message(message_id)
-        if message is None:  # auth-failed mid-run — fail-soft
+        try:
+            message = client.get_message(message_id)
+        except Exception:  # noqa: BLE001 — any fetch error is a hole, not fatal
+            message = None
+        if message is None:
+            unresolved += 1
             continue
         if evaluate(rule, message, account_id=account_id).matched:
             effective.append(message)
@@ -201,7 +218,9 @@ def poll_account_rule(
     effective.sort(key=lambda m: (internal_seconds(m), str(m.get("id"))))
 
     new_cursor = cursor
-    blocked = False
+    # An unresolved candidate is a hole: start BLOCKED so no done match advances
+    # the cursor past a candidate we couldn't fetch.
+    blocked = unresolved > 0
     processed = 0
     for message in effective:
         done = process_message(
@@ -223,11 +242,12 @@ def poll_account_rule(
         cursors.set(rid, rver, new_cursor)
 
     _log.debug(
-        "gmail poll account=%s rule=%s candidates=%d effective=%d processed=%d blocked=%s",
-        account_id, rid, len(ids), len(effective), processed, blocked,
+        "gmail poll account=%s rule=%s candidates=%d effective=%d processed=%d "
+        "unresolved=%d blocked=%s",
+        account_id, rid, len(ids), len(effective), processed, unresolved, blocked,
     )
     return PollResult(
         account_id=account_id, rule_id=rid, rule_version=rver,
         candidates=len(ids), effective=len(effective), processed=processed,
-        blocked=blocked, cursor=cursors.get(rid, rver),
+        blocked=blocked, cursor=cursors.get(rid, rver), unresolved=unresolved,
     )

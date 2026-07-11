@@ -64,11 +64,17 @@ under `skills/`, each package with its own README, build, and tests.
   ledger` → advance the watermark only through the contiguous done prefix), and
   `collect_plugin` (scheduled 15-min plugin; Cloud-Console-clickpath +
   repeatable add-account wizard; per-account health; registered via entry point
-  + `_bundled_plugins`). NOTE: the multi-account add-account callback route
-  (nonce-as-state → getProfile bind) is not wired into collect's generic
-  single-namespace OAuth route — it is exposed as
-  `collect_plugin.begin_add_account`/`complete_add_account` for the host/Task-4
-  to drive.
+  + `_bundled_plugins`), and `collect_routes` (the Gmail-specific add-account
+  OAuth endpoints: a start endpoint that mints a nonce + PKCE and 302-redirects
+  to Google consent, and the `/api/oauth/callback` endpoint that consumes the
+  nonce once, exchanges the code, getProfile-binds, and writes the registry row
+  + keychain token — a B4 flow the generic single-namespace oauth route can't
+  model; wired optionally into `collect/web.py` and linked from the wizard).
+  Codex P1 hardening: an unresolved candidate fetch is a frontier hole (cursor
+  never advances past a candidate it couldn't look at); `parse_rules` rejects a
+  `relay` action with no `relay_to`, and a relay a rule requires is never
+  silently completed when no relay backend is configured (the message stays
+  incomplete). Only live OAuth-credential verification is deferred to Task 4.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent

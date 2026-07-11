@@ -54,6 +54,6 @@ privacy ledger, bus relay).
 from __future__ import annotations
 
 __all__ = [
-    "accounts", "client", "collect_plugin", "convert", "cursors",
-    "files_writer", "ledger", "pipeline", "relay", "rules",
+    "accounts", "client", "collect_plugin", "collect_routes", "convert",
+    "cursors", "files_writer", "ledger", "pipeline", "relay", "rules",
 ]

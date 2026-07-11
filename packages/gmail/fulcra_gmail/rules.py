@@ -125,6 +125,16 @@ def parse_rules(raw_rules: list[dict]) -> list[Rule]:
                     f"rule {raw['id']!r} has unknown action {action!r} "
                     f"(allowed: {VALID_ACTIONS})"
                 )
+        # A rule that asks to relay MUST name a recipient. Rejecting this at
+        # parse time (not silently dropping the relay mid-poll) means a
+        # misconfigured relay rule fails loudly at startup — it can never mark a
+        # message "done" without ever relaying it and then advance its cursor
+        # past emails that should have been relayed (B1/B3 safety).
+        if "relay" in actions and not raw.get("relay_to"):
+            raise ValueError(
+                f"rule {raw['id']!r} has a 'relay' action but no relay_to — "
+                f"set relay_to to the recipient agent"
+            )
         from_regex = raw.get("from_regex")
         subject_regex = raw.get("subject_regex")
         from_regex_re = _compile_pattern(raw["id"], "from_regex", from_regex)

@@ -157,18 +157,39 @@ def test_relay_failure_leaves_message_incomplete(tmp_path):
     assert ledger.remaining_actions("m1", "receipts", 1, [ACTION_FILE, ACTION_RELAY]) == [ACTION_RELAY]
 
 
-def test_no_relay_emitter_files_only(tmp_path):
-    # No coord team configured (relay_emitter=None) → file-only; the relay
-    # action is dropped and the message still counts done (cursor advances).
+def test_relay_rule_with_no_backend_stays_blocked_until_restored(tmp_path):
+    # P1-b regression: a ["file","relay"] rule with NO relay backend must NOT
+    # silently mark the message done. It stays INCOMPLETE (cursor blocked) until
+    # a relay backend is configured, then completes — the email is never lost.
     ledger, files, _ = _deps(tmp_path)
+    cursors = CursorStore("acct-1", root=tmp_path)
     rule = _rule(actions=("file", "relay"))
-    msg = _msg("m1", 1_600_000_000_000)
-    assert process_message(msg, rule=rule, account_id="acct-1", ledger=ledger,
-                           files_writer=files, relay_emitter=None)
+    m1 = _msg("m1", 1_600_000_000_000)
+
+    # Run 1: no relay backend → blocked, cursor does NOT advance.
+    r1 = poll_account_rule(
+        client=FakeClient([m1]), rule=rule, account_id="acct-1", ledger=ledger,
+        cursors=cursors, files_writer=files, relay_emitter=None,
+        now_epoch=1_600_002_000,
+    )
+    assert r1.blocked is True
+    assert r1.cursor is None  # never advanced past the un-relayed message
+    # The relay is still owed (not marked done); file may have been written once.
+    assert ledger.remaining_actions("m1", "receipts", 1,
+                                    [ACTION_FILE, ACTION_RELAY]) == [ACTION_RELAY]
+
+    # Run 2: relay backend restored → completes and the cursor advances.
+    relay = FakeRelay()
+    r2 = poll_account_rule(
+        client=FakeClient([m1]), rule=rule, account_id="acct-1", ledger=ledger,
+        cursors=cursors, files_writer=files, relay_emitter=relay,
+        now_epoch=1_600_003_000,
+    )
+    assert not r2.blocked
+    assert r2.cursor == 1_600_000_000
+    assert _visible_directive_count(relay) == 1
+    # File was written exactly once across both runs (never re-filed).
     assert len(files._api.uploads) == 1
-    # Only a file-done entry — no relay entries at all.
-    actions = {e["action"] for e in ledger.entries()}
-    assert actions == {ACTION_FILE}
 
 
 def test_relay_only_rule_skips_file(tmp_path):
@@ -199,6 +220,57 @@ class FakeClient:
 
     def get_message(self, message_id, format="full"):  # noqa: A002
         return self._by_id.get(message_id)
+
+
+class FetchFailingClient(FakeClient):
+    """A client whose ``get_message`` returns None for a chosen id (a transient
+    per-message fetch failure / mid-run auth failure)."""
+
+    def __init__(self, messages, *, fail_ids, id_order=None):
+        super().__init__(messages, id_order=id_order)
+        self.fail_ids = set(fail_ids)
+
+    def get_message(self, message_id, format="full"):  # noqa: A002
+        if message_id in self.fail_ids:
+            return None
+        return self._by_id.get(message_id)
+
+
+def test_unresolved_fetch_is_a_frontier_hole_cursor_holds(tmp_path):
+    # P1-a: the oldest listed id fails to fetch; a newer id succeeds. The cursor
+    # must NOT advance past the unresolved (never-evaluated) id — a second run
+    # re-attempts it.
+    ledger, files, relay = _deps(tmp_path)
+    cursors = CursorStore("acct-1", root=tmp_path)
+    rule = _rule()
+    m_old = _msg("m_old", 1_600_000_000_000)
+    m_new = _msg("m_new", 1_600_000_900_000)
+
+    failing = FetchFailingClient([m_old, m_new], fail_ids={"m_old"},
+                                 id_order=["m_new", "m_old"])
+    r1 = poll_account_rule(
+        client=failing, rule=rule, account_id="acct-1", ledger=ledger,
+        cursors=cursors, files_writer=files, relay_emitter=relay,
+        now_epoch=1_600_002_000,
+    )
+    assert r1.unresolved == 1
+    assert r1.blocked is True
+    # Newer one was processed, but the cursor did NOT advance past the hole.
+    assert r1.cursor is None
+    assert _visible_directive_count(relay) == 1  # only the newer relayed
+
+    # Run 2: fetch of the older id now succeeds → it processes and the frontier
+    # advances past both.
+    healthy = FakeClient([m_old, m_new], id_order=["m_new", "m_old"])
+    r2 = poll_account_rule(
+        client=healthy, rule=rule, account_id="acct-1", ledger=ledger,
+        cursors=cursors, files_writer=files, relay_emitter=relay,
+        now_epoch=1_600_003_000,
+    )
+    assert r2.unresolved == 0
+    assert not r2.blocked
+    assert r2.cursor == 1_600_000_900
+    assert _visible_directive_count(relay) == 2  # older one now relayed too
 
 
 def test_frontier_processes_oldest_first_across_out_of_order_pages(tmp_path):

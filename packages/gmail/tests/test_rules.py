@@ -66,6 +66,25 @@ def test_parse_rejects_unknown_action():
         }])
 
 
+def test_parse_rejects_relay_action_without_relay_to():
+    # P1-b: a relay action with no recipient is rejected at parse time (naming
+    # the rule id + the missing field), so a misconfigured relay rule can never
+    # silently complete a message without relaying it.
+    with pytest.raises(ValueError, match=r"r1.*relay_to"):
+        rules.parse_rules([{
+            "id": "r1", "version": 1, "name": "n", "match": "in:inbox",
+            "actions": ["file", "relay"],  # no relay_to
+        }])
+
+
+def test_parse_accepts_relay_action_with_relay_to():
+    (rule,) = rules.parse_rules([{
+        "id": "r1", "version": 1, "name": "n", "match": "in:inbox",
+        "actions": ["file", "relay"], "relay_to": "agent:claude",
+    }])
+    assert rule.relay_to == "agent:claude"
+
+
 def test_parse_rejects_missing_required_field():
     with pytest.raises(ValueError):
         rules.parse_rules([{"id": "r1", "name": "n", "match": "x",

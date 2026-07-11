@@ -51,8 +51,13 @@ from .rules import parse_rules
 _log = logging.getLogger("fulcra_gmail.collect_plugin")
 
 PLUGIN_ID = "gmail"
-#: The OAuth callback collect already serves (Trakt-proven).
-REDIRECT_URI = "http://127.0.0.1:9292/api/oauth/callback"
+#: The Gmail add-account OAuth callback path (must equal the redirect baked into
+#: the Google OAuth client). Served by :mod:`fulcra_gmail.collect_routes`.
+OAUTH_CALLBACK_PATH = "/api/oauth/callback"
+#: The add-account start endpoint the wizard links to.
+ADD_ACCOUNT_START_PATH = "/api/oauth/gmail/add-account/start"
+#: Full redirect URI baked into the Google OAuth client.
+REDIRECT_URI = f"http://127.0.0.1:9292{OAUTH_CALLBACK_PATH}"
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +317,9 @@ PLUGIN = Plugin(
                 "authorize (discovered from the token via getProfile). Run "
                 "this step again for each additional account."
             ),
+            # Opens the Gmail add-account start endpoint, which mints a nonce and
+            # 302-redirects to Google's consent screen (see collect_routes).
+            external_link=f"http://127.0.0.1:9292{ADD_ACCOUNT_START_PATH}",
         ),
         SetupStep(
             kind="input",
