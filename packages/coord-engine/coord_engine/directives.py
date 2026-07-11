@@ -46,9 +46,17 @@ def parse_when(when: str, *, now: str) -> Optional[str]:
     return (base + delta).isoformat().replace("+00:00", "Z")
 
 
-def is_directed_at(row: dict[str, Any], agent: str) -> bool:
+def is_directed_at(
+    row: dict[str, Any], agent: str,
+    held_roles: "Optional[set[str] | list[str]]" = None,
+) -> bool:
     a = row.get("assignee")
-    return a == agent or a == "*"
+    if a == agent or a == "*":
+        return True
+    # Role routing: a directive assigned to a ROLE is directed at whoever holds a
+    # fresh lease on it. The caller resolves holders (a lease read) and passes the
+    # roles this agent holds; an empty/None set leaves behavior unchanged.
+    return bool(held_roles) and a in held_roles
 
 
 def inbox(
@@ -58,10 +66,11 @@ def inbox(
     *,
     now: Optional[str] = None,
     include_backlog: bool = False,
+    held_roles: "Optional[set[str] | list[str]]" = None,
 ) -> list[dict[str, Any]]:
-    """Open directives agent X still owes attention to: assigned to X or ``*``,
-    not acked by X, ``not_before`` gate applied. Priority-sorted. ``acks`` maps
-    slug -> list of agents who acked."""
+    """Open directives agent X still owes attention to: assigned to X, ``*``, or a
+    ROLE X holds (``held_roles``), not acked by X, ``not_before`` gate applied.
+    Priority-sorted. ``acks`` maps slug -> list of agents who acked."""
     out: list[dict[str, Any]] = []
     for r in rows:
         if r.get("status") not in OPEN_STATUSES:
@@ -69,7 +78,7 @@ def inbox(
         a = r.get("assignee")
         if a == BACKLOG and not include_backlog:
             continue
-        if not is_directed_at(r, agent):
+        if not is_directed_at(r, agent, held_roles):
             continue
         slug = str(r.get("name") or r.get("id") or "")
         if agent in (acks.get(slug) or []):

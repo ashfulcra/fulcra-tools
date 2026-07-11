@@ -543,6 +543,224 @@ def test_cli_inbox_ack_hides_immediately_pre_reconcile(capsys):
     assert _j.loads(capsys.readouterr().out) == []
 
 
+# --- Task 2.5: live-freshness overlay (the PR348 between-reconciles false-clear) ---
+
+def test_cli_inbox_overlay_surfaces_fresh_directive_before_reconcile(capsys):
+    """The exact repro: a directive delivered BETWEEN reconciles (task doc present,
+    summaries index stale) is surfaced by inbox immediately via the overlay — no
+    heartbeat rebuild required."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Old news", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)            # summaries now has old-news
+    # NEW directive between reconciles: task doc written, index NOT rebuilt
+    cli.main(["tell", "r", "amy", "Fresh work", "--from", "boss"], transport=t)
+    fresh = _dslug("Fresh work", assignee="amy")
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    assert fresh in names                                # overlay surfaced it, no reconcile
+
+
+def test_cli_inbox_overlay_no_duplicate_for_indexed_doc(capsys):
+    """A doc present in BOTH the index and the task dir yields exactly one row —
+    the index row wins, the overlay never re-reads it."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Do it", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)            # now in index AND task dir
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    names = [r["name"] for r in json.loads(capsys.readouterr().out)]
+    assert names.count(_dslug("Do it", assignee="amy")) == 1
+
+
+def test_cli_inbox_overlay_skips_unparseable_doc(capsys):
+    """A fresh doc that won't parse as a Task is skipped-not-fatal; other fresh docs
+    are still served."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Anchor", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    cli.main(["tell", "r", "amy", "Fresh good", "--from", "boss"], transport=t)
+    good = _dslug("Fresh good", assignee="amy")
+    t.put("team/r/task/broken.md", "no frontmatter fence here — unparseable")
+    capsys.readouterr()
+    assert cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t) == 0  # no crash
+    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    assert good in names and "broken" not in names
+
+
+def test_load_rows_overlay_listing_failure_degrades_not_silent():
+    """Overlay task-dir listing raises while the summaries read succeeds: the index
+    rows are STILL served and ``ok`` flips False so the caller surfaces the
+    degradation (never a silent empty) — attributed to the OVERLAY, not the index."""
+    from coord_engine.transport import TransportError
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Indexed", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    indexed = _dslug("Indexed", assignee="amy")
+    orig_list = t.list_dir
+    def boom_on_task(prefix):
+        if prefix == "team/r/task/":
+            raise TransportError("overlay boom")
+        return orig_list(prefix)
+    t.list_dir = boom_on_task
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False                                   # degraded, not silent
+    assert "task-dir overlay" in reason                  # NOT "summaries index unreadable"
+    assert {r["name"] for r in rows} == {indexed}        # index rows still served
+
+
+def test_load_rows_no_summaries_is_unchanged_no_overlay():
+    """A fresh team (no summaries yet) keeps the existing full-listing fallback: the
+    overlay only runs when the index is present — absent index stays empty+readable,
+    the reconcile-first contract unchanged."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "No index yet", "--from", "boss"], transport=t)
+    rows, ok, reason = cli._load_rows_status(t, "r")     # NO reconcile: index absent
+    assert rows == [] and ok is True and reason == ""    # unchanged: absence != failure
+
+
+def test_load_rows_overlay_listed_doc_read_failure_degrades_not_silent():
+    """MUST 1: a doc the overlay's OWN listing just proved exists but that reads as
+    None must NOT vanish silently (the false-clear class, at the overlay's read
+    step) — ``ok`` flips False with overlay attribution; the index rows AND the
+    other readable fresh docs are still served. Parse-garbage stays a sanctioned
+    silent skip (separate test)."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Indexed", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    indexed = _dslug("Indexed", assignee="amy")
+    cli.main(["tell", "r", "amy", "Fresh readable", "--from", "boss"], transport=t)
+    readable = _dslug("Fresh readable", assignee="amy")
+    cli.main(["tell", "r", "amy", "Fresh unreadable", "--from", "boss"], transport=t)
+    ghost = _dslug("Fresh unreadable", assignee="amy")
+    ghost_path = f"team/r/task/{ghost}.md"
+    orig_read = t.read
+    t.read = lambda p: None if p == ghost_path else orig_read(p)  # listed, unreadable
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False                                   # degraded, never a silent vanish
+    assert "task-dir overlay" in reason and f"{ghost}.md" in reason
+    names = {r["name"] for r in rows}
+    assert indexed in names and readable in names        # everything readable still served
+    assert ghost not in names
+
+
+def test_load_rows_overlay_unparseable_stays_silent_skip():
+    """Sanctioned silent skip preserved: a fresh doc that READS fine but is
+    parse-garbage / not a Task does not degrade (mirrors reconcile's tolerance)."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Anchor", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    t.put("team/r/task/broken.md", "no frontmatter fence here — unparseable")
+    t.put("team/r/task/note.md", "---\ntype: Reference\n---\nnot a task")
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is True and reason == ""                   # skip, not an outage
+    assert "broken" not in {r["name"] for r in rows}
+
+
+def _put_fresh_docs(t, n):
+    """n fresh (post-reconcile, absent-from-index) directive docs for amy."""
+    for i in range(n):
+        t.put(f"team/r/task/fresh-{i:02d}.md",
+              f"---\ntype: Task\nid: fresh-{i:02d}\ntitle: F{i}\nstatus: proposed\n"
+              f"priority: P2\nowner: boss\nassignee: amy\n---\nbody")
+
+
+def test_overlay_cap_truncates_deterministically_and_degrades():
+    """MUST 2: the overlay read-cost is bounded when reconcile is down. 20 fresh
+    docs + default cap 16 -> exactly the first 16 BY SORTED NAME are served (every
+    agent converges on the same subset) and the fold degrades visibly with the
+    {served, absent_total} counts — capped-but-visible, never silent truncation."""
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)            # index present (empty)
+    _put_fresh_docs(t, 20)
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False                                   # truncation is degraded, not silent
+    assert "truncated" in reason and "16 of 20" in reason
+    served = {r["name"] for r in rows}
+    assert served == {f"fresh-{i:02d}" for i in range(16)}   # sorted-name determinism
+
+
+def test_overlay_cap_env_override_honored(monkeypatch):
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    _put_fresh_docs(t, 8)
+    monkeypatch.setenv("COORD_OVERLAY_CAP", "5")
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False and "5 of 8" in reason
+    assert {r["name"] for r in rows} == {f"fresh-{i:02d}" for i in range(5)}
+    # bad env values never disable the bound: fall back to the default
+    monkeypatch.setenv("COORD_OVERLAY_CAP", "bananas")
+    assert cli._overlay_cap() == cli.DEFAULT_OVERLAY_CAP
+    monkeypatch.setenv("COORD_OVERLAY_CAP", "0")
+    assert cli._overlay_cap() == cli.DEFAULT_OVERLAY_CAP
+
+
+def test_overlay_under_cap_unchanged_no_flag():
+    """At-or-under the cap nothing changes: all fresh docs served, no degradation.
+    (Also the healthy-under-budget guard: runs under the default 10s
+    COORD_OVERLAY_BUDGET — fast reads never trip it.)"""
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    _put_fresh_docs(t, 3)
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is True and reason == ""
+    assert {r["name"] for r in rows} == {"fresh-00", "fresh-01", "fresh-02"}
+
+
+def test_overlay_budget_stops_slow_reads_partial_served(monkeypatch):
+    """MUST (whole-branch review): the cap bounds read COUNT, not TIME — slow
+    per-doc reads (each running toward the transport's subprocess timeout) must not
+    starve every canonical surface read. A tiny budget + reads that sleep past it →
+    the overlay stops after the first slow read (after-op discipline), serves what
+    it got plus the index rows, and degrades with the budget reason."""
+    import time as _time
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)            # index present (empty)
+    _put_fresh_docs(t, 3)
+    orig_read = t.read
+    def slow_read(path):
+        if "/task/fresh-" in path:
+            _time.sleep(0.05)                            # each read blows the budget
+        return orig_read(path)
+    t.read = slow_read
+    monkeypatch.setenv("COORD_OVERLAY_BUDGET", "0.01")
+    t0 = _time.monotonic()
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 1.0                                 # order-of-magnitude of the budget,
+    assert ok is False                                   # not 3 serial timeouts
+    assert "budget exhausted" in reason and "1 of 3" in reason
+    assert {r["name"] for r in rows} == {"fresh-00"}     # everything read so far served
+
+
+def test_overlay_budget_fast_none_keeps_unreadable_degrade(monkeypatch):
+    """A FAST None (doc deleted between list and read — returns quickly) keeps the
+    continue-and-degrade behavior under a small budget: all readables served, and
+    the degrade reason is the unreadable one, not a budget breach."""
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    _put_fresh_docs(t, 3)
+    orig_read = t.read
+    t.read = lambda p: None if p == "team/r/task/fresh-01.md" else orig_read(p)
+    monkeypatch.setenv("COORD_OVERLAY_BUDGET", "5")      # small but ample for fast reads
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False
+    assert "fresh-01.md unreadable" in reason and "budget" not in reason
+    assert {r["name"] for r in rows} == {"fresh-00", "fresh-02"}
+
+
+def test_overlay_budget_env_fallback():
+    """Bad COORD_OVERLAY_BUDGET values never disable the bound."""
+    import os as _os
+    for bad in ("bananas", "0", "-3", "inf", "nan"):
+        _os.environ["COORD_OVERLAY_BUDGET"] = bad
+        try:
+            assert cli._overlay_budget() == cli.DEFAULT_OVERLAY_BUDGET, bad
+        finally:
+            del _os.environ["COORD_OVERLAY_BUDGET"]
+    assert cli._overlay_budget() == cli.DEFAULT_OVERLAY_BUDGET
+
+
 def test_parse_when_date_only_gates_until_end_of_day():
     from coord_engine import directives
     assert directives.parse_when("2026-07-02", now="2026-07-02T12:00:00Z") == "2026-07-02T23:59:59Z"
@@ -1196,3 +1414,289 @@ def test_answer_rejects_terminal_task_with_stale_needs_human(capsys):
           "---\ntype: Task\ntitle: O\nstatus: done\nowner: a\ntags: [needs:human]\n---\n")
     assert cli.main(["answer", "r", "oldie", "--with", "hi"], transport=t) == 1
     assert "not a waiting-for-operator ask" in capsys.readouterr().err
+
+
+# --- forge-feedback section budget (the briefing/needs-me forge hang) ---------
+#
+# `_forge_responsible`/`_forge_feedback_for` did unbounded, team-global per-PR
+# transport reads with no budget: under a degraded transport `briefing` hung in
+# the FORGE-FEEDBACK section. These cover the shared briefing deadline
+# (COORD_BRIEFING_BUDGET) that now bounds the forge section, mirroring the
+# review-fold budget: breach/failure -> a `forge-degraded` row (json passthrough
+# + one text line), never a hang or a silent drop.
+
+import time as _time  # noqa: E402
+from coord_engine import forge as _forge  # noqa: E402
+from coord_engine.transport import TransportError as _TransportError  # noqa: E402
+
+_PR_URLS = ["https://github.com/o/r/pull/1",
+            "https://github.com/o/r/pull/2",
+            "https://github.com/o/r/pull/3"]
+
+
+def _seed_forge(t, agent="bob", urls=_PR_URLS):
+    """Watch each PR for `agent` and drop one unacked feedback shard per PR, so
+    the agent is responsible for len(urls) PRs each carrying one feedback item."""
+    for u in urls:
+        slug = _forge.pr_slug(u)
+        t.put(f"team/r/_coord/forge/watch/{slug}.md",
+              f"---\ntype: Watch\nurl: {u}\nagent: {agent}\nts: 2026-07-08T12:00:00Z\n---\n")
+        t.put(f"team/r/_coord/forge/feedback/{slug}/review-PRR_1.md",
+              "---\ntype: ForgeFeedback\nauthor: rev\nbody: fix it\n---\n")
+
+
+class _SlowFeedbackTransport(FakeTransport):
+    """Sleeps only on forge-feedback prefix ops — responsibility building stays
+    fast (so `total` is deterministic) while the per-PR feedback scan is slow."""
+
+    def __init__(self, delay=0.03):
+        super().__init__()
+        self.delay = delay
+
+    def _slow(self, path):
+        if "/forge/feedback/" in path:
+            _time.sleep(self.delay)
+
+    def read(self, path):
+        self._slow(path)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        self._slow(prefix)
+        return super().list_dir(prefix)
+
+
+def test_forge_feedback_budget_emits_degraded_marker(capsys):
+    t = _SlowFeedbackTransport(delay=0.03)
+    _seed_forge(t, agent="bob")
+    capsys.readouterr()
+    start = _time.monotonic()
+    out = cli._forge_feedback_for(t, "r", "bob", deadline=_time.monotonic() + 0.05)
+    elapsed = _time.monotonic() - start
+    deg = [r for r in out if r.get("type") == "forge-degraded"]
+    assert len(deg) == 1, f"budget breach must append exactly one degraded marker: {out}"
+    assert deg[0]["total"] == 3, deg[0]
+    assert 0 <= deg[0]["scanned"] <= 3, deg[0]
+    assert elapsed < 1.0, "the fold must not read every PR unbounded"
+
+
+def test_forge_feedback_healthy_no_degraded_row(capsys):
+    # Healthy transport: no budget breach, real feedback rows, NO degraded marker.
+    t = FakeTransport()
+    _seed_forge(t, agent="bob")
+    out = cli._forge_feedback_for(t, "r", "bob", deadline=_time.monotonic() + 60)
+    assert [r for r in out if r.get("type") == "forge-degraded"] == []
+    fb = [r for r in out if r.get("type") == "forge-feedback"]
+    assert len(fb) == 3 and all(r["count"] == 1 for r in fb)
+    # deadline=None (the un-budgeted path) is byte-identical
+    assert cli._forge_feedback_for(t, "r", "bob") == out
+
+
+def test_forge_feedback_listing_raises_degraded_not_crash(capsys):
+    # The forge feedback listing for a responsible PR raises: surface a degraded
+    # row (skipped), never crash, never silently drop.
+    class _FeedbackListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if "/forge/feedback/" in prefix:
+                raise _TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = _FeedbackListFails()
+    _seed_forge(t, agent="bob")
+    out = cli._forge_feedback_for(t, "r", "bob")
+    deg = [r for r in out if r.get("type") == "forge-degraded"]
+    assert len(deg) == 1 and deg[0]["skipped"] == 3, out
+    assert [r for r in out if r.get("type") == "forge-feedback"] == []
+
+
+def test_briefing_forge_degraded_exits_zero_other_sections_intact(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
+    t = _SlowFeedbackTransport(delay=0.03)
+    _seed_forge(t, agent="bob")
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+
+    assert cli.main(["briefing", "r", "--agent", "bob"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "forge fold degraded" in out
+    assert "board:" in out and "needs-me:" in out  # other sections still rendered
+
+    assert cli.main(["briefing", "r", "--agent", "bob", "--json"], transport=t) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "forge-degraded" for r in doc["forge_feedback"]), \
+        "json path must surface the forge-degraded marker as-is"
+    assert "board" in doc and "needs_me" in doc and "presence" in doc
+
+
+def test_needs_me_forge_degraded_exits_zero(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
+    t = _SlowFeedbackTransport(delay=0.03)
+    _seed_forge(t, agent="bob")
+    capsys.readouterr()
+    assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 0
+    assert "forge fold degraded" in capsys.readouterr().out
+    assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "forge-degraded" for r in got)
+
+
+# --- Task 2: fail-closed roles/vacancy fold ----------------------------------
+
+def test_roles_status_lease_listing_unknown_rc1_no_vacancy(capsys):
+    # ADDED SCOPE (fail-closed): a lease LISTING that raises must read as UNKNOWN,
+    # never VACANT — a degraded transport must not assert vacancy and fire a false
+    # SLA escalation. rc 1, same "unknown, retry" register as review status.
+    from coord_engine.transport import TransportError
+
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    rc = cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t)
+    assert rc == 1
+    cap = capsys.readouterr()
+    res = json.loads(cap.out)
+    assert res["status"] == "UNKNOWN"
+    assert res["escalation_due"] is not True  # unknown never escalates
+    assert "unknown" in cap.err.lower()
+
+
+def test_roles_status_lease_listing_unknown_text_mode_rc1(capsys):
+    from coord_engine.transport import TransportError
+
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer"], transport=t) == 1
+    err = capsys.readouterr().err
+    assert "unknown" in err.lower() and "retry" in err.lower()
+
+
+def test_escalate_does_not_escalate_on_unknown_lease(capsys):
+    # The vacancy sweep must not escalate when the lease state is UNKNOWN (listing
+    # raised) — only a proven VACANT past SLA escalates.
+    from coord_engine.transport import TransportError
+
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put("team/r/roles/reviewer.md",
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "0 escalated" in out
+    assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store)
+    assert not any("escalations/" in p for p in t.store)
+
+
+def test_escalate_skips_role_on_transient_doc_read_failure(capsys):
+    # Review fix (HIGH): the role doc was JUST LISTED by the parent roles/ scan, so
+    # a None doc read is knowably transient-or-deleted — NOT a role with default
+    # SLA. Falling through with DEFAULT_SLA_HOURS=24 would collapse a >24h-SLA
+    # role's window and fire a false VACANT escalation (the incident vector, on the
+    # acting path). Fix: doc-None after listing -> UNKNOWN -> skip.
+    class RoleDocReadFails(FakeTransport):
+        def read(self, path):
+            if path == "team/r/roles/patient.md":
+                return None  # transient read failure on a just-listed doc
+            return super().read(path)
+
+    t = RoleDocReadFails()
+    # 72h-SLA role; lease 30h old: fresh per its doc, stale per the 24h default
+    t.put("team/r/roles/patient.md",
+          "---\ntype: Role\nsla_hours: 72\nmaintainer: ash\n---\n")
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat().replace("+00:00", "Z")
+    t.put("team/r/roles/patient/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {ts}\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "0 escalated" in out
+    assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store), \
+        "a transient role-doc read failure must never fire a VACANT escalation"
+    assert not any("escalations/" in p for p in t.store)
+
+
+def test_roles_status_doc_none_but_listed_unknown_rc1(capsys):
+    # Codex P1 follow-through: roles status can now disambiguate a None role-doc
+    # read with the parent roles/ listing — doc listed but unreadable = transport
+    # failure = UNKNOWN rc 1 (never a default-SLA VACANT on the reporting path).
+    class RoleDocReadFails(FakeTransport):
+        def read(self, path):
+            if path == "team/r/roles/patient.md":
+                return None
+            return super().read(path)
+
+    t = RoleDocReadFails()
+    t.put("team/r/roles/patient.md", "---\ntype: Role\nsla_hours: 72\n---\n")
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat().replace("+00:00", "Z")
+    t.put("team/r/roles/patient/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {ts}\n---\n")
+    assert cli.main(["roles", "status", "r", "patient", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "unknown" in cap.err.lower() and "retry" in cap.err.lower()
+    assert "VACANT" not in cap.out
+
+
+def test_roles_status_unregistered_role_still_works(capsys):
+    # Doc genuinely ABSENT (not in the roles/ listing): the unregistered-role flow
+    # keeps its default-SLA behavior — claim-without-doc still reads HELD.
+    t = FakeTransport()
+    assert cli.main(["roles", "claim", "r", "adhoc", "--agent", "amy"], transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["roles", "status", "r", "adhoc", "--json"], transport=t) == 0
+    import json as _j
+    assert _j.loads(capsys.readouterr().out)["status"] == "HELD"
+
+
+def test_roles_status_listed_lease_shard_unreadable_unknown_rc1(capsys):
+    # A listed lease shard whose read returns None must be UNKNOWN (rc 1), never
+    # parsed as {} -> timestamp lost -> silently stale -> false VACANT.
+    class LeaseReadFails(FakeTransport):
+        def read(self, path):
+            if "/leases/" in path:
+                return None
+            return super().read(path)
+
+    t = LeaseReadFails()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    t.put("team/r/roles/reviewer/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {_now_iso()}\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert json.loads(cap.out)["status"] == "UNKNOWN"
+    assert "unknown" in cap.err.lower()
+
+
+def test_escalate_skips_role_on_lease_shard_read_failure(capsys):
+    # Same class on the ACTING path: a listed lease shard read-None must not fold
+    # to {} -> stale -> false VACANT escalation. Skip as unknown.
+    class LeaseReadFails(FakeTransport):
+        def read(self, path):
+            if "/leases/" in path:
+                return None
+            return super().read(path)
+
+    t = LeaseReadFails()
+    t.put("team/r/roles/reviewer.md",
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
+    t.put("team/r/roles/reviewer/leases/amy.md",
+          f"---\ntype: Lease\nagent: amy\ntimestamp: {_now_iso()}\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert "0 escalated" in capsys.readouterr().out
+    assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store)

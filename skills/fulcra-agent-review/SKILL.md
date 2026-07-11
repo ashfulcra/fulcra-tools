@@ -107,6 +107,12 @@ proceed to request a new review or advance an existing one below.
    and both UNKNOWN (without the `required` list a lone approval would tally as a clean APPROVED and
    durably hide a pending review). A watcher must read rc 1 as *transport down, retry*, never as a state.
 
+   **Nudge only against a live obligation.** Before nudging a reviewer about a pending review, run
+   `review status <team> <slug> --json` on the *exact* slug and nudge only if `pending_required` still
+   names that assignee — a verdict may have landed since you last looked, and a stale nudge is noise that
+   trains reviewers to ignore the real ones. rc 1 is *transport down, retry* (not a settled state), so
+   never take an unreadable tally as "no longer pending" and suppress a legitimate nudge on it.
+
 ## When to use
 - Gating a merge/land on review in a multi-agent team.
 - Any "N reviewers must sign off" flow where you need an unambiguous, non-drifting verdict state.

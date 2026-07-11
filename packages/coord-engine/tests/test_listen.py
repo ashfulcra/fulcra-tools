@@ -69,7 +69,7 @@ def _fresh_state():
     return {"inbox_ids": [], "response_keys": [], "slug_owned": {},
             "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
             "degraded": {"inbox": False, "responses": False, "orphans": False,
-                         "verdicts": False}}
+                         "verdicts": False, "roles": False}}
 
 
 # --- Source 1: inbox directives -------------------------------------------
@@ -357,12 +357,13 @@ def test_legacy_single_bool_degraded_migrates_to_per_source(tmp_path):
                               "slug_owned": {}, "degraded": True}), encoding="utf-8")
     state = cli._load_listen_state(path)
     assert state["degraded"] == {"inbox": True, "responses": True,
-                                 "orphans": True, "verdicts": True}
+                                 "orphans": True, "verdicts": True, "roles": True}
     assert state["inbox_ids"] == ["x"]
 
     path.write_text(_j.dumps({"degraded": False}), encoding="utf-8")
     assert cli._load_listen_state(path)["degraded"] == {
-        "inbox": False, "responses": False, "orphans": False, "verdicts": False}
+        "inbox": False, "responses": False, "orphans": False, "verdicts": False,
+        "roles": False}
 
 
 def test_verbose_heartbeat_only_on_quiet_tick_and_only_stderr(capsys):
@@ -621,8 +622,10 @@ def test_load_state_tolerates_corrupt_file(tmp_path):
     state = cli._load_listen_state(path)
     assert state == {"inbox_ids": [], "response_keys": [], "slug_owned": {},
                      "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
+                     "orphan_slugs": [],
                      "degraded": {"inbox": False, "responses": False,
-                                  "orphans": False, "verdicts": False}}
+                                  "orphans": False, "verdicts": False,
+                                  "roles": False}}
 
 
 def test_cmd_listen_once_exits_zero(tmp_path, monkeypatch, capsys):
@@ -677,3 +680,330 @@ def test_listen_state_path_prints_and_does_not_tick(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out.strip()
     assert out == str(cli._listen_state_path(TEAM, "bob"))
     assert not cli._listen_state_path(TEAM, "bob").exists()  # resolver never writes
+
+
+# --- Task 2: role-routed directives + orphan review dirs ------------------
+
+from coord_engine.transport import TransportError as _TE
+from coord_engine.tasks import agent_key as _akey
+
+
+def _put_role(t, role, *, sla_hours=8760000, policy="shared"):
+    t.put(cli._role_doc_path(TEAM, role),
+          f"---\ntype: Role\npolicy: {policy}\nsla_hours: {sla_hours}\n---\n")
+
+
+def _put_lease(t, role, agent, *, ts=NOW):
+    t.put(cli._leases_prefix(TEAM, role) + f"{_akey(agent)}.md",
+          f"---\ntype: Lease\nagent: {agent}\ntimestamp: {ts}\n---\n")
+
+
+def test_role_routed_directive_fires_holder_listen_then_quiet(capsys):
+    # A directive assigned to a ROLE fires the current fresh-lease holder's listen.
+    t = FakeTransport()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")
+    _put_directive(t, "role-do-1", "Review the PR", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    assert failures == {}
+    assert [e["type"] for e in events] == ["directive"]
+    assert events[0]["slug"] == "role-do-1"
+    assert "role-do-1" in state["inbox_ids"]
+    # re-tick: same id -> quiet (id-diff on the directive slug, route-agnostic)
+    events2, _ = cli._run_listen_tick(t, TEAM, "bob", state,
+                                      json_mode=False, verbose=False)
+    assert events2 == []
+
+
+def test_role_routed_directive_not_fired_for_non_holder(capsys):
+    t = FakeTransport()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")
+    _put_directive(t, "role-do-2", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    # carol does NOT hold the role -> quiet, no false directive
+    events, failures = cli._run_listen_tick(t, TEAM, "carol", _fresh_state(),
+                                            json_mode=False, verbose=False)
+    assert events == [] and failures == {}
+
+
+def test_role_routed_directive_lease_expiry_stops_it(capsys):
+    # An expired (stale) lease means the agent is no longer a holder -> no fire.
+    t = FakeTransport()
+    _put_role(t, "reviewer", sla_hours=24)
+    _put_lease(t, "reviewer", "bob", ts="2020-01-01T00:00:00Z")  # ancient -> stale
+    _put_directive(t, "role-do-3", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
+                                            json_mode=False, verbose=False)
+    assert events == [] and failures == {}
+
+
+def test_role_holder_change_new_holder_sees_unseen_directive(capsys):
+    # Holder-change semantics: state files are PER-AGENT, so the id-diff is per
+    # holder. amy (current holder) sees the directive once; when the lease moves to
+    # bob, bob's OWN fresh state has never seen the id, so bob fires — while amy,
+    # who already recorded the id, stays quiet even before losing the lease.
+    t = FakeTransport()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "amy")
+    _put_directive(t, "role-do-4", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    amy_state = _fresh_state()
+    events, _ = cli._run_listen_tick(t, TEAM, "amy", amy_state,
+                                     json_mode=False, verbose=False)
+    assert [e["slug"] for e in events] == ["role-do-4"]
+    assert "role-do-4" in amy_state["inbox_ids"]
+
+    # lease moves to bob (amy released, bob claims)
+    del t.store[cli._leases_prefix(TEAM, "reviewer") + f"{_akey('amy')}.md"]
+    _put_lease(t, "reviewer", "bob")
+    bob_state = _fresh_state()
+    bob_events, _ = cli._run_listen_tick(t, TEAM, "bob", bob_state,
+                                         json_mode=False, verbose=False)
+    assert [e["slug"] for e in bob_events] == ["role-do-4"], \
+        "new holder sees the directive iff its id is unseen in THEIR state"
+    # amy re-ticks: id already in amy's state -> quiet regardless of lease
+    amy_events2, _ = cli._run_listen_tick(t, TEAM, "amy", amy_state,
+                                          json_mode=False, verbose=False)
+    assert amy_events2 == []
+
+
+def test_role_lease_read_degraded_is_visible_not_crash(capsys):
+    # Fail-closed: a lease LISTING that raises must degrade VISIBLY (the agent may
+    # miss role-routed work) — never crash the tick, never falsely fire.
+    class LeaseListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise _TE("boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")
+    _put_directive(t, "role-do-5", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    # no crash; directive not falsely emitted; degradation surfaced on its OWN
+    # "roles" source (not inbox — independent streaks, see the masking test below)
+    assert not [e for e in events if e.get("slug") == "role-do-5"]
+    assert "roles" in failures
+    assert state["degraded"]["roles"] is True
+    assert state["degraded"]["inbox"] is False
+
+
+def test_orphan_review_dir_emits_one_listen_event_cached(capsys):
+    # A review whose verdicts dir exists but whose <slug>.md doc does NOT is an
+    # orphan: listen surfaces it ONCE (cached in state), doc-ful reviews unaffected.
+    t = FakeTransport()
+    _put_review(t, "pr-doc", requested_by="me")           # a normal, doc-ful review
+    # orphan: verdicts dir present, no team/r/review/pr-orphan.md doc
+    _put_verdict(t, "pr-orphan", "rev", "approve")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    out = capsys.readouterr().out
+    orphans = [e for e in events if e.get("type") == "orphan"]
+    assert [e["slug"] for e in orphans] == ["pr-orphan"]
+    assert "ORPHAN pr-orphan" in out
+    assert state["orphan_slugs"] == ["pr-orphan"]
+    # re-tick: cached -> no repeat
+    events2, _ = cli._run_listen_tick(t, TEAM, "me", state,
+                                      json_mode=False, verbose=False)
+    assert not [e for e in events2 if e.get("type") == "orphan"]
+
+
+def test_pinned_roles_streak_does_not_mask_fresh_inbox_outage(capsys):
+    # Review fix (MEDIUM): role-lease-unknown is its OWN degraded source ("roles"),
+    # not folded into `inbox` — a chronic role degradation must not pin the inbox
+    # streak and mask a fresh summaries outage (the independent-streak invariant).
+    class LeaseListFails(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.fail_summaries = False
+
+        def read(self, path):
+            if self.fail_summaries and path.endswith("summaries.json"):
+                raise TransportError("summaries boom")
+            return super().read(path)
+
+        def list_dir(self, prefix):
+            if prefix.endswith("/leases/"):
+                raise TransportError("lease boom")
+            return super().list_dir(prefix)
+
+    t = LeaseListFails()
+    t.put(cli._role_doc_path(TEAM, "reviewer"),
+          "---\ntype: Role\npolicy: shared\nsla_hours: 8760000\n---\n")
+    _put_directive(t, "role-do-m", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    state = _fresh_state()
+    # tick 1: chronic role degradation alarms once, on ITS OWN "roles" streak
+    _, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                       json_mode=False, verbose=False)
+    err1 = capsys.readouterr().err
+    assert "roles" in failures and "inbox" not in failures
+    assert state["degraded"]["roles"] is True
+    assert state["degraded"]["inbox"] is False
+    assert "LISTEN DEGRADED" in err1
+    # tick 2: roles STILL degraded (suppressed) AND a fresh summaries outage —
+    # the inbox source must still alarm.
+    t.fail_summaries = True
+    _, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                        json_mode=False, verbose=False)
+    err2 = capsys.readouterr().err
+    assert "inbox" in failures2
+    assert state["degraded"]["inbox"] is True
+    assert "LISTEN DEGRADED" in err2 and "summaries index unreadable" in err2
+    assert "lease unknown" not in err2, "pinned roles streak must stay suppressed"
+
+
+# --- Task 2.5: live-freshness overlay in the listen inbox source -----------
+
+def test_listen_overlay_fires_fresh_directive_before_reconcile(capsys):
+    """A directive delivered BETWEEN reconciles (task doc present, summaries index
+    stale) fires the holder's listen immediately via the freshness overlay — no
+    heartbeat rebuild required. Re-tick is quiet (id-diff seen)."""
+    t = FakeTransport()
+    _put_directive(t, "anchor-0", "Anchor", owner="alice", assignee="bob")
+    _reconcile(t)                                  # summaries present, has anchor-0
+    state = _fresh_state()
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    capsys.readouterr()                            # anchor consumed
+    # fresh directive: task doc written, index NOT rebuilt
+    _put_directive(t, "fresh-1", "Fresh work", owner="alice", assignee="bob")
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    out = capsys.readouterr().out
+    assert failures == {}
+    assert [e["slug"] for e in events] == ["fresh-1"]
+    assert "DIRECTIVE fresh-1" in out
+    # re-tick: same id, no reconcile -> quiet
+    events2, _ = cli._run_listen_tick(t, TEAM, "bob", state,
+                                      json_mode=False, verbose=False)
+    assert events2 == []
+
+
+def test_listen_overlay_no_duplicate_after_reconcile(capsys):
+    """Once reconcile folds the fresh doc into the index, it lives in BOTH the index
+    and the task dir — the overlay skips it (index row wins), so no second fire."""
+    t = FakeTransport()
+    _reconcile(t)                                  # summaries present (empty)
+    state = _fresh_state()
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    # fresh directive surfaced by the overlay
+    _put_directive(t, "once-1", "Once", owner="alice", assignee="bob")
+    ev1, _ = cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert [e["slug"] for e in ev1] == ["once-1"]
+    # now reconcile folds it into the index; it must NOT re-fire (id seen + no dup row)
+    _reconcile(t)
+    ev2, _ = cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    assert ev2 == []
+
+
+def test_listen_overlay_listing_failure_degraded_not_silent(capsys):
+    """The overlay task-dir listing raises while the summaries read succeeds: the
+    inbox source degrades VISIBLY (never silent) AND the index rows are still served
+    — a directive already in the index still fires despite the overlay outage."""
+    t = FakeTransport()
+    _put_directive(t, "anchor-0", "Anchor", owner="alice", assignee="bob")
+    _reconcile(t)                                  # anchor-0 in the index
+    orig_list = t.list_dir
+    def boom_on_task(prefix):
+        if prefix == reconcile.task_prefix(TEAM):
+            raise TransportError("overlay boom")
+        return orig_list(prefix)
+    t.list_dir = boom_on_task
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    err = capsys.readouterr().err
+    assert "inbox" in failures                     # degraded, attributed to inbox source
+    assert "LISTEN DEGRADED" in err                # not silent
+    # honest attribution: the OVERLAY failed, not the summaries index
+    assert "task-dir overlay" in err
+    assert "summaries index unreadable" not in err
+    assert state["degraded"]["inbox"] is True
+    assert [e["slug"] for e in events] == ["anchor-0"]   # index rows still served
+
+
+# --- Codex P1: fail-open holes in _role_fresh_holders ----------------------
+
+def test_role_doc_none_but_listed_degrades_roles_then_recovers(capsys):
+    # A role-doc read that returns None for a name PRESENT in the roles/ listing
+    # is a transport failure, NOT a non-role: the directive must not be silently
+    # unrouted with zero degradation. Roles source degrades; the id must NOT enter
+    # state (no false advance); the recovery tick fires the directive.
+    class RoleDocReadFails(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.fail_doc = True
+
+        def read(self, path):
+            if self.fail_doc and path == cli._role_doc_path(TEAM, "reviewer"):
+                return None
+            return super().read(path)
+
+    t = RoleDocReadFails()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")
+    _put_directive(t, "role-do-t", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert "roles" in failures, "doc-None on a LISTED role must degrade, not non-role"
+    assert not [e for e in events if e.get("slug") == "role-do-t"]
+    assert "role-do-t" not in state["inbox_ids"], \
+        "id must never enter state while holders were unknown"
+    # recovery: doc readable again -> the deferred directive fires
+    t.fail_doc = False
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                              json_mode=False, verbose=False)
+    assert [e["slug"] for e in events2 if e["type"] == "directive"] == ["role-do-t"]
+    assert "role-do-t" in state["inbox_ids"]
+    assert "roles" not in failures2
+
+
+def test_listed_lease_read_none_is_unknown_not_stale():
+    # A JUST-LISTED lease shard whose read returns None must not parse as {} and
+    # get silently folded out as stale (fail-open vacancy inside the fold).
+    class LeaseReadFails(FakeTransport):
+        def read(self, path):
+            if "/leases/" in path:
+                return None
+            return super().read(path)
+
+    t = LeaseReadFails()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")  # fresh lease; only its shard READ fails
+    holders, ok = cli._role_fresh_holders(t, TEAM, "reviewer", now=NOW)
+    assert ok is False, "listed-lease read-None is UNKNOWN, never dropped-as-stale"
+    assert holders == []
+
+
+def test_absent_role_doc_unchanged_nonrole():
+    # Genuinely-absent role doc (name not in the roles/ listing): still a plain
+    # non-role — the literal-agent-id case must not degrade.
+    t = FakeTransport()
+    holders, ok = cli._role_fresh_holders(t, TEAM, "just-an-agent", now=NOW)
+    assert (holders, ok) == ([], True)
+
+
+def test_foreign_literal_assignee_no_roles_degradation(capsys):
+    # A directive assigned to another literal agent (no role doc anywhere) must
+    # not produce a roles failure while listening as a third party.
+    t = FakeTransport()
+    _put_directive(t, "for-carol", "Carol's job", owner="alice", assignee="carol")
+    _reconcile(t)
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
+                                            json_mode=False, verbose=False)
+    assert events == [] and failures == {}

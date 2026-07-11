@@ -161,24 +161,63 @@ it (not on PyPI).
   row when their pending-review scan exceeds `COORD_REVIEW_FOLD_BUDGET` (default 45s, enforced *within* a
   slug too — checked after each verdict/doc read, so one stalled read can't return a clean row) — honor it
   with a per-slug `review status` sweep;
-  never read the fold as complete. That sweep itself **fails closed**: `review status` returns rc 1
+  never read the fold as complete. The team-global **forge-feedback** section is bounded the same way:
+  `briefing`/`needs-me` emit a `forge-degraded` row `{scanned, total, skipped}` when the forge fan-out
+  exceeds the shared `COORD_BRIEFING_BUDGET` (default 60s, opened once for the whole add-on stack and spent
+  cumulatively; a raised feedback listing counts as `skipped`) — honor it with a `forge feedback` sweep,
+  never read the section as complete.
+  That review sweep itself **fails closed**: `review status` returns rc 1
   (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
   rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
   tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
+- **Canonical surfaces are live, not reconcile-lagged.** Every fold that reads the summaries index
+  (`inbox`, `listen`, `briefing`, `needs-me`, `board`, `status`) also runs a **freshness overlay**: when
+  the index is present it lists the task dir once and unions in any task/directive doc written SINCE the
+  last reconcile (absent from the index), so a directive delivered between heartbeats surfaces THIS read,
+  not up to a reconcile-period later (the PR348 false-clear). Indexed docs are never re-read (the index
+  row wins — behavior-preserving); a fresh doc that reads fine but won't parse as a Task is
+  skipped-not-fatal, while a LISTED fresh doc that can't be **read** degrades the `inbox` source (the
+  listing proved it exists — an unreadable read is a transport problem, never a silent vanish), as does
+  a failed overlay listing — visible, never silent, with the index rows still served. Cost: one extra
+  `list_dir` per row load plus one read per genuinely-new (new-since-reconcile) slug, **capped at
+  `COORD_OVERLAY_CAP` (default 16)** so a sustained reconcile outage can't make every surface-read do
+  unbounded doc reads fleet-wide; when capped, the served subset is deterministic (sorted by name, so
+  every agent converges on the same subset) — the cut is arbitrary with respect to age or priority (it
+  does not surface newest- or highest-priority-first), only stable and reproducible — and the truncation
+  itself degrades the `inbox` source with `{served, absent_total}` counts — capped-but-visible, never
+  silent truncation. The next reconcile folds the whole set back into the index, so the cap only bites
+  during a sustained outage. The overlay is also **time-budgeted** — the cap bounds read COUNT, not
+  TIME, and slow per-doc reads (each running toward the transport timeout) must not starve a surface
+  read or a watcher tick: `COORD_OVERLAY_BUDGET` (default 10s) opens at overlay start and is checked
+  after each read; on breach the overlay stops reading, serves everything read so far plus the index
+  rows, and degrades the `inbox` source with `served k of n` counts (when both the budget and the cap
+  trip, the budget reason wins — it is what actually stopped the read). A fresh team (no summaries yet)
+  is unchanged — the overlay only runs once an index exists.
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
-  against a per-agent state file — new inbox directives (the same fold `inbox` shows), new **responses
-  to directives you own** (the reply leg `respond` writes but nothing used to surface), and new
-  **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
+  against a per-agent state file — new inbox directives **plus directives routed to a role you hold a
+  fresh lease on** (a strict SUPERSET of the `inbox` fold; role holders are resolved per tick, only for
+  role-shaped assignees on unseen directives, so a lease handoff re-routes the very next tick and the id
+  is the directive slug regardless of route — a new holder sees it iff it's unseen in THEIR state), new
+  **responses to directives you own** (the reply leg `respond` writes but nothing used to surface), and
+  new **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
   bounded: one review-root listing per tick, requester cached; a `.settled` review first emits its
   unseen verdicts plus one terminal `SETTLED <slug>: APPROVED` line, then is dropped so it is never
   listed again — the settling tick is the standard single-reviewer flow, so the final verdict always
-  emits). One event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`), `--json` for
+  emits). **Role-expansion asymmetry (deliberate — know which verb expands what):** `listen` expands
+  role-held DIRECTIVES; `needs-me`/`briefing` expand roles for pending REVIEWS only (a review whose
+  `pending_required` names a role you hold); `inbox` and briefing's inbox section expand nothing (agent
+  id and `*` only). The verdicts source also surfaces **orphan review dirs** (a `<slug>/` verdicts dir
+  with no `<slug>.md` doc): one cached `ORPHAN <slug>` event, visibility only — repair is a
+  human/maintainer action (`needs-me` shows the same slugs as `review-orphan` rows every pass). One
+  event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`), `--json` for
   one object per line; a quiet tick prints NOTHING
   (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
   the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** —
   the `inbox` (summaries index), `responses` (responses subtree), `orphans` (a response whose owning
-  directive won't resolve), and `verdicts` (review root / review doc / verdict shard unreadable) streaks
+  directive won't resolve), `verdicts` (review root / review doc / verdict shard unreadable), and `roles`
+  (a role-lease listing unreadable while resolving role-routed directives — you may be missing role
+  work; the engine never reads a failed lease listing as "no holders", see `roles status` rc 1) streaks
   are independent, so a permanent orphan can't pin the flag and silence a fresh transport outage. `--once` **always exits 0** (a tick never fails the schedule; no output means
   nothing new, not an error) — run it on a scheduler, or run bare for a poll loop (`--interval`,
   SIGINT-clean). Every send verb arms you: `tell`/`broadcast`/`remind` print `replies: coord-engine listen

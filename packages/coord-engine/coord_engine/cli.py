@@ -65,12 +65,165 @@ def _replies_breadcrumb(team: str, sender: str) -> str:
     return f"replies: coord-engine listen {team} --agent {sender}"
 
 
-def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool]:
-    """Summaries rows plus whether the index was READABLE. ``ok`` is False only for
-    an index we could not read as intended — present-but-unparseable, or a read/
-    listing that failed under a degraded transport. A genuinely-absent index (a
-    fresh team, no reconcile yet) is empty-and-readable (``ok`` True): absence is a
-    normal empty state, never conflated with failure.
+#: Read-cap for the freshness overlay: at most this many absent-from-index docs
+#: are read per row load. The overlay's normal bound is new-since-reconcile items
+#: (typically zero or a handful), but under a SUSTAINED reconcile outage that set
+#: grows without limit — 50 new docs would mean 50 reads per surface-read, per
+#: agent, fleet-wide. A capped-but-VISIBLE overlay (the truncation degrades the
+#: inbox source) beats both silent truncation and unbounded reads.
+DEFAULT_OVERLAY_CAP = 16
+
+
+def _overlay_cap() -> int:
+    """Env override ``COORD_OVERLAY_CAP`` (same parse discipline as the budgets):
+    anything unparseable or non-positive falls back to the default — a bad env
+    value must never disable the bound."""
+    raw = os.environ.get("COORD_OVERLAY_CAP")
+    if raw is None:
+        return DEFAULT_OVERLAY_CAP
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OVERLAY_CAP
+    return v if v > 0 else DEFAULT_OVERLAY_CAP
+
+
+#: Time budget (seconds) for the freshness overlay's doc reads. The cap bounds
+#: READ COUNT, not TIME: under partial degradation (listing succeeds, each doc
+#: read runs to the transport's subprocess timeout) 16 absent names could mean
+#: minutes of serial timeouts inside EVERY canonical surface read — inbox/
+#: needs-me/listen have no other budget on this path (the briefing budget opens
+#: only AFTER _load_rows). That latency is the hang class this branch kills;
+#: the overlay carries its own deadline so a watcher's tick can never starve on
+#: it. Fast failures (a doc deleted between list and read returns quickly) keep
+#: the continue-and-degrade behavior — the budget only stops the SLOW bleed.
+DEFAULT_OVERLAY_BUDGET = 10.0
+
+
+def _overlay_budget() -> float:
+    """Env override ``COORD_OVERLAY_BUDGET`` (same parse discipline as
+    ``COORD_BRIEFING_BUDGET``): unparseable, non-positive, NaN, or inf falls back
+    to the default — a bad env value must never disable the bound."""
+    raw = os.environ.get("COORD_OVERLAY_BUDGET")
+    if raw is None:
+        return DEFAULT_OVERLAY_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OVERLAY_BUDGET
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_OVERLAY_BUDGET
+    return v
+
+
+def _fresh_overlay_rows(
+    transport: Any, team: str, index_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Freshness overlay (Task 2.5, the PR348 false-clear).
+
+    ``inbox``/``listen``/every canonical surface read the reconcile-built summaries
+    index, so a task/directive doc written BETWEEN reconciles is invisible to all of
+    them until the next heartbeat rebuild (live-repro'd: delivered 14:05:29Z, raw-
+    file-visible 14:07Z, inbox-visible 14:11Z — a watcher polling the canonical
+    surface misses fresh work for up to a reconcile period). When the index is
+    present+readable we ALSO list the task dir once and parse ONLY docs whose slug is
+    ABSENT from the index (bounded by new-since-reconcile items — typically zero or a
+    handful — and hard-capped at ``COORD_OVERLAY_CAP``), unioning them into the fold.
+    Rows already in the index are NOT re-read: the index row wins, so this is
+    behavior-preserving for every summarized doc.
+
+    Returns ``(overlay_rows, ok, reason)``. ``ok`` flips False — degrading the inbox
+    source visibly, never silent, while the index rows are still served — when:
+      * the task-dir LISTING raised (the overlay's view is unknown);
+      * a LISTED absent doc could not be READ (None/raise): the listing just proved
+        the doc exists, so an unreadable read is a transport problem, not a
+        sanctioned skip — silently dropping it is the false-clear class this branch
+        kills, at the overlay's own read step;
+      * the absent set exceeded the cap (truncated — served subset is deterministic:
+        absent names are read in sorted order, so every agent converges on the SAME
+        served subset; the reason carries {served, absent_total});
+      * the ``COORD_OVERLAY_BUDGET`` deadline expired with docs still unread (the
+        cap bounds read COUNT, this bounds TIME — slow per-doc reads must not
+        starve a surface read/watcher tick; checked AFTER each read, the after-op
+        discipline). Everything read so far is still served. When both the budget
+        and the cap trip, the budget reason wins (it is the truthful one — the cap
+        wasn't what stopped us).
+    Parse-garbage / not-a-Task docs remain sanctioned SILENT skips (mirrors
+    reconcile's own tolerance). Cost: one extra ``list_dir`` per row load, plus one
+    ``read`` per genuinely-new (unsummarized) slug, at most the cap, within the
+    budget."""
+    deadline = time.monotonic() + _overlay_budget()
+    prefix = rec.task_prefix(team)
+    try:
+        listing = transport.list_dir(prefix)
+    except Exception:
+        # listing unknown -> degraded (caller surfaces it), never silent
+        return [], False, "task-dir overlay unreadable"
+    from . import model
+    known = {str(r.get("name")) for r in index_rows if isinstance(r, dict)}
+    absent: list[tuple[str, Any]] = []
+    for entry in listing:
+        name = entry.get("name") or ""
+        if entry.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
+            continue
+        if name[:-3] in known:
+            continue  # index row wins — never re-read an already-summarized doc
+        absent.append((name, entry))
+    absent.sort(key=lambda p: p[0])  # deterministic served subset under the cap
+    cap = _overlay_cap()
+    overlay: list[dict[str, Any]] = []
+    ok, reason = True, ""
+    served = 0
+    budget_breached = False
+    for name, entry in absent[:cap]:
+        try:
+            raw = transport.read(f"{prefix}{name}")
+        except Exception:
+            raw = None
+        served += 1
+        if raw is None:
+            # LISTED but unreadable: a transport problem on a doc we know exists.
+            # Degrade visibly (never a silent vanish); other overlay docs + the
+            # index rows are still served. A FAST failure (doc deleted between
+            # list and read) keeps this continue-and-degrade path — only the
+            # budget check below stops the slow bleed.
+            ok = False
+            reason = f"task-dir overlay: fresh doc {name} unreadable"
+        else:
+            try:
+                fm = okf.parse_frontmatter(raw)
+                if fm is not None and model.is_task(fm):
+                    overlay.append(model.row_from_frontmatter(
+                        fm, name=name[:-3], path=f"task/{name}", mtime=entry.get("mtime")))
+                # else: parse-garbage / not a Task -> sanctioned silent skip
+            except Exception:
+                pass  # malformed content is a skip, not a transport failure
+        if time.monotonic() > deadline:
+            # After-op discipline: the budget bounds TIME where the cap bounds
+            # COUNT — stop reading, serve what we have, degrade visibly.
+            budget_breached = True
+            break
+    if budget_breached and served < len(absent):
+        ok = False
+        reason = (f"task-dir overlay budget exhausted: served {served} of "
+                  f"{len(absent)} fresh docs")
+    elif len(absent) > cap:
+        ok = False
+        reason = (f"task-dir overlay truncated: served {cap} of {len(absent)} "
+                  f"fresh docs (COORD_OVERLAY_CAP={cap})")
+    return overlay, ok, reason
+
+
+def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool, str]:
+    """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
+    was not, a short ``reason`` for the degraded surface to print (attribution: a
+    summaries-index failure and a freshness-overlay failure are different outages
+    and must not report as one another). ``ok`` is False for an index we could not
+    read as intended — present-but-unparseable, or a read/listing that failed under
+    a degraded transport — AND for a freshness-overlay problem (listing raised, a
+    listed fresh doc unreadable, or the overlay read-cap truncated the fresh set).
+    A genuinely-absent index (a fresh team, no reconcile yet) is empty-and-readable
+    (``ok`` True): absence is a normal empty state, never conflated with failure.
 
     ``read`` returning None is ambiguous (absent vs transport-down — the T1 lesson),
     so a None is disambiguated with one parent listing: ``list_dir`` RAISES on a
@@ -81,20 +234,28 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
     try:
         raw = transport.read(path)
     except Exception:
-        return [], False
+        return [], False, "summaries index unreadable"
     if raw:
         try:
-            return aggregate.aggregate_rows(json.loads(raw)), True
+            rows = aggregate.aggregate_rows(json.loads(raw))
         except Exception:
-            return [], False  # index present but corrupt -> unreadable, surface it
+            # index present but corrupt -> unreadable, surface it
+            return [], False, "summaries index unreadable"
+        # Live-freshness overlay: union in task docs written since the last
+        # reconcile (absent from this index). Any overlay problem flips ``ok`` so
+        # the inbox source degrades visibly; the index rows are still served.
+        overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(transport, team, rows)
+        return rows + overlay, overlay_ok, overlay_reason
     parent, entry = path.rsplit("/", 1)
     try:
         names = {e.get("name") for e in transport.list_dir(parent + "/")}
     except TransportError:
-        return [], False  # transport down -> unknown, not a confirmed-empty index
+        # transport down -> unknown, not a confirmed-empty index
+        return [], False, "summaries index unreadable"
     if entry in names:
-        return [], False  # index there yet unreadable (read returned None) -> degraded
-    return [], True  # genuinely absent -> a real, readable empty
+        # index there yet unreadable (read returned None) -> degraded
+        return [], False, "summaries index unreadable"
+    return [], True, ""  # genuinely absent -> a real, readable empty
 
 
 def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
@@ -160,8 +321,12 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     rows = _load_rows(transport, args.team)
     got = query.needs_me(rows, args.agent, now=_iso(_now()))
+    # Shared add-on deadline (see _briefing_budget): opened here so the forge
+    # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
+    # own independent, already-shipped budget.
+    deadline = time.monotonic() + _briefing_budget()
     got += _pending_reviews_for(transport, args.team, args.agent)
-    got += _forge_feedback_for(transport, args.team, args.agent)
+    got += _forge_feedback_for(transport, args.team, args.agent, deadline=deadline)
     if args.json:
         print(json.dumps(got, indent=2))
     else:
@@ -172,8 +337,16 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                       f"(required: {', '.join(r['pending_required'])})")
             elif r.get("type") == "review-fold-degraded":
                 print(_review_degraded_line(r))
+            elif r.get("type") == "review-orphan":
+                print(f"  [REVIEW] orphan review dir (verdicts, no doc): "
+                      f"{r['name']} — needs maintainer repair")
+            elif r.get("type") == "review-role-degraded":
+                print(f"  review role resolution degraded: "
+                      f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
             elif r.get("type") == "forge-feedback":
                 print(_forge_feedback_line(r))
+            elif r.get("type") == "forge-degraded":
+                print(_forge_degraded_line(r))
             else:
                 print(_line(r))
     return 0
@@ -235,7 +408,23 @@ def _escalation_marker_path(team: str, role: str, date: str) -> str:
 def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     team, role = args.team, args.role
     now = _iso(_now())
-    reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, role))) or {}
+    # A None role-doc read is DISAMBIGUATED with one roles/ listing (fetched only
+    # on the None path, so healthy queries pay nothing): doc listed-but-unreadable
+    # = transport failure = UNKNOWN rc 1 — a transient doc-read failure must not
+    # collapse a long-SLA role onto the 24h default and print a false VACANT.
+    # Doc genuinely ABSENT keeps the default-SLA fallback: querying an
+    # unregistered role (leases without a doc — `roles claim` supports it) still
+    # works. This supersedes the earlier single-read-ambiguity rationale: the
+    # disambiguator (`_roles_listing_names`) now exists and its cost lands only
+    # on the already-degraded path.
+    raw_doc = transport.read(_role_doc_path(team, role))
+    if raw_doc is None:
+        names = _roles_listing_names(transport, team)
+        if names is None or f"{role}.md" in names:
+            print(f"role doc unreadable for {role} in team/{team} — "
+                  f"state unknown, degraded transport, retry", file=sys.stderr)
+            return 1
+    reg = okf.parse_frontmatter(raw_doc) or {}
     policy = reg.get("policy") or "shared"
     try:
         sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
@@ -248,7 +437,12 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
             n = e.get("name") or ""
             if e.get("is_dir") or not n.endswith(".md"):
                 continue
-            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, role) + n)) or {}
+            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, role) + n))
+            if fm is None:
+                # A JUST-LISTED lease shard read None/unparseable: folding it out
+                # as `{}` (timestamp lost -> stale) would be a hidden vacancy.
+                leases = None  # UNKNOWN
+                break
             leases.append({"agent": fm.get("agent") or n[:-3], "timestamp": fm.get("timestamp")})
     except TransportError:
         leases = None  # unreadable -> UNKNOWN
@@ -271,6 +465,14 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
             print("  fresh holders: " + ", ".join(str(l.get("agent")) for l in fresh))
         if esc:
             print("  ESCALATION DUE — vacant past SLA, no marker today")
+    if status == roles.UNKNOWN:
+        # FAIL CLOSED (2026-07-11): the lease listing was unreadable, so the role's
+        # state is UNKNOWN — NOT vacant. A degraded transport must not let a caller
+        # read this as VACANT and fire a false SLA escalation. rc 1, same register
+        # as `review status`'s "tally unknown" (leases dropped/None never asserts).
+        print(f"lease state unknown for role {role} in team/{team} — "
+              f"degraded transport, retry", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -419,6 +621,7 @@ def _verdicts_prefix(team: str, slug: str) -> str:
 SETTLED_MARKER = ".settled"
 
 DEFAULT_REVIEW_FOLD_BUDGET = 45.0
+DEFAULT_BRIEFING_BUDGET = 60.0
 
 
 def _settled_marker_path(team: str, slug: str) -> str:
@@ -438,6 +641,30 @@ def _review_fold_budget() -> float:
         return DEFAULT_REVIEW_FOLD_BUDGET
     if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
         return DEFAULT_REVIEW_FOLD_BUDGET
+    return v
+
+
+def _briefing_budget() -> float:
+    """Aggregate deadline (seconds) for the transport-heavy briefing/needs-me
+    add-on sections — chiefly the team-global forge-feedback fan-out, which did
+    unbounded per-PR reads and hung the whole bundle under a degraded transport.
+    ONE budget opens when the add-on stack begins and is spent cumulatively: an
+    absolute ``time.monotonic()`` deadline is computed at that point and passed
+    to each transport-heavy section, so time already burned by an earlier section
+    shrinks what the next one gets (pending-reviews keeps its own, independent and
+    already-shipped ``COORD_REVIEW_FOLD_BUDGET``; whichever bound is sooner wins).
+    Env override ``COORD_BRIEFING_BUDGET``; anything unparseable, non-positive, or
+    inf falls back to the default (a bad env value must never disable the bound or
+    make the fold hang)."""
+    raw = os.environ.get("COORD_BRIEFING_BUDGET")
+    if raw is None:
+        return DEFAULT_BRIEFING_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_BRIEFING_BUDGET
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_BRIEFING_BUDGET
     return v
 
 
@@ -574,17 +801,61 @@ def _review_tally(
     return tally, raw is not None, vok, listing_ok
 
 
-def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
+def _roles_listing_names(transport: Any, team: str) -> Optional[set[str]]:
+    """Entry names under ``team/<team>/roles/``, or None if the listing itself
+    raised (membership UNKNOWN). The disambiguator for a role-doc ``read`` that
+    returned None: listed-but-unreadable = transport failure; absent = genuinely
+    not a role."""
+    try:
+        return {(e.get("name") or "") for e in transport.list_dir(f"team/{team}/roles/")}
+    except TransportError:
+        return None
+
+
+def _role_fresh_holders(
+    transport: Any, team: str, name: str, *, now: str,
+    listing_cache: Optional[dict[str, Any]] = None,
+) -> tuple[list[str], bool]:
     """Fresh lease holders of role name per the CANONICAL fold: the role
     doc's own sla_hours (falling back to the default) fed to
     roles.fresh_holders — the same fold roles status uses, so the two
-    can never disagree about a lease. A name that is not a role (no role doc)
-    or contains a path separator returns []."""
+    can never disagree about a lease.
+
+    Returns ``(holders, ok)``. FAIL CLOSED (2026-07-11, tightened per codex P1):
+    ``ok`` is False whenever the lease state is UNKNOWN — never let a degraded
+    transport read as "no holders" (asserting vacancy / silently dropping
+    role-routed work). UNKNOWN cases:
+
+    - the lease LISTING raises ``TransportError``;
+    - a JUST-LISTED lease shard reads None or unparseable (previously ``or {}``
+      dropped its timestamp and silently folded the holder out as stale — a
+      fail-open vacancy INSIDE the fold);
+    - the role-doc read returns None while the name IS present in the roles/
+      listing (or that listing itself raised): listed-but-unreadable is a
+      transport failure, not a non-role.
+
+    A doc-read None with the name ABSENT from the listing is a genuine non-role
+    (``([], True)``) — the literal-agent-id case stays non-degraded, as does a
+    doc that reads fine but isn't frontmatter (affirmative knowledge: not a
+    role). ``listing_cache`` (a per-tick/per-fold dict) memoizes the one roles/
+    listing across role-shaped assignees; pass the same dict for every call in
+    a pass."""
     if "/" in name:
-        return []  # a role name is a single path segment; anything else is not a role
-    reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, name)))
+        return [], True  # a role name is a single path segment; anything else is not a role
+    raw_doc = transport.read(_role_doc_path(team, name))
+    reg = okf.parse_frontmatter(raw_doc)
     if reg is None:
-        return []
+        if raw_doc is not None:
+            return [], True  # read fine, just not a role doc -> affirmative non-role
+        cache = listing_cache if listing_cache is not None else {}
+        if "names" not in cache:
+            cache["names"] = _roles_listing_names(transport, team)
+        names = cache["names"]
+        if names is None or f"{name}.md" in names:
+            # roles/ listing unreadable (membership unknown) OR the doc is listed
+            # yet unreadable (transport failure): UNKNOWN, fail closed.
+            return [], False
+        return [], True  # genuinely absent -> not a role (literal agent id case)
     try:
         sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
     except (TypeError, ValueError):
@@ -595,12 +866,17 @@ def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> li
             fn = f.get("name") or ""
             if f.get("is_dir") or not fn.endswith(".md"):
                 continue
-            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn)) or {}
+            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn))
+            if fm is None:
+                # Listed shard, failed/unparseable read: this lease's freshness is
+                # UNKNOWN — folding it out as stale would be a hidden vacancy.
+                return [], False
             leases.append({"agent": fm.get("agent") or fn[:-3],
                            "timestamp": fm.get("timestamp")})
     except TransportError:
-        return []
-    return [str(l.get("agent")) for l in roles.fresh_holders(leases, now=now, sla_hours=sla)]
+        return [], False  # lease state UNKNOWN -> fail closed, never assert vacant
+    return [str(l.get("agent"))
+            for l in roles.fresh_holders(leases, now=now, sla_hours=sla)], True
 
 
 def _pending_reviews_for(
@@ -637,6 +913,8 @@ def _pending_reviews_for(
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
+    degraded_roles: set[str] = set()  # roles whose lease read was UNKNOWN (fail-closed)
+    roles_listing_cache: dict[str, Any] = {}  # one roles/ listing per pass (doc-None disambiguation)
     try:
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
@@ -645,6 +923,16 @@ def _pending_reviews_for(
         e for e in entries
         if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
     ]
+    # Orphan review dirs (visibility only): a `<slug>/` dir with verdicts but no
+    # `<slug>.md` doc is invisible to the doc-keyed scan below. Surface each as a
+    # `review-orphan` row EVERY pass (repair stays a human/maintainer action).
+    doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
+    for e in entries:
+        if not e.get("is_dir"):
+            continue
+        oslug = (e.get("name") or "").rstrip("/")
+        if oslug and oslug not in doc_slugs:
+            out.append({"type": "review-orphan", "name": oslug})
     total = len(slug_entries)
     scanned = 0
     skipped = 0
@@ -715,10 +1003,23 @@ def _pending_reviews_for(
         if agent not in pending:  # direct hit needs no role folding at all
             for r in pending:
                 if r not in role_holders:
-                    role_holders[r] = _role_fresh_holders(transport, team, r, now=now)
+                    holders, ok = _role_fresh_holders(
+                        transport, team, r, now=now,
+                        listing_cache=roles_listing_cache)
+                    role_holders[r] = holders
+                    if not ok:
+                        # Fail-closed: the role's lease read is UNKNOWN. Do NOT let
+                        # it read as "no holders" (a silently dropped obligation) —
+                        # record it so a degraded marker surfaces below.
+                        degraded_roles.add(r)
         if review.is_pending_for(pending, agent, role_holders):
             out.append({"type": "review-pending", "name": slug,
                         "state": "PENDING", "pending_required": pending})
+    if degraded_roles:
+        # A role's lease read degraded: the agent might be a holder we couldn't
+        # resolve, so a role-routed obligation may be missing. Make it VISIBLE.
+        out.append({"type": "review-role-degraded",
+                    "roles": sorted(degraded_roles)})
     if skipped:
         # Completed inside budget but some slugs were unreadable: partial
         # knowledge must be visible, so emit the degraded marker anyway.
@@ -735,74 +1036,174 @@ def _review_degraded_line(r: dict[str, Any]) -> str:
     return line
 
 
-def _forge_responsible(transport: Any, team: str) -> dict[str, set]:
-    """{pr_slug: {responsible agents}}. Responsibility comes from two sources,
-    unioned: the watch registry (its ``agent``) and, for review-artifact PRs,
-    the review's ``requested_by``. Best-effort — any listing failure is skipped
-    so needs-me/briefing never fail because the forge add-on is absent."""
+def _forge_responsible(
+    transport: Any, team: str, *, deadline: Optional[float] = None
+) -> tuple[dict[str, set], bool]:
+    """``({pr_slug: {responsible agents}}, ok)``. Responsibility comes from two
+    sources, unioned: the watch registry (its ``agent``) and, for review-artifact
+    PRs, the review's ``requested_by``. Best-effort — any listing failure is
+    skipped so needs-me/briefing never fail because the forge add-on is absent.
+
+    BOUNDED. Both sources are team-global fan-outs (list + one read per entry);
+    ``deadline`` (an absolute ``time.monotonic()`` instant, or None for no bound)
+    is checked BEFORE and AFTER each blocking op, mirroring the review fold — so a
+    degraded transport can no longer turn discovery into an unbounded hang. ``ok``
+    is False when a source listing raised OR the budget expired mid-scan: the map
+    is then a FLOOR (partial), and the caller must surface a degraded row rather
+    than treat the partial responsibility set as complete. A cheap zero-read skip
+    for "this agent has no forge responsibility" is NOT possible from one listing:
+    responsibility lives in per-file frontmatter across TWO sources, so the budget
+    is the guard (the empty-store case already costs only the two empty listings).
+    """
     resp: dict[str, set] = {}
+    ok = True
+
+    def _expired() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
     watch_prefix = f"team/{team}/_coord/forge/watch/"
     try:
-        for e in transport.list_dir(watch_prefix):
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md"):
-                continue
-            fm = okf.parse_frontmatter(transport.read(watch_prefix + n)) or {}
-            slug = forge_mod.pr_slug(fm.get("url")) or n[:-3]
-            a = fm.get("agent")
-            if a:
-                resp.setdefault(slug, set()).add(str(a))
+        watch_entries = transport.list_dir(watch_prefix)
     except TransportError:
-        pass
+        watch_entries = []
+        ok = False
+    for e in watch_entries:
+        if _expired():
+            ok = False
+            break
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        raw = transport.read(watch_prefix + n)
+        if _expired():  # the read pushed us over budget — detect it immediately
+            ok = False
+            break
+        fm = okf.parse_frontmatter(raw) or {}
+        slug = forge_mod.pr_slug(fm.get("url")) or n[:-3]
+        a = fm.get("agent")
+        if a:
+            resp.setdefault(slug, set()).add(str(a))
     review_prefix = f"team/{team}/review/"
     try:
-        for e in transport.list_dir(review_prefix):
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
-                continue
-            fm = okf.parse_frontmatter(transport.read(review_prefix + n)) or {}
-            slug = forge_mod.pr_slug(forge_mod.review_artifact(fm))
-            who = fm.get("requested_by")
-            if slug and who:
-                resp.setdefault(slug, set()).add(str(who))
+        review_entries = transport.list_dir(review_prefix)
     except TransportError:
-        pass
-    return resp
+        review_entries = []
+        ok = False
+    for e in review_entries:
+        if _expired():
+            ok = False
+            break
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
+            continue
+        raw = transport.read(review_prefix + n)
+        if _expired():
+            ok = False
+            break
+        fm = okf.parse_frontmatter(raw) or {}
+        slug = forge_mod.pr_slug(forge_mod.review_artifact(fm))
+        who = fm.get("requested_by")
+        if slug and who:
+            resp.setdefault(slug, set()).add(str(who))
+    return resp, ok
 
 
-def _forge_feedback_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+def _forge_slug_feedback(
+    transport: Any, team: str, agent: str, slug: str,
+    entries: list[dict[str, Any]], prefix: str, deadline: Optional[float],
+) -> tuple[Optional[dict[str, Any]], bool]:
+    """Feedback row for ONE PR from its already-listed feedback dir, ->
+    ``(row_or_None, fully_scanned)``. ``fully_scanned`` is False when the budget
+    expired mid-scan (checked before AND after each blocking read): a single PR
+    with many shards would otherwise read them all unbounded. A truncated scan is
+    UNTRUSTED — the caller discards the partial row and counts the slug skipped,
+    exactly as the review fold discards a mid-slug tally."""
+    items: list[str] = []
+    authors: list[str] = []
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, False
+        stem = n[:-3]
+        acked = transport.read(_ack_path(team, stem, agent))
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, False
+        if acked is not None:
+            continue  # acked by this agent — hidden
+        raw = transport.read(prefix + n)
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, False
+        items.append(stem)
+        fm = okf.parse_frontmatter(raw) or {}
+        a = fm.get("author")
+        if a and str(a) not in authors:
+            authors.append(str(a))
+    if items:
+        return ({"type": "forge-feedback", "pr_slug": slug, "count": len(items),
+                 "authors": sorted(authors), "items": sorted(items)}, True)
+    return None, True
+
+
+def _forge_feedback_for(
+    transport: Any, team: str, agent: str, *, deadline: Optional[float] = None
+) -> list[dict[str, Any]]:
     """Unacked forge-feedback shards on PRs the agent is responsible for, one
     row per PR: ``{type, pr_slug, count, authors, items}``. Ack state reuses the
     directive ack namespace (``_coord/acks/<item-id>/<agent>.md``) — acked items
-    drop; a new node id (new shard) re-surfaces. Best-effort; never raises."""
+    drop; a new node id (new shard) re-surfaces. Best-effort; never raises.
+
+    BOUNDED by the shared briefing ``deadline`` (absolute ``time.monotonic()``,
+    None = unbounded/legacy). On any breach — the responsibility scan truncating,
+    a per-PR feedback listing raising, or the per-PR shard scan overrunning — a
+    single ``forge-degraded`` row ``{scanned, total, skipped}`` is appended (same
+    shape/discipline as ``review-fold-degraded``): partial forge knowledge stays
+    VISIBLE, the section never hangs the entry fold and never dies silently.
+    ``total`` is the count of PRs the agent is responsible for (a floor if the
+    responsibility scan itself was truncated); ``scanned`` counts those reached;
+    ``skipped`` counts those reached-but-unreadable/cut."""
     out: list[dict[str, Any]] = []
-    resp = _forge_responsible(transport, team)
-    for slug, agents in sorted(resp.items()):
-        if agent not in agents:
-            continue
+    resp, resp_ok = _forge_responsible(transport, team, deadline=deadline)
+    mine = sorted(slug for slug, agents in resp.items() if agent in agents)
+    total = len(mine)
+    scanned = 0
+    skipped = 0
+    degraded = not resp_ok  # a truncated/failed responsibility scan is already degraded
+    for slug in mine:
+        if deadline is not None and time.monotonic() >= deadline:
+            degraded = True
+            break
+        scanned += 1
         prefix = f"team/{team}/_coord/forge/feedback/{slug}/"
-        items: list[str] = []
-        authors: list[str] = []
         try:
             entries = transport.list_dir(prefix)
         except TransportError:
+            # This PR's feedback is UNKNOWN (listing raised): count it skipped and
+            # keep scanning the rest — never let one PR sink the whole section.
+            skipped += 1
+            degraded = True
             continue
-        for e in entries:
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md"):
-                continue
-            stem = n[:-3]
-            if transport.read(_ack_path(team, stem, agent)) is not None:
-                continue  # acked by this agent — hidden
-            items.append(stem)
-            fm = okf.parse_frontmatter(transport.read(prefix + n)) or {}
-            a = fm.get("author")
-            if a and str(a) not in authors:
-                authors.append(str(a))
-        if items:
-            out.append({"type": "forge-feedback", "pr_slug": slug,
-                        "count": len(items), "authors": sorted(authors),
-                        "items": sorted(items)})
+        if deadline is not None and time.monotonic() >= deadline:
+            # The listing itself pushed us over budget: this PR is unscanned.
+            skipped += 1
+            degraded = True
+            break
+        row, fully = _forge_slug_feedback(transport, team, agent, slug, entries, prefix, deadline)
+        if not fully:
+            # Budget expired mid-shard: the partial row is untrusted, discard it,
+            # count the PR skipped, and stop — the budget is spent.
+            skipped += 1
+            degraded = True
+            break
+        if row:
+            out.append(row)
+    if degraded:
+        marker: dict[str, Any] = {"type": "forge-degraded", "scanned": scanned,
+                                  "total": total}
+        if skipped:
+            marker["skipped"] = skipped
+        out.append(marker)
     return out
 
 
@@ -810,6 +1211,14 @@ def _forge_feedback_line(r: dict[str, Any]) -> str:
     who = ", ".join(r.get("authors") or []) or "?"
     return (f"  [FORGE] feedback on {r.get('pr_slug')}: "
             f"{r.get('count')} item(s) from {who}")
+
+
+def _forge_degraded_line(r: dict[str, Any]) -> str:
+    line = (f"  forge fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
+            f"before budget — run forge feedback for the rest")
+    if r.get("skipped"):
+        line += f" ({r['skipped']} PR(s) skipped on transport error)"
+    return line
 
 
 def _normalize_required(required: Any) -> list[str]:
@@ -1369,6 +1778,33 @@ def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _directed_inbox(transport: Any, team: str, agent: str,
+                    rows: list[dict[str, Any]], *,
+                    held_roles: "Optional[set[str]]" = None,
+                    include_backlog: bool = False) -> list[dict[str, Any]]:
+    """The open-directive fold over ALREADY-LOADED ``rows`` — directives assigned
+    to ``agent``, ``*``, or a role in ``held_roles`` (role routing), with the same
+    ack + read-your-write gating `inbox` applies. Split out from
+    ``_inbox_rows_status`` so `listen` can resolve held roles from the rows FIRST
+    (bounding the lease reads to role-shaped assignees on unseen directives) and
+    then fold once, without re-reading the summaries index."""
+    now = _iso(_now())
+    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
+    stale_visible = directives.inbox(rows, acks, agent, now=now,
+                                     include_backlog=include_backlog,
+                                     held_roles=held_roles)
+    for r in stale_visible:
+        slug = str(r.get("name") or "")
+        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(team, slug, agent)):
+            acks.setdefault(slug, []).append(agent)
+    got = directives.inbox(rows, acks, agent, now=now,
+                           include_backlog=include_backlog, held_roles=held_roles)
+    # read-your-write: an ack written since the last reconcile hides the item
+    # for the acking agent immediately (live shard check, only for shown items).
+    return [r for r in got
+            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None]
+
+
 def _inbox_rows_status(transport: Any, team: str, agent: str, *,
                        include_backlog: bool = False) -> tuple[list[dict[str, Any]], bool]:
     """The open-directive fold `inbox` surfaces for `agent`, plus whether the
@@ -1377,20 +1813,9 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
     drift. Never raises: an unreadable summaries read folds to an empty list, but
     now with ``ok=False`` so a listener can surface the degradation rather than
     mistake it for an empty inbox."""
-    now = _iso(_now())
-    rows, ok = _load_rows_status(transport, team)
-    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
-    stale_visible = directives.inbox(rows, acks, agent, now=now,
-                                     include_backlog=include_backlog)
-    for r in stale_visible:
-        slug = str(r.get("name") or "")
-        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(team, slug, agent)):
-            acks.setdefault(slug, []).append(agent)
-    got = directives.inbox(rows, acks, agent, now=now, include_backlog=include_backlog)
-    # read-your-write: an ack written since the last reconcile hides the item
-    # for the acking agent immediately (live shard check, only for shown items).
-    return [r for r in got
-            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None], ok
+    rows, ok, _reason = _load_rows_status(transport, team)
+    return _directed_inbox(transport, team, agent, rows,
+                           include_backlog=include_backlog), ok
 
 
 def _inbox_rows(transport: Any, team: str, agent: str, *,
@@ -1454,10 +1879,11 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 #      the await leg of `review request`, now that a verb-opened review notifies
 #      its reviewers atomically (so the `await verdicts` breadcrumb is genuine).
 #
-# Four failure SOURCES are tracked independently — inbox (summaries index),
+# Five failure SOURCES are tracked independently — inbox (summaries index),
 # responses (the responses subtree transport), orphans (a response whose owning
-# directive doc won't resolve), and verdicts (the review root / a review doc /
-# a verdict shard unreadable). Each is its own degraded streak.
+# directive doc won't resolve), verdicts (the review root / a review doc /
+# a verdict shard unreadable), and roles (a role-lease listing unreadable while
+# resolving role-routed directives). Each is its own degraded streak.
 #
 # Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
 #   * No false advance — a failed/None read during a tick must NOT mark unknown
@@ -1480,7 +1906,11 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 
 
 # The independent degraded streaks. Each source alarms once per its own streak.
-_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts")
+# `roles` (role-lease resolution for role-routed directives) is its own source:
+# folding it into `inbox` would let a chronic role degradation pin that streak
+# and mask a fresh summaries outage — the independent-streak invariant. Legacy
+# state files lack the key; _coerce_degraded defaults it False (free migration).
+_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles")
 
 
 def _fresh_degraded() -> dict[str, bool]:
@@ -1527,6 +1957,9 @@ def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
         "verdict_keys": list(data.get("verdict_keys") or []),
         "review_requested": dict(data.get("review_requested") or {}),
         "settled_reviews": list(data.get("settled_reviews") or []),
+        # Orphan review dirs already reported (verdicts dir, no doc) — cached so
+        # each is surfaced ONCE; legacy files lack the key and default empty.
+        "orphan_slugs": list(data.get("orphan_slugs") or []),
         "degraded": _coerce_degraded(data.get("degraded")),
     }
 
@@ -1544,7 +1977,7 @@ def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
 def _listen_tick(transport: Any, team: str, agent: str,
                  state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
-    degraded SOURCE (``inbox`` / ``responses`` / ``orphans``) to its messages, and
+    degraded SOURCE (see ``_LISTEN_SOURCES``) to its messages, and
     mutates ``state`` with ONLY affirmatively-processed ids (add-only — see the
     section note): a failed read/list adds nothing, so it can never mark unknown
     data as seen."""
@@ -1558,11 +1991,58 @@ def _listen_tick(transport: Any, team: str, agent: str,
     response_keys = set(state["response_keys"])
     slug_owned: dict[str, Any] = dict(state["slug_owned"])
 
-    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces). An
-    # unreadable summaries index is degraded, NOT a legitimately-empty inbox.
-    inbox, inbox_ok = _inbox_rows_status(transport, team, agent)
+    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces), PLUS
+    # directives routed to a fresh-lease ROLE this agent holds. An unreadable
+    # summaries index is degraded, NOT a legitimately-empty inbox.
+    now_iso = _iso(_now())
+    rows, inbox_ok, inbox_reason = _load_rows_status(transport, team)
     if not inbox_ok:
-        _fail("inbox", "summaries index unreadable")
+        # The reason attributes WHICH leg failed (summaries index vs the freshness
+        # overlay — different outages, same inbox source/streak).
+        _fail("inbox", inbox_reason or "summaries index unreadable")
+    # Role expansion (contract gap): resolve fresh-lease holders ONLY for
+    # role-shaped assignees on UNSEEN open directives — one role-doc(+lease) read
+    # per distinct such assignee, deduped per tick (NOT persistent state: leases
+    # change). HONEST BOUND: a directive assigned to ANOTHER literal agent never
+    # enters this agent's inbox_ids, so its assignee is re-probed every tick (one
+    # role-doc read resolving to "not a role", no lease reads) for as long as the
+    # directive stays open — per-tick cost is O(distinct foreign assignees on open
+    # directives), small in practice. A persistent negative "not-a-role" cache was
+    # considered and REJECTED: read() can't distinguish absent from failed, and a
+    # name later registered as a role would be silently unroutable forever (a
+    # staleness hole worse than the read cost). Revisit only with a roles/-listing
+    # invalidation if fleets grow. id-diff is unchanged (the directive slug is the
+    # id regardless of the route), so a new role holder sees a directive iff its id
+    # is unseen in THEIR OWN state file (state is per-agent) — the holder-change
+    # semantics fall out.
+    candidate_roles: set[str] = set()
+    for r in rows:
+        if r.get("status") not in directives.OPEN_STATUSES:
+            continue
+        a = str(r.get("assignee") or "")
+        if not a or a in (agent, "*", directives.BACKLOG) or "/" in a:
+            continue
+        slug = str(r.get("name") or "")
+        if not slug or slug in inbox_ids:
+            continue  # already seen -> zero role-resolution cost
+        candidate_roles.add(a)
+    held_roles: set[str] = set()
+    roles_listing_cache: dict[str, Any] = {}  # one roles/ listing per tick (doc-None disambiguation)
+    for role in sorted(candidate_roles):
+        holders, ok = _role_fresh_holders(transport, team, role, now=now_iso,
+                                          listing_cache=roles_listing_cache)
+        if not ok:
+            # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent
+            # may miss role-routed work) on the DEDICATED `roles` source — never
+            # crash, never treat unknown as "not a holder" silently. Its own
+            # source is load-bearing: a chronic role degradation must not pin the
+            # inbox streak and mask a fresh summaries outage.
+            _fail("roles", f"role lease unknown for {role}")
+            continue
+        if agent in holders:
+            held_roles.add(role)
+    inbox = _directed_inbox(transport, team, agent, rows,
+                            held_roles=held_roles or None)
     for r in inbox:
         slug = str(r.get("name") or "")
         if not slug or slug in inbox_ids:
@@ -1709,12 +2189,31 @@ def _listen_tick(transport: Any, team: str, agent: str,
                            "state": review.APPROVED})
             settled_reviews.add(slug)
 
+    # Orphan review dirs (visibility only): a `<slug>/` dir with verdicts but no
+    # `<slug>.md` doc is skipped by the doc-keyed scan above and would never be
+    # seen. Surface each ONCE (cached in `orphan_slugs`) so a listener learns the
+    # slug exists — repair stays a human/maintainer action, never auto-delete.
+    # Skipped entirely when the review listing failed (rentries is None): an
+    # unreadable root is UNKNOWN, not an absence of docs.
+    orphan_slugs = set(state.get("orphan_slugs") or [])
+    if rentries is not None:
+        doc_names = {(e.get("name") or "")[:-3] for e in rentries
+                     if not e.get("is_dir") and (e.get("name") or "").endswith(".md")}
+        for e in rentries:
+            if not e.get("is_dir"):
+                continue
+            oslug = (e.get("name") or "").rstrip("/")
+            if oslug and oslug not in doc_names and oslug not in orphan_slugs:
+                events.append({"type": "orphan", "slug": oslug})
+                orphan_slugs.add(oslug)
+
     state["inbox_ids"] = sorted(inbox_ids)
     state["response_keys"] = sorted(response_keys)
     state["slug_owned"] = slug_owned
     state["verdict_keys"] = sorted(verdict_keys)
     state["review_requested"] = review_requested
     state["settled_reviews"] = sorted(settled_reviews)
+    state["orphan_slugs"] = sorted(orphan_slugs)
     return events, failures
 
 
@@ -1725,6 +2224,8 @@ def _format_listen_event(ev: dict[str, Any]) -> str:
         return f"VERDICT {ev['slug']} by {ev['reviewer']}: {ev['verdict']}"
     if ev["type"] == "settled":
         return f"SETTLED {ev['slug']}: {ev['state']}"
+    if ev["type"] == "orphan":
+        return f"ORPHAN {ev['slug']} (verdicts dir, no review doc — needs repair)"
     return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
 
 
@@ -1921,13 +2422,20 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
+    # One shared add-on deadline (see _briefing_budget), opened before the
+    # transport-heavy sections and spent cumulatively: time burned by
+    # pending-reviews shrinks the window the forge fan-out gets, so the whole
+    # add-on stack is bounded, not each section independently. pending-reviews
+    # keeps its own tighter, already-shipped budget (whichever bound is sooner).
+    add_on_deadline = time.monotonic() + _briefing_budget()
     try:
         out["pending_reviews"] = _pending_reviews_for(transport, args.team, agent)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
     try:
-        out["forge_feedback"] = _forge_feedback_for(transport, args.team, agent)
+        out["forge_feedback"] = _forge_feedback_for(
+            transport, args.team, agent, deadline=add_on_deadline)
     except Exception as e:
         print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
         out["forge_feedback"] = []
@@ -1967,9 +2475,14 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(_line(r))
     for r in degraded_rows:  # always shown — a degraded fold must never hide
         print(_review_degraded_line(r))
-    print(f"  forge feedback: {len(out.get('forge_feedback') or [])} PR(s)")
-    for r in (out.get("forge_feedback") or [])[:5]:
+    forge_rows = out.get("forge_feedback") or []
+    forge_fb = [r for r in forge_rows if r.get("type") != "forge-degraded"]
+    forge_deg = [r for r in forge_rows if r.get("type") == "forge-degraded"]
+    print(f"  forge feedback: {len(forge_fb)} PR(s)")
+    for r in forge_fb[:5]:
         print(_forge_feedback_line(r))
+    for r in forge_deg:  # always shown — a degraded fold must never hide
+        print(_forge_degraded_line(r))
     print(continuity.render_resume(out["resume"]))
     return 0
 
@@ -2613,7 +3126,21 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
             continue
         role = n[:-3]; checked += 1
-        reg = okf.parse_frontmatter(transport.read(_role_doc_path(args.team, role))) or {}
+        doc = transport.read(_role_doc_path(args.team, role))
+        if doc is None:
+            # FAIL CLOSED (review fix): this doc was JUST LISTED by the parent
+            # roles/ scan, so a None read is knowably transient-or-deleted — never
+            # a live role to judge under DEFAULT_SLA_HOURS. Falling through with
+            # the 24h default would collapse a longer-SLA role's window and fire a
+            # false VACANT escalation (the incident vector, on the acting path).
+            # Skip: transient -> retried next sweep (correct); deleted -> role
+            # gone (also correct). `roles status` now applies the same
+            # disambiguation on its doc-None path (via _roles_listing_names) —
+            # both surfaces agree that listed-but-unreadable is UNKNOWN.
+            print(f"escalate: role doc unreadable for {role} — state unknown, "
+                  f"skipped (degraded transport, retry)", file=sys.stderr)
+            continue
+        reg = okf.parse_frontmatter(doc) or {}
         try:
             sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
         except (TypeError, ValueError):
@@ -2624,7 +3151,16 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                 fn = f.get("name") or ""
                 if not f.get("is_dir") and fn.endswith(".md"):
                     fm = okf.parse_frontmatter(
-                        transport.read(_leases_prefix(args.team, role) + fn)) or {}
+                        transport.read(_leases_prefix(args.team, role) + fn))
+                    if fm is None:
+                        # A JUST-LISTED lease shard read None/unparseable: `or {}`
+                        # here dropped the timestamp and silently folded the holder
+                        # out as stale — a fail-open VACANCY on the ACTING path
+                        # (same class as the codex P1). UNKNOWN: never escalate.
+                        print(f"escalate: lease shard unreadable for {role} — "
+                              f"state unknown, skipped", file=sys.stderr)
+                        leases = None
+                        break
                     leases.append({"agent": fm.get("agent") or fn[:-3],
                                    "timestamp": fm.get("timestamp")})
         except TransportError:
