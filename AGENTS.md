@@ -224,7 +224,10 @@ it (not on PyPI).
   listen, and `[?]`/orphan emission (an orphan row here is the wrong ontology, not a pending
   obligation); a verdicts listing that **raises** is **unknown** — fail closed and surface it visibly
   (`review-orphan-degraded` / a degraded `verdicts` source), never assume tombstone on transport
-  failure. `review status <slug>` on a tombstone stays rc 1 but says *tombstone (archived/deleted
+  failure. In the fold, classification runs under a reserved half of the review-fold budget (a
+  visibility-only pass must never starve the load-bearing doc scan); on breach the remaining dirs
+  emit one aggregate `review-orphan-degraded {unclassified: k}` row and the doc scan proceeds on the
+  reserved remainder. `review status <slug>` on a tombstone stays rc 1 but says *tombstone (archived/deleted
   review) — no doc, no verdicts* instead of the generic "unknown, retry" (a retry never resurrects a
   gone doc). One
   event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`), `--json` for

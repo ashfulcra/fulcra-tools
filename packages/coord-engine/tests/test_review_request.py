@@ -917,6 +917,39 @@ def test_needs_me_tombstone_absent_orphan_degraded_present(capsys):
     assert "pr-unk" in out, "a degraded orphan classification must print"
 
 
+def test_dir_classification_runs_under_the_fold_budget(capsys):
+    # Pre-budget seam (coordinator review): the dir-classification loop and its
+    # per-dir verdicts listings must run UNDER the fold's own deadline — 15
+    # tombstones on a degraded transport must never buy N x timeout of unbudgeted
+    # listings AHEAD of the budget. Classification is capped at a RESERVED half of
+    # the fold budget (visibility-only work must never starve the load-bearing doc
+    # scan — the reconcile reserved-budget pattern). On breach the remaining
+    # unclassified dirs roll into ONE aggregate degraded row ({unclassified: k})
+    # and the fold proceeds to the doc scan with the reserved remainder — a real
+    # pending review is still served.
+    class SlowGhostListings(CountingTransport):
+        def list_dir(self, prefix):
+            if "/verdicts/" in prefix and "ghost-" in prefix:
+                time.sleep(0.03)  # a degraded transport's slow dir listing
+            return super().list_dir(prefix)
+
+    t = SlowGhostListings()
+    cli.main(["review", "request", "r", "pr-live", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    for i in range(6):
+        t.put(f"team/r/review/ghost-{i}/", "")  # six soft-delete ghosts
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
+    agg = [r for r in out if r.get("type") == "review-orphan-degraded"
+           and r.get("unclassified")]
+    assert len(agg) == 1 and agg[0]["unclassified"] >= 1, \
+        f"breach must emit ONE aggregate unclassified row, got {out}"
+    ghost_lists = [p for p in t.lists if "/verdicts/" in p and "ghost-" in p]
+    assert len(ghost_lists) < 6, "classification must stop at the deadline, not run out"
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-live"
+               for r in out), "doc-scan rows must still be served after the breach"
+
+
 def test_review_status_on_tombstone_says_tombstone_not_retry(capsys):
     # `review status` on a doc-less, verdict-less slug: keep rc 1 but say tombstone
     # (a retry will never help), not the generic "unknown, retry".

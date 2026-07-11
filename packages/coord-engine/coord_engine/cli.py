@@ -341,8 +341,12 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(f"  [REVIEW] orphan review dir (verdicts, no doc): "
                       f"{r['name']} — needs maintainer repair")
             elif r.get("type") == "review-orphan-degraded":
-                print(f"  [REVIEW] orphan dir classification degraded: "
-                      f"{r['name']} — verdicts listing unreadable, retry")
+                if r.get("unclassified"):
+                    print(f"  [REVIEW] dir classification degraded: "
+                          f"{r['unclassified']} dir(s) unclassified before budget — retry")
+                else:
+                    print(f"  [REVIEW] orphan dir classification degraded: "
+                          f"{r['name']} — verdicts listing unreadable, retry")
             elif r.get("type") == "review-role-degraded":
                 print(f"  review role resolution degraded: "
                       f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
@@ -953,32 +957,60 @@ def _pending_reviews_for(
         e for e in entries
         if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
     ]
+    # The fold's ONE deadline opens HERE — before the dir-classification loop, not
+    # after it (coordinator P1, the recurring pre-budget class): classification does
+    # one verdicts listing per dir-only slug, and the store's soft deletes make
+    # those dirs permanent (15 tombstones today, forever) — under a degraded
+    # transport an unbudgeted loop is up to N x timeout of listings AHEAD of the
+    # budget, the exact presence-P1 shape. Everything below — classification and
+    # the doc scan — spends this same budget cumulatively.
+    total = len(slug_entries)
+    scanned = 0
+    skipped = 0
+    deadline = time.monotonic() + deadline_seconds  # absolute monotonic instant (F2)
     # Dir-only review slugs (a `<slug>/` dir with no `<slug>.md` doc) are invisible
     # to the doc-keyed scan below. Classify each via the tombstone three-way (one
     # verdicts listing apiece): a dir with real verdict shards is an ORPHAN (surface
     # a `review-orphan` row EVERY pass — repair stays a human/maintainer action); an
     # EMPTY dir (no shards, or only a stale `.settled` marker) is a soft-delete
     # TOMBSTONE carrying zero information — skip it silently (no orphan, no [?] row);
-    # a verdicts listing that RAISES is UNKNOWN — fail closed, surface a
+    # a verdicts listing that RAISES is UNKNOWN — fail closed, surface a per-dir
     # `review-orphan-degraded` row (never assume tombstone on transport failure).
+    # BUDGETED (the recurring pre-budget class): soft deletes make these dirs
+    # permanent, so under a degraded transport an unbudgeted loop is up to
+    # N x timeout of listings AHEAD of the fold's budget. Classification runs
+    # under a RESERVED sub-deadline — half the fold budget — so the doc scan (the
+    # load-bearing output) always keeps the other half and its measurable-progress
+    # guarantee (the reserved-budget pattern from the reconcile starve fix; a
+    # visibility-only pass must never starve the critical one). The sub-deadline
+    # is checked before each listing (equivalently after the previous — adjacent
+    # iterations — so an overrun is detected immediately; overshoot is bounded by
+    # ONE listing, whose completed result is definitive knowledge and is kept).
+    # On breach the REMAINING unclassified dirs fold into ONE aggregate
+    # `review-orphan-degraded` row ({unclassified: k}) — their state is UNKNOWN,
+    # never assumed tombstone — and the fold proceeds to the doc scan with the
+    # budget that remains (its existing between-slug/mid-slug checks, against the
+    # full fold deadline, then govern).
+    classify_deadline = deadline - deadline_seconds / 2.0
     doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
+    dir_slugs = []
     for e in entries:
         if not e.get("is_dir"):
             continue
         oslug = (e.get("name") or "").rstrip("/")
-        if not oslug or oslug in doc_slugs:
-            continue
+        if oslug and oslug not in doc_slugs:
+            dir_slugs.append(oslug)
+    for i, oslug in enumerate(dir_slugs):
+        if time.monotonic() >= classify_deadline:
+            out.append({"type": "review-orphan-degraded",
+                        "unclassified": len(dir_slugs) - i})
+            break
         kind = _classify_orphan_dir(transport, team, oslug)
         if kind == "orphan":
             out.append({"type": "review-orphan", "name": oslug})
         elif kind == "unknown":
             out.append({"type": "review-orphan-degraded", "name": oslug})
         # tombstone -> silently skipped
-    total = len(slug_entries)
-    scanned = 0
-    skipped = 0
-    start = time.monotonic()
-    deadline = start + deadline_seconds  # absolute monotonic instant (F2)
     for e in slug_entries:
         # Budget is checked BETWEEN slugs (after at least one is scanned, so a
         # slow transport still makes measurable progress before degrading).
