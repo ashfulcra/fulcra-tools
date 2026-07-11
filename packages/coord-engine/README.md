@@ -64,3 +64,8 @@ uv run --extra dev pytest       # from packages/coord-engine/
 The suite is CI-gated on Linux and macOS; run it locally before pushing (see
 [`AGENTS.md`](../../AGENTS.md) → CI section). Design history:
 [`docs/coord/`](../../docs/coord) and [`docs/coord-DESIGN.md`](../../docs/coord-DESIGN.md).
+
+**Releasing:** cutting a `coord-engine-vX.Y.Z` tag REQUIRES bumping `__version__` in
+[`coord_engine/__init__.py`](coord_engine/__init__.py) to the same `X.Y.Z` **in the same commit** —
+`doctor` self-reports `__version__`, so a tag without the bump makes upgraded installs report a stale
+version (v1.4.0/v1.5.0/v1.5.1 all shipped stale off a frozen `1.3.0`, caught by a remote field report).

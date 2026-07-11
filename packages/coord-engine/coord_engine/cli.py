@@ -2392,8 +2392,23 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     out: dict[str, Any] = {"schema": "coord.teams.briefing.v1", "team": args.team,
                            "agent": agent, "at": now}
     rows = _load_rows(transport, args.team)
+    # One shared add-on deadline (see _briefing_budget), opened HERE — before the
+    # first UNBUDGETED transport-heavy section (presence) — and spent cumulatively
+    # across presence + forge + resume, so the WHOLE add-on stack is bounded, not
+    # just the forge fan-out. P1 (codex-reviewer): presence shard reads were
+    # unbudgeted AND ran before the deadline even opened, so a degraded transport
+    # hung `briefing` in `presence.roster(_presence_shards(...))` before any bound
+    # applied. (`_load_rows` above carries its OWN COORD_OVERLAY_BUDGET; pending-
+    # reviews keeps its own independent, already-shipped COORD_REVIEW_FOLD_BUDGET.)
+    add_on_deadline = time.monotonic() + _briefing_budget()
     try:
-        out["presence"] = presence.roster(_presence_shards(transport, args.team), now=now)
+        shards, pres_degraded = _presence_shards_bounded(
+            transport, args.team, deadline=add_on_deadline)
+        out["presence"] = presence.roster(shards, now=now)
+        if pres_degraded is not None:
+            # Same discipline as forge: append the degraded marker to the section
+            # list so partial presence knowledge stays VISIBLE (json + text).
+            out["presence"].append(pres_degraded)
     except Exception as e:
         print(f"briefing: presence section unavailable ({type(e).__name__})", file=sys.stderr)
         out["presence"] = []
@@ -2422,12 +2437,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
-    # One shared add-on deadline (see _briefing_budget), opened before the
-    # transport-heavy sections and spent cumulatively: time burned by
-    # pending-reviews shrinks the window the forge fan-out gets, so the whole
-    # add-on stack is bounded, not each section independently. pending-reviews
-    # keeps its own tighter, already-shipped budget (whichever bound is sooner).
-    add_on_deadline = time.monotonic() + _briefing_budget()
+    # The shared add-on deadline (add_on_deadline) was opened at the top of this
+    # function, before the presence section — time already burned by presence and
+    # pending-reviews shrinks the window the forge fan-out and resume read get, so
+    # the whole add-on stack is bounded cumulatively. pending-reviews keeps its own
+    # tighter, already-shipped budget (whichever bound is sooner).
     try:
         out["pending_reviews"] = _pending_reviews_for(transport, args.team, agent)
     except Exception as e:
@@ -2441,7 +2455,14 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         out["forge_feedback"] = []
     try:
         snaps = []
+        resume_cut = False
         for e in transport.list_dir(_continuity_prefix(args.team, agent)):
+            if time.monotonic() >= add_on_deadline:
+                # Shared budget spent by the earlier add-on sections: stop reading
+                # this agent's snapshots (a per-file read fan-out) rather than let a
+                # slow tail hang the briefing. The resume is a floor, not the truth.
+                resume_cut = True
+                break
             n = (e.get("name") or "").rstrip("/")
             if e.get("is_dir") and n:
                 raw = transport.read(_continuity_path(args.team, agent, n))
@@ -2451,6 +2472,10 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
                     except Exception:
                         pass
         out["resume"] = continuity.latest(snaps)
+        if resume_cut:
+            print("briefing: resume section truncated (shared budget spent) — "
+                  "resume may be stale; run `continuity resume` for the latest",
+                  file=sys.stderr)
     except Exception as e:
         print(f"briefing: resume section unavailable ({type(e).__name__})", file=sys.stderr)
         out["resume"] = None
@@ -2460,6 +2485,9 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     print(f"briefing — {agent} in team/{args.team}")
     live = [p["agent"] for p in out["presence"] if p.get("liveness") == "live"]
     print(f"  live now: {', '.join(live) if live else '(nobody)'}")
+    for r in out["presence"]:  # always shown — a degraded roster must never hide
+        if r.get("type") == "presence-degraded":
+            print(_presence_degraded_line(r))
     open_counts = {k: len(v) for k, v in (out["board"] or {}).items() if v}
     print("  board: " + (", ".join(f"{k}={v}" for k, v in open_counts.items()) or "empty"))
     print(f"  inbox: {len(out['inbox'])} item(s)")
@@ -2506,6 +2534,84 @@ def _presence_shards(transport: Any, team: str) -> list[dict[str, Any]]:
     except TransportError:
         pass
     return shards
+
+
+def _presence_shards_bounded(
+    transport: Any, team: str, *, deadline: Optional[float] = None
+) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Read presence shards into the roster-fold shape, BOUNDED by an absolute
+    ``time.monotonic()`` deadline (None = unbounded/legacy). Returns
+    ``(shards, degraded_marker_or_None)``.
+
+    The presence section is a team-global fan-out — one shard per agent, a
+    ``list_dir`` plus one read each. Before the P1 fix (codex-reviewer) it ran via
+    the unbudgeted ``_presence_shards`` AND before the shared briefing deadline even
+    opened, so a degraded transport hung the whole ``briefing`` in
+    ``presence.roster(_presence_shards(...))`` (needed a SIGINT). This mirrors the
+    forge/review fold discipline: the deadline is checked BOTH before and after
+    each blocking read (a single stalled read can't return a clean row — overshoot
+    is bounded by ONE read), a listed-but-unreadable shard (read -> None) counts as
+    ``skipped``, and a top-level listing failure yields ``scanned=0``. On any
+    breach/failure a single ``presence-degraded`` row
+    ``{type, scanned, total[, skipped]}`` (same shape family as ``forge-degraded``)
+    is returned alongside the PARTIAL roster — the section never hangs, never
+    crashes, never silently truncates. Dashboards/digests keep the unbounded
+    ``_presence_shards`` (they are not on the briefing hang path)."""
+    pfx = _presence_prefix(team)
+    try:
+        entries = transport.list_dir(pfx)
+    except TransportError:
+        # The listing itself failed: the roster is UNKNOWN, not empty. Surface a
+        # degraded marker (scanned=0) so absence-vs-outage isn't folded to silence.
+        return [], {"type": "presence-degraded", "scanned": 0, "total": 0}
+    files = [e for e in entries
+             if not e.get("is_dir") and (e.get("name") or "").endswith(".md")]
+    total = len(files)
+    shards: list[dict[str, Any]] = []
+    scanned = 0
+    skipped = 0
+    degraded = False
+    for e in files:
+        if deadline is not None and time.monotonic() >= deadline:
+            degraded = True
+            break
+        scanned += 1
+        n = e.get("name") or ""
+        raw = transport.read(pfx + n)
+        if deadline is not None and time.monotonic() >= deadline:
+            # The deadline passed DURING this read: detect the overrun immediately
+            # after the blocking op. Keep the shard we already paid for, then stop.
+            degraded = True
+            if raw is not None:
+                fm = okf.parse_frontmatter(raw) or {}
+                fm.setdefault("agent", n[:-3])
+                shards.append(fm)
+            else:
+                skipped += 1
+            break
+        if raw is None:
+            # Listed yet unreadable -> UNKNOWN shard (a transport problem, never a
+            # silent vanish): count it skipped and keep scanning the rest.
+            skipped += 1
+            degraded = True
+            continue
+        fm = okf.parse_frontmatter(raw) or {}
+        fm.setdefault("agent", n[:-3])
+        shards.append(fm)
+    marker: Optional[dict[str, Any]] = None
+    if degraded:
+        marker = {"type": "presence-degraded", "scanned": scanned, "total": total}
+        if skipped:
+            marker["skipped"] = skipped
+    return shards, marker
+
+
+def _presence_degraded_line(r: dict[str, Any]) -> str:
+    line = (f"  presence fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
+            f"before budget — roster may be partial, run `presence show` for the rest")
+    if r.get("skipped"):
+        line += f" ({r['skipped']} shard(s) skipped on transport error)"
+    return line
 
 
 # --- ATC: cross-subscription cap ledger (fulcra-agent-atc) -------------------
