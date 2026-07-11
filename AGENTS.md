@@ -128,10 +128,16 @@ skills. Subagent-only work stays OFF the bus.
   the index is present it lists the task dir once and unions in any task/directive doc written SINCE the
   last reconcile (absent from the index), so a directive delivered between heartbeats surfaces THIS read,
   not up to a reconcile-period later (the PR348 false-clear). Indexed docs are never re-read (the index
-  row wins — behavior-preserving); a fresh doc that won't parse as a Task is skipped-not-fatal; a failed
-  overlay listing degrades the `inbox` source (visible, never silent) while the index rows are still
-  served. Cost: one extra `list_dir` per row load plus one read per genuinely-new slug. A fresh team
-  (no summaries yet) is unchanged — the overlay only runs once an index exists.
+  row wins — behavior-preserving); a fresh doc that reads fine but won't parse as a Task is
+  skipped-not-fatal, while a LISTED fresh doc that can't be **read** degrades the `inbox` source (the
+  listing proved it exists — an unreadable read is a transport problem, never a silent vanish), as does
+  a failed overlay listing — visible, never silent, with the index rows still served. Cost: one extra
+  `list_dir` per row load plus one read per genuinely-new (new-since-reconcile) slug, **capped at
+  `COORD_OVERLAY_CAP` (default 16)** so a sustained reconcile outage can't make every surface-read do
+  unbounded doc reads fleet-wide; when capped, the served subset is deterministic (sorted by name, all
+  agents converge) and the truncation itself degrades the `inbox` source with `{served, absent_total}`
+  counts — capped-but-visible, never silent truncation. A fresh team (no summaries yet) is unchanged —
+  the overlay only runs once an index exists.
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
   against a per-agent state file — new inbox directives **plus directives routed to a role you hold a

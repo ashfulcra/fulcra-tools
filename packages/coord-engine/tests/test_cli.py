@@ -591,7 +591,7 @@ def test_cli_inbox_overlay_skips_unparseable_doc(capsys):
 def test_load_rows_overlay_listing_failure_degrades_not_silent():
     """Overlay task-dir listing raises while the summaries read succeeds: the index
     rows are STILL served and ``ok`` flips False so the caller surfaces the
-    degradation (never a silent empty)."""
+    degradation (never a silent empty) — attributed to the OVERLAY, not the index."""
     from coord_engine.transport import TransportError
     t = FakeTransport()
     cli.main(["tell", "r", "amy", "Indexed", "--from", "boss"], transport=t)
@@ -603,8 +603,9 @@ def test_load_rows_overlay_listing_failure_degrades_not_silent():
             raise TransportError("overlay boom")
         return orig_list(prefix)
     t.list_dir = boom_on_task
-    rows, ok = cli._load_rows_status(t, "r")
+    rows, ok, reason = cli._load_rows_status(t, "r")
     assert ok is False                                   # degraded, not silent
+    assert "task-dir overlay" in reason                  # NOT "summaries index unreadable"
     assert {r["name"] for r in rows} == {indexed}        # index rows still served
 
 
@@ -614,8 +615,94 @@ def test_load_rows_no_summaries_is_unchanged_no_overlay():
     the reconcile-first contract unchanged."""
     t = FakeTransport()
     cli.main(["tell", "r", "amy", "No index yet", "--from", "boss"], transport=t)
-    rows, ok = cli._load_rows_status(t, "r")             # NO reconcile: index absent
-    assert rows == [] and ok is True                     # unchanged: absence != failure
+    rows, ok, reason = cli._load_rows_status(t, "r")     # NO reconcile: index absent
+    assert rows == [] and ok is True and reason == ""    # unchanged: absence != failure
+
+
+def test_load_rows_overlay_listed_doc_read_failure_degrades_not_silent():
+    """MUST 1: a doc the overlay's OWN listing just proved exists but that reads as
+    None must NOT vanish silently (the false-clear class, at the overlay's read
+    step) — ``ok`` flips False with overlay attribution; the index rows AND the
+    other readable fresh docs are still served. Parse-garbage stays a sanctioned
+    silent skip (separate test)."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Indexed", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    indexed = _dslug("Indexed", assignee="amy")
+    cli.main(["tell", "r", "amy", "Fresh readable", "--from", "boss"], transport=t)
+    readable = _dslug("Fresh readable", assignee="amy")
+    cli.main(["tell", "r", "amy", "Fresh unreadable", "--from", "boss"], transport=t)
+    ghost = _dslug("Fresh unreadable", assignee="amy")
+    ghost_path = f"team/r/task/{ghost}.md"
+    orig_read = t.read
+    t.read = lambda p: None if p == ghost_path else orig_read(p)  # listed, unreadable
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False                                   # degraded, never a silent vanish
+    assert "task-dir overlay" in reason and f"{ghost}.md" in reason
+    names = {r["name"] for r in rows}
+    assert indexed in names and readable in names        # everything readable still served
+    assert ghost not in names
+
+
+def test_load_rows_overlay_unparseable_stays_silent_skip():
+    """Sanctioned silent skip preserved: a fresh doc that READS fine but is
+    parse-garbage / not a Task does not degrade (mirrors reconcile's tolerance)."""
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Anchor", "--from", "boss"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    t.put("team/r/task/broken.md", "no frontmatter fence here — unparseable")
+    t.put("team/r/task/note.md", "---\ntype: Reference\n---\nnot a task")
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is True and reason == ""                   # skip, not an outage
+    assert "broken" not in {r["name"] for r in rows}
+
+
+def _put_fresh_docs(t, n):
+    """n fresh (post-reconcile, absent-from-index) directive docs for amy."""
+    for i in range(n):
+        t.put(f"team/r/task/fresh-{i:02d}.md",
+              f"---\ntype: Task\nid: fresh-{i:02d}\ntitle: F{i}\nstatus: proposed\n"
+              f"priority: P2\nowner: boss\nassignee: amy\n---\nbody")
+
+
+def test_overlay_cap_truncates_deterministically_and_degrades():
+    """MUST 2: the overlay read-cost is bounded when reconcile is down. 20 fresh
+    docs + default cap 16 -> exactly the first 16 BY SORTED NAME are served (every
+    agent converges on the same subset) and the fold degrades visibly with the
+    {served, absent_total} counts — capped-but-visible, never silent truncation."""
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)            # index present (empty)
+    _put_fresh_docs(t, 20)
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False                                   # truncation is degraded, not silent
+    assert "truncated" in reason and "16 of 20" in reason
+    served = {r["name"] for r in rows}
+    assert served == {f"fresh-{i:02d}" for i in range(16)}   # sorted-name determinism
+
+
+def test_overlay_cap_env_override_honored(monkeypatch):
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    _put_fresh_docs(t, 8)
+    monkeypatch.setenv("COORD_OVERLAY_CAP", "5")
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False and "5 of 8" in reason
+    assert {r["name"] for r in rows} == {f"fresh-{i:02d}" for i in range(5)}
+    # bad env values never disable the bound: fall back to the default
+    monkeypatch.setenv("COORD_OVERLAY_CAP", "bananas")
+    assert cli._overlay_cap() == cli.DEFAULT_OVERLAY_CAP
+    monkeypatch.setenv("COORD_OVERLAY_CAP", "0")
+    assert cli._overlay_cap() == cli.DEFAULT_OVERLAY_CAP
+
+
+def test_overlay_under_cap_unchanged_no_flag():
+    """At-or-under the cap nothing changes: all fresh docs served, no degradation."""
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    _put_fresh_docs(t, 3)
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is True and reason == ""
+    assert {r["name"] for r in rows} == {"fresh-00", "fresh-01", "fresh-02"}
 
 
 def test_parse_when_date_only_gates_until_end_of_day():

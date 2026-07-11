@@ -65,9 +65,32 @@ def _replies_breadcrumb(team: str, sender: str) -> str:
     return f"replies: coord-engine listen {team} --agent {sender}"
 
 
+#: Read-cap for the freshness overlay: at most this many absent-from-index docs
+#: are read per row load. The overlay's normal bound is new-since-reconcile items
+#: (typically zero or a handful), but under a SUSTAINED reconcile outage that set
+#: grows without limit — 50 new docs would mean 50 reads per surface-read, per
+#: agent, fleet-wide. A capped-but-VISIBLE overlay (the truncation degrades the
+#: inbox source) beats both silent truncation and unbounded reads.
+DEFAULT_OVERLAY_CAP = 16
+
+
+def _overlay_cap() -> int:
+    """Env override ``COORD_OVERLAY_CAP`` (same parse discipline as the budgets):
+    anything unparseable or non-positive falls back to the default — a bad env
+    value must never disable the bound."""
+    raw = os.environ.get("COORD_OVERLAY_CAP")
+    if raw is None:
+        return DEFAULT_OVERLAY_CAP
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OVERLAY_CAP
+    return v if v > 0 else DEFAULT_OVERLAY_CAP
+
+
 def _fresh_overlay_rows(
     transport: Any, team: str, index_rows: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], bool]:
+) -> tuple[list[dict[str, Any]], bool, str]:
     """Freshness overlay (Task 2.5, the PR348 false-clear).
 
     ``inbox``/``listen``/every canonical surface read the reconcile-built summaries
@@ -77,46 +100,80 @@ def _fresh_overlay_rows(
     surface misses fresh work for up to a reconcile period). When the index is
     present+readable we ALSO list the task dir once and parse ONLY docs whose slug is
     ABSENT from the index (bounded by new-since-reconcile items — typically zero or a
-    handful), unioning them into the fold. Rows already in the index are NOT re-read:
-    the index row wins, so this is behavior-preserving for every summarized doc.
+    handful — and hard-capped at ``COORD_OVERLAY_CAP``), unioning them into the fold.
+    Rows already in the index are NOT re-read: the index row wins, so this is
+    behavior-preserving for every summarized doc.
 
-    Returns ``(overlay_rows, ok)``. ``ok`` is False iff the task-dir LISTING raised —
-    the caller surfaces that as the (existing) inbox source degrading, never silent,
-    while still serving the index rows. A single overlay doc's read/parse failure is
-    skipped-not-fatal (others are still served). Cost: one extra ``list_dir`` per row
-    load, plus one ``read`` per genuinely-new (unsummarized) slug."""
+    Returns ``(overlay_rows, ok, reason)``. ``ok`` flips False — degrading the inbox
+    source visibly, never silent, while the index rows are still served — when:
+      * the task-dir LISTING raised (the overlay's view is unknown);
+      * a LISTED absent doc could not be READ (None/raise): the listing just proved
+        the doc exists, so an unreadable read is a transport problem, not a
+        sanctioned skip — silently dropping it is the false-clear class this branch
+        kills, at the overlay's own read step;
+      * the absent set exceeded the cap (truncated — served subset is deterministic:
+        absent names are read in sorted order, so every agent converges on the SAME
+        served subset; the reason carries {served, absent_total}).
+    Parse-garbage / not-a-Task docs remain sanctioned SILENT skips (mirrors
+    reconcile's own tolerance). Cost: one extra ``list_dir`` per row load, plus one
+    ``read`` per genuinely-new (unsummarized) slug, at most the cap."""
     prefix = rec.task_prefix(team)
     try:
         listing = transport.list_dir(prefix)
     except Exception:
-        return [], False  # listing unknown -> degraded (caller surfaces it), never silent
+        # listing unknown -> degraded (caller surfaces it), never silent
+        return [], False, "task-dir overlay unreadable"
     from . import model
     known = {str(r.get("name")) for r in index_rows if isinstance(r, dict)}
-    overlay: list[dict[str, Any]] = []
+    absent: list[tuple[str, Any]] = []
     for entry in listing:
         name = entry.get("name") or ""
         if entry.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
             continue
-        slug = name[:-3]
-        if slug in known:
+        if name[:-3] in known:
             continue  # index row wins — never re-read an already-summarized doc
+        absent.append((name, entry))
+    absent.sort(key=lambda p: p[0])  # deterministic served subset under the cap
+    cap = _overlay_cap()
+    overlay: list[dict[str, Any]] = []
+    ok, reason = True, ""
+    for name, entry in absent[:cap]:
         try:
-            fm = okf.parse_frontmatter(transport.read(f"{prefix}{name}"))
-            if not model.is_task(fm):
-                continue  # unparseable OR not a Task concept -> skip, not fatal
-            overlay.append(model.row_from_frontmatter(
-                fm, name=slug, path=f"task/{name}", mtime=entry.get("mtime")))
+            raw = transport.read(f"{prefix}{name}")
         except Exception:
-            continue  # one doc's read/parse failure is skipped; others still served
-    return overlay, True
+            raw = None
+        if raw is None:
+            # LISTED but unreadable: a transport problem on a doc we know exists.
+            # Degrade visibly (never a silent vanish); other overlay docs + the
+            # index rows are still served.
+            ok = False
+            reason = f"task-dir overlay: fresh doc {name} unreadable"
+            continue
+        try:
+            fm = okf.parse_frontmatter(raw)
+            if not model.is_task(fm):
+                continue  # parse-garbage / not a Task -> sanctioned silent skip
+            overlay.append(model.row_from_frontmatter(
+                fm, name=name[:-3], path=f"task/{name}", mtime=entry.get("mtime")))
+        except Exception:
+            continue  # malformed content is a skip, not a transport failure
+    if len(absent) > cap:
+        ok = False
+        reason = (f"task-dir overlay truncated: served {cap} of {len(absent)} "
+                  f"fresh docs (COORD_OVERLAY_CAP={cap})")
+    return overlay, ok, reason
 
 
-def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool]:
-    """Summaries rows plus whether the index was READABLE. ``ok`` is False only for
-    an index we could not read as intended — present-but-unparseable, or a read/
-    listing that failed under a degraded transport. A genuinely-absent index (a
-    fresh team, no reconcile yet) is empty-and-readable (``ok`` True): absence is a
-    normal empty state, never conflated with failure.
+def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool, str]:
+    """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
+    was not, a short ``reason`` for the degraded surface to print (attribution: a
+    summaries-index failure and a freshness-overlay failure are different outages
+    and must not report as one another). ``ok`` is False for an index we could not
+    read as intended — present-but-unparseable, or a read/listing that failed under
+    a degraded transport — AND for a freshness-overlay problem (listing raised, a
+    listed fresh doc unreadable, or the overlay read-cap truncated the fresh set).
+    A genuinely-absent index (a fresh team, no reconcile yet) is empty-and-readable
+    (``ok`` True): absence is a normal empty state, never conflated with failure.
 
     ``read`` returning None is ambiguous (absent vs transport-down — the T1 lesson),
     so a None is disambiguated with one parent listing: ``list_dir`` RAISES on a
@@ -127,25 +184,28 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
     try:
         raw = transport.read(path)
     except Exception:
-        return [], False
+        return [], False, "summaries index unreadable"
     if raw:
         try:
             rows = aggregate.aggregate_rows(json.loads(raw))
         except Exception:
-            return [], False  # index present but corrupt -> unreadable, surface it
+            # index present but corrupt -> unreadable, surface it
+            return [], False, "summaries index unreadable"
         # Live-freshness overlay: union in task docs written since the last
-        # reconcile (absent from this index). A listing failure flips ``ok`` so the
-        # inbox source degrades visibly; the index rows are still served.
-        overlay, overlay_ok = _fresh_overlay_rows(transport, team, rows)
-        return rows + overlay, overlay_ok
+        # reconcile (absent from this index). Any overlay problem flips ``ok`` so
+        # the inbox source degrades visibly; the index rows are still served.
+        overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(transport, team, rows)
+        return rows + overlay, overlay_ok, overlay_reason
     parent, entry = path.rsplit("/", 1)
     try:
         names = {e.get("name") for e in transport.list_dir(parent + "/")}
     except TransportError:
-        return [], False  # transport down -> unknown, not a confirmed-empty index
+        # transport down -> unknown, not a confirmed-empty index
+        return [], False, "summaries index unreadable"
     if entry in names:
-        return [], False  # index there yet unreadable (read returned None) -> degraded
-    return [], True  # genuinely absent -> a real, readable empty
+        # index there yet unreadable (read returned None) -> degraded
+        return [], False, "summaries index unreadable"
+    return [], True, ""  # genuinely absent -> a real, readable empty
 
 
 def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
@@ -1647,7 +1707,7 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
     drift. Never raises: an unreadable summaries read folds to an empty list, but
     now with ``ok=False`` so a listener can surface the degradation rather than
     mistake it for an empty inbox."""
-    rows, ok = _load_rows_status(transport, team)
+    rows, ok, _reason = _load_rows_status(transport, team)
     return _directed_inbox(transport, team, agent, rows,
                            include_backlog=include_backlog), ok
 
@@ -1829,9 +1889,11 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # directives routed to a fresh-lease ROLE this agent holds. An unreadable
     # summaries index is degraded, NOT a legitimately-empty inbox.
     now_iso = _iso(_now())
-    rows, inbox_ok = _load_rows_status(transport, team)
+    rows, inbox_ok, inbox_reason = _load_rows_status(transport, team)
     if not inbox_ok:
-        _fail("inbox", "summaries index unreadable")
+        # The reason attributes WHICH leg failed (summaries index vs the freshness
+        # overlay — different outages, same inbox source/streak).
+        _fail("inbox", inbox_reason or "summaries index unreadable")
     # Role expansion (contract gap): resolve fresh-lease holders ONLY for
     # role-shaped assignees on UNSEEN open directives — one role-doc(+lease) read
     # per distinct such assignee, deduped per tick (NOT persistent state: leases

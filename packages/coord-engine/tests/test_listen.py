@@ -927,5 +927,8 @@ def test_listen_overlay_listing_failure_degraded_not_silent(capsys):
     err = capsys.readouterr().err
     assert "inbox" in failures                     # degraded, attributed to inbox source
     assert "LISTEN DEGRADED" in err                # not silent
+    # honest attribution: the OVERLAY failed, not the summaries index
+    assert "task-dir overlay" in err
+    assert "summaries index unreadable" not in err
     assert state["degraded"]["inbox"] is True
     assert [e["slug"] for e in events] == ["anchor-0"]   # index rows still served
