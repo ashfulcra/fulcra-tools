@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-gmail"
+version = "0.1.0"
+description = "Local Gmail relay for Fulcra: per-account read-only client + OAuth account registry."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    # Sibling packages in this monorepo.
+    "fulcra-common",
+    "fulcra-collect",  # keychain/credential helpers + config dir + PluginState store
+]
+
+[tool.uv.sources]
+# Resolve the sibling packages from the workspace, not PyPI.
+fulcra-common = { workspace = true }
+fulcra-collect = { workspace = true }
+
+[project.optional-dependencies]
+dev = [
+    # fulcra-api currently pins pytest<8 in its runtime deps, so we must
+    # stay compatible with that constraint until upstream loosens it.
+    "pytest>=7.4,<8",
+    "pytest-mock>=3.12",
+    "ruff>=0.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_gmail"]
