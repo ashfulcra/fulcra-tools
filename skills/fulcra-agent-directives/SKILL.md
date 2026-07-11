@@ -40,6 +40,7 @@ tell      <team> <assignee> <title> [-p P0..P3] [-s summary] [-n next] [--from m
 broadcast <team> <title> …                        # assignee '*' — reaches every non-stale agent
 remind    <team> <assignee> <when> <title> …      # hidden until WHEN (ISO or 5d/36h/10m)
 later     <team> <title> …                        # backlog (@backlog; inbox --all surfaces it)
+intent    <team> "<text>" --for ash [--by <when>]  # capture a spoken commitment (intent:ash item)
 handoff   <team> <task> --to <agent> [--checkpoint REF] [-n next]   # ATOMIC: one write
 inbox     <team> [--agent X] [--json]             # open directives for X, minus X's acks
 inbox     <team> --agent X --ack <slug>           # ack: hides it for X, stops re-notify
@@ -57,6 +58,20 @@ respond   <team> <slug> --outcome TEXT [-e evidence]   # record a response + clo
   deliberate act; a mis-fired ack permanently silences that item for you.
 - **Handoff is atomic**: the checkpoint ref and the new assignee land in ONE task-file write, so there is
   no window where the work moved but the resume state doesn't exist.
+- **`intent` — the spoken-commitment member of this family, with the capture doctrine.** When Ash states an
+  intent to ANY agent ("later today", "I'll enumerate that list"), that agent files it in the SAME turn with
+  `intent` — an uncaptured commitment is the drop nobody can see; the `coord-engine threads <team> --for ash`
+  fold (dropped work-in-progress) only surfaces what was recorded. `intent` writes an ordinary directive
+  (`intent:ash` tag + `assignee`
+  + `intent_by` window) through the same hash-slug delivery + read-back as `tell`, with ONE deliberate
+  identity deviation: **identity is text + assignee only — `--by` is NOT part of the slug.** So restatement
+  is well-defined and never forks a second item:
+  - *identical* (same text, no `--by` or the same window) → pure dedup, rc 0 `intent already captured`;
+  - *new `--by`* → the SAME commitment with a revised deadline → a verified in-place window update on the
+    existing doc (rewrite `intent_by` → read-back-confirm the new window landed; unverifiable → rc 1, retry,
+    never a silently-stale deadline);
+  - a *relative* `--by` (`5d`/`36h`/`10m`) re-resolves from now on each restatement, so re-stating "by end of
+    day" pushes the window forward rather than pinning the first resolution.
 - **Shard-GC**: reconcile prunes ack shards whose task no longer exists (orphan-proofing the ack dir).
 
 ## Fail-closed notes

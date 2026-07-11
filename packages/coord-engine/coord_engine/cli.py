@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, annotate as annotate_mod, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, annotate as annotate_mod, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks, threads as threads_mod
 from . import reconcile as rec
 from .log import get_logger
 from .transport import FulcraFileTransport, TransportError
@@ -622,6 +622,19 @@ SETTLED_MARKER = ".settled"
 
 DEFAULT_REVIEW_FOLD_BUDGET = 45.0
 DEFAULT_BRIEFING_BUDGET = 60.0
+
+#: Aggregate deadline (seconds) for the `threads` fold's per-candidate shard/doc
+#: reads (ash-activity attribution + intent_by). Bounds the same slow-bleed class
+#: the overlay/briefing budgets do: N principal candidates x per-doc transport
+#: timeout under a degraded transport. On breach the fold STOPS and emits a
+#: `threads-degraded` row (never silence, never crash).
+DEFAULT_THREADS_FOLD_BUDGET = 30.0
+
+#: `threads` window defaults (spec §Surface 1). CLI flags override these, and env
+#: `COORD_THREADS_SILENCE_DAYS` / `COORD_THREADS_INTENT_GRACE_HOURS` override the
+#: defaults when no flag is passed (flag > env > default).
+DEFAULT_THREADS_SILENCE_DAYS = 3.0
+DEFAULT_THREADS_INTENT_GRACE_HOURS = 48.0
 
 
 def _settled_marker_path(team: str, slug: str) -> str:
@@ -1759,6 +1772,132 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_later(args: argparse.Namespace, transport: Any) -> int:
     return _create_directive(args, transport, assignee=directives.BACKLOG)
+
+
+def _update_intent_window(transport: Any, path: str, existing: str, *, slug: str,
+                          intent_by: str) -> int:
+    """Rewrite ONLY ``intent_by`` on an existing intent doc, in place, then verify
+    by read-back — the trust-eroding-false-drop guard from Surface 2.
+
+    THE SEAM (deliberate divergence from ``_write_directive``'s read-back): the
+    generic write-verification compares ``_doc_payload`` — title/summary/next/
+    assignee — and ``intent_by`` is NOT in that tuple. So a window change is
+    INVISIBLE to the generic read-back (it would pass a stale-window write as
+    verified). The update therefore does its OWN ``intent_by``-specific read-back:
+    None/unparseable/mismatch all mean "cannot confirm the new window landed" ->
+    rc 1 retry, never a claimed-but-false deadline. Identity fields (title/
+    assignee) are untouched, so the slot keeps its identity and later identical
+    restatements still dedupe onto it.
+    """
+    split = okf.split_frontmatter(existing)
+    fm = okf.parse_frontmatter(existing)
+    if split is None or fm is None:  # defensive: caller already parsed, but never write blind
+        print(f"intent {slug}: doc unparseable, cannot verify, retry", file=sys.stderr)
+        return 1
+    fm["intent_by"] = intent_by
+    content = okf.render_frontmatter(fm) + "\n" + split[1]
+    if not transport.write(path, content):
+        print("intent window update failed (transport)", file=sys.stderr)
+        return 1
+    # intent_by-SPECIFIC read-back (the seam): confirm the NEW window is on the bus.
+    readback = transport.read(path)
+    if readback is None:
+        print(f"intent {slug}: window update unverifiable "
+              f"(read-back failed, transport degraded), retry", file=sys.stderr)
+        return 1
+    rb = okf.parse_frontmatter(readback)
+    if rb is None or str(rb.get("intent_by") or "") != str(intent_by or ""):
+        print(f"intent {slug}: window update unverifiable "
+              f"(read-back mismatch, transport degraded), retry", file=sys.stderr)
+        return 1
+    print("intent window updated")
+    return 0
+
+
+def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
+    """Capture a spoken commitment as an ``intent:<principal>`` directive.
+
+    DELIBERATE IDENTITY DEVIATION from the plain directive path: an intent's
+    identity is ``text + assignee ONLY`` — ``intent_by`` (the declared window) is
+    EXCLUDED from the hash-slug. Restating the SAME commitment with a revised
+    deadline must NOT fork a second item, so the window cannot be part of identity;
+    but the plain path's "metadata outside identity dedupes onto the original doc"
+    rule would then silently PRESERVE a stale deadline on restatement (the
+    trust-eroding false-drop). So intent_by gets a VERIFIED in-place update path
+    instead (see ``_update_intent_window``). Identity = ``_directive_payload(text,
+    None, None, principal)`` — summary/next_action are constant-empty, so the hash
+    ranges over text + assignee exactly.
+
+    Delivery reuses the directive machinery: a genuinely-new capture goes through
+    ``_write_directive`` (its absence-confirmation, write, and write-verification
+    guards — no second delivery implementation). Only the two intent-specific
+    outcomes are handled here: identical restatement -> rc 0 "intent already
+    captured"; a different ``--by`` -> in-place window update.
+    """
+    principal = args.principal
+    text = args.title
+    now_iso = _iso(_now())
+    intent_by: Optional[str] = None
+    by = getattr(args, "by", None)
+    if by:
+        intent_by = directives.parse_when(by, now=now_iso)
+        if intent_by is None:
+            print(f"intent failed: cannot parse --by {by!r} (ISO or 5d/36h/10m)",
+                  file=sys.stderr)
+            return 1
+
+    # Identity: text + assignee ONLY (intent_by excluded — see docstring).
+    payload = _directive_payload(text, None, None, principal)
+    slug = f"{tasks.slugify(text)}-{_payload_hash(payload)}"
+    path = _task_path(args.team, slug)
+
+    existing = transport.read(path)
+    if existing is not None:
+        # Present + readable at our hash slot. Confirm it IS our message (identity
+        # match); a payload mismatch/unparseable means corruption or a hash
+        # collision — never overwrite, fail loud (mirrors _write_directive).
+        doc_payload = _doc_payload(existing)
+        if doc_payload is None or doc_payload != payload:
+            print(f"intent {slug}: slot holds unverifiable content, "
+                  f"cannot verify, retry", file=sys.stderr)
+            return 1
+        # Our intent already exists. Same window (or no --by) -> pure dedup.
+        existing_by = (okf.parse_frontmatter(existing) or {}).get("intent_by")
+        if intent_by is None or str(existing_by or "") == str(intent_by or ""):
+            print("intent already captured")
+            return 0
+        # A revised deadline: verified in-place window update, never a fork.
+        return _update_intent_window(transport, path, existing, slug=slug,
+                                     intent_by=intent_by)
+
+    # existing is None -> absent OR present-but-unreadable (I1). Reuse
+    # _write_directive's guards: it re-confirms absence via a directory listing
+    # (present-but-unreadable -> rc 1 cannot-verify, no overwrite) then writes +
+    # verifies. Build the doc with the capture doctrine: intent:<principal> tag +
+    # intent_by frontmatter (both invisible to the payload identity).
+    try:
+        _, base = tasks.new_task_doc(
+            text, now=now_iso, status="proposed",
+            priority=getattr(args, "priority", None) or "P2",
+            owner=getattr(args, "sender", None) or _host(), assignee=principal,
+            summary="", next_action=None, kind="directive", slug=slug,
+        )
+    except tasks.TaskError as e:
+        print(f"intent failed: {e}", file=sys.stderr)
+        return 1
+    fm = okf.parse_frontmatter(base)
+    split = okf.split_frontmatter(base)
+    if fm is None or split is None:  # unreachable (we just rendered it), never write blind
+        print("intent failed: could not build doc", file=sys.stderr)
+        return 1
+    tags = fm.get("tags") or []
+    if not isinstance(tags, list):
+        tags = [str(tags)]
+    fm["tags"] = tags + [f"intent:{principal}"]
+    fm["intent_by"] = intent_by  # None omitted by render_frontmatter (undeclared)
+    content = okf.render_frontmatter(fm) + "\n" + split[1]
+    return _write_directive(transport, args, slug=slug, content=content,
+                            payload=payload, assignee=principal, not_before=None)
 
 
 def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
@@ -3565,6 +3704,287 @@ def cmd_annotate_project(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# --- dropped threads (fulcra-agent — 2026-07-11-dropped-threads) -------------
+#
+# The bus ADAPTER for `threads.classify`. Reversibility (Ash requirement): the
+# pure fold consumes a NEUTRAL row shape; this adapter is the ONLY place bus
+# specifics live, so a GitHub/fulcra-pm source later is a new adapter emitting the
+# same rows, not a rewrite. v1 reads ONE source — coord bus items on the team
+# where the principal is involved (assignee/owner, or an intent:/blocked-on: tag).
+
+def _threads_fold_budget() -> float:
+    """Env override ``COORD_THREADS_FOLD_BUDGET`` (same parse discipline as the
+    other budgets): unparseable, non-positive, NaN, or inf -> default. A bad env
+    value must never disable the bound or make the fold hang."""
+    raw = os.environ.get("COORD_THREADS_FOLD_BUDGET")
+    if raw is None:
+        return DEFAULT_THREADS_FOLD_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_THREADS_FOLD_BUDGET
+    if not (v > 0) or v == float("inf"):
+        return DEFAULT_THREADS_FOLD_BUDGET
+    return v
+
+
+def _threads_window(flag: Optional[float], env: str, default: float) -> float:
+    """Resolve a window: flag > env > default. A bad flag/env value falls back
+    (never let a typo disable the bound)."""
+    if flag is not None:
+        try:
+            v = float(flag)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    raw = os.environ.get(env)
+    if raw is not None:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+def _threads_is_principal(row: dict[str, Any], principal: str, tags: list[str]) -> bool:
+    return (row.get("assignee") == principal or row.get("owner") == principal
+            or f"intent:{principal}" in tags or f"blocked-on:{principal}" in tags)
+
+
+def _threads_blocked_signal(row: dict[str, Any], principal: str,
+                            tags: list[str]) -> Optional[str]:
+    """Which blocked-on-principal signal fires (spec mode 2), or None. Order is
+    just for the human evidence label — any one is sufficient."""
+    if row.get("assignee") == principal:
+        return f"assignee: {principal}"
+    if f"blocked-on:{principal}" in tags:
+        return f"blocked-on:{principal} tag"
+    if str(row.get("blocked_on") or "") == principal:
+        return f"blocked_on: {principal}"
+    if "needs:human" in tags and (row.get("assignee") == principal
+                                  or row.get("owner") == principal):
+        return "needs:human block"
+    return None
+
+
+def _threads_ash_activity(transport: Any, team: str, slug: str, principal: str,
+                          response_slugs: set[str], row_ts: Optional[str],
+                          ) -> tuple[Optional[str], bool, str]:
+    """Last activity ATTRIBUTABLE to the principal for a mode-1 candidate.
+
+    Reads the principal's ack shard + any response shards the principal authored
+    (only when the slug is known to have responses — the shared responses listing
+    tells us that, so we never list/read for a slug that has none). Returns
+    ``(ts, attributed, source)``: when no principal-attributable event is found we
+    FALL BACK to the item's own ``timestamp`` (the last doc write, NOT attributable
+    to the principal) and FLAG that in ``attributed=False`` — honesty over
+    cleverness. A shard read that FAILS is skipped (best-effort attribution never
+    crashes the fold); the aggregate budget in the caller bounds the total cost."""
+    best: Optional[str] = None
+    source = ""
+
+    def _consider(ts: Any, label: str) -> None:
+        nonlocal best, source
+        if isinstance(ts, str) and ts and (best is None or ts > best):
+            best, source = ts, label
+
+    # ack shard: path is principal-keyed, so its existence IS the attribution.
+    try:
+        ack = transport.read(_ack_path(team, slug, principal))
+    except Exception:
+        ack = None
+    if ack:
+        fm = okf.parse_frontmatter(ack) or {}
+        _consider(fm.get("timestamp"), "ack shard")
+
+    # response shards authored by the principal (only if this slug has responses).
+    if slug in response_slugs:
+        prefix = _responses_prefix(team) + slug + "/"
+        try:
+            entries = transport.list_dir(prefix)
+        except Exception:
+            entries = []
+        for e in entries:
+            n = e.get("name") or ""
+            if e.get("is_dir") or not n.endswith(".md"):
+                continue
+            try:
+                raw = transport.read(prefix + n)
+            except Exception:
+                raw = None
+            fm = okf.parse_frontmatter(raw) or {}
+            if str(fm.get("agent") or "") == principal:
+                _consider(fm.get("timestamp"), "response shard")
+
+    if best is not None:
+        return best, True, source
+    return (row_ts, False, "item timestamp")  # fallback, flagged
+
+
+def _threads_candidate_rows(
+    transport: Any, team: str, principal: str,
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Build the NEUTRAL rows `threads.classify` consumes, from summaries + the
+    freshness overlay (inherited free via ``_load_rows_status`` — fresh intents ARE
+    visible), filtered to principal items. Per-candidate reads only for the signals
+    summaries lack: ``intent_by`` (intent window) and ash-activity attribution.
+
+    Returns ``(rows, ok, reason)``: ``ok`` False (with a reason) whenever the
+    summaries/overlay load degraded OR the fold budget was exhausted with candidates
+    still unread — the caller surfaces a ``threads-degraded`` row, never silence."""
+    summary_rows, ok, reason = _load_rows_status(transport, team)
+
+    # One shared responses-root listing: tells us (a) which slugs have a response
+    # shard (the mode-3 `responded` signal) and (b) which slugs are worth reading
+    # for principal-authored activity. One list_dir, not per-candidate.
+    response_slugs: set[str] = set()
+    try:
+        for e in transport.list_dir(_responses_prefix(team)):
+            n = e.get("name") or ""
+            if e.get("is_dir") or n.endswith("/"):
+                response_slugs.add(n.rstrip("/"))
+    except Exception:
+        # A responses-listing failure only weakens the `responded` suppression
+        # signal + activity attribution — degrade visibly, keep folding.
+        ok = False
+        reason = reason or "responses listing unreadable"
+
+    deadline = time.monotonic() + _threads_fold_budget()
+    budget_hit = False
+    rows: list[dict[str, Any]] = []
+    for r in summary_rows:
+        if time.monotonic() > deadline:
+            # After-op discipline, checked at the TOP of each candidate: the
+            # PREVIOUS candidate's reads breached the budget — detected before
+            # any further reads (and a breach on the FINAL candidate, with
+            # nothing left to read, never false-degrades). Stop, serve what we
+            # have, degrade visibly.
+            budget_hit = True
+            break
+        if not isinstance(r, dict):
+            continue
+        tags = [str(t) for t in (r.get("tags") or []) if isinstance(r.get("tags"), list)]
+        if not _threads_is_principal(r, principal, tags):
+            continue
+        slug = str(r.get("name") or r.get("id") or "")
+        is_intent = f"intent:{principal}" in tags
+        followup_ref = next(
+            (t.split(":", 1)[1] for t in tags if t.startswith("followed-up-by:")), None)
+
+        declared_window = None
+        ash_ts: Optional[str] = None
+        attributed = True
+        source = ""
+        if is_intent:
+            # Intent needs intent_by (summaries lack it) — one doc read. A
+            # MISSED read (raise OR None) — or a doc that reads but parses to
+            # garbage — means the window is UNKNOWN: ripeness cannot be decided,
+            # so this intent is EXCLUDED from this pass (silently windowing it
+            # to capture+grace would manufacture a false mode-3 drop with a
+            # clean degraded flag — the nagging-sensitive failure the spec
+            # forbids) AND the fold degrades visibly. It returns, correctly
+            # windowed, once readable. Only a doc that reads+parses fine and
+            # GENUINELY lacks intent_by is legitimately undeclared — the
+            # capture+grace fallback below stands for that case alone.
+            try:
+                doc = transport.read(_task_path(team, slug))
+            except Exception:
+                doc = None
+            fm = okf.parse_frontmatter(doc) if doc is not None else None
+            if fm is None:
+                ok = False
+                reason = reason or f"intent window unreadable: {slug}"
+                continue
+            declared_window = fm.get("intent_by")
+        else:
+            # Mode-1/2 candidates: attribute ash-activity from shards.
+            ash_ts, attributed, source = _threads_ash_activity(
+                transport, team, slug, principal, response_slugs, r.get("timestamp"))
+
+        rows.append({
+            "id": r.get("id") or slug,
+            "title": r.get("title") or slug,
+            "status": str(r.get("status") or ""),
+            "tags": tags,
+            "intent": is_intent,
+            "blocked_on_principal": bool(_threads_blocked_signal(r, principal, tags)),
+            "blocked_signal": _threads_blocked_signal(r, principal, tags) or "",
+            "parked": r.get("assignee") == directives.BACKLOG,
+            "not_before": r.get("not_before"),
+            "ash_activity_ts": ash_ts,
+            "ash_activity_attributed": attributed,
+            "ash_activity_source": source,
+            "declared_window": declared_window,
+            "captured_ts": r.get("timestamp"),
+            "followup": {
+                "status": str(r.get("status") or "proposed"),
+                "responded": slug in response_slugs,
+                "followup_ref": followup_ref,
+            },
+        })
+
+    if budget_hit:
+        ok = False
+        reason = "threads fold budget exhausted"
+    return rows, ok, reason
+
+
+def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
+    """`coord-engine threads <team> --for <principal>` — the dropped-threads fold.
+
+    Windows: ``--silence-days`` (default 3, env ``COORD_THREADS_SILENCE_DAYS``),
+    ``--intent-grace-hours`` (default 48, env ``COORD_THREADS_INTENT_GRACE_HOURS``);
+    flag > env > default. Text is grouped by mode, oldest-first; ``--json`` emits
+    ONE object per line (``{mode, id, title, age, window, evidence}``), plus a
+    ``{"type": "threads-degraded", ...}`` object when a source was not fully
+    readable. Never crashes, never silently empties on failure."""
+    principal = args.principal
+    silence_days = _threads_window(getattr(args, "silence_days", None),
+                                   "COORD_THREADS_SILENCE_DAYS",
+                                   DEFAULT_THREADS_SILENCE_DAYS)
+    grace_hours = _threads_window(getattr(args, "intent_grace_hours", None),
+                                  "COORD_THREADS_INTENT_GRACE_HOURS",
+                                  DEFAULT_THREADS_INTENT_GRACE_HOURS)
+    rows, ok, reason = _threads_candidate_rows(transport, args.team, principal)
+    dropped = threads_mod.classify(rows, now=_iso(_now()),
+                                   silence_days=silence_days,
+                                   intent_grace_hours=grace_hours)
+
+    if args.json:
+        for o in dropped:
+            print(json.dumps(o))
+        if not ok:
+            print(json.dumps({"type": "threads-degraded",
+                              "reason": reason or "threads source degraded"}))
+        return 0
+
+    if not ok:
+        # Degraded notice on STDERR: stdout stays the clean, pipeable thread
+        # list (a consumer grepping/parsing stdout never confuses a degradation
+        # notice for a thread), while the degradation is still impossible to
+        # miss interactively — the house stdout/stderr split.
+        print(f"threads degraded (partial): {reason or 'source unreadable'}",
+              file=sys.stderr)
+    labels = {1: "started-then-silent", 2: "blocked-on-ash", 3: "intent-never-started"}
+    if not dropped:
+        print(f"threads — {principal}: nothing dropped")
+        return 0
+    print(f"threads — {principal}: {len(dropped)} dropped")
+    # DELIBERATE divergence from --json: text orders groups 2,3,1 (awaited-now
+    # first for the human eye); --json stays mode-ascending (classify's order).
+    for mode in (2, 3, 1):  # awaited-now first, then commitments, then silence
+        group = [o for o in dropped if o["mode"] == mode]
+        if not group:
+            continue
+        print(f"\n[{mode}] {labels[mode]} ({len(group)})")
+        for o in group:  # classify already sorts oldest-first within a mode
+            print(f"  {o['id']}: {o['title']} — {o['evidence']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coord-engine", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -3637,6 +4057,13 @@ def build_parser() -> argparse.ArgumentParser:
     lt = sub.add_parser("later", help="capture a backlog idea (@backlog)")
     lt.add_argument("team"); lt.add_argument("title")
     add_directive_flags(lt); lt.set_defaults(func=cmd_later)
+    it = sub.add_parser("intent", help="capture a spoken commitment (intent:<principal>); restatement never forks, a new --by updates the window in place")
+    it.add_argument("team"); it.add_argument("title", help="the commitment text")
+    it.add_argument("--for", dest="principal", required=True, help="the principal who owes the commitment (e.g. ash)")
+    it.add_argument("--by", help="declared window (ISO or 5d/36h/10m); absent = undeclared -> fold uses capture+grace")
+    it.add_argument("--from", dest="sender", help="capturing agent (records ownership)")
+    it.add_argument("--priority", "-p", default="P2")
+    it.set_defaults(func=cmd_intent)
     ho = sub.add_parser("handoff", help="atomic handoff: assignee + checkpoint ref in one write")
     ho.add_argument("team"); ho.add_argument("name"); ho.add_argument("--to", required=True)
     ho.add_argument("--checkpoint"); ho.add_argument("--next", "-n")
@@ -3656,6 +4083,16 @@ def build_parser() -> argparse.ArgumentParser:
     hl = sub.add_parser("health", help="fleet health: which hosts reconcile this team (fulcra-agent-health)")
     hl.add_argument("team"); add_json(hl)
     hl.set_defaults(func=cmd_health)
+
+    th = sub.add_parser("threads", help="dropped work-in-progress for a principal (started-then-silent / blocked-on / intent-never-started)")
+    th.add_argument("team")
+    th.add_argument("--for", dest="principal", required=True, help="the principal (e.g. ash)")
+    th.add_argument("--silence-days", dest="silence_days", type=float,
+                    help="mode-1 silence window in days (default 3; env COORD_THREADS_SILENCE_DAYS)")
+    th.add_argument("--intent-grace-hours", dest="intent_grace_hours", type=float,
+                    help="mode-3 grace when an intent declares no window, hours (default 48; env COORD_THREADS_INTENT_GRACE_HOURS)")
+    add_json(th)
+    th.set_defaults(func=cmd_threads)
 
     us = sub.add_parser("usage", help="ATC cap ledger (fulcra-agent-atc)")
     ussub = us.add_subparsers(dest="usage_command", required=True)
