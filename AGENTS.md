@@ -178,6 +178,13 @@ it (not on PyPI).
   (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
   rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
   tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
+  Those budgets rest on **hard per-op boundedness**: every transport subprocess (the `fulcra-api file`
+  ops and `data-updates`, plus forge's `gh` calls) runs in its OWN process group and, on timeout, the
+  WHOLE group is SIGKILLed and the drain grace-bounded — a hung child that spawned pipe-holding helpers
+  can't stretch an op past its timeout the way a bare `subprocess.run(timeout=)` (which kills only the
+  direct child and leaks the tree) would. The per-op bound is `COORD_TRANSPORT_TIMEOUT` (float seconds,
+  default 30; unparseable/≤0/NaN/inf falls back to the default; constructor arg wins for tests) — run it
+  TIGHT on a watcher (e.g. 8s) so the fold budgets above buy real responsiveness.
 - **Canonical surfaces are live, not reconcile-lagged.** Every fold that reads the summaries index
   (`inbox`, `listen`, `briefing`, `needs-me`, `board`, `status`) also runs a **freshness overlay**: when
   the index is present it lists the task dir once and unions in any task/directive doc written SINCE the

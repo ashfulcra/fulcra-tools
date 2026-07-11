@@ -54,16 +54,15 @@ def test_list_dir_sorted_by_name():
 
 
 # --- transport.updates() (data-updates feed) ---
+#
+# updates() runs through the hard-bounded runner ``run_bounded`` (Popen + group
+# kill), so the seam these tests patch is ``run_bounded`` — returning the
+# ``(returncode, stdout, stderr)`` tuple the real one yields.
 
-class _Proc:
-    def __init__(self, rc, out):
-        self.returncode, self.stdout, self.stderr = rc, out, ""
-
-
-def _fake_run(result, calls):
-    def run(cmd, **kw):
-        calls.append(cmd)
-        return result
+def _fake_run(rc, out, calls):
+    def run(argv, timeout, **kw):
+        calls.append(argv)
+        return (rc, out, "")
     return run
 
 
@@ -71,8 +70,8 @@ def test_updates_parses_file_changes(monkeypatch):
     from coord_engine import transport as tr
     t = tr.FulcraFileTransport(command=["uv", "tool", "run", "fulcra-api"])
     calls = []
-    monkeypatch.setattr(tr.subprocess, "run",
-                        _fake_run(_Proc(0, '{"file_changes": [{"full_name": "/team/r/task/a.md"}]}'), calls))
+    monkeypatch.setattr(tr, "run_bounded",
+                        _fake_run(0, '{"file_changes": [{"full_name": "/team/r/task/a.md"}]}', calls))
     got = t.updates("900 seconds")
     assert got == [{"full_name": "/team/r/task/a.md"}]
     # exact command: the transport's own base verbatim — no binary rewriting
@@ -82,10 +81,10 @@ def test_updates_parses_file_changes(monkeypatch):
 def test_updates_never_raises(monkeypatch):
     from coord_engine import transport as tr
     t = tr.FulcraFileTransport(command=["fulcra-api"])
-    for proc in (_Proc(2, ""), _Proc(0, "not json"), _Proc(0, '{"file_changes": "nope"}')):
-        monkeypatch.setattr(tr.subprocess, "run", _fake_run(proc, []))
+    for rc, out in ((2, ""), (0, "not json"), (0, '{"file_changes": "nope"}')):
+        monkeypatch.setattr(tr, "run_bounded", _fake_run(rc, out, []))
         assert t.updates("60 seconds") is None
-    def boom(cmd, **kw):
+    def boom(argv, timeout, **kw):
         raise OSError("no binary")
-    monkeypatch.setattr(tr.subprocess, "run", boom)
+    monkeypatch.setattr(tr, "run_bounded", boom)
     assert t.updates("60 seconds") is None
