@@ -13,13 +13,57 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import aggregate, health as health_mod, model, okf
+from .log import get_logger
 from .roles import age_hours
 from .tasks import agent_key
-from .log import get_logger
 from .transport import TransportError
+
+
+def _parse_iso_utc(s: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 ``generated_at`` (``…Z`` or offset) to a tz-aware UTC
+    datetime, or None. Never raises."""
+    if not s:
+        return None
+    txt = str(s).strip()
+    iso = (txt[:-1] + "+00:00") if txt.endswith(("Z", "z")) else txt
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _same_minute_reuse_safe(entry_mtime: Any, last_reconcile_iso: Any) -> Optional[bool]:
+    """Skew-tolerant same-minute guard for incremental reuse.
+
+    Store ``file list`` mtimes are MINUTE-granular, so a doc written twice inside
+    one clock-minute keeps ONE mtime and an equal-length second write is invisible
+    to a mtime+size compare. A prior row is provably unchanged only if our LAST
+    reconcile READ happened after that minute fully CLOSED — i.e. the row's
+    mtime-minute + 1 minute is at or before ``last_reconcile``. Returns:
+
+    * True  — the minute closed before the last reconcile: safe to reuse.
+    * False — the doc was touched in (or after) the last reconcile's minute, so it
+              is same-minute-ambiguous: reparse (correct beats cheap; only recently
+              touched docs pay the read).
+    * None  — no reconcile anchor (legacy aggregate without ``generated_at``, or an
+              unparseable mtime): the caller falls back to the mtime+size compare.
+
+    Bias under host/store clock skew is toward reparse (a host clock BEHIND the
+    store over-reparses; only a host clock >~1min AHEAD could under-read, the same
+    now-vs-mtime assumption the retention sub-pass already makes)."""
+    lr = _parse_iso_utc(last_reconcile_iso)
+    if lr is None:
+        return None
+    em = aggregate._parse_store_mtime(entry_mtime) if entry_mtime else None
+    if em is None:
+        return False  # can't prove the minute closed -> reparse
+    minute_close = em.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return lr >= minute_close
 
 
 def task_prefix(team: str) -> str:
@@ -294,6 +338,10 @@ def reconcile(
     prior_agg = _load_prior_aggregate(transport, team)
     prior_rows = aggregate.aggregate_rows(prior_agg)
     prior_by_name = aggregate.rows_by_name(prior_rows)
+    # When our LAST full pass ran — the anchor for the same-minute reuse guard
+    # (see _same_minute_reuse_safe). Absent on a legacy aggregate -> guard falls
+    # back to mtime+size.
+    last_reconcile_iso = (prior_agg or {}).get("generated_at")
 
     if _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
         # NOTE: warnings from the prior aggregate are not resurfaced here; they
@@ -321,9 +369,34 @@ def reconcile(
             continue
         slug = name[:-3]
         prior = prior_by_name.get(slug)
-        # incremental: reuse the prior row iff the list minute-timestamp is
-        # unchanged (equality — the conservative reading of minute resolution).
-        if prior and entry.get("mtime") and prior.get("mtime") == entry.get("mtime"):
+        entry_mtime = entry.get("mtime")
+        entry_size = entry.get("size")
+        # Incremental reuse. The store listing carries only size + a MINUTE-granular
+        # mtime + name — NO per-file content fingerprint (the `Version:` UUID lives
+        # in per-file `file stat`, one read per doc, too expensive for a fold). So
+        # reuse rests on THREE listing-only checks, all of which must hold:
+        #   (a) mtime unchanged — a new write bumps it to a new minute;
+        #   (b) byte size unchanged AND the prior row actually CARRIES a size —
+        #       a legacy pre-`size` row (or any length-changing edit) is reparsed
+        #       ONCE and re-stamped, so no row lingers on mtime-only reuse;
+        #   (c) the mtime-minute provably CLOSED before our last reconcile read
+        #       (_same_minute_reuse_safe) — mtime+size alone cannot see a
+        #       SAME-length edit made in the SAME clock-minute (the fossil: the row
+        #       lies stale until an unrelated write). This is the honest narrow
+        #       guarantee: same-minute-TOUCHED docs are reparsed, not reused; it is
+        #       the index-side companion to PR #356's read-side doc-authoritative
+        #       status guard. When there is no anchor (legacy aggregate w/o
+        #       generated_at) (c) is skipped and reuse falls back to (a)+(b).
+        minute_safe = _same_minute_reuse_safe(entry_mtime, last_reconcile_iso)
+        reusable = (
+            prior is not None
+            and entry_mtime
+            and prior.get("mtime") == entry_mtime
+            and prior.get("size") is not None
+            and prior.get("size") == entry_size
+            and minute_safe is not False
+        )
+        if reusable:
             rows.append(prior)
             reused += 1
             continue
@@ -339,11 +412,12 @@ def reconcile(
             continue
         if not model.is_task(fm):
             continue  # not a Task concept doc — silently ignore
-        rows.append(
-            model.row_from_frontmatter(
-                fm, name=slug, path=f"task/{name}", mtime=entry.get("mtime")
-            )
+        row = model.row_from_frontmatter(
+            fm, name=slug, path=f"task/{name}", mtime=entry_mtime
         )
+        # Stamp the listed size so the NEXT pass can sub-minute-compare (above).
+        row["size"] = entry_size
+        rows.append(row)
         parsed += 1
 
     # --- retention sub-pass (OPTIONAL: only when configured) ---
