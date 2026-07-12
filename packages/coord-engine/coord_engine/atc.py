@@ -8,6 +8,7 @@ flags the account for cap calibration.
 """
 from __future__ import annotations
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from typing import Any, Optional
@@ -507,3 +508,59 @@ def _demotions_for_route(demo_map: dict[tuple[str, str], dict[str, Any]]
     for (model, tc) in demo_map:
         out.setdefault(model, []).append(tc)
     return {m: sorted(tags) for m, tags in out.items()}
+
+
+# --- coordinator joins: bindings + outcome harvest (fulcra-agent-atc) -------
+
+def parse_bindings(text: Optional[str]) -> dict[str, Any]:
+    """Parse team/<team>/atc/bindings.json — the agent/role -> account join.
+
+    Shape: {"bindings": [{"agent": ..., "account": ..., "tier": ...,
+    "model": ...?, "harness": ...?, "task_class": ...?}]}. Tolerant like
+    parse_accounts: an entry missing a non-empty string agent/account/tier is
+    dropped and reported; the fold survives. Returns {"bindings": {agent: entry},
+    "dropped": [...], "error": str|None} — never raises."""
+    out: dict[str, Any] = {"bindings": {}, "dropped": [], "error": None}
+    if not text:
+        return out
+    try:
+        d = json.loads(text)
+    except (ValueError, TypeError) as e:
+        out["error"] = f"bindings.json unparseable: {e}"
+        return out
+    rows = d.get("bindings") if isinstance(d, dict) else None
+    for i, b in enumerate(rows if isinstance(rows, list) else []):
+        if not isinstance(b, dict):
+            out["dropped"].append(f"entry {i}: not an object")
+            continue
+        agent, account, tier = b.get("agent"), b.get("account"), b.get("tier")
+        if not all(isinstance(v, str) and v.strip() for v in (agent, account, tier)):
+            out["dropped"].append(f"entry {i}: needs non-empty agent/account/tier")
+            continue
+        tc = b.get("task_class")
+        if tc is not None and tc not in TAXONOMY:
+            out["dropped"].append(f"entry {i} ({agent}): unknown task_class {tc!r}")
+            continue
+        out["bindings"][agent.strip()] = b
+    return out
+
+
+def review_families(slugs: list[str]) -> dict[str, list[str]]:
+    """Group review slugs into re-request families: ``pr-7`` + ``pr-7-r2`` +
+    ``pr-7-r3`` fold to base ``pr-7``. Deterministic, order-independent."""
+    fams: dict[str, list[str]] = {}
+    for s in sorted(slugs):
+        m = re.match(r"^(.*)-r(\d+)$", s)
+        base = m.group(1) if m and m.group(1) in slugs else s
+        fams.setdefault(base, []).append(s)
+    def _round_no(slug: str, base: str) -> int:
+        m = re.match(re.escape(base) + r"-r(\d+)$", slug)
+        return int(m.group(1)) if m else 0   # base itself sorts first
+    return {b: sorted(rs, key=lambda r: _round_no(r, b))
+            for b, rs in fams.items()}
+
+
+def family_outcome(rounds: list[str]) -> str:
+    """A settled single-round family landed as dispatched (clean); any -rN
+    re-request means the work needed another pass (rework)."""
+    return "clean" if len(rounds) == 1 else "rework"

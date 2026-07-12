@@ -3039,6 +3039,10 @@ def _atc_accounts_path(team: str) -> str:
     return f"team/{team}/atc/accounts.json"
 
 
+def _atc_bindings_path(team: str) -> str:
+    return f"team/{team}/atc/bindings.json"
+
+
 def _atc_usage_prefix(team: str) -> str:
     return f"team/{team}/atc/usage/"
 
@@ -3174,6 +3178,40 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
                        demotions=demo_for_route, now=_now())
     # Surface the overlay-merge notes alongside the fold's own coercion notes.
     result["dropped_unknown_tags"] = merge_reports + result.get("dropped_unknown_tags", [])
+    role = getattr(args, "for_role", None)
+    role_note = None
+    if role:
+        # the coordinator join: filter candidates to the role's bound account and
+        # surface holder liveness -- never route into a void silently.
+        bparsed = atc.parse_bindings(transport.read(_atc_bindings_path(args.team)))
+        b = bparsed["bindings"].get(role)
+        if not b:
+            print(f"route -- no binding for role {role!r}: declare it in "
+                  f"{_atc_bindings_path(args.team)}", file=sys.stderr)
+            return 2
+        result["candidates"] = [c for c in result["candidates"]
+                                if c["account"] == b["account"]]
+        if not result["candidates"] and not result.get("reason"):
+            result["reason"] = (f"no headroom-bearing candidates on "
+                                f"{b['account']} (binding for {role})")
+        holders, ok = _role_fresh_holders(transport, args.team, role,
+                                           now=_iso(_now()))
+        role_note = (f"role {role}: UNKNOWN (lease fold degraded -- verify before dispatch)"
+                     if not ok else
+                     f"role {role}: HELD by {', '.join(holders)}" if holders else
+                     f"role {role}: VACANT -- dispatch will wait for a holder")
+        result["role"] = {"role": role, "account": b["account"],
+                          "fresh_holders": holders if ok else None, "fold_ok": ok}
+        if not ok or not holders:
+            # FAIL CLOSED (codex P1): a VACANT/UNKNOWN role returns NO candidates
+            # — a JSON consumer must never dispatch into a void off rank 1.
+            result["candidates"] = []
+            result["reason"] = f"role {role} is not HELD ({role_note})"
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"no candidates: {result['reason']}")
+            return 1
     reason = result.get("reason")
     unknown_need = bool(reason) and reason.startswith("unknown need:")
     if args.json:
@@ -3185,6 +3223,8 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
         return 2
     if not result["candidates"]:
         print(f"no candidates: {reason}")
+        if role_note:
+            print(role_note)
         return 0
     print(f"route — {args.team} — needs {','.join(needs)} "
           f"(map {result['map_version']})")
@@ -3193,6 +3233,84 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
         tags = ",".join(c["tags"])
         demo = f" [demoted: {', '.join(c['demoted'])}]" if c["demoted"] else ""
         print(f"{i}. {c['model']} — ({c['account']}) — {pct}% — {tags}{demo}")
+    if role_note:
+        print(role_note)
+    return 0
+
+
+
+def cmd_atc_harvest(args: argparse.Namespace, transport: Any) -> int:
+    """Derive outcome shards from SETTLED review families on the bus, attributed
+    via team/<team>/atc/bindings.json (agent/role -> account/tier[/model/
+    task_class]). Self-reported outcome logging has empirically failed; the bus
+    already records how work turned out — this folds it into the ledger.
+
+    Idempotent by construction: each family writes ONE deterministic shard
+    (``harvest-<base>.md``), so a re-run rewrites the same bytes (§7.10). Units
+    are 0 — harvest feeds the demotion fold, never fakes headroom spend."""
+    braw = transport.read(_atc_bindings_path(args.team))
+    parsed = atc.parse_bindings(braw)
+    for d in parsed["dropped"]:
+        print(f"harvest — dropped binding: {d}", file=sys.stderr)
+    if parsed.get("error"):
+        print(f"harvest — {parsed['error']}", file=sys.stderr)
+        return 1
+    if not parsed["bindings"]:
+        print(f"harvest — no bindings declared: write {_atc_bindings_path(args.team)} "
+              "({\"bindings\": [{\"agent\": ..., \"account\": ..., \"tier\": ...}]})")
+        return 0
+    # review root listing: dirs are slugs; docs are <slug>.md (tombstones excluded
+    # by requiring the doc to exist and read).
+    entries = transport.list_dir(f"team/{args.team}/review/")
+    slugs = sorted({e["name"][:-3] for e in entries
+                    if e.get("name", "").endswith(".md")})
+    already = {e.get("name", "") for e in
+               transport.list_dir(_atc_usage_prefix(args.team))}
+    written = skipped = 0
+    unattributed: list[str] = []
+    for base, rounds in sorted(atc.review_families(slugs).items()):
+        shard_name = f"harvest-{base}.md"
+        latest = rounds[-1]
+        # settled marker is the terminal-APPROVED signal; unsettled families wait.
+        names = {e.get("name") for e in
+                 transport.list_dir(_verdicts_prefix(args.team, latest))}
+        if SETTLED_MARKER not in names:
+            continue
+        doc = transport.read(_review_doc_path(args.team, latest))
+        fm_doc = okf.parse_frontmatter(doc) if doc else None
+        author = fm_doc.get("requested_by") if fm_doc else None
+        b = parsed["bindings"].get(author or "")
+        if not b:
+            unattributed.append(f"{base} (requested_by={author or '?'})")
+            continue
+        outcome = atc.family_outcome(rounds)
+        if shard_name in already:
+            # CONVERGENT, not write-once: a later settled round must flip a
+            # previously-harvested clean family to rework. Rewrite only when the
+            # derived outcome/round-count changed; unchanged families skip.
+            prior = okf.parse_frontmatter(
+                transport.read(_atc_usage_prefix(args.team) + shard_name)) or {}
+            if (prior.get("outcome") == outcome
+                    and str(prior.get("rounds")) == str(len(rounds))):
+                skipped += 1
+                continue
+        fm = {"schema": "atc-usage/v1", "agent": "atc-harvest", "ts": _iso(_now()),
+              "account": b["account"], "tier": b["tier"], "units": 0,
+              "throttled": False, "outcome": outcome, "rounds": len(rounds),
+              "harvest_source": base}
+        if b.get("model"):
+            fm["model"] = b["model"]
+        if b.get("task_class"):
+            fm["task_class"] = b["task_class"]
+        if not transport.write(_atc_usage_prefix(args.team) + shard_name,
+                               okf.render_frontmatter(fm) + "\n"):
+            print(f"harvest — write failed for {base} (transport)", file=sys.stderr)
+            return 1
+        written += 1
+    for u in unattributed:
+        print(f"harvest — no binding for author of {u}; add them to bindings.json")
+    print(f"harvest — {args.team}: {written} shard(s) written, {skipped} already "
+          f"harvested, {len(unattributed)} unattributed")
     return 0
 
 
@@ -4434,6 +4552,9 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--needs", required=True,
                     help="comma-separated capability tags (e.g. code,long-context)")
     rt.add_argument("--json", action="store_true")
+    rt.add_argument("--for-role", dest="for_role", metavar="ROLE",
+                    help="filter to ROLE's bound account (atc/bindings.json) and "
+                         "report the role's lease liveness alongside the ranking")
     rt.set_defaults(func=cmd_route)
 
     at = sub.add_parser("atc", help="ATC reports (fulcra-agent-atc)")
@@ -4457,6 +4578,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="override the seeded harnesses for declared accounts "
                           "(repeatable; default is the map's per-provider union)")
     ati.set_defaults(func=cmd_atc_init)
+    ath = atsub.add_parser(
+        "harvest", help="derive outcome shards from settled review families "
+                        "(attribution via atc/bindings.json; idempotent)")
+    ath.add_argument("team")
+    ath.set_defaults(func=cmd_atc_harvest)
 
     def _add_dash_parser(parent: Any) -> None:
         d = parent.add_parser(
