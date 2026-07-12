@@ -4005,6 +4005,7 @@ def _threads_candidate_rows(
     Returns ``(rows, ok, reason)``: ``ok`` False (with a reason) whenever the
     summaries/overlay load degraded OR the fold budget was exhausted with candidates
     still unread — the caller surfaces a ``threads-degraded`` row, never silence."""
+    from . import model
     summary_rows, ok, reason = _load_rows_status(transport, team)
 
     # One shared responses-root listing: tells us (a) which slugs have a response
@@ -4044,40 +4045,64 @@ def _threads_candidate_rows(
         followup_ref = next(
             (t.split(":", 1)[1] for t in tags if t.startswith("followed-up-by:")), None)
 
+        # Authoritative TERMINAL status. The summaries row's status can be STALE:
+        # a close (`respond`/`task done`) that lands in the SAME mtime-minute as the
+        # last indexed write is never re-read by reconcile's minute-resolution
+        # incremental reuse, so the row indexes 'proposed' forever while the doc is
+        # 'done' (the live acceptance-ping leak — a directive done since 7/02 that
+        # surfaced as mode-1 silence off the item-timestamp fallback). A terminal
+        # item is NEVER a dropped thread; when summaries already reads terminal we
+        # trust it (terminal is sticky), otherwise we CONFIRM against the doc's own
+        # status. For a terminal row we then SKIP the ash-activity signal reads
+        # (suspenders: no per-candidate reads for a row the fold will refuse) — the
+        # authoritative status rides the row and threads.classify does the refusing.
+        status = str(r.get("status") or "")
         declared_window = None
         ash_ts: Optional[str] = None
         attributed = True
         source = ""
-        if is_intent:
-            # Intent needs intent_by (summaries lack it) — one doc read. A
-            # MISSED read (raise OR None) — or a doc that reads but parses to
-            # garbage — means the window is UNKNOWN: ripeness cannot be decided,
-            # so this intent is EXCLUDED from this pass (silently windowing it
-            # to capture+grace would manufacture a false mode-3 drop with a
-            # clean degraded flag — the nagging-sensitive failure the spec
-            # forbids) AND the fold degrades visibly. It returns, correctly
-            # windowed, once readable. Only a doc that reads+parses fine and
-            # GENUINELY lacks intent_by is legitimately undeclared — the
-            # capture+grace fallback below stands for that case alone.
+        # Read the doc when we need something summaries lack: the intent window,
+        # or a terminal-status confirmation for a non-terminal-indexed candidate.
+        if is_intent or status not in model.TERMINAL_STATUSES:
             try:
                 doc = transport.read(_task_path(team, slug))
             except Exception:
                 doc = None
             fm = okf.parse_frontmatter(doc) if doc is not None else None
-            if fm is None:
+            if is_intent and fm is None:
+                # Intent needs intent_by (summaries lack it). A MISSED read (raise
+                # OR None) — or a doc that parses to garbage — means the window is
+                # UNKNOWN: ripeness cannot be decided, so this intent is EXCLUDED
+                # from this pass (silently windowing it to capture+grace would
+                # manufacture a false mode-3 drop) AND the fold degrades visibly. It
+                # returns, correctly windowed, once readable. Only a doc that
+                # reads+parses fine and GENUINELY lacks intent_by is legitimately
+                # undeclared — the capture+grace fallback below stands for that case.
                 ok = False
                 reason = reason or f"intent window unreadable: {slug}"
                 continue
-            declared_window = fm.get("intent_by")
-        else:
-            # Mode-1/2 candidates: attribute ash-activity from shards.
+            if fm is not None:
+                # The doc is the source of truth for status; a stale-proposed
+                # summaries row cannot leak a closed item past the fold belt. A
+                # non-intent doc that won't read falls back to the summaries status
+                # (best-effort — never over-degrade a mode-1/2 candidate on a
+                # transient read; no worse than before this guard existed).
+                doc_status = fm.get("status")
+                if doc_status:
+                    status = str(doc_status)
+                declared_window = fm.get("intent_by")
+
+        terminal = status in model.TERMINAL_STATUSES
+        if not is_intent and not terminal:
+            # Mode-1/2 candidates: attribute ash-activity from shards. Skipped for
+            # terminal rows — the fold refuses them, so their signal reads are waste.
             ash_ts, attributed, source = _threads_ash_activity(
                 transport, team, slug, principal, response_slugs, r.get("timestamp"))
 
         rows.append({
             "id": r.get("id") or slug,
             "title": r.get("title") or slug,
-            "status": str(r.get("status") or ""),
+            "status": status,
             "tags": tags,
             "intent": is_intent,
             "blocked_on_principal": bool(_threads_blocked_signal(r, principal, tags)),
@@ -4090,7 +4115,7 @@ def _threads_candidate_rows(
             "declared_window": declared_window,
             "captured_ts": r.get("timestamp"),
             "followup": {
-                "status": str(r.get("status") or "proposed"),
+                "status": status if is_intent else str(r.get("status") or "proposed"),
                 "responded": slug in response_slugs,
                 "followup_ref": followup_ref,
             },

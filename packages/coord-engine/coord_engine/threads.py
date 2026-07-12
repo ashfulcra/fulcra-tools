@@ -121,6 +121,14 @@ def classify(
         rid = str(row.get("id") or "")
         title = str(row.get("title") or rid)
 
+        # --- Belt: a terminal item is NEVER a dropped thread, for ANY candidate
+        # path. Hoisted ABOVE the intent carve-out so it refuses done/abandoned
+        # rows regardless of which signal admitted them (owner/assignee/blocked-on
+        # AND intent) — the acceptance-ping leak was a terminal directive whose
+        # adapter row reached this fold; the guard must not depend on the mode.
+        if str(row.get("status") or "") in TERMINAL_STATUSES:
+            continue
+
         # --- Mode 3 carve-out: an intent item is ONLY EVER mode 3 --------------
         if row.get("intent"):
             declared = _parse(row.get("declared_window"))
@@ -146,10 +154,7 @@ def classify(
             })
             continue
 
-        # --- Non-intent -------------------------------------------------------
-        if str(row.get("status") or "") in TERMINAL_STATUSES:
-            continue  # a closed item is not a dropped thread
-
+        # --- Non-intent (terminal already refused by the belt above) ----------
         # Mode 2: blocked-on-principal dominates aged silence, no aging.
         if row.get("blocked_on_principal"):
             signal = str(row.get("blocked_signal") or "blocked on ash")

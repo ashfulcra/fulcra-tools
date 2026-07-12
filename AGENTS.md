@@ -291,9 +291,12 @@ it (not on PyPI).
     default 48) and not followed up (status advanced, a response shard, or a
     `followed-up-by:` tag each discharge it). Windows: `--silence-days` /
     `--intent-grace-hours`, env `COORD_THREADS_SILENCE_DAYS` /
-    `COORD_THREADS_INTENT_GRACE_HOURS`. A **`threads-degraded` row** (a JSON object
-    under `--json`; a stderr notice in text mode) means the fold saw only PART of
-    the store — sweep or wait, **never trust it as complete**. coord-boss runs
+    `COORD_THREADS_INTENT_GRACE_HOURS`. A **terminal item (`done`/`abandoned`) is
+    NEVER a dropped thread** in any mode — the fold refuses it and the adapter reads
+    the authoritative status from the task doc, not the summaries index (a same-minute
+    close can leave the index stale-`proposed`). A **`threads-degraded` row** (a JSON
+    object under `--json`; a stderr notice in text mode) means the fold saw only PART
+    of the store — sweep or wait, **never trust it as complete**. coord-boss runs
     `threads fulcra --for ash --json` in its loop and owns the curation/push call.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
   `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
