@@ -40,7 +40,7 @@ Three commands to a routable ledger. The engine is stdlib-only and installs on i
 
 ```bash
 uv tool install fulcra-api   # the `fulcra` CLI: auth + the Fulcra File Store (the bus)
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.4.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.1#subdirectory=packages/coord-engine"
 fulcra auth login            # browser sign-in; an account is created on first login
 ```
 
@@ -243,6 +243,31 @@ Two read-only folds show ATC is working, from the same accounts.json + usage sha
   (the top level had to gain the demotions sibling). Each window row carries `account`,
   `window_hours`, `cap`, `used`, `headroom`, `pct`, `throttled`, `calibrate`; each
   demotion carries `model`, `task_class`, `bad`, `of`.
+
+## Coordinator joins: bindings, harvest, role-aware routing
+
+On a coord team a COORDINATOR dispatches to ROLES, and outcomes are already
+recorded on the bus (review verdict rounds) — two joins make ATC learn from that
+without self-reporting:
+
+- **`team/<team>/atc/bindings.json`** — the declared agent/role -> account join:
+  `{"bindings": [{"agent": "codex-reviewer", "account": "openai-codex",
+  "tier": "standard", "model": "gpt-x", "task_class": "code"}]}`. `agent`,
+  `account`, `tier` are required; `model`/`task_class` give harvest full
+  demotion-fold attribution. Malformed entries are dropped and reported; the
+  fold survives.
+- **`coord-engine atc harvest <team>`** — derives outcome shards from SETTLED
+  review families: a single-round settled family is `clean`; any `-rN`
+  re-request round means `rework`. Attribution comes from the review's
+  `requested_by` joined through bindings; unbound authors are reported, never
+  guessed. Idempotent by construction (one deterministic `harvest-<base>.md`
+  shard per family; re-runs skip). Units are 0 — harvest feeds the demotion
+  fold, never fakes headroom spend. Run it on a coordinator cadence.
+- **`coord-engine route <team> --needs ... --for-role <role>`** — filters
+  candidates to the role's bound account and prints the role's lease liveness
+  (`HELD by ...` / `VACANT — dispatch will wait` / `UNKNOWN` on a degraded
+  fold) so a coordinator never routes into a void silently. No binding for the
+  role is a loud exit 2.
 
 ## Where to start — the re-entrancy probes
 

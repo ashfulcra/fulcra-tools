@@ -354,6 +354,12 @@ it (not on PyPI).
   --task-class <tag> --outcome clean|rework|escalated`. That ledger feeds the
   headroom fold and demotes a model that keeps failing a task class. Rubric and
   routing procedure: [`fulcra-agent-atc`](skills/fulcra-agent-atc/SKILL.md).
+- **ATC coordinator joins.** Declare `team/<team>/atc/bindings.json`
+  (agent/role -> account/tier[/model/task_class]); then `coord-engine atc
+  harvest <team>` folds settled review families into outcome shards (idempotent,
+  zero-unit — feeds demotion, not headroom), and `route --needs ... --for-role
+  <role>` filters to the role's bound account and reports lease liveness so
+  dispatch never routes into a void. See [`fulcra-agent-atc`](skills/fulcra-agent-atc/SKILL.md).
 - **Timeline projection (opt-in).** `coord-engine annotate resolution <team>
   transitions` (default `off`) makes the heartbeat project task transitions onto
   your Fulcra timeline model-free, right after each reconcile; `annotate status
