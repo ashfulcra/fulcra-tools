@@ -317,10 +317,20 @@ def test_read_timeout_over_occupied_slot_refuses_to_clobber(capsys):
     assert "unreadable" in cap.err
 
 
-def test_reremind_new_when_dedupes_and_keeps_original_schedule(capsys):
+def test_reremind_new_when_dedupes_and_keeps_original_schedule(monkeypatch, capsys):
     # Minor (a): re-reminding the same reminder with a DIFFERENT not_before is the
     # same message (not_before is delivery metadata, outside identity) -> rc 0
     # dedup, original schedule kept, one doc.
+    #
+    # The clock is PINNED (established cli._now monkeypatch pattern, cf.
+    # test_cli_respond_response_paths_do_not_collide): the directive doc stamps a
+    # `created` timestamp from cli._now(), so an unpinned wall clock landing on
+    # 2026-07-12 (UTC) would inject "2026-07-12" into the doc and false-fail the
+    # `"2026-07-12" not in doc` schedule-preservation assertion. Pinning to a date
+    # distinct from BOTH not_before dates keeps the assertion purely about the
+    # kept schedule, independent of the day the suite runs.
+    from datetime import datetime, timezone
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc))
     slug = _dslug("standup", assignee="amy")
     path = f"team/r/task/{slug}.md"
     t = FakeTransport()
