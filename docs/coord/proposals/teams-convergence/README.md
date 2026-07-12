@@ -1,5 +1,14 @@
 # Teams convergence — coord + continuity as optional layers on `fulcra-agent-teams`
 
+> **📎 HISTORICAL — design provenance, not current instructions.** This whole
+> subtree is a **proposal/design set**, superseded by what actually shipped: the
+> convergence landed as [`packages/coord-engine`](../../../../packages/coord-engine/README.md)
+> + the [`skills/fulcra-agent-*`](../../../../skills) skills. Any `ashfulcra/coord2`
+> clone/install URLs below are **retired-codename historical references** — do NOT
+> paste them as current setup commands; the current install path is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md). Read these docs for the
+> reasoning, not for runnable commands.
+
 A proposal set exploring whether coord (this repo) and `fulcra-continuity` can be rebuilt as **optional
 packages layered on top of Fulcra's official (alpha) `fulcra-agent-teams` skill**
 (`fulcradynamics/agent-skills`), rather than as a parallel system.

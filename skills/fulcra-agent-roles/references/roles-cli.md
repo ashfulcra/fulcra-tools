@@ -59,3 +59,21 @@ uv tool run fulcra-api file upload /tmp/notice.md \
 ## Freshness window
 Treat a lease as fresh if its `timestamp` is within the role's `sla_hours` (default 24h). A role with no
 fresh lease is VACANT; an `exclusive` role with two or more fresh leases is CONTESTED.
+
+## Dormancy — park a role without muting the sweep by hand
+Deliberately leaving a role unattended (a reviewer on leave, seasonal on-call) is an ENGINE fact, not an
+agent-side convention. Set `dormant_until: <ISO>` in the role doc:
+```bash
+# roles/<name>.md frontmatter — add alongside policy / sla_hours / maintainer:
+#   dormant_until: 2026-08-01T00:00:00Z
+uv tool run fulcra-api file upload /tmp/reviewer.md "team/<team>/roles/reviewer.md"
+```
+While that date is future, the mechanical `escalate` sweep **suppresses the role's vacancy escalation**
+on every heartbeat host, and `roles status` reports `DORMANT (until <ts>)`:
+```bash
+coord-engine roles status <team> reviewer --json
+# -> {status: DORMANT, dormant_until: <ts>, ...}
+```
+Escalation resumes automatically past the date; a live lease still shows HELD; and a **garbage
+`dormant_until` fails OPEN** (noted on stderr, escalation still fires) so a typo can never silently mute
+a role. See [`SKILL.md`](../SKILL.md) for the full doctrine.

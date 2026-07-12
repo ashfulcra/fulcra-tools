@@ -71,7 +71,7 @@ wanted, is an explicit move to `task/archive/`, mirroring coord retention — op
 ### 3.1 `render_index(rows)` → `task/index.md` (OKF §6, no frontmatter)
 ```markdown
 # Active
-* [Fix summaries orphan leak](fix-summaries.md) - prune stale orphans on the authoritative merge
+* Fix summaries orphan leak - prune stale orphans on the authoritative merge
 
 # Waiting
 ...

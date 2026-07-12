@@ -15,7 +15,7 @@ and the agent conventions ([`AGENTS.md`](../../AGENTS.md)).
 ## Install
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.5.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.2#subdirectory=packages/coord-engine"
 coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 ```
 
@@ -32,7 +32,8 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 |---|---|
 | Wake up / what needs me | `briefing` (THE entry fold) · `needs-me` · `inbox` · `digest` |
 | Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` |
-| Directives & messaging | `tell` · `broadcast` · `remind` · `respond` · `later` (backlog) · `handoff` · `listen` (the engine-owned watcher) |
+| Directives & messaging | `tell` · `broadcast` · `remind` · `respond` · `later` (backlog) · `intent` (spoken commitment) · `handoff` · `listen` (the engine-owned watcher) |
+| Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` |
 | Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |

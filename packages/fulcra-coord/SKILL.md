@@ -1,7 +1,15 @@
 ---
 name: fulcra-coord
-description: Use when coordinating durable work across multiple agent sessions or hosts — handing off a task between sessions, telling another agent to do something, surfacing a blocker to the human operator, checking what other agents are doing, or resuming after a restart/compaction. Use when you see a `/coordination` Fulcra Files bus or a `fulcra-coord` CLI.
+description: "DEPRECATED — the first-generation coordination bus, in sunset. Do NOT route new coordination work here; use coord-engine + the skills/fulcra-agent-* skills instead. Retained only for reference and the live annotations.py carve-out. Consult only when maintaining an existing `/coordination` fulcra-coord deployment."
 ---
+
+> **⚠️ DEPRECATED — do not build on this.** `fulcra-coord` is the
+> first-generation coordination bus, superseded by **coord**:
+> [`packages/coord-engine`](../coord-engine/README.md) (the `coord-engine` CLI) +
+> the [`skills/fulcra-agent-*`](../../skills) skills. New coordination work goes
+> there. This package is retained for provenance and the live `annotations.py`
+> carve-out only — see [`DEPRECATED.md`](DEPRECATED.md). Everything below
+> describes the legacy bus and is kept for existing deployments.
 
 # fulcra-coord
 
