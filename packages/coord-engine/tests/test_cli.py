@@ -1895,3 +1895,94 @@ def test_escalate_skips_role_on_lease_shard_read_failure(capsys):
     assert cli.main(["escalate", "r"], transport=t) == 0
     assert "0 escalated" in capsys.readouterr().out
     assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store)
+
+
+# --- role dormancy (deliberately-parked roles) ---
+
+def _future_iso(days=30):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+
+def _past_iso(days=30):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+
+def test_escalate_dormant_future_suppresses_vacancy(capsys):
+    # A deliberately-parked role (future dormant_until) is vacant past SLA but must
+    # NOT fire a vacancy escalation on any heartbeat host — the live incident.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          f"---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n"
+          f"dormant_until: {_future_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/ghost.md",
+          "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert "0 escalated" in capsys.readouterr().out
+    assert not any(p.startswith("team/r/task/role-vacant-") for p in t.store)
+    assert not any("escalations/" in p for p in t.store)
+
+
+def test_escalate_dormant_past_escalates_as_normal(capsys):
+    # A park whose date has passed reverts to current behavior: it escalates.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          f"---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n"
+          f"dormant_until: {_past_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/ghost.md",
+          "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert "escalated reviewer -> ash" in capsys.readouterr().out
+
+
+def test_escalate_dormant_garbage_notes_stderr_and_escalates(capsys):
+    # Unparseable dormant_until -> treat as ABSENT, note it on stderr, and escalate.
+    # Fail OPEN: a typo must never silently suppress an escalation.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n"
+          "dormant_until: whenever\n---\n")
+    t.put("team/r/roles/reviewer/leases/ghost.md",
+          "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    cap = capsys.readouterr()
+    assert "escalated reviewer -> ash" in cap.out
+    assert "dormant_until" in cap.err
+
+
+def test_roles_status_dormant_when_vacant(capsys):
+    ts = _future_iso()
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          f"---\ntype: Role\nsla_hours: 24\ndormant_until: {ts}\n---\n")
+    t.put("team/r/roles/reviewer/leases/ghost.md",
+          "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
+    res = json.loads(capsys.readouterr().out)
+    assert res["status"] == "DORMANT"
+    assert res["escalation_due"] is False
+    assert res["dormant_until"] == ts
+
+
+def test_roles_status_dormant_text_shows_until(capsys):
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          f"---\ntype: Role\nsla_hours: 24\ndormant_until: {_future_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/ghost.md",
+          "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "DORMANT" in out and "until" in out
+
+
+def test_roles_status_held_outranks_dormant(capsys):
+    # A live lease outranks the dormancy display: HELD, not DORMANT.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          f"---\ntype: Role\nsla_hours: 24\ndormant_until: {_future_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/ash.md",
+          f"---\ntype: Lease\nagent: ash\ntimestamp: {_now_iso()}\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
+    res = json.loads(capsys.readouterr().out)
+    assert res["status"] == "HELD"

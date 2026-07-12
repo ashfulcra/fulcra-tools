@@ -56,3 +56,37 @@ def test_escalation_not_due_when_marker_exists():
 
 def test_escalation_not_due_when_held():
     assert roles.escalation_due([_lease("a", 1)], now=NOW, sla_hours=24) is False
+
+
+# --- dormancy (deliberately-parked roles) ---
+
+def test_dormant_state_future_is_dormant():
+    # NOW is 2026-07-01; a 2026-08-05 park is in the future -> dormant, no error.
+    assert roles.dormant_state("2026-08-05T09:00:00Z", now=NOW) == (True, False)
+
+
+def test_dormant_state_past_is_not_dormant():
+    assert roles.dormant_state("2026-06-01T00:00:00Z", now=NOW) == (False, False)
+
+
+def test_dormant_state_absent_is_not_dormant():
+    assert roles.dormant_state(None, now=NOW) == (False, False)
+    assert roles.dormant_state("", now=NOW) == (False, False)
+    assert roles.dormant_state("   ", now=NOW) == (False, False)
+
+
+def test_dormant_state_garbage_is_parse_error_not_dormant():
+    # Fail OPEN toward escalation: a typo must never silently suppress. Report the
+    # parse error so the caller can note it; never treat garbage as dormant.
+    assert roles.dormant_state("not-a-date", now=NOW) == (False, True)
+
+
+def test_escalation_suppressed_when_dormant():
+    # A vacant-past-SLA role that is dormant must NOT escalate.
+    assert roles.escalation_due([_lease("a", 30)], now=NOW, sla_hours=24,
+                                dormant=True) is False
+
+
+def test_escalation_still_due_when_not_dormant():
+    assert roles.escalation_due([_lease("a", 30)], now=NOW, sla_hours=24,
+                                dormant=False) is True

@@ -15,6 +15,7 @@ HELD = "HELD"
 VACANT = "VACANT"
 CONTESTED = "CONTESTED"
 UNKNOWN = "UNKNOWN"
+DORMANT = "DORMANT"
 
 DEFAULT_SLA_HOURS = 24.0
 
@@ -69,15 +70,45 @@ def classify(
     return HELD if fresh else VACANT
 
 
+def dormant_state(dormant_until: Optional[str], *, now: str) -> tuple[bool, bool]:
+    """Fold a role doc's ``dormant_until`` into ``(is_dormant, parse_error)``.
+
+    A deliberately-parked role sets ``dormant_until: <ISO>`` on its doc; the
+    ENGINE (not agent-side convention) must suppress the mechanical vacancy sweep
+    until that date. This is the code half of that decision.
+
+    - absent / None / blank -> ``(False, False)``: current behavior, not parked.
+    - ISO ts in the FUTURE  -> ``(True, False)``:  dormant, suppress escalation.
+    - ISO ts in the PAST    -> ``(False, False)``: park elapsed, resume normally.
+    - unparseable garbage    -> ``(False, True)``:  fail OPEN toward escalation and
+      report the error, so a typo can never silently suppress an escalation
+      (the safe direction HERE, since dormancy is what SUPPRESSES).
+    """
+    if dormant_until is None:
+        return (False, False)
+    raw = str(dormant_until).strip()
+    if not raw:
+        return (False, False)
+    until = _parse(raw)
+    if until is None:
+        return (False, True)  # garbage: absent + error, fail open toward escalation
+    n = _parse(now)
+    if n is None:
+        return (False, False)
+    return (until > n, False)
+
+
 def escalation_due(
     leases: Optional[list[dict[str, Any]]],
     *,
     now: str,
     sla_hours: float = DEFAULT_SLA_HOURS,
     marker_exists_today: bool = False,
+    dormant: bool = False,
 ) -> bool:
     """Engine DECIDES escalation (the SKILL prose ACTS): true iff the role is
-    vacant past its SLA and today's dedupe marker isn't already present."""
-    if marker_exists_today:
+    vacant past its SLA, not deliberately parked (``dormant``), and today's dedupe
+    marker isn't already present."""
+    if dormant or marker_exists_today:
         return False
     return classify(leases, now=now, sla_hours=sla_hours) == VACANT
