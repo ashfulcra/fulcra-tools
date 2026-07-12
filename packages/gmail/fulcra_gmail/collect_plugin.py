@@ -10,8 +10,12 @@ opaque ``account_id``. One account's auth failure is fail-soft: it is skipped
 with a health warning while the others proceed.
 
 **Setup wizard.** ``setup_steps`` walk the operator through creating ONE
-Google Workspace *Internal Web* OAuth client (exact Cloud-Console click-path
-below), pasting the shared client id/secret, then a **repeatable add-account**
+Google *External Web* OAuth client, published unverified (exact Cloud-Console
+click-path below — External so BOTH Workspace and personal ``@gmail.com``
+accounts can authorize; ``gmail.readonly`` is a restricted scope, so an
+unverified app shows a bypassable warning and is capped at 100 lifetime users
+until Google verification + a CASA security assessment), pasting the shared
+client id/secret, then a **repeatable add-account**
 leg that mints a single-use nonce, opens Google consent, and binds the granted
 token to the account discovered via ``users.getProfile`` (B4). Adding a second
 account is the same leg again.
@@ -208,19 +212,25 @@ def health_check(ctx: RunContext) -> HealthResult:
 
 
 _CLOUD_CONSOLE_CLICKPATH = (
-    "Create the OAuth client **once** in the Google Cloud Console for your "
-    "Workspace:\n\n"
+    "Create the OAuth client **once** in the Google Cloud Console:\n\n"
     "1. Go to **console.cloud.google.com** → pick (or create) a project.\n"
     "2. **APIs & Services → Enabled APIs & services → + Enable APIs** → enable "
     "the **Gmail API**.\n"
-    "3. **APIs & Services → OAuth consent screen** → **User Type: Internal** "
-    "→ Create. (Internal needs no Google verification for the restricted "
-    "`gmail.readonly` scope and has no 7-day token expiry.)\n"
-    "4. **APIs & Services → Credentials → + Create Credentials → OAuth client "
+    "3. **APIs & Services → OAuth consent screen** → **User Type: External** "
+    "→ Create. (External lets BOTH Workspace and personal `@gmail.com` accounts "
+    "authorize.)\n"
+    "4. On the consent screen, add the scope "
+    "`https://www.googleapis.com/auth/gmail.readonly`, then **Publish app** "
+    "(status → In production). Leave it **unverified** for now: users see a "
+    "bypassable 'Google hasn't verified this app' warning, refresh tokens do "
+    "NOT expire, and up to **100 accounts (lifetime)** can connect. Lifting "
+    "that cap requires Google verification + a CASA security assessment "
+    "(~$500/yr, a few weeks) — a later step, not needed to start.\n"
+    "5. **APIs & Services → Credentials → + Create Credentials → OAuth client "
     "ID** → **Application type: Web application**.\n"
-    "5. Under **Authorized redirect URIs** add EXACTLY: "
+    "6. Under **Authorized redirect URIs** add EXACTLY: "
     f"`{REDIRECT_URI}` (one entry, no trailing slash).\n"
-    "6. Create → copy the **Client ID** and **Client secret**.\n\n"
+    "7. Create → copy the **Client ID** and **Client secret**.\n\n"
     "Scope requested: `https://www.googleapis.com/auth/gmail.readonly` ONLY — "
     "the relay never modifies, sends, or deletes mail."
 )
