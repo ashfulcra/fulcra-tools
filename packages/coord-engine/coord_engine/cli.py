@@ -454,9 +454,20 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     except TransportError:
         leases = None  # unreadable -> UNKNOWN
     status = roles.classify(leases, now=now, sla_hours=sla, policy=policy)
+    # Dormancy: a deliberately-parked role (future dormant_until) reads as DORMANT
+    # instead of VACANT and never shows escalation_due — but a LIVE lease outranks
+    # the park (HELD wins the display). Garbage dormant_until fails open with a note.
+    dormant, dormant_err = roles.dormant_state(reg.get("dormant_until"), now=now)
+    if dormant_err:
+        print(f"roles status: unparseable dormant_until for {role} in team/{team} — "
+              f"treated as absent (not dormant); fix the date to park it",
+              file=sys.stderr)
+    if status == roles.VACANT and dormant:
+        status = roles.DORMANT
     today = _now().strftime("%Y-%m-%d")
     marker_exists = transport.read(_escalation_marker_path(team, role, today)) is not None
-    esc = roles.escalation_due(leases, now=now, sla_hours=sla, marker_exists_today=marker_exists)
+    esc = roles.escalation_due(leases, now=now, sla_hours=sla,
+                               marker_exists_today=marker_exists, dormant=dormant)
     fresh = roles.fresh_holders(leases, now=now, sla_hours=sla) if leases else []
     result = {
         "team": team, "role": role, "status": status, "policy": policy, "sla_hours": sla,
@@ -464,10 +475,14 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
         "fresh_holders": [l.get("agent") for l in fresh],
         "escalation_due": esc,
     }
+    if status == roles.DORMANT:
+        result["dormant_until"] = reg.get("dormant_until")
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(f"role {role} in team/{team}: {status} (policy={policy}, sla={sla:g}h)")
+        label = (f"DORMANT (until {reg.get('dormant_until')})"
+                 if status == roles.DORMANT else status)
+        print(f"role {role} in team/{team}: {label} (policy={policy}, sla={sla:g}h)")
         if fresh:
             print("  fresh holders: " + ", ".join(str(l.get("agent")) for l in fresh))
         if esc:
@@ -3547,6 +3562,20 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
         except (TypeError, ValueError):
             sla = roles.DEFAULT_SLA_HOURS
+        # Dormancy: a deliberately-parked role (future dormant_until) is exempt from
+        # the mechanical vacancy sweep regardless of lease state — the parked role
+        # is vacant BY DESIGN, so re-firing a P1 every heartbeat host, daily, is the
+        # bug. Garbage dormant_until fails OPEN (treated absent + a visible note) so
+        # a typo can never silently suppress escalations.
+        dormant, dormant_err = roles.dormant_state(reg.get("dormant_until"), now=now)
+        if dormant_err:
+            print(f"escalate: unparseable dormant_until for {role} — treated as "
+                  f"absent, escalation NOT suppressed (fix the date to park it)",
+                  file=sys.stderr)
+        if dormant:
+            print(f"escalate: {role} dormant until {reg.get('dormant_until')} — "
+                  f"vacancy escalation suppressed", file=sys.stderr)
+            continue
         leases: Optional[list[dict[str, Any]]] = []
         try:
             for f in transport.list_dir(_leases_prefix(args.team, role)):
