@@ -324,12 +324,16 @@ def test_reremind_new_when_dedupes_and_keeps_original_schedule(capsys):
     slug = _dslug("standup", assignee="amy")
     path = f"team/r/task/{slug}.md"
     t = FakeTransport()
-    assert cli.main(["remind", "r", "amy", "2026-07-11T09:00:00+00:00", "standup"],
+    assert cli.main(["remind", "r", "amy", "2030-01-01T09:00:00+00:00", "standup"],
                     transport=t) == 0
     capsys.readouterr()
-    assert cli.main(["remind", "r", "amy", "2026-07-12T15:00:00+00:00", "standup"],
+    assert cli.main(["remind", "r", "amy", "2030-01-02T15:00:00+00:00", "standup"],
                     transport=t) == 0
     assert "already delivered" in capsys.readouterr().out
     assert _task_docs(t) == [path]
     doc = t.store[path]
-    assert "2026-07-11" in doc and "2026-07-12" not in doc, "original schedule kept"
+    # assert on the not_before FIELD, not the whole doc — the doc's write
+    # timestamp contains the current date, so a blanket "date not in doc"
+    # fails whenever the wall clock reaches the re-remind date
+    assert "not_before: 2030-01-01T09:00:00+00:00" in doc, "original schedule kept"
+    assert "not_before: 2030-01-02" not in doc, "re-remind must not move the schedule"
