@@ -194,6 +194,42 @@ it (not on PyPI).
   direct child and leaks the tree) would. The per-op bound is `COORD_TRANSPORT_TIMEOUT` (float seconds,
   default 30; unparseable/≤0/NaN/inf falls back to the default; constructor arg wins for tests) — run it
   TIGHT on a watcher (e.g. 8s) so the fold budgets above buy real responsiveness.
+- **The public-read failure contract — UNKNOWN is loud, never a clean-empty.** Every aggregate-backed
+  public read (`status`, `board`, `needs-me`, `search`, `inbox`, plus the `agents`/`digest`/`asks`/
+  `briefing` bundles) folds the summaries index via `_load_rows_status`, whose `ok` bit is **False when
+  the index/listing is UNKNOWN** — an unreadable/corrupt index, a read that failed under a degraded
+  transport, or a degraded freshness overlay — as distinct from a genuinely-ABSENT index (a fresh team,
+  no reconcile yet), which is a real, readable **empty** (`ok` True). A read whose `ok` is False must
+  **NEVER return a clean-empty result**: it emits the one shared marker `_read_degraded_row(reason)` =
+  `{"type": "read-degraded", "reason": …}` (family-consistent with `review-fold-degraded` /
+  `forge-degraded` / `presence-degraded` / `threads-degraded`; `inbox` stamps its named
+  `inbox-degraded` type), carried IN the `--json` result (a list element, or a reserved
+  `read-degraded` key on the counts/board/digest objects, so stdout stays one parseable value) and as a
+  stderr notice in text mode, while retaining any partial rows. This is the README's *"fails loud, never
+  silent"* property; `threads` is the reference implementation. The hazard it closes: a silently-empty
+  task fold that reads "all clear" while a live unacked directive is merely unreadable. **This contract
+  is a ship-gate: a new aggregate-backed read consumes `_load_rows_status` (never `_load_rows`) and
+  surfaces the marker on `ok is False`, with a red-first test asserting no clean-empty under a degraded
+  transport.**
+- **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
+  (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
+  load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
+  unknown — e.g. `review status` `tally unknown, retry`, `roles status` `lease state unknown … retry`,
+  `tell` `cannot verify delivery, retry`) and names a **tombstone** iff terminal (a `review status` on a
+  soft-deleted review — a retry never resurrects it). An **UNEXPECTED** exception is neither: the
+  top-level guard emits a registered envelope `coord-engine: error: command=<cmd> type=<Exc>: <msg>`
+  (rc 1) — the `error:` token distinguishes an engine fault from a retryable degrade. The load-bearing
+  `listen` daemon wraps each tick in a guard: an unmodeled tick fault emits `LISTEN DEGRADED: tick
+  raised …` and the daemon **continues** (one degraded tick, never a dead watcher); `--once` stays
+  unguarded so a scheduled run surfaces its failure.
+- **Reconcile's incremental reuse is sub-minute-safe.** A prior summaries row is reused only when the
+  listing shows the doc unchanged by **mtime AND byte size** (size stamped on every parsed row).
+  Store `mtime` is minute-resolution, so a doc changed twice inside one clock-minute keeps an identical
+  mtime — a mtime-only reuse would never re-read the second write and the row would fossilize stale
+  forever (`status`/`board`/`inbox` then lie until an unrelated write). Size is the sub-minute change
+  signal, compared when both sides know it (a legacy row without a stamped size falls back to mtime-only
+  and re-strengthens on its next natural reparse). This is the index-side twin of the read-side
+  doc-authoritative status guard (PR #356).
 - **Canonical surfaces are live, not reconcile-lagged.** Every fold that reads the summaries index
   (`inbox`, `listen`, `briefing`, `needs-me`, `board`, `status`) also runs a **freshness overlay**: when
   the index is present it lists the task dir once and unions in any task/directive doc written SINCE the

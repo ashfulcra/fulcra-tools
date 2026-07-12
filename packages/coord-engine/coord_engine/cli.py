@@ -262,6 +262,50 @@ def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
     return _load_rows_status(transport, team)[0]
 
 
+# --- The public-read failure contract (defined ONCE) -----------------------
+#
+# Every aggregate-backed PUBLIC READ — `status`, `board`, `needs-me`, `search`,
+# `inbox` (and the `briefing`/`threads` bundles) — folds the summaries index via
+# `_load_rows_status`, whose ``ok`` bit is False when the index/listing is
+# UNKNOWN: an unreadable/corrupt index, a read that failed under a degraded
+# transport, or a degraded freshness overlay. UNKNOWN is NOT the same as a
+# genuinely-absent index (a fresh team, no reconcile yet), which is a real,
+# readable EMPTY (``ok`` True). THE CONTRACT: a read whose ``ok`` is False must
+# NEVER return a clean-empty result. It emits the shared machine-parseable
+# degraded row below (family-consistent with ``review-fold-degraded`` /
+# ``forge-degraded`` / ``presence-degraded`` / ``threads-degraded``) and, in text
+# mode, a stderr notice — so "unknown" is LOUD, never silently indistinguishable
+# from "nothing to do". This is the README's "fails loud, never silent" property;
+# `cmd_threads` is the reference implementation this generalizes. The one hazard
+# this closes: a silently-empty task fold that reads as "all clear" while a real
+# unacked directive (a live P1) is merely unreadable — codex live-reproduced it on
+# `inbox --json` under a clamped transport timeout.
+_READ_DEGRADED = "read-degraded"
+
+
+def _read_degraded_row(reason: str, *, marker: str = _READ_DEGRADED) -> dict[str, Any]:
+    """Build the ONE public-read degraded marker row — shape ``{type, reason}``
+    (the degraded-row family shape ``{type, scanned?, total?, reason}`` with
+    scanned/total omitted, because a summaries-index fold is all-or-nothing rather
+    than a bounded partial scan). ``marker`` lets `inbox` stamp its named
+    ``inbox-degraded`` type while every caller shares this one builder."""
+    return {"type": marker, "reason": reason or "summaries index unreadable"}
+
+
+def _surface_read_degraded(reason: str, *, json_mode: bool,
+                           marker: str = _READ_DEGRADED) -> None:
+    """Emit the degraded marker the house way for text mode / a stderr notice:
+    under ``--json`` the caller is expected to carry the row IN its result (a
+    list element or a reserved dict key, so stdout stays a single parseable
+    value); this only prints the stderr notice consumed by humans and monitors
+    (`json_mode` suppresses stdout noise so a piped consumer never confuses the
+    notice for a result). Never suppresses data — the caller still prints its
+    partial rows."""
+    if not json_mode:
+        print(f"{marker}: {reason or 'summaries index unreadable'} — "
+              f"unknown, not empty; retry", file=sys.stderr)
+
+
 def _line(row: dict[str, Any]) -> str:
     return (
         f"  [{row.get('priority', '?'):>2}] {str(row.get('status', '?')):8} "
@@ -291,24 +335,41 @@ def cmd_reconcile(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_status(args: argparse.Namespace, transport: Any) -> int:
-    rows = _load_rows(transport, args.team)
+    # Public-read failure contract (see _read_degraded_row): consume the readable
+    # bit, never fold an UNKNOWN index to clean-empty (all-zero) counts.
+    rows, ok, reason = _load_rows_status(transport, args.team)
     counts = query.status_counts(rows)
     if args.json:
+        if not ok:
+            # Embed the marker under a reserved key so stdout stays ONE parseable
+            # object; a consumer summing status counts already knows its status
+            # vocabulary and skips the namespaced marker.
+            counts = {**counts, _READ_DEGRADED: _read_degraded_row(reason)}
         print(json.dumps(counts, indent=2))
     else:
-        if not rows:
+        if not ok:
+            _surface_read_degraded(reason, json_mode=False)
+        elif not rows:
             print(f"(no aggregate for team/{args.team} — run `reconcile` first)")
         print(f"team/{args.team}: {len(rows)} tasks — " + ", ".join(
-            f"{k}={v}" for k, v in sorted(counts.items())))
+            f"{k}={v}" for k, v in sorted(counts.items())
+            if k != _READ_DEGRADED))
     return 0
 
 
 def cmd_board(args: argparse.Namespace, transport: Any) -> int:
-    rows = _load_rows(transport, args.team)
+    rows, ok, reason = _load_rows_status(transport, args.team)
     groups = query.board(rows)
     if args.json:
+        if not ok:
+            # Reserved section-shaped key: value is a list (like every other board
+            # section) so stdout stays one parseable object and the text loop's
+            # fixed section set ignores it.
+            groups[_READ_DEGRADED] = [_read_degraded_row(reason)]
         print(json.dumps(groups, indent=2))
         return 0
+    if not ok:
+        _surface_read_degraded(reason, json_mode=False)
     for section in ("active", "waiting", "blocked", "proposed"):
         items = groups.get(section, [])
         if items:
@@ -319,8 +380,13 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
-    rows = _load_rows(transport, args.team)
+    rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
     got = query.needs_me(rows, args.agent, now=_iso(_now()))
+    # Public-read failure contract: an UNKNOWN task fold must announce itself with
+    # the shared marker BEFORE the review/forge add-ons pile their own markers onto
+    # what would otherwise read as a silently-empty (but "complete") needs-me.
+    if not rows_ok:
+        got = [_read_degraded_row(rows_reason)] + got
     # Shared add-on deadline (see _briefing_budget): opened here so the forge
     # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
     # own independent, already-shipped budget.
@@ -332,7 +398,10 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     else:
         print(f"{len(got)} item(s) need {args.agent}:")
         for r in got:
-            if r.get("type") == "review-pending":
+            if r.get("type") == _READ_DEGRADED:
+                print(f"  read degraded: {r.get('reason')} — task fold unknown "
+                      f"(not empty), retry")
+            elif r.get("type") == "review-pending":
                 print(f"  [REVIEW] pending verdict: {r['name']} "
                       f"(required: {', '.join(r['pending_required'])})")
             elif r.get("type") == "review-fold-degraded":
@@ -360,7 +429,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_search(args: argparse.Namespace, transport: Any) -> int:
-    rows = _load_rows(transport, args.team)
+    rows, ok, reason = _load_rows_status(transport, args.team)
     if getattr(args, "archived", False):
         # cold path: read archived task docs directly (archives are small + rare)
         from . import model as _model
@@ -380,11 +449,18 @@ def cmd_search(args: argparse.Namespace, transport: Any) -> int:
             except TransportError:
                 pass
     got = query.search(rows, args.query)
+    # Public-read failure contract: an UNKNOWN index must not return a clean-empty
+    # "no matches" — surface the shared marker (json row / stderr notice).
+    if not ok:
+        got = [_read_degraded_row(reason)] + got
     if args.json:
         print(json.dumps(got, indent=2))
     else:
-        print(f"{len(got)} match(es) for {args.query!r}:")
-        for r in got:
+        if not ok:
+            _surface_read_degraded(reason, json_mode=False)
+        real = [r for r in got if r.get("type") != _READ_DEGRADED]
+        print(f"{len(real)} match(es) for {args.query!r}:")
+        for r in real:
             print(_line(r))
     return 0
 
@@ -2071,24 +2147,21 @@ def _directed_inbox(transport: Any, team: str, agent: str,
 
 
 def _inbox_rows_status(transport: Any, team: str, agent: str, *,
-                       include_backlog: bool = False) -> tuple[list[dict[str, Any]], bool]:
-    """The open-directive fold `inbox` surfaces for `agent`, plus whether the
-    summaries index was readable (``ok``). Extracted so `listen` awaits the SAME
-    source `inbox` shows — one inbox computation, no second implementation to
-    drift. Never raises: an unreadable summaries read folds to an empty list, but
-    now with ``ok=False`` so a listener can surface the degradation rather than
-    mistake it for an empty inbox."""
-    rows, ok, _reason = _load_rows_status(transport, team)
-    return _directed_inbox(transport, team, agent, rows,
-                           include_backlog=include_backlog), ok
-
-
-def _inbox_rows(transport: Any, team: str, agent: str, *,
-                include_backlog: bool = False) -> list[dict[str, Any]]:
-    """Rows-only view of ``_inbox_rows_status`` for callers that don't surface the
-    readable flag (cmd_inbox / briefing keep their existing degradation behavior)."""
-    return _inbox_rows_status(transport, team, agent,
-                              include_backlog=include_backlog)[0]
+                       include_backlog: bool = False
+                       ) -> tuple[list[dict[str, Any]], bool, str]:
+    """The open-directive fold `inbox` surfaces for `agent`, plus the readability
+    of the underlying summaries fold: ``ok`` False (with a ``reason``) when the
+    index/listing is UNKNOWN — see the public-read failure contract at
+    ``_read_degraded_row``. Extracted so `listen` awaits the SAME source `inbox`
+    shows — one inbox computation, no second implementation to drift. Never
+    raises: an unreadable summaries read folds to an empty list, but with
+    ``ok=False`` and a ``reason`` so EVERY caller (inbox, listen, briefing)
+    surfaces the degradation as the loud marker rather than mistaking UNKNOWN for
+    an empty inbox — the codex-reproduced silent clean-``[]`` that suppressed a
+    live unacked directive."""
+    rows, ok, reason = _load_rows_status(transport, team)
+    return (_directed_inbox(transport, team, agent, rows,
+                            include_backlog=include_backlog), ok, reason)
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
@@ -2099,10 +2172,20 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
                         okf.render_frontmatter(fm) + "\nacked\n")
         print(f"acked {args.ack}")
         return 0
-    got = _inbox_rows(transport, args.team, agent, include_backlog=args.all)
+    # Public-read failure contract (see _read_degraded_row): consume the readable
+    # bit. Under a degraded transport the summaries index is UNKNOWN, not empty —
+    # emit the `inbox-degraded` marker (json row / stderr notice) and RETAIN any
+    # partial rows, NEVER a clean-``[]`` exit 0 that would suppress a live unacked
+    # directive (the codex CRIT, live-reproduced).
+    got, ok, reason = _inbox_rows_status(transport, args.team, agent,
+                                         include_backlog=args.all)
     if args.json:
-        print(json.dumps(got, indent=2))
+        rows_out = ([_read_degraded_row(reason, marker="inbox-degraded")] + got
+                    if not ok else got)
+        print(json.dumps(rows_out, indent=2))
         return 0
+    if not ok:
+        _surface_read_degraded(reason, json_mode=False, marker="inbox-degraded")
     print(f"inbox — {agent}: {len(got)} item(s)")
     for r in got:
         print(_line(r))
@@ -2579,7 +2662,23 @@ def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
     interval = args.interval if args.interval and args.interval > 0 else 60
     try:
         while True:
-            tick()
+            # Per-tick guard: `listen` is the load-bearing watcher (its tick latency
+            # is the reply leg of `tell`/`respond`/`review`). An UNMODELED exception
+            # in one tick must degrade THAT tick, never kill the daemon — a
+            # transient bug would otherwise silence the whole watcher. Log to stderr
+            # in the `LISTEN DEGRADED:` register, keep the streak state, continue.
+            # `--once` deliberately stays UNguarded above: a one-shot run surfaces
+            # its failure (rc 1 via main's envelope) to whatever scheduled it.
+            try:
+                tick()
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                _log.error("listen tick failed (daemon continues)",
+                           team=args.team, agent=agent,
+                           error=f"{type(e).__name__}: {e}")
+                print(f"LISTEN DEGRADED: tick raised {type(e).__name__}: {e} — "
+                      f"daemon continues, next tick in {interval}s", file=sys.stderr)
             time.sleep(interval)
     except KeyboardInterrupt:
         if verbose:
@@ -2686,7 +2785,13 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
     out: dict[str, Any] = {"schema": "coord.teams.briefing.v1", "team": args.team,
                            "agent": agent, "at": now}
-    rows = _load_rows(transport, args.team)
+    # Public-read failure contract (see _read_degraded_row): the CORE task fold is
+    # not an add-on — an UNKNOWN summaries index must surface as the shared marker,
+    # never a silently-empty board/inbox/needs-me that reads as "all clear". The
+    # bundle stays tolerant (rc 0); the marker + stderr notice make it loud.
+    rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
+    if not rows_ok:
+        out["read_degraded"] = _read_degraded_row(rows_reason)
     # One shared add-on deadline (see _briefing_budget), opened HERE — before the
     # first UNBUDGETED transport-heavy section (presence) — and spent cumulatively
     # across presence + forge + resume, so the WHOLE add-on stack is bounded, not
@@ -2778,6 +2883,8 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(json.dumps(out, indent=2))
         return 0
     print(f"briefing — {agent} in team/{args.team}")
+    if not rows_ok:
+        _surface_read_degraded(rows_reason, json_mode=False)
     live = [p["agent"] for p in out["presence"] if p.get("liveness") == "live"]
     print(f"  live now: {', '.join(live) if live else '(nobody)'}")
     for r in out["presence"]:  # always shown — a degraded roster must never hide
@@ -3334,11 +3441,16 @@ def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
-    rows = _load_rows(transport, args.team)
+    # Public-read failure contract (see _read_degraded_row): an UNKNOWN task fold
+    # must not read as every agent having "no open work".
+    rows, ok, reason = _load_rows_status(transport, args.team)
     digest = presence.agents_digest(rows, _presence_shards(transport, args.team), now=_iso(_now()))
     if args.json:
-        print(json.dumps(digest, indent=2))
+        out = digest + [_read_degraded_row(reason)] if not ok else digest
+        print(json.dumps(out, indent=2))
         return 0
+    if not ok:
+        _surface_read_degraded(reason, json_mode=False)
     for a in digest:
         counts = ", ".join(f"{k}={v}" for k, v in sorted(a["open"].items())) or "no open work"
         print(f"  [{a['liveness']:7}] {a['agent']} — {counts}"
@@ -3496,12 +3608,18 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
-    rows = _load_rows(transport, args.team)
+    # Public-read failure contract (see _read_degraded_row): don't fold an UNKNOWN
+    # index into a falsely-quiet health digest.
+    rows, ok, reason = _load_rows_status(transport, args.team)
     d = digest_mod.build(rows, _presence_shards(transport, args.team),
                          now=now, human=args.human or _human())
     if args.json:
+        if not ok:
+            d = {**d, _READ_DEGRADED: _read_degraded_row(reason)}
         print(json.dumps(d, indent=2))
     else:
+        if not ok:
+            _surface_read_degraded(reason, json_mode=False)
         print(digest_mod.render(d), end="")
         try:
             text = transport.read(_atc_accounts_path(args.team))
@@ -3734,11 +3852,16 @@ def cmd_migrate(args: argparse.Namespace, transport: Any) -> int:
 # --- operator loop (fulcra-agent-operator): asks + answer ---
 
 def cmd_asks(args: argparse.Namespace, transport: Any) -> int:
-    rows = _load_rows(transport, args.team)
+    # Public-read failure contract (see _read_degraded_row): an UNKNOWN index must
+    # not read as "nothing waiting on the human".
+    rows, ok, reason = _load_rows_status(transport, args.team)
     got = query.asks(rows, now=_iso(_now()), human=args.human or _human())
     if args.json:
-        print(json.dumps(got, indent=2))
+        out = [_read_degraded_row(reason)] + got if not ok else got
+        print(json.dumps(out, indent=2))
         return 0
+    if not ok:
+        _surface_read_degraded(reason, json_mode=False)
     print(f"asks — {len(got)} waiting on {args.human or _human()} (oldest first)")
     for r in got:
         age = "?" if r.get("age_hours") is None else f"{r['age_hours']:g}h"
@@ -4507,7 +4630,17 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
     try:
         return args.func(args, transport)
     except Exception as e:  # never dump a traceback at the user
-        print(f"coord-engine: {type(e).__name__}: {e}", file=sys.stderr)
+        # Registered error envelope. An UNEXPECTED exception is NOT a retryable
+        # degrade: the `error:` register token (distinct from the "…, retry" /
+        # tombstone voice of the degraded single-slug paths) makes it
+        # machine-distinguishable to a watcher grepping stderr, carrying the
+        # command + exception type as structured fields rather than an off-register
+        # `coord-engine: {type}: {e}` prose line. rc 1 is preserved (behavior
+        # unchanged); only the surface is now parseable. See AGENTS.md, "the
+        # public-read + error register".
+        cmd = getattr(args, "command", None) or "?"
+        print(f"coord-engine: error: command={cmd} type={type(e).__name__}: {e}",
+              file=sys.stderr)
         return 1
 
 

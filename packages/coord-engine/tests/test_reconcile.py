@@ -10,11 +10,17 @@ class FakeTransport:
     def __init__(self):
         self.store: dict[str, str] = {}
         self.mtimes: dict[str, str] = {}
+        self.sizes: dict[str, str] = {}
         self.fail_list = False
 
-    def put(self, path, content, mtime="2026-07-01 04:00PM UTC"):
+    def put(self, path, content, mtime="2026-07-01 04:00PM UTC", size=None):
         self.store[path] = content
         self.mtimes[path] = mtime
+        # Mirror `fulcra-api file list`, which reports a byte size per entry. Size
+        # is the sub-minute change signal the incremental-reuse guard relies on:
+        # default it to the content length so a same-minute edit that changes the
+        # doc changes its listed size.
+        self.sizes[path] = size if size is not None else f"{len(content)}B"
 
     def list_dir(self, prefix):
         if self.fail_list:
@@ -35,6 +41,7 @@ class FakeTransport:
                     out.append({"name": seg, "mtime": None, "is_dir": True})
                 continue
             out.append({"name": rest, "mtime": self.mtimes.get(p),
+                        "size": self.sizes.get(p),
                         "is_dir": rest.endswith("/")})
         return out
 
@@ -161,6 +168,28 @@ def test_reconcile_reparses_when_mtime_changes():
     assert res["parsed"] == 1
     agg = json.loads(t.store["team/r/_coord/summaries.json"])
     assert agg["rows"][0]["status"] == "done"
+
+
+def test_reconcile_same_minute_double_write_not_fossilized():
+    """ENG-1-4 (out-of-band, the index-side twin of PR #356): a doc changed TWICE
+    inside one clock-minute keeps an identical minute-resolution mtime, so the
+    mtime-only incremental reuse would never re-read the second write — the
+    summaries row fossilizes stale forever and status/board/inbox lie until an
+    unrelated write. The reuse guard must detect the sub-minute change (mtime+size)
+    and re-read, so the row reflects the LATEST content."""
+    t = FakeTransport()
+    minute = "2026-07-01 04:23PM UTC"
+    t.put("team/r/task/a.md", _task("A", "proposed"), mtime=minute)
+    _run(t)  # pass 1: indexes the proposed row (new code stamps its size)
+    agg1 = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert agg1["rows"][0]["status"] == "proposed"
+    # SECOND write in the SAME clock-minute: mtime string is unchanged, but the
+    # content (and therefore the listed size) differs.
+    t.put("team/r/task/a.md", _task("A", "done"), mtime=minute)
+    _run(t)  # pass 2: must NOT reuse the stale proposed row
+    agg2 = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert agg2["rows"][0]["status"] == "done", \
+        "same-minute second write must be re-read, not fossilized as 'proposed'"
 
 
 def test_reconcile_unparseable_keeps_prior_row_and_warns():

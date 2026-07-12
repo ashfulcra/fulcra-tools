@@ -1986,3 +1986,181 @@ def test_roles_status_held_outranks_dormant(capsys):
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
     res = json.loads(capsys.readouterr().out)
     assert res["status"] == "HELD"
+
+
+# --- ENG-1: the public-read failure contract (codex CRIT family) -----------
+#
+# Contract (see cli._read_degraded_row): every aggregate-backed public read
+# surfaces the shared degraded marker when the summaries index/listing is UNKNOWN
+# (`_load_rows_status(...).ok is False`) — NEVER a clean-empty result that a
+# watcher can't distinguish from "nothing to do". codex live-reproduced the
+# inbox clean-`[]` exit-0 suppressing a live unacked directive.
+
+from coord_engine.transport import TransportError as _TE
+
+
+def _degrade_summaries(t, team="r"):
+    """Make the summaries index read fail (transport down) so `_load_rows_status`
+    reports UNKNOWN (ok=False) rather than a confirmed-empty index."""
+    path = f"team/{team}/_coord/summaries.json"
+    orig = t.read
+
+    def read(p):
+        if p == path:
+            raise _TE("summaries index down")
+        return orig(p)
+
+    t.read = read
+
+
+def _seed_indexed_directive(t, team="r", agent="amy"):
+    cli.main(["tell", team, agent, "Live P1 charter", "--from", "boss"], transport=t)
+    cli.main(["reconcile", team], transport=t)
+
+
+def test_inbox_degraded_transport_marker_not_clean_empty(capsys):
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    _degrade_summaries(t)
+    capsys.readouterr()
+    rc = cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out != [], "degraded inbox must NOT be a clean empty list"
+    assert any(r.get("type") == "inbox-degraded" for r in out), \
+        f"degraded inbox must carry the inbox-degraded marker: {out}"
+
+
+def test_inbox_degraded_transport_text_stderr_notice(capsys):
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    _degrade_summaries(t)
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy"], transport=t)
+    err = capsys.readouterr().err
+    assert "inbox-degraded" in err
+
+
+def test_inbox_absent_index_is_not_degraded(capsys):
+    # A genuinely-absent index (no reconcile yet) is a real readable empty, NOT a
+    # degradation — the marker must NOT appear (absence != failure).
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "hi", "--from", "boss"], transport=t)  # no reconcile
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    out = json.loads(capsys.readouterr().out)
+    assert not any(r.get("type") == "inbox-degraded" for r in out)
+
+
+def test_status_degraded_transport_marker(capsys):
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    _degrade_summaries(t)
+    capsys.readouterr()
+    cli.main(["status", "r", "--json"], transport=t)
+    counts = json.loads(capsys.readouterr().out)
+    assert "read-degraded" in counts, f"degraded status must carry the marker: {counts}"
+
+
+def test_board_degraded_transport_marker(capsys):
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    _degrade_summaries(t)
+    capsys.readouterr()
+    cli.main(["board", "r", "--json"], transport=t)
+    groups = json.loads(capsys.readouterr().out)
+    assert "read-degraded" in groups
+
+
+def test_needs_me_degraded_transport_marker(capsys):
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    _degrade_summaries(t)
+    capsys.readouterr()
+    cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
+    got = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "read-degraded" for r in got), \
+        f"degraded needs-me must announce the core fold before add-ons: {got}"
+
+
+def test_search_degraded_transport_marker(capsys):
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    _degrade_summaries(t)
+    capsys.readouterr()
+    cli.main(["search", "r", "charter", "--json"], transport=t)
+    got = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "read-degraded" for r in got)
+
+
+def test_briefing_degraded_transport_marker(capsys):
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    _degrade_summaries(t)
+    capsys.readouterr()
+    cli.main(["briefing", "r", "--agent", "amy", "--json"], transport=t)
+    doc = json.loads(capsys.readouterr().out)
+    assert "read_degraded" in doc and doc["read_degraded"]["type"] == "read-degraded"
+
+
+def test_public_reads_healthy_no_degraded_marker(capsys):
+    # Positive control: a HEALTHY read must NOT emit the marker (no over-alarm).
+    t = FakeTransport()
+    _seed_indexed_directive(t)
+    capsys.readouterr()
+    cli.main(["status", "r", "--json"], transport=t)
+    assert "read-degraded" not in json.loads(capsys.readouterr().out)
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    assert not any(r.get("type") == "inbox-degraded"
+                   for r in json.loads(capsys.readouterr().out))
+    cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
+    assert not any(r.get("type") == "read-degraded"
+                   for r in json.loads(capsys.readouterr().out))
+
+
+# --- ENG-1-5: listen daemon per-tick guard ---------------------------------
+
+def test_listen_daemon_survives_tick_exception(monkeypatch, capsys):
+    """A:25 — the load-bearing `listen` daemon (`while True: tick()`) must survive
+    an UNMODELED tick exception: it degrades that tick and continues, never lets
+    the fault kill the watcher."""
+    import coord_engine.cli as _cli
+    t = FakeTransport()
+    _cli.main(["reconcile", "r"], transport=t)
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("unmodeled tick fault")
+
+    monkeypatch.setattr(_cli, "_run_listen_tick", boom)
+
+    def stop_after_first_sleep(_):
+        raise KeyboardInterrupt  # break out of the daemon loop cleanly
+
+    monkeypatch.setattr(_cli.time, "sleep", stop_after_first_sleep)
+    capsys.readouterr()
+    rc = _cli.main(["listen", "r", "--agent", "amy", "--interval", "1"], transport=t)
+    assert rc == 0, "daemon must exit cleanly, not propagate the tick RuntimeError"
+    assert calls["n"] == 1
+    assert "LISTEN DEGRADED" in capsys.readouterr().err
+
+
+# --- ENG-1-6: registered top-level error envelope --------------------------
+
+def test_toplevel_unexpected_error_is_registered(monkeypatch, capsys):
+    """A:26 — an unexpected exception surfaces as a REGISTERED, machine-parseable
+    envelope (an `error:` token + command + type), distinct from the retryable
+    degrade voice, not an off-register prose line."""
+    import coord_engine.cli as _cli
+    t = FakeTransport()
+
+    def boom(_args, _transport):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(_cli, "cmd_status", boom)
+    capsys.readouterr()
+    rc = _cli.main(["status", "r"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err and "command=status" in err and "RuntimeError" in err

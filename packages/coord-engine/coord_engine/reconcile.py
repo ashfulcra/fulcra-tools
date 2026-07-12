@@ -321,9 +321,22 @@ def reconcile(
             continue
         slug = name[:-3]
         prior = prior_by_name.get(slug)
-        # incremental: reuse the prior row iff the list minute-timestamp is
-        # unchanged (equality — the conservative reading of minute resolution).
-        if prior and entry.get("mtime") and prior.get("mtime") == entry.get("mtime"):
+        entry_mtime = entry.get("mtime")
+        entry_size = entry.get("size")
+        # Incremental reuse: reuse the prior row iff the listing shows NO change.
+        # mtime alone is MINUTE-resolution, so a doc changed twice inside one
+        # clock-minute keeps an identical mtime — mtime-only reuse would never
+        # re-read the second write and the summaries row would fossilize stale
+        # forever (status/board/inbox then lie until an unrelated write; the
+        # index-side twin of PR #356's read-side doc-authoritative guard). SIZE is
+        # the sub-minute change signal (the listing already carries it), compared
+        # when BOTH sides know it: any length-changing edit — every real status
+        # transition — then forces a re-read. A prior row without a stamped size
+        # (legacy aggregate) falls back to mtime-only and re-strengthens on its
+        # next natural reparse, so this stays migration-safe.
+        size_known = prior is not None and prior.get("size") is not None and entry_size is not None
+        if (prior and entry_mtime and prior.get("mtime") == entry_mtime
+                and (not size_known or prior.get("size") == entry_size)):
             rows.append(prior)
             reused += 1
             continue
@@ -339,11 +352,12 @@ def reconcile(
             continue
         if not model.is_task(fm):
             continue  # not a Task concept doc — silently ignore
-        rows.append(
-            model.row_from_frontmatter(
-                fm, name=slug, path=f"task/{name}", mtime=entry.get("mtime")
-            )
+        row = model.row_from_frontmatter(
+            fm, name=slug, path=f"task/{name}", mtime=entry_mtime
         )
+        # Stamp the listed size so the NEXT pass can sub-minute-compare (above).
+        row["size"] = entry_size
+        rows.append(row)
         parsed += 1
 
     # --- retention sub-pass (OPTIONAL: only when configured) ---
