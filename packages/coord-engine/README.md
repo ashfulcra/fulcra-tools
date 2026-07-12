@@ -3,7 +3,7 @@
 The shared engine of **coord**, the agent-coordination layer: a **stdlib-only** Python CLI
 that gives a fleet of independent agents (Claude Code, Codex, OpenClaw, CI, humans) durable
 coordination over the Fulcra File Store as a bus. Judgment stays in prose — the twelve
-[`fulcra-agent-*` skills](../../skills) — and every consistency-critical fold (who's live,
+[`fulcra-agent-*` skills](../../skills) (of 14 total) — and every consistency-critical fold (who's live,
 what's mine, is this review settled) is a deterministic engine verb, so two agents always
 agree on derived state instead of eyeballing timestamps.
 
