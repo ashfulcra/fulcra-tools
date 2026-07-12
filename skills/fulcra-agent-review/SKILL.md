@@ -78,16 +78,20 @@ proceed to request a new review or advance an existing one below.
    hosts, and compaction with no one having to remember it. A bare `tell` is the failure mode this
    replaces: an acked directive leaves **no** durable marker, so a dropped or forgotten review vanishes
    silently and the merge gates on nothing. Never request reviews via `tell`.
-2. **Verdict** (reviewer): write `review/<slug>/verdicts/<you>.md` — **slug-exact**, named after **you**
-   (the filename is the identity the tally uses) — use the exact name the request's `required:` list names
-   you by (your role, not a session identity) — with `verdict: approve|changes` and notes. Then
-   **verify** the fold reflects it (`coord-engine review status <team> <slug>` — you must no longer be in
-   `pending_required`) and **only then ack** the request in your inbox (if a directive accompanied the request)
-   (`coord-engine inbox <team> --agent <you> --ack <slug>`). Never satisfy a review by acking without a
-   verdict file, or against a different slug's status. To change your mind, re-upload your verdict file
-   (overwrites; the File Store keeps the history). **Fail-closed:** a `changes` verdict keeps blocking
-   until *that reviewer* re-uploads `approve` — pushing a fix does **not** clear it; the reviewer must
-   re-affirm.
+2. **Verdict** (reviewer): write `review/<review-slug>/verdicts/<you>.md` — **slug-exact**, named after
+   **you** (the filename is the identity the tally uses) — use the exact name the request's `required:`
+   list names you by (your role, not a session identity) — with `verdict: approve|changes` and notes. The
+   **verdict file is what discharges the obligation** (the tally folds presence-of-file). Then **verify**
+   the fold reflects it (`coord-engine review status <team> <review-slug>` — you must no longer be in
+   `pending_required`) and **only then ack** the accompanying directive as inbox hygiene — using the
+   **directive** id, NOT the `<review-slug>`: the review-request directive has its own slug
+   `review-request-<review-slug>-<hash>`, so ack that (read it from `coord-engine inbox <team> --agent
+   <you> --json` — the `name` of the `REVIEW REQUEST: <review-slug>` row), never `--ack <review-slug>`
+   (which the directive would never match, leaving it re-notifying). Never satisfy a review by acking
+   without a verdict file, or against a different review's status. To change your mind, re-upload your
+   verdict file (overwrites; the File Store keeps the history). **Fail-closed:** a `changes` verdict keeps
+   blocking until *that reviewer* re-uploads `approve` — pushing a fix does **not** clear it; the reviewer
+   must re-affirm.
 3. **Check state** (anyone) — deterministic fold, do not tally by hand:
    ```bash
    coord-engine review status <team> <slug> --json

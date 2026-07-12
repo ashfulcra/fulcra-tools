@@ -107,6 +107,11 @@ or one JSON object per line under `--json`. Quiet ticks print nothing. A transpo
 resolving role-routed directives; independent so a chronic role failure can't mask a fresh inbox
 outage). A degraded read never advances state, so the pending event re-surfaces on recovery.
 
+`listen` is the reply-leg watcher; the load-bearing **wake** read is the composite `briefing` path.
+When a scheduled tick's `briefing`/`inbox` degrades, quiet is NOT clear — apply the raw-bus fallback
+in §3 (**Degraded briefing → fail-closed raw-bus fallback**): raw-list + direct-read the unacked
+directives before reporting, never conclude "no work" off a degraded read.
+
 ```
 coord-engine listen <team> --agent <agent> [--interval N=60] [--once] [--json] [--verbose]
 ```
@@ -178,13 +183,31 @@ hooks/prompts/blocks are rendered artifacts, not live references:** after upgrad
 **RE-RUN YOUR ADAPTER INSTALLER** to regenerate them — an un-regenerated hook keeps emitting the
 doctrine it was rendered under.
 
-**Degraded review fold.** The `briefing`/`needs-me` fold that surfaces pending reviews is wall-clock
-bounded (`COORD_REVIEW_FOLD_BUDGET`, default 45s): on a slow transport it stops early and emits a
-`review-fold-degraded` row (`{scanned, total}`, plus `skipped` when a slug's doc or verdict read failed)
-rather than a clean-looking partial. A watcher that sees it must NOT treat the fold as authoritative —
-fall back to a per-slug `review status` sweep over the `review/` listing for the unscanned and skipped
-remainder, and clear those verdicts before acking. Codex's repaired watch prompt already does this; the
-fallback is doctrine, not optional.
+**Degraded briefing → fail-closed raw-bus fallback (doctrine, not optional).** A wake read that
+degrades is *absence of a complete answer, never proof of "all clear"* — and the fallback covers
+**every** degraded section, not just reviews. A watcher that acts only on what a clean-looking fold
+returned can silently drop a live unacked directive.
+
+- **Directives / inbox — the general case.** Every aggregate-backed read (`briefing`, `inbox`,
+  `needs-me`, `status`, `board`, `search`) folds the summaries index through the public-read failure
+  contract ([`AGENTS.md` → The public-read failure contract](../../AGENTS.md)): when the index/listing
+  is UNKNOWN it emits the shared `read-degraded` marker (or `inbox`'s named `inbox-degraded` type) —
+  carried in the `--json` result and as a stderr notice — instead of a clean-empty. On ANY such marker
+  (or a `briefing` that reports a failed resume / stalled section), the watcher MUST NOT conclude "no
+  work": it **raw-lists and direct-reads the unacked directives** — enumerate `team/<team>/task/`
+  (`fulcra-api file list`), read each `intent:`/`assignee`-shaped doc naming this agent or a role it
+  holds, and act on anything open-and-unacked. Only report a genuinely clear inbox when a *non-degraded*
+  read returns empty; a degraded read is reported **degraded**, never "no directives."
+- **Reviews — the specific case.** The `briefing`/`needs-me` pending-review fold is wall-clock bounded
+  (`COORD_REVIEW_FOLD_BUDGET`, default 45s): on a slow transport it stops early and emits a
+  `review-fold-degraded` row (`{scanned, total}`, plus `skipped` when a slug's doc or verdict read
+  failed) rather than a clean-looking partial. On that row, fall back to a per-slug `review status`
+  sweep over the `review/` listing for the unscanned and skipped remainder, and clear those verdicts
+  before acking.
+
+Codex's repaired watch prompt already does the review sweep; the **directive raw-bus fallback is the
+same discipline for the inbox side** — the installer-generated watcher (§2) and every adapter tick
+(below) run the composite engine path (`briefing` first) and honor both markers before reporting.
 
 **Claude Code / Cowork** — settings.json hooks.
 ```bash

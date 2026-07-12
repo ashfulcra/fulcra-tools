@@ -54,7 +54,17 @@ humans and reviewers catch it late; CI catches it at commit time).
 4. A contract test pins any SKILL.md claim that code could falsify (counts, command names,
    flag spellings) — grep-based is fine, cheap beats clever.
 
-## Adoption surface (inventory, 2026-07-09)
+## Adoption surface (inventory, 2026-07-12)
+
+> **References-vs-engine freshness (2026-07-12).** Beyond the SKILL-body probe
+> tables (item 4), the coord skills' `references/*.md` command docs are now part of
+> the drift surface. This pass re-verified every coord reference command against the
+> live engine (`coord-engine <verb> --help`) and corrected the ones that had lagged
+> the SKILLs — the atomic `review request` flow (review-cli.md), `intent` + `threads`
+> (directives-cli.md), and role dormancy (roles-cli.md). Treat a reference that
+> narrates a command the engine no longer exposes (or a superseded flow the SKILL
+> forbids) as blocking drift, same as a bad probe verb.
+
 
 | Skill tree | Probe preamble | Script tests | Notes |
 |---|---|---|---|

@@ -13,12 +13,19 @@ needs to know, say so in the PR body ("AGENTS.md: no change needed").
 
 ## Where to start
 
-Landing cold? Run the probes top to bottom, then jump to the layer you're
+**Zero state — never installed `coord-engine`, or joining from a fresh / remote /
+sandboxed host?** Start at
+[`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) — install → auth →
+(remote egress) → team bootstrap from zero → join. The probe grid below assumes the
+engine is installed and a `<team>` exists; if `coord-engine` is `command not found`
+or you have no team yet, the grid can't help you — the quickstart is the entry.
+
+Already on the bus? Run the probes top to bottom, then jump to the layer you're
 touching. First failing probe is where your setup gap is.
 
 | Probe / question | Command | Passes when | Where to go |
 |---|---|---|---|
-| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 — tooling present, store reachable | fix the reported gap first (auth: `fulcra auth login`; missing/old `coord-engine`: reinstall) |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 — tooling present, store reachable | never installed / `command not found` / no team yet → [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) (install → auth → bootstrap → join). Otherwise fix the reported gap (auth: `fulcra auth login`; missing/old `coord-engine`: reinstall) |
 | On the bus? | `coord-engine briefing <team> --agent <you>` | prints your identity, role inboxes, and everything that needs you | [Coordinate on the bus](#coordinate-on-the-bus) — that fold IS your work queue |
 | Own worktree? | `git worktree list` | your cwd is a dedicated worktree, not a shared checkout (no conflict markers or foreign staged files) | [Working tree](#working-tree) — carve your own before committing |
 | Touching Collect / the daemon? | — | — | [The daemon (Collect)](#the-daemon-collect) |
@@ -36,53 +43,18 @@ under `skills/`, each package with its own README, build, and tests.
   menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest
   pipeline), plus the importer packages (`dayone`, `csv-importer`,
   `media-helpers`, `attention`, `netflix-skill`, …).
-- **`packages/gmail`** (`fulcra-gmail`) — the local Gmail relay (rebuild of
-  ArcBot's unrecoverable MVP). Multi-account, read-only (`gmail.readonly`),
-  keyed by opaque `account_id` (email is metadata, never a path/key segment).
-  Auth posture: an **External** OAuth client published **unverified** (so both
-  Workspace and personal `@gmail.com` accounts can connect); `gmail.readonly`
-  is a restricted scope, so unverified = a bypassable warning + a **100-account
-  lifetime cap** until Google verification + the annual restricted-scope security
-  assessment (CASA via an empaneled assessor; cost/turnaround vary). Publishing
-  lifts the Testing-mode 7-day refresh-token expiry (tokens can still be revoked;
-  the relay re-auths on `invalid_grant`). No code depends on Internal/External —
-  that is purely a Cloud-Console consent-screen setting.
-  Task 1 ships the client + OAuth account registry: `GmailClient` (Gmail
-  REST v1 httpx wrapper, refresh-on-401, fail-soft `invalid_grant`) and the
-  `AccountRegistry` (keychain secrets via collect's `credentials` helpers +
-  a JSON registry doc; B4 single-use OAuth `state`-nonce → `users.getProfile`
-  account binding). Task 2 adds the pure-local processing layer (no daemon,
-  no network): `rules` (parse rules, server-`q` builder with 24h overlap /
-  7d-or-backfill first-run, and the post-filter effective-match decision with
-  privacy-safe reason codes — B2: no subject/from/body ever logged),
-  `convert` (Gmail `messages.get(full)` payload → deterministic selected-email
-  JSON; attachments = metadata only, bytes deferred to v2), and `ledger`
-  (append-only per-account JSONL, fsync per append, torn-line tolerance,
-  processed-set keyed by `(message_id, rule_id, rule_version)`, deterministic
-  relay outbox key). Task 3 ships the daemon layer: `files_writer` (selected
-  email → Fulcra Files at `/collect/gmail/<account_id>/<yyyy-mm>/<message_id>
-  .json`; same id → same path, post-crash rewrite is a same-content overwrite),
-  `relay` (B3 exactly-once-visible bus relay — a byte-stable coord directive
-  keyed by the ledger `outbox_key`, emitted + readback-verified via
-  `coord-engine tell`/`search` so retries converge on one visible directive;
-  the installed engine's deterministic slug + readback satisfy the B3 version
-  pin), `cursors` (per-`(account, rule)` contiguous-frontier watermark),
-  `pipeline` (the crash-safe poll: fully paginate → refine to effective matches
-  → order oldest-first by `(internalDate, id)` → `file → ledger → relay →
-  ledger` → advance the watermark only through the contiguous done prefix), and
-  `collect_plugin` (scheduled 15-min plugin; Cloud-Console-clickpath +
-  repeatable add-account wizard; per-account health; registered via entry point
-  + `_bundled_plugins`), and `collect_routes` (the Gmail-specific add-account
-  OAuth endpoints: a start endpoint that mints a nonce + PKCE and 302-redirects
-  to Google consent, and the `/api/oauth/callback` endpoint that consumes the
-  nonce once, exchanges the code, getProfile-binds, and writes the registry row
-  + keychain token — a B4 flow the generic single-namespace oauth route can't
-  model; wired optionally into `collect/web.py` and linked from the wizard).
-  Codex P1 hardening: an unresolved candidate fetch is a frontier hole (cursor
-  never advances past a candidate it couldn't look at); `parse_rules` rejects a
-  `relay` action with no `relay_to`, and a relay a rule requires is never
-  silently completed when no relay backend is configured (the message stays
-  incomplete). Only live OAuth-credential verification is deferred to Task 4.
+- **`packages/gmail`** (`fulcra-gmail`) — the local, read-only (`gmail.readonly`)
+  Gmail relay: multi-account, keyed by opaque `account_id` (email is metadata,
+  never a path/key segment), crash-safe (append-only per-account ledger + a
+  contiguous-frontier watermark), landing selected emails in Fulcra Files and
+  relaying matches over the coord bus. The load-bearing agent-facing facts:
+  the OAuth client is **External / unverified**, so `gmail.readonly` (a restricted
+  scope) carries a **100-account lifetime cap** until Google verification + the
+  annual CASA assessment; **no subject/from/body is ever logged** (privacy-safe
+  reason codes only). Task-by-task module breakdown, the OAuth clickpath, and the
+  ledger/relay/pipeline design live in
+  [`packages/gmail/README.md`](packages/gmail/README.md) — read it before touching
+  the relay.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent
@@ -141,11 +113,12 @@ it (not on PyPI).
   `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
   verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`.
-  The request is **atomic**: with the doc landed it also delivers one directive
+  The request is **durable-first, not atomic**: the review doc lands FIRST (that
+  doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened
   review fires each reviewer's inbox/`listen` — never hand-send a review tell),
   and a partial notification failure is reported loud (rc 1) naming exactly which
-  reviewers were and were not notified — and is **retryable**: re-running the SAME
+  reviewers were and were not notified — and is **idempotently recoverable**: re-running the SAME
   request (same `of`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
   only the reviewers a prior partial failure dropped (the doc is left byte-unchanged,
   already-delivered directives dedupe rc 0), so no reviewer is stranded by the
@@ -157,43 +130,37 @@ it (not on PyPI).
   SHA, URL, or a non-code deliverable), so the handshake works with any forge
   or none. A GitHub-only "Approve"/comment does NOT count — co-located agents
   (and Codex) often share one GitHub account, so a forge verdict can no-op; the
-  bus verdict, keyed by agent identity, is the source of truth. **Verdict
-  before ack, on the exact slug — never a bare ack.** Full rules and per-harness
-  wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
+  bus verdict, keyed by agent identity, is the source of truth. **The verdict
+  FILE discharges the obligation** (write it at the review slug's verdict path,
+  then verify `review status` clears you); the ack is inbox hygiene and targets
+  the review-request *directive* by its inbox id
+  (`review-request-<review-slug>-<hash>`), never the bare review slug. Full rules
+  and per-harness wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
   and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 - **Park a role, don't mute the sweep by hand.** Deliberately leaving a role unattended (a reviewer on leave, seasonal on-call) is an ENGINE fact, not an agent-side convention: set `dormant_until: <ISO>` in `team/<team>/roles/<role>.md`, and while that date is future the mechanical `escalate` sweep suppresses the role's vacancy escalation on every heartbeat host and `roles status` reports `DORMANT (until <ts>)`; escalation resumes automatically past the date, a live lease still shows HELD, and a garbage `dormant_until` fails OPEN (noted on stderr, escalation still fires) so a typo can't silently mute a role — see [`fulcra-agent-roles`](skills/fulcra-agent-roles/SKILL.md).
-- **Engine surfaces a watcher must honor.** Every directive slug now carries a payload hash
-  (`<title-slug>-<sha256(payload)[:8]>`), so identical resends dedupe by construction and distinct
-  messages can never share (or clobber) a slot; rc 0 `directive <slug> already delivered` is a *deduped
-  identical resend*, not a fresh write, and rc 1 `cannot verify delivery, retry` means the slot was
-  unreadable — never overwritten, safe to retry. `briefing`/`needs-me` may emit a `review-fold-degraded`
-  row when their pending-review scan exceeds `COORD_REVIEW_FOLD_BUDGET` (default 45s, enforced *within* a
-  slug too — checked after each verdict/doc read, so one stalled read can't return a clean row) — honor it
-  with a per-slug `review status` sweep;
-  never read the fold as complete. The team-global **forge-feedback** section is bounded the same way:
-  `briefing`/`needs-me` emit a `forge-degraded` row `{scanned, total, skipped}` when the forge fan-out
-  exceeds the shared `COORD_BRIEFING_BUDGET` (default 60s, opened once for the whole add-on stack and spent
-  cumulatively; a raised feedback listing counts as `skipped`) — honor it with a `forge feedback` sweep,
-  never read the section as complete. The `COORD_BRIEFING_BUDGET` deadline now opens at the TOP of
-  `briefing` — before the **presence** section — so it bounds the whole add-on stack (presence + forge +
-  resume), not just the forge fan-out: the team-global presence-shard reads (one `list_dir` + a read per
-  agent) used to run unbudgeted AND before the deadline even opened, hanging the whole briefing under a
-  degraded transport. `briefing` now emits a `presence-degraded` row `{scanned, total, skipped}` (same
-  shape family, appended to the `presence` section list — json passthrough + one text line) when the
-  presence fan-out breaches the budget, a listed shard is unreadable, or the presence listing raises;
-  honor it with a `presence show` sweep, never read a partial roster as complete. The `resume`
-  (own-continuity) read shares the same deadline and truncates (stderr note) rather than hang the tail.
-  That review sweep itself **fails closed**: `review status` returns rc 1
-  (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
-  rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
-  tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
-  Those budgets rest on **hard per-op boundedness**: every transport subprocess (the `fulcra-api file`
-  ops and `data-updates`, plus forge's `gh` calls) runs in its OWN process group and, on timeout, the
-  WHOLE group is SIGKILLed and the drain grace-bounded — a hung child that spawned pipe-holding helpers
-  can't stretch an op past its timeout the way a bare `subprocess.run(timeout=)` (which kills only the
-  direct child and leaks the tree) would. The per-op bound is `COORD_TRANSPORT_TIMEOUT` (float seconds,
-  default 30; unparseable/≤0/NaN/inf falls back to the default; constructor arg wins for tests) — run it
-  TIGHT on a watcher (e.g. 8s) so the fold budgets above buy real responsiveness.
+- **Engine surfaces a watcher must honor.** Two invariants a watcher lives by:
+  - **Slug dedup + delivery rc.** Every directive slug carries a payload hash
+    (`<title-slug>-<sha256(payload)[:8]>`), so identical resends dedupe by construction and distinct
+    messages can never share or clobber a slot: rc 0 `directive <slug> already delivered` is a *deduped
+    identical resend*, and rc 1 `cannot verify delivery, retry` means the slot was unreadable — never
+    overwritten, safe to retry.
+  - **Honor every degraded row; never read a bounded fold as complete.** `briefing`/`needs-me` bound
+    each section under `COORD_BRIEFING_BUDGET` (default 60s, opened once at the TOP of `briefing` and
+    spent cumulatively across presence + forge + resume) and emit a `{scanned, total, skipped}`
+    degraded row per section — `review-fold-degraded` (also bounded per-slug by
+    `COORD_REVIEW_FOLD_BUDGET`, default 45s), `forge-degraded`, `presence-degraded` — plus the
+    public-read `read-degraded`/`inbox-degraded` markers below. On ANY of them, fall back to the
+    section's direct sweep (`review status` per slug, `forge feedback`, `presence show`) — see
+    [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md) and
+    [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md) for the per-section fallbacks.
+    The review sweep itself **fails closed**: `review status` returns rc 1 (`tally unknown, retry`) when
+    the doc, the verdicts *listing*, or any verdict shard is unreadable, rather than printing a partial
+    APPROVED — so a degraded transport can never green-light a merge.
+
+  These budgets rest on **hard per-op boundedness**: every transport subprocess runs in its own process
+  group and is SIGKILLed whole on timeout (a hung child can't leak a pipe-holding tree past the bound).
+  The per-op bound is `COORD_TRANSPORT_TIMEOUT` (float seconds, default 30; unparseable/≤0/NaN/inf →
+  default) — **run it TIGHT on a watcher (e.g. 8s)** so the fold budgets above buy real responsiveness.
 - **The public-read failure contract — UNKNOWN is loud, never a clean-empty.** Every aggregate-backed
   public read (`status`, `board`, `needs-me`, `search`, `inbox`, plus the `agents`/`digest`/`asks`/
   `briefing` bundles) folds the summaries index via `_load_rows_status`, whose `ok` bit is **False when
@@ -222,90 +189,43 @@ it (not on PyPI).
   `listen` daemon wraps each tick in a guard: an unmodeled tick fault emits `LISTEN DEGRADED: tick
   raised …` and the daemon **continues** (one degraded tick, never a dead watcher); `--once` stays
   unguarded so a scheduled run surfaces its failure.
-- **Reconcile's incremental reuse — same-minute-touched docs are reparsed, not reused.** The store
-  `file list` carries only size + a **minute-granular** mtime + name; the content fingerprint (the
-  `Version:` UUID) lives in per-file `file stat` (one read per doc — too expensive for a fold). So a
-  prior summaries row is reused only when the listing shows the doc unchanged by **mtime AND byte size**
-  (size stamped on every parsed row; a legacy row without a stamped size is reparsed ONCE and
-  re-stamped, never reused on mtime alone), **AND** the doc's mtime-minute is provably closed before our
-  last reconcile read. Because mtime is minute-resolution, a doc changed twice inside one clock-minute
-  keeps one mtime and a same-length second edit is invisible to mtime+size — so any doc TOUCHED in (or
-  after) the last reconcile's minute is reparsed rather than reused (`generated_at` is the anchor; absent
-  on a legacy aggregate, reuse falls back to mtime+size). This is the honest narrow guarantee — NOT a
-  general sub-minute exactness claim — and it is the index-side companion to PR #356's read-side
-  doc-authoritative status guard: without it a same-minute close leaves `status`/`board`/`inbox` lying
-  until an unrelated write.
-- **Canonical surfaces are live, not reconcile-lagged.** Every fold that reads the summaries index
-  (`inbox`, `listen`, `briefing`, `needs-me`, `board`, `status`) also runs a **freshness overlay**: when
-  the index is present it lists the task dir once and unions in any task/directive doc written SINCE the
-  last reconcile (absent from the index), so a directive delivered between heartbeats surfaces THIS read,
-  not up to a reconcile-period later (the PR348 false-clear). Indexed docs are never re-read (the index
-  row wins — behavior-preserving); a fresh doc that reads fine but won't parse as a Task is
-  skipped-not-fatal, while a LISTED fresh doc that can't be **read** degrades the `inbox` source (the
-  listing proved it exists — an unreadable read is a transport problem, never a silent vanish), as does
-  a failed overlay listing — visible, never silent, with the index rows still served. Cost: one extra
-  `list_dir` per row load plus one read per genuinely-new (new-since-reconcile) slug, **capped at
-  `COORD_OVERLAY_CAP` (default 16)** so a sustained reconcile outage can't make every surface-read do
-  unbounded doc reads fleet-wide; when capped, the served subset is deterministic (sorted by name, so
-  every agent converges on the same subset) — the cut is arbitrary with respect to age or priority (it
-  does not surface newest- or highest-priority-first), only stable and reproducible — and the truncation
-  itself degrades the `inbox` source with `{served, absent_total}` counts — capped-but-visible, never
-  silent truncation. The next reconcile folds the whole set back into the index, so the cap only bites
-  during a sustained outage. The overlay is also **time-budgeted** — the cap bounds read COUNT, not
-  TIME, and slow per-doc reads (each running toward the transport timeout) must not starve a surface
-  read or a watcher tick: `COORD_OVERLAY_BUDGET` (default 10s) opens at overlay start and is checked
-  after each read; on breach the overlay stops reading, serves everything read so far plus the index
-  rows, and degrades the `inbox` source with `served k of n` counts (when both the budget and the cap
-  trip, the budget reason wins — it is what actually stopped the read). A fresh team (no summaries yet)
-  is unchanged — the overlay only runs once an index exists.
+- **Views never lie past the current read — the index-freshness invariant.** Two mechanisms keep
+  `status`/`board`/`inbox` honest between heartbeats, so a same-minute close or a between-tick directive
+  can't leave a surface stale:
+  - **Same-minute-touched docs are reparsed, not reused.** Because the store `file list` mtime is
+    minute-granular, reconcile reuses a prior summaries row only when the doc is unchanged by mtime AND
+    byte size AND its mtime-minute is provably closed before the last reconcile read — so a doc touched
+    twice in one clock-minute is reparsed, never trusted stale. (The honest narrow guarantee; not a
+    general sub-minute exactness claim.)
+  - **A freshness overlay surfaces new docs THIS read.** Every summaries-index fold (`inbox`, `listen`,
+    `briefing`, `needs-me`, `board`, `status`) lists the task dir once and unions in any doc written
+    since the last reconcile, so a directive delivered between heartbeats surfaces now, not a
+    reconcile-period later. It is bounded (`COORD_OVERLAY_CAP` reads, default 16; `COORD_OVERLAY_BUDGET`
+    time, default 10s) and **degrades the `inbox` source visibly** when capped, budget-breached, or a
+    listed doc is unreadable — capped-but-visible, never silent truncation. A fresh team (no index yet)
+    is unchanged.
+
+  Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
+  [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and
+  [`packages/coord-engine`](packages/coord-engine/README.md).
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
-  against a per-agent state file — new inbox directives **plus directives routed to a role you hold a
-  fresh lease on** (a strict SUPERSET of the `inbox` fold; role holders are resolved per tick, only for
-  role-shaped assignees on unseen directives, so a lease handoff re-routes the very next tick and the id
-  is the directive slug regardless of route — a new holder sees it iff it's unseen in THEIR state), new
-  **responses to directives you own** (the reply leg `respond` writes but nothing used to surface), and
-  new **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
-  bounded: one review-root listing per tick, requester cached; a `.settled` review first emits its
-  unseen verdicts plus one terminal `SETTLED <slug>: APPROVED` line, then is dropped so it is never
-  listed again — the settling tick is the standard single-reviewer flow, so the final verdict always
-  emits). **Role-expansion asymmetry (deliberate — know which verb expands what):** `listen` expands
-  role-held DIRECTIVES; `needs-me`/`briefing` expand roles for pending REVIEWS only (a review whose
-  `pending_required` names a role you hold); `inbox` and briefing's inbox section expand nothing (agent
-  id and `*` only). The verdicts source also classifies **dir-only review slugs** (a `<slug>/` dir with no
-  `<slug>.md` doc) by a **tombstone three-way** (one verdicts listing apiece, so zero extra ops):
-  a dir with real verdict `.md` shards is an **orphan** — one cached `ORPHAN <slug>` event / a
-  `review-orphan` row every `needs-me`/`briefing` pass, visibility only (repair is a human/maintainer
-  action, never auto-delete); an **empty** dir (no shards, or only a stale `.settled` marker whose doc
-  is gone) is a soft-delete **tombstone** carrying zero information — silently skipped by the fold,
-  listen, and `[?]`/orphan emission (an orphan row here is the wrong ontology, not a pending
-  obligation); a verdicts listing that **raises** is **unknown** — fail closed and surface it visibly
-  (`review-orphan-degraded` / a degraded `verdicts` source), never assume tombstone on transport
-  failure. Classification is budgeted everywhere it runs — the dir-only set is permanent and growing
-  (soft deletes), unlike the my-unsettled-slugs set bounding the source's other listings: in the fold
-  it runs under a reserved half of the review-fold budget (a visibility-only pass must never starve
-  the load-bearing doc scan; on breach the remaining dirs emit one aggregate `review-orphan-degraded
-  {unclassified: k}` row and the doc scan proceeds on the reserved remainder), and in `listen` under
-  a per-tick cap (`COORD_LISTEN_CLASSIFY_BUDGET`, default 10s; on exhaustion the `verdicts` source
-  degrades, nothing is cached for unvisited dirs, and the next tick retries). `review status <slug>`
-  on a tombstone stays rc 1 but says *tombstone (archived/deleted
-  review) — no doc, no verdicts* instead of the generic "unknown, retry" (a retry never resurrects a
-  gone doc). One
-  event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`), `--json` for
-  one object per line; a quiet tick prints NOTHING
-  (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
-  the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** —
-  the `inbox` (summaries index), `responses` (responses subtree), `orphans` (a response whose owning
-  directive won't resolve), `verdicts` (review root / review doc / verdict shard unreadable), and `roles`
-  (a role-lease listing unreadable while resolving role-routed directives — you may be missing role
-  work; the engine never reads a failed lease listing as "no holders", see `roles status` rc 1) streaks
-  are independent, so a permanent orphan can't pin the flag and silence a fresh transport outage. `--once` **always exits 0** (a tick never fails the schedule; no output means
-  nothing new, not an error) — run it on a scheduler, or run bare for a poll loop (`--interval`,
-  SIGINT-clean). Every send verb arms you: `tell`/`broadcast`/`remind` print `replies: coord-engine listen
-  <team> --agent <sender>` and `review request` prints `await verdicts: …` (both only when the sender
-  identity is known — `--from` or `FULCRA_COORD_AGENT`, never the bare host tag), and `respond` confirms
-  `the owner's listen surfaces it`. The launchd/cron listener, live sessions, Codex, and headless all
-  delegate to this one verb (see [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)).
+  against a per-agent state file — new **inbox directives plus directives routed to a role you hold a
+  fresh lease on** (a strict superset of the `inbox` fold; a lease handoff re-routes the very next tick),
+  new **responses to directives you own** (the reply leg of `respond`), and new **verdicts on reviews you
+  requested** (the await leg of `review request`, including the terminal `SETTLED <slug>` line). One event
+  line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`; `--json` = one object per line);
+  a quiet tick prints NOTHING. It never advances state over an unread tick (a failed read re-surfaces the
+  pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** across
+  five independent sources (`inbox`, `responses`, `orphans`, `verdicts`, `roles`) — so a permanent orphan
+  can't pin the flag and silence a fresh outage. `--once` **always exits 0** (no output = nothing new, not
+  an error) — run it on a scheduler, or bare for a poll loop (`--interval`, SIGINT-clean). Every send verb
+  arms you with the exact `listen` line to run for replies. The deeper mechanics — role-expansion
+  asymmetry (which verb expands roles for directives vs reviews), the orphan/tombstone/unknown
+  classification of dir-only review slugs, and the classify budgets (`COORD_LISTEN_CLASSIFY_BUDGET`) —
+  live in [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md), the one skill the
+  launchd/cron listener, live sessions, Codex, and headless all delegate to. (`review status` on a
+  tombstone slug is terminal rc 1 — see [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md).)
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

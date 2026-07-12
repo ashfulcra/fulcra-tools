@@ -1,5 +1,14 @@
 # fulcra-coord
 
+> **⚠️ DEPRECATED — see [`DEPRECATED.md`](DEPRECATED.md).** This is the
+> **first-generation** coordination bus, now **in sunset** and superseded by
+> **coord**: [`packages/coord-engine`](../coord-engine/README.md) (the
+> `coord-engine` CLI) + the [`skills/fulcra-agent-*`](../../skills) skills.
+> **Do not build anything new on `fulcra-coord`** — point new coordination work
+> at coord-engine. This package is retained for provenance and the live
+> `annotations.py` carve-out only; the value-prop and command reference below
+> document the legacy bus for existing deployments, not a supported product.
+
 **Shared agent coordination layer using Fulcra Files as a coordination bus.**
 
 Multiple independent agents — local Claude Code sessions, cloud agents, CI jobs, OpenClaw, Codex — coordinate durable work through Fulcra Files without shared memory, direct calls, or a central broker.

@@ -70,8 +70,9 @@ open-source CLI; not a secret).
 
 ## File library (tiers 1 & 2) — read AND write
 
-Versioned, path-addressed user file store. This is what the fulcra-coord bus
-runs on, so it is battle-tested at load.
+Versioned, path-addressed user file store. This is what the **coord** bus
+(`coord-engine`, and the first-generation `fulcra-coord` before it) runs on, so it
+is battle-tested at load.
 
 - **Tier 1:** `fulcra file list|stat|download|upload|delete <path>`
   (`stat` shows version history; deleted files restorable via lib
@@ -176,8 +177,9 @@ record-write/delete lib method, only definition + tag management. There are now
 
 Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list`
 (lib: `create_tag`/`create_tags`/`delete_tag`/`get_tag_by_name`/`get_tag_by_id`/
-`tags`). Tier 2: `GET|POST /user/v1alpha1/tag`; lookup `GET /tag/id/{id}` or
-`GET /tag/name/{name}`; delete `DELETE /tag/id/{id}`.
+`tags`). Tier 2: `GET|POST /user/v1alpha1/tag`; lookup
+`GET /user/v1alpha1/tag/id/{id}` or `GET /user/v1alpha1/tag/name/{name}`; delete
+`DELETE /user/v1alpha1/tag/id/{id}`.
 
 ## Data queries (read-side, tiers 1 & 2)
 

@@ -1,5 +1,10 @@
 """fulcra-coord — shared agent coordination layer using Fulcra Files as a bus.
 
+DEPRECATED (except annotations.py): this is the first-generation coordination bus,
+in sunset and superseded by coord-engine (packages/coord-engine) + the
+skills/fulcra-agent-* skills. Do not build new coordination features here; only
+``annotations.py`` remains live. See DEPRECATED.md.
+
 Remote root: configurable via FULCRA_COORD_REMOTE_ROOT (default: /coordination)
 Cache root:  ${XDG_CACHE_HOME:-~/.cache}/fulcra-coord/
 CLI:         FULCRA_CLI_COMMAND (default: fulcra-api or uv tool run fulcra-api)

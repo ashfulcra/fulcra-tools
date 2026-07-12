@@ -322,10 +322,10 @@ def render_resume_brief(checkpoint: ContinuityCheckpoint) -> str:
 def default_demo_checkpoint() -> ContinuityCheckpoint:
     return make_checkpoint(
         task_id="TASK-demo-context-cliff-rescue",
-        title="Migrate daily check-ins onto fulcra-coord",
+        title="Migrate daily check-ins onto coord-engine",
         objective=(
             "Move a spreadsheet-backed daily check-in parser into a low-noise "
-            "fulcra-coord lifecycle flow without losing task state during handoff."
+            "coord-engine task lifecycle without losing task state during handoff."
         ),
         owner_agent="openclaw:discord:main-comms",
         workstream_id="openclaw:discord:main-comms",
@@ -345,7 +345,7 @@ def default_demo_checkpoint() -> ContinuityCheckpoint:
             "Checkpoint before compaction with decisions, artifacts, and next actions.",
         ],
         artifacts=[
-            Artifact(path="packages/fulcra-coord/README.md", note="coordination CLI behavior"),
+            Artifact(path="packages/coord-engine/README.md", note="coordination CLI behavior"),
             Artifact(path="memory/2026-06-06.md", note="operator request trail"),
         ],
         open_questions=[
@@ -354,7 +354,7 @@ def default_demo_checkpoint() -> ContinuityCheckpoint:
         ],
         next_actions=[
             "Find the current spreadsheet parser entry point.",
-            "Map parser output fields to fulcra-coord start/update/done lifecycle fields.",
+            "Map parser output fields to coord-engine task create/update/done lifecycle fields.",
             "Run one dry-run migration and verify no Discord broadcast noise.",
         ],
         memory_writes=[
@@ -364,7 +364,7 @@ def default_demo_checkpoint() -> ContinuityCheckpoint:
                 ttl="90d",
             ),
         ],
-        tags=["demo", "context-cliff-rescue", "fulcra-coord"],
+        tags=["demo", "context-cliff-rescue", "coord-engine"],
     )
 
 

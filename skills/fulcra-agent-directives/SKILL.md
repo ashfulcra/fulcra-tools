@@ -45,7 +45,12 @@ handoff   <team> <task> --to <agent> [--checkpoint REF] [-n next]   # ATOMIC: on
 inbox     <team> [--agent X] [--json]             # open directives for X, minus X's acks
 inbox     <team> --agent X --ack <slug>           # ack: hides it for X, stops re-notify
 respond   <team> <slug> --outcome TEXT [-e evidence]   # record a response + close the loop
+threads   <team> --for <principal> [--json]       # FOLD: dropped work-in-progress for a principal
 ```
+
+`threads` is a read-only **fold**, not a directive — it surfaces started-then-silent /
+blocked-on-principal / intent-never-started items the intent-capture doctrine leans on.
+Flags, modes, windows, and the `threads-degraded` row: see the [CLI reference](references/directives-cli.md).
 
 ## How the deterministic parts work
 - **Inbox fold** (engine): open tasks assigned to you or `*`, minus your acks

@@ -1,5 +1,13 @@
 # fulcra-coord Reconcile Performance Implementation Plan
 
+> **📎 HISTORICAL / ARCHIVED (2026-06-22).** This is an implementation plan for the
+> **deprecated first-generation `fulcra-coord`** bus, retained for provenance. It is
+> **not current work** and its `fulcra-coord` commands are legacy. Current
+> coordination lives in **coord**:
+> [`packages/coord-engine`](../../packages/coord-engine/README.md) +
+> [`skills/fulcra-agent-*`](../../skills). Do not execute this plan against a live
+> system; read it only as design history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bring `fulcra-coord reconcile` back under its default 90s deadline at steady-state task counts so the launchd heartbeat completes every pass without a budget bump.
