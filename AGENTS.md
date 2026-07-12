@@ -313,6 +313,33 @@ it (not on PyPI).
   (see [Fulcra platform surface](#fulcra-platform-surface--records)). Setup:
   [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 
+## Operator knowledge: vault + prefs
+
+Long-running work with the operator accumulates knowledge about them. Store it
+on Fulcra **the turn it is stated** (the same capture doctrine that applies to
+intents), split by kind:
+
+- **Facts about the operator's world** — people, companies, places, pets,
+  routines, the semantics of their Fulcra data ("a hike on X road is always a
+  dog walk") — go in **[`fulcra-vault`](packages/fulcra-vault/README.md)**: a
+  markdown knowledge vault in Fulcra Files (live today; it also hosts the
+  meeting CRM). Write an owned section under your agent id, add a log line,
+  `reindex`; give entities their own wikilink-able notes. The CLI works from
+  any authed host.
+- **Preferences** — how the operator wants to be served: tone, format, defaults,
+  per-platform overrides — are **[`fulcra-prefs`](packages/fulcra-prefs/README.md)**
+  signals (typed, decaying, confidence-weighted, deterministically compiled).
+  If `fulcra-prefs capture` fails (the layer is alpha), do NOT drop the signal:
+  store the statement as a vault note and queue the signal keys there for
+  capture once the layer is up.
+- **Retrieval, today**: both layers inject at session start — vault
+  `install-hooks` loads `HOT.md`, prefs compiles per-platform docs into the
+  boot context. Beyond the hot set, the convention is judgment-based: **when a
+  person, company, place, or project is named in your work, consult the vault**
+  (`fulcra-vault read MAP.md`, `backlinks`) before asking the operator or
+  guessing. Deeper retrieval (search/MCP) is future work — storage now is what
+  makes it possible later.
+
 ## Working tree
 
 Prefer a **per-agent git worktree**, not a shared checkout — concurrent
