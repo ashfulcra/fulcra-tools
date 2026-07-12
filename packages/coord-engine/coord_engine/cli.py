@@ -3202,6 +3202,15 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
                      f"role {role}: VACANT -- dispatch will wait for a holder")
         result["role"] = {"role": role, "account": b["account"],
                           "fresh_holders": holders if ok else None, "fold_ok": ok}
+        if not ok or not holders:
+            # FAIL CLOSED (codex P1): a VACANT/UNKNOWN role returns NO candidates
+            # — a JSON consumer must never dispatch into a void off rank 1.
+            result["candidates"] = []
+            result["reason"] = f"role {role} is not HELD ({role_note})"
+            print(f"no candidates: {result['reason']}")
+            if args.json:
+                print(json.dumps(result, indent=2))
+            return 1
     reason = result.get("reason")
     unknown_need = bool(reason) and reason.startswith("unknown need:")
     if args.json:
@@ -3260,9 +3269,6 @@ def cmd_atc_harvest(args: argparse.Namespace, transport: Any) -> int:
     unattributed: list[str] = []
     for base, rounds in sorted(atc.review_families(slugs).items()):
         shard_name = f"harvest-{base}.md"
-        if shard_name in already:
-            skipped += 1
-            continue
         latest = rounds[-1]
         # settled marker is the terminal-APPROVED signal; unsettled families wait.
         names = {e.get("name") for e in
@@ -3276,9 +3282,20 @@ def cmd_atc_harvest(args: argparse.Namespace, transport: Any) -> int:
         if not b:
             unattributed.append(f"{base} (requested_by={author or '?'})")
             continue
+        outcome = atc.family_outcome(rounds)
+        if shard_name in already:
+            # CONVERGENT, not write-once: a later settled round must flip a
+            # previously-harvested clean family to rework. Rewrite only when the
+            # derived outcome/round-count changed; unchanged families skip.
+            prior = okf.parse_frontmatter(
+                transport.read(_atc_usage_prefix(args.team) + shard_name)) or {}
+            if (prior.get("outcome") == outcome
+                    and str(prior.get("rounds")) == str(len(rounds))):
+                skipped += 1
+                continue
         fm = {"schema": "atc-usage/v1", "agent": "atc-harvest", "ts": _iso(_now()),
               "account": b["account"], "tier": b["tier"], "units": 0,
-              "throttled": False, "outcome": atc.family_outcome(rounds),
+              "throttled": False, "outcome": outcome, "rounds": len(rounds),
               "harvest_source": base}
         if b.get("model"):
             fm["model"] = b["model"]

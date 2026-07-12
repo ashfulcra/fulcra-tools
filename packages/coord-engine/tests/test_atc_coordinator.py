@@ -141,8 +141,25 @@ def test_route_for_role_vacant_flags_the_void(capsys):
     t.put("team/r/roles/codex-reviewer.md",
           "---\ntype: Role\npolicy: shared\nsla_hours: 24\n---\n")
     assert cli.main(["route", "r", "--needs", "code",
-                     "--for-role", "codex-reviewer"], transport=t) == 0
-    assert "VACANT" in capsys.readouterr().out
+                     "--for-role", "codex-reviewer"], transport=t) == 1
+    out = capsys.readouterr().out
+    assert "VACANT" in out and "no candidates" in out
+
+
+def test_harvest_converges_when_a_later_round_settles(capsys):
+    t = FakeTransport()
+    t.put("team/r/atc/bindings.json", BINDINGS)
+    _seed_settled_review(t, "pr-1", "codex-reviewer")
+    assert cli.main(["atc", "harvest", "r"], transport=t) == 0
+    assert "outcome: clean" in t.store["team/r/atc/usage/harvest-pr-1.md"]
+    _seed_settled_review(t, "pr-1-r2", "codex-reviewer")
+    assert cli.main(["atc", "harvest", "r"], transport=t) == 0
+    assert "outcome: rework" in t.store["team/r/atc/usage/harvest-pr-1.md"]
+
+
+def test_review_families_sort_rounds_numerically():
+    fams = atc.review_families(["pr-1", "pr-1-r10", "pr-1-r2"])
+    assert fams["pr-1"] == ["pr-1", "pr-1-r2", "pr-1-r10"]
 
 
 def test_route_for_role_without_binding_exits_2(capsys):

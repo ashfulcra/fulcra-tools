@@ -553,7 +553,11 @@ def review_families(slugs: list[str]) -> dict[str, list[str]]:
         m = re.match(r"^(.*)-r(\d+)$", s)
         base = m.group(1) if m and m.group(1) in slugs else s
         fams.setdefault(base, []).append(s)
-    return fams
+    def _round_no(slug: str, base: str) -> int:
+        m = re.match(re.escape(base) + r"-r(\d+)$", slug)
+        return int(m.group(1)) if m else 0   # base itself sorts first
+    return {b: sorted(rs, key=lambda r: _round_no(r, b))
+            for b, rs in fams.items()}
 
 
 def family_outcome(rounds: list[str]) -> str:
