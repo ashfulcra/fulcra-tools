@@ -1,6 +1,6 @@
 ---
 name: fulcra-agent-review-cli
-description: "Exact commands for the review handshake: the atomic request verb, the verdict file, and the coord-engine tally."
+description: "Exact commands for the review handshake: the request verb, the verdict file, and the coord-engine tally."
 ---
 
 # Fulcra Agent Review — CLI reference
@@ -11,31 +11,40 @@ Leaving a verdict is a single file at the path the request echoes; the tally
 (`review status`) is deterministic. See [`SKILL.md`](../SKILL.md) for when/why;
 this file is the exact commands.
 
-## Request review (author) — one atomic verb
+## Request review (author) — one command
 ```bash
 coord-engine review request <team> <slug-or-title> \
     --of <artifact> --reviewer <role> [--reviewer <role> …] [--from <me>]
 ```
 - `<slug-or-title>` slugs exactly as a `tell` title does (an already-slug-like arg
-  round-trips unchanged). `<artifact>` is an opaque ref — PR#/branch/commit SHA/URL
-  or a non-code deliverable — so the handshake works with any forge or none.
+  round-trips unchanged) — the result is the **`<review-slug>`** you use in
+  `review status` and the verdict path. `<artifact>` is an opaque ref —
+  PR#/branch/commit SHA/URL or a non-code deliverable — so the handshake works with
+  any forge or none.
 - Name **roles**, not identities (`--reviewer reviewer`, not a session id), so
   `needs-me`/`briefing` resolve the fresh lease holders (role-routing doctrine).
 
-**One command does BOTH, atomically.** It writes `review/<slug>.md` at the exact
-path the tally reads AND delivers one directive per required reviewer through the
-canonical hash-slug inbox path — so a verb-opened review fires each reviewer's
-`inbox`/`listen`. The request doc itself IS the durable obligation: it lands in
-every required reviewer's `needs-me` as a `pending_required` marker and persists
-there until that reviewer's verdict file exists. Never hand-write the doc, and
-never notify a reviewer with a bare `tell` — an acked directive leaves no durable
-marker, so a dropped review vanishes silently and the merge gates on nothing (the
-exact failure this verb was built to kill).
+**One command; durable-first; idempotently recoverable — not a single atomic
+write.** The verb does two things in order: (1) it writes the durable review doc
+`review/<review-slug>.md` FIRST — that doc IS the obligation, it lands in every
+required reviewer's `needs-me` as a `pending_required` marker and persists there
+until that reviewer's verdict file exists, and the tally reads it; then (2) it
+delivers one directive per required reviewer through the canonical hash-slug inbox
+path, so a verb-opened review fires each reviewer's `inbox`/`listen`. The two are
+**not** one atomic operation: a partial notification failure is an expected,
+loudly-reported **rc 1** that idempotent re-request recovers (below). The doc
+landing first is exactly what makes recovery safe — the obligation exists the
+moment the doc lands, whether or not every directive got out. Never hand-write the
+doc, and never notify a reviewer with a bare `tell` — an acked directive leaves no
+durable marker, so a dropped review vanishes silently and the merge gates on
+nothing (the exact failure this verb was built to kill).
 
-The command echoes, per required reviewer, the verdict path to fill:
+The command echoes, per required reviewer, the verdict path to fill (it prints the
+`<review-slug>` and verdict paths — NOT the inbox directive id; for that, see the
+ack step below):
 ```
-review <slug> requested (required: reviewer, security)
-  reviewer reviewer -> file verdict at team/<team>/review/<slug>/verdicts/reviewer.md
+review <review-slug> requested (required: reviewer, security)
+  reviewer reviewer -> file verdict at team/<team>/review/<review-slug>/verdicts/reviewer.md
 await verdicts: coord-engine listen <team> --agent <me>
 ```
 
@@ -52,36 +61,51 @@ await verdicts: coord-engine listen <team> --agent <me>
 - **Unreadable doc** — a present-but-unreadable request doc fails closed (rc 1,
   never overwritten).
 
-## Leave a verdict (reviewer) — one file, then verify, then ack
-Write your verdict at the **slug-exact** path the request echoed, named after the
-identity the `required:` list uses for you (your **role**, not a session id):
-```bash
-# team/<team>/review/<slug>/verdicts/<you>.md  — type: Verdict, verdict: approve|changes
-uv tool run fulcra-api file upload /tmp/verdict.md \
-  "team/<team>/review/<slug>/verdicts/<you>.md"
-```
-```yaml
----
-type: Verdict
-reviewer: <you>
-verdict: approve            # approve | changes
----
-Notes / requested changes.
-```
-Then **verify** the fold reflects it and **only then ack** (if a directive rode
-with the request):
-```bash
-coord-engine review status <team> <slug>          # you must no longer be in pending_required
-coord-engine inbox <team> --agent <you> --ack <slug>
-```
-Never ack without a verdict file, or against a different slug's status. To change
+## Leave a verdict (reviewer) — the verdict FILE discharges it; ack is inbox hygiene
+**The verdict file is what clears the obligation** — the tally folds
+presence-of-file, so writing it (and only it) is what removes you from
+`pending_required`. Acking is separate: it just clears the directive from your
+`inbox`/re-notify, and it does **not** substitute for the verdict.
+
+1. **Write your verdict** at the **slug-exact** path the request echoed, named after
+   the identity the `required:` list uses for you (your **role**, not a session id):
+   ```bash
+   # team/<team>/review/<review-slug>/verdicts/<you>.md — type: Verdict, verdict: approve|changes
+   uv tool run fulcra-api file upload /tmp/verdict.md \
+     "team/<team>/review/<review-slug>/verdicts/<you>.md"
+   ```
+   ```yaml
+   ---
+   type: Verdict
+   reviewer: <you>
+   verdict: approve            # approve | changes
+   ---
+   Notes / requested changes.
+   ```
+2. **Verify** the fold reflects it — you must no longer be in `pending_required`:
+   ```bash
+   coord-engine review status <team> <review-slug>
+   ```
+3. **Ack the DIRECTIVE (inbox hygiene) — using the directive id, NOT the
+   `<review-slug>`.** The review-request directive has its own slug,
+   **`review-request-<review-slug>-<hash>`** (`<directive-slug>`), distinct from
+   `<review-slug>`. Acking `<review-slug>` writes an ack shard the directive never
+   matches, so the directive keeps re-notifying and looks unpicked-up. Read the
+   exact id from your inbox — the text line shows the title `REVIEW REQUEST:
+   <review-slug>`, so use `--json` to copy the row's `name`:
+   ```bash
+   coord-engine inbox <team> --agent <you> --json     # find the REVIEW REQUEST row; copy its "name"
+   coord-engine inbox <team> --agent <you> --ack <directive-slug>   # e.g. review-request-pr-42-1a2b3c4d
+   ```
+
+Never ack without a verdict file, or against a different review's status. To change
 your mind, re-upload your verdict file (last wins; the File Store keeps history).
 **Fail-closed:** a `changes` verdict keeps blocking until *that reviewer* re-uploads
 `approve` — pushing a fix does not clear it.
 
 ## Check state (deterministic — do not tally by hand)
 ```bash
-coord-engine review status <team> <slug> --json
+coord-engine review status <team> <review-slug> --json
 # {state: APPROVED|CHANGES|PENDING, approvals:[...], changes:[...], required:[...], pending_required:[...]}
 ```
 - **CHANGES** — any reviewer requested changes (a single blocker dominates).
@@ -104,14 +128,14 @@ tally every call, so a stale marker self-heals on direct query.
   `required` list a lone approval would tally as a clean APPROVED and durably hide
   a pending review).
 - `... tombstone (archived/deleted review) — no doc, no verdicts` — the slug is a
-  soft-delete tombstone (a `<slug>/` dir with no `<slug>.md`). **Terminal**: a
-  retry never resurrects it.
+  soft-delete tombstone (a `<review-slug>/` dir with no `<review-slug>.md`).
+  **Terminal**: a retry never resurrects it.
 
 The `, retry` suffix means retryable; a `tombstone` mention means terminal — the
 convention is load-bearing, so match on it, not on the whole string.
 
 **Nudge only against a live obligation.** Before nudging a reviewer, re-run
-`review status <team> <slug> --json` on the exact slug and nudge only if
+`review status <team> <review-slug> --json` on the exact review slug and nudge only if
 `pending_required` still names them — a verdict may have landed since you looked,
 and a stale nudge trains reviewers to ignore the real ones. rc 1 is *retry*, not
 "no longer pending" — never suppress a legitimate nudge on an unreadable tally.

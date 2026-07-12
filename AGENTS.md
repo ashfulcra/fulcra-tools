@@ -113,11 +113,12 @@ it (not on PyPI).
   `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
   verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`.
-  The request is **atomic**: with the doc landed it also delivers one directive
+  The request is **durable-first, not atomic**: the review doc lands FIRST (that
+  doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened
   review fires each reviewer's inbox/`listen` — never hand-send a review tell),
   and a partial notification failure is reported loud (rc 1) naming exactly which
-  reviewers were and were not notified — and is **retryable**: re-running the SAME
+  reviewers were and were not notified — and is **idempotently recoverable**: re-running the SAME
   request (same `of`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
   only the reviewers a prior partial failure dropped (the doc is left byte-unchanged,
   already-delivered directives dedupe rc 0), so no reviewer is stranded by the
@@ -129,9 +130,12 @@ it (not on PyPI).
   SHA, URL, or a non-code deliverable), so the handshake works with any forge
   or none. A GitHub-only "Approve"/comment does NOT count — co-located agents
   (and Codex) often share one GitHub account, so a forge verdict can no-op; the
-  bus verdict, keyed by agent identity, is the source of truth. **Verdict
-  before ack, on the exact slug — never a bare ack.** Full rules and per-harness
-  wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
+  bus verdict, keyed by agent identity, is the source of truth. **The verdict
+  FILE discharges the obligation** (write it at the review slug's verdict path,
+  then verify `review status` clears you); the ack is inbox hygiene and targets
+  the review-request *directive* by its inbox id
+  (`review-request-<review-slug>-<hash>`), never the bare review slug. Full rules
+  and per-harness wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
   and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 - **Park a role, don't mute the sweep by hand.** Deliberately leaving a role unattended (a reviewer on leave, seasonal on-call) is an ENGINE fact, not an agent-side convention: set `dormant_until: <ISO>` in `team/<team>/roles/<role>.md`, and while that date is future the mechanical `escalate` sweep suppresses the role's vacancy escalation on every heartbeat host and `roles status` reports `DORMANT (until <ts>)`; escalation resumes automatically past the date, a live lease still shows HELD, and a garbage `dormant_until` fails OPEN (noted on stderr, escalation still fires) so a typo can't silently mute a role — see [`fulcra-agent-roles`](skills/fulcra-agent-roles/SKILL.md).
 - **Engine surfaces a watcher must honor.** Two invariants a watcher lives by:
