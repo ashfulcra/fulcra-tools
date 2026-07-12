@@ -168,3 +168,15 @@ def test_route_for_role_without_binding_exits_2(capsys):
     assert cli.main(["route", "r", "--needs", "code",
                      "--for-role", "ghost-role"], transport=t) == 2
     assert "no binding for role" in capsys.readouterr().err
+
+
+def test_route_for_role_vacant_json_is_pure_json(capsys):
+    t = FakeTransport()
+    t.put("team/r/atc/accounts.json", ACCOUNTS)
+    t.put("team/r/atc/bindings.json", BINDINGS)
+    t.put("team/r/roles/codex-reviewer.md",
+          "---\ntype: Role\npolicy: shared\nsla_hours: 24\n---\n")
+    assert cli.main(["route", "r", "--needs", "code",
+                     "--for-role", "codex-reviewer", "--json"], transport=t) == 1
+    d = json.loads(capsys.readouterr().out)   # must parse as ONE document
+    assert d["candidates"] == [] and "not HELD" in d["reason"]

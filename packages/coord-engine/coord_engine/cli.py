@@ -3207,9 +3207,10 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
             # — a JSON consumer must never dispatch into a void off rank 1.
             result["candidates"] = []
             result["reason"] = f"role {role} is not HELD ({role_note})"
-            print(f"no candidates: {result['reason']}")
             if args.json:
                 print(json.dumps(result, indent=2))
+            else:
+                print(f"no candidates: {result['reason']}")
             return 1
     reason = result.get("reason")
     unknown_need = bool(reason) and reason.startswith("unknown need:")
