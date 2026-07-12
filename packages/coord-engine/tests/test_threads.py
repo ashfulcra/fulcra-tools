@@ -522,6 +522,42 @@ def test_verb_terminal_status_excluded(capsys):
     assert [o for o in _json_objs(out) if o.get("type") != "threads-degraded"] == []
 
 
+def test_verb_terminal_directive_stale_summary_excluded(capsys):
+    # (1c) THE LIVE LEAK (`acceptance-ping`, first day of the threads feature): a
+    # kind:directive OWNED by ash (assignee an agent), RESPONDED and status:done in
+    # its own doc since 7/02 — yet surfaced as a mode-1 "started-then-silent 9.7d"
+    # via the item-timestamp fallback. Root cause (suspect 3): the SUMMARIES row was
+    # STALE 'proposed' because the close (`respond`) landed in the SAME mtime-minute
+    # as the last indexed write, so reconcile's minute-resolution incremental reuse
+    # (reconcile.py: prior.mtime == entry.mtime -> reuse prior row) NEVER re-read the
+    # now-done doc — and the adapter read `status` from that stale row, not the doc.
+    # A done task can NEVER be a dropped thread: the adapter must source the
+    # authoritative doc status and the fold must refuse the terminal row.
+    #
+    # Faithful repro: FakeTransport.write() does NOT bump mtime, so `respond`'s
+    # rewrite-to-done keeps the doc's mtime-minute — exactly the same-minute close
+    # that defeats reuse, so the second reconcile serves the stale 'proposed' row.
+    t = FakeTransport()
+    _put_task(t, "acceptance-ping", title="Acceptance ping", owner="ash",
+              assignee="claude-code:Ashs-MBP-Work:fulcra-tools",
+              status="proposed", tags=["kind:directive"], timestamp=_ancient())
+    _reconcile(t)
+    assert cli.main(["respond", "x", "acceptance-ping", "--outcome", "done",
+                     "--evidence", "acceptance recorded", "--agent",
+                     "claude-code:Ashs-MBP-Work:fulcra-tools"], transport=t) == 0
+    _reconcile(t)  # reuses the STALE 'proposed' row (mtime-minute unchanged)
+    # Precondition: the leak SHAPE is real — doc done, summaries row stale-proposed.
+    from coord_engine import aggregate as _agg
+    agg = json.loads(t.store["team/x/_coord/summaries.json"])
+    srow = next(r for r in _agg.aggregate_rows(agg) if r.get("name") == "acceptance-ping")
+    assert srow["status"] == "proposed"           # stale index...
+    doc_fm = cli.okf.parse_frontmatter(t.store["team/x/task/acceptance-ping.md"])
+    assert doc_fm["status"] == "done"             # ...but the doc is terminal
+    rc, out = _run_threads(t, capsys)
+    assert rc == 0
+    assert [o for o in _json_objs(out) if o.get("type") != "threads-degraded"] == []
+
+
 def test_verb_text_degraded_on_stderr_list_on_stdout(capsys):
     # (2) text-mode degraded output pinned: the notice goes to STDERR, stdout
     # stays the clean thread list (here the empty-state line).
