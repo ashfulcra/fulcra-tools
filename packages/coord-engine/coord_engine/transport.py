@@ -18,6 +18,8 @@ import subprocess
 import tempfile
 from typing import Any, Optional
 
+from . import config
+
 DEFAULT_COMMAND = ("fulcra-api",)
 
 #: Per-op HARD upper bound (seconds). Overridable via ``COORD_TRANSPORT_TIMEOUT``
@@ -32,20 +34,11 @@ _TRANSPORT_GRACE = 2.0
 
 
 def _transport_timeout() -> float:
-    """Default per-op timeout, seconds. Env override ``COORD_TRANSPORT_TIMEOUT``
-    — same parse-hardening as the fold budgets: unparseable, non-positive, NaN,
-    or inf falls back to the default (a bad env value must never disable the
-    bound or make an op hang). The constructor arg still takes precedence."""
-    raw = os.environ.get("COORD_TRANSPORT_TIMEOUT")
-    if raw is None:
-        return DEFAULT_TRANSPORT_TIMEOUT
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_TRANSPORT_TIMEOUT
-    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
-        return DEFAULT_TRANSPORT_TIMEOUT
-    return v
+    """Default per-op timeout, seconds. Env ``COORD_TRANSPORT_TIMEOUT`` (positive-
+    finite float, else the default — see :mod:`coord_engine.config`). The
+    constructor arg still takes precedence: ``FulcraFileTransport.__init__`` uses
+    this only when no explicit ``timeout=`` is passed."""
+    return config.env_float("COORD_TRANSPORT_TIMEOUT", DEFAULT_TRANSPORT_TIMEOUT)
 
 
 def _kill_process_group(proc: "subprocess.Popen") -> None:

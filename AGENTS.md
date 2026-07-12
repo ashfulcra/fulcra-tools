@@ -161,6 +161,9 @@ it (not on PyPI).
   group and is SIGKILLed whole on timeout (a hung child can't leak a pipe-holding tree past the bound).
   The per-op bound is `COORD_TRANSPORT_TIMEOUT` (float seconds, default 30; unparseable/≤0/NaN/inf →
   default) — **run it TIGHT on a watcher (e.g. 8s)** so the fold budgets above buy real responsiveness.
+  Every `COORD_*` tuning knob (default, unit, what it bounds), the shared positive-finite parse policy,
+  and the `FULCRA_COORD_*` legacy-prefix rule are catalogued in one place:
+  [`packages/coord-engine/README.md` → Environment / tuning](packages/coord-engine/README.md#environment--tuning).
 - **The public-read failure contract — UNKNOWN is loud, never a clean-empty.** Every aggregate-backed
   public read (`status`, `board`, `needs-me`, `search`, `inbox`, plus the `agents`/`digest`/`asks`/
   `briefing` bundles) folds the summaries index via `_load_rows_status`, whose `ok` bit is **False when
@@ -263,9 +266,11 @@ it (not on PyPI).
     `COORD_THREADS_INTENT_GRACE_HOURS`. A **terminal item (`done`/`abandoned`) is
     NEVER a dropped thread** in any mode — the fold refuses it and the adapter reads
     the authoritative status from the task doc, not the summaries index (a same-minute
-    close can leave the index stale-`proposed`). A **`threads-degraded` row** (a JSON
+    close can leave the index stale-`proposed`). The fold's aggregate read deadline is
+    `COORD_THREADS_FOLD_BUDGET` (default 30s). A **`threads-degraded` row** (a JSON
     object under `--json`; a stderr notice in text mode) means the fold saw only PART
-    of the store — sweep or wait, **never trust it as complete**. coord-boss runs
+    of the store (budget breach or an unreadable shard) — sweep or wait, **never trust
+    it as complete**. coord-boss runs
     `threads fulcra --for ash --json` in its loop and owns the curation/push call.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
   `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
