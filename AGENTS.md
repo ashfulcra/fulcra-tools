@@ -39,6 +39,14 @@ under `skills/`, each package with its own README, build, and tests.
 - **`packages/gmail`** (`fulcra-gmail`) — the local Gmail relay (rebuild of
   ArcBot's unrecoverable MVP). Multi-account, read-only (`gmail.readonly`),
   keyed by opaque `account_id` (email is metadata, never a path/key segment).
+  Auth posture: an **External** OAuth client published **unverified** (so both
+  Workspace and personal `@gmail.com` accounts can connect); `gmail.readonly`
+  is a restricted scope, so unverified = a bypassable warning + a **100-account
+  lifetime cap** until Google verification + the annual restricted-scope security
+  assessment (CASA via an empaneled assessor; cost/turnaround vary). Publishing
+  lifts the Testing-mode 7-day refresh-token expiry (tokens can still be revoked;
+  the relay re-auths on `invalid_grant`). No code depends on Internal/External —
+  that is purely a Cloud-Console consent-screen setting.
   Task 1 ships the client + OAuth account registry: `GmailClient` (Gmail
   REST v1 httpx wrapper, refresh-on-401, fail-soft `invalid_grant`) and the
   `AccountRegistry` (keychain secrets via collect's `credentials` helpers +
