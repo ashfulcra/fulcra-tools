@@ -930,7 +930,7 @@ def test_dir_classification_runs_under_the_fold_budget(capsys):
     class SlowGhostListings(CountingTransport):
         def list_dir(self, prefix):
             if "/verdicts/" in prefix and "ghost-" in prefix:
-                time.sleep(0.03)  # a degraded transport's slow dir listing
+                time.sleep(0.3)  # a degraded transport's slow dir listing
             return super().list_dir(prefix)
 
     t = SlowGhostListings()
@@ -939,7 +939,10 @@ def test_dir_classification_runs_under_the_fold_budget(capsys):
     for i in range(6):
         t.put(f"team/r/review/ghost-{i}/", "")  # six soft-delete ghosts
     capsys.readouterr()
-    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
+    # the deadline is real wall-clock: keep sleep >> reserved-half >> in-memory
+    # scan cost, or a slow CI VM blows the whole budget before the doc scan and
+    # the final assert flakes (observed on the macOS runner at 0.05s)
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.5)
     agg = [r for r in out if r.get("type") == "review-orphan-degraded"
            and r.get("unclassified")]
     assert len(agg) == 1 and agg[0]["unclassified"] >= 1, \
