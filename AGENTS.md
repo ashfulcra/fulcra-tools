@@ -222,14 +222,19 @@ it (not on PyPI).
   `listen` daemon wraps each tick in a guard: an unmodeled tick fault emits `LISTEN DEGRADED: tick
   raised …` and the daemon **continues** (one degraded tick, never a dead watcher); `--once` stays
   unguarded so a scheduled run surfaces its failure.
-- **Reconcile's incremental reuse is sub-minute-safe.** A prior summaries row is reused only when the
-  listing shows the doc unchanged by **mtime AND byte size** (size stamped on every parsed row).
-  Store `mtime` is minute-resolution, so a doc changed twice inside one clock-minute keeps an identical
-  mtime — a mtime-only reuse would never re-read the second write and the row would fossilize stale
-  forever (`status`/`board`/`inbox` then lie until an unrelated write). Size is the sub-minute change
-  signal, compared when both sides know it (a legacy row without a stamped size falls back to mtime-only
-  and re-strengthens on its next natural reparse). This is the index-side twin of the read-side
-  doc-authoritative status guard (PR #356).
+- **Reconcile's incremental reuse — same-minute-touched docs are reparsed, not reused.** The store
+  `file list` carries only size + a **minute-granular** mtime + name; the content fingerprint (the
+  `Version:` UUID) lives in per-file `file stat` (one read per doc — too expensive for a fold). So a
+  prior summaries row is reused only when the listing shows the doc unchanged by **mtime AND byte size**
+  (size stamped on every parsed row; a legacy row without a stamped size is reparsed ONCE and
+  re-stamped, never reused on mtime alone), **AND** the doc's mtime-minute is provably closed before our
+  last reconcile read. Because mtime is minute-resolution, a doc changed twice inside one clock-minute
+  keeps one mtime and a same-length second edit is invisible to mtime+size — so any doc TOUCHED in (or
+  after) the last reconcile's minute is reparsed rather than reused (`generated_at` is the anchor; absent
+  on a legacy aggregate, reuse falls back to mtime+size). This is the honest narrow guarantee — NOT a
+  general sub-minute exactness claim — and it is the index-side companion to PR #356's read-side
+  doc-authoritative status guard: without it a same-minute close leaves `status`/`board`/`inbox` lying
+  until an unrelated write.
 - **Canonical surfaces are live, not reconcile-lagged.** Every fold that reads the summaries index
   (`inbox`, `listen`, `briefing`, `needs-me`, `board`, `status`) also runs a **freshness overlay**: when
   the index is present it lists the task dir once and unions in any task/directive doc written SINCE the

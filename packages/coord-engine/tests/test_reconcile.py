@@ -146,16 +146,20 @@ def test_reconcile_is_orphan_proof():
 
 def test_reconcile_incremental_reuses_unchanged_without_download():
     t = FakeTransport()
+    body = _task("A", "active")
+    # A well-formed prior row carries a stamped `size` (the row format now includes
+    # it); an old mtime (no generated_at anchor) reuses on the mtime+size compare.
     prior = {"rows": [{"id": "a", "name": "a", "status": "active", "title": "A",
-                       "mtime": "2026-07-01 04:00PM UTC", "description": "d"}]}
+                       "mtime": "2026-07-01 04:00PM UTC", "size": f"{len(body)}B",
+                       "description": "d"}]}
     t.put("team/r/_coord/summaries.json", json.dumps(prior))
-    t.put("team/r/task/a.md", _task("A", "active"), mtime="2026-07-01 04:00PM UTC")
+    t.put("team/r/task/a.md", body, mtime="2026-07-01 04:00PM UTC")
     reads = []
     orig = t.read
     t.read = lambda p: (reads.append(p), orig(p))[1]
     res = _run(t)
     assert res["reused"] == 1 and res["parsed"] == 0
-    assert "team/r/task/a.md" not in reads  # unchanged mtime -> never downloaded
+    assert "team/r/task/a.md" not in reads  # unchanged mtime+size -> never downloaded
 
 
 def test_reconcile_reparses_when_mtime_changes():
@@ -170,26 +174,63 @@ def test_reconcile_reparses_when_mtime_changes():
     assert agg["rows"][0]["status"] == "done"
 
 
+def _reconcile_at(t, now, team="r"):
+    return reconcile.reconcile(t, team, now=now, today=now[:10], host="h")
+
+
 def test_reconcile_same_minute_double_write_not_fossilized():
-    """ENG-1-4 (out-of-band, the index-side twin of PR #356): a doc changed TWICE
-    inside one clock-minute keeps an identical minute-resolution mtime, so the
-    mtime-only incremental reuse would never re-read the second write — the
-    summaries row fossilizes stale forever and status/board/inbox lie until an
-    unrelated write. The reuse guard must detect the sub-minute change (mtime+size)
-    and re-read, so the row reflects the LATEST content."""
+    """ENG-1-4 (index-side twin of PR #356): a doc changed TWICE in one clock-minute
+    keeps an identical minute-resolution mtime; a length-CHANGING second write is
+    caught by the size compare so the row reflects the LATEST content, never the
+    fossil."""
     t = FakeTransport()
     minute = "2026-07-01 04:23PM UTC"
     t.put("team/r/task/a.md", _task("A", "proposed"), mtime=minute)
-    _run(t)  # pass 1: indexes the proposed row (new code stamps its size)
-    agg1 = json.loads(t.store["team/r/_coord/summaries.json"])
-    assert agg1["rows"][0]["status"] == "proposed"
-    # SECOND write in the SAME clock-minute: mtime string is unchanged, but the
-    # content (and therefore the listed size) differs.
-    t.put("team/r/task/a.md", _task("A", "done"), mtime=minute)
-    _run(t)  # pass 2: must NOT reuse the stale proposed row
-    agg2 = json.loads(t.store["team/r/_coord/summaries.json"])
-    assert agg2["rows"][0]["status"] == "done", \
-        "same-minute second write must be re-read, not fossilized as 'proposed'"
+    _reconcile_at(t, "2026-07-01T16:23:20Z")
+    assert json.loads(t.store["team/r/_coord/summaries.json"])["rows"][0]["status"] == "proposed"
+    t.put("team/r/task/a.md", _task("A", "done"), mtime=minute)  # different length -> size differs
+    _reconcile_at(t, "2026-07-01T16:24:05Z")
+    assert json.loads(t.store["team/r/_coord/summaries.json"])["rows"][0]["status"] == "done", \
+        "same-minute length-changing write must be re-read, not fossilized"
+
+
+def test_reconcile_same_minute_equal_length_edit_reflects_latest():
+    """Codex probe 1 (the mtime+size blind spot): a SAME-length edit in the SAME
+    clock-minute leaves mtime AND byte size identical, so mtime+size alone would
+    fossilize the stale row. The same-minute guard (mtime-minute not proven closed
+    before our last reconcile) forces a reparse — the row reflects the LATEST
+    content. `blocked`->`waiting` are both 7 chars, so the doc size is unchanged."""
+    t = FakeTransport()
+    minute = "2026-07-01 04:23PM UTC"
+    t.put("team/r/task/a.md", _task("A", "blocked"), mtime=minute)
+    _reconcile_at(t, "2026-07-01T16:23:20Z")  # pass 1 reads DURING minute 16:23
+    a1 = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert a1["rows"][0]["status"] == "blocked"
+    assert a1["rows"][0].get("size") is not None  # size stamped
+    t.put("team/r/task/a.md", _task("A", "waiting"), mtime=minute)  # SAME size, SAME minute
+    _reconcile_at(t, "2026-07-01T16:24:05Z")  # last reconcile (16:23) did not outlast minute 16:23
+    a2 = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert a2["rows"][0]["status"] == "waiting", \
+        "same-minute equal-length edit must be re-read, not fossilized as 'blocked'"
+
+
+def test_reconcile_legacy_no_size_row_reparsed_once():
+    """Codex probe 2 (HIGH-2, migration): a legacy prior row carries NO stamped
+    `size` (pre-upgrade aggregate). It must be reparsed ONCE — never reused on
+    mtime alone — so a pre-existing stale/fossilized row is healed and re-stamped
+    on the first post-upgrade reconcile, even for a same-length live edit."""
+    t = FakeTransport()
+    minute = "2026-07-01 04:23PM UTC"
+    prior = {"schema": "coord.teams.summaries.v1", "generated_at": "2026-07-01T16:20:00Z",
+             "rows": [{"id": "a", "name": "a", "status": "blocked", "title": "A",
+                       "mtime": minute, "description": ""}]}  # NO `size` -> legacy
+    t.put("team/r/_coord/summaries.json", json.dumps(prior))
+    t.put("team/r/task/a.md", _task("A", "waiting"), mtime=minute)  # live doc moved on
+    _reconcile_at(t, "2026-07-01T16:25:00Z")
+    a = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert a["rows"][0]["status"] == "waiting", \
+        "legacy no-size prior must be reparsed once, not reused stale"
+    assert a["rows"][0].get("size") is not None  # and re-stamped for next time
 
 
 def test_reconcile_unparseable_keeps_prior_row_and_warns():
