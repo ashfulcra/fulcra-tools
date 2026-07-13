@@ -93,7 +93,7 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 `uv run fulcra-collect doctor`. The coord engine installs on its own:
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.3#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.4#subdirectory=packages/coord-engine"
 ```
 
 and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
