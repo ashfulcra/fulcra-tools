@@ -22,7 +22,8 @@ so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-07/08 on
   (one element per match/version) where 0.1.35 returned a single dict. This
   silently broke a downstream consumer (fulcra-prefs, fixed 2026-07-13); any
   lib code doing `resolve_filepath(...)["id"]` breaks on 0.1.36 — take
-  `[0]["id"]` and handle the empty list.
+  `[0]["id"]`. Not-found still **raises** (`Exception("File not found in
+  Fulcra: ...")`); the method never returns an empty list.
 - **Spec composition:** `/data/v1/updates` and
   `/input/v1/file[_upload]/recent_changes` are now **published** in the
   OpenAPI (both were live-but-unpublished at the 07-08 stamp). The datashare
@@ -89,8 +90,10 @@ is battle-tested at load.
   (`stat` shows version history; **0.1.36 added `restore` as a CLI verb** —
   previously lib-only `restore_file`).
 - **Lib contract (0.1.36):** `resolve_filepath(path)` returns a **list** of
-  match dicts, not one dict — `matches[0]["id"]`, and treat `[]` as absent.
-  Code written against 0.1.35's single-dict return breaks silently.
+  match dicts, not one dict — `matches[0]["id"]`. A path with no match
+  **raises** `Exception("File not found in Fulcra: <path>")` rather than
+  returning `[]`, so absent-handling means catching that exception. Code
+  written against 0.1.35's single-dict return breaks silently.
 - **Tier 2 (REST, all on `https://api.fulcradynamics.com`):** the file API is
   now **published in the OpenAPI spec** (it wasn't before — don't be surprised
   it's there). Two identical path prefixes exist: **`/input/v1/file`** (the
