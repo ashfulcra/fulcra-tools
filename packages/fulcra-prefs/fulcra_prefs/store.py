@@ -3,18 +3,21 @@
 to /ingest/v1/record — the library has no record-write helper yet (see
 FULCRA-PRIMITIVES.md); switch to CLI/lib annotation commands when they land.
 
-Real-library shape notes (fulcra_api.core.FulcraAPI, verified v0.1.30,
-file-commands branch):
+Real-library shape notes (fulcra_api.core.FulcraAPI, verified v0.1.36):
 
-  resolve_filepath(filepath) -> dict
-    Returns ONE dict (the file record) when found; raises
-    Exception("File not found in Fulcra Library: <filepath>") when absent.
-    Does NOT return a list — read_json does match["id"], not matches[0]["id"].
-    read_json catches the "File not found" exception and returns None to
-    signal "missing"; transport errors (OSError subclasses) propagate.
+  resolve_filepath(filepath, all_versions=False) -> list[dict]
+    Returns a LIST of matching file records (the "files" array) when found;
+    raises Exception("File not found in Fulcra: <filepath>") when absent.
+    CHANGED in 0.1.36: pre-0.1.36 it returned a single dict, so read_json did
+    match["id"]; now it returns a list and read_json must take matches[0]["id"].
+    read_json tolerates BOTH shapes (list or lone dict) so it never re-breaks
+    on either. It catches the "File not found" exception (substring match, so
+    the "Library" wording drop in 0.1.36 is fine) and returns None to signal
+    "missing"; transport errors (OSError subclasses) propagate.
 
-  list_files(path="/") -> dict {"files": [...], ...}
+  list_files(path="/", state="uploaded") -> dict {"files": [...], ...}
     Returns a wrapper dict, NOT a plain list. list_json extracts ["files"].
+    Unchanged across the 0.1.35->0.1.36 bump.
 
   download_file(file_id) -> http.client.HTTPResponse
     Has a .read() method; this is the only interface store.py uses.
@@ -94,18 +97,22 @@ class FulcraStore:
     def read_json(self, path: str):
         """Return the parsed JSON at path, or None if the file does not exist.
 
-        resolve_filepath(path) returns ONE dict when found, and raises
-        Exception("File not found in Fulcra Library: ...") when absent.
-        We catch only that specific message so transport failures (OSError
-        subclasses) still propagate — callers must not confuse an outage
-        with a legitimately missing file.
+        resolve_filepath(path) returns a list[dict] of matching file records in
+        fulcra-api 0.1.36 (it was a single dict pre-0.1.36), and raises
+        Exception("File not found in Fulcra: ...") when absent. We catch only
+        the "File not found" message (substring, so the 0.1.36 wording change is
+        tolerated) so transport failures (OSError subclasses) still propagate —
+        callers must not confuse an outage with a legitimately missing file.
+        The first match is the current uploaded version (state="uploaded").
         """
         try:
-            match = self._api.resolve_filepath(_abs(path))
+            matches = self._api.resolve_filepath(_abs(path))
         except Exception as e:
             if "File not found" in str(e):
                 return None
             raise
+        # 0.1.36 returns a list; older libs / fakes may return a lone dict.
+        match = matches[0] if isinstance(matches, list) else matches
         resp = self._api.download_file(match["id"])
         return json.loads(resp.read().decode())
 
