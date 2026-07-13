@@ -164,6 +164,13 @@ it (not on PyPI).
   Every `COORD_*` tuning knob (default, unit, what it bounds), the shared positive-finite parse policy,
   and the `FULCRA_COORD_*` legacy-prefix rule are catalogued in one place:
   [`packages/coord-engine/README.md` → Environment / tuning](packages/coord-engine/README.md#environment--tuning).
+  The *mechanics* that spend those budgets live in one place too — `coord_engine/budget.py`
+  (`Deadline.open/expired/reserve` for the absolute-`monotonic()` deadline + reserved sub-budget,
+  `degraded_row`/`fold_degraded_line` for the `{scanned, total, skipped}` marker and its renderer).
+  **This is a ship-gate: a NEW bounded fan-out uses `budget.Deadline` for its deadline check (never a
+  hand-rolled `time.monotonic() >= deadline`) and `budget.degraded_row` for its marker**, so the whole
+  family keeps one `>=` boundary and one degraded shape (`config.py` = the env parsers; `budget.py` = the
+  deadline/degraded mechanics — import both).
 - **The public-read failure contract — UNKNOWN is loud, never a clean-empty.** Every aggregate-backed
   public read (`status`, `board`, `needs-me`, `search`, `inbox`, plus the `agents`/`digest`/`asks`/
   `briefing` bundles) folds the summaries index via `_load_rows_status`, whose `ok` bit is **False when

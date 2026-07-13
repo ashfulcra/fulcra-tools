@@ -25,7 +25,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, annotate as annotate_mod, atc, atc_dash, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks, threads as threads_mod
+from . import aggregate, annotate as annotate_mod, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks, threads as threads_mod
+from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
 from .transport import FulcraFileTransport, TransportError
@@ -133,7 +134,7 @@ def _fresh_overlay_rows(
     reconcile's own tolerance). Cost: one extra ``list_dir`` per row load, plus one
     ``read`` per genuinely-new (unsummarized) slug, at most the cap, within the
     budget."""
-    deadline = time.monotonic() + _overlay_budget()
+    dl = Deadline.open(_overlay_budget())
     prefix = rec.task_prefix(team)
     try:
         listing = transport.list_dir(prefix)
@@ -179,7 +180,7 @@ def _fresh_overlay_rows(
                 # else: parse-garbage / not a Task -> sanctioned silent skip
             except Exception:
                 pass  # malformed content is a skip, not a transport failure
-        if time.monotonic() > deadline:
+        if dl.expired():
             # After-op discipline: the budget bounds TIME where the cap bounds
             # COUNT — stop reading, serve what we have, degrade visibly.
             budget_breached = True
@@ -371,9 +372,9 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # Shared add-on deadline (see _briefing_budget): opened here so the forge
     # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
     # own independent, already-shipped budget.
-    deadline = time.monotonic() + _briefing_budget()
+    add_on = Deadline.open(_briefing_budget())
     got += _pending_reviews_for(transport, args.team, args.agent)
-    got += _forge_feedback_for(transport, args.team, args.agent, deadline=deadline)
+    got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
     if args.json:
         print(json.dumps(got, indent=2))
     else:
@@ -825,17 +826,18 @@ def _tally_from_verdict_entries(
     verdicts: list[dict[str, Any]] = []
     reads_ok = True
     fully_scanned = True
+    dl = Deadline(deadline)
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
             continue
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             # Budget expired mid-slug: stop reading shards. The tally built so far
             # is a floor, not the truth — the caller treats this slug as skipped.
             fully_scanned = False
             break
         raw_v = transport.read(_verdicts_prefix(team, slug) + n)
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             # The deadline passed DURING this read (F2/P1-B): checking only BEFORE
             # the read let one stalled read complete and return a clean row despite
             # blowing the budget. Detect the overrun immediately after the blocking
@@ -1048,7 +1050,7 @@ def _pending_reviews_for(
     total = len(slug_entries)
     scanned = 0
     skipped = 0
-    deadline = time.monotonic() + deadline_seconds  # absolute monotonic instant (F2)
+    dl = Deadline.open(deadline_seconds)  # absolute monotonic instant (F2)
     # Dir-only review slugs (a `<slug>/` dir with no `<slug>.md` doc) are invisible
     # to the doc-keyed scan below. Classify each via the tombstone three-way (one
     # verdicts listing apiece): a dir with real verdict shards is an ORPHAN (surface
@@ -1072,7 +1074,7 @@ def _pending_reviews_for(
     # never assumed tombstone — and the fold proceeds to the doc scan with the
     # budget that remains (its existing between-slug/mid-slug checks, against the
     # full fold deadline, then govern).
-    classify_deadline = deadline - deadline_seconds / 2.0
+    classify_dl = dl.reserve(0.5)
     doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
     dir_slugs = []
     for e in entries:
@@ -1082,7 +1084,7 @@ def _pending_reviews_for(
         if oslug and oslug not in doc_slugs:
             dir_slugs.append(oslug)
     for i, oslug in enumerate(dir_slugs):
-        if time.monotonic() >= classify_deadline:
+        if classify_dl.expired():
             out.append({"type": "review-orphan-degraded",
                         "unclassified": len(dir_slugs) - i})
             break
@@ -1095,11 +1097,9 @@ def _pending_reviews_for(
     for e in slug_entries:
         # Budget is checked BETWEEN slugs (after at least one is scanned, so a
         # slow transport still makes measurable progress before degrading).
-        if scanned and time.monotonic() >= deadline:
-            marker = {"type": "review-fold-degraded", "scanned": scanned, "total": total}
-            if skipped:
-                marker["skipped"] = skipped
-            out.append(marker)
+        if scanned and dl.expired():
+            out.append(budget_mod.degraded_row(
+                "review-fold-degraded", scanned, total, skipped))
             return out
         slug = (e.get("name") or "")[:-3]
         scanned += 1
@@ -1115,17 +1115,17 @@ def _pending_reviews_for(
                 # settled, not silently pending. Count it, keep scanning.
                 skipped += 1
                 continue
-            if time.monotonic() >= deadline:
+            if dl.expired():
                 # The doc read itself pushed us over budget (P1-B): check AFTER the
                 # blocking op, not only between slugs. Don't start the verdict
                 # reads — this slug is UNKNOWN. Count it skipped and surface the
                 # degraded marker; the budget is spent.
                 skipped += 1
-                out.append({"type": "review-fold-degraded", "scanned": scanned,
-                            "total": total, "skipped": skipped})
+                out.append(budget_mod.degraded_row(
+                    "review-fold-degraded", scanned, total, skipped))
                 return out
             tally, vreads_ok, fully = _tally_from_verdict_entries(
-                transport, team, slug, ventries, doc_raw, deadline=deadline)
+                transport, team, slug, ventries, doc_raw, deadline=dl.instant)
             if not fully:
                 # Budget expired MID-SLUG (F2): a single review with many verdict
                 # shards would otherwise read them all unbounded. The partial
@@ -1134,9 +1134,8 @@ def _pending_reviews_for(
                 # doc-read failure (scanned includes skipped; unscanned=total-scanned).
                 # The budget is spent: stop and surface the degraded marker.
                 skipped += 1
-                marker = {"type": "review-fold-degraded", "scanned": scanned,
-                          "total": total, "skipped": skipped}
-                out.append(marker)
+                out.append(budget_mod.degraded_row(
+                    "review-fold-degraded", scanned, total, skipped))
                 return out
         except TransportError:
             # A single slug's tally timed out (Task-1 contract): skip it, keep
@@ -1177,17 +1176,15 @@ def _pending_reviews_for(
     if skipped:
         # Completed inside budget but some slugs were unreadable: partial
         # knowledge must be visible, so emit the degraded marker anyway.
-        out.append({"type": "review-fold-degraded", "scanned": scanned,
-                    "total": total, "skipped": skipped})
+        out.append(budget_mod.degraded_row(
+            "review-fold-degraded", scanned, total, skipped))
     return out
 
 
 def _review_degraded_line(r: dict[str, Any]) -> str:
-    line = (f"  review fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
-            f"before budget — run per-slug review status for the rest")
-    if r.get("skipped"):
-        line += f" ({r['skipped']} slug(s) skipped on transport error)"
-    return line
+    return budget_mod.fold_degraded_line(
+        r, label="review", remedy="run per-slug review status for the rest",
+        noun="slug")
 
 
 def _forge_responsible(
@@ -1211,10 +1208,7 @@ def _forge_responsible(
     """
     resp: dict[str, set] = {}
     ok = True
-
-    def _expired() -> bool:
-        return deadline is not None and time.monotonic() >= deadline
-
+    dl = Deadline(deadline)
     watch_prefix = f"team/{team}/_coord/forge/watch/"
     try:
         watch_entries = transport.list_dir(watch_prefix)
@@ -1222,14 +1216,14 @@ def _forge_responsible(
         watch_entries = []
         ok = False
     for e in watch_entries:
-        if _expired():
+        if dl.expired():
             ok = False
             break
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
             continue
         raw = transport.read(watch_prefix + n)
-        if _expired():  # the read pushed us over budget — detect it immediately
+        if dl.expired():  # the read pushed us over budget — detect it immediately
             ok = False
             break
         fm = okf.parse_frontmatter(raw) or {}
@@ -1244,14 +1238,14 @@ def _forge_responsible(
         review_entries = []
         ok = False
     for e in review_entries:
-        if _expired():
+        if dl.expired():
             ok = False
             break
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
             continue
         raw = transport.read(review_prefix + n)
-        if _expired():
+        if dl.expired():
             ok = False
             break
         fm = okf.parse_frontmatter(raw) or {}
@@ -1274,20 +1268,21 @@ def _forge_slug_feedback(
     exactly as the review fold discards a mid-slug tally."""
     items: list[str] = []
     authors: list[str] = []
+    dl = Deadline(deadline)
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
             continue
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             return None, False
         stem = n[:-3]
         acked = transport.read(_ack_path(team, stem, agent))
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             return None, False
         if acked is not None:
             continue  # acked by this agent — hidden
         raw = transport.read(prefix + n)
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             return None, False
         items.append(stem)
         fm = okf.parse_frontmatter(raw) or {}
@@ -1318,6 +1313,7 @@ def _forge_feedback_for(
     responsibility scan itself was truncated); ``scanned`` counts those reached;
     ``skipped`` counts those reached-but-unreadable/cut."""
     out: list[dict[str, Any]] = []
+    dl = Deadline(deadline)
     resp, resp_ok = _forge_responsible(transport, team, deadline=deadline)
     mine = sorted(slug for slug, agents in resp.items() if agent in agents)
     total = len(mine)
@@ -1325,7 +1321,7 @@ def _forge_feedback_for(
     skipped = 0
     degraded = not resp_ok  # a truncated/failed responsibility scan is already degraded
     for slug in mine:
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             degraded = True
             break
         scanned += 1
@@ -1338,7 +1334,7 @@ def _forge_feedback_for(
             skipped += 1
             degraded = True
             continue
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             # The listing itself pushed us over budget: this PR is unscanned.
             skipped += 1
             degraded = True
@@ -1353,11 +1349,7 @@ def _forge_feedback_for(
         if row:
             out.append(row)
     if degraded:
-        marker: dict[str, Any] = {"type": "forge-degraded", "scanned": scanned,
-                                  "total": total}
-        if skipped:
-            marker["skipped"] = skipped
-        out.append(marker)
+        out.append(budget_mod.degraded_row("forge-degraded", scanned, total, skipped))
     return out
 
 
@@ -1368,11 +1360,8 @@ def _forge_feedback_line(r: dict[str, Any]) -> str:
 
 
 def _forge_degraded_line(r: dict[str, Any]) -> str:
-    line = (f"  forge fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
-            f"before budget — run forge feedback for the rest")
-    if r.get("skipped"):
-        line += f" ({r['skipped']} PR(s) skipped on transport error)"
-    return line
+    return budget_mod.fold_degraded_line(
+        r, label="forge", remedy="run forge feedback for the rest", noun="PR")
 
 
 def _normalize_required(required: Any) -> list[str]:
@@ -2516,14 +2505,14 @@ def _listen_tick(transport: Any, team: str, agent: str,
     if rentries is not None:
         doc_names = {(e.get("name") or "")[:-3] for e in rentries
                      if not e.get("is_dir") and (e.get("name") or "").endswith(".md")}
-        classify_deadline = time.monotonic() + _listen_classify_budget()
+        classify_dl = Deadline.open(_listen_classify_budget())
         for e in rentries:
             if not e.get("is_dir"):
                 continue
             oslug = (e.get("name") or "").rstrip("/")
             if not oslug or oslug in doc_names or oslug in orphan_slugs:
                 continue
-            if time.monotonic() >= classify_deadline:
+            if classify_dl.expired():
                 _fail("verdicts", "dir classification budget spent — "
                       "unclassified review dirs remain, retried next tick")
                 break
@@ -2751,10 +2740,10 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # hung `briefing` in `presence.roster(_presence_shards(...))` before any bound
     # applied. (`_load_rows` above carries its OWN COORD_OVERLAY_BUDGET; pending-
     # reviews keeps its own independent, already-shipped COORD_REVIEW_FOLD_BUDGET.)
-    add_on_deadline = time.monotonic() + _briefing_budget()
+    add_on = Deadline.open(_briefing_budget())
     try:
         shards, pres_degraded = _presence_shards_bounded(
-            transport, args.team, deadline=add_on_deadline)
+            transport, args.team, deadline=add_on.instant)
         out["presence"] = presence.roster(shards, now=now)
         if pres_degraded is not None:
             # Same discipline as forge: append the degraded marker to the section
@@ -2788,7 +2777,7 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
-    # The shared add-on deadline (add_on_deadline) was opened at the top of this
+    # The shared add-on deadline (add_on) was opened at the top of this
     # function, before the presence section — time already burned by presence and
     # pending-reviews shrinks the window the forge fan-out and resume read get, so
     # the whole add-on stack is bounded cumulatively. pending-reviews keeps its own
@@ -2800,7 +2789,7 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         out["pending_reviews"] = []
     try:
         out["forge_feedback"] = _forge_feedback_for(
-            transport, args.team, agent, deadline=add_on_deadline)
+            transport, args.team, agent, deadline=add_on.instant)
     except Exception as e:
         print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
         out["forge_feedback"] = []
@@ -2808,7 +2797,7 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         snaps = []
         resume_cut = False
         for e in transport.list_dir(_continuity_prefix(args.team, agent)):
-            if time.monotonic() >= add_on_deadline:
+            if add_on.expired():
                 # Shared budget spent by the earlier add-on sections: stop reading
                 # this agent's snapshots (a per-file read fan-out) rather than let a
                 # slow tail hang the briefing. The resume is a floor, not the truth.
@@ -2916,38 +2905,39 @@ def _presence_shards_bounded(
     the section never hangs, never crashes, never silently truncates.
     Dashboards/digests keep the unbounded ``_presence_shards`` (they are not on the
     briefing hang path)."""
-    if deadline is not None and time.monotonic() >= deadline:
+    dl = Deadline(deadline)
+    if dl.expired():
         # Budget already spent before the section started: skip the listing — don't
         # pay one more blocking op. total=0: the roster size is UNKNOWN (never listed).
-        return [], {"type": "presence-degraded", "scanned": 0, "total": 0}
+        return [], budget_mod.degraded_row("presence-degraded", 0, 0)
     pfx = _presence_prefix(team)
     try:
         entries = transport.list_dir(pfx)
     except TransportError:
         # The listing itself failed: the roster is UNKNOWN, not empty. Surface a
         # degraded marker (scanned=0) so absence-vs-outage isn't folded to silence.
-        return [], {"type": "presence-degraded", "scanned": 0, "total": 0}
+        return [], budget_mod.degraded_row("presence-degraded", 0, 0)
     files = [e for e in entries
              if not e.get("is_dir") and (e.get("name") or "").endswith(".md")]
     total = len(files)
-    if deadline is not None and time.monotonic() >= deadline:
+    if dl.expired():
         # The deadline passed DURING the listing: detect the overrun immediately
         # after the blocking op — even for total==0, where the per-shard loop below
         # never runs and could not surface it. No shard is read (the budget is
         # spent); the listing we already paid for still prices ``total`` honestly.
-        return [], {"type": "presence-degraded", "scanned": 0, "total": total}
+        return [], budget_mod.degraded_row("presence-degraded", 0, total)
     shards: list[dict[str, Any]] = []
     scanned = 0
     skipped = 0
     degraded = False
     for e in files:
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             degraded = True
             break
         scanned += 1
         n = e.get("name") or ""
         raw = transport.read(pfx + n)
-        if deadline is not None and time.monotonic() >= deadline:
+        if dl.expired():
             # The deadline passed DURING this read: detect the overrun immediately
             # after the blocking op. Keep the shard we already paid for, then stop.
             degraded = True
@@ -2969,18 +2959,15 @@ def _presence_shards_bounded(
         shards.append(fm)
     marker: Optional[dict[str, Any]] = None
     if degraded:
-        marker = {"type": "presence-degraded", "scanned": scanned, "total": total}
-        if skipped:
-            marker["skipped"] = skipped
+        marker = budget_mod.degraded_row("presence-degraded", scanned, total, skipped)
     return shards, marker
 
 
 def _presence_degraded_line(r: dict[str, Any]) -> str:
-    line = (f"  presence fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
-            f"before budget — roster may be partial, run `presence show` for the rest")
-    if r.get("skipped"):
-        line += f" ({r['skipped']} shard(s) skipped on transport error)"
-    return line
+    return budget_mod.fold_degraded_line(
+        r, label="presence",
+        remedy="roster may be partial, run `presence show` for the rest",
+        noun="shard")
 
 
 # --- ATC: cross-subscription cap ledger (fulcra-agent-atc) -------------------
@@ -4194,11 +4181,11 @@ def _threads_candidate_rows(
         ok = False
         reason = reason or "responses listing unreadable"
 
-    deadline = time.monotonic() + _threads_fold_budget()
+    dl = Deadline.open(_threads_fold_budget())
     budget_hit = False
     rows: list[dict[str, Any]] = []
     for r in summary_rows:
-        if time.monotonic() > deadline:
+        if dl.expired():
             # After-op discipline, checked at the TOP of each candidate: the
             # PREVIOUS candidate's reads breached the budget — detected before
             # any further reads (and a breach on the FINAL candidate, with
