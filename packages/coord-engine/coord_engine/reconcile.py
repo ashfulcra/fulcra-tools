@@ -12,11 +12,10 @@ never unioned with stale state.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import aggregate, health as health_mod, model, okf
+from . import aggregate, config, health as health_mod, model, okf
 from .log import get_logger
 from .roles import age_hours
 from .tasks import agent_key
@@ -421,18 +420,23 @@ def reconcile(
         parsed += 1
 
     # --- retention sub-pass (OPTIONAL: only when configured) ---
+    # Off unless configured (default 0.0 -> disabled): NO positive fallback, unlike
+    # the fold budgets. Precedence: --retention-days flag > COORD_RETENTION_DAYS >
+    # legacy FULCRA_COORD_RETENTION_DAYS. The legacy prefix is alias-ACCEPTED (an
+    # operator copying old fulcra-coord docs still gets retention) but the legacy
+    # default of 30 is NOT adopted — coord-engine stays opt-in. Routing through the
+    # shared parser also gives retention the NaN/inf guard the fold budgets have
+    # (ENG-1-8: an inf/NaN value now disables cleanly instead of running unbounded).
     archived_map: dict = {}
-    if retention_days is None:
-        retention_days = os.environ.get("COORD_RETENTION_DAYS")
-    if retention_days and rows:
-        try:
-            days = float(retention_days)
-        except (TypeError, ValueError):
-            days = 0
-        if days > 0:
-            rows, notes, archived_map = _run_retention(
-                transport, team, rows, now=now, today=today, days=days, log=log)
-            warnings.extend(n for n in notes if "FAILED" in n or "kept hot" in n)
+    days = config.env_float(
+        "COORD_RETENTION_DAYS", 0.0,
+        override=retention_days,
+        aliases=("FULCRA_COORD_RETENTION_DAYS",),
+    )
+    if days > 0 and rows:
+        rows, notes, archived_map = _run_retention(
+            transport, team, rows, now=now, today=today, days=days, log=log)
+        warnings.extend(n for n in notes if "FAILED" in n or "kept hot" in n)
 
     # --- ack fold + shard-GC sub-pass ---
     acks, gc_count = _fold_and_gc_acks(transport, team, {r.get("name") for r in rows}, now=now)

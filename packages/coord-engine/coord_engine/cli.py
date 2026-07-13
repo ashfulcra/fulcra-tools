@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, annotate as annotate_mod, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks, threads as threads_mod
+from . import aggregate, annotate as annotate_mod, atc, atc_dash, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks, threads as threads_mod
 from . import reconcile as rec
 from .log import get_logger
 from .transport import FulcraFileTransport, TransportError
@@ -75,17 +75,8 @@ DEFAULT_OVERLAY_CAP = 16
 
 
 def _overlay_cap() -> int:
-    """Env override ``COORD_OVERLAY_CAP`` (same parse discipline as the budgets):
-    anything unparseable or non-positive falls back to the default — a bad env
-    value must never disable the bound."""
-    raw = os.environ.get("COORD_OVERLAY_CAP")
-    if raw is None:
-        return DEFAULT_OVERLAY_CAP
-    try:
-        v = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_OVERLAY_CAP
-    return v if v > 0 else DEFAULT_OVERLAY_CAP
+    """Read-COUNT bound for the freshness overlay. Env ``COORD_OVERLAY_CAP``."""
+    return config.env_int("COORD_OVERLAY_CAP", DEFAULT_OVERLAY_CAP)
 
 
 #: Time budget (seconds) for the freshness overlay's doc reads. The cap bounds
@@ -101,19 +92,9 @@ DEFAULT_OVERLAY_BUDGET = 10.0
 
 
 def _overlay_budget() -> float:
-    """Env override ``COORD_OVERLAY_BUDGET`` (same parse discipline as
-    ``COORD_BRIEFING_BUDGET``): unparseable, non-positive, NaN, or inf falls back
-    to the default — a bad env value must never disable the bound."""
-    raw = os.environ.get("COORD_OVERLAY_BUDGET")
-    if raw is None:
-        return DEFAULT_OVERLAY_BUDGET
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_OVERLAY_BUDGET
-    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
-        return DEFAULT_OVERLAY_BUDGET
-    return v
+    """Time bound (seconds) for the freshness overlay's doc reads. Env
+    ``COORD_OVERLAY_BUDGET`` (see the DEFAULT_OVERLAY_BUDGET rationale)."""
+    return config.env_float("COORD_OVERLAY_BUDGET", DEFAULT_OVERLAY_BUDGET)
 
 
 def _fresh_overlay_rows(
@@ -718,8 +699,20 @@ def _verdicts_prefix(team: str, slug: str) -> str:
 # self-heals a wrong/stale marker on direct query.
 SETTLED_MARKER = ".settled"
 
+#: Aggregate deadline (seconds) for ``_pending_reviews_for`` — never let a degraded
+#: pending-review scan hang or (via a bad env value) run unbounded.
 DEFAULT_REVIEW_FOLD_BUDGET = 45.0
+#: Aggregate deadline (seconds) for the transport-heavy briefing/needs-me add-on
+#: sections (chiefly the team-global forge-feedback fan-out, which did unbounded
+#: per-PR reads and hung the whole bundle under a degraded transport). ONE budget
+#: opens when the add-on stack begins and is spent cumulatively across sections;
+#: pending-reviews keeps its own independent COORD_REVIEW_FOLD_BUDGET (sooner wins).
 DEFAULT_BRIEFING_BUDGET = 60.0
+#: Per-tick bound (seconds) for the listener's dir-only review-slug classification
+#: pass. That set is PERMANENT and growing (soft deletes leave every review dir
+#: forever), so an unbudgeted pass could spend N x transport-timeout on a degraded
+#: tick, on the watcher whose tick latency is load-bearing. 10s is a bounded
+#: fraction of the default 60s poll interval.
 DEFAULT_LISTEN_CLASSIFY_BUDGET = 10.0
 
 #: Aggregate deadline (seconds) for the `threads` fold's per-candidate shard/doc
@@ -741,68 +734,26 @@ def _settled_marker_path(team: str, slug: str) -> str:
 
 
 def _review_fold_budget() -> float:
-    """Aggregate deadline for `_pending_reviews_for`, seconds. Env override
-    ``COORD_REVIEW_FOLD_BUDGET``; anything unparseable or non-positive falls back
-    to the default (never let a bad env value disable the fold or make it hang)."""
-    raw = os.environ.get("COORD_REVIEW_FOLD_BUDGET")
-    if raw is None:
-        return DEFAULT_REVIEW_FOLD_BUDGET
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_REVIEW_FOLD_BUDGET
-    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
-        return DEFAULT_REVIEW_FOLD_BUDGET
-    return v
+    """Aggregate deadline for `_pending_reviews_for`, seconds. Env
+    ``COORD_REVIEW_FOLD_BUDGET`` (see the DEFAULT_REVIEW_FOLD_BUDGET rationale)."""
+    return config.env_float("COORD_REVIEW_FOLD_BUDGET", DEFAULT_REVIEW_FOLD_BUDGET)
 
 
 def _briefing_budget() -> float:
-    """Aggregate deadline (seconds) for the transport-heavy briefing/needs-me
-    add-on sections — chiefly the team-global forge-feedback fan-out, which did
-    unbounded per-PR reads and hung the whole bundle under a degraded transport.
-    ONE budget opens when the add-on stack begins and is spent cumulatively: an
-    absolute ``time.monotonic()`` deadline is computed at that point and passed
-    to each transport-heavy section, so time already burned by an earlier section
-    shrinks what the next one gets (pending-reviews keeps its own, independent and
-    already-shipped ``COORD_REVIEW_FOLD_BUDGET``; whichever bound is sooner wins).
-    Env override ``COORD_BRIEFING_BUDGET``; anything unparseable, non-positive, or
-    inf falls back to the default (a bad env value must never disable the bound or
-    make the fold hang)."""
-    raw = os.environ.get("COORD_BRIEFING_BUDGET")
-    if raw is None:
-        return DEFAULT_BRIEFING_BUDGET
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_BRIEFING_BUDGET
-    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
-        return DEFAULT_BRIEFING_BUDGET
-    return v
+    """Shared aggregate deadline (seconds) for the briefing/needs-me add-on stack.
+    Env ``COORD_BRIEFING_BUDGET`` (see the DEFAULT_BRIEFING_BUDGET rationale). One
+    absolute ``time.monotonic()`` deadline is computed where the stack opens and
+    passed to each transport-heavy section, so an earlier section's spend shrinks
+    what the next one gets; pending-reviews keeps its own independent
+    ``COORD_REVIEW_FOLD_BUDGET`` (whichever bound is sooner wins)."""
+    return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
 
 
 def _listen_classify_budget() -> float:
     """Per-tick bound (seconds) for the listener's dir-only review-slug
-    classification pass (codex P1 on the tombstone ontology). The cost class is
-    NOT the source's other listings: those are bounded by MY-unsettled-slugs
-    (small, shrinking), while the dir-only set is PERMANENT and growing (the
-    store's deletes are soft — every archived review leaves its dir forever), so
-    an unbudgeted pass could spend N x transport-timeout on a degraded tick, on
-    the listener whose tick latency is load-bearing. Default 10s: a bounded
-    fraction of the default 60s poll interval with room for a few slow listings
-    (transport timeout is 30s, so even ONE stalled listing overshoots — the
-    budget's job is to stop the pass from stacking them). Env override
-    ``COORD_LISTEN_CLASSIFY_BUDGET``; anything unparseable, non-positive, or inf
-    falls back to the default (a bad env value must never disable the bound)."""
-    raw = os.environ.get("COORD_LISTEN_CLASSIFY_BUDGET")
-    if raw is None:
-        return DEFAULT_LISTEN_CLASSIFY_BUDGET
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_LISTEN_CLASSIFY_BUDGET
-    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
-        return DEFAULT_LISTEN_CLASSIFY_BUDGET
-    return v
+    classification pass. Env ``COORD_LISTEN_CLASSIFY_BUDGET`` (see the
+    DEFAULT_LISTEN_CLASSIFY_BUDGET rationale)."""
+    return config.env_float("COORD_LISTEN_CLASSIFY_BUDGET", DEFAULT_LISTEN_CLASSIFY_BUDGET)
 
 
 def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
@@ -4124,40 +4075,19 @@ def cmd_annotate_project(args: argparse.Namespace, transport: Any) -> int:
 # where the principal is involved (assignee/owner, or an intent:/blocked-on: tag).
 
 def _threads_fold_budget() -> float:
-    """Env override ``COORD_THREADS_FOLD_BUDGET`` (same parse discipline as the
-    other budgets): unparseable, non-positive, NaN, or inf -> default. A bad env
-    value must never disable the bound or make the fold hang."""
-    raw = os.environ.get("COORD_THREADS_FOLD_BUDGET")
-    if raw is None:
-        return DEFAULT_THREADS_FOLD_BUDGET
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_THREADS_FOLD_BUDGET
-    if not (v > 0) or v == float("inf"):
-        return DEFAULT_THREADS_FOLD_BUDGET
-    return v
+    """Aggregate deadline (seconds) for the `threads` fold's per-candidate reads.
+    Env ``COORD_THREADS_FOLD_BUDGET`` (see the DEFAULT_THREADS_FOLD_BUDGET
+    rationale); on breach the fold emits a `threads-degraded` row."""
+    return config.env_float("COORD_THREADS_FOLD_BUDGET", DEFAULT_THREADS_FOLD_BUDGET)
 
 
 def _threads_window(flag: Optional[float], env: str, default: float) -> float:
-    """Resolve a window: flag > env > default. A bad flag/env value falls back
-    (never let a typo disable the bound)."""
-    if flag is not None:
-        try:
-            v = float(flag)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
-    raw = os.environ.get(env)
-    if raw is not None:
-        try:
-            v = float(raw)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
-    return default
+    """Resolve a `threads` window: flag > env > default, through the shared
+    positive-finite parser (``config.env_float``) — the ``override`` carries the
+    flag>env precedence and NaN/inf/≤0 fall back to the default, so these knobs
+    obey the same env-contract the README states for every numeric knob (no more
+    `inf` leaking a window)."""
+    return config.env_float(env, default, override=flag)
 
 
 def _threads_is_principal(row: dict[str, Any], principal: str, tags: list[str]) -> bool:

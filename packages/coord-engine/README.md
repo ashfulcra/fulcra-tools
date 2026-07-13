@@ -56,6 +56,45 @@ per-verb command references live in each skill's `references/` directory.
   instead of returning a clean-looking partial answer.
 - **Structured logs** to stderr (`$COORD_LOG_LEVEL`).
 
+## Environment / tuning
+
+The single reference for every environment variable the engine reads. **Prefix rule:**
+`COORD_*` is the engine-native, canonical prefix for all tuning knobs; `FULCRA_COORD_*`
+is the legacy prefix, retained for the identity vars below and **alias-accepted for
+`COORD_RETENTION_DAYS` only** (an operator migrating off the deprecated `fulcra-coord`
+bus keeps working — when both are set, the `COORD_*` form wins). No other tuning knob
+reads a `FULCRA_COORD_*` alias.
+
+**Parse policy (all numeric knobs, one shared parser — `coord_engine/config.py`):** a
+value is **positive-finite**, resolved **flag/constructor arg > env > default**; anything
+unparseable, `NaN`, `inf`, or `≤ 0` falls back to the default — a bad value can never
+disable a bound or make an op hang.
+
+### Budgets & timeouts
+
+| Variable | Default | Unit | Bounds |
+|---|---|---|---|
+| `COORD_TRANSPORT_TIMEOUT` | `30` | seconds | Hard per-op bound on every `fulcra-api file` subprocess. Constructor arg wins; run it TIGHT on a watcher (e.g. `8`) so the fold budgets buy real responsiveness. |
+| `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`). |
+| `COORD_BRIEFING_BUDGET` | `60` | seconds | Aggregate deadline for the `briefing`/`needs-me` transport-heavy add-on stack (chiefly the forge-feedback fan-out); opened once, spent cumulatively across sections. |
+| `COORD_LISTEN_CLASSIFY_BUDGET` | `10` | seconds | Per-tick bound on the `listen` daemon's dir-only review-slug classification pass. |
+| `COORD_OVERLAY_BUDGET` | `10` | seconds | Time bound on the freshness overlay's fresh-doc reads (the cap bounds read COUNT; this bounds TIME). |
+| `COORD_OVERLAY_CAP` | `16` | count | Max fresh (unsummarized) task docs the overlay reads per surface-read before truncating (visibly). |
+| `COORD_THREADS_FOLD_BUDGET` | `30` | seconds | Aggregate deadline for the `threads` dropped-work fold's per-candidate reads; breach emits a `threads-degraded` row. |
+| `COORD_THREADS_SILENCE_DAYS` | `3` | days | `threads` started-then-silent window (flag `--silence-days` wins). |
+| `COORD_THREADS_INTENT_GRACE_HOURS` | `48` | hours | `threads` intent grace when an intent declares no window (flag `--intent-grace-hours` wins). |
+| `COORD_RETENTION_DAYS` | *unset → off* | days | When set `> 0` (or `--retention-days N`), `reconcile` archives terminal (`done`/`abandoned`) tasks older than N days to the cold archive. **OFF unless configured.** Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins; the legacy default of `30` is *not* adopted — coord-engine stays opt-in). |
+
+### Identity, state & logging
+
+| Variable | Default | Bounds |
+|---|---|---|
+| `FULCRA_COORD_AGENT` | `coord-reconcile:<host>` | Agent identity — set it to the **role** you act as (`--from` overrides per-command). Legacy prefix; still canonical for identity. |
+| `FULCRA_COORD_HUMAN` | `human` | Operator handle for `--on-user` / `asks`. |
+| `COORD_ENGINE_STATE_DIR` | `~/.local/state/coord-engine` | Local state root (write-verify nonce cache, etc.). |
+| `COORD_LISTENER_STATE` | *(under the state dir)* | `listen` watcher's seen-ids state file. |
+| `COORD_LOG_LEVEL` | `info` | Structured-log level to stderr (`debug`/`info`/`warn`/`error`). |
+
 ## Dev
 
 ```bash
