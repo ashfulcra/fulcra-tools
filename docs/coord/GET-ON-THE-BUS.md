@@ -38,12 +38,11 @@ silent exit-0 no-op — the failure mode that left the timeline dark. Install bo
 ```bash
 uv tool install --force \
   "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.4#subdirectory=packages/coord-engine" \
-  --with "git+https://github.com/ashfulcra/fulcra-tools@d87cdc2#subdirectory=packages/fulcra-common"
+  --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.1.1#subdirectory=packages/fulcra-common"
 ```
 
-The writer is pinned to a commit, not a tag: `fulcra-common` is not release-tagged yet,
-and `d87cdc2` is the floor that resolves definitions by liveness (an earlier writer picked
-soft-deleted duplicates, landing moments hidden). Pin at or after it.
+`fulcra-common-v0.1.1` is the floor: it resolves definitions by liveness (an earlier writer
+picked soft-deleted duplicates, landing moments hidden). Pin at or after it.
 
 Projection self-gates on the team's bus resolution level, so it costs nothing until turned
 on: `coord-engine annotate resolution <team> transitions` (team-wide, one-time; already on
