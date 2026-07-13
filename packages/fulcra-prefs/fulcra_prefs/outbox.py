@@ -39,7 +39,7 @@ class Outbox:
         return out
 
     def flush(self, store) -> int:
-        from .store import SIGNALS_CACHE_PREFIX
+        from .store import SIGNALS_CACHE_PREFIX, typed_body, typed_ingest_endpoint
         flushed = 0
         for p in sorted(self.root.glob("*.json")):
             try:
@@ -47,8 +47,10 @@ class Outbox:
             except ValueError:
                 continue   # corrupt spool file: skip it, don't wedge the flush
             try:
-                store._api.fulcra_api("/ingest/v1/record", data=record,
-                                      method="POST")
+                # Spool holds the canonical build_record envelope; translate to
+                # the typed body at the wire, same as store.ingest_signal.
+                store._api.fulcra_api(typed_ingest_endpoint(record),
+                                      data=typed_body(record), method="POST")
             except (OSError, ConnectionError, TimeoutError):
                 continue                     # keep spooled; retry next flush
             # Back-fill the signals-cache shard so a subsequent compile sees

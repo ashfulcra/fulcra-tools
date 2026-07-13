@@ -29,30 +29,37 @@ Background: FULCRA-PRIMITIVES.md at the repo root.
 
 ## 3. Capture a signal (one POST)
 
-`POST /ingest/v1/record` with JSON body:
+`POST /ingest/v1/record/<bare type>` (the TYPED surface — the data_type is a
+path segment) with the UNWRAPPED JSON body:
 
-    {"data": "{\"v\":1,\"kind\":\"preference\",\"key\":\"dining.cuisine.thai\",
+    {"note": "{\"v\":1,\"kind\":\"preference\",\"key\":\"dining.cuisine.thai\",
       \"scope\":\"global\",\"value\":{\"liked\":true},\"strength\":0.8,
       \"confidence\":0.9,\"half_life_days\":90,
       \"source\":{\"platform\":\"chatgpt\",\"agent\":null,\"session\":null},
       \"supersedes\":null}",
-     "metadata": {"content_type": "application/json",
-       "data_type": "<bare type — see note below>",
-       "recorded_at": "<now, ISO8601 UTC>",
-       "source": ["com.fulcra-prefs.sig.<24-hex-of-sha256(key|recorded_at|platform)>",
-                   "com.fulcradynamics.annotation.<definition_id>",
-                   "com.fulcra-prefs.capture.<your-platform>"]},
-     "specversion": 1}
+     "recorded_at": "<now, ISO8601 UTC>",
+     "sources": ["com.fulcra-prefs.sig.<24-hex-of-sha256(key|recorded_at|platform)>",
+                  "com.fulcradynamics.annotation.<definition_id>",
+                  "com.fulcra-prefs.capture.<your-platform>"]}
 
-**data_type**: `prefs/meta.json` stores `"data_type": "MomentAnnotation/<definition_id>"`.
-Split on the first "/":
-- `metadata.data_type` = the part before the slash, e.g. `"MomentAnnotation"` — this
-  is the FulcraDataTypes enum value the API accepts. Sending the full compound string
-  causes a 422.
-- `metadata.source[1]` = `"com.fulcradynamics.annotation.<definition_id>"` where
+Send `Content-Type: application/json` and a `content-length` header; `201` →
+`{"upload_id": "<uuid>"}`. The signal payload is a JSON **string** in `note`.
+
+**data_type (the path segment)**: `prefs/meta.json` stores
+`"data_type": "MomentAnnotation/<definition_id>"`. Split on the first "/":
+- The URL uses the part BEFORE the slash, e.g.
+  `POST /ingest/v1/record/MomentAnnotation` — the base FulcraDataTypes enum value.
+  A custom definition is NOT a valid path segment (`.../MomentAnnotation/<uuid>`
+  404s), so it rides in `sources` instead (next bullet).
+- `sources[1]` = `"com.fulcradynamics.annotation.<definition_id>"` where
   `<definition_id>` is the part after the slash (also available as
   `meta.json`'s `"definition_id"` field). This is how the record links to its
   definition — matching the production pattern in the attention Chrome extension.
+
+The legacy wrapped `POST /ingest/v1/record` with a `DataRecordV1` envelope
+(`{data, metadata:{data_type, recorded_at, source}, specversion:1}`) still works
+but is unpublished/retirement-eligible; prefer the typed path above. Reads
+tolerate both (`data`-or-`note`).
 
 Read `prefs/meta.json` using the same two-GET pattern as step 2.
 Retry once on failure, then tell the user the capture didn't stick.

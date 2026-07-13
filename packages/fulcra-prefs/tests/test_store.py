@@ -53,28 +53,45 @@ def test_written_bytes_are_canonical(fake_api):
     store.write_json("prefs/meta.json", {"b": 1.23456789, "a": 1})
     assert fake_api.files["/prefs/meta.json"] == b'{"a":1,"b":1.234568}'
 
-def test_ingest_signal_posts_data_record_v1(fake_api):
+def test_ingest_signal_posts_typed_unwrapped_body(fake_api):
+    """ingest_signal writes to the TYPED surface: POST /ingest/v1/record/{base}
+    with an unwrapped body {note, recorded_at, sources} — NOT the legacy wrapped
+    DataRecordV1 envelope. The base data_type is the path segment; the custom
+    definition rides in `sources`."""
     store = FulcraStore(fake_api)
     store.ingest_signal(make_signal(id=None), data_type="MomentAnnotation/def-123")
+    # Endpoint carries the BARE base type — the API rejects a compound path segment.
+    assert fake_api.ingest_paths[0] == "/ingest/v1/record/MomentAnnotation"
     rec = fake_api.ingested[0]
-    assert rec["specversion"] == 1
-    # data_type must be the bare enum value — the API rejects compound strings
-    assert rec["metadata"]["data_type"] == "MomentAnnotation"
-    assert rec["metadata"]["recorded_at"] == "2026-06-01T12:00:00+00:00"
-    # source[0]: temp signal id; source[1]: annotation linkage (definition id
-    # from the part after the "/" in data_type); source[2]: capture marker
-    assert rec["metadata"]["source"][0].startswith("com.fulcra-prefs.sig.")
-    assert rec["metadata"]["source"][1] == "com.fulcradynamics.annotation.def-123"
-    assert rec["metadata"]["source"][2] == "com.fulcra-prefs.capture.claude-code"
-    assert json.loads(rec["data"])["key"] == "dining.cuisine.thai"
+    assert set(rec) == {"note", "recorded_at", "sources"}   # unwrapped, no envelope
+    assert "specversion" not in rec and "metadata" not in rec
+    assert rec["recorded_at"] == "2026-06-01T12:00:00+00:00"
+    # sources[0]: temp signal id; [1]: annotation linkage (definition id from the
+    # part after the "/" in data_type); [2]: capture marker
+    assert rec["sources"][0].startswith("com.fulcra-prefs.sig.")
+    assert rec["sources"][1] == "com.fulcradynamics.annotation.def-123"
+    assert rec["sources"][2] == "com.fulcra-prefs.capture.claude-code"
+    assert json.loads(rec["note"])["key"] == "dining.cuisine.thai"
 
 def test_ingest_signal_bare_data_type_has_no_annotation_source(fake_api):
-    """When data_type has no slash (no definition id), source is [sid, capture-marker]
+    """When data_type has no slash (no definition id), sources is [sid, capture-marker]
     — the annotation linkage entry is omitted rather than emitting an empty string."""
     store = FulcraStore(fake_api)
     store.ingest_signal(make_signal(id=None), data_type="MomentAnnotation")
+    assert fake_api.ingest_paths[0] == "/ingest/v1/record/MomentAnnotation"
     rec = fake_api.ingested[0]
-    assert rec["metadata"]["data_type"] == "MomentAnnotation"
-    assert len(rec["metadata"]["source"]) == 2
-    assert rec["metadata"]["source"][0].startswith("com.fulcra-prefs.sig.")
-    assert rec["metadata"]["source"][1] == "com.fulcra-prefs.capture.claude-code"
+    assert len(rec["sources"]) == 2
+    assert rec["sources"][0].startswith("com.fulcra-prefs.sig.")
+    assert rec["sources"][1] == "com.fulcra-prefs.capture.claude-code"
+
+
+def test_typed_body_and_endpoint_map_from_canonical_envelope():
+    """typed_body/typed_ingest_endpoint translate the canonical build_record
+    envelope (kept for the outbox spool + shard cache) to the typed wire shape."""
+    from fulcra_prefs.store import build_record, typed_body, typed_ingest_endpoint
+    record = build_record(make_signal(id=None), "MomentAnnotation/def-123")
+    assert typed_ingest_endpoint(record) == "/ingest/v1/record/MomentAnnotation"
+    body = typed_body(record)
+    assert body == {"note": record["data"],
+                    "recorded_at": record["metadata"]["recorded_at"],
+                    "sources": record["metadata"]["source"]}

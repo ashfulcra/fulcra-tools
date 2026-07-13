@@ -1,7 +1,16 @@
 """The ONLY module that talks to Fulcra. Files via the fulcra_api library
 (list/resolve/download/upload); record writes via the generic request method
-to /ingest/v1/record — the library has no record-write helper yet (see
-FULCRA-PRIMITIVES.md); switch to CLI/lib annotation commands when they land.
+to the TYPED ingest surface POST /ingest/v1/record/{data_type} — the library
+has no record-write helper yet (see FULCRA-PRIMITIVES.md); switch to CLI/lib
+annotation commands when they land.
+
+Ingest write path (migrated 2026-07-13 from the legacy wrapped DataRecordV1
+envelope to the typed surface, live-verified against MomentAnnotation
+v1alpha1): build_record stays the single canonical envelope used by the outbox
+spool + signals-cache shards; typed_body()/typed_ingest_endpoint() translate it
+to the unwrapped typed body at the HTTP boundary. The custom definition rides in
+`sources` (base type in the path), and the read side already reads note-or-data,
+so this is forward-compatible with records ingested via either path.
 
 Real-library shape notes (fulcra_api.core.FulcraAPI, verified v0.1.36):
 
@@ -72,6 +81,33 @@ def build_record(sig: Signal, data_type: str) -> dict:
         },
         "specversion": 1,
     }
+
+def typed_ingest_endpoint(record: dict) -> str:
+    """Typed ingest path for a canonical build_record envelope: the base
+    data_type is a URL path segment (e.g. /ingest/v1/record/MomentAnnotation).
+    A custom definition is NOT a valid path segment — it rides in `sources`
+    instead (see typed_body), so the path is always the base type."""
+    return f"/ingest/v1/record/{record['metadata']['data_type']}"
+
+
+def typed_body(record: dict) -> dict:
+    """Translate the canonical DataRecordV1 envelope (build_record output) into
+    the UNWRAPPED body the typed endpoint expects. Mapping verified against the
+    live MomentAnnotation v1alpha1 record schema (fields: id?/tags?/sources?/
+    recorded_at?/note?):
+        metadata.source     -> sources   (plural; carries the def linkage)
+        data (JSON string)  -> note      (top-level string payload)
+        metadata.recorded_at-> recorded_at
+    `id` is omitted so the server generates one; the deterministic temp id stays
+    in sources[0], which is what the read side keys on. `content_type` has no
+    typed-body slot (the payload is a JSON string in `note`, parsed on read)."""
+    md = record["metadata"]
+    return {
+        "note": record["data"],
+        "recorded_at": md["recorded_at"],
+        "sources": md["source"],
+    }
+
 
 PREFS_ROOT = "prefs"
 META_PATH = f"{PREFS_ROOT}/meta.json"
@@ -162,7 +198,8 @@ class FulcraStore:
 
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         record = build_record(sig, data_type)
-        self._api.fulcra_api("/ingest/v1/record", data=record, method="POST")
+        self._api.fulcra_api(typed_ingest_endpoint(record),
+                             data=typed_body(record), method="POST")
 
     def read_signal_records(self, definition_id: str | None,
                             start_time=None, end_time=None) -> list[Signal]:
