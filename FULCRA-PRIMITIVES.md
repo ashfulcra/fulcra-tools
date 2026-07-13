@@ -2,23 +2,34 @@
 
 What the Fulcra platform actually provides and how to use it, **by agent
 capability tier**. Written so you don't have to re-research the platform
-surface. Verified against live services on 2026-07-07, **Records section
-re-verified 2026-07-08** (`fulcra-api` CLI/lib **0.1.35** from PyPI,
-fulcra-api-python main @ `694f858`, api.fulcradynamics.com OpenAPI — **53
-paths as of 2026-07-08**, up from 48 on 07-07; the file API + a v1 catalog +
-an insights endpoint are published in the spec — docs.fulcradynamics.com,
-mcp.fulcradynamics.com discovery docs). 0.1.35 added the `data-updates`
-command and refined `auth login` (see below); still no record-level CLI
-commands. **Drift since 2026-07-07: the platform published the typed record
-ingest surface** (`POST /ingest/v1/record/{data_type}` + catalog schema
-discovery — see §Records, live-verified 2026-07-08); PyPI is still 0.1.35,
-records remain CLI-less (CLI `data-type` still exposes only
-`create`/`archive`/`restore`), and the MCP server still lists the same 11
-read-only tools. The one delta: fulcra-api-python `main` advanced past the
-0.1.35 tag (`62f580b`→`694f858`) with **unreleased** work — shorthand data-type
-identifiers and an optional `fulcra_userid`/`--user-id` on `get-records` (for
-datashare access). None of it is on PyPI yet, so the **installed** surface is
-unchanged; re-check once a new version publishes.
+surface. **Full surface re-verified 2026-07-13** (`fulcra-api` CLI/lib
+**0.1.36** from PyPI, released 2026-07-10; api.fulcradynamics.com OpenAPI —
+**53 paths**, same count as 07-08 but the composition changed: see below; a
+diffable paths/schemas baseline now lives at
+[`docs/specs/fulcra-openapi-digest.txt`](docs/specs/fulcra-openapi-digest.txt)
+so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-07/08 on
+0.1.35.
+
+**Drift since 2026-07-08, all shipped in CLI 0.1.36:**
+
+- **NEW `fulcra share` command group** — data sharing between Fulcra users:
+  `create|update|delete|leave|list-incoming|list-outgoing`. See §Data sharing.
+- **`get-records --user-id`** shipped (query another user's data via an
+  active datashare), plus shorthand data-type identifiers — the two items the
+  07-08 stamp tracked as unreleased main work.
+- **`fulcra file restore`** is now a released CLI verb (was lib-only).
+- **Lib BREAKING change:** `resolve_filepath` now returns **`list[dict]`**
+  (one element per match/version) where 0.1.35 returned a single dict. This
+  silently broke a downstream consumer (fulcra-prefs, fixed 2026-07-13); any
+  lib code doing `resolve_filepath(...)["id"]` breaks on 0.1.36 — take
+  `[0]["id"]` and handle the empty list.
+- **Spec composition:** `/data/v1/updates` and
+  `/input/v1/file[_upload]/recent_changes` are now **published** in the
+  OpenAPI (both were live-but-unpublished at the 07-08 stamp). The datashare
+  endpoints the new `share` CLI hits are today's live-but-unpublished set;
+  `/ingest/v1/record/batch` remains unpublished. Records remain CLI-less
+  (`data-type` still exposes only `create`/`archive`/`restore`), and the MCP
+  server tool list is unchanged (last source-verified 2026-07-06).
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
@@ -74,9 +85,12 @@ Versioned, path-addressed user file store. This is what the **coord** bus
 (`coord-engine`, and the first-generation `fulcra-coord` before it) runs on, so it
 is battle-tested at load.
 
-- **Tier 1:** `fulcra file list|stat|download|upload|delete <path>`
-  (`stat` shows version history; deleted files restorable via lib
-  `restore_file`).
+- **Tier 1:** `fulcra file list|stat|download|upload|delete|restore <path>`
+  (`stat` shows version history; **0.1.36 added `restore` as a CLI verb** —
+  previously lib-only `restore_file`).
+- **Lib contract (0.1.36):** `resolve_filepath(path)` returns a **list** of
+  match dicts, not one dict — `matches[0]["id"]`, and treat `[]` as absent.
+  Code written against 0.1.35's single-dict return breaks silently.
 - **Tier 2 (REST, all on `https://api.fulcradynamics.com`):** the file API is
   now **published in the OpenAPI spec** (it wasn't before — don't be surprised
   it's there). Two identical path prefixes exist: **`/input/v1/file`** (the
@@ -90,6 +104,8 @@ is battle-tested at load.
     `url` → `POST` the raw bytes to that URL with matching headers.
   - Delete: `DELETE /input/v1/file/{input_id}`; restore:
     `POST /input/v1/file/{input_id}/restore`
+  - What-changed: `GET /input/v1/file/recent_changes` (published in the spec
+    as of 07-13; the file-side counterpart of `/data/v1/updates`)
 
 ## Annotations (definitions vs records — they differ!)
 
@@ -107,7 +123,7 @@ is battle-tested at load.
   `GET /user/v1alpha1/schema/annotation`.
 
 **Records** (instances on the timeline) are **write-via-ingest only** — still
-true as of CLI 0.1.35; there is no `fulcra` record-write/delete command and no
+true as of CLI 0.1.36; there is no `fulcra` record-write/delete command and no
 record-write/delete lib method, only definition + tag management. There are now
 **two ingest write paths**. The typed endpoint is **live round-trip verified
 2026-07-08**; the legacy single-record path is published in the OpenAPI
@@ -191,8 +207,8 @@ Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list
 - What-changed: `fulcra data-updates "<range>"` (0.1.35) — summary of which
   data types had records processed (with counts) and which uploaded files
   changed over a time range; good for incremental "what's new since I last
-  looked" syncs. Backed by `/data/v1/updates` (CLI-exposed; not yet in the
-  public OpenAPI).
+  looked" syncs. Backed by `/data/v1/updates` — **now published in the
+  OpenAPI** (it was live-but-unpublished at the 07-08 stamp).
 - Time series: `/data/v0/time_series_grouped` (arbitrary metrics × time,
   `samprate` resolution); per-metric `/data/v1alpha1/metric/{type}` and
   events `/data/v1alpha1/event/{type}` (both with `/agg/{resolution}` variants).
@@ -201,6 +217,25 @@ Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list
 - Schemas: `GET /user/v1alpha1/schema/annotation` and `…/schema/measurement`.
 - Domain helpers in lib/CLI: sleep cycles/stages, calendars + events,
   workouts, location time series / at-time / visits.
+
+## Data sharing (tiers 1 & 2) — NEW in CLI 0.1.36
+
+Share slices of your Fulcra data with another Fulcra user, and read data
+shared with you.
+
+- **Tier 1:** `fulcra share create|update|delete|leave|list-incoming|list-outgoing`.
+  Reading shared data: `fulcra get-records <DataType> "<range>" --user-id
+  <their fulcra_userid>` (requires an active incoming share).
+- **Tier 2:** the CLI hits `GET|POST /user/v1alpha1/datashares` and
+  `GET|PUT|DELETE /user/v1alpha1/datashare/{datashare_id}` — **live but NOT in
+  the published OpenAPI as of 2026-07-13** (the same
+  published-later pattern `/data/v1/updates` followed); read shapes off the
+  CLI source (`fulcra_api/core.py`) until they publish, and treat them as
+  changeable.
+- Coordination note: this is the platform's first cross-**principal** surface —
+  relevant to the multi-party layer sketched in `COORDINATION-PROTOCOL.md` §6
+  (each party owns their store; disclosure crosses an explicit boundary). Not
+  yet used by anything in this repo.
 
 ## User preferences endpoint — NOT a general store
 
