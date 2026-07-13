@@ -112,7 +112,9 @@ it (not on PyPI).
   a direct push to `main`**. The handshake rides the bus, not the forge:
   `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
-  verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`.
+  verdict file exists at `team/<team>/review/<slug>/verdicts/<role>.md` (the
+  filename stem is the `required` token — the role passed to `--reviewer` — not
+  the holder's own name; that stem is what the tally credits).
   The request is **durable-first, not atomic**: the review doc lands FIRST (that
   doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened

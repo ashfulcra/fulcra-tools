@@ -93,7 +93,7 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 `uv run fulcra-collect doctor`. The coord engine installs on its own:
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.3#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.4#subdirectory=packages/coord-engine"
 ```
 
 and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
@@ -140,7 +140,9 @@ than the author. Changes go through a PR where a forge exists — never direct
 pushes to `main` — and the review handshake rides the bus, not the forge:
 `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
 creates a review doc that sits in the reviewer's `needs-me` until their
-verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`;
+verdict file exists at `team/<team>/review/<slug>/verdicts/<role>.md` (the
+filename stem is the `required` token — the role passed to `--reviewer` — not the
+holder's name);
 `coord-engine review status <team> <slug>` gates the merge (a GitHub-only
 comment doesn't count, and neither does an ack). The artifact ref is opaque —
 PR#, branch, commit, URL — so the handshake works with any forge or none.

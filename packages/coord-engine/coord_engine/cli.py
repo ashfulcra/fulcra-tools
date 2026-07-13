@@ -2177,11 +2177,17 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 #   * Fail visible, no flooding — a transport failure emits `LISTEN DEGRADED:`
 #     ONCE per consecutive-failure streak, PER SOURCE (the streak flags persist IN
 #     the state file, so a scheduler re-running `--once` does not re-alarm every
-#     tick). Per-source is load-bearing: a single shared flag would let a permanent
-#     orphan (`owner unresolved` every tick) pin it TRUE forever and silence a NEW,
-#     distinct outage. Each source alerts once per ITS OWN streak and resets on ITS
-#     OWN recovery. It goes to STDERR so `--json` stdout stays a clean
+#     tick). Per-source is load-bearing: a single shared flag would let a chronic
+#     degradation on one source pin it TRUE forever and silence a NEW, distinct
+#     outage on another. Each source alerts once per ITS OWN streak and resets on
+#     ITS OWN recovery. It goes to STDERR so `--json` stdout stays a clean
 #     one-object-per-line event stream for filter-free streaming consumers.
+#     A permanently-absent owner/requester doc is handled a level BELOW the streak:
+#     it is emit-once-cached PER SLUG (`flagged_orphan_responses`/`_verdicts`, like
+#     the dir-only `orphan_slugs`) and skipped silently thereafter, so it never even
+#     reaches its source's streak — a fail-closed watcher (persistent DEGRADED ==
+#     fatal) is not murdered by a doc that will never return, while a genuine
+#     transport outage on that same source still fails loud.
 #   * Quiet ticks print NOTHING to stdout (the monitor-flood lesson) — only
 #     `--verbose` emits a heartbeat, and only to stderr.
 #   * Bounded cost — one list_dir of _coord/responses/ + per-slug work ONLY for
@@ -2245,6 +2251,14 @@ def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
         # Orphan review dirs already reported (verdicts dir, no doc) — cached so
         # each is surfaced ONCE; legacy files lack the key and default empty.
         "orphan_slugs": list(data.get("orphan_slugs") or []),
+        # Emit-once caches for a PERMANENTLY-absent owner/requester doc at the
+        # responses / verdicts sources — a slug whose directive|review doc reads
+        # None has its degrade emitted ONCE, then is skipped silently (a fail-closed
+        # watcher treats persistent DEGRADED as fatal). Distinct from orphan_slugs,
+        # which caches emitted-orphan EVENTS; these cache emitted-DEGRADE slugs.
+        # Legacy files lack the keys and default empty.
+        "flagged_orphan_responses": list(data.get("flagged_orphan_responses") or []),
+        "flagged_orphan_verdicts": list(data.get("flagged_orphan_verdicts") or []),
         "degraded": _coerce_degraded(data.get("degraded")),
     }
 
@@ -2275,6 +2289,13 @@ def _listen_tick(transport: Any, team: str, agent: str,
     inbox_ids = set(state["inbox_ids"])
     response_keys = set(state["response_keys"])
     slug_owned: dict[str, Any] = dict(state["slug_owned"])
+    # Emit-once caches: slugs whose owner/requester doc read None and have already
+    # had their degrade emitted. Skipped SILENTLY thereafter so a fail-closed
+    # watcher (persistent DEGRADED == fatal) survives a permanently-missing doc;
+    # recovery (doc reads non-None) discards the slug to re-arm fail-loud. Mirrors
+    # the `orphan_slugs` emit-once cache the dir-only review scan uses below.
+    flagged_orphan_responses = set(state.get("flagged_orphan_responses") or [])
+    flagged_orphan_verdicts = set(state.get("flagged_orphan_verdicts") or [])
 
     # Source 1 — new inbox directives (the SAME fold `inbox` surfaces), PLUS
     # directives routed to a fresh-lease ROLE this agent holds. An unreadable
@@ -2356,17 +2377,26 @@ def _listen_tick(transport: Any, team: str, agent: str,
         if owned is None:
             doc = transport.read(_task_path(team, slug))
             if doc is None:
-                # Ambiguous: a transient read failure OR an orphan response whose
-                # directive doc is gone. Either way ownership is UNKNOWN, so we do
-                # NOT cache and do NOT advance — unknown != seen, retry next tick.
-                # This is its OWN source: a permanent orphan can pin `orphans`
-                # forever without silencing a fresh `responses`/`inbox` outage.
-                _fail("orphans", f"owner unresolved for {slug}")
+                # Ambiguous: a transient read failure OR a permanent orphan whose
+                # directive doc is gone (a settled/archived/tombstoned directive).
+                # Ownership is UNKNOWN either way, so we do NOT cache and do NOT
+                # advance — unknown != seen, retry next tick. EMIT-ONCE per slug:
+                # a fail-closed watcher treats persistent DEGRADED as fatal, so a
+                # permanently-missing doc must not re-degrade every tick and murder
+                # it. First occurrence fails loud on the `orphans` source; the slug
+                # is then skipped silently until it recovers, so it never pins the
+                # source either. Other sources still fail-loud on their own
+                # transport failures, so a genuine outage is never masked — first
+                # occurrence + recovery visibility is retained.
+                if slug not in flagged_orphan_responses:
+                    _fail("orphans", f"owner unresolved for {slug}")
+                    flagged_orphan_responses.add(slug)
                 continue
             fm = okf.parse_frontmatter(doc) or {}
             owner = str(fm.get("owner") or "").strip()
             owned = owner == agent  # owner is the directive's SENDER; broadcast/absent -> not owned
             slug_owned[slug] = owned  # definitive classification: cache it
+            flagged_orphan_responses.discard(slug)  # recovered -> re-arm fail-loud
         if not owned:
             continue  # responses to other-owner / broadcast directives are noise
         try:
@@ -2419,14 +2449,25 @@ def _listen_tick(transport: Any, team: str, agent: str,
         if requested is None:
             doc = transport.read(_review_doc_path(team, slug))
             if doc is None:
-                # The slug came from the listing so the doc exists — a None read
-                # is a transient transport failure. Requester UNKNOWN: do NOT
-                # cache and do NOT advance (no-false-advance), retry next tick.
-                _fail("verdicts", f"requester unresolved for {slug}")
+                # Ordinarily the slug came from the listing so the doc exists and a
+                # None read is a transient transport failure — but a settled/archived
+                # review can leave its `<slug>/` verdicts subtree listed with the
+                # `<slug>.md` doc gone, a PERMANENT None. Requester UNKNOWN either
+                # way: do NOT cache and do NOT advance (no-false-advance), retry next
+                # tick. EMIT-ONCE per slug: a fail-closed watcher treats persistent
+                # DEGRADED as fatal, so a permanently-missing doc must not re-degrade
+                # every tick. First occurrence fails loud on `verdicts`; the slug is
+                # skipped silently thereafter, never pinning the source. Other
+                # sources still fail-loud on their own transport failures, so a real
+                # outage is never masked. Recovery below re-arms the slug.
+                if slug not in flagged_orphan_verdicts:
+                    _fail("verdicts", f"requester unresolved for {slug}")
+                    flagged_orphan_verdicts.add(slug)
                 continue
             fm = okf.parse_frontmatter(doc) or {}
             requested = str(fm.get("requested_by") or "").strip() == agent
             review_requested[slug] = requested  # definitive classification: cache
+            flagged_orphan_verdicts.discard(slug)  # recovered -> re-arm fail-loud
         if not requested:
             continue  # someone else's review -> noise
         try:
@@ -2529,6 +2570,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
     state["review_requested"] = review_requested
     state["settled_reviews"] = sorted(settled_reviews)
     state["orphan_slugs"] = sorted(orphan_slugs)
+    state["flagged_orphan_responses"] = sorted(flagged_orphan_responses)
+    state["flagged_orphan_verdicts"] = sorted(flagged_orphan_verdicts)
     return events, failures
 
 

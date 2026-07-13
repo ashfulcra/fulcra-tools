@@ -624,6 +624,7 @@ def test_load_state_tolerates_corrupt_file(tmp_path):
     assert state == {"inbox_ids": [], "response_keys": [], "slug_owned": {},
                      "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
                      "orphan_slugs": [],
+                     "flagged_orphan_responses": [], "flagged_orphan_verdicts": [],
                      "degraded": {"inbox": False, "responses": False,
                                   "orphans": False, "verdicts": False,
                                   "roles": False}}
@@ -1087,3 +1088,135 @@ def test_foreign_literal_assignee_no_roles_degradation(capsys):
     events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
                                             json_mode=False, verbose=False)
     assert events == [] and failures == {}
+
+
+# --- v1.6.4 Fix B: orphan/requester-unresolved degrade is emit-once, not per-tick
+# A response/verdict dir whose directive|review doc is PERMANENTLY absent (a
+# settled/archived/tombstoned directive) must degrade exactly ONCE, then stay
+# silent — a fail-closed watcher treats persistent DEGRADED stderr as fatal, so a
+# per-tick re-degrade murders it. Recovery (doc reappears) re-arms fail-loud.
+
+
+def test_owner_unresolved_degrade_emits_once_not_per_tick(capsys):
+    # Red before the fix: `orphans` re-entered `failures` (and re-pinned the source)
+    # on every tick for a permanently-missing directive doc.
+    t = FakeTransport()
+    _put_response(t, "gone-1", "20260710T0000-carol", agent="carol", outcome="ACK")
+    state = _fresh_state()
+
+    # tick 1: the orphan degrades once and is cached in the flagged set
+    _, failures1 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                        json_mode=False, verbose=False)
+    err1 = capsys.readouterr().err
+    assert "orphans" in failures1
+    assert err1.count("LISTEN DEGRADED") == 1
+    assert state["flagged_orphan_responses"] == ["gone-1"]
+
+    # tick 2: SAME permanently-absent doc -> silent; the source is NOT re-flagged
+    # and NOT pinned (so it stays free to alarm a genuinely fresh outage)
+    _, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                        json_mode=False, verbose=False)
+    err2 = capsys.readouterr().err
+    assert "orphans" not in failures2, "a permanent orphan must not re-degrade every tick"
+    assert "LISTEN DEGRADED" not in err2
+    assert state["degraded"]["orphans"] is False
+    assert state["response_keys"] == []  # still no false advance
+
+
+class _ReviewDocReadNone(FakeTransport):
+    """A review `<slug>.md` doc that is LISTED (so the Source-3 loop enters) but
+    whose read returns None — models a settled/archived review whose doc is gone
+    while its verdicts subtree still lists. ``doc_fail`` toggles for recovery."""
+
+    def __init__(self):
+        super().__init__()
+        self.doc_fail = True
+
+    def read(self, path):
+        if (self.doc_fail and path.startswith("team/r/review/")
+                and path.endswith(".md") and "/verdicts/" not in path):
+            return None
+        return super().read(path)
+
+
+def test_requester_unresolved_degrade_emits_once_not_per_tick(capsys):
+    t = _ReviewDocReadNone()
+    _put_review(t, "pr-gone", requested_by="me")   # doc present in the listing
+    _put_verdict(t, "pr-gone", "rev", "approve")
+    state = _fresh_state()
+
+    _, failures1 = cli._run_listen_tick(t, TEAM, "me", state,
+                                        json_mode=False, verbose=False)
+    err1 = capsys.readouterr().err
+    assert "verdicts" in failures1
+    assert err1.count("LISTEN DEGRADED") == 1
+    assert state["flagged_orphan_verdicts"] == ["pr-gone"]
+
+    _, failures2 = cli._run_listen_tick(t, TEAM, "me", state,
+                                        json_mode=False, verbose=False)
+    err2 = capsys.readouterr().err
+    assert "verdicts" not in failures2, "a permanent requester-orphan must not re-degrade every tick"
+    assert "LISTEN DEGRADED" not in err2
+    assert state["degraded"]["verdicts"] is False
+    assert state["verdict_keys"] == []   # still no false advance
+
+
+def test_owner_unresolved_flag_cleared_on_recovery(capsys):
+    # Recovery re-arms: a slug flagged on tick 1 whose directive doc becomes
+    # readable on tick 2 is processed normally AND discarded from the flagged set,
+    # so a genuine future orphaning re-degrades once rather than being suppressed
+    # forever by a stale flag.
+    t = FakeTransport()
+    _put_response(t, "flap-1", "20260710T0000-carol", agent="carol", outcome="ACK")
+    state = _fresh_state()
+
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert state["flagged_orphan_responses"] == ["flap-1"]
+
+    # directive doc appears (owned by bob) -> processed + flag discarded
+    _put_directive(t, "flap-1", "Flap", owner="bob", assignee="carol")
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                              json_mode=False, verbose=False)
+    out2 = capsys.readouterr().out
+    assert failures2 == {}
+    assert [e["slug"] for e in events2] == ["flap-1"]
+    assert "RESPONSE flap-1 by carol: ACK" in out2
+    assert state["flagged_orphan_responses"] == [], "recovered slug must clear the flagged set"
+    assert state["slug_owned"] == {"flap-1": True}
+
+
+def test_requester_unresolved_flag_cleared_on_recovery(capsys):
+    t = _ReviewDocReadNone()
+    _put_review(t, "pr-flap", requested_by="me")
+    _put_verdict(t, "pr-flap", "rev", "approve")
+    state = _fresh_state()
+
+    cli._run_listen_tick(t, TEAM, "me", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert state["flagged_orphan_verdicts"] == ["pr-flap"]
+
+    # review doc becomes readable -> the verdict fires and the flag is discarded
+    t.doc_fail = False
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "me", state,
+                                              json_mode=False, verbose=False)
+    out2 = capsys.readouterr().out
+    assert failures2 == {}
+    assert [e["type"] for e in events2] == ["verdict"]
+    assert "VERDICT pr-flap by rev: approve" in out2
+    assert state["flagged_orphan_verdicts"] == [], "recovered requester must clear the flagged set"
+
+
+def test_response_listing_raise_still_fails_loud_not_emit_once(capsys):
+    # Emit-once is ONLY for the None-doc/missing-doc case. A transport ERROR
+    # (list_dir raises) on the responses root must still fail loud on its streak —
+    # never silenced by the orphan-flag mechanism, and never cached as an orphan.
+    t = FakeTransport()
+    t.fail_list = True
+    state = _fresh_state()
+    _, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                       json_mode=False, verbose=False)
+    err = capsys.readouterr().err
+    assert "responses" in failures
+    assert "LISTEN DEGRADED" in err
+    assert state["flagged_orphan_responses"] == [], "a raised listing is not an orphan-flag case"
