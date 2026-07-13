@@ -19,7 +19,7 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ```bash
 uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.2#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.3#subdirectory=packages/coord-engine"
 ```
 
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
