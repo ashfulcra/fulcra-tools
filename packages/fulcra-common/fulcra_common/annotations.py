@@ -831,14 +831,6 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
             if live is None:
                 unknown.append(m)
             # live is False: authoritatively soft-deleted — never a candidate.
-        if chosen is None and unknown:
-            # Liveness unverifiable (no token / flake) for every non-deleted
-            # candidate: fall back to the oldest unverified one rather than
-            # refusing to annotate — the pre-verification behavior, now loud.
-            chosen = unknown[0]["id"]
-            logger.warning(
-                "annotations: liveness of %r candidates could not be verified; "
-                "falling back to OLDEST unverified %s", def_name, chosen)
         if chosen is not None:
             if len(matches) > 1:
                 logger.warning(
@@ -848,6 +840,20 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
                     len(matches), def_name, chosen, [m["id"] for m in matches])
             _DEF_ID_MEMO[def_name] = chosen
             return chosen
+        if unknown:
+            # Liveness unverifiable (no token / flake) for every non-deleted
+            # candidate: fall back to the oldest unverified one rather than
+            # refusing to annotate — the pre-verification behavior, now loud.
+            # Deliberately NOT memoized: the memo's invariant is verified-only,
+            # and pinning an unverified pick for the process lifetime would
+            # route every later emit to a possibly-deleted def with no retry.
+            # The next resolve re-attempts verification instead.
+            fallback = unknown[0]["id"]
+            logger.warning(
+                "annotations: liveness of %r candidates could not be verified; "
+                "falling back to OLDEST unverified %s (not memoized — "
+                "verification retries on the next resolve)", def_name, fallback)
+            return fallback
         # Every same-name candidate is AUTHORITATIVELY soft-deleted: same as the
         # recognized-soft-delete catalog shapes above — permits a create.
         logger.info(

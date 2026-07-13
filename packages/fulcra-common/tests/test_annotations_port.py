@@ -302,6 +302,21 @@ def test_verified_absent_creates_exactly_once(monkeypatch):
 # when the first projection run landed hidden under a def deleted that day)
 # ---------------------------------------------------------------------------
 
+#: The real helper, captured at import time so the tri-state unit test can
+#: exercise it even though the autouse fixture below stubs the module attr.
+_REAL_DEFINITION_LIVE = ann._definition_live
+
+
+@pytest.fixture(autouse=True)
+def _liveness_verified_by_default(monkeypatch):
+    """Stub per-id liveness to verified-live for every test.
+
+    Keeps the pre-liveness semantics for all legacy resolver tests AND stops
+    them making real (rejected) network GETs from the test suite. Tests about
+    liveness behavior monkeypatch over this (see _stub_liveness)."""
+    monkeypatch.setattr(ann, "_definition_live", lambda def_id, token: True)
+
+
 def _current_row(def_id):
     """A current-fulcra-api-shape catalog row (as served live: NO created_at,
     `deprecated: false` even for soft-deleted definitions)."""
@@ -361,6 +376,27 @@ def test_unverifiable_liveness_falls_back_to_oldest(monkeypatch):
 
     assert got == "aaa"
     assert not any(c[:2] == ["data-type", "create"] for c in calls)
+    assert ann.DEFINITION_NAME not in ann._DEF_ID_MEMO, \
+        "an unverified fallback must NOT be memoized (memo is verified-only)"
+
+
+def test_unverified_fallback_recovers_once_liveness_returns(monkeypatch):
+    # Transient flake resolves to the fallback WITHOUT memoizing; when the
+    # per-id API recovers and reveals the oldest candidate is deleted, the
+    # next resolve picks the verified-live sibling instead of the pinned pick.
+    _stub_cli(monkeypatch,
+              catalog_lines=[_current_row("aaa"), _current_row("bbb")])
+    states = {"aaa": None, "bbb": None}
+    _stub_liveness(monkeypatch, states)
+
+    first = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+    assert first == "aaa", "flake window: oldest unverified fallback"
+
+    states["aaa"] = False   # API recovered: oldest is authoritatively deleted
+    states["bbb"] = True
+    second = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+    assert second == "bbb", "recovery must re-verify, not reuse the flake pick"
+    assert ann._DEF_ID_MEMO.get(ann.DEFINITION_NAME) == "bbb"
 
 
 def test_definition_live_tristate(monkeypatch):
@@ -379,16 +415,16 @@ def test_definition_live_tristate(monkeypatch):
     monkeypatch.setattr(ann, "_request", fake_request)
 
     responses["r"] = (200, json.dumps({"deleted_at": None}).encode())
-    assert ann._definition_live("d", "tok") is True
+    assert _REAL_DEFINITION_LIVE("d", "tok") is True
     responses["r"] = (200, json.dumps({"deleted_at": "2026-07-13T00:00:00Z"}).encode())
-    assert ann._definition_live("d", "tok") is False
+    assert _REAL_DEFINITION_LIVE("d", "tok") is False
     responses["r"] = ue.HTTPError("u", 404, "nf", {}, None)
-    assert ann._definition_live("d", "tok") is False
+    assert _REAL_DEFINITION_LIVE("d", "tok") is False
     responses["r"] = ue.HTTPError("u", 500, "boom", {}, None)
-    assert ann._definition_live("d", "tok") is None
+    assert _REAL_DEFINITION_LIVE("d", "tok") is None
     responses["r"] = ue.URLError("down")
-    assert ann._definition_live("d", "tok") is None
-    assert ann._definition_live("d", None) is None
+    assert _REAL_DEFINITION_LIVE("d", "tok") is None
+    assert _REAL_DEFINITION_LIVE("d", None) is None
 
 
 # ---------------------------------------------------------------------------
