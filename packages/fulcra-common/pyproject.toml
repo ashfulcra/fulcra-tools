@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fulcra-common"
-version = "0.1.0"
+version = "0.1.1"
 description = "Shared Fulcra API client for the fulcra-tools packages."
 requires-python = ">=3.11"
 dependencies = [
