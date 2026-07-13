@@ -297,6 +297,137 @@ def test_verified_absent_creates_exactly_once(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Authoritative liveness verification (the catalog LIES about soft-deletion:
+# deleted user defs come back `deprecated: false` — live-verified 2026-07-13,
+# when the first projection run landed hidden under a def deleted that day)
+# ---------------------------------------------------------------------------
+
+#: The real helper, captured at import time so the tri-state unit test can
+#: exercise it even though the autouse fixture below stubs the module attr.
+_REAL_DEFINITION_LIVE = ann._definition_live
+
+
+@pytest.fixture(autouse=True)
+def _liveness_verified_by_default(monkeypatch):
+    """Stub per-id liveness to verified-live for every test.
+
+    Keeps the pre-liveness semantics for all legacy resolver tests AND stops
+    them making real (rejected) network GETs from the test suite. Tests about
+    liveness behavior monkeypatch over this (see _stub_liveness)."""
+    monkeypatch.setattr(ann, "_definition_live", lambda def_id, token: True)
+
+
+def _current_row(def_id):
+    """A current-fulcra-api-shape catalog row (as served live: NO created_at,
+    `deprecated: false` even for soft-deleted definitions)."""
+    return {"id": f"MomentAnnotation/{def_id}", "name": ann.DEFINITION_NAME,
+            "column_name": "moment", "deprecated": False}
+
+
+def _stub_liveness(monkeypatch, states):
+    """Route _definition_live through a def-id -> True/False/None map, and give
+    the resolver a token so verification is attempted. Records lookups."""
+    seen: list[str] = []
+
+    def fake_live(def_id, token):
+        seen.append(def_id)
+        return states.get(def_id)
+
+    monkeypatch.setattr(ann, "_resolve_token", lambda: "tok")
+    monkeypatch.setattr(ann, "_definition_live", fake_live)
+    return seen
+
+
+def test_deleted_candidate_skipped_for_verified_live(monkeypatch):
+    # aaa sorts first (would win on the old rule) but is soft-deleted per the
+    # authoritative per-id check; bbb is live -> bbb wins, nothing created.
+    calls = _stub_cli(monkeypatch,
+                      catalog_lines=[_current_row("aaa"), _current_row("bbb")])
+    _stub_liveness(monkeypatch, {"aaa": False, "bbb": True})
+
+    got = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+
+    assert got == "bbb", "must skip the authoritatively deleted candidate"
+    assert not any(c[:2] == ["data-type", "create"] for c in calls)
+
+
+def test_all_candidates_deleted_permits_create(monkeypatch):
+    # Every same-name def is soft-deleted -> recognized-soft-delete semantics:
+    # treat as absent and create exactly once.
+    calls = _stub_cli(monkeypatch, catalog_lines=[_current_row("aaa")],
+                      create_id="def-fresh")
+    _stub_liveness(monkeypatch, {"aaa": False})
+
+    got = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+
+    assert got == "def-fresh"
+    creates = [c for c in calls if c[:2] == ["data-type", "create"]]
+    assert len(creates) == 1
+
+
+def test_unverifiable_liveness_falls_back_to_oldest(monkeypatch):
+    # Verification unavailable (flake / no answer) for every candidate: keep
+    # the pre-verification behavior (oldest by sort key), never create.
+    calls = _stub_cli(monkeypatch,
+                      catalog_lines=[_current_row("aaa"), _current_row("bbb")])
+    _stub_liveness(monkeypatch, {"aaa": None, "bbb": None})
+
+    got = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+
+    assert got == "aaa"
+    assert not any(c[:2] == ["data-type", "create"] for c in calls)
+    assert ann.DEFINITION_NAME not in ann._DEF_ID_MEMO, \
+        "an unverified fallback must NOT be memoized (memo is verified-only)"
+
+
+def test_unverified_fallback_recovers_once_liveness_returns(monkeypatch):
+    # Transient flake resolves to the fallback WITHOUT memoizing; when the
+    # per-id API recovers and reveals the oldest candidate is deleted, the
+    # next resolve picks the verified-live sibling instead of the pinned pick.
+    _stub_cli(monkeypatch,
+              catalog_lines=[_current_row("aaa"), _current_row("bbb")])
+    states = {"aaa": None, "bbb": None}
+    _stub_liveness(monkeypatch, states)
+
+    first = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+    assert first == "aaa", "flake window: oldest unverified fallback"
+
+    states["aaa"] = False   # API recovered: oldest is authoritatively deleted
+    states["bbb"] = True
+    second = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+    assert second == "bbb", "recovery must re-verify, not reuse the flake pick"
+    assert ann._DEF_ID_MEMO.get(ann.DEFINITION_NAME) == "bbb"
+
+
+def test_definition_live_tristate(monkeypatch):
+    # 200 without/with deleted_at -> True/False; 404 -> False; 5xx/transport
+    # -> None; no token -> None (verification skipped entirely).
+    import urllib.error as ue
+
+    responses = {}
+
+    def fake_request(method, url, token, **k):
+        r = responses["r"]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(ann, "_request", fake_request)
+
+    responses["r"] = (200, json.dumps({"deleted_at": None}).encode())
+    assert _REAL_DEFINITION_LIVE("d", "tok") is True
+    responses["r"] = (200, json.dumps({"deleted_at": "2026-07-13T00:00:00Z"}).encode())
+    assert _REAL_DEFINITION_LIVE("d", "tok") is False
+    responses["r"] = ue.HTTPError("u", 404, "nf", {}, None)
+    assert _REAL_DEFINITION_LIVE("d", "tok") is False
+    responses["r"] = ue.HTTPError("u", 500, "boom", {}, None)
+    assert _REAL_DEFINITION_LIVE("d", "tok") is None
+    responses["r"] = ue.URLError("down")
+    assert _REAL_DEFINITION_LIVE("d", "tok") is None
+    assert _REAL_DEFINITION_LIVE("d", None) is None
+
+
+# ---------------------------------------------------------------------------
 # RAW-output fail-closed: these feed real subprocess stdout THROUGH the parse
 # layer (via a `printf` CLI base) instead of stubbing the pre-parsed list. The
 # earlier stubs sat ABOVE the parser, so catalog-shape drift and non-JSON
