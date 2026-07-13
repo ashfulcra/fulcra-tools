@@ -3,12 +3,12 @@ store uses: list_files / resolve_filepath / download_file / upload_file /
 fulcra_api (generic request). Keep method signatures in lockstep with the
 real library (fulcra-api git file-commands branch, v0.1.30).
 
-VERIFIED against fulcra_api/core.py (v0.1.30, file-commands branch):
+VERIFIED against fulcra_api/core.py (v0.1.36):
 
-- resolve_filepath(filepath): returns ONE dict (the file record) when found.
-  Raises Exception("File not found in Fulcra Library: <filepath>") when the
-  file is absent. Does NOT return a list — callers do match["id"], not
-  matches[0]["id"].
+- resolve_filepath(filepath, all_versions=False): returns a list[dict] of
+  matching file records when found (CHANGED in 0.1.36 from a single dict).
+  Raises Exception("File not found in Fulcra: <filepath>") when the file is
+  absent. Callers take matches[0]["id"] (read_json tolerates a lone dict too).
 
 - list_files(path="/"): returns a dict {"files": [...], ...},
   NOT a plain list. store.py extracts result["files"].
@@ -57,14 +57,14 @@ class FakeFulcraAPI:
     # --- file library (matches fulcra_api.core.FulcraAPI shapes) ---
 
     def resolve_filepath(self, filepath, all_versions=False):
-        """Returns ONE dict (the file record) when found.
-        Raises Exception("File not found in Fulcra Library: <filepath>") when
+        """Returns a list[dict] of matching file records when found (0.1.36
+        shape). Raises Exception("File not found in Fulcra: <filepath>") when
         absent — matching the real library's exact error message and shape.
-        Callers do match["id"], NOT matches[0]["id"]."""
+        Callers take matches[0]["id"]."""
         filepath = self._abs(filepath)
         if filepath not in self.files:
-            raise Exception(f"File not found in Fulcra Library: {filepath}")
-        return {"id": f"v-{filepath}", "name": filepath.rsplit('/', 1)[-1]}
+            raise Exception(f"File not found in Fulcra: {filepath}")
+        return [{"id": f"v-{filepath}", "name": filepath.rsplit('/', 1)[-1]}]
 
     def download_file(self, file_id):
         path = file_id[2:]                      # "v-<path>"
