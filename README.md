@@ -1,10 +1,11 @@
 # Ash's Fulcra Tools
 
-WARNING: Everything in this repo was vibe coded by Fulcra's lawyer,
-using Fulcra's file and datastream primitives.
+Vibe-coded by Fulcra's lawyer on Fulcra's own primitives — unofficial,
+unsupported, and a genuinely useful thing to point your agents at.
 
-Nothing in this repo is official Fulcra software, and it may or may
-not be supported in the future.
+**Point your agents here.** Clone it, then tell your agent: "read AGENTS.md
+and tell me how this could help our work." The rest of this file is for you;
+AGENTS.md is for them.
 
 This is a uv-workspace monorepo of helper projects built on
 [Fulcra](https://fulcradynamics.com) — the personal data platform: your
@@ -15,23 +16,53 @@ skills live under [`skills/`](skills), and each package keeps its own README,
 build, and tests. This file is the front door; the package READMEs carry the
 detail.
 
-> **Note:** Using the coord skills, Continuity and Prefs effectively turns
-> any agent (including Claude Code and Codex) into a looping multithreaded
-> agent with persistent memory across sessions, much like Openclaw or Hermes
-> Agent.
+## No Fulcra account? Start here
+
+Your agent can get real value out of this repo before you authenticate
+anything. Reading is free; live data is the only thing gated behind a Fulcra
+token, and this file won't pretend otherwise.
+
+**No account needed — read and understand:**
+
+- [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps the whole platform surface
+  (auth, files, annotations, queries, MCP) by agent capability tier — CLI, raw
+  HTTP, or MCP-only.
+- [`docs/how-do-i-get-my-data.md`](docs/how-do-i-get-my-data.md) is a lookup of
+  every data source Fulcra can pull from today and the pathway for each.
+- The [`skills/`](skills) directory — twelve `fulcra-agent-*` skills (of 14
+  total) — is the prose an agent reads to learn the coordination layer;
+  [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) and
+  [`docs/coord-DESIGN.md`](docs/coord-DESIGN.md) explain the bus without
+  touching it. ([`docs/README.md`](docs/README.md) indexes which docs are
+  written for a cold reader.)
+- The coord engine is stdlib-only, so it installs with no Fulcra account (see
+  [Getting started](#getting-started)); `coord-engine --help` then prints the
+  full verb surface offline.
+
+**Needs your Fulcra token — live data:** anything that reads or writes your
+actual data — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the
+read-only MCP server, and Collect's ingest. Auth is a browser sign-in that
+creates your account on first login (`fulcra auth login`). There is no
+sample-data or offline demo bundled here, so that sign-in is the honest line
+between reading about Fulcra and running it on your own life.
 
 ## The packages
 
+Ordered from the coordination layer your agents run on, down to the data it
+works on top of. **coord** is the killer feature; **Collect** shows the promise
+underneath it — your agents operating on your life data without ever logging in
+as you:
+
 | Project | What it is | Start here |
 |---|---|---|
-| **coord** | The agent-coordination layer, second generation: judgment stays in prose (skills), bookkeeping is deterministic code (a stdlib-only CLI, [`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenClaw, Hermes, CI — coordinate durable tasks over Fulcra Files as a bus: a cross-agent inbox with directives and broadcasts, role-based identity with leases, a review handshake where the obligation persists until the verdict file exists (no ack can clear it), continuity checkpoints, and `briefing`/`needs-me` as the single entry fold for a waking agent. The twelve `fulcra-agent-*` skills under [`skills/`](skills) are how an agent actually uses it; per-platform watch/wake installers (Codex app automations, Claude Code hooks, OpenClaw heartbeat blocks) live in [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md). Design and pitch docs: [`docs/coord/`](docs/coord). | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [`README.md`](packages/coord-engine/README.md) · [`skills/`](skills) (agents) · [pitch](docs/coord/pitch/one-pager.md) |
+| **coord** | The agent-coordination layer (second generation): judgment stays in prose (skills), bookkeeping is deterministic stdlib-only code ([`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenClaw, CI — coordinate durable tasks over Fulcra Files as a bus: a cross-agent inbox, role-based identity with leases, a review handshake whose obligation persists until the verdict file exists (no ack can clear it), continuity checkpoints, and `briefing`/`needs-me` as the single entry fold for a waking agent. The twelve `fulcra-agent-*` skills (of 14 total) under [`skills/`](skills) are how an agent actually uses it. | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [`README.md`](packages/coord-engine/README.md) · [`skills/`](skills) (agents) · [design](docs/coord-DESIGN.md) |
 | **ATC** | Air-traffic control for a fleet running on subscription caps — capability-matched model routing. A versioned capability map ships in the engine (current Claude/GPT/Gemini/Grok lineups + the local OSS tier); `coord-engine route <team> --needs code,long-context` ranks the cheapest capable model on the account with headroom, agents log usage and outcomes after each dispatch (`usage log`), and three bad outcomes demote a model for that kind of work. `coord-engine atc init` gets a solo operator from zero to routed dispatch in one command — no team concepts required; `atc report` and `atc dash` (localhost) show the tier mix and estimated frontier-cap days preserved. | [`SKILL.md`](skills/fulcra-agent-atc/SKILL.md) · [design](docs/coord/atc-DESIGN.md) |
-| **Fulcra FDE** | A forward-deployed engineer as a skill: bring a business plan, deck, or idea; it interviews you to surface goals and assumptions, maps the product onto Fulcra primitives (with an honest gap register), builds a verification prototype — including a deployment rehearsal — and only then the real thing. Engagement state lives in your own Fulcra file store; judgment is prose ([`skills/fulcra-fde`](skills/fulcra-fde/SKILL.md)), bookkeeping is a stdlib-only engine ([`packages/fde-engine`](packages/fde-engine)). | [`SKILL.md`](skills/fulcra-fde/SKILL.md) · [`README.md`](packages/fde-engine/README.md) |
+| **Fulcra Collect** | A local daemon that imports your personal-data streams into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md)) hosts every importer plugin, runs them on schedule in worker subprocesses, stores secrets in the OS keychain, and serves the onboarding wizard + dashboard at `127.0.0.1:9292` ([`packages/web-ui`](packages/web-ui/README.md)). [`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the shared API client + ingest pipeline every importer builds against; and [`packages/dayone`](packages/dayone/README.md), [`packages/csv-importer`](packages/csv-importer/README.md), and [`packages/media-helpers`](packages/media-helpers/README.md) are data-source importers (Day One journals, arbitrary CSVs, and watched/listened/read history from ~13 services). | [`docs/collect.md`](docs/collect.md) |
+| **Fulcra Attention** | A Chrome (MV3) extension that captures what you read while browsing — foreground-tab attention, with title and time-on-page — and posts it directly to the Fulcra API after a browser sign-in. No daemon involved: the Python half of the package is just the Collect pointer plugin that tells you to install the extension. Three privacy tiers (param-strip, categorize, ignore) are built in. | [`README.md`](packages/attention/README.md) |
 | **Fulcra Continuity** | Turns a long-running agent task into a structured checkpoint (objective, decisions, artifacts, open questions, next actions) that another session or agent can resume from without guessing. A standalone library + CLI (`checkpoint` / `resume`) that pairs with coord without depending on it: `coord-engine continuity resume/snapshot/park` read and write the same shape, and the [continuity skill](skills/fulcra-agent-continuity/SKILL.md) carries the cross-harness lifecycle contract (resume on wake, snapshot on change, park before context loss) with installers for each harness. | [`README.md`](packages/fulcra-continuity/README.md) |
 | **Fulcra Prefs** *(alpha)* | A user-owned preference layer: typed preference signals with half-life decay, captured by any of your agents, deterministically compiled into per-platform preference docs, plus a group-decision solver and consent-gated export where every disclosure is logged (the Privacy Ledger). Ships an agent skill with raw-HTTP recipes for shell-less agents, and a session hook that boots Claude Code with your preferences loaded. | [`README.md`](packages/fulcra-prefs/README.md) · [`SKILL.md`](packages/fulcra-prefs/skill/SKILL.md) (agents) |
 | **Fulcra Vault** *(alpha)* | A shared markdown knowledge vault in Fulcra Files — one durable place for humans and agents to keep prose memory: projects, people, decisions, corrections, and domain notes, linked with Obsidian-style `[[wikilinks]]`. Flat Dataview-friendly frontmatter, owned sections agents can edit safely, append-only logs, backlink indexes, and deterministic `MAP.md`/`HOT.md` rendering. | [`README.md`](packages/fulcra-vault/README.md) |
-| **Fulcra Collect** | A local daemon that imports your personal-data streams into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md)) hosts every importer plugin, runs them on schedule in worker subprocesses, stores secrets in the OS keychain, and serves the onboarding wizard + dashboard at `127.0.0.1:9292` ([`packages/web-ui`](packages/web-ui/README.md)). [`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the shared API client + ingest pipeline every importer builds against; and [`packages/dayone`](packages/dayone/README.md), [`packages/csv-importer`](packages/csv-importer/README.md), and [`packages/media-helpers`](packages/media-helpers/README.md) are data-source importers (Day One journals, arbitrary CSVs, and watched/listened/read history from ~13 services). | [`docs/collect.md`](docs/collect.md) |
-| **Fulcra Attention** | A Chrome (MV3) extension that captures what you read while browsing — foreground-tab attention, with title and time-on-page — and posts it directly to the Fulcra API after a browser sign-in. No daemon involved: the Python half of the package is just the Collect pointer plugin that tells you to install the extension. Three privacy tiers (param-strip, categorize, ignore) are built in. | [`README.md`](packages/attention/README.md) |
+| **Fulcra FDE** | A forward-deployed engineer as a skill: bring a business plan, deck, or idea; it interviews you to surface goals and assumptions, maps the product onto Fulcra primitives (with an honest gap register), builds a verification prototype — including a deployment rehearsal — and only then the real thing. Engagement state lives in your own Fulcra file store; judgment is prose ([`skills/fulcra-fde`](skills/fulcra-fde/SKILL.md)), bookkeeping is a stdlib-only engine ([`packages/fde-engine`](packages/fde-engine)). | [`SKILL.md`](skills/fulcra-fde/SKILL.md) · [`README.md`](packages/fde-engine/README.md) |
 
 **Legacy:** [`packages/fulcra-coord`](packages/fulcra-coord/README.md) and
 [`packages/fulcra-coord-files`](packages/fulcra-coord-files/README.md) are the
@@ -62,7 +93,7 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 `uv run fulcra-collect doctor`. The coord engine installs on its own:
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.2#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.3#subdirectory=packages/coord-engine"
 ```
 
 and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
