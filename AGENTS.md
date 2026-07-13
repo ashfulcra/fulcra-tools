@@ -299,8 +299,12 @@ it (not on PyPI).
   your Fulcra timeline model-free, right after each reconcile; `annotate status
   <team>` shows the level + cursor. It is the successor to the legacy
   `fulcra-coord annotations` writer — enabling it requires that writer stay off
-  (see [Fulcra platform surface](#fulcra-platform-surface--records)). Setup:
-  [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
+  (see [Fulcra platform surface](#fulcra-platform-surface--records)). Projection
+  needs the typed-record writer (`fulcra-common`) installed *beside* coord-engine
+  (`uv tool install … --with fulcra-common`); without it the step is a silent
+  exit-0 no-op. Setup + install recipe:
+  [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md#enable-timeline-projection-recommended)
+  and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 
 ## Operator knowledge: vault + prefs
 

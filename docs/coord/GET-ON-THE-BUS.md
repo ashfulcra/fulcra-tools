@@ -27,6 +27,34 @@ PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the 
 binary.) Install the skills into your agent with
 [`scripts/coord/coord-setup.sh`](../../scripts/coord/coord-setup.sh).
 
+### Enable timeline projection (recommended)
+
+The heartbeat can project each agent-task transition onto your Fulcra timeline — the
+demo surface that shows an agent's work as it happens. The bus itself is stdlib-only and
+needs none of this; projection is the one feature that requires the typed-record **writer**
+(`fulcra_common`) installed *next to* coord-engine. Without it the projection step is a
+silent exit-0 no-op — the failure mode that left the timeline dark. Install both together:
+
+```bash
+uv tool install --force \
+  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.4#subdirectory=packages/coord-engine" \
+  --with "git+https://github.com/ashfulcra/fulcra-tools@d87cdc2#subdirectory=packages/fulcra-common"
+```
+
+The writer is pinned to a commit, not a tag: `fulcra-common` is not release-tagged yet,
+and `d87cdc2` is the floor that resolves definitions by liveness (an earlier writer picked
+soft-deleted duplicates, landing moments hidden). Pin at or after it.
+
+Projection self-gates on the team's bus resolution level, so it costs nothing until turned
+on: `coord-engine annotate resolution <team> transitions` (team-wide, one-time; already on
+for `fulcra`). The heartbeat then runs `reconcile && annotate project <team>` every beat —
+idempotent across hosts (deterministic ids + a shared cursor + a skew window). Verify with
+`coord-engine annotate status <team>` (resolution + cursor) and a manual `coord-engine
+annotate project <team>` (reports `emitted N`). **Already running a heartbeat?** If it was
+installed before the projection chain, re-run
+[`install-heartbeat.sh`](../../skills/fulcra-agent-automation/scripts/install-heartbeat.sh)
+to pick up the `annotate project` leg.
+
 ## 3. Authenticate
 
 Interactive (a browser opens):
