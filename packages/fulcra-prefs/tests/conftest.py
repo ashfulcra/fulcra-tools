@@ -23,7 +23,9 @@ VERIFIED against fulcra_api/core.py (v0.1.36):
   (url_path, method, query, data, ...) — plan fake had query/data before method.
   Corrected here. store.py calls with keyword args so no runtime breakage either
   way, but the fake should faithfully mirror the real lib for documentation
-  accuracy.
+  accuracy. Ingest goes to the TYPED surface POST /ingest/v1/record/{data_type}
+  with an unwrapped body {note, recorded_at, sources}; the fake accepts that
+  path (and the legacy bare path) and records both body + endpoint.
 """
 import io
 import sys
@@ -44,7 +46,8 @@ class FakeResponse:
 class FakeFulcraAPI:
     def __init__(self):
         self.files: dict[str, bytes] = {}      # path -> content (normalized to absolute)
-        self.ingested: list[dict] = []         # posted record bodies
+        self.ingested: list[dict] = []         # posted record bodies (typed unwrapped)
+        self.ingest_paths: list[str] = []      # the endpoint each body was POSTed to
         self.fail_ingest = False
         self.fail_upload = False
         self.fail_read = False
@@ -100,11 +103,16 @@ class FakeFulcraAPI:
     #                            return_raw_response=False)
     def fulcra_api(self, path, method="GET", query=None, data=None,
                    return_raw_response=False):
-        if path == "/ingest/v1/record" and method == "POST":
+        # Typed ingest surface: POST /ingest/v1/record/{data_type} with the
+        # unwrapped body {note, recorded_at, sources}. (The bare
+        # /ingest/v1/record legacy path is still accepted for back-compat.)
+        if method == "POST" and (path == "/ingest/v1/record"
+                                 or path.startswith("/ingest/v1/record/")):
             if self.fail_ingest:
                 raise ConnectionError("simulated ingest outage")
             self.ingested.append(data)
-            return b"{}"
+            self.ingest_paths.append(path)
+            return b'{"upload_id": "00000000-0000-0000-0000-000000000000"}'
         raise NotImplementedError(path)
 
     # --- record reads (mirrors FulcraAPI.moment_annotations) ---
@@ -119,11 +127,21 @@ class FakeFulcraAPI:
             raise ConnectionError("simulated get-records outage")
         out = []
         for i, body in enumerate(self.ingested):
-            md = body["metadata"]
+            # Typed bodies carry the payload in `note` + `sources`/`recorded_at`
+            # at top level. (Fall back to the legacy wrapped shape so a
+            # hand-posted DataRecordV1 still reads back.)
+            if "metadata" in body:                       # legacy envelope
+                md = body["metadata"]
+                recorded_at, sources = md["recorded_at"], md["source"]
+                payload = body["data"]
+            else:                                        # typed body
+                recorded_at = body.get("recorded_at")
+                sources = body.get("sources") or []
+                payload = body.get("note")
             out.append({"id": f"rec-{i:04d}",
-                        "recorded_at": md["recorded_at"],
-                        "sources": md["source"],
-                        "data": body["data"]})
+                        "recorded_at": recorded_at,
+                        "sources": sources,
+                        "note": payload})               # read side: data-or-note
         return out
 
 

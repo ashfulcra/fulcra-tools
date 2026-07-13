@@ -49,7 +49,7 @@ def test_get_for_audience_filters_and_logs_disclosure(env, capsys):
     out = json.loads(capsys.readouterr().out)
     assert list(out["keys"]) == ["dining.cuisine.thai"]
     assert len(fake_api.ingested) == n_before + 1          # disclosure logged
-    disclosure = json.loads(fake_api.ingested[-1]["data"])
+    disclosure = json.loads(fake_api.ingested[-1]["note"])  # typed body: payload in `note`
     assert disclosure["kind"] == "consent"
 
 
@@ -73,7 +73,7 @@ def test_get_for_purpose_solve_excludes_read_only_grants(env, capsys):
     assert call("get", "--for", "ea", "--purpose", "solve") == 0
     assert list(json.loads(capsys.readouterr().out)["keys"]) == ["dining.cuisine.thai"]
     assert len(fake_api.ingested) == n_before + 1
-    disclosure = json.loads(fake_api.ingested[-1]["data"])
+    disclosure = json.loads(fake_api.ingested[-1]["note"])  # typed body: payload in `note`
     assert disclosure["value"]["purpose"] == "solve"
 
 def test_get_platform_falls_back_to_global_when_no_overlay(env, capsys):
