@@ -34,6 +34,24 @@ def test_preview_flags_caught_negative():
     assert res.negatives_caught == ["9"]   # rule too loose — caught a ✗
 
 
+def test_label_candidates_verified_independently_of_query_page():
+    # The query page has ONE non-matching filler; the labeled ✓/✗ live only in
+    # label_candidates (they sorted past the query page). They must still be
+    # cross-referenced against the operator's selection.
+    rule = {"id": "r1", "version": 1, "name": "n",
+            "match": "from:shop.example", "actions": ["file"]}
+    query_page = [_msg("f", "u@other.example", "hello")]  # no match → count 0
+    labeled = [_msg("pos", "r@shop.example", "receipt"),
+               _msg("neg", "r@shop.example", "newsletter")]
+    res = rules_preview.preview(
+        rule, query_page, "acct",
+        positives={"pos"}, negatives={"neg"},
+        label_candidates=labeled)
+    assert res.match_count == 0            # driven by the query page only
+    assert res.positives_caught == ["pos"]
+    assert res.negatives_caught == ["neg"]  # both match from:shop.example
+
+
 def test_preview_rejects_invalid_rule():
     import pytest
     bad = {"id": "r1", "version": 1, "name": "n", "match": "x",

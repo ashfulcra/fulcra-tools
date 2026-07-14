@@ -46,6 +46,29 @@ def _query_from_ok(match_query: str, from_header: str) -> bool:
     return True
 
 
+def _matches(rule, msg: dict, account_id: str) -> bool:
+    """True iff ``msg`` is an effective match — the sender-query filter AND the
+    engine post-filter decision (:func:`rules.evaluate`)."""
+    from_header = convert.get_header(msg.get("payload", {}), "From") or ""
+    if not _query_from_ok(rule.match, from_header):
+        return False
+    return rules.evaluate(rule, msg, account_id=account_id).matched
+
+
+def _matched_ids(rule, pool: list[dict], account_id: str) -> list[str]:
+    """Ordered, de-duplicated ids from ``pool`` that match ``rule``."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for msg in pool:
+        mid = msg.get("id", "")
+        if mid in seen:
+            continue
+        seen.add(mid)
+        if _matches(rule, msg, account_id):
+            out.append(mid)
+    return out
+
+
 def preview(
     rule_dict: dict,
     candidates: list[dict],
@@ -54,17 +77,25 @@ def preview(
     negatives: set[str],
     *,
     sample_limit: int = 10,
+    label_candidates: list[dict] | None = None,
 ) -> PreviewResult:
+    """Precision-check a draft rule.
+
+    ``candidates`` is the bounded server-query page — it drives ``match_count``
+    and ``sample`` (a representative window of the inbox).
+
+    ``label_candidates`` are the operator's ✓/✗ messages fetched DIRECTLY by id
+    (independent of the truncated query page); they drive
+    ``positives_caught``/``negatives_caught`` so a labeled example that matches
+    the draft but sorts past page 1 is still verified. Defaults to
+    ``candidates`` when not supplied (keeps the pure-unit contract).
+    """
     (rule,) = rules.parse_rules([rule_dict])  # raises ValueError on bad rule
     res = PreviewResult()
     matched_ids: list[str] = []
     for msg in candidates:
         mid = msg.get("id", "")
-        from_header = convert.get_header(msg.get("payload", {}), "From") or ""
-        if not _query_from_ok(rule.match, from_header):
-            continue
-        decision = rules.evaluate(rule, msg, account_id=account_id)
-        if not decision.matched:
+        if not _matches(rule, msg, account_id):
             continue
         matched_ids.append(mid)
         if len(res.sample) < sample_limit:
@@ -74,6 +105,9 @@ def preview(
                 "subject": convert.get_header(msg.get("payload", {}), "Subject") or "",
             })
     res.match_count = len(matched_ids)
-    res.positives_caught = [m for m in matched_ids if m in positives]
-    res.negatives_caught = [m for m in matched_ids if m in negatives]
+
+    label_pool = candidates if label_candidates is None else label_candidates
+    label_matched = _matched_ids(rule, label_pool, account_id)
+    res.positives_caught = [m for m in label_matched if m in positives]
+    res.negatives_caught = [m for m in label_matched if m in negatives]
     return res
