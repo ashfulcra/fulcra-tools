@@ -60,7 +60,7 @@ the setup self-test checks for both. Engine-only, no checkout:
 `uv tool install "git+https://github.com/ashfulcra/coord2.git@v0.4.0#subdirectory=engine"`.
 
 Publishing to PyPI / a plugin registry is deferred to the upstream phase (see
-`docs/proposals/teams-convergence/04-standalone-packaging.md`).
+`docs/coord/proposals/teams-convergence/04-standalone-packaging.md`).
 
 ## Full port (A1–A8) — complete
 All remaining `fulcra-coord` + `fulcra-continuity` functionality is ported as **optional add-ons**

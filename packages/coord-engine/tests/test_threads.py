@@ -14,11 +14,28 @@ Two layers, per the plan's Task 1:
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from coord_engine import cli, threads
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
 NOW = "2026-07-11T12:00:00Z"
+PINNED_NOW = datetime(2026, 7, 11, 12, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Pin cli._now to PINNED_NOW, just after the NOW constant.
+
+    Fixtures here stamp shards/tasks relative to NOW, but the folds run on
+    cli._now() — against the REAL clock every 'fresh activity' fixture
+    silently crossed the 3.0d dropped-thread window 72h after NOW was written
+    (first bit CI 2026-07-14T12:00Z; the repo's third real-clock boundary
+    flake). Remedy per precedent: pin the clock, never weaken assertions.
+    Tests that stamp relative ages must derive them from PINNED_NOW; tests
+    that MOVE time monkeypatch cli._now themselves, overriding this."""
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
 
 
 class _FailReadTransport(FakeTransport):
@@ -601,7 +618,7 @@ def test_verb_needs_human_block_is_mode2(capsys):
 
 def test_verb_silence_days_flag_and_env(capsys, monkeypatch):
     t = FakeTransport()
-    two_days = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    two_days = (PINNED_NOW - timedelta(days=2)).isoformat().replace("+00:00", "Z")
     _put_task(t, "recent", owner="ash", timestamp=two_days)
     _reconcile(t)
     # default silence 3d -> a 2d-old item is fresh -> absent.

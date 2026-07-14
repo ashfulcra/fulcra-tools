@@ -19,7 +19,7 @@ external publishing (PyPI / plugin registry) is deliberately **deferred to the u
 
 ### A — Git-installable + a setup script (NO external publishing)  ← recommended for this phase
 - Engine: `uv tool install "git+…/coord2#subdirectory=engine"` (optionally `@<tag>`).
-- Skills: a top-level `scripts/coord-setup.sh` that installs the engine and **links the 6 skills into the
+- Skills: a top-level `scripts/coord/coord-setup.sh` that installs the engine and **links the 6 skills into the
   agent's skills location** (detect `~/.claude/skills/` and/or OpenClaw's skills dir; symlink or copy;
   consent-gated), then runs a self-test (`coord-engine --help`).
 - Quickstart in the README; tag `v0.4.0`.

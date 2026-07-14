@@ -64,10 +64,33 @@ confirm() {
 selftest() {  # B3 — run once at install so a broken PATH/auth fails LOUDLY now, not silently in 20m
   echo "self-test: running the heartbeat once (PATH=$JOB_PATH)…"
   if env -i HOME="$HOME" PATH="$JOB_PATH" /bin/sh -c "$CMD" >/dev/null 2>&1; then
-    echo "self-test: OK"
+    echo "self-test: OK (chain exit 0)"
   else
     echo "WARNING: self-test failed — the scheduled job would silently fail. Verify" >&2
     echo "  fulcra-api is authenticated (fulcra-api auth login) and reachable under PATH=$JOB_PATH" >&2
+  fi
+  # Exit 0 is NOT proof the timeline legs can land: projection and the digest
+  # emit deliberately degrade to loud-warn no-ops when the fulcra_common writer
+  # is absent (the chain must never break), which is exactly how a timeline
+  # goes dark while every tick reports success. The installed chain requests
+  # timeline emission UNCONDITIONALLY (`digest --emit-timeline` runs every
+  # tick regardless of the team's projection resolution), so the writer check
+  # is unconditional too — gating it on `resolution=transitions` would pass
+  # the exact digest-only dark-timeline condition (codex docs-QA P1, twice).
+  local cebin cepy
+  cebin="$(command -v "$CEB" || echo "$CEB")"
+  cepy="$(dirname "$(readlink -f "$cebin")")/python"
+  if [[ -x "$cepy" ]] && "$cepy" -c "import fulcra_common" >/dev/null 2>&1; then
+    echo "self-test: timeline writer present (fulcra_common importable next to coord-engine)"
+  else
+    echo "ERROR: self-test FAILED — the heartbeat chain emits timeline moments" >&2
+    echo "  (digest --emit-timeline every tick; annotate project when the team opts in)" >&2
+    echo "  but the fulcra_common writer is NOT importable in coord-engine's" >&2
+    echo "  environment: those emits will no-op and the timeline stays dark." >&2
+    echo "  Reinstall with the writer:" >&2
+    echo "    uv tool install --force \"git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.5#subdirectory=packages/coord-engine\" \\" >&2
+    echo "      --with \"git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.1.1#subdirectory=packages/fulcra-common\"" >&2
+    exit 4
   fi
 }
 

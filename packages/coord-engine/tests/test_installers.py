@@ -26,6 +26,12 @@ SHIMS = {
     "osascript": '#!/bin/sh\necho "osascript" >> "${SHIM_LOG:-/dev/null}"\nexit 0\n',
     "coord-engine": '#!/bin/sh\necho "coord-engine $*" >> "${SHIM_LOG:-/dev/null}"\nexit 0\n',
     "fulcra-api": '#!/bin/sh\nexit 0\n',
+    # Stands in for the interpreter of coord-engine's venv: the heartbeat
+    # installer's self-test runs `<dirname of coord-engine>/python -c "import
+    # fulcra_common"` UNCONDITIONALLY (the chain always emits timeline moments
+    # via `digest --emit-timeline`). Exit 0 = writer importable. Tests for the
+    # writer-absent contract delete this shim.
+    "python": '#!/bin/sh\nexit 0\n',
     # real-semantics crontab: -l prints the store (exit 1 if absent, like real
     # cron), bare invocation replaces the store from stdin
     "crontab": (
@@ -119,6 +125,26 @@ class TestHeartbeatBothPlatforms:
             assert len(_plists(env)) == 1
         else:
             assert len(_cron_lines(env)) == 1  # dedup by label comment, never accumulates
+
+    def test_selftest_verifies_timeline_writer_present(self, env):
+        # The chain requests timeline emission unconditionally, so a successful
+        # install must have PROVEN the writer importable — not just chain rc 0.
+        r = _run("install-heartbeat.sh", ["--yes", "teamx"], env)
+        assert r.returncode == 0, r.stderr
+        assert "timeline writer present" in r.stdout
+
+    def test_selftest_fails_loud_when_writer_absent(self, env):
+        # codex docs-QA P1 (round 2): a missing fulcra_common writer means the
+        # digest/projection emits silently no-op — the dark-timeline condition.
+        # The self-test must FAIL the install regardless of the team's
+        # projection resolution (the digest leg runs at any resolution), with
+        # the reinstall recipe on stderr. Writer absence is simulated by
+        # removing the venv-interpreter shim next to coord-engine.
+        (env["shims"] / "python").unlink()
+        r = _run("install-heartbeat.sh", ["--yes", "teamx"], env)
+        assert r.returncode == 4, (r.returncode, r.stderr)
+        assert "self-test FAILED" in r.stderr
+        assert "fulcra-common-v0.1.1" in r.stderr, "must print the reinstall recipe"
 
     def test_uninstall_roundtrip_including_only_entry(self, env):
         # the pipefail bug class: uninstalling when ours is the ONLY entry must exit 0

@@ -46,12 +46,27 @@ PINNED_DOCS = (
 
 
 def _all_pins():
-    """(relpath, lineno, pinned_version) for every install pin under the repo,
-    so a NEW doc that pins a version is covered without editing this test."""
+    """(relpath, lineno, pinned_version) for every install pin in TRACKED docs,
+    so a NEW doc that pins a version is covered without editing this test.
+
+    Tracked-only via `git ls-files` — an rglob walk also scanned gitignored
+    nested worktrees/clones (e.g. `.claude/worktrees/*`), whose historical
+    pins made this a machine-dependent false red (codex docs-QA 2026-07-14).
+    Falls back to the rglob walk when git is unavailable (sdist/tarball)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "*.md"],
+            capture_output=True, text=True, timeout=30, check=True).stdout
+        rels = [ln for ln in out.splitlines() if ln.strip()]
+        paths = [(REPO / rel, rel) for rel in rels]
+    except Exception:
+        paths = [(md, md.relative_to(REPO).as_posix()) for md in REPO.rglob("*.md")
+                 if not md.relative_to(REPO).as_posix().startswith(".superpowers/")
+                 and "/.git/" not in f"/{md.relative_to(REPO).as_posix()}"]
     hits = []
-    for md in REPO.rglob("*.md"):
-        rel = md.relative_to(REPO).as_posix()
-        if rel.startswith(".superpowers/") or "/.git/" in f"/{rel}":
+    for md, rel in paths:
+        if not md.exists():
             continue
         for i, line in enumerate(md.read_text(encoding="utf-8").splitlines(), 1):
             for m in PIN_RE.finditer(line):

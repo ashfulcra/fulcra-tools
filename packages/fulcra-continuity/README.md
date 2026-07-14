@@ -8,17 +8,22 @@ handoff, capture the task objective, decisions, artifacts, open questions, next
 actions, and memory writes. After compaction, render a resume brief that gives
 the next session an inspectable operating state.
 
-Fulcra Continuity is designed to pair with `fulcra-coord` without depending on
-it. `fulcra-coord` remains the operational ledger for task lifecycle updates;
-Fulcra Continuity stores the durable "how to pick this work back up" snapshot.
-When both are used, checkpoints can carry the same workstream, agent, and coord
-task identity so another session can find a coord task and import the latest
-same-agent continuity snapshot. For cross-agent handoff, include the producer's
-checkpoint path or JSON as a portable artifact so the receiver can load it
-directly before writing its own pickup checkpoint.
+Fulcra Continuity pairs with the current coordination layer without depending
+on it: **`coord-engine`** is the operational ledger for task lifecycle
+(`coord-engine task …`), and `coord-engine continuity snapshot|checkpoint|resume`
+is the engine-native way most agents carry session state today. This package
+stores the durable "how to pick this work back up" snapshot for setups that
+want it as a standalone library. When both are used, checkpoints can carry the
+same workstream, agent, and task identity so another session can find the bus
+task and import the latest same-agent continuity snapshot. For cross-agent
+handoff, include the producer's checkpoint path or JSON as a portable artifact
+so the receiver can load it directly before writing its own pickup checkpoint.
 
-For the coord-side model, see
-[`../fulcra-coord/docs/continuity-handoff.md`](../fulcra-coord/docs/continuity-handoff.md).
+**Legacy note:** the original pairing target, `fulcra-coord`, is the sunset
+first-generation layer (see [`../fulcra-coord/README.md`](../fulcra-coord/README.md));
+its handoff model is preserved at
+[`../fulcra-coord/docs/continuity-handoff.md`](../fulcra-coord/docs/continuity-handoff.md)
+for provenance — don't build new work against it.
 
 ## Install in the workspace
 

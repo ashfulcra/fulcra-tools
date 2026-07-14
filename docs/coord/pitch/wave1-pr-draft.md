@@ -1,3 +1,8 @@
+> **Historical document (superseded 2026-07-13)** — wave-1 SHIPPED: the upstream PR this
+> draft staged is now OPEN as [fulcradynamics/agent-skills#129](https://github.com/fulcradynamics/agent-skills/pull/129)
+> (refreshed to coord-engine v1.6.3, dual-green, ready-for-review per operator authorization).
+> Preserved for provenance; nothing below is a live instruction.
+
 # Wave-1 upstream PR — staged draft
 
 *Everything needed to open the PR to `fulcradynamics/agent-skills` the day the pitch lands ask-1.
