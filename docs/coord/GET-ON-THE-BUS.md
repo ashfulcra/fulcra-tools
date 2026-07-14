@@ -56,7 +56,8 @@ coord-engine reconcile <team> && coord-engine annotate project <team> \
 — idempotent across hosts (deterministic record ids upsert at ingestion; a shared cursor +
 skew window keep quiet ticks cheap; the digest is once-per-window). Verify with
 `coord-engine annotate status <team>` (resolution + cursor) and a manual `coord-engine
-annotate project <team>` (reports `emitted N`). **Already running a heartbeat?** If it was
+annotate project <team>` (prints `projected N/N transition(s)` — N/N means every fresh
+transition landed; `0/N` means the writer refused or failed). **Already running a heartbeat?** If it was
 installed before the DIGEST leg (2026-07-14) — not just before projection — re-run
 [`install-heartbeat.sh`](../../skills/fulcra-agent-automation/scripts/install-heartbeat.sh)
 to pick up the current chain; an older two-leg heartbeat keeps the digest bus copy and
