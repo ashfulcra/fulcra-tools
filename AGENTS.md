@@ -383,7 +383,23 @@ earned by an incident:
 - Historical docs (proposals/, superseded designs) carry a **historical
   banner** instead of being rewritten; broken references get fixed even there.
 
-## CI, the pre-push hook, and workspace membership
+### Writing for upstream (issues & PRs to fulcradynamics/*)
+
+Direct feedback from upstream engineers (2026-07-14): our issues work — same-day
+fixes — but they are exhausting to read: too long, and full of assumed shared
+language. Standing rules for anything posted outside this repo:
+
+- **Zero internal vocabulary.** The bus, folds, dual-green, tombstones,
+  coord-boss, heartbeats, our incident narratives — none of it means anything
+  upstream. If a term isn't in *their* repo or a public spec, don't use it.
+- **Short.** Repro steps, expected vs. actual, impact, minimal evidence
+  (one curl/one traceback), suggested fix if obvious. A maintainer should get
+  it on one read. Aim for a dozen lines; hard-think anything past thirty.
+- **Backstory stays home.** How we found it, what it broke in our fleet, our
+  workaround's design — that lives on our bus/repo. Link it at the bottom if
+  genuinely useful ("found while building X: <link>"), never inline.
+- Before posting, reread as a stranger: every sentence they'd have to
+  decipher is a sentence to cut or rewrite.
 
 - **macOS CI is path-filtered and bills at 10×**, so it only runs on
   macOS-relevant changes (`packages/fulcra-menubar/**`, `packages/coord-engine/**`,
