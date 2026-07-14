@@ -425,6 +425,22 @@ def test_cli_respond_closes_and_records(capsys):
     assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
 
+def test_cli_respond_fails_loud_on_unresolved_directive(capsys):
+    """A name that resolves to no directive doc must FAIL rc-1 and write NO
+    response shard. A slugified display-title matches no hash-suffixed slug, and
+    the old code recorded a ghost response (rc 0) while the real directive stayed
+    open in needs-me forever — fail-loud, same doctrine as review status."""
+    t = FakeTransport()
+    # nothing created: 'a-display-title' resolves to no task doc
+    rc = cli.main(["respond", "r", "a-display-title", "-o", "answered", "-a", "amy"],
+                  transport=t)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "a-display-title" in err  # the message names the unresolved directive
+    # crucially: NO ghost response shard was written
+    assert not any(p.startswith("team/r/_coord/responses/") for p in t.store)
+
+
 def test_cli_respond_response_paths_do_not_collide(monkeypatch, capsys):
     from datetime import datetime, timezone
     t = FakeTransport()
