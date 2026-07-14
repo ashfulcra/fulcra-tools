@@ -86,6 +86,12 @@ under `skills/`, each package with its own README, build, and tests.
 - PyObjC-free logic is split into its own modules so tests run on Linux CI;
   macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC
   imports lazy (inside functions), never at module import time.
+- Date/clock tests: a module that fixes a top-level `NOW` for its data must also
+  **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
+  `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving
+  relative ages from `PINNED_NOW`, never asserting against the real clock.
+  Otherwise the suite flips red once wall-clock passes `NOW + window`. Enforced
+  by `tests/test_clock_pin_convention.py`.
 
 ## Coordinate on the bus
 

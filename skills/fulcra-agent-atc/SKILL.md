@@ -40,7 +40,7 @@ Three commands to a routable ledger. The engine is stdlib-only and installs on i
 
 ```bash
 uv tool install fulcra-api   # the `fulcra` CLI: auth + the Fulcra File Store (the bus)
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.5#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.6#subdirectory=packages/coord-engine"
 fulcra auth login            # browser sign-in; an account is created on first login
 ```
 
