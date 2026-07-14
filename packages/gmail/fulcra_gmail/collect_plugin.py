@@ -133,6 +133,8 @@ def run(ctx: RunContext) -> None:
         for rule in rules:
             if not rule.applies_to_account(account.account_id, account.email):
                 continue
+            if not getattr(rule, "enabled", True):
+                continue
             try:
                 result = poll_account_rule(
                     client=client, rule=rule, account_id=account.account_id,
@@ -185,6 +187,8 @@ def health_check(ctx: RunContext) -> HealthResult:
         oldest_age = None
         for rule in rules:
             if not rule.applies_to_account(account.account_id, account.email):
+                continue
+            if not getattr(rule, "enabled", True):
                 continue
             age = _cursor_age_hours(cursors.get(rule.id, rule.version), now=now)
             if age is not None and (oldest_age is None or age > oldest_age):
