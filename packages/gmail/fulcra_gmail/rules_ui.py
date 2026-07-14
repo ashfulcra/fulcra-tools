@@ -35,8 +35,9 @@ RULES_UI_HTML = r"""<!doctype html>
 <script>
 const TOKEN = localStorage.getItem('fulcra-web-token') || '';
 const H = {'Content-Type':'application/json','Authorization':'Bearer '+TOKEN};
-let RESULTS=[], LABEL={}, CHIPS=[];
-async function api(path, body){const r=await fetch(path,{method:body?'POST':'GET',headers:H,
+let RESULTS=[], LABEL={}, CHIPS=[], EDITING=null, EDIT_RULE=null;
+async function api(path, body, method){const m=method||(body?'POST':'GET');
+  const r=await fetch(path,{method:m,headers:H,
   body:body?JSON.stringify(body):undefined});if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json();}
 function acct(){return document.getElementById('acct').value;}
 async function loadAccounts(){try{const d=await api('/api/gmail/rules/accounts');
@@ -79,15 +80,34 @@ async function aiSuggest(){if(!confirm('This sends the from/subject/snippet of y
   if(r.match){CHIPS=[{kind:'ai',field:'match',value:r.match,label:'q='+r.match,on:true}];
    if(r.subject_regex)CHIPS.push({kind:'ai',field:'subject_regex',value:r.subject_regex,label:'subject~'+r.subject_regex,on:true});
    drawChips();preview();}}
-async function save(){const r=draft();try{await api('/api/gmail/rules',r);await loadRules();alert('Saved');}
+async function save(){const r=draft();
+  try{
+    if(EDITING){r.id=EDITING; if(EDIT_RULE&&EDIT_RULE.version)r.version=EDIT_RULE.version;
+      await api('/api/gmail/rules/'+encodeURIComponent(EDITING),r,'PUT');}
+    else{await api('/api/gmail/rules',r);}
+    EDITING=null;EDIT_RULE=null;await loadRules();alert('Saved');}
   catch(e){alert('Save failed: '+e.message);}}
+async function editRule(id){const r=await api('/api/gmail/rules/'+encodeURIComponent(id));
+  EDITING=id;EDIT_RULE=r;
+  document.getElementById('rid').value=r.id; document.getElementById('name').value=r.name;
+  document.getElementById('q').value=r.match||'';
+  document.getElementById('a_file').checked=(r.actions||[]).includes('file');
+  document.getElementById('a_relay').checked=(r.actions||[]).includes('relay');
+  document.getElementById('relay_to').value=r.relay_to||'';
+  document.getElementById('relay_priority').value=r.relay_priority||'';
+  CHIPS=[{kind:'edit',field:'match',value:r.match||'',label:'q='+(r.match||''),on:true}];
+  if(r.subject_regex)CHIPS.push({kind:'edit',field:'subject_regex',value:r.subject_regex,label:'subject~'+r.subject_regex,on:true});
+  if(r.from_regex)CHIPS.push({kind:'edit',field:'from_regex',value:r.from_regex,label:'from~'+r.from_regex,on:true});
+  if(r.has_attachment)CHIPS.push({kind:'edit',field:'has_attachment',value:'has:attachment',label:'has attachment',on:true});
+  drawChips();preview();}
 async function loadRules(){const d=await api('/api/gmail/rules');
   document.getElementById('rules').innerHTML=d.rules.map(r=>`<div class="msg">
    <b>${esc(r.name)}</b> <span class="frm">${esc(r.summary)}</span>
+   <button class="sec" onclick="editRule('${r.id}')">edit</button>
    <button class="sec" onclick="toggleRule('${r.id}',${!r.enabled})">${r.enabled?'disable':'enable'}</button>
    <button class="sec" onclick="delRule('${r.id}')">delete</button></div>`).join('');}
 async function toggleRule(id,en){await api('/api/gmail/rules/'+id+'/enabled',{enabled:en});loadRules();}
-async function delRule(id){if(confirm('Delete '+id+'?')){await fetch('/api/gmail/rules/'+id,{method:'DELETE',headers:H});loadRules();}}
+async function delRule(id){if(confirm('Delete '+id+'?')){await api('/api/gmail/rules/'+encodeURIComponent(id),null,'DELETE');loadRules();}}
 function val(id){return document.getElementById(id).value.trim();}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 loadAccounts();

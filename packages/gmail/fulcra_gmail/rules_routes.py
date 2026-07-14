@@ -160,10 +160,17 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         q = rules_mod.build_query(rule)
         ids = client.list_message_ids(q)[:_SEARCH_PAGE]
         candidates = _fetch(account_id, ids)
+        positives = list(body.get("positives", []))
+        negatives = list(body.get("negatives", []))
+        # Fetch the labeled ✓/✗ ids DIRECTLY (independent of the truncated query
+        # page) so a labeled example that matches the draft but sorts past page 1
+        # is still verified against the operator's selection.
+        labeled = _fetch(account_id, list(dict.fromkeys(positives + negatives)))
         res = rules_preview.preview(
             rule_dict, candidates, account_id,
-            positives=set(body.get("positives", [])),
-            negatives=set(body.get("negatives", [])),
+            positives=set(positives),
+            negatives=set(negatives),
+            label_candidates=labeled,
         )
         return {
             "match_count": res.match_count, "sample": res.sample,
@@ -191,6 +198,14 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
 
     @app.put("/api/gmail/rules/{rule_id}", dependencies=guard)
     def update(rule_id: str, body: dict = Body(...)):
+        # Rule id is immutable: the path id is authoritative. A body id that
+        # disagrees would otherwise mint a second rule under a different id and
+        # collide on the ``(id, version)`` processed-set key.
+        if body.get("id") != rule_id:
+            raise HTTPException(
+                400,
+                f"rule id is immutable: path {rule_id!r} != body {body.get('id')!r}",
+            )
         existing = _load_rules_list(config_module)
         idx = next((i for i, r in enumerate(existing) if r.get("id") == rule_id), None)
         if idx is None:
@@ -246,3 +261,17 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
     def ui():
         from fastapi.responses import HTMLResponse
         return HTMLResponse(RULES_UI_HTML)
+
+    # Registered LAST so the literal GET routes above (``/accounts``, ``/ui``)
+    # win over this catch-all path parameter.
+    @app.get("/api/gmail/rules/{rule_id}", dependencies=guard)
+    def get_rule(rule_id: str):
+        raw = next((r for r in _load_rules_list(config_module)
+                    if r.get("id") == rule_id), None)
+        if raw is None:
+            raise HTTPException(404, f"unknown rule {rule_id!r}")
+        try:
+            (rule,) = rules_mod.parse_rules([raw])
+        except ValueError as e:
+            raise HTTPException(500, f"stored rule {rule_id!r} is invalid: {e}") from e
+        return rules_mod.rule_to_config_dict(rule)

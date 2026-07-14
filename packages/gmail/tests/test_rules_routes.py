@@ -53,8 +53,7 @@ class _Reg:
         return [A()]
 
 
-@pytest.fixture
-def client():
+def _build_client(msgs):
     app = FastAPI()
 
     class Ctx:
@@ -65,10 +64,6 @@ def client():
             def handle_request(_req):
                 return {"ok": True}
 
-    msgs = {
-        "1": _msg("1", "r@shop.example", "Your receipt", attach=True),
-        "2": _msg("2", "noise@shop.example", "newsletter"),
-    }
     cfg = FakeConfig()
     rules_routes.register(
         app, Ctx(),
@@ -79,6 +74,15 @@ def client():
     c = TestClient(app)
     c._cfg = cfg
     return c
+
+
+@pytest.fixture
+def client():
+    msgs = {
+        "1": _msg("1", "r@shop.example", "Your receipt", attach=True),
+        "2": _msg("2", "noise@shop.example", "newsletter"),
+    }
+    return _build_client(msgs)
 
 
 def test_search_returns_headers_no_body(client):
@@ -145,6 +149,60 @@ def test_ui_page_renders_builder(client):
     for anchor in ("gmail-rule-builder", "/api/gmail/rules/search",
                    "/api/gmail/rules/derive", "/api/gmail/rules/preview"):
         assert anchor in html
+    # The edit workflow: an edit affordance that issues a PUT.
+    assert "editRule(" in html
+    assert "'PUT'" in html
+
+
+def test_preview_labeled_examples_beyond_query_page_still_verified():
+    # 25 non-matching fillers fill the query page; the labeled ✓/✗ examples that
+    # DO match the draft sort past page 1 — they must still be verified via a
+    # direct fetch, not silently dropped (the P1 correctness fix).
+    msgs = {f"f{i}": _msg(f"f{i}", f"u{i}@other.example", "hello") for i in range(25)}
+    msgs["negx"] = _msg("negx", "r@shop.example", "receipt")
+    msgs["posx"] = _msg("posx", "r@shop.example", "receipt again")
+    c = _build_client(msgs)
+    rule = {"id": "r", "version": 1, "name": "n",
+            "match": "from:shop.example", "actions": ["file"]}
+    r = c.post("/api/gmail/rules/preview", json={
+        "account_id": "acct", "rule": rule,
+        "positives": ["posx"], "negatives": ["negx"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert "negx" in body["negatives_caught"]   # ✗ leak surfaced despite paging
+    assert "posx" in body["positives_caught"]    # ✓ caught despite paging
+    assert body["match_count"] == 0              # query page = 25 non-matching fillers
+
+
+def test_put_rejects_mismatched_body_id(client):
+    rule = {"id": "a", "version": 1, "name": "n", "match": "x", "actions": ["file"]}
+    assert client.post("/api/gmail/rules", json=rule).status_code == 200
+    r = client.put("/api/gmail/rules/a", json={**rule, "id": "b"})
+    assert r.status_code == 400
+    # No stray 'b' rule minted via the mismatched PUT.
+    ids = [x["id"] for x in client.get("/api/gmail/rules").json()["rules"]]
+    assert "b" not in ids and ids == ["a"]
+
+
+def test_get_single_rule_returns_full_dict(client):
+    rule = {"id": "r", "version": 1, "name": "N", "match": "from:shop.example",
+            "actions": ["file"], "subject_regex": "(?i)receipt"}
+    client.post("/api/gmail/rules", json=rule)
+    r = client.get("/api/gmail/rules/r")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == "r" and body["match"] == "from:shop.example"
+    assert body["subject_regex"] == "(?i)receipt"
+
+
+def test_get_unknown_rule_404(client):
+    assert client.get("/api/gmail/rules/nope").status_code == 404
+
+
+def test_accounts_route_not_shadowed_by_get_rule(client):
+    r = client.get("/api/gmail/rules/accounts")
+    assert r.status_code == 200
+    assert r.json()["accounts"][0]["account_id"] == "acct"
 
 
 def test_ai_suggest_requires_consent(client):
