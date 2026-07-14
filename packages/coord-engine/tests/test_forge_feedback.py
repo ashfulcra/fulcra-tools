@@ -14,6 +14,25 @@ from coord_engine.cli import build_parser
 from coord_engine_test_helpers import FakeTransport
 
 NOW = "2026-07-08T12:00:00Z"
+
+# clock-pin support (see #378):
+import pytest
+from datetime import datetime, timezone
+PINNED_NOW = datetime(2026, 7, 8, 12, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Pin cli._now to PINNED_NOW (just after the module NOW).
+
+    Fixtures stamp data relative to NOW, but folds/verbs compute windows and
+    staleness off cli._now() against the REAL clock — so once wall-clock time
+    crossed NOW + a window this suite flipped RED for good (the repo's
+    date-boundary CI-flake class; template: #378 test_threads). Remedy: pin the
+    clock, never weaken assertions. Tests that MOVE time monkeypatch cli._now
+    themselves, overriding this."""
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
+
 URL = "https://github.com/o/r/pull/42"
 URL2 = "https://github.com/o/r/pull/99"
 

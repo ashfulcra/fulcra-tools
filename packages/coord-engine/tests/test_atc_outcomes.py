@@ -21,6 +21,23 @@ from coord_engine_test_helpers import FakeTransport
 
 NOW = datetime(2026, 7, 8, 6, 0, tzinfo=timezone.utc)
 
+# clock-pin support (see #378):
+import pytest
+PINNED_NOW = datetime(2026, 7, 8, 6, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Pin cli._now to PINNED_NOW (just after the module NOW).
+
+    Fixtures stamp data relative to NOW, but folds/verbs compute windows and
+    staleness off cli._now() against the REAL clock — so once wall-clock time
+    crossed NOW + a window this suite flipped RED for good (the repo's
+    date-boundary CI-flake class; template: #378 test_threads). Remedy: pin the
+    clock, never weaken assertions. Tests that MOVE time monkeypatch cli._now
+    themselves, overriding this."""
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
+
 
 def _sh(model, tc, outcome, age_h, account="a", units=1, throttled=False):
     """A usage shard row (headroom-fold shape) carrying the task-3 outcome
@@ -260,6 +277,18 @@ def _seed(t):
     t.put("team/fulcra/atc/accounts.json", json.dumps(_OVERLAY))
 
 
+def _distinct_clock(monkeypatch):
+    """Override the constant autouse pin with a monotonic per-call clock anchored
+    at PINNED_NOW. Usage-shard paths derive from the ts (``_stamp_for_path``), so
+    N writes under a CONSTANT clock collide onto one path and overwrite; stepping
+    the clock by whole seconds gives each write a distinct path while staying
+    deterministic and far from the real clock (window math is hours/days)."""
+    import itertools
+    counter = itertools.count()
+    monkeypatch.setattr(
+        cli, "_now", lambda: PINNED_NOW + timedelta(seconds=next(counter)))
+
+
 def _log_bad(t, n=3, model="cheap", tc="code", outcome="rework"):
     for _ in range(n):
         cli.main(["usage", "log", "fulcra", "--account", "box", "--tier", "x",
@@ -297,8 +326,9 @@ def test_usage_log_unknown_task_class_exits_2(capsys):
     assert not [p for p in t.store if p.startswith("team/fulcra/atc/usage/")]
 
 
-def test_cli_route_demotes_model_with_bad_outcomes(capsys):
+def test_cli_route_demotes_model_with_bad_outcomes(capsys, monkeypatch):
     t = FakeTransport()
+    _distinct_clock(monkeypatch)
     _seed(t)
     _log_bad(t, n=3)
     capsys.readouterr()
@@ -310,8 +340,9 @@ def test_cli_route_demotes_model_with_bad_outcomes(capsys):
     assert "[demoted: code]" in lines[1]
 
 
-def test_cli_route_json_demoted_marker(capsys):
+def test_cli_route_json_demoted_marker(capsys, monkeypatch):
     t = FakeTransport()
+    _distinct_clock(monkeypatch)
     _seed(t)
     _log_bad(t, n=3)
     capsys.readouterr()
@@ -322,8 +353,9 @@ def test_cli_route_json_demoted_marker(capsys):
     assert by_model["pricey"]["demoted"] == []
 
 
-def test_cli_headroom_json_surfaces_demotions(capsys):
+def test_cli_headroom_json_surfaces_demotions(capsys, monkeypatch):
     t = FakeTransport()
+    _distinct_clock(monkeypatch)
     _seed(t)
     _log_bad(t, n=3)
     capsys.readouterr()
