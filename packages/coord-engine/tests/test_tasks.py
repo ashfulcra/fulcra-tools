@@ -4,6 +4,24 @@ from coord_engine import model, okf, tasks
 
 NOW = "2026-07-01T18:00:00Z"
 
+# clock-pin support (see #378):
+from datetime import datetime, timezone
+from coord_engine import cli
+PINNED_NOW = datetime(2026, 7, 1, 18, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Pin cli._now to PINNED_NOW (just after the module NOW).
+
+    Fixtures stamp data relative to NOW, but folds/verbs compute windows and
+    staleness off cli._now() against the REAL clock — so once wall-clock time
+    crossed NOW + a window this suite flipped RED for good (the repo's
+    date-boundary CI-flake class; template: #378 test_threads). Remedy: pin the
+    clock, never weaken assertions. Tests that MOVE time monkeypatch cli._now
+    themselves, overriding this."""
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
+
 
 def test_slugify():
     assert tasks.slugify("Fix the Widget!") == "fix-the-widget"
