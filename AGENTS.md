@@ -388,6 +388,16 @@ earned by an incident:
 - Historical docs (proposals/, superseded designs) carry a **historical
   banner** instead of being rewritten; broken references get fixed even there.
 
+### Writing for upstream (issues & PRs to fulcradynamics/*)
+
+Upstream engineers read none of this repo (operator-relayed feedback, 2026-07-14).
+
+- **Succinct.** First sentence states the bug. Repro, expected, actual, one
+  self-contained piece of evidence (a curl, a traceback). Ten lines.
+- **Their vocabulary only.** No fulcra-tools terms, codenames, or links —
+  evidence must reproduce from their code alone.
+- Everything else — discovery story, fleet impact, workarounds — stays here.
+
 ## CI, the pre-push hook, and workspace membership
 
 - **macOS CI is path-filtered and bills at 10×**, so it only runs on
