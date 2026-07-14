@@ -392,6 +392,15 @@ def build_app(daemon) -> FastAPI:
     if gmail_routes is not None:
         gmail_routes.register(app, ctx)
 
+    # The Gmail rule-builder surface (search/derive/preview/CRUD + UI) mounts
+    # the same way — optional import so collect runs fine without the plugin.
+    try:
+        from fulcra_gmail import rules_routes as gmail_rules_routes
+    except Exception:  # noqa: BLE001 — plugin not installed / import error
+        gmail_rules_routes = None
+    if gmail_rules_routes is not None:
+        gmail_rules_routes.register(app, ctx)
+
     return app
 
 
