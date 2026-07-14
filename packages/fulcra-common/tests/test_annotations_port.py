@@ -237,6 +237,24 @@ def test_digest_folds_title_into_note_no_title_key(monkeypatch):
     assert "ship-widget" in rec["note"]
 
 
+def test_digest_mode_gate_default_vs_engine_bypass(monkeypatch):
+    # Default (gated=True) keeps the legacy contract: machine-local mode off
+    # -> no emit, no POST. Engine-driven callers (digest --emit-timeline) pass
+    # gated=False: their opt-in is the heartbeat flag + fleet store marker, so
+    # the emit must work from hosts whose local writer config is off.
+    _stub_cli(monkeypatch, catalog_lines=[_existing_def_row()])
+    router = _install_router(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_ANNOTATIONS", "off")
+
+    kw = dict(name="Morning digest", note="body", window="morning",
+              agent="claude-code:mb:repo")
+    assert ann.emit_digest_annotation(**kw) is False
+    assert router.posts() == [], "mode off must suppress the legacy-gated emit"
+
+    assert ann.emit_digest_annotation(**kw, gated=False) is True
+    assert len(router.posts()) == 1, "gated=False bypasses the machine-local mode"
+
+
 def test_custom_definition_referenced_in_sources_on_base_path(monkeypatch):
     _stub_cli(monkeypatch, catalog_lines=[_existing_def_row(uuid="def-existing")])
     router = _install_router(monkeypatch)

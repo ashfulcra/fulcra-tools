@@ -1189,15 +1189,31 @@ def emit_projection_annotation(
 
 
 def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
-                           backend: Optional[list[str]] = None) -> bool:
+                           backend: Optional[list[str]] = None,
+                           gated: bool = True,
+                           id: Optional[str] = None) -> bool:
     """Emit ONE operator-digest moment on the ``Agent Tasks — Digest`` track.
 
     BEST-EFFORT, NEVER RAISES. Reuses the typed record path against
     ``_resolve_digest_definition_id`` so digests land on their OWN track. Tags:
     ``[agent-digest, <window>, agent:<kind>]``. No idempotency marker here — the
-    per-window dedup guard (in the CLI) prevents a double digest."""
+    per-window dedup guard (in the CLI) prevents a double digest.
+
+    ``gated=True`` (default) keeps the legacy in-process-writer contract: the
+    machine-local :func:`_mode` config must be ``on``. Engine-driven callers
+    (coord-engine's ``digest --emit-timeline`` heartbeat leg) pass
+    ``gated=False`` for the same reason :func:`emit_projection_annotation`
+    skips the mode gate entirely: their opt-in and idempotency are OWNED by the
+    engine, and the emit must work from any host/harness, not only one whose
+    local writer config happens to be switched on.
+
+    ``id``: optional explicit record id. The typed ingest endpoint UPSERTS on
+    an explicit id (live-verified 2026-07-14: same-id re-POST returns 201 and
+    the record count stays 1), so a caller passing a DETERMINISTIC id gets
+    ingestion-layer idempotency — concurrent emitters of the same logical
+    digest converge on one timeline record."""
     try:
-        if _mode() == "off":
+        if gated and _mode() == "off":
             return False
         token = _resolve_token()
         if not token:
@@ -1221,6 +1237,8 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
         merged = "\n\n".join(part for part in (name.strip(), note.strip()) if part)
         if merged:
             inner["note"] = merged
+        if id:
+            inner["id"] = id
         sources = [
             f"com.fulcradynamics.fulcra-coord.digest.{uuid.uuid4()}",
             f"com.fulcradynamics.annotation.{def_id}",

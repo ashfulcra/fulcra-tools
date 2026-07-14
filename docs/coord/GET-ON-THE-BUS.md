@@ -157,3 +157,5 @@ idempotent refresh).
   probes telling a waking agent exactly where to enter.
 - [`docs/coord/pitch/`](pitch) — the one-pager and demo script, if you're evaluating
   whether to adopt this at all.
+- [`HARNESS-MAP.md`](HARNESS-MAP.md) — the environments agents actually run in and
+  the walls each has hit (proxies, git gateways, silent no-ops), with the fixes.
