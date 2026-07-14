@@ -72,13 +72,16 @@ The level is stored on the bus, so every host's heartbeat reads the same setting
 it consumes the structured `pending.json` transitions reconcile just wrote (the `log.md` bullets can't
 feed the fold — they carry no task_id/kind/ts), emits one annotation per new transition (deterministic
 id + cursor, so a re-run or mid-run crash never double-writes), and advances the cursor. Off or absent
-⇒ the step no-ops.
+⇒ the step no-ops. The heartbeat chain then finishes with `coord-engine digest <team> --store
+--emit-timeline`, which keeps the operator's twice-daily digest alive on both surfaces (bus copy +
+the 'Agent Tasks — Digest' timeline track) — see the health skill for its semantics.
 
-The cursor's deterministic id dedups within a host, but the endpoint has no server-side dedup: if two
-hosts run `reconcile && annotate project` in the same window, both read the same cursor and pending and
-both emit, duplicating each transition on the timeline. Until a bus lease serializes projection
-(follow-up), run projection from a **single** host — keep `annotate resolution transitions` scoped to
-one heartbeat and leave the others at `off`.
+Multi-host is safe: the typed ingest endpoint **upserts on an explicit record id** (live-verified
+2026-07-14 — a same-id re-POST returns 201 and the record count stays 1), and every projected
+annotation carries a deterministic id, so two hosts racing `reconcile && annotate project` in the
+same window converge on the same records instead of duplicating them. The cursor still matters — it
+is what keeps quiet ticks cheap (no re-POSTs) — but it is an efficiency guard, not the only thing
+between you and duplicates. Run projection from every heartbeat host.
 
 `resolution` is a **level axis, not a boolean**: `{off, transitions}` are live today; finer levels (tool
 calls, I/O, …) are additive later without a config-shape change. Any other value is rejected.

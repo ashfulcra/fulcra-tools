@@ -349,6 +349,34 @@ Author commits as `ashfulcra
 trailer `Co-Authored-By: <your model> <noreply@anthropic.com>` (e.g.
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
 
+## Documentation rules (standing, operator-set)
+
+The docs' primary reader is an **agent**; the showcase test is the goal: a
+founder drops this repo's link to their agent asking "anything useful here?"
+and the docs get it to "yes, and here's how" unaided. Standing rules, each
+earned by an incident:
+
+- **Truth over aspiration.** Document live, verified behavior; stamp
+  verification dates and drift headers where the platform moves faster than
+  the repo (the FULCRA-PRIMITIVES pattern). Doc claims get adversarially
+  reviewed like code.
+- **Exact commands, exact paths, canonical form.** Bare `coord-engine`, never
+  `uv tool run coord-engine` (not on PyPI). One wrong documented filename made
+  role-gated reviews structurally unapprovable (v1.6.4 fix) — path precision
+  is correctness, not style.
+- **No dead or broken references** (operator rule, 2026-07-14): relative
+  links must resolve, referenced files/commands/sections must exist, and
+  mentions of real repo things should BE links. Sweep on every docs QA pass.
+- **Teach fail-loud, never fail-quiet.** No documented pattern may swallow
+  errors; if a leg degrades to a no-op without its backend, the doc says so
+  in bold (the silent-writer darkness).
+- **Docs ship with the change, same PR, dual-green.** Docs debt is in scope,
+  never a follow-up. This file is the ship-gate.
+- **One canonical home per fact**; everything else links to it. Scattered
+  version pins and duplicated doctrine are drift bombs.
+- Historical docs (proposals/, superseded designs) carry a **historical
+  banner** instead of being rewritten; broken references get fixed even there.
+
 ## CI, the pre-push hook, and workspace membership
 
 - **macOS CI is path-filtered and bills at 10×**, so it only runs on
