@@ -1190,7 +1190,8 @@ def emit_projection_annotation(
 
 def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
                            backend: Optional[list[str]] = None,
-                           gated: bool = True) -> bool:
+                           gated: bool = True,
+                           id: Optional[str] = None) -> bool:
     """Emit ONE operator-digest moment on the ``Agent Tasks — Digest`` track.
 
     BEST-EFFORT, NEVER RAISES. Reuses the typed record path against
@@ -1203,9 +1204,14 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
     (coord-engine's ``digest --emit-timeline`` heartbeat leg) pass
     ``gated=False`` for the same reason :func:`emit_projection_annotation`
     skips the mode gate entirely: their opt-in and idempotency are OWNED by the
-    engine (the explicit heartbeat flag + the fleet-wide per-day+window store
-    marker), and the emit must work from any host/harness, not only one whose
-    local writer config happens to be switched on."""
+    engine, and the emit must work from any host/harness, not only one whose
+    local writer config happens to be switched on.
+
+    ``id``: optional explicit record id. The typed ingest endpoint UPSERTS on
+    an explicit id (live-verified 2026-07-14: same-id re-POST returns 201 and
+    the record count stays 1), so a caller passing a DETERMINISTIC id gets
+    ingestion-layer idempotency — concurrent emitters of the same logical
+    digest converge on one timeline record."""
     try:
         if gated and _mode() == "off":
             return False
@@ -1231,6 +1237,8 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
         merged = "\n\n".join(part for part in (name.strip(), note.strip()) if part)
         if merged:
             inner["note"] = merged
+        if id:
+            inner["id"] = id
         sources = [
             f"com.fulcradynamics.fulcra-coord.digest.{uuid.uuid4()}",
             f"com.fulcradynamics.annotation.{def_id}",

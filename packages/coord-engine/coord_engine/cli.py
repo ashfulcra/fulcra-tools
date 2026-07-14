@@ -22,6 +22,7 @@ import secrets
 import socket
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -3223,7 +3224,19 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
 
 # --- digest + escalate (fulcra-agent-health, A5b) ---
 
-def _emit_digest_timeline(*, name: str, note: str, window: str, agent: str) -> bool:
+def _digest_record_id(team: str, day: str, window: str) -> str:
+    """Deterministic record id for the (team, day, window) digest moment.
+
+    The typed ingest endpoint UPSERTS on an explicit id (live-verified
+    2026-07-14), so every host that emits this window's digest converges on ONE
+    timeline record — idempotency lives at the ingestion layer, not in any
+    read-then-write marker race."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL,
+                          f"fulcra-coord-digest:{team}:{day}:{window}"))
+
+
+def _emit_digest_timeline(*, name: str, note: str, window: str, agent: str,
+                          record_id: str) -> bool:
     """Hand ONE rendered digest to the hardened fulcra_common digest writer.
 
     Best-effort, mirrors ``_emit_projection_spec``: coord-engine is stdlib-only,
@@ -3236,10 +3249,12 @@ def _emit_digest_timeline(*, name: str, note: str, window: str, agent: str) -> b
         return False
     try:
         # gated=False: this seam's opt-in is the heartbeat's explicit
-        # --emit-timeline flag + the fleet-wide store marker, not the
-        # machine-local writer mode (same contract as projection emits).
+        # --emit-timeline flag, not the machine-local writer mode (same
+        # contract as projection emits). The deterministic record_id makes
+        # concurrent same-window emits upsert into one record.
         return bool(_ann.emit_digest_annotation(
-            name=name, note=note, window=window, agent=agent, gated=False))
+            name=name, note=note, window=window, agent=agent, gated=False,
+            id=record_id))
     except Exception:
         return False
 
@@ -3273,32 +3288,46 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
             pass
     emit_timeline = getattr(args, "emit_timeline", False)
     if args.store or emit_timeline:
-        # The per-day+window store marker is the fleet-wide EXACTLY-ONCE guard
-        # for both the bus copy and the timeline moment: first-writer-wins on
-        # the marker, so a multi-host heartbeat fleet emits one digest per
-        # window. --emit-timeline therefore implies the marker write.
         day = now[:10]
         window = digest_mod.window_for(now)
         marker = f"team/{args.team}/_coord/digests/{day}-{window}.md"
-        if transport.read(marker) is not None:
+        # The store marker dedups the BUS COPY (a lost race just re-writes an
+        # equivalent copy as a new version — harmless). It is NOT the timeline
+        # correctness guard: that lives in the deterministic record id below.
+        stored_body = transport.read(marker)
+        if stored_body is not None:
             print(f"(digest for {day} {window} already stored — skipped)", file=sys.stderr)
         else:
-            rendered = digest_mod.render(d)
-            transport.write(marker, rendered)
+            stored_body = digest_mod.render(d)
+            transport.write(marker, stored_body)
             print(f"stored digest -> _coord/digests/{day}-{window}.md", file=sys.stderr)
-            if emit_timeline:
-                # Best-effort but LOUD on failure: the bus copy exists either
-                # way; a missed timeline moment for the window is a warn, not a
-                # broken heartbeat chain (rc stays 0).
+        if emit_timeline:
+            # Timeline emit state is SEPARATE from the store marker and written
+            # only after a confirmed emit, so a transient failure (missing
+            # writer, token flake, HTTP error) RETRIES on the next heartbeat
+            # tick instead of consuming the window (codex P1). The deterministic
+            # record id makes any concurrent or ambiguously-acked re-emit an
+            # ingestion-layer upsert of the same record, so retries and races
+            # can never duplicate the digest (codex P1).
+            emitted_marker = f"team/{args.team}/_coord/digests/{day}-{window}.emitted"
+            if transport.read(emitted_marker) is not None:
+                pass  # this window's digest is confirmed on the timeline
+            else:
+                rid = _digest_record_id(args.team, day, window)
                 if _emit_digest_timeline(
                         name=f"Agent digest — {day} {window}",
-                        note=rendered, window=window, agent=_host()):
+                        note=stored_body, window=window, agent=_host(),
+                        record_id=rid):
+                    transport.write(emitted_marker,
+                                    f"emitted {now} by {_host()} record {rid}\n")
                     print(f"emitted digest timeline moment ({day} {window})",
                           file=sys.stderr)
                 else:
+                    # LOUD but rc 0: the bus copy exists; the next heartbeat
+                    # tick retries this window's emit (no marker written).
                     print("digest timeline emit FAILED (fulcra_common writer "
-                          "missing or degraded) — bus copy stored; timeline "
-                          "missed this window", file=sys.stderr)
+                          "missing or degraded) — bus copy stored; will retry "
+                          "on the next heartbeat tick", file=sys.stderr)
     return 0
 
 
@@ -3745,8 +3774,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="persist to _coord/digests/<date>-<window>.md (deduped per day+window)")
     dg.add_argument("--emit-timeline", action="store_true",
                     help="also emit the digest as a moment on the 'Agent Tasks — Digest' "
-                         "timeline track (implies the --store marker write, which is the "
-                         "fleet-wide once-per-window guard; best-effort via fulcra-common)")
+                         "timeline track (deterministic per-window record id upserts at "
+                         "ingestion, so fleets and retries converge on one record; failed "
+                         "emits retry on the next tick; best-effort via fulcra-common)")
     dg.set_defaults(func=cmd_digest)
     es = sub.add_parser("escalate", help="role-vacancy sweep -> daily marker + P1 directive to maintainer")
     es.add_argument("team")

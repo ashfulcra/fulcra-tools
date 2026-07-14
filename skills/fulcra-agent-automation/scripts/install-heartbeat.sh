@@ -48,10 +48,11 @@ CEB="${CE:-coord-engine}"
 # projection self-gates on the bus resolution level, so this runs unconditionally
 # and is a cheap exit-0 no-op when projection is off — one degradation-safe chain.
 # The digest leg keeps the operator's twice-daily digest alive on BOTH surfaces
-# (bus copy + 'Agent Tasks — Digest' timeline track): the per-day+window store
-# marker is first-writer-wins across the fleet, so every tick may run it and
-# exactly one host emits per window; a missing fulcra_common writer warns loud
-# but never breaks the chain (rc 0).
+# (bus copy + 'Agent Tasks — Digest' timeline track). Every tick may run it:
+# the timeline record id is DETERMINISTIC per (team, day, window) and the
+# ingest endpoint upserts on explicit ids, so concurrent hosts and retries
+# converge on one record; a failed emit retries on the next tick; a missing
+# fulcra_common writer warns loud but never breaks the chain (rc 0).
 CMD="${CEB} reconcile ${TEAM} && ${CEB} annotate project ${TEAM} && ${CEB} digest ${TEAM} --store --emit-timeline"
 
 confirm() {
