@@ -30,6 +30,9 @@ dev = [
     "pytest-mock>=3.12",
     "ruff>=0.5",
 ]
+# Opt-in AI rule suggestion backend (the ONLY off-device path; never a hard
+# dep — the deterministic builder works without it).
+ai = ["anthropic>=0.40"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
