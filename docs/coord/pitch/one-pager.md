@@ -12,7 +12,7 @@ Coordination built on disagreement doesn't heal; it drifts.
 
 ## What exists today (not a proposal — running in production)
 
-Eleven `fulcra-agent-*` skills + one stdlib-only CLI (`coord-engine`, invoked like `fulcra-api`)
+Twelve `fulcra-agent-*` skills + one stdlib-only CLI (`coord-engine`, invoked like `fulcra-api`)
 that layer onto teams without changing it. The design rule: **prose for judgment, code for folds**
 — any question two agents must answer identically is a deterministic engine command.
 
