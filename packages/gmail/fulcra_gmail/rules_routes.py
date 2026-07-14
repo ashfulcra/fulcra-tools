@@ -118,6 +118,12 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
             })
         return {"rules": result}
 
+    @app.get("/api/gmail/rules/accounts", dependencies=guard)
+    def accounts():
+        reg = make_registry()
+        return {"accounts": [{"account_id": a.account_id, "email": a.email,
+                              "status": a.status} for a in reg.list_accounts()]}
+
     @app.post("/api/gmail/rules/search", dependencies=guard)
     def search(body: dict = Body(...)):
         account_id = body["account_id"]

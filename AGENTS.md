@@ -55,6 +55,11 @@ under `skills/`, each package with its own README, build, and tests.
   ledger/relay/pipeline design live in
   [`packages/gmail/README.md`](packages/gmail/README.md) — read it before touching
   the relay.
+  Rule authoring is an in-plugin example-first builder (`rules_routes` + `rules_derive`
+  + `rules_preview` + opt-in `rules_ai`, UI at `/api/gmail/rules/ui`): search a bound
+  account, mark ✓/✗ examples, derive → preview → save; rules persist to
+  `plugin_settings.gmail.rules` (the store the engine already reads). The `long_text`
+  rules setting stays as a power-user escape hatch.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent

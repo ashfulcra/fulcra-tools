@@ -339,14 +339,24 @@ PLUGIN = Plugin(
             external_link=f"http://127.0.0.1:9292{ADD_ACCOUNT_START_PATH}",
         ),
         SetupStep(
-            kind="input",
-            title="Point at your filter rules",
+            kind="external_action",
+            title="Build your filter rules",
             body_md=(
-                "Add one or more [[plugin_settings.gmail.rules]] tables to "
-                "config.toml (see the Filter rules setting for the schema), "
-                "then set the coord relay team below."
+                "Open the rule builder: search your inbox, mark example emails, "
+                "and it drafts a rule you preview and save. Rules can be edited "
+                "any time from the plugin's Configure page."
             ),
-            settings_keys=("relay_team", "rules"),
+            external_link="http://127.0.0.1:9292/api/gmail/rules/ui",
+        ),
+        SetupStep(
+            kind="input",
+            title="Set the coord relay team",
+            body_md=(
+                "Set the coord relay team below. Rules themselves are authored "
+                "in the builder above (the [[plugin_settings.gmail.rules]] "
+                "config setting stays as a power-user escape hatch)."
+            ),
+            settings_keys=("relay_team",),
         ),
         SetupStep(
             kind="test_connection",

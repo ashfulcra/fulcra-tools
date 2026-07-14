@@ -47,7 +47,9 @@ def _msg(mid, frm, subject, attach=False, list_id=None):
 class _Reg:
     def list_accounts(self):
         class A:  # noqa: N801
-            account_id = "acct"; email = "user@example.test"; status = "active"
+            account_id = "acct"
+            email = "user@example.test"
+            status = "active"
         return [A()]
 
 
@@ -134,6 +136,15 @@ def test_enabled_toggle(client):
     client.post("/api/gmail/rules/r/enabled", json={"enabled": False})
     saved = client._cfg.saved.plugin_settings["gmail"]["rules"][0]
     assert saved["enabled"] is False
+
+
+def test_ui_page_renders_builder(client):
+    r = client.get("/api/gmail/rules/ui")
+    assert r.status_code == 200
+    html = r.text
+    for anchor in ("gmail-rule-builder", "/api/gmail/rules/search",
+                   "/api/gmail/rules/derive", "/api/gmail/rules/preview"):
+        assert anchor in html
 
 
 def test_ai_suggest_requires_consent(client):
