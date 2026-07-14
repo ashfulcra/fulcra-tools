@@ -393,6 +393,8 @@ Upstream engineers read none of this repo (operator-relayed feedback, 2026-07-14
   evidence must reproduce from their code alone.
 - Everything else — discovery story, fleet impact, workarounds — stays here.
 
+## CI, the pre-push hook, and workspace membership
+
 - **macOS CI is path-filtered and bills at 10×**, so it only runs on
   macOS-relevant changes (`packages/fulcra-menubar/**`, `packages/coord-engine/**`,
   `skills/fulcra-agent-automation/**`, and the macOS-touching `fulcra-coord`
