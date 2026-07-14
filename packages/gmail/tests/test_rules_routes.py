@@ -192,6 +192,42 @@ def test_preview_labeled_ids_not_capped_at_query_page():
     assert len(caught) == 30        # every labeled negative verified, none dropped
 
 
+def test_preview_rejects_over_label_ceiling():
+    # 201 combined labeled ids exceed the 200 ceiling — fail LOUD with 400 rather
+    # than silently truncating (which would let preview certify a partial set).
+    c = _build_client({})  # no messages needed: the guard fires before any fetch
+    rule = {"id": "r", "version": 1, "name": "n",
+            "match": "from:shop.example", "actions": ["file"]}
+    r = c.post("/api/gmail/rules/preview", json={
+        "account_id": "acct", "rule": rule,
+        "positives": [f"x{i}" for i in range(201)], "negatives": []})
+    assert r.status_code == 400
+    assert "too many labeled examples" in r.json()["detail"]
+    assert "narrow your selection" in r.json()["detail"]
+
+
+def test_derive_rejects_over_label_ceiling():
+    c = _build_client({})
+    r = c.post("/api/gmail/rules/derive", json={
+        "account_id": "acct",
+        "positives": [f"x{i}" for i in range(150)],   # 150 + 51 = 201 > 200
+        "negatives": [f"y{i}" for i in range(51)]})
+    assert r.status_code == 400
+    assert "too many labeled examples" in r.json()["detail"]
+
+
+def test_preview_at_label_ceiling_is_allowed():
+    # Exactly 200 combined labels is within the ceiling — no 400.
+    msgs = {f"x{i}": _msg(f"x{i}", "r@shop.example", "receipt") for i in range(200)}
+    c = _build_client(msgs)
+    rule = {"id": "r", "version": 1, "name": "n",
+            "match": "from:shop.example", "actions": ["file"]}
+    r = c.post("/api/gmail/rules/preview", json={
+        "account_id": "acct", "rule": rule,
+        "positives": [f"x{i}" for i in range(200)], "negatives": []})
+    assert r.status_code == 200
+
+
 def test_edit_roundtrips_unedited_behavior_critical_fields(client):
     # Mirrors the UI edit flow at the backend contract: GET the full rule, change
     # ONLY the name, PUT it back — enabled/accounts/from_regex/backfill persist.

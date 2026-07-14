@@ -32,6 +32,23 @@ def _registry() -> AccountRegistry:
     return AccountRegistry()
 
 
+def _guard_label_count(positives: list, negatives: list) -> None:
+    """Fail LOUD when the operator labeled more examples than we will fetch.
+
+    A silent cap on a correctness-bearing set (the labeled ✓/✗ ids that certify
+    a rule) would let preview/derive report a false-safe result from an
+    incomplete set. Reject with HTTP 400 so the UI can never certify or derive
+    from a truncated selection; the operator narrows the set instead.
+    """
+    total = len(positives) + len(negatives)
+    if total > _LABEL_FETCH_MAX:
+        raise HTTPException(
+            400,
+            f"too many labeled examples ({total} > {_LABEL_FETCH_MAX} max); "
+            f"narrow your selection or search",
+        )
+
+
 def _default_call_model():
     """Build a ``call_model(prompt)->str`` from the Anthropic SDK, or None.
 
@@ -142,8 +159,11 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
     @app.post("/api/gmail/rules/derive", dependencies=guard)
     def derive(body: dict = Body(...)):
         account_id = body["account_id"]
-        pos = _fetch(account_id, body.get("positives", []), cap=_LABEL_FETCH_MAX)
-        neg = _fetch(account_id, body.get("negatives", []), cap=_LABEL_FETCH_MAX)
+        positives = body.get("positives", [])
+        negatives = body.get("negatives", [])
+        _guard_label_count(positives, negatives)
+        pos = _fetch(account_id, positives, cap=_LABEL_FETCH_MAX)
+        neg = _fetch(account_id, negatives, cap=_LABEL_FETCH_MAX)
         res = rules_derive.derive([_header_record(m) for m in pos],
                                   [_header_record(m) for m in neg])
         return {
@@ -156,6 +176,9 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
     def preview(body: dict = Body(...)):
         account_id = body["account_id"]
         rule_dict = body["rule"]
+        positives = list(body.get("positives", []))
+        negatives = list(body.get("negatives", []))
+        _guard_label_count(positives, negatives)
         try:
             (rule,) = rules_mod.parse_rules([rule_dict])
         except ValueError as e:
@@ -165,8 +188,6 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         q = rules_mod.build_query(rule)
         ids = client.list_message_ids(q)[:_SEARCH_PAGE]
         candidates = _fetch(account_id, ids)
-        positives = list(body.get("positives", []))
-        negatives = list(body.get("negatives", []))
         # Fetch the labeled ✓/✗ ids DIRECTLY (independent of the truncated query
         # page, and NOT subject to the 25-cap) so every labeled example is
         # verified against the operator's selection — even past a page of labels.
@@ -256,10 +277,13 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         if call_model is None:
             raise HTTPException(400, "no AI backend configured (set ANTHROPIC_API_KEY)")
         account_id = body["account_id"]
+        positives = body.get("positives", [])
+        negatives = body.get("negatives", [])
+        _guard_label_count(positives, negatives)
         pos = [_header_record(m) for m in
-               _fetch(account_id, body.get("positives", []), cap=_LABEL_FETCH_MAX)]
+               _fetch(account_id, positives, cap=_LABEL_FETCH_MAX)]
         neg = [_header_record(m) for m in
-               _fetch(account_id, body.get("negatives", []), cap=_LABEL_FETCH_MAX)]
+               _fetch(account_id, negatives, cap=_LABEL_FETCH_MAX)]
         try:
             return rules_ai.suggest(pos, neg, call_model=call_model)
         except ValueError as e:
