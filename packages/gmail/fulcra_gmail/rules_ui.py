@@ -54,7 +54,8 @@ function render(){document.getElementById('results').innerHTML=RESULTS.map(m=>`
 function mark(id,v){LABEL[id]=LABEL[id]===v?undefined:v;
   document.getElementById('lbl-'+id).textContent=LABEL[id]==='pos'?'✓':LABEL[id]==='neg'?'✗':'';}
 function ids(v){return Object.keys(LABEL).filter(k=>LABEL[k]===v);}
-async function derive(){const d=await api('/api/gmail/rules/derive',
+async function derive(){EDITING=null;EDIT_RULE=null;
+  const d=await api('/api/gmail/rules/derive',
   {account_id:acct(),positives:ids('pos'),negatives:ids('neg')});CHIPS=d.chips;drawChips();preview();}
 function drawChips(){document.getElementById('chips').innerHTML=CHIPS.map((c,i)=>
   `<span class="chip ${c.on?'on':''}" onclick="toggle(${i})">${esc(c.label)}</span>`).join('');}
@@ -62,9 +63,22 @@ function toggle(i){CHIPS[i].on=!CHIPS[i].on;drawChips();preview();}
 function draft(){const m=CHIPS.filter(c=>c.on&&c.field==='match').map(c=>c.value).join(' ');
   const r={id:val('rid')||'rule',version:1,name:val('name')||'rule',match:m,actions:actions()};
   CHIPS.filter(c=>c.on&&c.field==='subject_regex').forEach(c=>r.subject_regex=c.value);
+  CHIPS.filter(c=>c.on&&c.field==='from_regex').forEach(c=>r.from_regex=c.value);
   CHIPS.filter(c=>c.on&&c.field==='has_attachment').forEach(()=>r.has_attachment=true);
   if(val('relay_to'))r.relay_to=val('relay_to'); if(val('relay_priority'))r.relay_priority=val('relay_priority');
   return r;}
+// The fields the builder FORM actually represents. On edit-save these are
+// overwritten from the form (or removed if the form omits them); every OTHER
+// field on the existing rule (accounts, backfill, enabled, …) round-trips
+// untouched so editing a rule's name can't silently re-enable or broaden it.
+const FORM_FIELDS=['match','actions','name','relay_to','relay_priority',
+                   'subject_regex','has_attachment','from_regex'];
+function editBody(){const d=draft();
+  const base=Object.assign({}, EDIT_RULE||{});
+  FORM_FIELDS.forEach(f=>{ if(d[f]!==undefined){base[f]=d[f];} else {delete base[f];} });
+  base.id=EDITING;
+  if(EDIT_RULE&&EDIT_RULE.version)base.version=EDIT_RULE.version;
+  return base;}
 function actions(){const a=[];if(document.getElementById('a_file').checked)a.push('file');
   if(document.getElementById('a_relay').checked)a.push('relay');return a;}
 async function preview(){try{const d=await api('/api/gmail/rules/preview',
@@ -74,17 +88,17 @@ async function preview(){try{const d=await api('/api/gmail/rules/preview',
    <span class="pill ${d.negatives_caught.length?'bad':'good'}">✗ leaked ${d.negatives_caught.length}</span>`;
   }catch(e){document.getElementById('preview').textContent='Preview: '+e.message;}}
 async function aiSuggest(){if(!confirm('This sends the from/subject/snippet of your labeled examples to Claude. Continue?'))return;
+  EDITING=null;EDIT_RULE=null;
   const d=await api('/api/gmail/rules/ai-suggest',{account_id:acct(),positives:ids('pos'),negatives:ids('neg'),consent:true});
   const r=d.draft_rule;document.getElementById('chips').innerHTML=
    `<div>AI: ${esc(d.explanation)}</div><pre>${esc(JSON.stringify(r,null,1))}</pre>`;
   if(r.match){CHIPS=[{kind:'ai',field:'match',value:r.match,label:'q='+r.match,on:true}];
    if(r.subject_regex)CHIPS.push({kind:'ai',field:'subject_regex',value:r.subject_regex,label:'subject~'+r.subject_regex,on:true});
    drawChips();preview();}}
-async function save(){const r=draft();
+async function save(){
   try{
-    if(EDITING){r.id=EDITING; if(EDIT_RULE&&EDIT_RULE.version)r.version=EDIT_RULE.version;
-      await api('/api/gmail/rules/'+encodeURIComponent(EDITING),r,'PUT');}
-    else{await api('/api/gmail/rules',r);}
+    if(EDITING){await api('/api/gmail/rules/'+encodeURIComponent(EDITING),editBody(),'PUT');}
+    else{await api('/api/gmail/rules',draft());}
     EDITING=null;EDIT_RULE=null;await loadRules();alert('Saved');}
   catch(e){alert('Save failed: '+e.message);}}
 async function editRule(id){const r=await api('/api/gmail/rules/'+encodeURIComponent(id));

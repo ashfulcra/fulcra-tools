@@ -20,7 +20,12 @@ from .client import GmailClient
 _log = logging.getLogger("fulcra_gmail.rules_routes")
 
 PLUGIN_ID = "gmail"
+#: Page cap for the UNLABELED search/query sample (bounds count + sample only).
 _SEARCH_PAGE = 25
+#: Ceiling for explicitly-labeled ✓/✗ ids fetched by id. Must exceed
+#: ``_SEARCH_PAGE`` so a labeled example is never dropped from verification just
+#: because the operator marked more than one page of examples.
+_LABEL_FETCH_MAX = 200
 
 
 def _registry() -> AccountRegistry:
@@ -93,11 +98,11 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
 
     guard = [Depends(ctx.require_token)]
 
-    def _fetch(account_id: str, ids: list[str]) -> list[dict]:
+    def _fetch(account_id: str, ids: list[str], *, cap: int = _SEARCH_PAGE) -> list[dict]:
         registry = make_registry()
         client = make_client(account_id, registry)
         out = []
-        for mid in ids[:_SEARCH_PAGE]:
+        for mid in ids[:cap]:
             msg = client.get_message(mid, format="full")
             if msg is not None:
                 out.append(msg)
@@ -137,8 +142,8 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
     @app.post("/api/gmail/rules/derive", dependencies=guard)
     def derive(body: dict = Body(...)):
         account_id = body["account_id"]
-        pos = _fetch(account_id, body.get("positives", []))
-        neg = _fetch(account_id, body.get("negatives", []))
+        pos = _fetch(account_id, body.get("positives", []), cap=_LABEL_FETCH_MAX)
+        neg = _fetch(account_id, body.get("negatives", []), cap=_LABEL_FETCH_MAX)
         res = rules_derive.derive([_header_record(m) for m in pos],
                                   [_header_record(m) for m in neg])
         return {
@@ -163,9 +168,10 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         positives = list(body.get("positives", []))
         negatives = list(body.get("negatives", []))
         # Fetch the labeled ✓/✗ ids DIRECTLY (independent of the truncated query
-        # page) so a labeled example that matches the draft but sorts past page 1
-        # is still verified against the operator's selection.
-        labeled = _fetch(account_id, list(dict.fromkeys(positives + negatives)))
+        # page, and NOT subject to the 25-cap) so every labeled example is
+        # verified against the operator's selection — even past a page of labels.
+        labeled = _fetch(account_id, list(dict.fromkeys(positives + negatives)),
+                         cap=_LABEL_FETCH_MAX)
         res = rules_preview.preview(
             rule_dict, candidates, account_id,
             positives=set(positives),
@@ -250,8 +256,10 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         if call_model is None:
             raise HTTPException(400, "no AI backend configured (set ANTHROPIC_API_KEY)")
         account_id = body["account_id"]
-        pos = [_header_record(m) for m in _fetch(account_id, body.get("positives", []))]
-        neg = [_header_record(m) for m in _fetch(account_id, body.get("negatives", []))]
+        pos = [_header_record(m) for m in
+               _fetch(account_id, body.get("positives", []), cap=_LABEL_FETCH_MAX)]
+        neg = [_header_record(m) for m in
+               _fetch(account_id, body.get("negatives", []), cap=_LABEL_FETCH_MAX)]
         try:
             return rules_ai.suggest(pos, neg, call_model=call_model)
         except ValueError as e:

@@ -149,9 +149,11 @@ def test_ui_page_renders_builder(client):
     for anchor in ("gmail-rule-builder", "/api/gmail/rules/search",
                    "/api/gmail/rules/derive", "/api/gmail/rules/preview"):
         assert anchor in html
-    # The edit workflow: an edit affordance that issues a PUT.
+    # The edit workflow: an edit affordance that issues a PUT, and a merge over
+    # the full rule (editBody) so unedited fields aren't dropped on save.
     assert "editRule(" in html
     assert "'PUT'" in html
+    assert "editBody(" in html
 
 
 def test_preview_labeled_examples_beyond_query_page_still_verified():
@@ -172,6 +174,44 @@ def test_preview_labeled_examples_beyond_query_page_still_verified():
     assert "negx" in body["negatives_caught"]   # ✗ leak surfaced despite paging
     assert "posx" in body["positives_caught"]    # ✓ caught despite paging
     assert body["match_count"] == 0              # query page = 25 non-matching fillers
+
+
+def test_preview_labeled_ids_not_capped_at_query_page():
+    # >25 labeled ids: a matching negative past index 24 must still be fetched and
+    # verified (the labeled fetch is not bound by the 25-message query-sample cap).
+    msgs = {f"n{i}": _msg(f"n{i}", "r@shop.example", "receipt") for i in range(30)}
+    c = _build_client(msgs)
+    rule = {"id": "r", "version": 1, "name": "n",
+            "match": "from:shop.example", "actions": ["file"]}
+    labels = [f"n{i}" for i in range(30)]
+    r = c.post("/api/gmail/rules/preview", json={
+        "account_id": "acct", "rule": rule, "positives": [], "negatives": labels})
+    assert r.status_code == 200
+    caught = set(r.json()["negatives_caught"])
+    assert "n29" in caught          # the label past the 25-cap is still caught
+    assert len(caught) == 30        # every labeled negative verified, none dropped
+
+
+def test_edit_roundtrips_unedited_behavior_critical_fields(client):
+    # Mirrors the UI edit flow at the backend contract: GET the full rule, change
+    # ONLY the name, PUT it back — enabled/accounts/from_regex/backfill persist.
+    rule = {"id": "scoped", "version": 3, "name": "Old",
+            "match": "from:shop.example", "actions": ["file"],
+            "from_regex": "(?i)billing", "accounts": ["acct-x"],
+            "backfill": 14, "enabled": False}
+    assert client.post("/api/gmail/rules", json=rule).status_code == 200
+    full = client.get("/api/gmail/rules/scoped").json()
+    assert full["enabled"] is False and full["accounts"] == ["acct-x"]
+    assert full["from_regex"] == "(?i)billing" and full["backfill"] == 14
+    edited = {**full, "name": "New"}
+    assert client.put("/api/gmail/rules/scoped", json=edited).status_code == 200
+    saved = client._cfg.saved.plugin_settings["gmail"]["rules"][0]
+    assert saved["name"] == "New"
+    assert saved["enabled"] is False
+    assert saved["accounts"] == ["acct-x"]
+    assert saved["from_regex"] == "(?i)billing"
+    assert saved["backfill"] == 14
+    assert saved["version"] == 3   # name-only change: matching unchanged, no bump
 
 
 def test_put_rejects_mismatched_body_id(client):
