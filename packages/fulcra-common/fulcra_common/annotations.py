@@ -1189,15 +1189,25 @@ def emit_projection_annotation(
 
 
 def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
-                           backend: Optional[list[str]] = None) -> bool:
+                           backend: Optional[list[str]] = None,
+                           gated: bool = True) -> bool:
     """Emit ONE operator-digest moment on the ``Agent Tasks — Digest`` track.
 
     BEST-EFFORT, NEVER RAISES. Reuses the typed record path against
     ``_resolve_digest_definition_id`` so digests land on their OWN track. Tags:
     ``[agent-digest, <window>, agent:<kind>]``. No idempotency marker here — the
-    per-window dedup guard (in the CLI) prevents a double digest."""
+    per-window dedup guard (in the CLI) prevents a double digest.
+
+    ``gated=True`` (default) keeps the legacy in-process-writer contract: the
+    machine-local :func:`_mode` config must be ``on``. Engine-driven callers
+    (coord-engine's ``digest --emit-timeline`` heartbeat leg) pass
+    ``gated=False`` for the same reason :func:`emit_projection_annotation`
+    skips the mode gate entirely: their opt-in and idempotency are OWNED by the
+    engine (the explicit heartbeat flag + the fleet-wide per-day+window store
+    marker), and the emit must work from any host/harness, not only one whose
+    local writer config happens to be switched on."""
     try:
-        if _mode() == "off":
+        if gated and _mode() == "off":
             return False
         token = _resolve_token()
         if not token:

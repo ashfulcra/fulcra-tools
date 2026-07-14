@@ -3235,8 +3235,11 @@ def _emit_digest_timeline(*, name: str, note: str, window: str, agent: str) -> b
     except Exception:
         return False
     try:
+        # gated=False: this seam's opt-in is the heartbeat's explicit
+        # --emit-timeline flag + the fleet-wide store marker, not the
+        # machine-local writer mode (same contract as projection emits).
         return bool(_ann.emit_digest_annotation(
-            name=name, note=note, window=window, agent=agent))
+            name=name, note=note, window=window, agent=agent, gated=False))
     except Exception:
         return False
 
