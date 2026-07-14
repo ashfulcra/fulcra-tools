@@ -14,7 +14,7 @@ store instead, deduped per day+window.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any
 
 from .model import OPEN_STATUSES, sort_rows
 from .roles import age_hours

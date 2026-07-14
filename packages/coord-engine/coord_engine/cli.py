@@ -2218,10 +2218,6 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 _LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles")
 
 
-def _fresh_degraded() -> dict[str, bool]:
-    return {s: False for s in _LISTEN_SOURCES}
-
-
 def _coerce_degraded(value: Any) -> dict[str, bool]:
     """Normalize the persisted ``degraded`` field to the per-source dict. A legacy
     single bool (pre per-source schema) migrates to the same value on EVERY source:
