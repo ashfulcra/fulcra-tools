@@ -18,7 +18,7 @@ import json
 import sys
 from typing import Any, Optional
 
-from . import config, directives, model, okf, threads as threads_mod
+from . import config, directives, okf, threads as threads_mod
 from . import cli
 from .budget import Deadline
 

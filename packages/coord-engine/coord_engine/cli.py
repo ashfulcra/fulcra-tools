@@ -2132,13 +2132,27 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     now = _iso(_now())
+    path = _task_path(args.team, args.name)
+    doc = transport.read(path)
+    if doc is None:
+        # Fail-loud (same doctrine as `review status` rc-1): the name resolves to
+        # NO directive doc — either a display TITLE was used in place of the
+        # hash-suffixed slug, or the read failed. Recording a response here would
+        # GHOST-CLOSE: the shard lands under a slug nobody owns while the real
+        # directive stays open in the owner's needs-me forever (cost three
+        # ghost-closes in one day). Write nothing; make the caller retry with the
+        # exact slug.
+        print(f"respond: no directive '{args.name}' in team/{args.team} "
+              f"(absent or unreadable) — nothing recorded. Use the exact slug from "
+              f"`inbox`/`briefing --json` (the hash-suffixed name, not the display "
+              f"title).", file=sys.stderr)
+        return 1
     stamp = _stamp_for_path(now, agent)
     fm = {"type": "Response", "agent": agent, "outcome": args.outcome, "timestamp": now}
     transport.write(_response_path(args.team, args.name, stamp),
                     okf.render_frontmatter(fm) + f"\n{args.evidence or args.outcome}\n")
-    path = _task_path(args.team, args.name)
     try:
-        out = tasks.apply_update(transport.read(path), now=now, status="done",
+        out = tasks.apply_update(doc, now=now, status="done",
                                  evidence=f"{args.outcome} (respond by {agent})")
         transport.write(path, out)
         print(f"responded {args.name}: {args.outcome} (closed)")
@@ -2202,10 +2216,6 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 # and mask a fresh summaries outage — the independent-streak invariant. Legacy
 # state files lack the key; _coerce_degraded defaults it False (free migration).
 _LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles")
-
-
-def _fresh_degraded() -> dict[str, bool]:
-    return {s: False for s in _LISTEN_SOURCES}
 
 
 def _coerce_degraded(value: Any) -> dict[str, bool]:
