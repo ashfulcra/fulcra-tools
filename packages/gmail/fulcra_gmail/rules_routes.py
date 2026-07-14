@@ -27,6 +27,31 @@ def _registry() -> AccountRegistry:
     return AccountRegistry()
 
 
+def _default_call_model():
+    """Build a ``call_model(prompt)->str`` from the Anthropic SDK, or None.
+
+    Returns None when no key/SDK is available; the route then 400s and the
+    deterministic path is unaffected.
+    """
+    import os
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return None
+    try:
+        from anthropic import Anthropic
+    except Exception:  # noqa: BLE001
+        return None
+    client = Anthropic(api_key=key)
+
+    def _call(prompt: str) -> str:
+        msg = client.messages.create(
+            model="claude-sonnet-5", max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    return _call
+
+
 def _header_record(msg: dict) -> dict:
     payload = msg.get("payload", {})
     return {
@@ -56,7 +81,7 @@ def _save_rules_list(config_module, ctx, rule_dicts: list[dict]) -> None:
 
 
 def register(app, ctx, *, registry_factory=None, client_factory=None,
-             config_module=None) -> None:
+             config_module=None, call_model_factory=None) -> None:
     from .rules_ui import RULES_UI_HTML  # Task 6 provides this; import lazily
 
     make_registry = registry_factory or _registry
@@ -64,6 +89,7 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         account_id, registry=registry))
     if config_module is None:
         from fulcra_collect import config as config_module  # noqa: PLW0127
+    make_model = call_model_factory or _default_call_model
 
     guard = [Depends(ctx.require_token)]
 
@@ -192,6 +218,23 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         existing[idx] = {**existing[idx], "enabled": bool(body.get("enabled", True))}
         _save_rules_list(config_module, ctx, existing)
         return {"ok": True}
+
+    from . import rules_ai
+
+    @app.post("/api/gmail/rules/ai-suggest", dependencies=guard)
+    def ai_suggest(body: dict = Body(...)):
+        if body.get("consent") is not True:
+            raise HTTPException(403, "AI suggestion requires explicit consent")
+        call_model = make_model()
+        if call_model is None:
+            raise HTTPException(400, "no AI backend configured (set ANTHROPIC_API_KEY)")
+        account_id = body["account_id"]
+        pos = [_header_record(m) for m in _fetch(account_id, body.get("positives", []))]
+        neg = [_header_record(m) for m in _fetch(account_id, body.get("negatives", []))]
+        try:
+            return rules_ai.suggest(pos, neg, call_model=call_model)
+        except ValueError as e:
+            raise HTTPException(502, f"AI suggestion failed: {e}") from e
 
     @app.get("/api/gmail/rules/ui")
     def ui():

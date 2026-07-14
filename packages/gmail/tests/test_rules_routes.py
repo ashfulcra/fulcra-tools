@@ -136,6 +136,12 @@ def test_enabled_toggle(client):
     assert saved["enabled"] is False
 
 
+def test_ai_suggest_requires_consent(client):
+    r = client.post("/api/gmail/rules/ai-suggest",
+                    json={"account_id": "acct", "positives": ["1"], "negatives": []})
+    assert r.status_code == 403
+
+
 def test_search_no_pii_in_logs(client, caplog):
     import logging
     caplog.set_level(logging.DEBUG)
