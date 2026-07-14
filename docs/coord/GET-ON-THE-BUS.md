@@ -46,13 +46,21 @@ picked soft-deleted duplicates, landing moments hidden). Pin at or after it.
 
 Projection self-gates on the team's bus resolution level, so it costs nothing until turned
 on: `coord-engine annotate resolution <team> transitions` (team-wide, one-time; already on
-for `fulcra`). The heartbeat then runs `reconcile && annotate project <team>` every beat —
-idempotent across hosts (deterministic ids + a shared cursor + a skew window). Verify with
+for `fulcra`). The heartbeat then runs the full three-leg chain every beat —
+
+```bash
+coord-engine reconcile <team> && coord-engine annotate project <team> \
+  && coord-engine digest <team> --store --emit-timeline
+```
+
+— idempotent across hosts (deterministic record ids upsert at ingestion; a shared cursor +
+skew window keep quiet ticks cheap; the digest is once-per-window). Verify with
 `coord-engine annotate status <team>` (resolution + cursor) and a manual `coord-engine
 annotate project <team>` (reports `emitted N`). **Already running a heartbeat?** If it was
-installed before the projection chain, re-run
+installed before the DIGEST leg (2026-07-14) — not just before projection — re-run
 [`install-heartbeat.sh`](../../skills/fulcra-agent-automation/scripts/install-heartbeat.sh)
-to pick up the `annotate project` leg.
+to pick up the current chain; an older two-leg heartbeat keeps the digest bus copy and
+timeline track dark while looking healthy.
 
 ## 3. Authenticate
 

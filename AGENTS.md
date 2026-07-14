@@ -433,10 +433,13 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
 - **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
   It defaults to off (inert); leave it there — an accidental `on` has caused
   duplicate-record proliferation. Its successor is the heartbeat **projection
-  fold** (`coord-engine annotate resolution <team> transitions`); the two write
-  the same Agent-Tasks moments to a no-dedup endpoint, so enabling projection
-  requires this writer stay off — use projection for timeline annotations, never
-  this writer.
+  fold** (`coord-engine annotate resolution <team> transitions`). Note the
+  duplicate risk is TWO WRITERS minting *different* ids for the same logical
+  moment: the typed ingest endpoint **upserts records with matching explicit
+  ids** (live-verified 2026-07-14), so the projection fleet's deterministic
+  ids converge — but the legacy writer generates its own ids and would still
+  duplicate alongside it. Use projection for timeline annotations, never this
+  writer.
 
 ## The daemon (Collect)
 
