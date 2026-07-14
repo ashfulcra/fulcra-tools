@@ -951,6 +951,54 @@ def test_cli_digest_sections_and_store_dedupe(capsys):
     assert "already stored" in capsys.readouterr().err
 
 
+def test_cli_digest_emit_timeline_once_per_window(capsys, monkeypatch):
+    t = FakeTransport()
+    cli.main(["presence", "beat", "r", "-a", "amy", "-s", "working"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    emitted = []
+    monkeypatch.setattr(cli, "_emit_digest_timeline",
+                        lambda **kw: (emitted.append(kw), True)[1])
+
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=t) == 0
+    err = capsys.readouterr().err
+    # --emit-timeline implies the store-marker write (the once-per-window guard).
+    assert "stored digest" in err and "emitted digest timeline moment" in err
+    assert len(emitted) == 1
+    assert emitted[0]["window"] in ("morning", "evening")
+    assert emitted[0]["window"] in emitted[0]["name"]
+    assert emitted[0]["note"]  # the rendered digest body rides in the note
+
+    # Second run in the same window: marker guard suppresses BOTH surfaces.
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=t) == 0
+    assert "already stored" in capsys.readouterr().err
+    assert len(emitted) == 1
+
+
+def test_cli_digest_emit_timeline_failure_is_loud_but_rc0(capsys, monkeypatch):
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "_emit_digest_timeline", lambda **kw: False)
+
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=t) == 0
+    err = capsys.readouterr().err
+    assert "emit FAILED" in err, "a missed timeline window must be loud"
+    # The bus copy still stored — store semantics win over emit failure.
+    assert any(p.startswith("team/r/_coord/digests/") for p in t.store)
+
+
+def test_cli_digest_store_alone_does_not_emit(capsys, monkeypatch):
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    calls = []
+    monkeypatch.setattr(cli, "_emit_digest_timeline",
+                        lambda **kw: (calls.append(1), True)[1])
+    assert cli.main(["digest", "r", "--store"], transport=t) == 0
+    assert calls == [], "--store alone must not touch the timeline"
+
+
 def test_cli_digest_blocked_on_human_uses_token_match(capsys):
     import json as _j
     t = FakeTransport()

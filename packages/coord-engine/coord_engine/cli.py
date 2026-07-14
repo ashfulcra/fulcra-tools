@@ -3223,6 +3223,24 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
 
 # --- digest + escalate (fulcra-agent-health, A5b) ---
 
+def _emit_digest_timeline(*, name: str, note: str, window: str, agent: str) -> bool:
+    """Hand ONE rendered digest to the hardened fulcra_common digest writer.
+
+    Best-effort, mirrors ``_emit_projection_spec``: coord-engine is stdlib-only,
+    so the writer package (and the fulcra-api CLI / token it needs) may be
+    entirely absent — that degrades to False, never an exception. Lands on the
+    'Agent Tasks — Digest' track via the writer's own definition resolution."""
+    try:
+        from fulcra_common import annotations as _ann
+    except Exception:
+        return False
+    try:
+        return bool(_ann.emit_digest_annotation(
+            name=name, note=note, window=window, agent=agent))
+    except Exception:
+        return False
+
+
 def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
     # Public-read failure contract (see _read_degraded_row): don't fold an UNKNOWN
@@ -3250,15 +3268,34 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
                           f"at {r['pct']}%" + (" THROTTLED" if r["throttled"] else ""))
         except Exception:
             pass
-    if args.store:
+    emit_timeline = getattr(args, "emit_timeline", False)
+    if args.store or emit_timeline:
+        # The per-day+window store marker is the fleet-wide EXACTLY-ONCE guard
+        # for both the bus copy and the timeline moment: first-writer-wins on
+        # the marker, so a multi-host heartbeat fleet emits one digest per
+        # window. --emit-timeline therefore implies the marker write.
         day = now[:10]
         window = digest_mod.window_for(now)
         marker = f"team/{args.team}/_coord/digests/{day}-{window}.md"
         if transport.read(marker) is not None:
             print(f"(digest for {day} {window} already stored — skipped)", file=sys.stderr)
         else:
-            transport.write(marker, digest_mod.render(d))
+            rendered = digest_mod.render(d)
+            transport.write(marker, rendered)
             print(f"stored digest -> _coord/digests/{day}-{window}.md", file=sys.stderr)
+            if emit_timeline:
+                # Best-effort but LOUD on failure: the bus copy exists either
+                # way; a missed timeline moment for the window is a warn, not a
+                # broken heartbeat chain (rc stays 0).
+                if _emit_digest_timeline(
+                        name=f"Agent digest — {day} {window}",
+                        note=rendered, window=window, agent=_host()):
+                    print(f"emitted digest timeline moment ({day} {window})",
+                          file=sys.stderr)
+                else:
+                    print("digest timeline emit FAILED (fulcra_common writer "
+                          "missing or degraded) — bus copy stored; timeline "
+                          "missed this window", file=sys.stderr)
     return 0
 
 
@@ -3703,6 +3740,10 @@ def build_parser() -> argparse.ArgumentParser:
     dg.add_argument("team"); dg.add_argument("--human"); add_json(dg)
     dg.add_argument("--store", action="store_true",
                     help="persist to _coord/digests/<date>-<window>.md (deduped per day+window)")
+    dg.add_argument("--emit-timeline", action="store_true",
+                    help="also emit the digest as a moment on the 'Agent Tasks — Digest' "
+                         "timeline track (implies the --store marker write, which is the "
+                         "fleet-wide once-per-window guard; best-effort via fulcra-common)")
     dg.set_defaults(func=cmd_digest)
     es = sub.add_parser("escalate", help="role-vacancy sweep -> daily marker + P1 directive to maintainer")
     es.add_argument("team")
