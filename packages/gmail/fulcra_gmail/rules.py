@@ -83,6 +83,8 @@ class Rule:
     accounts: list[str] | None = None
     #: First-run window widener (in days). ``None`` == default 7d.
     backfill: int | None = None
+    #: Whether the poller applies this rule. Absent in older configs ⇒ enabled.
+    enabled: bool = True
     #: Precompiled post-filter patterns (``None`` when the raw field is unset).
     #: ``compare=False`` so equality/repr stay driven by the raw strings.
     from_regex_re: "re.Pattern[str] | None" = field(default=None, compare=False)
@@ -140,6 +142,7 @@ def parse_rules(raw_rules: list[dict]) -> list[Rule]:
         from_regex_re = _compile_pattern(raw["id"], "from_regex", from_regex)
         subject_regex_re = _compile_pattern(raw["id"], "subject_regex", subject_regex)
         accounts = raw.get("accounts")
+        enabled = bool(raw.get("enabled", True))
         parsed.append(Rule(
             id=str(raw["id"]),
             version=int(raw["version"]),
@@ -153,6 +156,7 @@ def parse_rules(raw_rules: list[dict]) -> list[Rule]:
             relay_priority=raw.get("relay_priority"),
             accounts=list(accounts) if accounts is not None else None,
             backfill=raw.get("backfill"),
+            enabled=enabled,
             from_regex_re=from_regex_re,
             subject_regex_re=subject_regex_re,
         ))
@@ -230,3 +234,51 @@ def evaluate(rule: Rule, message: dict, *, account_id: str) -> MatchDecision:
         account_id, message.get("id"), rule.id, matched, reason.value,
     )
     return MatchDecision(matched=matched, reason=reason)
+
+
+def rule_to_config_dict(rule: Rule) -> dict:
+    """Serialize a Rule back to its config (TOML) dict shape.
+
+    Inverse of one ``parse_rules`` element: emits only set/non-default fields
+    and never the compiled ``*_re`` patterns, so the result round-trips
+    through ``parse_rules`` to an equal Rule.
+    """
+    out: dict = {
+        "id": rule.id,
+        "version": rule.version,
+        "name": rule.name,
+        "match": rule.match,
+        "actions": list(rule.actions),
+    }
+    if rule.from_regex is not None:
+        out["from_regex"] = rule.from_regex
+    if rule.subject_regex is not None:
+        out["subject_regex"] = rule.subject_regex
+    if rule.has_attachment is not None:
+        out["has_attachment"] = rule.has_attachment
+    if rule.relay_to is not None:
+        out["relay_to"] = rule.relay_to
+    if rule.relay_priority is not None:
+        out["relay_priority"] = rule.relay_priority
+    if rule.accounts is not None:
+        out["accounts"] = list(rule.accounts)
+    if rule.backfill is not None:
+        out["backfill"] = rule.backfill
+    if rule.enabled is not True:
+        out["enabled"] = rule.enabled
+    return out
+
+
+def rule_summary(rule: Rule) -> str:
+    """One-line, PII-free human summary for the rule list UI."""
+    parts = [f"q={rule.match}"]
+    if rule.from_regex:
+        parts.append(f"from~{rule.from_regex}")
+    if rule.subject_regex:
+        parts.append(f"subject~{rule.subject_regex}")
+    if rule.has_attachment:
+        parts.append("has_attachment")
+    tail = ",".join(rule.actions)
+    if "relay" in rule.actions and rule.relay_to:
+        tail += f"→{rule.relay_to}"
+    return " · ".join(parts) + " · " + tail

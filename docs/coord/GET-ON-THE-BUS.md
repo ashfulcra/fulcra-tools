@@ -8,8 +8,14 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ## 1. Prerequisites
 
-- A [Fulcra](https://fulcradynamics.com) account (created on first login) — the bus is
-  your Fulcra File Store; there is no broker or server to run.
+- A [Fulcra](https://fulcradynamics.com) account (created on first login). Fulcra
+  gives agents a shared place to access and store real-world data, record what
+  matters, coordinate work, and discover what's new on every loop — data from
+  any source or stream, plus hard-to-get streams like health/location/calendar
+  (via the Context App) and media plays / browsing attention (via the alpha
+  Collect app), in one store the user owns with an API agents can use. The bus
+  is the coordinate-work leg: it rides your Fulcra **File Store**; there is no
+  broker or server to run.
 - [`uv`](https://docs.astral.sh/uv/).
 - Optional: the official [`fulcra-agent-teams`](https://github.com/fulcradynamics/agent-skills)
   skill is the base prose convention (members, inboxes) that the `fulcra-agent-*` skills
@@ -19,13 +25,49 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ```bash
 uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.3#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.6#subdirectory=packages/coord-engine"
 ```
 
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
 PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the installed
 binary.) Install the skills into your agent with
 [`scripts/coord/coord-setup.sh`](../../scripts/coord/coord-setup.sh).
+
+### Enable timeline projection (recommended)
+
+The heartbeat can project each agent-task transition onto your Fulcra timeline — the
+demo surface that shows an agent's work as it happens. The bus itself is stdlib-only and
+needs none of this; projection is the one feature that requires the typed-record **writer**
+(`fulcra_common`) installed *next to* coord-engine. Without it the projection step is a
+silent exit-0 no-op — the failure mode that left the timeline dark. Install both together:
+
+```bash
+uv tool install --force \
+  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.6#subdirectory=packages/coord-engine" \
+  --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.1.1#subdirectory=packages/fulcra-common"
+```
+
+`fulcra-common-v0.1.1` is the floor: it resolves definitions by liveness (an earlier writer
+picked soft-deleted duplicates, landing moments hidden). Pin at or after it.
+
+Projection self-gates on the team's bus resolution level, so it costs nothing until turned
+on: `coord-engine annotate resolution <team> transitions` (team-wide, one-time; already on
+for `fulcra`). The heartbeat then runs the full three-leg chain every beat —
+
+```bash
+coord-engine reconcile <team> && coord-engine annotate project <team> \
+  && coord-engine digest <team> --store --emit-timeline
+```
+
+— idempotent across hosts (deterministic record ids upsert at ingestion; a shared cursor +
+skew window keep quiet ticks cheap; the digest is once-per-window). Verify with
+`coord-engine annotate status <team>` (resolution + cursor) and a manual `coord-engine
+annotate project <team>` (prints `projected N/N transition(s)` — N/N means every fresh
+transition landed; `0/N` means the writer refused or failed). **Already running a heartbeat?** If it was
+installed before the DIGEST leg (2026-07-14) — not just before projection — re-run
+[`install-heartbeat.sh`](../../skills/fulcra-agent-automation/scripts/install-heartbeat.sh)
+to pick up the current chain; an older two-leg heartbeat keeps the digest bus copy and
+timeline track dark while looking healthy.
 
 ## 3. Authenticate
 
@@ -130,3 +172,5 @@ idempotent refresh).
   probes telling a waking agent exactly where to enter.
 - [`docs/coord/pitch/`](pitch) — the one-pager and demo script, if you're evaluating
   whether to adopt this at all.
+- [`HARNESS-MAP.md`](HARNESS-MAP.md) — the environments agents actually run in and
+  the walls each has hit (proxies, git gateways, silent no-ops), with the fixes.

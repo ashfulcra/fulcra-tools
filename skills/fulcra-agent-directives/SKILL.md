@@ -80,6 +80,9 @@ Flags, modes, windows, and the `threads-degraded` row: see the [CLI reference](r
 - **Shard-GC**: reconcile prunes ack shards whose task no longer exists (orphan-proofing the ack dir).
 
 ## Fail-closed notes
-- `respond` records the response shard first, then closes the task (done, evidence = outcome). If the
-  close is an illegal transition, the response is still recorded and the failure reported.
+- `respond` resolves the directive **first**: a name that maps to no directive doc (a display title
+  instead of the hash-suffixed slug, or an unreadable read) fails **rc-1** and records nothing — no ghost
+  shard under a slug nobody owns while the real directive stays open. A resolved directive records the
+  response shard, then closes the task (done, evidence = outcome); if the close is an illegal transition
+  the response is still recorded and the failure reported.
 - A `remind` with an unparseable WHEN errors — it never creates a directive that fires at the wrong time.

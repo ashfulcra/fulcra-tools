@@ -268,20 +268,23 @@ def _migration_002_import_plugin_state_json(conn: sqlite3.Connection) -> None:
 
 
 def _migration_003_forwarded_attention(conn: sqlite3.Connection) -> None:
-    """Create the ``forwarded_attention`` dedup table.
+    """Create the ``forwarded_attention`` dedup table (HISTORICAL — the
+    route it served is retired; the table is retained for schema
+    compatibility on existing databases).
 
-    The daemon's ``POST /api/extension/attention`` route forwards each
-    attention event to Fulcra keyed by a DETERMINISTIC ``source_id``
-    (``com.fulcra.attention.v2.<hash>``). Fulcra does NOT dedupe by
-    ``source_id`` at write time — it's a query-time hint only — so a
-    re-POSTed event (the extension's outbox-flush concurrency bug re-sends
-    the same entries many times) creates a PERMANENT duplicate in the
-    user's Fulcra account. This table is the daemon's memory of which
-    attention ``source_id``s it has already forwarded, so it can forward
-    each unique source_id at most once. ``source_id`` is the PRIMARY KEY,
-    which lets ``INSERT OR IGNORE`` do the atomic check-and-record under a
-    storm of identical concurrent POSTs without any application-level
-    locking."""
+    The FORMER daemon route ``POST /api/extension/attention`` (removed —
+    the Attention extension is now fully relayless and POSTs straight to
+    the Fulcra API) forwarded each attention event to Fulcra keyed by a
+    DETERMINISTIC ``source_id`` (``com.fulcra.attention.v2.<hash>``).
+    Fulcra does NOT dedupe by ``source_id`` at write time — it's a
+    query-time hint only — so a re-POSTed event (the extension's
+    outbox-flush concurrency bug re-sent the same entries many times)
+    created a PERMANENT duplicate in the user's Fulcra account. This table
+    was the daemon's memory of which attention ``source_id``s it had
+    already forwarded (``source_id`` PRIMARY KEY + ``INSERT OR IGNORE``
+    made the check-and-record atomic under a storm of identical concurrent
+    POSTs). Migrations are append-only, so it still runs on new
+    databases."""
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS forwarded_attention (
@@ -296,21 +299,23 @@ def _migration_004_forwarded_events(conn: sqlite3.Connection) -> None:
     """Generalise the attention dedup table into a per-event dedup keyed on
     an arbitrary ``dedup_key``.
 
-    PR #20 added ``forwarded_attention`` to stop the attention route from
-    re-forwarding a re-POSTed event (the extension's outbox-flush storm).
-    The media import path needs the SAME guarantee, keyed on a *set* of
-    dedup keys per event (``deterministic_id`` ∪ the ``com.fulcra.content.*``
-    cross-source fingerprints) rather than one attention ``source_id``. This
-    table generalises that: any string key, ``INSERT OR IGNORE`` against the
+    PR #20 added ``forwarded_attention`` to stop the FORMER attention route
+    (retired; see migration 003's note) from re-forwarding a re-POSTed
+    event (the extension's then outbox-flush storm). The media import path
+    needs the SAME guarantee, keyed on a *set* of dedup keys per event
+    (``deterministic_id`` ∪ the ``com.fulcra.content.*`` cross-source
+    fingerprints) rather than one attention ``source_id``. This table
+    generalises that: any string key, ``INSERT OR IGNORE`` against the
     PRIMARY KEY does the atomic claim under concurrency.
 
     Migration safety: every existing ``forwarded_attention.source_id`` is
     copied into ``forwarded_events`` so an attention source_id that was
     already forwarded by a pre-#004 daemon is still recognised as a
     duplicate after upgrade — no attention claim is lost. The
-    ``forwarded_attention`` table is intentionally left in place (it remains
-    the backing store for ``claim_attention_source_id``, whose contract is
-    unchanged); the copy means both tables agree on the historical rows."""
+    ``forwarded_attention`` table is intentionally left in place for schema
+    compatibility (it backed ``claim_attention_source_id``, itself retained
+    as historical/compatibility-only alongside the retired route); the copy
+    means both tables agree on the historical rows."""
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS forwarded_events (
@@ -320,8 +325,8 @@ def _migration_004_forwarded_events(conn: sqlite3.Connection) -> None:
         """,
     )
     # Preserve already-forwarded attention claims: copy each historical
-    # source_id into the generalised table so the route (now keyed via
-    # claim_dedup_keys) still treats it as a duplicate post-upgrade. The
+    # source_id into the generalised table so dedup-key consumers still
+    # treat it as a duplicate post-upgrade. The
     # forwarded_attention table may not exist on a brand-new db where 003
     # and 004 run back-to-back from migrate() — but 003 always runs first
     # in that loop, so the table is present whenever 004 runs.
@@ -392,20 +397,23 @@ def upsert_plugin_state(conn: sqlite3.Connection, *, plugin_id: str,
 
 def claim_attention_source_id(conn: sqlite3.Connection,
                               source_id: str) -> bool:
-    """Atomically claim an attention ``source_id`` for forwarding.
+    """Atomically claim an attention ``source_id`` for forwarding
+    (HISTORICAL/compatibility-only — its caller, the retired
+    ``POST /api/extension/attention`` route, is removed and nothing in
+    production calls this; retained alongside the ``forwarded_attention``
+    table it backs. New dedup consumers use ``claim_dedup_keys``).
 
-    Returns ``True`` if THIS call inserted the row (the source_id has not
-    been forwarded before → the caller should forward to Fulcra), or
-    ``False`` if the row already existed (a duplicate → the caller should
-    SKIP the forward).
+    Returned ``True`` if THIS call inserted the row (the source_id had not
+    been forwarded before → the caller forwarded to Fulcra), or ``False``
+    if the row already existed (a duplicate → the caller skipped).
 
-    ``INSERT OR IGNORE`` against the ``source_id`` PRIMARY KEY makes the
+    ``INSERT OR IGNORE`` against the ``source_id`` PRIMARY KEY made the
     check-and-record a single atomic statement, so the extension's flush
-    storm (many identical source_ids POSTed near-simultaneously) results
+    storm (many identical source_ids POSTed near-simultaneously) resulted
     in exactly one ``True`` and the rest ``False`` — SQLite serialises the
-    inserts and the unique constraint does the dedup. No application-level
-    lock needed. ``cursor.rowcount`` is 1 when a row was actually inserted
-    and 0 when the IGNORE swallowed a constraint violation."""
+    inserts and the unique constraint does the dedup, no application-level
+    lock. ``cursor.rowcount`` is 1 when a row was actually inserted and 0
+    when the IGNORE swallowed a constraint violation."""
     cur = conn.execute(
         "INSERT OR IGNORE INTO forwarded_attention (source_id, forwarded_at) "
         "VALUES (?, ?)",

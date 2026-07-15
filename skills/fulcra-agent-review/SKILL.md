@@ -25,7 +25,7 @@ supersedes it), so re-entry never corrupts the tally:
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT tally against a broken engine |
-| Any reviews owed me? | `coord-engine needs-me <team> --agent <me>` | NO `[REVIEW] pending verdict:` row prints for you — no `pending_required` entry names you (NON-mutating read) | **Leave a verdict** — each printed `[REVIEW] pending verdict: <slug> (required: …)` row is an open obligation on you; write your verdict at the echoed path `team/<team>/review/<slug>/verdicts/<me>.md`, then verify + ack per [Lifecycle](#lifecycle) step 2 |
+| Any reviews owed me? | `coord-engine needs-me <team> --agent <me>` | NO `[REVIEW] pending verdict:` row prints for you — no `pending_required` entry names you (NON-mutating read) | **Leave a verdict** — each printed `[REVIEW] pending verdict: <slug> (required: …)` row is an open obligation on you; write your verdict at the echoed path `team/<team>/review/<slug>/verdicts/<required-token>.md` (the filename stem is the `required` token the row names — a role, or a direct agent name — not your own), then verify + ack per [Lifecycle](#lifecycle) step 2 |
 | Known artifact's handshake state settled? | `coord-engine review status <team> <slug>` | prints a line beginning `review <slug> in team/<team>:` ending in `APPROVED` or `CHANGES` (deterministic fold — never tally by hand) | if it prints `PENDING`, the review is not settled — chase the `awaiting required:` reviewers per [Lifecycle](#lifecycle) step 3 |
 
 All probes clean → nothing is blocked on your verdict and any artifact you name is at its folded state;
@@ -46,11 +46,13 @@ proceed to request a new review or advance an existing one below.
   ---
   Review requested: <artifact>
   ```
-- **`review/<slug>/verdicts/<reviewer>.md`** — one verdict per reviewer. OKF `type: Verdict`:
+- **`review/<slug>/verdicts/<required-token>.md`** — one verdict per requirement. The **filename stem is
+  the tally key** and must equal a `required` token (the role, or the direct agent name), not the holder's
+  own name. OKF `type: Verdict`:
   ```yaml
   ---
   type: Verdict
-  reviewer: alice
+  reviewer: alice             # who signed off (informational — the FILENAME drives the tally)
   verdict: approve            # approve | changes
   ---
   Notes / requested changes.
@@ -78,20 +80,25 @@ proceed to request a new review or advance an existing one below.
    hosts, and compaction with no one having to remember it. A bare `tell` is the failure mode this
    replaces: an acked directive leaves **no** durable marker, so a dropped or forgotten review vanishes
    silently and the merge gates on nothing. Never request reviews via `tell`.
-2. **Verdict** (reviewer): write `review/<review-slug>/verdicts/<you>.md` — **slug-exact**, named after
-   **you** (the filename is the identity the tally uses) — use the exact name the request's `required:`
-   list names you by (your role, not a session identity) — with `verdict: approve|changes` and notes. The
-   **verdict file is what discharges the obligation** (the tally folds presence-of-file). Then **verify**
-   the fold reflects it (`coord-engine review status <team> <review-slug>` — you must no longer be in
-   `pending_required`) and **only then ack** the accompanying directive as inbox hygiene — using the
-   **directive** id, NOT the `<review-slug>`: the review-request directive has its own slug
-   `review-request-<review-slug>-<hash>`, so ack that (read it from `coord-engine inbox <team> --agent
-   <you> --json` — the `name` of the `REVIEW REQUEST: <review-slug>` row), never `--ack <review-slug>`
-   (which the directive would never match, leaving it re-notifying). Never satisfy a review by acking
-   without a verdict file, or against a different review's status. To change your mind, re-upload your
-   verdict file (overwrites; the File Store keeps the history). **Fail-closed:** a `changes` verdict keeps
-   blocking until *that reviewer* re-uploads `approve` — pushing a fix does **not** clear it; the reviewer
-   must re-affirm.
+2. **Verdict** (reviewer): write the verdict file at the **exact path `review request` echoed** for you —
+   **slug-exact**, and named after the **requirement, not yourself**. The **filename stem is what the tally
+   matches against the `required` token**, not the frontmatter `reviewer:` field:
+   - **role requirement** (`required: reviewer`) → `review/<review-slug>/verdicts/reviewer.md`, whoever
+     holds the role. Writing `verdicts/alice.md` records an approval the tally can't credit: `reviewer`
+     stays in `pending_required` and the review can never reach APPROVED.
+   - **direct requirement** (`required: alice`) → `review/<review-slug>/verdicts/alice.md`.
+
+   Write it with `verdict: approve|changes` and notes. The **verdict file is what discharges the
+   obligation** (the tally folds presence-of-file). Then **verify** the fold reflects it (`coord-engine
+   review status <team> <review-slug>` — that requirement must no longer be in `pending_required`) and
+   **only then ack** the accompanying directive as inbox hygiene — using the **directive** id, NOT the
+   `<review-slug>`: the review-request directive has its own slug `review-request-<review-slug>-<hash>`, so
+   ack that (read it from `coord-engine inbox <team> --agent <you> --json` — the `name` of the `REVIEW
+   REQUEST: <review-slug>` row), never `--ack <review-slug>` (which the directive would never match,
+   leaving it re-notifying). Never satisfy a review by acking without a verdict file, or against a
+   different review's status. To change your mind, re-upload the same file (overwrites; the File Store
+   keeps the history). **Fail-closed:** a `changes` verdict keeps blocking until that same file is
+   re-uploaded as `approve` — pushing a fix does **not** clear it; the requirement must be re-affirmed.
 3. **Check state** (anyone) — deterministic fold, do not tally by hand:
    ```bash
    coord-engine review status <team> <slug> --json

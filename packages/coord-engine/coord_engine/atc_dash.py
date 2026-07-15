@@ -108,7 +108,7 @@ class _DashHandler(BaseHTTPRequestHandler):
         elif path == "/data.json":
             try:
                 body = json.dumps(self.server.data_fn()).encode("utf-8")  # type: ignore[attr-defined]
-            except Exception as e:
+            except Exception:
                 # never crash the server on a bad fold — surface it as a 500.
                 # The body is deliberately generic: exception text can reflect
                 # bus-derived data, so it must not leak into the response.

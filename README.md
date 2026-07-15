@@ -8,9 +8,16 @@ and tell me how this could help our work." The rest of this file is for you;
 AGENTS.md is for them.
 
 This is a uv-workspace monorepo of helper projects built on
-[Fulcra](https://fulcradynamics.com) — the personal data platform: your
-health, location, calendar, media, attention, and any custom data streams you
-define, in one store you own, with an API your agents can use. Code lives
+[Fulcra](https://fulcradynamics.com). **Fulcra helps agents know their user,
+know what's happening in their user's world, work with their user's other
+agents, and become more helpful over time.** To get there, it gives agents a
+shared place to access and store real-world data — hard-to-get streams like
+health, location, and calendar (via the [Context App](https://apps.apple.com/us/app/context-personal-data-kit/id1633037434)),
+media plays and browsing attention (via the alpha [Collect app](packages/collect)),
+or anything else your agent wants to add — to record what matters, coordinate
+work, and discover what's new on every loop. That context belongs to you
+rather than any individual agent, so it can be securely shared across your
+agents and other AI applications over time. Code lives
 under [`packages/`](packages) (Python and TypeScript both appear here), agent
 skills live under [`skills/`](skills), and each package keeps its own README,
 build, and tests. This file is the front door; the package READMEs carry the
@@ -93,7 +100,7 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 `uv run fulcra-collect doctor`. The coord engine installs on its own:
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.3#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.6#subdirectory=packages/coord-engine"
 ```
 
 and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
@@ -140,7 +147,9 @@ than the author. Changes go through a PR where a forge exists — never direct
 pushes to `main` — and the review handshake rides the bus, not the forge:
 `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
 creates a review doc that sits in the reviewer's `needs-me` until their
-verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`;
+verdict file exists at `team/<team>/review/<slug>/verdicts/<role>.md` (the
+filename stem is the `required` token — the role passed to `--reviewer` — not the
+holder's name);
 `coord-engine review status <team> <slug>` gates the merge (a GitHub-only
 comment doesn't count, and neither does an ack). The artifact ref is opaque —
 PR#, branch, commit, URL — so the handshake works with any forge or none.

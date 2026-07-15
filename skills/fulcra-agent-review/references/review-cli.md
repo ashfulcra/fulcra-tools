@@ -67,17 +67,23 @@ presence-of-file, so writing it (and only it) is what removes you from
 `pending_required`. Acking is separate: it just clears the directive from your
 `inbox`/re-notify, and it does **not** substitute for the verdict.
 
-1. **Write your verdict** at the **slug-exact** path the request echoed, named after
-   the identity the `required:` list uses for you (your **role**, not a session id):
+1. **Write your verdict** at the **slug-exact** path the request echoed. The verdict
+   FILENAME STEM must equal the `required` token the request named — that stem is what
+   the tally matches, NOT the frontmatter `reviewer:` field — so name the file after
+   the requirement, not yourself:
+   - **role requirement** (`required: reviewer`) → `verdicts/reviewer.md`, whoever
+     holds the role (`verdicts/alice.md` records an approval the tally can't credit —
+     `reviewer` stays in `pending_required` forever).
+   - **direct requirement** (`required: alice`) → `verdicts/alice.md`.
    ```bash
-   # team/<team>/review/<review-slug>/verdicts/<you>.md — type: Verdict, verdict: approve|changes
+   # filename = the required token, e.g. reviewer.md — type: Verdict, verdict: approve|changes
    uv tool run fulcra-api file upload /tmp/verdict.md \
-     "team/<team>/review/<review-slug>/verdicts/<you>.md"
+     "team/<team>/review/<review-slug>/verdicts/reviewer.md"
    ```
    ```yaml
    ---
    type: Verdict
-   reviewer: <you>
+   reviewer: <you>             # who signed off (informational — the FILENAME drives the tally)
    verdict: approve            # approve | changes
    ---
    Notes / requested changes.

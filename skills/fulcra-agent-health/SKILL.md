@@ -29,9 +29,12 @@ role-escalation sweep land here too — A5b.)
 **blocked on you** (`needs:human` tags / tasks assigned to your handle — env `FULCRA_COORD_HUMAN`),
 **upcoming** (`not_before` within 7 days), **agents** (liveness + open work each), and **stale**
 (active tasks untouched > 48h). `--store` persists it to `_coord/digests/<date>-<window>.md`, deduped
-per day+window (morning/evening) — heartbeat-safe. *Timeline annotation is deferred until the
-record-write CLI surface is verified — the incumbent's racy check-then-create minted duplicate data
-types (operator bug), and we won't repeat that.*
+per day+window (morning/evening) — heartbeat-safe. `--emit-timeline` additionally lands the digest as
+a moment on the **'Agent Tasks — Digest'** timeline track: the record id is deterministic per
+(team, day, window) and the typed ingest endpoint upserts on explicit ids (live-verified 2026-07-14),
+so fleet races and retries converge on one record; a failed emit warns loud, keeps rc 0, and retries
+on the next heartbeat tick (the `.emitted` state is written only after a confirmed emit). Requires the
+`fulcra_common` writer installed next to coord-engine — without it the emit degrades to a loud warn.
 
 ## Role-vacancy escalation (A5b)
 `coord-engine escalate <team>` sweeps every role doc: if a role is VACANT past its `sla_hours` and
@@ -42,7 +45,7 @@ today's marker doesn't exist, it writes the marker and files a **P1 directive to
 ```bash
 coord-engine doctor <team>          # preflight; exit 0 = healthy
 coord-engine health <team> [--json] # fleet fold; exit 1 if no fresh reconciler
-coord-engine digest <team> [--human H] [--json] [--store]
+coord-engine digest <team> [--human H] [--json] [--store] [--emit-timeline]
 coord-engine escalate <team>        # vacancy sweep (heartbeat-safe)
 ```
 

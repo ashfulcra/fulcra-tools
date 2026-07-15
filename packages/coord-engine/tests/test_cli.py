@@ -425,6 +425,22 @@ def test_cli_respond_closes_and_records(capsys):
     assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
 
+def test_cli_respond_fails_loud_on_unresolved_directive(capsys):
+    """A name that resolves to no directive doc must FAIL rc-1 and write NO
+    response shard. A slugified display-title matches no hash-suffixed slug, and
+    the old code recorded a ghost response (rc 0) while the real directive stayed
+    open in needs-me forever — fail-loud, same doctrine as review status."""
+    t = FakeTransport()
+    # nothing created: 'a-display-title' resolves to no task doc
+    rc = cli.main(["respond", "r", "a-display-title", "-o", "answered", "-a", "amy"],
+                  transport=t)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "a-display-title" in err  # the message names the unresolved directive
+    # crucially: NO ghost response shard was written
+    assert not any(p.startswith("team/r/_coord/responses/") for p in t.store)
+
+
 def test_cli_respond_response_paths_do_not_collide(monkeypatch, capsys):
     from datetime import datetime, timezone
     t = FakeTransport()
@@ -949,6 +965,98 @@ def test_cli_digest_sections_and_store_dedupe(capsys):
     assert len(stored) == 1
     cli.main(["digest", "r", "--store"], transport=t)
     assert "already stored" in capsys.readouterr().err
+
+
+def test_cli_digest_emit_timeline_once_per_window(capsys, monkeypatch):
+    t = FakeTransport()
+    cli.main(["presence", "beat", "r", "-a", "amy", "-s", "working"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    emitted = []
+    monkeypatch.setattr(cli, "_emit_digest_timeline",
+                        lambda **kw: (emitted.append(kw), True)[1])
+
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=t) == 0
+    err = capsys.readouterr().err
+    # --emit-timeline implies the store-marker write (the bus-copy dedup).
+    assert "stored digest" in err and "emitted digest timeline moment" in err
+    assert len(emitted) == 1
+    assert emitted[0]["window"] in ("morning", "evening")
+    assert emitted[0]["window"] in emitted[0]["name"]
+    assert emitted[0]["note"]  # the rendered digest body rides in the note
+    # A confirmed emit records the .emitted state.
+    assert any(p.endswith(".emitted") for p in t.store)
+
+    # Second run in the same window: .emitted suppresses the re-emit.
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=t) == 0
+    assert "already stored" in capsys.readouterr().err
+    assert len(emitted) == 1
+
+
+def test_cli_digest_emit_failure_retries_next_tick_with_same_id(capsys, monkeypatch):
+    # codex P1: a transient emit failure must NOT consume the window. The
+    # .emitted state is written only after a confirmed emit, so the next tick
+    # retries — with the SAME deterministic record id and the STORED body, so
+    # an ambiguously-acked first POST upserts instead of duplicating.
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    calls = []
+    outcome = {"ok": False}
+    monkeypatch.setattr(cli, "_emit_digest_timeline",
+                        lambda **kw: (calls.append(kw), outcome["ok"])[1])
+
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=t) == 0
+    err = capsys.readouterr().err
+    assert "will retry" in err, "a missed window must be loud AND retryable"
+    assert any(p.endswith(".md") and "_coord/digests/" in p for p in t.store)
+    assert not any(p.endswith(".emitted") for p in t.store), \
+        "no emit confirmation may be recorded on failure"
+
+    outcome["ok"] = True
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=t) == 0
+    assert "emitted digest timeline moment" in capsys.readouterr().err
+    assert len(calls) == 2
+    assert calls[0]["record_id"] == calls[1]["record_id"], \
+        "retry must reuse the deterministic per-window record id"
+    assert calls[0]["note"] == calls[1]["note"], \
+        "retry must emit the STORED window body, not a re-rendered one"
+    assert any(p.endswith(".emitted") for p in t.store)
+
+    # Third tick: confirmed — no further emit calls.
+    cli.main(["digest", "r", "--emit-timeline"], transport=t)
+    assert len(calls) == 2
+
+
+def test_cli_digest_concurrent_hosts_converge_on_one_record_id(capsys, monkeypatch):
+    # codex P1: the marker read-then-write is NOT atomic — two hosts can both
+    # see the window unclaimed and both emit. Correctness lives at the
+    # ingestion layer: both emits must carry the SAME deterministic record id,
+    # which the typed endpoint upserts into one record (live-verified).
+    ta, tb = FakeTransport(), FakeTransport()   # two hosts, isolated stores
+    for t in (ta, tb):
+        cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    emitted = []
+    monkeypatch.setattr(cli, "_emit_digest_timeline",
+                        lambda **kw: (emitted.append(kw), True)[1])
+
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=ta) == 0
+    assert cli.main(["digest", "r", "--emit-timeline"], transport=tb) == 0
+    assert len(emitted) == 2, "both racing hosts emit (no atomic claim exists)"
+    assert emitted[0]["record_id"] == emitted[1]["record_id"], \
+        "racing emits must converge on one deterministic record id"
+
+
+def test_cli_digest_store_alone_does_not_emit(capsys, monkeypatch):
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    calls = []
+    monkeypatch.setattr(cli, "_emit_digest_timeline",
+                        lambda **kw: (calls.append(1), True)[1])
+    assert cli.main(["digest", "r", "--store"], transport=t) == 0
+    assert calls == [], "--store alone must not touch the timeline"
 
 
 def test_cli_digest_blocked_on_human_uses_token_match(capsys):

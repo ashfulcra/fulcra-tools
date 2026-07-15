@@ -247,3 +247,38 @@ def test_postfilter_order_from_checked_first():
                                 header("Subject", "y")])
     assert rules.evaluate(rule, msg, account_id="a").reason \
         is MatchReason.REJECTED_FROM_REGEX
+
+
+def test_enabled_defaults_true_and_parses():
+    (r_default,) = rules.parse_rules([
+        {"id": "r1", "version": 1, "name": "n", "match": "in:inbox", "actions": ["file"]},
+    ])
+    assert r_default.enabled is True
+    (r_off,) = rules.parse_rules([
+        {"id": "r2", "version": 1, "name": "n", "match": "in:inbox",
+         "actions": ["file"], "enabled": False},
+    ])
+    assert r_off.enabled is False
+
+
+def test_rule_to_config_dict_roundtrips():
+    raw = {
+        "id": "r1", "version": 2, "name": "Receipts", "match": "from:shop.example",
+        "actions": ["file", "relay"], "relay_to": "amy", "relay_priority": "P2",
+        "subject_regex": "(?i)receipt", "has_attachment": True, "enabled": False,
+    }
+    (rule,) = rules.parse_rules([raw])
+    out = rules.rule_to_config_dict(rule)
+    # Re-parsing the serialized dict yields an equal rule.
+    (roundtripped,) = rules.parse_rules([out])
+    assert roundtripped == rule
+    assert "from_regex_re" not in out and "subject_regex_re" not in out
+
+
+def test_rule_summary_is_human_and_pii_free():
+    (rule,) = rules.parse_rules([
+        {"id": "r1", "version": 1, "name": "n", "match": "from:a@b.example has:attachment",
+         "actions": ["file", "relay"], "relay_to": "amy", "subject_regex": "(?i)receipt"},
+    ])
+    s = rules.rule_summary(rule)
+    assert "from:a@b.example" in s and "relay" in s and "amy" in s

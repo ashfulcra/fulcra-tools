@@ -1,8 +1,14 @@
 # fulcra-collect
 
-The local daemon at the centre of Fulcra's helper tools. It hosts every
-Fulcra Collect *plugin* — the periodic importers, the long-lived
-webhook receivers, the browser-extension ingest endpoint — under one
+The **alpha Collect app**: the capture side of Fulcra — how agents know
+what's happening in their user's world — for streams no platform hands you:
+media plays, browsing attention, mail-derived signals, landing in the one
+Fulcra store you own, alongside the health/location/calendar data the
+Context App captures.
+
+Mechanically, a local daemon at the centre of Fulcra's helper tools. It hosts
+every Fulcra Collect *plugin* — the periodic importers, the long-lived
+webhook receivers, the pointer plugins — under one
 process, supervises them, exposes their state over a JSON API plus a
 web UI on `127.0.0.1:9292`, and stores per-plugin state in a single
 SQLite database at `~/.config/fulcra-collect/state.db`.
@@ -36,8 +42,8 @@ plumbing for free.
 * **Serves a web UI.** A FastAPI app bound to `127.0.0.1:9292`
   serves the wizard / dashboard / settings frontend out of
   `packages/web-ui/dist/` and answers the JSON API described below.
-  The port is stable across restarts so that OAuth redirect URIs and
-  the Chrome extension's POST endpoint don't break when the daemon
+  The port is stable across restarts so that OAuth redirect URIs
+  registered with external providers don't break when the daemon
   restarts.
 * **Auto-launches the macOS menubar app** on startup when one is
   installed, so the user always has a visible status indicator

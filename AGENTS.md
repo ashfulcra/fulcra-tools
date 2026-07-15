@@ -1,9 +1,12 @@
 # Fulcra Tools — agent guide
 
-Your entry point to this repo: the non-obvious environment and the conventions
-you can't infer from the source. The [`README.md`](README.md) tells the
-top-level story (what each package is, how to install the pieces) — this file
-does not repeat it; it covers what an agent has to know to work here safely.
+Your entry point to this repo. Fulcra helps agents know their user, know
+what's happening in their user's world, work with their user's other agents,
+and become more helpful over time — the packages here are working examples of
+all four. This file covers the non-obvious environment and the conventions
+you can't infer from the source; the [`README.md`](README.md) tells the
+top-level story (what each package is, how to install the pieces) and this
+file does not repeat it.
 
 **This file is a ship-gate artifact.** Every PR that changes agent-facing
 behavior — CLI verbs, skills, conventions, environment requirements, review
@@ -55,6 +58,11 @@ under `skills/`, each package with its own README, build, and tests.
   ledger/relay/pipeline design live in
   [`packages/gmail/README.md`](packages/gmail/README.md) — read it before touching
   the relay.
+  Rule authoring is an in-plugin example-first builder (`rules_routes` + `rules_derive`
+  + `rules_preview` + opt-in `rules_ai`, UI at `/api/gmail/rules/ui`): search a bound
+  account, mark ✓/✗ examples, derive → preview → save; rules persist to
+  `plugin_settings.gmail.rules` (the store the engine already reads). The `long_text`
+  rules setting stays as a power-user escape hatch.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent
@@ -86,6 +94,12 @@ under `skills/`, each package with its own README, build, and tests.
 - PyObjC-free logic is split into its own modules so tests run on Linux CI;
   macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC
   imports lazy (inside functions), never at module import time.
+- Date/clock tests: a module that fixes a top-level `NOW` for its data must also
+  **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
+  `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving
+  relative ages from `PINNED_NOW`, never asserting against the real clock.
+  Otherwise the suite flips red once wall-clock passes `NOW + window`. Enforced
+  by `tests/test_clock_pin_convention.py`.
 
 ## Coordinate on the bus
 
@@ -112,7 +126,9 @@ it (not on PyPI).
   a direct push to `main`**. The handshake rides the bus, not the forge:
   `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
-  verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`.
+  verdict file exists at `team/<team>/review/<slug>/verdicts/<role>.md` (the
+  filename stem is the `required` token — the role passed to `--reviewer` — not
+  the holder's own name; that stem is what the tally credits).
   The request is **durable-first, not atomic**: the review doc lands FIRST (that
   doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened
@@ -297,8 +313,12 @@ it (not on PyPI).
   your Fulcra timeline model-free, right after each reconcile; `annotate status
   <team>` shows the level + cursor. It is the successor to the legacy
   `fulcra-coord annotations` writer — enabling it requires that writer stay off
-  (see [Fulcra platform surface](#fulcra-platform-surface--records)). Setup:
-  [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
+  (see [Fulcra platform surface](#fulcra-platform-surface--records)). Projection
+  needs the typed-record writer (`fulcra-common`) installed *beside* coord-engine
+  (`uv tool install … --with fulcra-common`); without it the step is a silent
+  exit-0 no-op. Setup + install recipe:
+  [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md#enable-timeline-projection-recommended)
+  and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 
 ## Operator knowledge: vault + prefs
 
@@ -342,6 +362,44 @@ Author commits as `ashfulcra
 <114089064+ashfulcra@users.noreply.github.com>` and end the message with the
 trailer `Co-Authored-By: <your model> <noreply@anthropic.com>` (e.g.
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
+
+## Documentation rules (standing, operator-set)
+
+The docs' primary reader is an **agent**; the showcase test is the goal: a
+founder drops this repo's link to their agent asking "anything useful here?"
+and the docs get it to "yes, and here's how" unaided. Standing rules, each
+earned by an incident:
+
+- **Truth over aspiration.** Document live, verified behavior; stamp
+  verification dates and drift headers where the platform moves faster than
+  the repo (the FULCRA-PRIMITIVES pattern). Doc claims get adversarially
+  reviewed like code.
+- **Exact commands, exact paths, canonical form.** Bare `coord-engine`, never
+  `uv tool run coord-engine` (not on PyPI). One wrong documented filename made
+  role-gated reviews structurally unapprovable (v1.6.4 fix) — path precision
+  is correctness, not style.
+- **No dead or broken references** (operator rule, 2026-07-14): relative
+  links must resolve, referenced files/commands/sections must exist, and
+  mentions of real repo things should BE links. Sweep on every docs QA pass.
+- **Teach fail-loud, never fail-quiet.** No documented pattern may swallow
+  errors; if a leg degrades to a no-op without its backend, the doc says so
+  in bold (the silent-writer darkness).
+- **Docs ship with the change, same PR, dual-green.** Docs debt is in scope,
+  never a follow-up. This file is the ship-gate.
+- **One canonical home per fact**; everything else links to it. Scattered
+  version pins and duplicated doctrine are drift bombs.
+- Historical docs (proposals/, superseded designs) carry a **historical
+  banner** instead of being rewritten; broken references get fixed even there.
+
+### Writing for upstream (issues & PRs to fulcradynamics/*)
+
+Upstream engineers read none of this repo (operator-relayed feedback, 2026-07-14).
+
+- **Succinct.** First sentence states the bug. Repro, expected, actual, one
+  self-contained piece of evidence (a curl, a traceback). Ten lines.
+- **Their vocabulary only.** No fulcra-tools terms, codenames, or links —
+  evidence must reproduce from their code alone.
+- Everything else — discovery story, fleet impact, workarounds — stays here.
 
 ## CI, the pre-push hook, and workspace membership
 
@@ -399,10 +457,13 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
 - **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
   It defaults to off (inert); leave it there — an accidental `on` has caused
   duplicate-record proliferation. Its successor is the heartbeat **projection
-  fold** (`coord-engine annotate resolution <team> transitions`); the two write
-  the same Agent-Tasks moments to a no-dedup endpoint, so enabling projection
-  requires this writer stay off — use projection for timeline annotations, never
-  this writer.
+  fold** (`coord-engine annotate resolution <team> transitions`). Note the
+  duplicate risk is TWO WRITERS minting *different* ids for the same logical
+  moment: the typed ingest endpoint **upserts records with matching explicit
+  ids** (live-verified 2026-07-14), so the projection fleet's deterministic
+  ids converge — but the legacy writer generates its own ids and would still
+  duplicate alongside it. Use projection for timeline annotations, never this
+  writer.
 
 ## The daemon (Collect)
 

@@ -22,6 +22,7 @@ import secrets
 import socket
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -2132,13 +2133,27 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     now = _iso(_now())
+    path = _task_path(args.team, args.name)
+    doc = transport.read(path)
+    if doc is None:
+        # Fail-loud (same doctrine as `review status` rc-1): the name resolves to
+        # NO directive doc — either a display TITLE was used in place of the
+        # hash-suffixed slug, or the read failed. Recording a response here would
+        # GHOST-CLOSE: the shard lands under a slug nobody owns while the real
+        # directive stays open in the owner's needs-me forever (cost three
+        # ghost-closes in one day). Write nothing; make the caller retry with the
+        # exact slug.
+        print(f"respond: no directive '{args.name}' in team/{args.team} "
+              f"(absent or unreadable) — nothing recorded. Use the exact slug from "
+              f"`inbox`/`briefing --json` (the hash-suffixed name, not the display "
+              f"title).", file=sys.stderr)
+        return 1
     stamp = _stamp_for_path(now, agent)
     fm = {"type": "Response", "agent": agent, "outcome": args.outcome, "timestamp": now}
     transport.write(_response_path(args.team, args.name, stamp),
                     okf.render_frontmatter(fm) + f"\n{args.evidence or args.outcome}\n")
-    path = _task_path(args.team, args.name)
     try:
-        out = tasks.apply_update(transport.read(path), now=now, status="done",
+        out = tasks.apply_update(doc, now=now, status="done",
                                  evidence=f"{args.outcome} (respond by {agent})")
         transport.write(path, out)
         print(f"responded {args.name}: {args.outcome} (closed)")
@@ -2177,11 +2192,17 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 #   * Fail visible, no flooding — a transport failure emits `LISTEN DEGRADED:`
 #     ONCE per consecutive-failure streak, PER SOURCE (the streak flags persist IN
 #     the state file, so a scheduler re-running `--once` does not re-alarm every
-#     tick). Per-source is load-bearing: a single shared flag would let a permanent
-#     orphan (`owner unresolved` every tick) pin it TRUE forever and silence a NEW,
-#     distinct outage. Each source alerts once per ITS OWN streak and resets on ITS
-#     OWN recovery. It goes to STDERR so `--json` stdout stays a clean
+#     tick). Per-source is load-bearing: a single shared flag would let a chronic
+#     degradation on one source pin it TRUE forever and silence a NEW, distinct
+#     outage on another. Each source alerts once per ITS OWN streak and resets on
+#     ITS OWN recovery. It goes to STDERR so `--json` stdout stays a clean
 #     one-object-per-line event stream for filter-free streaming consumers.
+#     A permanently-absent owner/requester doc is handled a level BELOW the streak:
+#     it is emit-once-cached PER SLUG (`flagged_orphan_responses`/`_verdicts`, like
+#     the dir-only `orphan_slugs`) and skipped silently thereafter, so it never even
+#     reaches its source's streak — a fail-closed watcher (persistent DEGRADED ==
+#     fatal) is not murdered by a doc that will never return, while a genuine
+#     transport outage on that same source still fails loud.
 #   * Quiet ticks print NOTHING to stdout (the monitor-flood lesson) — only
 #     `--verbose` emits a heartbeat, and only to stderr.
 #   * Bounded cost — one list_dir of _coord/responses/ + per-slug work ONLY for
@@ -2196,10 +2217,6 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 # and mask a fresh summaries outage — the independent-streak invariant. Legacy
 # state files lack the key; _coerce_degraded defaults it False (free migration).
 _LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles")
-
-
-def _fresh_degraded() -> dict[str, bool]:
-    return {s: False for s in _LISTEN_SOURCES}
 
 
 def _coerce_degraded(value: Any) -> dict[str, bool]:
@@ -2245,6 +2262,14 @@ def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
         # Orphan review dirs already reported (verdicts dir, no doc) — cached so
         # each is surfaced ONCE; legacy files lack the key and default empty.
         "orphan_slugs": list(data.get("orphan_slugs") or []),
+        # Emit-once caches for a PERMANENTLY-absent owner/requester doc at the
+        # responses / verdicts sources — a slug whose directive|review doc reads
+        # None has its degrade emitted ONCE, then is skipped silently (a fail-closed
+        # watcher treats persistent DEGRADED as fatal). Distinct from orphan_slugs,
+        # which caches emitted-orphan EVENTS; these cache emitted-DEGRADE slugs.
+        # Legacy files lack the keys and default empty.
+        "flagged_orphan_responses": list(data.get("flagged_orphan_responses") or []),
+        "flagged_orphan_verdicts": list(data.get("flagged_orphan_verdicts") or []),
         "degraded": _coerce_degraded(data.get("degraded")),
     }
 
@@ -2275,6 +2300,13 @@ def _listen_tick(transport: Any, team: str, agent: str,
     inbox_ids = set(state["inbox_ids"])
     response_keys = set(state["response_keys"])
     slug_owned: dict[str, Any] = dict(state["slug_owned"])
+    # Emit-once caches: slugs whose owner/requester doc read None and have already
+    # had their degrade emitted. Skipped SILENTLY thereafter so a fail-closed
+    # watcher (persistent DEGRADED == fatal) survives a permanently-missing doc;
+    # recovery (doc reads non-None) discards the slug to re-arm fail-loud. Mirrors
+    # the `orphan_slugs` emit-once cache the dir-only review scan uses below.
+    flagged_orphan_responses = set(state.get("flagged_orphan_responses") or [])
+    flagged_orphan_verdicts = set(state.get("flagged_orphan_verdicts") or [])
 
     # Source 1 — new inbox directives (the SAME fold `inbox` surfaces), PLUS
     # directives routed to a fresh-lease ROLE this agent holds. An unreadable
@@ -2356,17 +2388,26 @@ def _listen_tick(transport: Any, team: str, agent: str,
         if owned is None:
             doc = transport.read(_task_path(team, slug))
             if doc is None:
-                # Ambiguous: a transient read failure OR an orphan response whose
-                # directive doc is gone. Either way ownership is UNKNOWN, so we do
-                # NOT cache and do NOT advance — unknown != seen, retry next tick.
-                # This is its OWN source: a permanent orphan can pin `orphans`
-                # forever without silencing a fresh `responses`/`inbox` outage.
-                _fail("orphans", f"owner unresolved for {slug}")
+                # Ambiguous: a transient read failure OR a permanent orphan whose
+                # directive doc is gone (a settled/archived/tombstoned directive).
+                # Ownership is UNKNOWN either way, so we do NOT cache and do NOT
+                # advance — unknown != seen, retry next tick. EMIT-ONCE per slug:
+                # a fail-closed watcher treats persistent DEGRADED as fatal, so a
+                # permanently-missing doc must not re-degrade every tick and murder
+                # it. First occurrence fails loud on the `orphans` source; the slug
+                # is then skipped silently until it recovers, so it never pins the
+                # source either. Other sources still fail-loud on their own
+                # transport failures, so a genuine outage is never masked — first
+                # occurrence + recovery visibility is retained.
+                if slug not in flagged_orphan_responses:
+                    _fail("orphans", f"owner unresolved for {slug}")
+                    flagged_orphan_responses.add(slug)
                 continue
             fm = okf.parse_frontmatter(doc) or {}
             owner = str(fm.get("owner") or "").strip()
             owned = owner == agent  # owner is the directive's SENDER; broadcast/absent -> not owned
             slug_owned[slug] = owned  # definitive classification: cache it
+            flagged_orphan_responses.discard(slug)  # recovered -> re-arm fail-loud
         if not owned:
             continue  # responses to other-owner / broadcast directives are noise
         try:
@@ -2419,14 +2460,25 @@ def _listen_tick(transport: Any, team: str, agent: str,
         if requested is None:
             doc = transport.read(_review_doc_path(team, slug))
             if doc is None:
-                # The slug came from the listing so the doc exists — a None read
-                # is a transient transport failure. Requester UNKNOWN: do NOT
-                # cache and do NOT advance (no-false-advance), retry next tick.
-                _fail("verdicts", f"requester unresolved for {slug}")
+                # Ordinarily the slug came from the listing so the doc exists and a
+                # None read is a transient transport failure — but a settled/archived
+                # review can leave its `<slug>/` verdicts subtree listed with the
+                # `<slug>.md` doc gone, a PERMANENT None. Requester UNKNOWN either
+                # way: do NOT cache and do NOT advance (no-false-advance), retry next
+                # tick. EMIT-ONCE per slug: a fail-closed watcher treats persistent
+                # DEGRADED as fatal, so a permanently-missing doc must not re-degrade
+                # every tick. First occurrence fails loud on `verdicts`; the slug is
+                # skipped silently thereafter, never pinning the source. Other
+                # sources still fail-loud on their own transport failures, so a real
+                # outage is never masked. Recovery below re-arms the slug.
+                if slug not in flagged_orphan_verdicts:
+                    _fail("verdicts", f"requester unresolved for {slug}")
+                    flagged_orphan_verdicts.add(slug)
                 continue
             fm = okf.parse_frontmatter(doc) or {}
             requested = str(fm.get("requested_by") or "").strip() == agent
             review_requested[slug] = requested  # definitive classification: cache
+            flagged_orphan_verdicts.discard(slug)  # recovered -> re-arm fail-loud
         if not requested:
             continue  # someone else's review -> noise
         try:
@@ -2529,6 +2581,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
     state["review_requested"] = review_requested
     state["settled_reviews"] = sorted(settled_reviews)
     state["orphan_slugs"] = sorted(orphan_slugs)
+    state["flagged_orphan_responses"] = sorted(flagged_orphan_responses)
+    state["flagged_orphan_verdicts"] = sorted(flagged_orphan_verdicts)
     return events, failures
 
 
@@ -3180,6 +3234,41 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
 
 # --- digest + escalate (fulcra-agent-health, A5b) ---
 
+def _digest_record_id(team: str, day: str, window: str) -> str:
+    """Deterministic record id for the (team, day, window) digest moment.
+
+    The typed ingest endpoint UPSERTS on an explicit id (live-verified
+    2026-07-14), so every host that emits this window's digest converges on ONE
+    timeline record — idempotency lives at the ingestion layer, not in any
+    read-then-write marker race."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL,
+                          f"fulcra-coord-digest:{team}:{day}:{window}"))
+
+
+def _emit_digest_timeline(*, name: str, note: str, window: str, agent: str,
+                          record_id: str) -> bool:
+    """Hand ONE rendered digest to the hardened fulcra_common digest writer.
+
+    Best-effort, mirrors ``_emit_projection_spec``: coord-engine is stdlib-only,
+    so the writer package (and the fulcra-api CLI / token it needs) may be
+    entirely absent — that degrades to False, never an exception. Lands on the
+    'Agent Tasks — Digest' track via the writer's own definition resolution."""
+    try:
+        from fulcra_common import annotations as _ann
+    except Exception:
+        return False
+    try:
+        # gated=False: this seam's opt-in is the heartbeat's explicit
+        # --emit-timeline flag, not the machine-local writer mode (same
+        # contract as projection emits). The deterministic record_id makes
+        # concurrent same-window emits upsert into one record.
+        return bool(_ann.emit_digest_annotation(
+            name=name, note=note, window=window, agent=agent, gated=False,
+            id=record_id))
+    except Exception:
+        return False
+
+
 def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
     # Public-read failure contract (see _read_degraded_row): don't fold an UNKNOWN
@@ -3207,15 +3296,48 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
                           f"at {r['pct']}%" + (" THROTTLED" if r["throttled"] else ""))
         except Exception:
             pass
-    if args.store:
+    emit_timeline = getattr(args, "emit_timeline", False)
+    if args.store or emit_timeline:
         day = now[:10]
         window = digest_mod.window_for(now)
         marker = f"team/{args.team}/_coord/digests/{day}-{window}.md"
-        if transport.read(marker) is not None:
+        # The store marker dedups the BUS COPY (a lost race just re-writes an
+        # equivalent copy as a new version — harmless). It is NOT the timeline
+        # correctness guard: that lives in the deterministic record id below.
+        stored_body = transport.read(marker)
+        if stored_body is not None:
             print(f"(digest for {day} {window} already stored — skipped)", file=sys.stderr)
         else:
-            transport.write(marker, digest_mod.render(d))
+            stored_body = digest_mod.render(d)
+            transport.write(marker, stored_body)
             print(f"stored digest -> _coord/digests/{day}-{window}.md", file=sys.stderr)
+        if emit_timeline:
+            # Timeline emit state is SEPARATE from the store marker and written
+            # only after a confirmed emit, so a transient failure (missing
+            # writer, token flake, HTTP error) RETRIES on the next heartbeat
+            # tick instead of consuming the window (codex P1). The deterministic
+            # record id makes any concurrent or ambiguously-acked re-emit an
+            # ingestion-layer upsert of the same record, so retries and races
+            # can never duplicate the digest (codex P1).
+            emitted_marker = f"team/{args.team}/_coord/digests/{day}-{window}.emitted"
+            if transport.read(emitted_marker) is not None:
+                pass  # this window's digest is confirmed on the timeline
+            else:
+                rid = _digest_record_id(args.team, day, window)
+                if _emit_digest_timeline(
+                        name=f"Agent digest — {day} {window}",
+                        note=stored_body, window=window, agent=_host(),
+                        record_id=rid):
+                    transport.write(emitted_marker,
+                                    f"emitted {now} by {_host()} record {rid}\n")
+                    print(f"emitted digest timeline moment ({day} {window})",
+                          file=sys.stderr)
+                else:
+                    # LOUD but rc 0: the bus copy exists; the next heartbeat
+                    # tick retries this window's emit (no marker written).
+                    print("digest timeline emit FAILED (fulcra_common writer "
+                          "missing or degraded) — bus copy stored; will retry "
+                          "on the next heartbeat tick", file=sys.stderr)
     return 0
 
 
@@ -3660,6 +3782,11 @@ def build_parser() -> argparse.ArgumentParser:
     dg.add_argument("team"); dg.add_argument("--human"); add_json(dg)
     dg.add_argument("--store", action="store_true",
                     help="persist to _coord/digests/<date>-<window>.md (deduped per day+window)")
+    dg.add_argument("--emit-timeline", action="store_true",
+                    help="also emit the digest as a moment on the 'Agent Tasks — Digest' "
+                         "timeline track (deterministic per-window record id upserts at "
+                         "ingestion, so fleets and retries converge on one record; failed "
+                         "emits retry on the next tick; best-effort via fulcra-common)")
     dg.set_defaults(func=cmd_digest)
     es = sub.add_parser("escalate", help="role-vacancy sweep -> daily marker + P1 directive to maintainer")
     es.add_argument("team")

@@ -17,6 +17,23 @@ from coord_engine_test_helpers import FakeTransport
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
 
+# clock-pin support (see #378):
+import pytest
+PINNED_NOW = datetime(2026, 7, 8, 12, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Pin cli._now to PINNED_NOW (just after the module NOW).
+
+    Fixtures stamp data relative to NOW, but folds/verbs compute windows and
+    staleness off cli._now() against the REAL clock — so once wall-clock time
+    crossed NOW + a window this suite flipped RED for good (the repo's
+    date-boundary CI-flake class; template: #378 test_threads). Remedy: pin the
+    clock, never weaken assertions. Tests that MOVE time monkeypatch cli._now
+    themselves, overriding this."""
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
+
 
 def _sh(tier, age_h=1, *, account="a", units=0, throttled=False,
         model=None, task_class=None, outcome=None):
@@ -228,8 +245,21 @@ def test_days_filter_excludes_older_dispatches():
 _ACCOUNTS = json.dumps({"accounts": [FRONTIER_ACCT], "tiers": {}})
 
 
-def test_cli_atc_report_text(capsys):
+def _distinct_clock(monkeypatch):
+    """Override the constant autouse pin with a monotonic per-call clock anchored
+    at PINNED_NOW. Usage-shard paths derive from the ts (``_stamp_for_path``), so
+    two writes under a CONSTANT clock collide onto one path and overwrite;
+    stepping by whole seconds gives each a distinct path, deterministic and far
+    from the real clock (the report window is days)."""
+    import itertools
+    counter = itertools.count()
+    monkeypatch.setattr(
+        cli, "_now", lambda: PINNED_NOW + timedelta(seconds=next(counter)))
+
+
+def test_cli_atc_report_text(capsys, monkeypatch):
     t = FakeTransport()
+    _distinct_clock(monkeypatch)
     t.put("team/fulcra/atc/accounts.json", _ACCOUNTS)
     cli.main(["usage", "log", "fulcra", "--account", "amax", "--tier", "frontier",
               "--units", "50"], transport=t)

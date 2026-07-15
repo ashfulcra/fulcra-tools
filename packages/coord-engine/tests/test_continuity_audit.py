@@ -4,6 +4,24 @@ from coord_engine.continuity_audit import stale_agents
 
 NOW = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
 
+# clock-pin support (see #378):
+import pytest
+PINNED_NOW = datetime(2026, 7, 7, 12, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Pin cli._now to PINNED_NOW (just after the module NOW).
+
+    Fixtures stamp data relative to NOW, but folds/verbs compute windows and
+    staleness off cli._now() against the REAL clock — so once wall-clock time
+    crossed NOW + a window this suite flipped RED for good (the repo's
+    date-boundary CI-flake class; template: #378 test_threads). Remedy: pin the
+    clock, never weaken assertions. Tests that MOVE time monkeypatch cli._now
+    themselves, overriding this."""
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
+
+
 def _p(agent, hours_ago):
     return {"agent": agent, "ts": NOW - timedelta(hours=hours_ago)}
 
@@ -47,15 +65,17 @@ def _iso(dt):
 
 
 def _beat(t, team, agent, hours_ago):
+    # Stamp relative to PINNED_NOW (the pinned verb clock), not the real clock —
+    # health computes freshness off cli._now() == PINNED_NOW.
     fm = {"type": "Presence", "agent": agent,
-          "timestamp": _iso(datetime.now(timezone.utc) - timedelta(hours=hours_ago))}
+          "timestamp": _iso(PINNED_NOW - timedelta(hours=hours_ago))}
     t.put(f"team/{team}/presence/{agent}.md", okf.render_frontmatter(fm) + f"\n# Presence: {agent}\n")
 
 
 def _snap(t, team, agent, task, hours_ago):
     snap = continuity.build_snapshot(
         agent=agent, task=task, objective="o",
-        now=_iso(datetime.now(timezone.utc) - timedelta(hours=hours_ago)))
+        now=_iso(PINNED_NOW - timedelta(hours=hours_ago)))
     t.put(cli._continuity_path(team, agent, task), json.dumps(snap))
 
 

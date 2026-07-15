@@ -581,6 +581,31 @@ def _request(method: str, url: str, token: str, *,
         return status, resp.read()
 
 
+def _definition_live(def_id: str, token: Optional[str]) -> Optional[bool]:
+    """Authoritative liveness of an annotation definition, tri-state.
+
+    True → per-id GET returned 200 with no ``deleted_at``; False → 200 with
+    ``deleted_at`` set, or 403/404 (soft-deleted / not this account's);
+    None → could not determine (no token, auth flake, 5xx, transport error).
+    Needed because the public catalog reports soft-deleted user definitions as
+    ``deprecated: false`` — only /user/v1alpha1/annotation/{id} tells the truth
+    (mirrors ``FulcraClient.definition_exists``, kept urllib-pure here)."""
+    if not token:
+        return None
+    try:
+        status, body = _request(
+            "GET", f"{_api_base()}/user/v1alpha1/annotation/{def_id}", token)
+        if status == 200:
+            return not json.loads(body).get("deleted_at")
+        return None
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 404):
+            return False
+        return None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Tag-id cache (name -> id, TTL-bounded so a server-side delete self-heals)
 # ---------------------------------------------------------------------------
@@ -788,15 +813,53 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
 
     if matches:
         matches.sort(key=_dedup_sort_key)
-        chosen = matches[0]["id"]
-        if len(matches) > 1:
+        # The public catalog LIES about deletion for user-defined definitions:
+        # soft-deleted defs come back `deprecated: false` (live-verified
+        # 2026-07-13 — every 07-03-deleted duplicate still read as live). The
+        # authoritative state is the per-id GET's `deleted_at`
+        # (/user/v1alpha1/annotation/{id}), so verify candidates there before
+        # picking: writing against a soft-deleted def is accepted by ingest and
+        # the moments are silently invisible on the timeline.
+        token = _resolve_token()
+        unknown: list[dict[str, str]] = []
+        chosen = None
+        for m in matches:  # oldest-first: first VERIFIED-LIVE wins
+            live = _definition_live(m["id"], token)
+            if live is True:
+                chosen = m["id"]
+                break
+            if live is None:
+                unknown.append(m)
+            # live is False: authoritatively soft-deleted — never a candidate.
+        if chosen is not None:
+            if len(matches) > 1:
+                logger.warning(
+                    "annotations: %d definitions named %r exist (duplicates from "
+                    "the 2026-07-03 proliferation bug); picking OLDEST verified-"
+                    "live %s; candidates=%s; NOT creating another",
+                    len(matches), def_name, chosen, [m["id"] for m in matches])
+            _DEF_ID_MEMO[def_name] = chosen
+            return chosen
+        if unknown:
+            # Liveness unverifiable (no token / flake) for every non-deleted
+            # candidate: fall back to the oldest unverified one rather than
+            # refusing to annotate — the pre-verification behavior, now loud.
+            # Deliberately NOT memoized: the memo's invariant is verified-only,
+            # and pinning an unverified pick for the process lifetime would
+            # route every later emit to a possibly-deleted def with no retry.
+            # The next resolve re-attempts verification instead.
+            fallback = unknown[0]["id"]
             logger.warning(
-                "annotations: %d definitions named %r exist (duplicates from the "
-                "2026-07-03 proliferation bug); picking OLDEST %s; candidates=%s; "
-                "NOT creating another",
-                len(matches), def_name, chosen, [m["id"] for m in matches])
-        _DEF_ID_MEMO[def_name] = chosen
-        return chosen
+                "annotations: liveness of %r candidates could not be verified; "
+                "falling back to OLDEST unverified %s (not memoized — "
+                "verification retries on the next resolve)", def_name, fallback)
+            return fallback
+        # Every same-name candidate is AUTHORITATIVELY soft-deleted: same as the
+        # recognized-soft-delete catalog shapes above — permits a create.
+        logger.info(
+            "annotations: all %d same-name candidates for %r are soft-deleted "
+            "per the authoritative per-id check; treating as absent",
+            len(matches), def_name)
 
     if has_unreadable_same_name:
         # A same-name catalog entry exists but sits in a shape we can classify as
@@ -1126,15 +1189,31 @@ def emit_projection_annotation(
 
 
 def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
-                           backend: Optional[list[str]] = None) -> bool:
+                           backend: Optional[list[str]] = None,
+                           gated: bool = True,
+                           id: Optional[str] = None) -> bool:
     """Emit ONE operator-digest moment on the ``Agent Tasks — Digest`` track.
 
     BEST-EFFORT, NEVER RAISES. Reuses the typed record path against
     ``_resolve_digest_definition_id`` so digests land on their OWN track. Tags:
     ``[agent-digest, <window>, agent:<kind>]``. No idempotency marker here — the
-    per-window dedup guard (in the CLI) prevents a double digest."""
+    per-window dedup guard (in the CLI) prevents a double digest.
+
+    ``gated=True`` (default) keeps the legacy in-process-writer contract: the
+    machine-local :func:`_mode` config must be ``on``. Engine-driven callers
+    (coord-engine's ``digest --emit-timeline`` heartbeat leg) pass
+    ``gated=False`` for the same reason :func:`emit_projection_annotation`
+    skips the mode gate entirely: their opt-in and idempotency are OWNED by the
+    engine, and the emit must work from any host/harness, not only one whose
+    local writer config happens to be switched on.
+
+    ``id``: optional explicit record id. The typed ingest endpoint UPSERTS on
+    an explicit id (live-verified 2026-07-14: same-id re-POST returns 201 and
+    the record count stays 1), so a caller passing a DETERMINISTIC id gets
+    ingestion-layer idempotency — concurrent emitters of the same logical
+    digest converge on one timeline record."""
     try:
-        if _mode() == "off":
+        if gated and _mode() == "off":
             return False
         token = _resolve_token()
         if not token:
@@ -1158,6 +1237,8 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
         merged = "\n\n".join(part for part in (name.strip(), note.strip()) if part)
         if merged:
             inner["note"] = merged
+        if id:
+            inner["id"] = id
         sources = [
             f"com.fulcradynamics.fulcra-coord.digest.{uuid.uuid4()}",
             f"com.fulcradynamics.annotation.{def_id}",
