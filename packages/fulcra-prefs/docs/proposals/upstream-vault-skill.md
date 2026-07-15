@@ -18,26 +18,43 @@ discipline needed to write to it safely. The official surface is prose over the
 `fulcra-api` CLI with no package dependency; a vault skill fits that shape exactly
 — it is entirely `fulcra-api file` operations plus conventions.
 
-## The one broadly-useful primitive: optimistic concurrency over LWW files
+## Writing safely to LWW files: best-effort collision detection (NOT compare-and-set)
 
-This matters to the **whole fleet**, not just vault. Fulcra Files are
-**last-write-wins with no conditional writes** (verified live 2026-07-04): there is
-no ETag/`If-Match`/CAS. Any two agents writing the same file can silently clobber
-each other. The vault's answer — worth standardizing as a documented convention —
-is a **client-built compare-and-set**:
+This matters to the **whole fleet**, not just vault — but state its limits
+honestly. Fulcra Files are **last-write-wins with no conditional writes** (verified
+live 2026-07-04): there is no ETag/`If-Match`/CAS and no atomic lock service. That
+means **there is no client-only way to guarantee no lost updates.** Any recipe
+below is *best-effort collision detection plus cooperative serialization*, not a
+compare-and-set — it narrows the race window, it does not close it.
+
+The convention:
 
 1. **Read** the target note and remember its current version identity (the file's
    resolved version id from `resolve_filepath`, or a content hash).
 2. Do the edit locally (owned-section replace / log append).
-3. **Re-verify** the version identity immediately before writing; if it changed
-   since step 1, **abort and retry** (re-read, re-apply) rather than overwrite.
+3. **Re-check** the version identity immediately before writing; if it changed
+   since step 1, **abort and retry** (re-read, re-apply) rather than blindly
+   overwrite. This catches the *common* case (a write that fully completed before
+   yours starts).
 4. Back it with a short-lived **advisory lock** (`vault/.locks/<note>.lock`,
-   holder-id + timestamp, self-reaped after ~120 s) so concurrent writers fail fast
-   with a retry hint instead of racing.
+   holder-id + timestamp, self-reaped after ~120 s) so cooperating writers usually
+   serialize and fail fast with a retry hint instead of racing.
 
-Locks are advisory (humans and mirrors ignore them); the abort-if-changed check is
-the real safety. This pattern is the generally-useful export — document it once in
-the skill so any agent writing to Files (not only vault) can adopt it.
+**The residual race is real and must be documented, not hidden.** Because the final
+upload is unconditional, writer B can upload *after* A's step-3 re-check but
+*before* A's step-4 upload, and A then silently overwrites B. The advisory lock does
+not remove this: lock acquisition is itself a read followed by an unconditional
+LWW upload, so two contenders can both observe "no lock" and both proceed. Locks are
+advisory (humans and mirrors ignore them) and reduce collisions; they do not make
+the write atomic.
+
+**If a caller needs a genuine no-lost-update guarantee, it requires an actually
+atomic primitive that the platform does not yet expose** — server-side
+CAS/conditional write, an atomic lock service, or a single-writer coordinator. Until
+one ships, this convention is the honest best-effort floor: safe for the low-contention,
+mostly-owned-sections case vault targets; not a substitute for transactions. This is
+the generally-useful export precisely *because* it names its own limits — document it
+once so any Files writer adopts the pattern **and** its caveats.
 
 ## Proposed skill contents (SKILL.md, prose over `fulcra-api file`)
 
@@ -46,14 +63,18 @@ the skill so any agent writing to Files (not only vault) can adopt it.
   **owned sections** (`<!-- owned:<agent> -->` … ) so an agent edit never disturbs
   a human's or another agent's block.
 - **Read:** `fulcra-api file download` the note (or `MAP.md`) and parse.
-- **Write:** the optimistic-concurrency recipe above, expressed as steps over
+- **Write:** the best-effort collision-detection recipe above, expressed as steps over
   `fulcra-api file` (resolve → download → edit → re-resolve/verify → upload, abort
   on version mismatch).
 - **Index:** `MAP.md` (all notes + links) and `HOT.md` (the hot set) are
   deterministically rendered from the notes; a reindex re-derives them.
-- **Rename/delete:** move the note and rewrite inbound wikilinks, locking every
-  touched note and aborting if any changed — the multi-file version of the same
-  discipline.
+- **Rename/delete:** move the note and rewrite inbound wikilinks, taking the
+  best-effort advisory lock on every touched note and aborting if any changed since
+  it was read. This is the multi-file application of the same *best-effort*
+  discipline — it is **not** a transaction: with no cross-file atomic write, a
+  concurrent writer can still interleave, so a rename can land partially (some
+  inbound links rewritten, some not) and must be safe to re-run to converge. Design
+  the operation to be idempotent/re-runnable rather than assuming all-or-nothing.
 
 ## HOT.md session-start injection — a convention, not a hook installer
 
@@ -63,13 +84,21 @@ start. To stay CLI-free and match the official pattern (cf.
 convention**: at session start, download and prepend `vault/HOT.md`. Hosts that
 want automation wire it themselves; the skill only states the convention.
 
-## Change detection: adopt `data-updates`
+## Change detection: `data-updates` as an optional optimization, not a dependency
 
-For sync / "what changed in the vault since last visit," adopt
-`fulcra data-updates <range>` (incremental record+file change feed) in place of
-list+stat polling. **Caveat:** it is an unpublished endpoint — pin its behavior in
-tests before relying on it. (Same adoption applies to the reference CLI's planned
-sync path.)
+For sync / "what changed in the vault since last visit," `fulcra data-updates
+<range>` (incremental record+file change feed) is attractive versus list+stat
+polling. **But it is an unpublished endpoint**, so the *official, portable* skill
+must not depend on it: an unpublished API cannot be part of the contract, and this
+repo's tests cannot make it one.
+
+The convention therefore is: **list+stat polling is the supported baseline**;
+`data-updates` is an **optional fast path gated on documented availability** — a
+skill/host may use it when the endpoint is published (or known-available in its
+environment) and MUST fall back to polling otherwise. The reference CLI may adopt
+the fast path behind that same gate and pin its behavior in the package's own
+tests; the upstream skill text ships polling as the contract and mentions
+`data-updates` only as an optimization to enable once published.
 
 ## What stays package-side
 
@@ -82,8 +111,8 @@ dependency-free prose expression of the same conventions.
 ## Open questions for upstream maintainers
 
 1. Is a vault skill in scope for `agent-skills`, or preferred as a standalone doc
-   that only *references* the optimistic-concurrency convention?
-2. Should the **optimistic-concurrency-over-LWW** recipe be its own small,
+   that only *references* the best-effort collision-detection convention?
+2. Should the **best-effort-write-over-LWW** recipe (with its documented residual race) be its own small,
    general skill (usable by any Files writer) that the vault skill references,
    rather than living inside the vault skill? (We lean toward extracting it — it is
    the most reusable piece.)
