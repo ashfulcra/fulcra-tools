@@ -156,6 +156,10 @@ it (not on PyPI).
   and per-harness wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
   and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 - **Park a role, don't mute the sweep by hand.** Deliberately leaving a role unattended (a reviewer on leave, seasonal on-call) is an ENGINE fact, not an agent-side convention: set `dormant_until: <ISO>` in `team/<team>/roles/<role>.md`, and while that date is future the mechanical `escalate` sweep suppresses the role's vacancy escalation on every heartbeat host and `roles status` reports `DORMANT (until <ts>)`; escalation resumes automatically past the date, a live lease still shows HELD, and a garbage `dormant_until` fails OPEN (noted on stderr, escalation still fires) so a typo can't silently mute a role — see [`fulcra-agent-roles`](skills/fulcra-agent-roles/SKILL.md).
+- **Fold text is capped; the task doc is the payload's home.** Summaries rows bound
+  `title`/`description` to `COORD_SUMMARY_TEXT_CAP` (default 280 chars, ellipsis-marked),
+  so `inbox`/`briefing`/`board` show enough to triage, never the full body of a long
+  directive — read the task doc (`team/<team>/task/<slug>.md`) before acting on one.
 - **Engine surfaces a watcher must honor.** Two invariants a watcher lives by:
   - **Slug dedup + delivery rc.** Every directive slug carries a payload hash
     (`<title-slug>-<sha256(payload)[:8]>`), so identical resends dedupe by construction and distinct
