@@ -34,6 +34,12 @@ so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-07/08 on
   (`data-type` still exposes only `create`/`archive`/`restore`), and the MCP
   server tool list is unchanged (last source-verified 2026-07-06).
 
+**Drift since the 2026-07-13 stamp (server moved ahead of released CLI):**
+
+- **`fulcra share create` (0.1.36) now 422s** — the datashare API grew a
+  required `fulcra_user_name` body field the released CLI doesn't send
+  (live-verified 2026-07-15). Details + REST workaround in §Data sharing.
+
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
 > repo**. As of 0.1.34 the annotation-**definition** and **tag** commands are in
@@ -231,6 +237,14 @@ shared with you.
 - **Tier 1:** `fulcra share create|update|delete|leave|list-incoming|list-outgoing`.
   Reading shared data: `fulcra get-records <DataType> "<range>" --user-id
   <their fulcra_userid>` (requires an active incoming share).
+  **BROKEN in released CLI 0.1.36 (server drift, live-verified 2026-07-15 by
+  coord-boss):** the server now requires body field `fulcra_user_name` (the
+  sharing user's display name), which 0.1.36 does not send — every
+  `fulcra share create` returns HTTP 422
+  `{'type':'missing','loc':['body','fulcra_user_name']}`. Workaround until the
+  CLI ships the field: POST `/user/v1alpha1/datashares` directly with the same
+  payload plus `fulcra_user_name`. Upstream report in flight (see the drift
+  list at the top).
 - **Tier 2:** the CLI hits `GET|POST /user/v1alpha1/datashares` and
   `GET|PUT|DELETE /user/v1alpha1/datashare/{datashare_id}` — **live but NOT in
   the published OpenAPI as of 2026-07-13** (the same
