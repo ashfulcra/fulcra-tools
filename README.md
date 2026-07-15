@@ -8,13 +8,16 @@ and tell me how this could help our work." The rest of this file is for you;
 AGENTS.md is for them.
 
 This is a uv-workspace monorepo of helper projects built on
-[Fulcra](https://fulcradynamics.com). **Fulcra helps agents know what's
-happening, share what they know, and coordinate what they do**: your personal
-data from any source or stream — hard-to-get data like health, location, and
-calendar (via the [Context App](https://apps.apple.com/us/app/context-personal-data-kit/id1633037434)),
+[Fulcra](https://fulcradynamics.com). **Fulcra helps agents know their user,
+know what's happening in their user's world, work with their user's other
+agents, and become more helpful over time.** To get there, it gives agents a
+shared place to access and store real-world data — hard-to-get streams like
+health, location, and calendar (via the [Context App](https://apps.apple.com/us/app/context-personal-data-kit/id1633037434)),
 media plays and browsing attention (via the alpha [Collect app](packages/collect)),
-or anything else your agent wants to add — plus a file store for agents, in
-one store you own, with an API your agents can use. Code lives
+or anything else your agent wants to add — to record what matters, coordinate
+work, and discover what's new on every loop. That context belongs to you
+rather than any individual agent, so it can be securely shared across your
+agents and other AI applications over time. Code lives
 under [`packages/`](packages) (Python and TypeScript both appear here), agent
 skills live under [`skills/`](skills), and each package keeps its own README,
 build, and tests. This file is the front door; the package READMEs carry the

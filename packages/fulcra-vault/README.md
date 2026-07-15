@@ -1,8 +1,10 @@
 # fulcra-vault
 
-`fulcra-vault` is a shared markdown knowledge vault stored in Fulcra Files.
-It gives humans and agents one durable place for prose memory: projects,
-people, decisions, corrections, domain notes, and links between them.
+`fulcra-vault` is a shared markdown knowledge vault stored in Fulcra Files —
+one durable place for humans and agents to record what matters: projects,
+people, decisions, corrections, domain notes, and links between them. It's
+how agents know their user's world beyond the data streams, and the context
+belongs to the user rather than any individual agent.
 
 The vault uses ordinary markdown files under `vault/`. Notes are compatible
 with Obsidian-style `[[wikilinks]]`, flat Dataview-friendly frontmatter, owned

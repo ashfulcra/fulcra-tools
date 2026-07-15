@@ -1,7 +1,7 @@
 # coord: the pro tier for fulcra-agent-teams
 
-*Fulcra helps agents know what's happening, share what they know, and
-coordinate what they do. coord is the coordinate leg. One page for the Fulcra
+*Fulcra helps agents work with their user's other agents. coord is that leg —
+coordinate work, discover what's new on every loop. One page for the Fulcra
 pitch; companion: `DESIGN.md` (architecture + evidence), 5-min live demo.*
 
 ## The problem

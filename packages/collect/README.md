@@ -1,9 +1,10 @@
 # fulcra-collect
 
-The **alpha Collect app**: the capture side of Fulcra — the *know what's
-happening* leg — for streams no platform hands you: media plays, browsing
-attention, mail-derived signals, landing in the one Fulcra store you own,
-alongside the health/location/calendar data the Context App captures.
+The **alpha Collect app**: the capture side of Fulcra — how agents know
+what's happening in their user's world — for streams no platform hands you:
+media plays, browsing attention, mail-derived signals, landing in the one
+Fulcra store you own, alongside the health/location/calendar data the
+Context App captures.
 
 Mechanically, a local daemon at the centre of Fulcra's helper tools. It hosts
 every Fulcra Collect *plugin* — the periodic importers, the long-lived
