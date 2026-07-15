@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from . import config
+
 VALID_STATUSES = ("proposed", "active", "waiting", "blocked", "done", "abandoned")
 TERMINAL_STATUSES = frozenset({"done", "abandoned"})
 OPEN_STATUSES = frozenset(set(VALID_STATUSES) - TERMINAL_STATUSES)
@@ -45,6 +47,29 @@ def is_task(frontmatter: Optional[dict]) -> bool:
     return bool(frontmatter) and frontmatter.get("type") == "Task"
 
 
+#: Default per-field character cap for summaries-row text (`COORD_SUMMARY_TEXT_CAP`).
+#: The summaries index is a SUMMARY: rows carry enough of `title`/`description` to
+#: triage a fold; the full payload stays in the task doc. Uncapped, a fleet whose
+#: directives carry multi-KB payloads inflates `_coord/summaries.json` past what a
+#: remote transport can read inside the fold budgets — every remote briefing then
+#: degrades to "summaries index unreadable" despite a fresh index.
+DEFAULT_SUMMARY_TEXT_CAP = 280
+_TRUNCATION_MARK = "…"
+
+
+def cap_summary_text(text: str, cap: Optional[int] = None) -> str:
+    """Bound a summaries-row text field to the configured cap, ellipsis-marked.
+
+    The marker fits INSIDE the cap so a capped field never exceeds it. A cap
+    is a positive int (`config` policy: unparseable/non-positive env falls back
+    to the default — a bad value must never unbound the index)."""
+    if cap is None:
+        cap = config.env_int("COORD_SUMMARY_TEXT_CAP", DEFAULT_SUMMARY_TEXT_CAP)
+    if len(text) <= cap:
+        return text
+    return text[: max(cap - len(_TRUNCATION_MARK), 0)] + _TRUNCATION_MARK
+
+
 def row_from_frontmatter(
     frontmatter: Optional[dict],
     *,
@@ -56,18 +81,21 @@ def row_from_frontmatter(
 
     Bare-``fulcra-agent-teams`` tasks may lack coord's extension keys; missing
     ``status``/``priority``/``id``/``title`` are backfilled so such tasks are
-    first-class (mixed-fleet tolerance, spec §2 step 3).
+    first-class (mixed-fleet tolerance, spec §2 step 3). ``title`` and
+    ``description`` are capped via :func:`cap_summary_text` — the row is an
+    index entry, not the payload's home.
     """
     fm = frontmatter or {}
     tags = fm.get("tags")
     if not isinstance(tags, list):
         tags = [tags] if tags else []
+    cap = config.env_int("COORD_SUMMARY_TEXT_CAP", DEFAULT_SUMMARY_TEXT_CAP)
     return {
         "id": fm.get("id") or name,
         "name": name,
         "path": path,
-        "title": fm.get("title") or name,
-        "description": fm.get("description") or "",
+        "title": cap_summary_text(str(fm.get("title") or name), cap),
+        "description": cap_summary_text(str(fm.get("description") or ""), cap),
         "status": fm.get("status") or DEFAULT_STATUS,
         "priority": fm.get("priority") or DEFAULT_PRIORITY,
         "owner": fm.get("owner"),
