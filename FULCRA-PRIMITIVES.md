@@ -1,7 +1,8 @@
 # Fulcra primitives — a field guide for agents
 
-What the Fulcra platform actually provides and how to use it, **by agent
-capability tier**. Written so you don't have to re-research the platform
+Fulcra helps agents know what's happening, share what they know, and
+coordinate what they do. This is what the platform actually provides for
+that and how to use it, **by agent capability tier**. Written so you don't have to re-research the platform
 surface. **Full surface re-verified 2026-07-13** (`fulcra-api` CLI/lib
 **0.1.36** from PyPI, released 2026-07-10; api.fulcradynamics.com OpenAPI —
 **53 paths**, same count as 07-08 but the composition changed: see below; a

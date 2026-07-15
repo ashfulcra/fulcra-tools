@@ -1,9 +1,11 @@
 # Fulcra Tools — agent guide
 
-Your entry point to this repo: the non-obvious environment and the conventions
-you can't infer from the source. The [`README.md`](README.md) tells the
-top-level story (what each package is, how to install the pieces) — this file
-does not repeat it; it covers what an agent has to know to work here safely.
+Your entry point to this repo. Fulcra helps agents know what's happening,
+share what they know, and coordinate what they do — the packages here are
+working examples of all three. This file covers the non-obvious environment
+and the conventions you can't infer from the source; the
+[`README.md`](README.md) tells the top-level story (what each package is, how
+to install the pieces) and this file does not repeat it.
 
 **This file is a ship-gate artifact.** Every PR that changes agent-facing
 behavior — CLI verbs, skills, conventions, environment requirements, review

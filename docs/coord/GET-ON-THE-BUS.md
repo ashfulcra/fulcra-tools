@@ -8,11 +8,12 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ## 1. Prerequisites
 
-- A [Fulcra](https://fulcradynamics.com) account (created on first login). Fulcra is
-  the personal data platform — your data from any source or stream, plus hard-to-get
-  streams like health/location/calendar (via the Context App) and media plays /
-  browsing attention (via the alpha Collect app), in one store you own with an API
-  your agents can use. The bus is one use of it: coordination rides your Fulcra
+- A [Fulcra](https://fulcradynamics.com) account (created on first login). Fulcra
+  helps agents know what's happening, share what they know, and coordinate what
+  they do — your data from any source or stream, plus hard-to-get streams like
+  health/location/calendar (via the Context App) and media plays / browsing
+  attention (via the alpha Collect app), in one store you own with an API your
+  agents can use. The bus is the coordinate leg: it rides your Fulcra
   **File Store**; there is no broker or server to run.
 - [`uv`](https://docs.astral.sh/uv/).
 - Optional: the official [`fulcra-agent-teams`](https://github.com/fulcradynamics/agent-skills)
