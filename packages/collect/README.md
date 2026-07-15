@@ -7,7 +7,7 @@ data the Context App captures.
 
 Mechanically, a local daemon at the centre of Fulcra's helper tools. It hosts
 every Fulcra Collect *plugin* — the periodic importers, the long-lived
-webhook receivers, the browser-extension ingest endpoint — under one
+webhook receivers, the pointer plugins — under one
 process, supervises them, exposes their state over a JSON API plus a
 web UI on `127.0.0.1:9292`, and stores per-plugin state in a single
 SQLite database at `~/.config/fulcra-collect/state.db`.

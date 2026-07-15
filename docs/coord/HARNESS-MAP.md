@@ -68,7 +68,7 @@ the wall exists — not where it happened first.
    AND an authoritative liveness re-check (see wall 3).
 10. **Silent-success on nonexistent targets** (all). `respond` against a
     mistyped/display-title slug records a ghost response and leaves the real
-    directive open forever (accepted for v1.6.5: fail loud). Same family as
+    directive open forever (fixed in v1.6.5: fails loud). Same family as
     walls 4 and 5: *the absence of an error is not success.*
 
 ## What "monitoring" should grow into

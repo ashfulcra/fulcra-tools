@@ -268,20 +268,23 @@ def _migration_002_import_plugin_state_json(conn: sqlite3.Connection) -> None:
 
 
 def _migration_003_forwarded_attention(conn: sqlite3.Connection) -> None:
-    """Create the ``forwarded_attention`` dedup table.
+    """Create the ``forwarded_attention`` dedup table (HISTORICAL — the
+    route it served is retired; the table is retained for schema
+    compatibility on existing databases).
 
-    The daemon's ``POST /api/extension/attention`` route forwards each
-    attention event to Fulcra keyed by a DETERMINISTIC ``source_id``
-    (``com.fulcra.attention.v2.<hash>``). Fulcra does NOT dedupe by
-    ``source_id`` at write time — it's a query-time hint only — so a
-    re-POSTed event (the extension's outbox-flush concurrency bug re-sends
-    the same entries many times) creates a PERMANENT duplicate in the
-    user's Fulcra account. This table is the daemon's memory of which
-    attention ``source_id``s it has already forwarded, so it can forward
-    each unique source_id at most once. ``source_id`` is the PRIMARY KEY,
-    which lets ``INSERT OR IGNORE`` do the atomic check-and-record under a
-    storm of identical concurrent POSTs without any application-level
-    locking."""
+    The FORMER daemon route ``POST /api/extension/attention`` (removed —
+    the Attention extension is now fully relayless and POSTs straight to
+    the Fulcra API) forwarded each attention event to Fulcra keyed by a
+    DETERMINISTIC ``source_id`` (``com.fulcra.attention.v2.<hash>``).
+    Fulcra does NOT dedupe by ``source_id`` at write time — it's a
+    query-time hint only — so a re-POSTed event (the extension's
+    outbox-flush concurrency bug re-sent the same entries many times)
+    created a PERMANENT duplicate in the user's Fulcra account. This table
+    was the daemon's memory of which attention ``source_id``s it had
+    already forwarded (``source_id`` PRIMARY KEY + ``INSERT OR IGNORE``
+    made the check-and-record atomic under a storm of identical concurrent
+    POSTs). Migrations are append-only, so it still runs on new
+    databases."""
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS forwarded_attention (
