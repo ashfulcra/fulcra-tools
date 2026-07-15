@@ -1,6 +1,8 @@
 # coord: the pro tier for fulcra-agent-teams
 
-*One page for the Fulcra pitch. Companion: `DESIGN.md` (architecture + evidence), 5-min live demo.*
+*Fulcra helps agents work with their user's other agents. coord is that leg —
+coordinate work, discover what's new on every loop. One page for the Fulcra
+pitch; companion: `DESIGN.md` (architecture + evidence), 5-min live demo.*
 
 ## The problem
 

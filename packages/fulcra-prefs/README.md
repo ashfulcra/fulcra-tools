@@ -6,7 +6,8 @@
 > across early versions. Don't build anything load-bearing on it yet; do try it
 > and file issues.
 
-`fulcra-prefs` is a user-owned preference layer on top of Fulcra: you capture
+`fulcra-prefs` is a user-owned preference layer on top of Fulcra — how agents
+know their user and become more helpful over time: you capture
 typed signals (preferences, facts, consent) with half-life decay, which are
 compiled deterministically into per-platform preference documents; a consent-gated
 export path keeps every disclosure logged — what the spec calls the Privacy Ledger.
