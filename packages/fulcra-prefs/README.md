@@ -71,6 +71,28 @@ fulcra auth login          # device flow; a free account is created on first log
 fulcra-prefs onboard       # creates the Preference Signals annotation definition
 ```
 
+### Headless / remote hosts (no browser: CI, cloud agents, sandboxes)
+
+`fulcra auth login` opens a browser. On a host without one, use the device flow's
+two-step form — print the URL, approve it on any device, then finish with the code:
+
+```
+fulcra auth login --get-auth-url            # prints a verification URL + device code
+# open the URL on your phone/laptop and approve, then:
+fulcra auth login --device-code <DEVICE_CODE>
+```
+
+This is the tier-2 onboarding path for remote agents. Two caveats on
+proxy-intercepting sandboxes (e.g. some cloud CI): the auth CLI's device flow uses
+raw `http.client` and can bypass an `HTTPS_PROXY`, and access tokens expire
+(~24 h) with refresh subject to the same limitation — so on a locked-down sandbox
+you may need to drive the same Auth0 device-code exchange with a proxy-aware HTTP
+client and write the result to `~/.config/fulcra/credentials.json` in the CLI's
+format. See the tier-2 raw-HTTP reference
+([`skill/references/fulcra-prefs-tier2-http.md`](skill/references/fulcra-prefs-tier2-http.md))
+for the device-flow endpoints; the same recipe refreshes an expiring token via the
+`refresh_token` grant without re-prompting a human.
+
 ---
 
 ## Quickstart
@@ -295,10 +317,15 @@ and cross-platform compile consistency.
 
 - **Read path is get-records + a shard cache.** `compile` reads authoritatively
   via `get-records` and unions a write-through shard cache (for offline/lag),
-  pruning shards once their records are confirmed. The remaining workaround is
-  the *write* side — signals are posted via `/ingest/v1/record` and there's no
-  record-level delete/replace yet, so corrections are modeled as `supersedes`
-  rather than true deletes. Native revocation lands when CLI annotation
+  pruning shards once their records are confirmed. A future incremental read could
+  adopt the `fulcra data-updates <range>` change feed as an *optional* fast path,
+  but only gated on that endpoint's published availability (it is currently
+  unpublished) — get-records stays the supported baseline. The remaining workaround
+  is the *write* side — signals are posted via the typed ingest endpoint
+  `POST /ingest/v1/record/{data_type}` (migrated from the legacy wrapped
+  `/ingest/v1/record` in the 0.1.36 pass) and there's no record-level delete/replace
+  yet, so corrections are modeled as `supersedes` rather than true deletes. Native
+  revocation lands when CLI annotation
   (record) commands ship; tracked on the bus.
 - **Single-user.** The solver takes pre-compiled docs as input; there is no
   multi-user sync layer in v1.
