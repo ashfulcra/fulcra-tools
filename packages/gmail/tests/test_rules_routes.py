@@ -149,6 +149,9 @@ def test_ui_page_renders_builder(client):
     for anchor in ("gmail-rule-builder", "/api/gmail/rules/search",
                    "/api/gmail/rules/derive", "/api/gmail/rules/preview"):
         assert anchor in html
+    # The page must read the daemon's web token from the fulcra_token cookie
+    # (how the collect frontend delivers it), not a non-existent localStorage key.
+    assert "fulcra_token=" in html
     # The edit workflow: an edit affordance that issues a PUT, and a merge over
     # the full rule (editBody) so unedited fields aren't dropped on save.
     assert "editRule(" in html

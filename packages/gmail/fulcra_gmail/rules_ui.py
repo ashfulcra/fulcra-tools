@@ -33,7 +33,8 @@ RULES_UI_HTML = r"""<!doctype html>
  <button onclick="save()">Save rule</button></div>
 <hr><h1>Rules</h1><div id="rules"></div>
 <script>
-const TOKEN = localStorage.getItem('fulcra-web-token') || '';
+const TOKEN = (document.cookie.match(/(?:^|;\s*)fulcra_token=([^;]+)/) || [])[1]
+  || localStorage.getItem('fulcra-web-token') || '';
 const H = {'Content-Type':'application/json','Authorization':'Bearer '+TOKEN};
 let RESULTS=[], LABEL={}, CHIPS=[], EDITING=null, EDIT_RULE=null;
 async function api(path, body, method){const m=method||(body?'POST':'GET');
