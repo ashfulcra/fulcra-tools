@@ -100,10 +100,20 @@ Three walls, in the order you'll hit them:
    the CLI's own format (`access_token`, ISO `access_token_expiration`,
    `refresh_token`, `refresh_token_expiration`) — the normal CLIs work from then on.
    Client constants live in `fulcra_api/core.py`. Token *refresh* has the same
-   limitation; expect to re-run the flow when the access token expires.
-3. **Ephemeral hosts.** Credentials and tool installs die with the container. Put the
-   two installs and the egress requirement in the environment's setup script; expect to
-   re-auth per session until a secrets store exists.
+   limitation — but you do NOT need to re-bother the human when the access token
+   expires (verified live 2026-07-15): POST `grant_type=refresh_token` +
+   `client_id` + your stored `refresh_token` to the same `/oauth/token` endpoint
+   via proxy-aware `urllib.request`, rewrite `credentials.json` in the same
+   format, and `chmod 600` it. Refresh proactively when under ~2h remain. Auth0
+   may rotate the refresh token — persist the returned one when present. Only a
+   dead *refresh* token (expired or revoked) needs a fresh human device-flow tap.
+3. **Ephemeral hosts.** Two distinct failure scales (verified live 2026-07-15): a
+   container **restart** kills every running process (your listener loop) but keeps
+   the filesystem — installs, `credentials.json`, scratch scripts all survive; a full
+   container **reclaim** loses those too. Put the two installs and the egress
+   requirement in the environment's setup script so a reclaim rebuilds cold, use the
+   refresh grant above so a restart never needs the human, and arm the revival
+   trigger (§7) so a restart doesn't leave you deaf.
 
 ## 4. Bootstrap a team (from zero)
 
@@ -138,6 +148,23 @@ coord-engine briefing <team> --agent <role> # THE work queue: inbox, needs-me, r
 Work whatever `briefing` surfaces; re-beat and re-claim as you go (each is a cheap,
 idempotent refresh).
 
+**Taking over an existing role?** A claim that prints `taking over an existing lease
+shard` is your cue: you are a continuation, not a fresh start. Run
+`coord-engine continuity resume <team> <role>` immediately after the claim — the
+predecessor's parked snapshot (objective, next actions, open questions, recent
+decisions) is the role's memory, and the role doc's `checkpoint_ref` names it. Two
+takeover surprises to expect (both observed live 2026-07-15):
+
+- **The first `listen --once` on a fresh host replays everything.** The listen cursor
+  is host-local, so your first tick emits every outstanding directive and historical
+  response as if new. Triage that first flood against the snapshot (the predecessor
+  likely already dispositioned most of it), don't work it item by item; the cursor is
+  primed after one tick and later ticks are quiet.
+- **A truncated `briefing` can print `No continuity snapshot found` when one exists** —
+  if the resume section was cut by the shared budget (`resume section truncated`),
+  treat the snapshot's existence as UNKNOWN and run `continuity resume` directly;
+  never conclude from the truncated fold that there is no memory to adopt.
+
 ## 6. Stay on the bus
 
 - **`coord-engine listen <team> --agent <you>`** is the engine-owned watcher for new
@@ -164,7 +191,29 @@ idempotent refresh).
   read, report **degraded** — never "no reviews owed." (`briefing` may also emit a
   `review-fold-degraded` row; honor it with this same per-slug sweep.)
 
-## 7. Where next
+## 7. Ephemeral hosts: survive restarts, serve the heartbeat
+
+A remote/cloud session that holds a role is not a guest — it may be the team's most
+reliable heartbeat host (a laptop's launchd heartbeat sleeps with the lid; a cloud
+scheduler doesn't). Two standing duties, both learned live (2026-07-15):
+
+- **The survival invariant.** Never end a turn without BOTH (a) the background
+  listener loop running (§6) and (b) a scheduler-side revival trigger armed (an
+  hourly cron/Routine in your harness's scheduler, OUTSIDE the container). Container
+  restarts kill background processes without warning; the trigger is what revives
+  the listener, re-beats presence, re-claims your role, and refreshes the token
+  (§3). Guard the listener with a **pidfile single-flight check** so a revival can't
+  start a second loop under the same identity — overlapping watchers under one
+  identity are a known incident class.
+- **Heartbeat duty.** If you hold a maintainer-class role from a long-lived session,
+  run the full three-leg chain (§2) on the hourly trigger:
+  `coord-engine reconcile <team> && coord-engine annotate project <team> && coord-engine digest <team> --store --emit-timeline`
+  — idempotent across hosts, safe to run alongside other heartbeat hosts. Budget
+  note: the FIRST reconcile on a cold host walks every doc and can take **several
+  minutes** — don't wrap it in a short timeout and misread your own kill (rc 143)
+  as a hang; subsequent ticks reuse the summaries cache and are cheap.
+
+## 8. Where next
 
 - [`AGENTS.md`](../../AGENTS.md) — the working conventions: review handshake, delivery
   rule, backlog, ATC routing.

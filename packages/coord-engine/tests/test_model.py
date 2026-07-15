@@ -70,3 +70,56 @@ def test_terminal_and_open_sets():
     assert model.TERMINAL_STATUSES == {"done", "abandoned"}
     assert "active" in model.OPEN_STATUSES
     assert "done" not in model.OPEN_STATUSES
+
+
+# --- summaries-row text cap (COORD_SUMMARY_TEXT_CAP) ---------------------------
+# The summaries index is a SUMMARY: a fleet whose directives carry multi-KB
+# payloads in title/description must not inflate _coord/summaries.json past what
+# a remote transport can read inside the fold budgets (the 954KiB incident,
+# 2026-07-15: every remote briefing degraded to "summaries index unreadable").
+
+
+def test_row_caps_long_title_and_description():
+    long = "x" * 5000
+    row = model.row_from_frontmatter(
+        {"type": "Task", "title": long, "description": long},
+        name="foo", path="task/foo.md")
+    assert len(row["title"]) == model.DEFAULT_SUMMARY_TEXT_CAP
+    assert len(row["description"]) == model.DEFAULT_SUMMARY_TEXT_CAP
+    assert row["title"].endswith("…")
+    assert row["description"].endswith("…")
+    assert row["title"].startswith("x" * 10)
+
+
+def test_row_short_text_untouched():
+    row = model.row_from_frontmatter(
+        {"type": "Task", "title": "short", "description": "also short"},
+        name="foo", path="task/foo.md")
+    assert row["title"] == "short"
+    assert row["description"] == "also short"
+
+
+def test_cap_boundary_exact_length_untouched():
+    exact = "y" * model.DEFAULT_SUMMARY_TEXT_CAP
+    assert model.cap_summary_text(exact) == exact
+    over = exact + "z"
+    capped = model.cap_summary_text(over)
+    assert len(capped) == model.DEFAULT_SUMMARY_TEXT_CAP
+    assert capped.endswith("…")
+
+
+def test_cap_env_override(monkeypatch):
+    monkeypatch.setenv("COORD_SUMMARY_TEXT_CAP", "40")
+    row = model.row_from_frontmatter(
+        {"type": "Task", "title": "t" * 100}, name="foo", path="task/foo.md")
+    assert len(row["title"]) == 40
+    assert row["title"].endswith("…")
+
+
+def test_cap_bad_env_falls_back_to_default(monkeypatch):
+    # config policy: unparseable / non-positive / non-finite -> default, never unbounded
+    for bad in ("nan", "-5", "0", "banana", "inf"):
+        monkeypatch.setenv("COORD_SUMMARY_TEXT_CAP", bad)
+        row = model.row_from_frontmatter(
+            {"type": "Task", "title": "t" * 5000}, name="foo", path="task/foo.md")
+        assert len(row["title"]) == model.DEFAULT_SUMMARY_TEXT_CAP, bad
