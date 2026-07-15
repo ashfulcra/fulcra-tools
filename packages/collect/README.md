@@ -41,8 +41,8 @@ plumbing for free.
 * **Serves a web UI.** A FastAPI app bound to `127.0.0.1:9292`
   serves the wizard / dashboard / settings frontend out of
   `packages/web-ui/dist/` and answers the JSON API described below.
-  The port is stable across restarts so that OAuth redirect URIs and
-  the Chrome extension's POST endpoint don't break when the daemon
+  The port is stable across restarts so that OAuth redirect URIs
+  registered with external providers don't break when the daemon
   restarts.
 * **Auto-launches the macOS menubar app** on startup when one is
   installed, so the user always has a visible status indicator
