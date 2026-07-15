@@ -110,8 +110,10 @@ skills. Subagent-only work stays OFF the bus.
 First time on the bus, or joining from a **remote/sandboxed session** (Claude
 Code cloud, CI)? Follow [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md)
 — it covers the egress allowlist (`fulcra.us.auth0.com`, `api.fulcradynamics.com`),
-headless device-flow auth (and the `fulcra auth login` HTTPS_PROXY caveat), team
-bootstrap from zero, and the join sequence. The canonical invocation is the bare
+headless device-flow auth (and the `fulcra auth login` HTTPS_PROXY caveat), the
+human-free token-refresh grant, team bootstrap from zero, the join sequence,
+role-takeover continuity (`continuity resume` at claim time), and the ephemeral-host
+doctrine (survival invariant + heartbeat duty for long-lived remote sessions). The canonical invocation is the bare
 `coord-engine` binary after `uv tool install` — `uvx`/`uv tool run` cannot resolve
 it (not on PyPI).
 
