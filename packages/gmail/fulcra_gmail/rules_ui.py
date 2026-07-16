@@ -33,11 +33,18 @@ RULES_UI_HTML = r"""<!doctype html>
  <button onclick="save()">Save rule</button></div>
 <hr><h1>Rules</h1><div id="rules"></div>
 <script>
-const TOKEN = (document.cookie.match(/(?:^|;\s*)fulcra_token=([^;]+)/) || [])[1]
-  || localStorage.getItem('fulcra-web-token') || '';
-const H = {'Content-Type':'application/json','Authorization':'Bearer '+TOKEN};
+function getToken(){return (document.cookie.match(/(?:^|;\s*)fulcra_token=([^;]+)/) || [])[1]
+  || localStorage.getItem('fulcra-web-token') || '';}
+async function ensureToken(){
+  // The daemon sets the fulcra_token cookie on GET / (the dashboard root).
+  // If this page is opened directly in a browser that never loaded the
+  // dashboard, bootstrap the cookie with one same-origin fetch of /.
+  if(getToken())return;
+  try{await fetch('/', {credentials:'same-origin', cache:'no-store'});}catch(e){}
+}
 let RESULTS=[], LABEL={}, CHIPS=[], EDITING=null, EDIT_RULE=null;
 async function api(path, body, method){const m=method||(body?'POST':'GET');
+  const H={'Content-Type':'application/json','Authorization':'Bearer '+getToken()};
   const r=await fetch(path,{method:m,headers:H,
   body:body?JSON.stringify(body):undefined});if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json();}
 function acct(){return document.getElementById('acct').value;}
@@ -125,6 +132,5 @@ async function toggleRule(id,en){await api('/api/gmail/rules/'+id+'/enabled',{en
 async function delRule(id){if(confirm('Delete '+id+'?')){await api('/api/gmail/rules/'+encodeURIComponent(id),null,'DELETE');loadRules();}}
 function val(id){return document.getElementById(id).value.trim();}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-loadAccounts();
-loadRules();
+(async()=>{await ensureToken();loadAccounts();loadRules();})();
 </script></body></html>"""
