@@ -152,6 +152,12 @@ def test_ui_page_renders_builder(client):
     # The page must read the daemon's web token from the fulcra_token cookie
     # (how the collect frontend delivers it), not a non-existent localStorage key.
     assert "fulcra_token=" in html
+    # ...and self-bootstrap the cookie when the page is opened directly in a
+    # browser that never loaded the dashboard root (which is what sets it):
+    # ensureToken() fetches / once, and the token is read per-request so a
+    # cookie that arrives after page load still takes effect.
+    assert "ensureToken" in html
+    assert "getToken()" in html
     # The edit workflow: an edit affordance that issues a PUT, and a merge over
     # the full rule (editBody) so unedited fields aren't dropped on save.
     assert "editRule(" in html
