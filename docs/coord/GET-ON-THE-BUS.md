@@ -212,15 +212,20 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
   run the full three-leg chain (§2) on the hourly trigger:
   `coord-engine reconcile <team> && coord-engine annotate project <team> && coord-engine digest <team> --store --emit-timeline`
   — idempotent across hosts, safe to run alongside other heartbeat hosts. Budget
-  note: the FIRST reconcile on a cold host walks every doc and can take **several
-  minutes** — don't wrap it in a short timeout and misread your own kill (rc 143)
-  as a hang; subsequent ticks reuse the summaries cache and are cheaper. On a
-  large team, though, even warm reconciles carry a read tail that grows with
-  history (per-task ack folds + the retention scan), and on remote transports
-  that tail has been observed to exceed a 10-minute budget at ~700 tasks
-  (live, 2026-07-15; bounding it is tracked for v1.6.8) — if reconcile keeps
-  timing out from your host, coordinate on the bus for a faster host to run the
-  reconcile leg and keep the `annotate project` + `digest` legs yourself.
+  notes (measured live on a 1.2s/op remote transport, ~750-task team, 2026-07-16):
+  - **Steady state is cheap since v1.6.8**: the acks fold is change-driven (it asks
+    the store what changed instead of listing every ack dir), so a warm reconcile
+    runs ~1 minute where the same pass took 13–18 minutes before.
+  - **Two slow passes are by design, not hangs**: the FIRST pass on a fresh host
+    bootstraps with a full fold (no ack anchor yet), and roughly one pass per day
+    (`COORD_ACKS_FULL_EVERY`, default 72) re-runs the full fold as a correctness
+    backstop — each measured ~18 minutes on that transport. Don't wrap reconcile
+    in a short timeout and misread your own kill (rc 143) as a hang.
+  - **Mixed-fleet caveat**: a host running a pre-v1.6.8 engine wipes the ack
+    anchor from the shared index on every pass, silently demoting every other
+    host back to full folds. If your warm passes stay slow, check
+    `coord-engine health <team>` for old writers and upgrade them — that, not
+    the engine, is the lever.
 
 ## 8. Where next
 
