@@ -4,51 +4,48 @@ Fulcra helps agents know their user, know what's happening in their user's
 world, work with their user's other agents, and become more helpful over
 time. This is what the platform actually provides for that and how to use
 it, **by agent capability tier**. Written so you don't have to re-research the platform
-surface. **Full surface re-verified 2026-07-13** (`fulcra-api` CLI/lib
-**0.1.36** from PyPI, released 2026-07-10; api.fulcradynamics.com OpenAPI —
-**53 paths**, same count as 07-08 but the composition changed: see below; a
-diffable paths/schemas baseline now lives at
+surface. **Full surface re-verified 2026-07-16** (`fulcra-api` CLI/lib
+**0.1.38** from PyPI, released 2026-07-16; api.fulcradynamics.com OpenAPI —
+**53 paths**; a diffable paths/schemas baseline lives at
 [`docs/specs/fulcra-openapi-digest.txt`](docs/specs/fulcra-openapi-digest.txt)
-so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-07/08 on
-0.1.35.
+so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-13 on
+0.1.36, 2026-07-07/08 on 0.1.35.
 
-**Drift since 2026-07-08, all shipped in CLI 0.1.36:**
+**Drift since 2026-07-13 (0.1.36 → 0.1.38) — the rewrite trigger fired:**
 
-- **NEW `fulcra share` command group** — data sharing between Fulcra users:
-  `create|update|delete|leave|list-incoming|list-outgoing`. See §Data sharing.
-- **`get-records --user-id`** shipped (query another user's data via an
-  active datashare), plus shorthand data-type identifiers — the two items the
-  07-08 stamp tracked as unreleased main work.
-- **`fulcra file restore`** is now a released CLI verb (was lib-only).
-- **Lib BREAKING change:** `resolve_filepath` now returns **`list[dict]`**
-  (one element per match/version) where 0.1.35 returned a single dict. This
-  silently broke a downstream consumer (fulcra-prefs, fixed 2026-07-13); any
-  lib code doing `resolve_filepath(...)["id"]` breaks on 0.1.36 — take
-  `[0]["id"]`. Not-found still **raises** (`Exception("File not found in
-  Fulcra: ...")`); the method never returns an empty list.
-- **Spec composition:** `/data/v1/updates` and
-  `/input/v1/file[_upload]/recent_changes` are now **published** in the
-  OpenAPI (both were live-but-unpublished at the 07-08 stamp). The datashare
-  endpoints the new `share` CLI hits are today's live-but-unpublished set;
-  `/ingest/v1/record/batch` remains unpublished. Records remain CLI-less
-  (`data-type` still exposes only `create`/`archive`/`restore`), and the MCP
-  server tool list is unchanged (last source-verified 2026-07-06).
-
-**Drift since the 2026-07-13 stamp (server moved ahead of released CLI):**
-
-- **`fulcra share create` (0.1.36) now 422s** — the datashare API grew a
-  required `fulcra_user_name` body field the released CLI doesn't send
-  (live-verified 2026-07-15). Details + REST workaround in §Data sharing.
+- **`fulcra record` and `fulcra delete` shipped in 0.1.37** (2026-07-15).
+  Annotation **records** — not just definitions — now have first-class CLI
+  write and delete verbs, and the lib has `record_data_type`. This is the
+  event the 07-13 stamp named as this doc's rewrite trigger; §Annotations is
+  rewritten around it. **Tier 1 no longer hand-rolls ingest POSTs for
+  records.**
+- **`fulcra data-type schema`** — new subcommand, returns a data type's JSON
+  schema (the discovery step before `record`). `data-type` is now
+  `create|archive|restore|schema`.
+- **`fulcra catalog --recordable-only`** — filters the catalog to types that
+  `record`/`delete` accept. Catalog rows also carry `related_cli_commands`
+  (which verbs work with that type).
+- **`fulcra share create` is FIXED in 0.1.38.** 0.1.36/0.1.37 omitted the
+  required `fulcra_user_name` body field and 422'd; 0.1.38 sends it. Upgrade
+  instead of applying the REST workaround the 07-15 stamp carried — it is
+  withdrawn.
+- **Lib (0.1.37):** new `record_data_type`, `validate_records`,
+  `v1_catalog_data_type`, `v1_catalog_schema`. There is **no** record-delete
+  lib method — delete is composed client-side (see §Annotations).
+- **Verb delta 0.1.36 → 0.1.38 is purely additive** (`record`, `delete`;
+  nothing removed), and 0.1.38 is 0.1.37 plus the datashare fix alone. The
+  0.1.36 `resolve_filepath` list-return contract is unchanged — see §File
+  library. MCP tools and scopes unchanged (re-verified 2026-07-16).
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
-> repo**. As of 0.1.34 the annotation-**definition** and **tag** commands are in
-> the released CLI (`fulcra data-type …`, `fulcra tag …`); annotation **record**
-> write/delete/replace are still NOT (records are ingest-only — see below). The
-> day record-level commands land (`fulcra data-type --help` shows a `record`/
-> `delete-record`/`append`-style verb, or a `fulcra record …` group appears),
-> the tier-2 API-direct guidance shifts with them and this doc gets a full
-> re-verification + rewrite, not a patch — say so on the bus.
+> repo**. Two releases landed inside 24 hours to produce this stamp. The
+> published OpenAPI is **not** a complete route list (`/ingest/v1/record/batch`
+> is live and unpublished), so absence from the spec is never evidence a route
+> is gone — probe it (404 gone, 401 exists) before concluding anything.
+> Next rewrite trigger: a **write** path via MCP, or record write/delete
+> reaching tier 3 — that collapses the tier table's central asymmetry and is a
+> rewrite, not a patch. Say so on the bus.
 
 ## Pick your tier
 
@@ -122,25 +119,69 @@ is battle-tested at load.
 
 **Definitions** (the user's custom data types) have full CRUD today:
 
-- Tier 1: `fulcra data-type create|archive|restore` (types: moment, duration,
-  boolean, numeric, scale; options for tags/units/scale labels/`--add-to-timeline`).
-  **New in CLI 0.1.34** — these (and the `tag` group) are now in the released
-  CLI; earlier releases (0.1.33) lacked them, so older agents hand-rolled
-  definition creation via the tier-2 POST below. The Python lib exposes the
+- Tier 1: `fulcra data-type create|archive|restore|schema` (types: moment,
+  duration, boolean, numeric, scale; options for tags/units/scale
+  labels/`--add-to-timeline`). `data-type schema <TYPE> [--api-version <V>]`
+  (**new in 0.1.37**) returns the JSON schema for a type — the fields a record
+  of it may carry. `--api-version` is required only when a type has several;
+  `MomentAnnotation` is **`v1alpha1`**, not `v1`. The Python lib exposes the
   same: `create_annotation`, `delete_annotation`, `restore_annotation`,
-  `annotations_catalog`. Prefer the CLI/lib over raw REST when you have a shell.
+  `annotations_catalog`, plus `v1_catalog_schema` for the schema. Prefer the
+  CLI/lib over raw REST when you have a shell.
 - Tier 2: `POST|GET|PUT|DELETE /user/v1alpha1/annotation[/{id}]`, soft-delete
   with `POST /{id}/cancel_deletion` to restore. JSON-schema discovery:
   `GET /user/v1alpha1/schema/annotation`.
 
-**Records** (instances on the timeline) are **write-via-ingest only** — still
-true as of CLI 0.1.36; there is no `fulcra` record-write/delete command and no
-record-write/delete lib method, only definition + tag management. There are now
-**two ingest write paths**. The typed endpoint is **live round-trip verified
-2026-07-08**; the legacy single-record path is published in the OpenAPI
-(spec-confirmed, not re-round-tripped):
+**Records** (instances on the timeline) are **CLI-writable and CLI-deletable as
+of 0.1.37** — this reversed the doc's long-standing "records are ingest-only"
+guidance. If you have a shell, do **not** hand-roll ingest POSTs any more; the
+raw endpoints below are tier-2 material and background for reading old code.
 
-- **Typed endpoint (preferred, new):** `POST /ingest/v1/record/{data_type}` —
+**Tier 1 — records:**
+
+- **Discover what you can write:** `fulcra catalog --recordable-only` lists the
+  types `record` and `delete` accept; each row's `related_cli_commands` says
+  which verbs apply. Then `fulcra data-type schema <TYPE> --api-version <V>`
+  for the fields.
+- **Write:** `fulcra record DATA_TYPE [VALUE]`. `DATA_TYPE` takes the
+  **`Base/<definition-uuid>` shorthand** (e.g.
+  `fulcra record MomentAnnotation/<UUID> --note="Felt energized"`); the CLI
+  splits it, POSTs to the base type, and appends
+  `com.fulcradynamics.annotation.<UUID>` to `sources` for you — the tier-2
+  dance described below, done automatically. `VALUE` is the shorthand for a
+  single metric value (`fulcra record NumericAnnotation/<UUID> 75.5`).
+  Arbitrary fields go as `--<name>=<value>`, parsed as JSON first and falling
+  back to string; they override fields from input data.
+- **Batch:** pipe JSON or JSONL on stdin, or `-f/--file <path>` — one record
+  per line, each validated independently.
+- **Other flags:** `--tag` and `--source` (repeatable; merged with whatever is
+  in the input data — `com.fulcradynamics.cli` is always added),
+  `--api-version` for ambiguous types, `--no-validate` to skip the client-side
+  schema check. Validation is **on by default**: the CLI fetches the type's
+  schema and refuses bad records before they reach the server.
+- **Delete:** `fulcra delete DATA_TYPE [RECORD_ID]`, only for recordable types.
+  Batch the same way, with `{"record_id": "<UUID>"}` per line.
+- **Delete is a tombstone, not an erasure** — worth knowing because it leaks
+  through. The CLI implements `delete` by *recording* a **`DeletedRecord`**
+  (`{"record_id": …, "data_type": <base type>}`) through the same ingest path.
+  So deletion is itself an append, `DeletedRecord` is a real queryable type,
+  and `--no-validate` on `delete` skips the `DeletedRecord` schema check. There
+  is still **no update/replace verb**: correct a record by deleting and
+  re-recording, or by writing a superseding one.
+- **Lib:** `record_data_type(data_type, records, api_version="v1alpha1")` takes
+  a list of dicts and returns `{"upload_id": …}`; `validate_records(...)`
+  pre-flights them against the schema, returning
+  `(index, message, ValidationError)` tuples. **There is no delete-record lib
+  method** — the CLI composes it, so lib callers write the `DeletedRecord`
+  themselves via `record_data_type`, and the `Base/<uuid>` shorthand is CLI-only
+  (the lib wants a base type plus an explicit `sources` entry).
+
+**Tier 2 — records (and what the CLI does under the hood).** Two ingest write
+paths. The typed endpoint is **live round-trip verified 2026-07-08** and is what
+0.1.37's `record`/`delete` call; the legacy single-record path is published in
+the OpenAPI (spec-confirmed, not re-round-tripped):
+
+- **Typed endpoint (preferred):** `POST /ingest/v1/record/{data_type}` —
   `data_type` is a path segment (e.g. `MomentAnnotation`). The body is the
   **unwrapped** record for that type — NOT the legacy `DataRecordV1` envelope.
   For `MomentAnnotation` the schema is flat:
@@ -149,7 +190,13 @@ record-write/delete lib method, only definition + tag management. There are now
   Send `Content-Type: application/json` for a single record, or
   `application/x-jsonl` with **one record per line** for a batch (each line is
   validated independently). A `content-length` header is required. 201 →
-  `{"upload_id": <uuid>}`.
+  `{"upload_id": <uuid>}`. Takes an **`?api_version=`** query param (the lib
+  defaults it to `v1alpha1`; `record`/`delete` resolve it off the catalog row
+  unless `--api-version` says otherwise).
+- **Deletion at tier 2** is this same endpoint: `POST
+  /ingest/v1/record/DeletedRecord` with `{"record_id": <uuid>, "data_type":
+  <base type>}`. Live (401 unauth, probed 2026-07-16), and unpublished in the
+  spec like the rest of `/ingest`.
 - **Schema discovery (stable v1 catalog):** `GET /data/v1/catalog` lists every
   type with `recordable` + `api_version` fields;
   `GET /data/v1/catalog/{data_type}/{api_version}/schema` returns the JSON Schema
@@ -157,7 +204,8 @@ record-write/delete lib method, only definition + tag management. There are now
   `GET /data/v1/catalog/{data_type}/{api_version}` returns type metadata incl.
   `record_spec.schema`. Note `MomentAnnotation`'s `api_version` is **`v1alpha1`**,
   not `v1` — read it off the catalog row, don't assume.
-- **Custom types (caveat — verified, does NOT work as a path segment):** the
+- **Custom types (caveat — verified, does NOT work as a path segment; tier 1
+  is exempt, `fulcra record` handles this for you):** the
   typed `{data_type}` accepts only **base** types. A custom definition's
   `MomentAnnotation/<definition-uuid>` is **not** a valid path segment —
   `POST /ingest/v1/record/MomentAnnotation/<uuid>` (raw slash or `%2F`-encoded)
@@ -174,31 +222,33 @@ record-write/delete lib method, only definition + tag management. There are now
   "tags": [<tag uuid>], "content_type": <optional>}, "specversion": 1}`.
   Batch: `POST /ingest/v1/record/batch`, content-type `application/x-jsonl`,
   one record per line. **Caveat: NOT in the published OpenAPI (53 paths,
-  checked 2026-07-08)** — it works in production (the Attention extension and
-  the legacy coord writer POST to it daily) but is unpublished, like
-  `/data/v1/updates`; treat it as retirement-eligible and prefer the typed
+  re-checked 2026-07-16)** — but it is **live** (401 unauth on probe 2026-07-16,
+  i.e. present and requiring auth; a 404 would mean gone). It works in
+  production (the Attention extension and the legacy coord writer POST to it
+  daily); it is unpublished, like `/data/v1/updates` once was. **Spec-absence is
+  not removal** — a drift check has already misread it that way once. Treat it
+  as retirement-eligible and prefer the typed
   endpoint's jsonlines mode for new code. Mind the
   envelope differences vs the typed body: legacy uses `source` (singular key)
   not `sources`, carries the payload as a JSON **string** in `data` rather than a
   top-level `note`, and rides `data_type` inside `metadata`.
-- **No record-level delete/replace yet** — corrections are modeled as new
-  records (e.g. a superseding signal), not edits. Record-write/delete **CLI
-  verbs** (expected to be built on these typed endpoints) are still NOT shipped;
-  **their arrival — not the typed endpoint's — is what triggers this doc's full
-  re-verification + rewrite** (a patch won't do; announce it on the bus), and the
-  tier-2 guidance shifts to the CLI then.
+- **Still no replace/update at any tier** — a record is appended, then
+  tombstoned by a `DeletedRecord`. Corrections are a delete plus a re-record, or
+  a superseding record; nothing edits in place.
 - The **fulcra-coord** Agent-Tasks annotation writer resolves its **tags** and
   annotation-**definitions** through the public `fulcra` CLI (`fulcra tag
   get/create`, `fulcra catalog`, `fulcra data-type create`) — coord is a
   dependency-light bus that shells out to the CLI rather than importing a client.
-  Its **records** remain ingest-only over stdlib `urllib`
-  (`POST /ingest/v1/record/batch`, the legacy path) because the platform exposes
-  no record-write CLI/lib verb yet. That record POST is the one remaining raw-REST
-  path in the writer; it migrates to the CLI once a first-class record-write verb
-  ships (and could adopt the typed endpoint meanwhile).
-- **Reads:** tier 1 `fulcra get-records <DataType> "<range>"` (user-defined:
-  `MomentAnnotation/<definition-uuid>`); tier 2 via
-  `/data/v1alpha1/event/{data_type}`.
+  Its **records** still go out over stdlib `urllib` to
+  `POST /ingest/v1/record/batch` (the legacy path) — the one remaining raw-REST
+  path in the writer, and a holdover: it predates 0.1.37. **The verb it was
+  waiting on now exists**, so that POST can migrate to `fulcra record` on the
+  same shell-out pattern as its tags and definitions. Unblocked, not yet done.
+- **Reads:** tier 1 `fulcra get-records <DataType> "<range>"` — the same
+  `Base/<definition-uuid>` shorthand `record` and `delete` take, so a
+  write/read-back round trip is three commands with one identifier. `<range>`
+  is two ISO8601 timestamps or one relative interval (`"1 day"`, `"3h"`).
+  Tier 2 via `/data/v1alpha1/event/{data_type}`.
 
 ## Tags (tiers 1 & 2)
 
@@ -210,9 +260,16 @@ Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list
 
 ## Data queries (read-side, tiers 1 & 2)
 
-- Catalog of everything queryable: `fulcra catalog [--category <c>]` /
+- Catalog of everything queryable: `fulcra catalog` /
   `GET /data/v1/catalog` (stable) or `GET /data/v1alpha1/data_types`; metrics
-  catalog at `/data/v0/metrics_catalog`.
+  catalog at `/data/v0/metrics_catalog`. Filters:
+  `-c/--category`, `-d/--data-type`, `-n/--name` (partial), `--api-version`,
+  `--base-types-only`, and **`--recordable-only`** (0.1.37 — the writable
+  subset; see §Annotations). Rows carry `related_cli_commands`: the verbs that
+  work with that type. Start here rather than guessing an identifier.
+- Raw records for any type: `fulcra get-records <DataType> "<range>"` — records
+  may carry multiple sources and need filtering/prioritizing before you treat
+  them as an answer.
 - Discovery: `GET /data/v1alpha1/data_available` (what data exists for a time
   range) and `/data/v1alpha1/data_sources` (which sources are connected).
 - What-changed: `fulcra data-updates "<range>"` (0.1.35) — summary of which
@@ -229,7 +286,7 @@ Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list
 - Domain helpers in lib/CLI: sleep cycles/stages, calendars + events,
   workouts, location time series / at-time / visits.
 
-## Data sharing (tiers 1 & 2) — NEW in CLI 0.1.36
+## Data sharing (tiers 1 & 2) — CLI 0.1.36, fixed in 0.1.38
 
 Share slices of your Fulcra data with another Fulcra user, and read data
 shared with you.
@@ -237,14 +294,16 @@ shared with you.
 - **Tier 1:** `fulcra share create|update|delete|leave|list-incoming|list-outgoing`.
   Reading shared data: `fulcra get-records <DataType> "<range>" --user-id
   <their fulcra_userid>` (requires an active incoming share).
-  **BROKEN in released CLI 0.1.36 (server drift, live-verified 2026-07-15 by
-  coord-boss):** the server now requires body field `fulcra_user_name` (the
-  sharing user's display name), which 0.1.36 does not send — every
-  `fulcra share create` returns HTTP 422
-  `{'type':'missing','loc':['body','fulcra_user_name']}`. Workaround until the
-  CLI ships the field: POST `/user/v1alpha1/datashares` directly with the same
-  payload plus `fulcra_user_name`. Upstream report in flight (see the drift
-  list at the top).
+  **Fixed in 0.1.38 — upgrade, don't work around.** 0.1.36/0.1.37 omitted the
+  `fulcra_user_name` body field the server had grown a requirement for, so every
+  `fulcra share create` 422'd
+  (`{'type':'missing','loc':['body','fulcra_user_name']}`); 0.1.38 sends it and
+  the REST workaround the 07-15 stamp carried is withdrawn. On **0.1.36/0.1.37
+  the 422 still happens** — check your installed version before debugging it.
+  Note what 0.1.38 sends: the client fills `fulcra_user_name` with your
+  **fulcra_userid**, not a display name, marked temporary in the source until
+  the name is available from the identity token. Cosmetic today; don't build on
+  that field's contents.
 - **Tier 2:** the CLI hits `GET|POST /user/v1alpha1/datashares` and
   `GET|PUT|DELETE /user/v1alpha1/datashare/{datashare_id}` — **live but NOT in
   the published OpenAPI as of 2026-07-13** (the same
