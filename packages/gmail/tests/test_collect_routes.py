@@ -83,6 +83,10 @@ def test_callback_valid_nonce_and_code_binds_account(make_registry, keychain, st
     account = registry.find_by_email("new@example.test")
     assert account is not None
     assert registry.get_refresh_token(account.account_id) == "rt-1"
+    # The success page must carry the operator forward: rule builder first,
+    # plus add-another-account and dashboard (Ash feedback, 2026-07-16).
+    assert "/api/gmail/rules/ui" in resp.text
+    assert "/api/oauth/gmail/add-account/start" in resp.text
 
 
 def test_callback_missing_nonce_rejects_with_no_token(make_registry, keychain, store):
