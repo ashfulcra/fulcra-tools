@@ -56,6 +56,15 @@ def is_task(frontmatter: Optional[dict]) -> bool:
 DEFAULT_SUMMARY_TEXT_CAP = 280
 _TRUNCATION_MARK = "…"
 
+#: Version of the summaries-row projection produced by :func:`row_from_frontmatter`.
+#: BUMP this whenever the row projection changes in a way that must self-heal an
+#: already-serialized index — e.g. the #388 text cap, which older uncapped rows
+#: predate. Reconcile stamps every fresh row with the current value ("sv") and
+#: force-reparses any prior row whose stamp != this, so a projection change heals
+#: the whole index within one full pass instead of only rows that happen to be
+#: rebuilt. Kept a tiny key + small int: it is stored per-row in the index.
+ROW_SCHEMA_VERSION = 1
+
 
 def cap_summary_text(text: str, cap: Optional[int] = None) -> str:
     """Bound a summaries-row text field to the configured cap, ellipsis-marked.
@@ -91,6 +100,7 @@ def row_from_frontmatter(
         tags = [tags] if tags else []
     cap = config.env_int("COORD_SUMMARY_TEXT_CAP", DEFAULT_SUMMARY_TEXT_CAP)
     return {
+        "sv": ROW_SCHEMA_VERSION,  # row-projection version; reconcile reparses stale-stamped rows
         "id": fm.get("id") or name,
         "name": name,
         "path": path,

@@ -108,6 +108,16 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
     gen = (prior_agg or {}).get("generated_at")
     if not gen:
         return False
+    # A wholesale reuse of prior_agg would carry PROJECTION-stale rows forward
+    # untouched — on a quiet fleet (no fold-relevant feed changes) forever. If any
+    # prior row lacks the current row-schema stamp (e.g. a pre-#388 uncapped row),
+    # decline the fast path and force a full pass so it reparses+caps+stamps. Once
+    # a full pass has stamped every row, the fast path resumes. Cheap: an in-memory
+    # scan of the already-loaded prior rows, no extra reads.
+    if any(row.get("sv") != model.ROW_SCHEMA_VERSION
+           for row in aggregate.aggregate_rows(prior_agg)):
+        log.info("fast path declined: prior aggregate has stale-schema rows", team=team)
+        return False
     age = age_hours(gen, now)
     if age is None or age < 0 or age > MAX_FAST_PATH_HOURS:
         return False
@@ -386,6 +396,12 @@ def reconcile(
         #       the index-side companion to PR #356's read-side doc-authoritative
         #       status guard. When there is no anchor (legacy aggregate w/o
         #       generated_at) (c) is skipped and reuse falls back to (a)+(b).
+        #   (d) the prior row carries the CURRENT row-schema stamp — a row projected
+        #       by an older `row_from_frontmatter` (e.g. pre-#388, uncapped title/
+        #       description, no `sv`) is NOT content-stale but PROJECTION-stale, so
+        #       mtime+size can't detect it (the doc never changed). Force one reparse
+        #       so the current projection (cap + stamp) applies; it then reuses
+        #       normally. This is what self-heals the legacy uncapped index.
         minute_safe = _same_minute_reuse_safe(entry_mtime, last_reconcile_iso)
         reusable = (
             prior is not None
@@ -394,6 +410,7 @@ def reconcile(
             and prior.get("size") is not None
             and prior.get("size") == entry_size
             and minute_safe is not False
+            and prior.get("sv") == model.ROW_SCHEMA_VERSION
         )
         if reusable:
             rows.append(prior)
