@@ -145,13 +145,15 @@ def test_reconcile_is_orphan_proof():
 
 
 def test_reconcile_incremental_reuses_unchanged_without_download():
+    from coord_engine import model
     t = FakeTransport()
     body = _task("A", "active")
-    # A well-formed prior row carries a stamped `size` (the row format now includes
-    # it); an old mtime (no generated_at anchor) reuses on the mtime+size compare.
+    # A well-formed prior row carries a stamped `size` AND the current row-schema
+    # stamp `sv` (the row format now includes both); an old mtime (no generated_at
+    # anchor) reuses on the mtime+size compare.
     prior = {"rows": [{"id": "a", "name": "a", "status": "active", "title": "A",
                        "mtime": "2026-07-01 04:00PM UTC", "size": f"{len(body)}B",
-                       "description": "d"}]}
+                       "sv": model.ROW_SCHEMA_VERSION, "description": "d"}]}
     t.put("team/r/_coord/summaries.json", json.dumps(prior))
     t.put("team/r/task/a.md", body, mtime="2026-07-01 04:00PM UTC")
     reads = []
@@ -231,6 +233,57 @@ def test_reconcile_legacy_no_size_row_reparsed_once():
     assert a["rows"][0]["status"] == "waiting", \
         "legacy no-size prior must be reparsed once, not reused stale"
     assert a["rows"][0].get("size") is not None  # and re-stamped for next time
+
+
+def test_reconcile_legacy_unstamped_row_reparsed_and_capped():
+    """v1.6.7 item B: a legacy row built BEFORE the #388 text cap carries an
+    uncapped title/description and NO `sv` stamp. Even with matching mtime+size
+    (an unchanged, static task) it must NOT be reused — it is force-reparsed so
+    the cap applies, then re-stamped with the current schema version."""
+    from coord_engine import model
+    t = FakeTransport()
+    minute = "2026-07-01 04:00PM UTC"
+    long_title = "T" * 5000
+    long_desc = "D" * 5000
+    # The live doc carries multi-KB title/description (the #388 scenario). A legacy
+    # prior row built pre-cap holds the SAME uncapped text and matching mtime+size,
+    # so mtime+size reuse would carry it forward untouched — the cap never applies.
+    body = (f"---\ntype: Task\ntitle: {long_title}\ndescription: {long_desc}\n"
+            f"status: proposed\npriority: P2\n---\nbody")
+    prior = {"schema": "coord.teams.summaries.v1", "generated_at": "2026-06-01T00:00:00Z",
+             "rows": [{"id": "a", "name": "a", "status": "proposed", "title": long_title,
+                       "description": long_desc, "mtime": minute,
+                       "size": f"{len(body)}B"}]}  # matching mtime+size, NO `sv` -> legacy
+    t.put("team/r/_coord/summaries.json", json.dumps(prior))
+    t.put("team/r/task/a.md", body, mtime=minute)
+    res = _run(t)
+    assert res["parsed"] == 1 and res["reused"] == 0, \
+        "legacy unstamped row must be reparsed, not reused uncapped"
+    row = json.loads(t.store["team/r/_coord/summaries.json"])["rows"][0]
+    assert len(row["title"]) == model.DEFAULT_SUMMARY_TEXT_CAP
+    assert len(row["description"]) == model.DEFAULT_SUMMARY_TEXT_CAP
+    assert row["sv"] == model.ROW_SCHEMA_VERSION  # re-stamped for next time
+
+
+def test_reconcile_stamped_short_row_still_reused():
+    """A row already stamped with the current schema version and within the cap,
+    with unchanged mtime+size, is reused as before — the stamp check must not
+    force needless reparses of already-current rows."""
+    from coord_engine import model
+    t = FakeTransport()
+    minute = "2026-07-01 04:00PM UTC"
+    body = _task("A", "active")
+    prior = {"rows": [{"id": "a", "name": "a", "status": "active", "title": "A",
+                       "description": "d", "mtime": minute, "size": f"{len(body)}B",
+                       "sv": model.ROW_SCHEMA_VERSION}]}
+    t.put("team/r/_coord/summaries.json", json.dumps(prior))
+    t.put("team/r/task/a.md", body, mtime=minute)
+    reads = []
+    orig = t.read
+    t.read = lambda p: (reads.append(p), orig(p))[1]
+    res = _run(t)
+    assert res["reused"] == 1 and res["parsed"] == 0
+    assert "team/r/task/a.md" not in reads  # stamped + unchanged -> never downloaded
 
 
 def test_reconcile_unparseable_keeps_prior_row_and_warns():
@@ -395,3 +448,35 @@ def test_fast_path_declines_on_deletion_entry():
                        "deleted_at": "2026-07-01T12:10:00Z"}])
     res = _reconciled(t, now="2026-07-01T12:30:00Z")
     assert not res.get("fast_path")
+
+
+def test_fast_path_declines_when_prior_has_unstamped_rows():
+    """v1.6.7 item B: the fast path reuses prior_agg WHOLESALE. A quiet fleet
+    (no fold-relevant feed changes) would otherwise perpetuate legacy unstamped
+    rows forever. The fast path must decline while ANY prior row lacks the current
+    schema stamp, forcing a full pass that reparses+caps+stamps it."""
+    from coord_engine import model
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    # Corrupt the freshly-written aggregate to look legacy: strip the `sv` stamp.
+    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    for row in agg["rows"]:
+        row.pop("sv", None)
+    t.store["team/r/_coord/summaries.json"] = json.dumps(agg)
+    _with_updates(t, [])                               # feed shows no changes
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path"), "unstamped prior row must force a full pass"
+    healed = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert healed["rows"][0]["sv"] == model.ROW_SCHEMA_VERSION  # stamped by full pass
+
+
+def test_fast_path_resumes_once_all_rows_stamped():
+    """Once a full pass has stamped every row, a subsequent quiet beat takes the
+    fast path again — the stamp guard only fires while stale-schema rows remain."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)                                     # rows written already stamped
+    _with_updates(t, [])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert res.get("fast_path") is True and res["parsed"] == 0

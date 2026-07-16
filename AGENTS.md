@@ -228,7 +228,10 @@ it (not on PyPI).
     minute-granular, reconcile reuses a prior summaries row only when the doc is unchanged by mtime AND
     byte size AND its mtime-minute is provably closed before the last reconcile read — so a doc touched
     twice in one clock-minute is reparsed, never trusted stale. (The honest narrow guarantee; not a
-    general sub-minute exactness claim.)
+    general sub-minute exactness claim.) A row projected by an older `row_from_frontmatter` (stamp
+    `sv` != current `ROW_SCHEMA_VERSION` — e.g. a pre-text-cap row) is likewise reparsed once, so a
+    projection change (like the summaries text cap) self-heals the whole index within one full pass
+    rather than waiting for each task to organically change.
   - **A freshness overlay surfaces new docs THIS read.** Every summaries-index fold (`inbox`, `listen`,
     `briefing`, `needs-me`, `board`, `status`) lists the task dir once and unions in any doc written
     since the last reconcile, so a directive delivered between heartbeats surfaces now, not a
