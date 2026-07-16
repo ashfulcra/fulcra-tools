@@ -108,18 +108,26 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
     gen = (prior_agg or {}).get("generated_at")
     if not gen:
         return False
-    # A wholesale reuse of prior_agg would carry PROJECTION-stale rows forward
-    # untouched — on a quiet fleet (no fold-relevant feed changes) forever. If any
-    # prior row lacks the current row-schema stamp (e.g. a pre-#388 uncapped row),
-    # decline the fast path and force a full pass so it reparses+caps+stamps. Once
-    # a full pass has stamped every row, the fast path resumes. Cheap: an in-memory
-    # scan of the already-loaded prior rows, no extra reads.
-    if any(row.get("sv") != model.ROW_SCHEMA_VERSION
-           for row in aggregate.aggregate_rows(prior_agg)):
-        log.info("fast path declined: prior aggregate has stale-schema rows", team=team)
-        return False
-    # Same rule, other sub-fold: the fast path may only fire when EVERY sub-fold is
-    # SETTLED. The ack fold advances its own anchor only when it read everything it
+    # NOT gated on the rows' schema stamp (`sv`), deliberately — v1.6.7 gated it
+    # here and v1.6.9 removed it. The gate assumed the fleet CONVERGES: decline
+    # until one full pass stamps every row, then resume. A mixed fleet never
+    # converges. All hosts reconcile ONE shared index, and every pass by a
+    # pre-stamp host (v1.6.6 predates both #388's text cap and `sv`) writes
+    # unstamped rows straight back in. The gate then declines on every beat,
+    # forever — strictly worse than no gate at all, since it costs a mixed fleet
+    # MORE full passes than it did before the gate existed.
+    #
+    # Stale rows still heal, just not from here: the incremental-reuse gate
+    # refuses to reuse a stale-projection row, forcing the reparse that re-caps +
+    # re-stamps it, on any pass that finds real work. And MAX_FAST_PATH_HOURS
+    # bounds a quiet fleet regardless — the fast path cannot run indefinitely, so
+    # a periodic full pass sweeps whatever a quiet stretch left behind.
+    #
+    # The ack-anchor guard below is NOT the same shape of rule, and stays: it is
+    # about a sub-fold OWING a pass, and it settles itself in one.
+    #
+    # That guard: the fast path may only fire when every sub-fold is SETTLED. The
+    # ack fold advances its own anchor only when it read everything it
     # meant to (see ACKS_ANCHOR_KEY); an anchor behind generated_at means it is owed
     # a change from BEFORE this window — which this probe cannot see, because it
     # asks about generated_at onward. Skipping here would strand that change until
@@ -196,10 +204,23 @@ GC_GRACE_HOURS = 24.0  #: never GC a shard younger than this (or undatable)
 #: How many passes may fold acks incrementally before one full fold is FORCED
 #: (env ``COORD_ACKS_FULL_EVERY``; positive-finite, bad value -> this default).
 #: The backstop bounds the blast radius of a change the query never reported: a
-#: missed ack is corrected within this many passes (~4h at the 20-min heartbeat),
-#: it can never persist indefinitely. It also carries the orphan-shard GC, which
-#: only rides the full fold. ``1`` disables the incremental path entirely.
-DEFAULT_ACKS_FULL_EVERY = 12
+#: missed ack is corrected within this many passes, so it can never persist
+#: indefinitely. It also carries the orphan-shard GC, which only rides the full
+#: fold. ``1`` disables the incremental path entirely.
+#:
+#: Why 72 and not 12: a forced full fold was MEASURED at 1091s (~18min) on a
+#: 1.2s/op remote transport. At 12 (~4h on a 20-min heartbeat) that is an
+#: 18-minute stall every four hours on every remote host — a real cost to pay
+#: for a check whose subject, the change query, was verified complete against an
+#: independent listing (31/31, zero missed). 72 puts the true-full at ~daily on
+#: the same heartbeat: still bounded, still catches a silently-dropped change
+#: within a day, at a SIXTH of the recurring cost (72/12 = 6x less frequent;
+#: the interval goes 4h -> ~24h, but the ratio is 6, not 24). The right end
+#: state is a
+#: change-driven backstop (query a WIDE window since the last CONCLUSIVE full
+#: fold, reserving a true-full for anchor-loss/doubt) — that is a design change,
+#: not a constant, so it is queued rather than rushed in here.
+DEFAULT_ACKS_FULL_EVERY = 72
 
 #: Key under which the aggregate carries the count of consecutive INCREMENTAL ack
 #: folds since the last full one — the backstop's counter. It lives in
@@ -652,7 +673,11 @@ def reconcile(
         #       description, no `sv`) is NOT content-stale but PROJECTION-stale, so
         #       mtime+size can't detect it (the doc never changed). Force one reparse
         #       so the current projection (cap + stamp) applies; it then reuses
-        #       normally. This is what self-heals the legacy uncapped index.
+        #       normally. This is what self-heals the legacy uncapped index, and
+        #       since v1.6.9 it is the ONLY place the `sv` check lives: the fast
+        #       path used to gate on it too, but a mixed fleet re-introduces
+        #       unstamped rows continuously, so gating there never settled (see
+        #       _fast_path_no_changes). Here it settles per-row, on contact.
         minute_safe = _same_minute_reuse_safe(entry_mtime, last_reconcile_iso)
         reusable = (
             prior is not None
@@ -755,9 +780,6 @@ def reconcile(
         structured = aggregate.diff_transitions(prior_for_diff, rows)
         _annotate.write_pending(transport, team, structured, now=now)
 
-    agg = aggregate.build_aggregate(
-        team, rows, generated_at=now, reconcile_host=host, warnings=warnings
-    )
     # --- ack fold state (not task state; consumers ignore both keys) ---
     # These ride the aggregate because it is already read + written every pass, so
     # they cost no transport op. The fast path returns before this and rewrites
@@ -769,13 +791,27 @@ def reconcile(
     # rather than consumed by this one. Likewise the streak: an inconclusive pass
     # neither spends a backstop pass nor resets the counter, so the forced full
     # fold keeps coming.
+    ack_state: dict[str, Any] = {}
     if fold.conclusive:
-        agg[ACKS_ANCHOR_KEY] = now
-        agg[ACKS_STREAK_KEY] = 0 if fold.full else streak + 1
+        ack_state[ACKS_ANCHOR_KEY] = now
+        ack_state[ACKS_STREAK_KEY] = 0 if fold.full else streak + 1
     else:
         if prior_anchor:
-            agg[ACKS_ANCHOR_KEY] = prior_anchor
-        agg[ACKS_STREAK_KEY] = streak
+            ack_state[ACKS_ANCHOR_KEY] = prior_anchor
+        ack_state[ACKS_STREAK_KEY] = streak
+    # `prior` carries any top-level key a NEWER host wrote that this build does not
+    # know about — see build_aggregate's invariant: rebuilding from a fixed key set
+    # is what killed v1.6.8's anchor on the live mixed fleet. The ack keys are cut
+    # from the passthrough first because THIS build owns them: `ack_state` above is
+    # their complete, recomputed value, including the case where it deliberately
+    # writes no anchor at all (inconclusive fold, no prior anchor). Passing them
+    # through would resurrect a value this pass decided not to keep.
+    prior_unknown = {k: v for k, v in (prior_agg or {}).items()
+                     if k not in (ACKS_ANCHOR_KEY, ACKS_STREAK_KEY)}
+    agg = aggregate.build_aggregate(
+        team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
+        state=ack_state, prior=prior_unknown,
+    )
     if not transport.write(summaries_path(team), json.dumps(agg, indent=2)):
         warnings.append("summaries.json write failed")
 

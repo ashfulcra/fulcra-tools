@@ -255,6 +255,16 @@ it (not on PyPI).
     anchor is behind `generated_at`, so a quiet beat can't skip the fold that still owes a read. A forced full fold every `COORD_ACKS_FULL_EVERY`
     passes (default 12, ~4h at a 20-min heartbeat) bounds anything the query could miss, and carries the
     orphan-shard GC.
+  - **summaries.json is one shared doc written by many hosts at many versions — a top-level key added
+    in version N is wiped by any host older than N.** The whole fleet reconciles ONE index, and an older
+    host rebuilds the document from the key set it knows and writes it over everyone else's. This is not
+    theoretical: it is why `acks_folded_through` (added in v1.6.8) does not survive on the live bus while
+    any pre-1.6.8 host still reconciles — its passes delete the anchor, so the change-driven fold above
+    silently degrades to a full fold every pass. Since v1.6.9 `build_aggregate` carries unknown top-level
+    keys through, which stops the next occurrence of this class but cannot fix a host that predates the
+    passthrough. **A new top-level key is live only once the whole fleet is upgraded** — check
+    `fleet health` before assuming a fold-state key is doing anything, and never rebuild the aggregate
+    from a fixed key set.
 
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and
