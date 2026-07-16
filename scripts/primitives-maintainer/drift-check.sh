@@ -3,9 +3,15 @@
 #
 # Fingerprints the agent-facing Fulcra surface and compares it to a stored
 # baseline. On drift (or on an unusable probe) it posts to the coord team bus
-# (team fulcra) as fulcra-primitives-maintainer and writes an ALERT file so a
-# Claude session does the actual FULCRA-PRIMITIVES.md rewrite. Detection is
-# unattended; the rewrite (model judgment) is not.
+# (team fulcra, to the fulcra-primitives-maintainer ROLE — see lib-alert.sh) and
+# writes an ALERT file so a Claude session does the actual FULCRA-PRIMITIVES.md
+# rewrite. Detection is unattended; the rewrite (model judgment) is not.
+#
+# THE ALERT PATH IS PART OF THE PROBE. A detector that pages a dead mailbox
+# reports silence just as convincingly as a detector that sees nothing, so the
+# target's reachability is verified on every run — clean ones included — and a
+# path that cannot deliver is loud locally (stderr + ALERT-UNDELIVERED.txt +
+# exit 3). See lib-alert.sh for why, and for what it cost to learn.
 #
 # WHAT IT OBSERVES (see README for the full claim/limit table):
 #   pypi_version    published fulcra-api version on PyPI.
@@ -69,10 +75,6 @@ ALERT="$STATE/DRIFT-ALERT.txt"
 # the rewrite that was actually owed would never be seen.
 UNKNOWN_MARK="$STATE/PROBE-UNKNOWN.txt"
 LOG="$STATE/drift-check.log"
-# Overridable so a test run can capture the notification instead of posting it.
-CE="${PRIMITIVES_COORD_ENGINE:-$(command -v coord-engine || echo "$HOME/.local/bin/coord-engine")}"
-TEAM="fulcra"
-AGENT="claude-code:Mac:fulcra-primitives-maintainer"
 
 SPEC_URL="${PRIMITIVES_SPEC_URL:-https://api.fulcradynamics.com/openapi.json}"
 MCP_URL="${PRIMITIVES_MCP_URL:-https://mcp.fulcradynamics.com/.well-known/oauth-authorization-server}"
@@ -103,6 +105,12 @@ MCP_SENTINEL="${PRIMITIVES_MCP_SENTINEL:-openid}"
 mkdir -p "$STATE"
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 log() { echo "$(ts)  $*" >> "$LOG"; }
+
+# The alert path (sender identity, target, delivery, ALERT-UNDELIVERED.txt). It
+# is shared with the weekly on purpose: this half of the system had the same bug
+# in both scripts because it was copy-pasted into both.
+. "$(dirname "${BASH_SOURCE[0]}")/lib-alert.sh"
+prim_init
 
 TMPDIR_RUN="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_RUN"' EXIT
@@ -390,20 +398,10 @@ print(json.dumps(d, sort_keys=True))
 ' "$SPEC_HASH" "$CLI_HEAD" "$MCP_SCOPES" "$PYPI_VER")"
 
 # --- notify helper ---------------------------------------------------------
-# `tell` drops a message (rc 1, "already exists") when a slug prefix collides,
-# so the title carries a timestamp and the rc is checked and logged.
-notify() {
-  local prio="$1" title="$2" summary="$3" out rc
-  out="$("$CE" tell "$TEAM" "$AGENT" "$title" --from "$AGENT" \
-        --workstream fulcra-primitives --priority "$prio" --summary "$summary" 2>&1)"
-  rc=$?
-  if [ $rc -ne 0 ]; then
-    log "TELL FAILED rc=$rc: $out"
-  else
-    log "tell ok: $title"
-  fi
-  return $rc
-}
+# The tell itself (rc-checked), the target's reachability, and the sender's
+# identity all live in lib-alert.sh. `tell` still drops a message (rc 1, "already
+# exists") when a slug prefix collides, so every title carries a timestamp.
+notify() { prim_notify "$@"; }
 
 # --- UNKNOWN: fail closed --------------------------------------------------
 # This branch writes UNKNOWN_MARK, never ALERT. An UNKNOWN run observed nothing,
@@ -436,7 +434,7 @@ if [ ${#UNKNOWN_REASONS[@]} -gt 0 ]; then
   [ -f "$ALERT" ] && OUTSTANDING_NOTE=" SEPARATELY: $ALERT is still outstanding from an earlier real drift and is untouched by this run — that rewrite is still owed."
   notify P1 "UNKNOWN: Fulcra primitives drift check could not observe the surface ($(ts))" \
     "$(printf '%s; ' "${UNKNOWN_REASONS[@]}")Baseline NOT advanced — a probe that cannot answer is not a clean run. Fix the probe or the fingerprint, then re-run scripts/primitives-maintainer/drift-check.sh. Probe-failure file: $UNKNOWN_MARK.$OUTSTANDING_NOTE"
-  exit 2
+  finish 2 "UNKNOWN — probes could not observe the surface: ${UNKNOWN_REASONS[*]}"
 fi
 
 # Probes answered. That discharges the probe-failure debt and only that debt:
@@ -452,7 +450,7 @@ fi
 if [ ! -f "$BASELINE" ]; then
   echo "$CUR" > "$BASELINE"
   log "baseline written: $CUR"
-  exit 0
+  finish 0
 fi
 
 PREV="$(cat "$BASELINE")"
@@ -520,10 +518,10 @@ if [ "$CUR" = "$PREV" ]; then
     log "no new drift, but UNACKED alert outstanding: $ALERT"
     notify P1 "OUTSTANDING: Fulcra primitives drift still unactioned ($(ts))" \
       "No new drift vs baseline, but $ALERT is still present — a previous drift has not been actioned. Do the FULCRA-PRIMITIVES.md rewrite, then \`rm $ALERT\` to clear. Alert contents: $(head -c 800 "$ALERT" | tr '\n' ' ')"
-    exit 1
+    finish 1 "OUTSTANDING — an earlier drift is still unactioned ($ALERT)"
   fi
   log "no drift (pypi=$PYPI_VER spec=$SPEC_HASH cli_head=$CLI_HEAD)"
-  exit 0
+  finish 0
 fi
 
 # --- drift -----------------------------------------------------------------
@@ -584,4 +582,4 @@ case "$DIFF" in
     echo "$CUR" > "$BASELINE"
     ;;
 esac
-exit 1
+finish 1 "DRIFT ($PRIO): $SUMMARY"

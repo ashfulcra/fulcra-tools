@@ -22,6 +22,8 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- Optional FULCRA_COORD_AGENT: see the daily plist's note. Same rule —
+             a host-specific identity is set at install time or not at all. -->
     </dict>
     <key>StandardOutPath</key>
     <string>__CHECKOUT__/.primitives-state/weekly.out.log</string>
