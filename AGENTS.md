@@ -471,24 +471,22 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   easier — a documented raw REST call is a legitimate tool, not a last resort.
   Still prefer the `fulcra` CLI / Python lib when you have a shell and a verb
   exists; the MCP server is read-only.
-- **Records are write-via-ingest.** Two write paths, both in the OpenAPI spec
-  (spec-verified 2026-07-08):
-  - **Typed (preferred, new):** `POST /ingest/v1/record/{data_type}` takes an
-    **unwrapped** record payload for that data type, and accepts jsonlines for
-    batch (one record per line). Discover types via `GET /data/v1/catalog`
-    (`recordable`/`api_version` fields) and the record shape via
-    `GET /data/v1/catalog/{data_type}/{api_version}/schema`. Caveat: custom
-    data types still reference the annotation id in the record's `sources`.
-  - **Legacy:** `POST /ingest/v1/record` with a wrapped `DataRecordV1`
-    (`data_type` rides in `metadata`) — published in the spec. The old JSONL
-    batch path `POST /ingest/v1/record/batch` is **NOT in the published
-    OpenAPI** (works in production; treat as retirement-eligible) — prefer the
-    typed endpoint's jsonlines mode for new code.
-
-  There is **no record-level delete/replace and no `fulcra` record-write/delete
-  CLI verb yet** (the CLI verbs will be built on the typed endpoints) — model
-  corrections as new (superseding) records. When the CLI record verbs land, the
-  primitives doc gets a full re-verification, not a patch — flag it on the bus.
+- **Records have CLI verbs as of 0.1.37** (2026-07-15) — `fulcra record
+  DATA_TYPE [VALUE]` and `fulcra delete DATA_TYPE [RECORD_ID]`, both with
+  `-f/--file` and JSON/JSONL on stdin for batch; `fulcra catalog
+  --recordable-only` lists the types they accept, and the lib gained
+  `record_data_type`/`validate_records`. Use them when you have a shell rather
+  than hand-rolling ingest POSTs. The raw ingest endpoints
+  (`POST /ingest/v1/record/{data_type}`, typed and preferred; the wrapped
+  `DataRecordV1` legacy path; the unpublished `/batch`) are still first-class
+  when you need them — the primitives doc covers all three and the custom-type
+  `sources` caveat.
+- **Records are still append-only. `delete` is a tombstone, not an erasure** —
+  the CLI implements it by recording a `DeletedRecord` through the same ingest
+  path, and there is no record-delete lib method. There is no hard delete and no
+  update/replace verb, so corrections are modeled as new records, not edits:
+  write a superseding record, or delete-then-re-record. What 0.1.37 changed is
+  availability, not semantics.
 - **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
   It defaults to off (inert); leave it there — an accidental `on` has caused
   duplicate-record proliferation. Its successor is the heartbeat **projection
