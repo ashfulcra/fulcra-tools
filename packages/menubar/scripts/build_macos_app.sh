@@ -19,7 +19,7 @@ WHEELHOUSE="$REPO/wheelhouse"
 echo "=== 1/3  build workspace wheels into wheelhouse/ ==="
 rm -rf "$WHEELHOUSE"; mkdir -p "$WHEELHOUSE"
 for pkg in fulcra-common fulcra-collect fulcra-media-helpers \
-           fulcra-dayone fulcra-attention fulcra-csv-importer; do
+           fulcra-dayone fulcra-attention fulcra-csv-importer fulcra-gmail; do
   uv build --package "$pkg" --wheel --out-dir "$WHEELHOUSE" >/dev/null
 done
 
@@ -34,5 +34,19 @@ rm -rf build dist
 PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase create macOS
 PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase build macOS
 
-echo "Built: packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
+APP="$REPO/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
+PKGS="$APP/Contents/Resources/app_packages"
+# Briefcase can exit 0 even when `briefcase create`'s pip install fails a
+# dependency resolution, leaving app_packages EMPTY and the app non-functional.
+# Guard explicitly: the bundle MUST contain the collect core and the gmail plugin.
+for need in fulcra_collect fulcra_gmail fulcra_common; do
+  if [ ! -d "$PKGS/$need" ]; then
+    echo "ERROR: $need is missing from the bundle ($PKGS)." >&2
+    echo "       The briefcase install likely failed a dependency resolution;" >&2
+    echo "       see packages/menubar/logs/briefcase.*.create.log." >&2
+    exit 1
+  fi
+done
+
+echo "Built: $APP"
 echo "Verify with: bash packages/menubar/scripts/verify_bundle.sh"
