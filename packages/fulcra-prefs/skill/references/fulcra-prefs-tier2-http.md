@@ -40,22 +40,27 @@ then on. **Exact schema** (all four fields; timestamps are ISO-8601 **local, nai
   "access_token": "<from /oauth/token>",
   "access_token_expiration": "<now + expires_in seconds, ISO local naive>",
   "refresh_token": "<from /oauth/token>",
-  "refresh_token_expiration": "<now + ~30 days, ISO local naive>"
+  "refresh_token_expiration": null
 }
 ```
 
-The Auth0 token response gives `expires_in` (seconds), not an absolute time —
-convert it: `access_token_expiration = now + expires_in`. Auth0 does not return a
-refresh-token lifetime here; use a conservative `now + 30 days`.
+`access_token_expiration` is the only expiration the installed CLI checks
+(`FulcraCredentials.is_expired()` compares it against `datetime.now()`). The Auth0
+token response gives `expires_in` (seconds), not an absolute time — convert it:
+`access_token_expiration = now + expires_in`. **`refresh_token_expiration` is
+`null`** — that is what the CLI itself writes (`get_token()` leaves it unset,
+`to_json()` serializes `null`) and the refresh path never consults it. Do **not**
+invent a lifetime for it; this CLI client's refresh-token TTL is not established by
+any repo source, so treat the token as valid until a refresh actually fails.
 
 **Refresh (no human re-prompt):** when the access token nears expiry,
 `POST https://fulcra.us.auth0.com/oauth/token` form
 `grant_type=refresh_token`, `client_id=48p3VbMnr5kMuJAUe9gJ9vjmdWLdnqZt`,
 `refresh_token=<stored>` → `{access_token, expires_in, refresh_token?}`. Recompute
 `access_token_expiration` from the new `expires_in`; if the response includes a new
-`refresh_token` (rotation), replace the stored one and its expiration; rewrite the
-file. The refresh token is valid for ~30 days, so a long-running host self-renews
-without prompting a human again.
+`refresh_token` (rotation), replace the stored one; rewrite the file (keeping
+`refresh_token_expiration` `null`). If a refresh ever returns `invalid_grant`, the
+refresh token is spent/expired — fall back to the device flow (§1a) to re-auth.
 
 ## 2. Read the compiled preferences (one GET each)
 
