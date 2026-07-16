@@ -214,7 +214,9 @@ GC_GRACE_HOURS = 24.0  #: never GC a shard younger than this (or undatable)
 #: for a check whose subject, the change query, was verified complete against an
 #: independent listing (31/31, zero missed). 72 puts the true-full at ~daily on
 #: the same heartbeat: still bounded, still catches a silently-dropped change
-#: within a day, at a twenty-fourth of the tax. The right end state is a
+#: within a day, at a SIXTH of the recurring cost (72/12 = 6x less frequent;
+#: the interval goes 4h -> ~24h, but the ratio is 6, not 24). The right end
+#: state is a
 #: change-driven backstop (query a WIDE window since the last CONCLUSIVE full
 #: fold, reserving a true-full for anchor-loss/doubt) — that is a design change,
 #: not a constant, so it is queued rather than rushed in here.

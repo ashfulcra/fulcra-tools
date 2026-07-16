@@ -821,7 +821,7 @@ def test_acks_change_unfolded_in_one_pass_is_still_folded_in_the_next():
     """(b) The retry-window boundary — the point of holding the anchor. The change
     lands at 16:06; pass N (16:40) can't read it. If the anchor had advanced to
     16:40, pass N+1's window would start at 16:25 and the change would be gone for
-    good (until the ~4h backstop). With the anchor held at 16:05, it is still in
+    good (until the ~daily backstop (DEFAULT_ACKS_FULL_EVERY=72 at a 20-min heartbeat)). With the anchor held at 16:05, it is still in
     the window and folds."""
     t = _seeded()                                      # anchor: 2026-07-01T16:05:00Z
     changes = [{"full_name": "/team/r/_coord/acks/b/dan.md",
