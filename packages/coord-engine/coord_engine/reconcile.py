@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from . import aggregate, config, health as health_mod, model, okf
 from .log import get_logger
@@ -194,6 +194,20 @@ DEFAULT_ACKS_FULL_EVERY = 12
 #: aggregate means no prior acks and no anchor, which is a full fold anyway.
 ACKS_STREAK_KEY = "acks_incremental_streak"
 
+#: Key under which the aggregate carries the ack fold's OWN anchor: the instant
+#: through which acks are provably folded. The change-query window starts here.
+#:
+#: Why not ``generated_at``: that anchor advances every pass, unconditionally. If
+#: a pass knew a slug had changed but could not READ it, reusing generated_at
+#: would consume the change — the next window would start past it and the new ack
+#: would stay invisible until the periodic backstop. That is a FALSE ADVANCE (the
+#: `listen` fold's discipline: a failed read must never mark unknown state as
+#: seen). This anchor advances ONLY on a fold that read everything it meant to,
+#: so an unread change stays inside the next pass's window. Absent (a legacy
+#: aggregate, or a pass that never got a conclusive fold) means NO anchor — a
+#: full fold — never a silent fallback to generated_at.
+ACKS_ANCHOR_KEY = "acks_folded_through"
+
 #: An anchor older than this makes the change query pointless: the endpoint 500s
 #: on an over-wide window (verified at 30 days), so a host that has been down for
 #: days would burn ~10s per pass to learn nothing. Skip straight to the full fold.
@@ -272,12 +286,22 @@ def _fold_slug(transport: Any, prefix: str, slug: str) -> Optional[list]:
     return sorted(set(agents))
 
 
-def _full_fold_and_gc(transport: Any, team: str, live_slugs: set, *,
-                      now: str) -> tuple[dict, int]:
+def _full_fold_and_gc(transport: Any, team: str, live_slugs: set, *, now: str,
+                      prior_acks: dict, log: Any) -> tuple[dict, int, bool]:
     """List EVERY ack dir, fold the live ones, and GC shards whose parent task no
     longer exists — the shard-GC sub-pass the plan review required. This is the
-    correct-by-construction fold every failure of the incremental path falls back
-    to; it is also the only path that can see orphan dirs, hence the GC's home.
+    fold every failure of the incremental path falls back to; it is also the only
+    path that can see orphan dirs, hence the GC's home.
+
+    Returns ``(acks, gc_count, conclusive)``. ``conclusive`` is False when any
+    listing this fold NEEDED failed, i.e. when the result is not a complete
+    picture of the ack tree as of ``now``. The caller must not advance the ack
+    anchor on an inconclusive fold.
+
+    A failed listing PRESERVES the slug's prior acked_by rather than omitting it:
+    the caller stamps every slug missing from this map to ``[]``, so an omission
+    is not a neutral gap — it is a silent un-ack of a real acknowledgement. A
+    transport failure must never cost us data we already had.
 
     GC is guarded against the data-loss case the code review flagged (a silently
     TRUNCATED task listing makes live tasks look deleted): never GC when the
@@ -290,16 +314,27 @@ def _full_fold_and_gc(transport: Any, team: str, live_slugs: set, *,
     gc = 0
     try:
         entries = transport.list_dir(prefix)
-    except TransportError:
-        return acks, gc
+    except TransportError as e:
+        # The whole tree is unreadable: keep every ack we already knew about
+        # (never un-ack a task because a listing failed) and report inconclusive.
+        log.warn("acks: root listing failed; prior acks preserved", team=team,
+                 error=str(e))
+        return {s: prior_acks[s] for s in live_slugs if s in prior_acks}, gc, False
+    conclusive = True
     for e in entries:
         n = (e.get("name") or "").rstrip("/")
         if not e.get("is_dir") or not n:
             continue
         if n in live_slugs:
             agents = _fold_slug(transport, prefix, n)
-            if agents is not None:
-                acks[n] = agents
+            if agents is None:
+                log.warn("acks: slug listing failed; prior acks preserved",
+                         team=team, slug=n)
+                conclusive = False
+                if n in prior_acks:
+                    acks[n] = prior_acks[n]
+                continue
+            acks[n] = agents
         elif live_slugs and hasattr(transport, "delete"):
             try:
                 shard_files = [f for f in transport.list_dir(prefix + n + "/")
@@ -314,29 +349,51 @@ def _full_fold_and_gc(transport: Any, team: str, live_slugs: set, *,
                     continue  # undatable or within grace: keep (data-loss guard)
                 if transport.delete(prefix + n + "/" + f["name"]):
                     gc += 1
-    return acks, gc
+    return acks, gc, conclusive
+
+
+class AckFold(NamedTuple):
+    """One ack fold's result.
+
+    ``full``       — the full fold ran (resets the backstop counter).
+    ``conclusive`` — every listing the fold needed succeeded, so ``acks`` is a
+                     complete picture as of ``now``. ONLY a conclusive fold may
+                     advance the ack anchor: an inconclusive one leaves the
+                     unread change inside the next pass's window.
+    """
+    acks: dict
+    gc: int
+    full: bool
+    conclusive: bool
 
 
 def _fold_and_gc_acks(transport: Any, team: str, live_slugs: set, *, now: str,
                       prior_acks: Optional[dict] = None, since: Any = None,
-                      force_full: bool = False,
-                      log: Any = None) -> tuple[dict, int, bool]:
+                      force_full: bool = False, log: Any = None) -> AckFold:
     """Fold per-agent ack shards (_coord/acks/<slug>/<agent>.md) into
-    {slug: [agent, ...]}. Returns ``(acks, gc_count, did_full_fold)``.
+    {slug: [agent, ...]}. See :class:`AckFold` for the return.
 
     THE INVARIANT: the incremental path is an OPTIMIZATION, and its failure mode
     is ALWAYS "fall back to the full fold and say so" — never "assume unchanged".
     Every unknown (no change-query capability, a query error/500, feed-shape
     drift, no ``since`` anchor, an anchor too old to query, a slug the prior
-    aggregate never saw) resolves to folding, not to reusing. Reuse happens only
-    on POSITIVE evidence: the store answered, and it did not name this slug.
+    aggregate never saw, a slug we knew had changed but could not read) resolves
+    to folding, not to reusing. Reuse happens only on POSITIVE evidence: the store
+    answered, and it did not name this slug.
+
+    Its COROLLARY, equally load-bearing: a fold that could not read what it meant
+    to must not let the pass advance past it. Falling back to the full fold is
+    only half the fix — the pass must also leave the ack anchor where it was
+    (``conclusive=False``), or the change we failed to read is consumed by the
+    window that reported it and stays invisible until the backstop. Failing
+    closed means failing SLOW, not failing quiet.
 
     Why it exists: the full fold costs one ``list_dir`` per ack dir per pass (280
     dirs on the live bus = ~336s at a remote host's 1.2s/op), even though at a
     20-min heartbeat ~0-2 shards actually change. So we ask the store what changed
-    since ``since`` (the prior aggregate's ``generated_at``, the same anchor the
-    summaries reuse uses), re-fold only those slugs, and reuse ``prior_acks`` —
-    the prior aggregate rows' ``acked_by`` — for the rest, at zero ops.
+    since ``since`` (the ack anchor — see ``ACKS_ANCHOR_KEY``), re-fold only those
+    slugs, and reuse ``prior_acks`` — the prior aggregate rows' ``acked_by`` — for
+    the rest, at zero ops.
 
     GC rides the full fold ONLY (see ``_full_fold_and_gc``): it is cleanup, not
     correctness, and the incremental path deliberately never lists the ack root,
@@ -349,7 +406,7 @@ def _fold_and_gc_acks(transport: Any, team: str, live_slugs: set, *, now: str,
     if force_full:
         reason = "periodic backstop"
     elif not since:
-        reason = "no generated_at anchor on the prior aggregate"
+        reason = "no ack anchor on the prior aggregate"
     elif not 0 <= age_hours(since, now) <= ACKS_ANCHOR_MAX_HOURS:
         # inf (unparseable), negative (clock skew / a future anchor), or a window
         # so wide the query would just 500 — don't spend the op to learn nothing.
@@ -357,16 +414,33 @@ def _fold_and_gc_acks(transport: Any, team: str, live_slugs: set, *, now: str,
     else:
         affected = _changed_ack_slugs(transport, team, since=since, now=now, log=log)
         reason = "change query unavailable or inconclusive" if affected is None else ""
-    if affected is None:
-        # Visible by design: a degraded fold is 280 listings and must be
-        # attributable, and a fold that silently stopped being change-driven is
-        # exactly the regression this line makes findable.
-        log.info("acks: full fold", team=team, reason=reason, dirs="all")
-        acks, gc = _full_fold_and_gc(transport, team, live_slugs, now=now)
-        return acks, gc, True
 
+    if affected is not None:
+        fold = _incremental_fold(transport, team, live_slugs, prior_acks=prior_acks,
+                                 affected=affected, log=log)
+        if fold is not None:
+            return fold
+        # A slug we KNEW had changed would not list. Reusing its prior acks and
+        # carrying on would be a false advance; re-fold everything instead.
+        reason = "a changed slug could not be listed"
+
+    # Visible by design: a degraded fold is 280 listings and must be attributable,
+    # and a fold that silently stopped being change-driven is exactly the
+    # regression this line makes findable.
+    log.info("acks: full fold", team=team, reason=reason, dirs="all")
+    acks, gc, conclusive = _full_fold_and_gc(transport, team, live_slugs, now=now,
+                                             prior_acks=prior_acks, log=log)
+    return AckFold(acks, gc, True, conclusive)
+
+
+def _incremental_fold(transport: Any, team: str, live_slugs: set, *,
+                      prior_acks: dict, affected: set, log: Any) -> Optional[AckFold]:
+    """Fold only the slugs the change query named (plus any the prior aggregate
+    never carried), reusing prior acks for the rest. Returns None if a slug we
+    needed to read would not list — the caller escalates to the full fold rather
+    than let the pass advance on a fold it could not complete."""
     prefix = _acks_prefix(team)
-    acks = {}
+    acks: dict[str, list] = {}
     folded = 0
     for slug in sorted(s for s in live_slugs if s):
         # A slug the prior aggregate never carried (new/restored task) has no
@@ -375,21 +449,16 @@ def _fold_and_gc_acks(transport: Any, team: str, live_slugs: set, *, now: str,
         if slug in affected or slug not in prior_acks:
             agents = _fold_slug(transport, prefix, slug)
             if agents is None:
-                # Transient per-slug listing failure. Keeping the prior row's acks
-                # is strictly safer than folding it to [] (which would drop real
-                # acks); the next pass re-folds it, since it stays "affected"
-                # inside the skew-widened window or gets the backstop.
-                log.warn("acks: slug listing failed; kept prior", team=team, slug=slug)
-                if slug in prior_acks:
-                    acks[slug] = prior_acks[slug]
-                continue
+                log.warn("acks: changed slug would not list; escalating to a full fold",
+                         team=team, slug=slug)
+                return None
             acks[slug] = agents
             folded += 1
         else:
             acks[slug] = prior_acks[slug]
     log.info("acks: incremental fold", team=team, folded=folded,
              reused=len(acks) - folded, changed_slugs=len(affected))
-    return acks, 0, False
+    return AckFold(acks, 0, False, True)
 
 
 def archive_prefix(team: str) -> str:
@@ -630,15 +699,17 @@ def reconcile(
     full_every = config.env_int("COORD_ACKS_FULL_EVERY", DEFAULT_ACKS_FULL_EVERY)
     streak = (prior_agg or {}).get(ACKS_STREAK_KEY)
     streak = streak if isinstance(streak, int) and streak >= 0 else 0
-    acks, gc_count, acks_full = _fold_and_gc_acks(
+    prior_anchor = (prior_agg or {}).get(ACKS_ANCHOR_KEY)
+    prior_anchor = prior_anchor if isinstance(prior_anchor, str) else None
+    fold = _fold_and_gc_acks(
         transport, team, {r.get("name") for r in rows}, now=now,
-        prior_acks=prior_acks, since=last_reconcile_iso,
+        prior_acks=prior_acks, since=prior_anchor,
         force_full=streak + 1 >= full_every, log=log,
     )
     for r in rows:
-        r["acked_by"] = acks.get(r.get("name"), [])
-    if gc_count:
-        warnings.append(f"shard-GC: pruned {gc_count} orphaned ack shard(s)")
+        r["acked_by"] = fold.acks.get(r.get("name"), [])
+    if fold.gc:
+        warnings.append(f"shard-GC: pruned {fold.gc} orphaned ack shard(s)")
 
     # --- heal engine-owned derived artifacts ---
     if not transport.write(index_path(team), okf.render_index(rows)):
@@ -673,13 +744,24 @@ def reconcile(
     agg = aggregate.build_aggregate(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings
     )
-    # Fold state, not task state: the ack backstop's counter rides the aggregate
-    # (already read+written each pass) so it costs no transport op. Reset by a
-    # full fold. Not part of the summaries contract — consumers ignore it, and a
-    # missing/garbage value reads as 0 (see the load above). The fast path returns
-    # before this and rewrites nothing, so a skipped pass doesn't advance it —
-    # correct: it did no ack fold.
-    agg[ACKS_STREAK_KEY] = 0 if acks_full else streak + 1
+    # --- ack fold state (not task state; consumers ignore both keys) ---
+    # These ride the aggregate because it is already read + written every pass, so
+    # they cost no transport op. The fast path returns before this and rewrites
+    # nothing, so a skipped pass moves neither — correct: it did no ack fold.
+    #
+    # The anchor advances ONLY on a conclusive fold. An inconclusive one carries
+    # the prior anchor forward unchanged (and writes none if there wasn't one), so
+    # whatever it failed to read is still inside the next pass's query window
+    # rather than consumed by this one. Likewise the streak: an inconclusive pass
+    # neither spends a backstop pass nor resets the counter, so the forced full
+    # fold keeps coming.
+    if fold.conclusive:
+        agg[ACKS_ANCHOR_KEY] = now
+        agg[ACKS_STREAK_KEY] = 0 if fold.full else streak + 1
+    else:
+        if prior_anchor:
+            agg[ACKS_ANCHOR_KEY] = prior_anchor
+        agg[ACKS_STREAK_KEY] = streak
     if not transport.write(summaries_path(team), json.dumps(agg, indent=2)):
         warnings.append("summaries.json write failed")
 

@@ -595,12 +595,16 @@ def test_acks_no_change_query_support_falls_back_to_full_fold():
     assert _acked(t) == {"a": ["amy"], "b": ["bob"], "c": ["cat"]}
 
 
-def test_acks_full_fold_without_generated_at_anchor():
-    """A legacy aggregate has no generated_at: there is no window to ask about, so
-    the pass must full-fold — not silently reuse the prior acks."""
+def test_acks_full_fold_without_an_ack_anchor():
+    """A legacy aggregate (pre-1.6.8) carries no ack anchor: there is no window to
+    ask about, so the pass must full-fold — not silently reuse the prior acks.
+    generated_at is NOT a fallback anchor: it advances on every pass, including
+    passes whose ack fold was inconclusive, so trusting it would reuse across a
+    change we never read."""
     t = _seeded()
     agg = json.loads(t.store["team/r/_coord/summaries.json"])
-    agg.pop("generated_at")
+    agg.pop(reconcile.ACKS_ANCHOR_KEY)
+    assert agg["generated_at"]                         # present, and deliberately unused
     t.store["team/r/_coord/summaries.json"] = json.dumps(agg)
     _with_recent_changes(t, [])                        # query is healthy, anchor isn't
     t.put("team/r/_coord/acks/b/dan.md",
@@ -702,3 +706,134 @@ def test_acks_change_query_window_covers_the_anchor_with_skew_margin():
     (start, end), = t.rc_calls
     # anchor 16:05 - 15min margin, now 16:15 + 15min margin
     assert start == "2026-07-01T15:50:00Z" and end == "2026-07-01T16:30:00Z"
+
+
+# --- the no-false-advance discipline (codex P1 on 56f9215) ---
+#
+# A fold that could not READ a slug it knew had changed must not let the pass
+# behave as though it had. The ack anchor is what makes that enforceable: it is
+# the engine's OWN record of what it has provably folded through, separate from
+# generated_at (which the task path advances every pass, unconditionally). An
+# inconclusive fold holds the anchor back, so the unread change stays inside the
+# next pass's query window instead of being consumed by it.
+
+def _anchor(t):
+    return json.loads(t.store["team/r/_coord/summaries.json"]).get(reconcile.ACKS_ANCHOR_KEY)
+
+
+def _streak(t):
+    return json.loads(t.store["team/r/_coord/summaries.json"]).get(reconcile.ACKS_STREAK_KEY)
+
+
+def _fail_list_for(t, *prefixes):
+    """Make specific list_dir prefixes raise, leaving the rest of the fake intact."""
+    orig = t.list_dir
+
+    def guard(prefix):
+        if prefix in prefixes:
+            raise TransportError("boom")
+        return orig(prefix)
+
+    t.list_dir = guard
+
+
+def _windowed_changes(entries):
+    """A change query that answers HONESTLY: only entries inside [start, end].
+    Anything the pass fails to consume must stay reachable by a later window —
+    that is what these tests prove."""
+    def files(start_iso, end_iso):
+        return [e for e in entries if start_iso <= e["uploaded_at"] <= end_iso]
+    return files
+
+
+def test_acks_changed_slug_listing_failure_falls_back_to_full_fold():
+    """(a) The slug we KNOW changed is the one we couldn't read: that is doubt, so
+    the pass full-folds like any other doubt path — it does not reuse-and-continue."""
+    t = _seeded()
+    _with_recent_changes(t, [_ack_change("b", "dan")])
+    t.put("team/r/_coord/acks/b/dan.md",
+          "---\ntype: Ack\nagent: dan\ntimestamp: 2026-07-01T16:10:00Z\n---\n")
+    _fail_list_for(t, "team/r/_coord/acks/b/")
+    calls = _spy_lists(t)
+    log, stream = _capture_log()
+    reconcile.reconcile(t, "r", now="2026-07-01T16:15:00Z", today="2026-07-01",
+                        host="h", logger=log)
+    assert "team/r/_coord/acks/" in _ack_lists(calls)   # escalated to the full fold
+    assert "full fold" in stream.getvalue()
+    # b is unreadable, so its prior acks are PRESERVED, never stamped to []
+    assert _acked(t) == {"a": ["amy"], "b": ["bob"], "c": ["cat"]}
+
+
+def test_acks_inconclusive_fold_does_not_advance_the_anchor_or_streak():
+    """(a) The false advance itself: a pass that failed to read a changed slug must
+    not move the ack anchor past that change, nor spend a backstop pass on it."""
+    t = _seeded()
+    assert _anchor(t) == "2026-07-01T16:05:00Z" and _streak(t) == 0
+    _with_recent_changes(t, [_ack_change("b", "dan")])
+    _fail_list_for(t, "team/r/_coord/acks/b/")
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert _anchor(t) == "2026-07-01T16:05:00Z"        # held back, NOT advanced to 16:15
+    assert _streak(t) == 0                             # not spent on false evidence
+
+
+def test_acks_change_unfolded_in_one_pass_is_still_folded_in_the_next():
+    """(b) The retry-window boundary — the point of holding the anchor. The change
+    lands at 16:06; pass N (16:40) can't read it. If the anchor had advanced to
+    16:40, pass N+1's window would start at 16:25 and the change would be gone for
+    good (until the ~4h backstop). With the anchor held at 16:05, it is still in
+    the window and folds."""
+    t = _seeded()                                      # anchor: 2026-07-01T16:05:00Z
+    changes = [{"full_name": "/team/r/_coord/acks/b/dan.md",
+                "state": "uploaded", "uploaded_at": "2026-07-01T16:06:00Z"}]
+    _with_recent_changes(t, _windowed_changes(changes))
+    t.put("team/r/_coord/acks/b/dan.md",
+          "---\ntype: Ack\nagent: dan\ntimestamp: 2026-07-01T16:06:00Z\n---\n")
+    _fail_list_for(t, "team/r/_coord/acks/b/")
+    _reconciled(t, now="2026-07-01T16:40:00Z")         # pass N: b unreadable
+    assert _acked(t)["b"] == ["bob"] and _anchor(t) == "2026-07-01T16:05:00Z"
+
+    t.list_dir = FakeTransport.list_dir.__get__(t)     # transport recovers
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:45:00Z")         # pass N+1
+    (start, _end), = t.rc_calls[-1:]
+    assert start == "2026-07-01T15:50:00Z"             # the HELD anchor - margin
+    assert _acked(t)["b"] == ["bob", "dan"]            # the change is not lost
+    assert _ack_lists(calls) == ["team/r/_coord/acks/b/"]   # and it stayed cheap
+    assert _anchor(t) == "2026-07-01T16:45:00Z"        # conclusive now -> advances
+
+
+def test_acks_full_fold_preserves_prior_acks_when_the_root_listing_fails():
+    """(c) A transport failure must never DROP acknowledgements. The full fold's
+    error paths return an incomplete map, and the caller stamps every missing slug
+    to [] — so an unreadable ack root would silently un-ack every task."""
+    t = _seeded()
+    _fail_list_for(t, "team/r/_coord/acks/")           # no change query -> full fold
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert _acked(t) == {"a": ["amy"], "b": ["bob"], "c": ["cat"]}   # preserved, not []
+    assert _anchor(t) == "2026-07-01T16:05:00Z"        # inconclusive -> anchor held
+
+
+def test_acks_full_fold_preserves_prior_acks_when_one_slug_listing_fails():
+    """(c) Same guarantee per-slug: one unreadable ack dir must not un-ack its task."""
+    t = _seeded()
+    _fail_list_for(t, "team/r/_coord/acks/b/")
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert _acked(t) == {"a": ["amy"], "b": ["bob"], "c": ["cat"]}
+    assert _anchor(t) is None or _anchor(t) == "2026-07-01T16:05:00Z"
+
+
+def test_acks_first_pass_with_an_unreadable_root_writes_no_anchor():
+    """No prior acks to preserve and nothing provably folded: write no anchor at
+    all, so the next pass full-folds rather than trusting a window it never read."""
+    t = _seed_acks(FakeTransport())
+    _fail_list_for(t, "team/r/_coord/acks/")
+    _reconciled(t, now="2026-07-01T16:05:00Z")
+    assert _acked(t) == {"a": [], "b": [], "c": []}    # nothing known, nothing claimed
+    assert _anchor(t) is None
+
+
+def test_acks_conclusive_full_fold_advances_the_anchor():
+    t = _seeded()
+    assert _anchor(t) == "2026-07-01T16:05:00Z"
+    _reconciled(t, now="2026-07-01T16:15:00Z")         # no query support -> full fold
+    assert _anchor(t) == "2026-07-01T16:15:00Z"
