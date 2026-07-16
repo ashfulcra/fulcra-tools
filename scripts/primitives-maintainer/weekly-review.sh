@@ -10,16 +10,21 @@ set -uo pipefail
 
 # ROOT = the maintainer checkout root (two levels up from scripts/primitives-maintainer/).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-STATE="$ROOT/.primitives-state"        # local runtime state (gitignored)
+# Overridable so tests/dry-runs never touch the live baseline (the daily has had
+# this since it grew a test suite; the weekly could not be tested at all).
+STATE="${PRIMITIVES_STATE_DIR:-$ROOT/.primitives-state}"
 WBASE="$STATE/weekly-baseline.json"
 WFLAG="$STATE/WEEKLY-REVIEW-DUE.txt"
 LOG="$STATE/weekly-review.log"
-CE="$(command -v coord-engine || echo "$HOME/.local/bin/coord-engine")"
-TEAM="fulcra"
-AGENT="claude-code:Mac:fulcra-primitives-maintainer"
 mkdir -p "$STATE"
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 log() { echo "$(ts)  $*" >> "$LOG"; }
+
+# Same alert path as the daily — same sender resolution, same role target, same
+# reachability check. It used to be a second copy of the same four lines, with
+# the same dead identity baked into it.
+. "$(dirname "${BASH_SOURCE[0]}")/lib-alert.sh"
+prim_init
 
 SPEC="$(mktemp)"
 curl -s --max-time 20 https://api.fulcradynamics.com/openapi.json -o "$SPEC"
@@ -65,8 +70,7 @@ echo "$CUR" > "$WBASE"
 
 if [ -n "$CHANGED" ]; then
   log "WIDE DRIFT: $CUR (prev differed)"
-  "$CE" tell "$TEAM" "$AGENT" "WEEKLY WIDE-DRIFT: full human-eyes re-read of FULCRA-PRIMITIVES.md needed" --from "$AGENT" --workstream fulcra-primitives --priority P2 --summary "Broad fingerprint changed — could be new endpoints/schemas, docs prose, or MCP surface the daily narrow check misses. NOW=$CUR." >> "$LOG" 2>&1
-else
-  log "weekly review flag dropped; no wide drift vs last week ($CUR)"
+  prim_notify P2 "WEEKLY WIDE-DRIFT: full human-eyes re-read of FULCRA-PRIMITIVES.md needed ($(ts))" \
+    "Broad fingerprint changed — could be new endpoints/schemas, docs prose, or MCP surface the daily narrow check misses. NOW=$CUR."
 fi
-exit 0
+finish 0

@@ -108,11 +108,46 @@ exit 0
 FAKE
 chmod +x "$WORK/fake-cli"
 
-# Stub coord-engine: append the tell to $TELL_LOG instead of posting it.
+# Stub coord-engine. Answers the three verbs the scripts use, so the alert path
+# is exercised end-to-end without a bus:
+#   tell           -> append to $TELL_LOG instead of posting  (FAKE_TELL_RC to fail it)
+#   roles status   -> FAKE_ROLE_STATUS (default HELD); "UNKNOWN" exits 1 like the
+#                     real engine does when the lease listing is unreadable
+#   presence show  -> a roster where the target has FAKE_LIVENESS (default live);
+#                     "ABSENT" omits it entirely
 cat > "$WORK/fake-coord-engine" <<'CE'
 #!/bin/bash
-printf '%s\n' "$*" >> "${TELL_LOG:-/dev/null}"
-exit 0
+case "$1 ${2:-}" in
+  "roles status")
+    st="${FAKE_ROLE_STATUS:-HELD}"
+    if [ "$st" = "UNKNOWN" ]; then
+      echo "lease state unknown for role $4 in team/$3 — degraded transport, retry" >&2
+      exit 1
+    fi
+    if [ "$st" = "HELD" ]; then
+      printf '{"team":"%s","role":"%s","status":"HELD","fresh_holders":["stub-holder"],"holders":["stub-holder"]}\n' "$3" "$4"
+    else
+      printf '{"team":"%s","role":"%s","status":"%s","fresh_holders":[],"holders":[]}\n' "$3" "$4" "$st"
+    fi
+    exit 0 ;;
+  "presence show")
+    if [ "${FAKE_LIVENESS:-live}" = "ABSENT" ]; then
+      printf '[{"agent":"somebody-else","liveness":"live","last_seen":"2026-07-16T21:00:00Z"}]\n'
+    else
+      printf '[{"agent":"%s","liveness":"%s","last_seen":"2026-07-16T21:00:00Z"}]\n' \
+        "${PRIMITIVES_TARGET:-fulcra-primitives-maintainer}" "${FAKE_LIVENESS:-live}"
+    fi
+    exit 0 ;;
+  "tell "*)
+    printf '%s\n' "$*" >> "${TELL_LOG:-/dev/null}"
+    if [ -n "${FAKE_TELL_RC:-}" ] && [ "${FAKE_TELL_RC}" != "0" ]; then
+      echo "directive failed: task already exists" >&2
+      exit "$FAKE_TELL_RC"
+    fi
+    exit 0 ;;
+esac
+echo "fake-coord-engine: unhandled: $*" >&2
+exit 64
 CE
 chmod +x "$WORK/fake-coord-engine"
 
@@ -154,7 +189,8 @@ run() {
   return 0
 }
 
-has() { grep -q "$2" "$1" 2>/dev/null; }
+# -e/-- so a pattern starting with a dash (--from …) is a pattern, not a flag.
+has() { grep -q -e "$2" -- "$1" 2>/dev/null; }
 
 # ============================================================================
 echo
@@ -292,6 +328,104 @@ printf '{"scopes_supported": ["something-else"]}' > "$WORK/mcp-wrong.json"
 S="$WORK/t13"; run "$S" PRIMITIVES_MCP_URL="file://$WORK/mcp-wrong.json"
 [ "$RC" = "2" ] && ok "exit 2" || bad "expected 2, got $RC"
 has "$S/PROBE-UNKNOWN.txt" "sentinel scope openid absent" && ok "mcp sentinel named" || bad "mcp sentinel did not fire"
+
+# ============================================================================
+# The alert path. Everything above proves the detector sees the change; these
+# prove somebody hears about it. On 2026-07-16 the first half worked and the
+# second half did not, and the run looked identical to a clean one.
+
+echo
+echo "14. the tell is addressed to the ROLE and sent by the resolved identity"
+S="$WORK/t14"; run "$S" FULCRA_COORD_AGENT=claude-code:test-host:primitives
+run "$S" FULCRA_COORD_AGENT=claude-code:test-host:primitives \
+  FAKE_VERBS="auth catalog data-type tag user-info record"
+has "$S/tells.txt" "tell fulcra fulcra-primitives-maintainer" && ok "addressed to the role" \
+  || bad "not addressed to the role: $(cat "$S/tells.txt")"
+has "$S/tells.txt" "--from claude-code:test-host:primitives" && ok "sender resolved from the env" \
+  || bad "sender not resolved: $(cat "$S/tells.txt")"
+! grep -q "claude-code:Mac:" "$S/tells.txt" && ok "no baked-in host identity" \
+  || bad "the hardcoded Mac identity is back: $(cat "$S/tells.txt")"
+
+echo
+echo "15. no shipped script assigns a hardcoded agent identity"
+# The actual 2026-07-16 defect, as a grep: one host's session id, assigned to a
+# variable, in a script that ships to every host. Matches an ASSIGNMENT of a
+# literal identity, so the prose explaining the bug does not trip it. Covers the
+# weekly too — the same line was in both, which is what a copy-pasted alert path
+# gets you.
+HARDCODED="$(grep -nE '^[^#]*[A-Za-z_]+=("|'"'"')?(claude-code|codex|openclaw|workbook):' \
+  "$HERE/drift-check.sh" "$HERE/weekly-review.sh" "$HERE/lib-alert.sh" 2>/dev/null || true)"
+if [ -n "$HARDCODED" ]; then
+  bad "a host/session identity is hardcoded: $HARDCODED"
+else
+  ok "identity is resolved at runtime in every shipped script"
+fi
+
+echo
+echo "16. clean run + role nobody holds -> exit 3, marker, NOT a silent 0"
+# The whole point: a clean run whose alert path is dead must not read as "fine".
+S="$WORK/t16"; run "$S"                       # baseline with a healthy path
+[ "$RC" = "0" ] && ok "healthy path -> exit 0" || bad "expected 0, got $RC"
+[ ! -f "$S/ALERT-UNDELIVERED.txt" ] && ok "no marker on a healthy path" || bad "marker written spuriously"
+run "$S" FAKE_ROLE_STATUS=VACANT
+[ "$RC" = "3" ] && ok "exit 3, not 0" || bad "expected 3, got $RC"
+has "$S/ALERT-UNDELIVERED.txt" "role fulcra-primitives-maintainer is VACANT" \
+  && ok "marker names the vacant role" || bad "marker missing: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+
+echo
+echo "17. unverifiable target (degraded transport) is a problem, not a pass"
+S="$WORK/t17"; run "$S" FAKE_ROLE_STATUS=UNKNOWN
+[ "$RC" = "3" ] && ok "exit 3" || bad "expected 3, got $RC"
+has "$S/ALERT-UNDELIVERED.txt" "cannot verify target" && ok "marker says it could not check" \
+  || bad "marker did not name the failed check: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+
+echo
+echo "18. drift + dead alert path: exit stays 1, and the marker carries the drift"
+# 3 must not swallow 1 — the drift is the more specific summons.
+S="$WORK/t18"; run "$S"
+run "$S" FAKE_ROLE_STATUS=VACANT FAKE_VERBS="auth catalog data-type tag user-info record delete"
+[ "$RC" = "1" ] && ok "exit 1 (drift outranks the delivery failure)" || bad "expected 1, got $RC"
+has "$S/DRIFT-ALERT.txt" "cli_verbs: ADDED delete, record" && ok "drift alert still written" || bad "drift alert lost"
+has "$S/ALERT-UNDELIVERED.txt" "WHAT THIS RUN WAS TRYING TO SAY" && ok "marker carries the undelivered payload" \
+  || bad "marker has no payload: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+has "$S/ALERT-UNDELIVERED.txt" "FULL-REWRITE TRIGGER" && ok "the undelivered P1 is legible in the marker" \
+  || bad "marker does not carry the trigger"
+
+echo
+echo "19. a dropped tell (slug collision, rc 1) is a delivery failure"
+# `tell` rc was logged to a file nothing reads: a dropped alert and a delivered
+# one produced the same run.
+S="$WORK/t19"; run "$S"
+run "$S" FAKE_TELL_RC=1 FAKE_VERBS="auth catalog data-type tag user-info record"
+has "$S/ALERT-UNDELIVERED.txt" "tell FAILED rc=1" && ok "marker names the dropped tell" \
+  || bad "dropped tell not surfaced: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+
+echo
+echo "20. the path recovering clears the marker (and only it)"
+S="$WORK/t20"; run "$S"
+run "$S" FAKE_ROLE_STATUS=VACANT
+[ -f "$S/ALERT-UNDELIVERED.txt" ] && ok "marker present while the role is vacant" || bad "no marker"
+run "$S"
+[ "$RC" = "0" ] && ok "exit 0 once the role is held again" || bad "expected 0, got $RC"
+[ ! -f "$S/ALERT-UNDELIVERED.txt" ] && ok "marker cleared by the run that could deliver" || bad "marker not cleared"
+
+echo
+echo "21. agent-kind target: stale is unreachable, live is reachable"
+# The exact 2026-07-16 shape: an identity that exists in presence, last beat 8
+# days ago. It is IN the roster — absence was never the tell.
+S="$WORK/t21"
+run "$S" PRIMITIVES_TARGET_KIND=agent PRIMITIVES_TARGET=claude-code:Mac:fulcra-primitives-maintainer \
+  FAKE_LIVENESS=live
+[ "$RC" = "0" ] && ok "live named agent -> exit 0" || bad "expected 0, got $RC"
+run "$S" PRIMITIVES_TARGET_KIND=agent PRIMITIVES_TARGET=claude-code:Mac:fulcra-primitives-maintainer \
+  FAKE_LIVENESS=stale
+[ "$RC" = "3" ] && ok "stale named agent -> exit 3" || bad "expected 3, got $RC"
+has "$S/ALERT-UNDELIVERED.txt" "liveness=stale" && ok "marker names the liveness" \
+  || bad "marker does not name liveness: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+run "$S" PRIMITIVES_TARGET_KIND=agent PRIMITIVES_TARGET=nobody-here FAKE_LIVENESS=ABSENT
+[ "$RC" = "3" ] && ok "target absent from the roster -> exit 3" || bad "expected 3, got $RC"
+has "$S/ALERT-UNDELIVERED.txt" "has no presence shard" && ok "marker distinguishes absent from stale" \
+  || bad "absent not named: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
