@@ -20,8 +20,11 @@
 #     reads (FULCRA_COORD_AGENT), never minted here. A script that invents an
 #     identity produces a phantom that diverges from the engine's resolver — the
 #     same family of bug as the id we are removing.
-#   - The TARGET is a ROLE, not a named agent. Sessions stop; the role outlives
-#     them, and whoever holds it is by definition the one who should act.
+#   - The TARGET is configured as a ROLE, not a named agent. Sessions stop; the
+#     role outlives them, and whoever holds it is by definition the one who
+#     should act. But the role is an ADDRESS BOOK ENTRY, not an address: it is
+#     resolved to a holder's IDENTITY at send time, and the tell is addressed
+#     there. See prim_check_target for why that resolution is not optional.
 #   - Reachability is verified on EVERY run, including clean ones. Routing rot is
 #     silent by construction: it costs nothing until the day it matters, which is
 #     the day you find out. The check is the alert path's positive control — an
@@ -36,11 +39,12 @@
 PRIM_TEAM="${PRIMITIVES_TEAM:-fulcra}"
 # WHO the alert is for. A role: whoever holds fulcra-primitives-maintainer.
 PRIM_TARGET="${PRIMITIVES_TARGET:-fulcra-primitives-maintainer}"
-# role|agent — changes only HOW reachability is verified, never whether it is.
-# `role`  -> `roles status`: HELD/CONTESTED with a fresh holder is reachable.
-# `agent` -> `presence show`: live|idle is reachable (the engine's own broadcast
-#            reach: everyone not stale). Provided because a host may deliberately
-#            aim at one named agent; it gets the same verification, not a pass.
+# role|agent — changes only HOW the delivery address is RESOLVED, never whether
+# it is verified. Both kinds converge on the same final test: presence must vouch
+# for the identity we are about to address.
+# `role`  -> `roles status` names the fresh holders; presence must then vouch for
+#            at least one of them, and THAT holder is the address.
+# `agent` -> the configured id is the candidate; presence must vouch for it.
 PRIM_TARGET_KIND="${PRIMITIVES_TARGET_KIND:-role}"
 PRIM_WORKSTREAM="${PRIMITIVES_WORKSTREAM:-fulcra-primitives}"
 PRIM_CE="${PRIMITIVES_COORD_ENGINE:-$(command -v coord-engine || echo "$HOME/.local/bin/coord-engine")}"
@@ -56,6 +60,10 @@ PRIM_SENDER=""
 PRIM_SENDER_ARGS=()
 PRIM_PROBLEMS=()
 PRIM_TARGET_STATE="not checked"
+# The resolved delivery ADDRESS — always a concrete agent identity, never a role
+# name. Empty until prim_check_target proves one; prim_notify treats empty as
+# "nobody was proven to be listening" and says so.
+PRIM_DELIVER_TO=""
 
 # Callers define ts()/log() before sourcing; these are the fallbacks so the lib
 # never depends on the caller's dialect.
@@ -114,40 +122,58 @@ prim_problem() {
 prim_alert_path_ok() { [ ${#PRIM_PROBLEMS[@]} -eq 0 ]; }
 
 # --- reachability ----------------------------------------------------------
-# Verify the target can receive. Fail-closed at every step: an unparseable or
-# failed lookup is UNKNOWN — a problem — never "assume it's fine". "I could not
-# check whether anyone is listening" and "someone is listening" must not produce
-# the same run.
+# Verify the target can receive, and resolve WHO to address. Fail-closed at every
+# step: an unparseable or failed lookup is UNKNOWN — a problem — never "assume
+# it's fine". "I could not check whether anyone is listening" and "someone is
+# listening" must not produce the same run.
+#
+# WHY A FRESH LEASE IS NOT ENOUGH, and why we resolve the role to an identity.
+# This function used to accept HELD/CONTESTED + any fresh_holders as reachable,
+# and prim_notify then addressed the tell to the ROLE NAME. That is the same
+# silent-delivery bug this file exists to close, rebuilt one level up. Read the
+# engine (coord_engine/, verified 2026-07-16 at packages/coord-engine):
+#
+#   - directives.is_directed_at(row, agent, held_roles) expands a role assignee
+#     ONLY if the caller passes held_roles.
+#   - cmd_inbox -> _inbox_rows_status -> _directed_inbox(...)  — no held_roles.
+#   - cmd_briefing -> directives.inbox(rows, acks, agent, now) — no held_roles.
+#   - query.needs_me() has no held_roles parameter AT ALL: it matches assignee ==
+#     agent or blocked_on naming the agent. Nothing else.
+#   - Only _run_listen_tick (cli.py ~2346) resolves holders and folds roles.
+#
+# So a directive addressed to a role is invisible to `inbox`, `needs-me` and
+# `briefing` — the folds a reviewer heartbeat actually runs — and is seen ONLY by
+# a live `listen`. A holder can keep a lease fresh forever without ever running
+# one. Lease freshness proves someone HOLDS the role; it proves nothing consumes
+# it. Accepting it would clear the marker on a proxy for delivery.
+#
+# The fix is (a) from the two on offer: resolve the fresh holder to an IDENTITY
+# and address that. An agent-addressed directive is folded by inbox, needs-me,
+# briefing AND listen — every consumer path, not the one. That removes the
+# dependence on the single fold role routing needs.
+#
+# Option (b) — a durable role-listener contract — was rejected on evidence, not
+# taste: `listen`'s state file is LOCAL (COORD_LISTENER_STATE, default
+# ~/.cache/coord-engine), and no listener heartbeat shard exists anywhere in the
+# store. There is nothing on the bus for another host to observe, so (b) means
+# new engine surface plus fleet-wide adoption before the contract holds — and
+# until every host adopts it, its absence is indistinguishable from a dead path,
+# so this script would mark every run broken. That is a coord-engine change, not
+# an alert-path fix.
+#
+# What this DOES prove: the identity we address is beating (presence live|idle —
+# the engine's own broadcast-reach standard, `presence.broadcast_roster` = not
+# stale) and the directive lands in a fold that identity's watcher runs. What it
+# does NOT prove is that a human read it; only an ack proves that, and an ack
+# cannot be awaited in-band. Hence the marker is retained by every OTHER failure
+# of the path, and the outstanding-flag replay (see the callers) re-alerts an
+# owed payload rather than trusting a single tell.
 prim_check_target() {
-  local out rc verdict
+  local out rc verdict pres candidates
+  PRIM_DELIVER_TO=""
   if [ "$PRIM_TARGET_KIND" = "agent" ]; then
-    out="$("$PRIM_CE" presence show "$PRIM_TEAM" --json 2>&1)"; rc=$?
-    if [ $rc -ne 0 ]; then
-      PRIM_TARGET_STATE="UNKNOWN"
-      prim_problem "cannot verify target: \`presence show $PRIM_TEAM\` exited $rc ($(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200))"
-      return 1
-    fi
-    verdict="$(TARGET="$PRIM_TARGET" TEAM="$PRIM_TEAM" python3 -c '
-import json, os, sys
-try:
-    ros = json.load(sys.stdin)
-    if not isinstance(ros, list):
-        raise ValueError("roster is not a list")
-except Exception as e:
-    print("UNKNOWN|roster did not parse (%s)" % (e,)); raise SystemExit(0)
-t = os.environ["TARGET"]
-hit = [r for r in ros if isinstance(r, dict) and r.get("agent") == t]
-if not hit:
-    print("ABSENT|%s has no presence shard at all in team/%s — it has never beaten, "
-          "or the id is a typo" % (t, os.environ.get("TEAM", "?")))
-    raise SystemExit(0)
-liv = hit[0].get("liveness")
-seen = hit[0].get("last_seen")
-# The engine treats not-stale as reachable (its broadcast roster). Match it
-# rather than inventing a second liveness rule.
-print("%s|%s liveness=%s last_seen=%s" % (
-    "OK" if liv in ("live", "idle") else "DEAD", t, liv, seen))
-' <<<"$out" 2>/dev/null)"
+    # A named agent is its own candidate; it still has to be vouched for below.
+    candidates="$PRIM_TARGET"
   else
     out="$("$PRIM_CE" roles status "$PRIM_TEAM" "$PRIM_TARGET" --json 2>&1)"; rc=$?
     if [ $rc -ne 0 ]; then
@@ -167,23 +193,85 @@ except Exception as e:
 fresh = d.get("fresh_holders")
 if not isinstance(fresh, list):
     print("UNKNOWN|roles status has no fresh_holders list"); raise SystemExit(0)
-if status in ("HELD", "CONTESTED") and fresh:
-    print("OK|%s held by %s" % (d.get("role"), ", ".join(map(str, fresh))))
+holders = [str(h) for h in fresh if h]
+if status in ("HELD", "CONTESTED") and holders:
+    # Candidates only. A lease is a claim to the role, not evidence of a reader.
+    print("HOLDERS|%s" % ",".join(holders))
 else:
     print("DEAD|role %s is %s (no fresh holder). A directive to a role nobody holds "
           "is delivered to nothing." % (d.get("role"), status))
 ' <<<"$out" 2>/dev/null)"
+    case "${verdict:-}" in
+      HOLDERS\|*) candidates="${verdict#HOLDERS|}" ;;
+      DEAD\|*)
+        PRIM_TARGET_STATE="UNREACHABLE — ${verdict#*|}"
+        prim_problem "alert target is unreachable: ${verdict#*|}"
+        return 1 ;;
+      *)
+        PRIM_TARGET_STATE="UNKNOWN"
+        prim_problem "cannot verify target ${PRIM_TARGET}: ${verdict:-roles-status parse produced no output (python3 missing, or it crashed)}"
+        return 1 ;;
+    esac
   fi
+
+  # Both kinds converge here: presence must vouch for the identity we address.
+  pres="$("$PRIM_CE" presence show "$PRIM_TEAM" --json 2>&1)"; rc=$?
+  if [ $rc -ne 0 ]; then
+    PRIM_TARGET_STATE="UNKNOWN"
+    prim_problem "cannot verify target: \`presence show $PRIM_TEAM\` exited $rc ($(printf '%s' "$pres" | tr '\n' ' ' | cut -c1-200))"
+    return 1
+  fi
+  verdict="$(CANDIDATES="$candidates" TEAM="$PRIM_TEAM" python3 -c '
+import json, os, sys
+try:
+    ros = json.load(sys.stdin)
+    if not isinstance(ros, list):
+        raise ValueError("roster is not a list")
+except Exception as e:
+    print("UNKNOWN|presence roster did not parse (%s)" % (e,)); raise SystemExit(0)
+cands = [c for c in os.environ["CANDIDATES"].split(",") if c]
+if not cands:
+    print("UNKNOWN|no candidate identity to check"); raise SystemExit(0)
+seen = {}
+for r in ros:
+    if isinstance(r, dict) and r.get("agent"):
+        seen[str(r["agent"])] = (r.get("liveness"), r.get("last_seen"))
+# The engine treats not-stale as reachable (presence.broadcast_roster). Match it
+# rather than inventing a second liveness rule.
+reach = sorted(c for c in cands if seen.get(c, (None, None))[0] in ("live", "idle"))
+if reach:
+    a = reach[0]
+    print("OK|%s|%s liveness=%s last_seen=%s" % (a, a, seen[a][0], seen[a][1]))
+    raise SystemExit(0)
+why = []
+for c in cands:
+    if c not in seen:
+        why.append("%s has no presence shard at all in team/%s — it has never "
+                   "beaten, or the id is a typo" % (c, os.environ.get("TEAM", "?")))
+    else:
+        why.append("%s liveness=%s last_seen=%s" % (c, seen[c][0], seen[c][1]))
+print("DEAD|%s" % "; ".join(why))
+' <<<"$pres" 2>/dev/null)"
 
   # An empty verdict means the parser itself died: UNKNOWN, not reachable.
   case "${verdict:-}" in
     OK\|*)
-      PRIM_TARGET_STATE="${verdict#OK|}"
-      log "target reachable: $PRIM_TARGET_STATE"
+      verdict="${verdict#OK|}"
+      PRIM_DELIVER_TO="${verdict%%|*}"
+      PRIM_TARGET_STATE="${verdict#*|}"
+      if [ "$PRIM_TARGET_KIND" != "agent" ]; then
+        PRIM_TARGET_STATE="$PRIM_TARGET_STATE (holds role $PRIM_TARGET)"
+      fi
+      log "target reachable: $PRIM_TARGET_STATE; delivering to $PRIM_DELIVER_TO"
       return 0 ;;
-    DEAD\|*|ABSENT\|*)
-      PRIM_TARGET_STATE="UNREACHABLE — ${verdict#*|}"
-      prim_problem "alert target is unreachable: ${verdict#*|}"
+    DEAD\|*)
+      if [ "$PRIM_TARGET_KIND" = "agent" ]; then
+        PRIM_TARGET_STATE="UNREACHABLE — ${verdict#*|}"
+      else
+        # Name the trap explicitly: the lease looked fine, and that is the point.
+        PRIM_TARGET_STATE="UNREACHABLE — role $PRIM_TARGET has a fresh holder, but no holder is reachable: ${verdict#*|}"
+      fi
+      prim_problem "alert target is unreachable: $(printf '%s' "$PRIM_TARGET_STATE" | sed 's/^UNREACHABLE — //')"
       return 1 ;;
     *)
       PRIM_TARGET_STATE="UNKNOWN"
@@ -197,18 +285,39 @@ else:
 # the rc is checked, logged, AND turned into a delivery problem. It used to be
 # logged only — to a file under the state dir that nothing reads. A tell that
 # failed and a tell that landed produced the same run.
+#
+# The tell goes to PRIM_DELIVER_TO — a resolved IDENTITY — never to the role
+# name. See prim_check_target: a role-addressed directive is folded only by
+# `listen`, so addressing the role is how an alert reaches a lease-holder who
+# never reads it.
+#
+# When no identity was resolved (the check failed), we still SEND — a best-effort
+# shout at the role is worth more than silence, and something may be listening —
+# but it is never counted as delivery. rc 0 from that send is exactly the "zero
+# exit code from a call whose delivery you did not confirm" this file refuses to
+# treat as evidence, so it books a problem and keeps the marker regardless.
 prim_notify() {
-  local prio="$1" title="$2" summary="$3" out rc
-  out="$("$PRIM_CE" tell "$PRIM_TEAM" "$PRIM_TARGET" "$title" \
+  local prio="$1" title="$2" summary="$3" out rc addr unproven=""
+  if [ -n "$PRIM_DELIVER_TO" ]; then
+    addr="$PRIM_DELIVER_TO"
+  else
+    addr="$PRIM_TARGET"
+    unproven="yes"
+  fi
+  out="$("$PRIM_CE" tell "$PRIM_TEAM" "$addr" "$title" \
         ${PRIM_SENDER_ARGS[@]+"${PRIM_SENDER_ARGS[@]}"} \
         --workstream "$PRIM_WORKSTREAM" --priority "$prio" --summary "$summary" 2>&1)"
   rc=$?
   if [ $rc -ne 0 ]; then
     prim_problem "tell FAILED rc=$rc — this alert was NOT delivered: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
-  else
-    log "tell ok ($PRIM_TARGET): $title"
+    return $rc
   fi
-  return $rc
+  if [ -n "$unproven" ]; then
+    prim_problem "tell to '$addr' returned 0, but NO reachable identity was resolved for it — this alert is NOT proven delivered (a role-addressed directive is folded only by a live \`listen\`). Treat it as unheard."
+    return 1
+  fi
+  log "tell ok ($addr): $title"
+  return 0
 }
 
 # --- the marker ------------------------------------------------------------
@@ -240,15 +349,27 @@ prim_flush() {
       echo "check failing. The next real alert would have gone nowhere."
     fi
     echo
-    echo "TARGET: $PRIM_TARGET (kind=$PRIM_TARGET_KIND, team=$PRIM_TEAM)"
-    echo "STATE:  $PRIM_TARGET_STATE"
-    echo "SENDER: ${PRIM_SENDER:-<unset — coord-engine host fallback>}"
+    echo "TARGET:   $PRIM_TARGET (kind=$PRIM_TARGET_KIND, team=$PRIM_TEAM)"
+    echo "STATE:    $PRIM_TARGET_STATE"
+    echo "DELIVERY: ${PRIM_DELIVER_TO:-<unresolved — no reachable identity>}"
+    echo "SENDER:   ${PRIM_SENDER:-<unset — coord-engine host fallback>}"
     echo
     echo "PROBLEMS:"
     printf '  - %s\n' "${PRIM_PROBLEMS[@]}"
     echo
-    echo "FIX: give the role a live holder"
-    echo "  coord-engine roles claim $PRIM_TEAM $PRIM_TARGET --agent <your-id>"
+    if [ "$PRIM_TARGET_KIND" = "agent" ]; then
+      echo "FIX: this job is aimed at a NAMED AGENT, and presence says it is not"
+      echo "beating. Point it at a live identity, or bring that one back:"
+      echo "  coord-engine presence beat $PRIM_TEAM --agent $PRIM_TARGET"
+    else
+      echo "FIX: the role needs a holder that is BOTH leased and beating. A fresh"
+      echo "lease alone is not enough and is not accepted here: a directive sent to a"
+      echo "role NAME is folded only by a live \`listen\` — \`inbox\`, \`needs-me\` and"
+      echo "\`briefing\` do not expand role assignees — so this job resolves the role"
+      echo "to a holder identity and needs presence to vouch for it."
+      echo "  coord-engine roles claim $PRIM_TEAM $PRIM_TARGET --agent <your-id>"
+      echo "  coord-engine presence beat $PRIM_TEAM --agent <your-id>   # and keep beating"
+    fi
     echo "or repoint the job (PRIMITIVES_TARGET / PRIMITIVES_TARGET_KIND) at an"
     echo "identity that is actually live. The next run whose target answers clears"
     echo "this file itself."

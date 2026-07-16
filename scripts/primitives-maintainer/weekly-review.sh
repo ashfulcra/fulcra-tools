@@ -300,8 +300,19 @@ if [ ${#UNKNOWN_REASONS[@]} -gt 0 ]; then
     echo "this file. The next run whose probes answer clears this one for you."
   } > "$WUNKNOWN"
   log "UNKNOWN: ${UNKNOWN_REASONS[*]}"
+  # Carry any outstanding re-read into THIS alert, and say so. Without this, an
+  # UNKNOWN week silently discharges an older debt: if a previous WIDE DRIFT tell
+  # failed, WFLAG and ALERT-UNDELIVERED.txt both survived — but a successful
+  # UNKNOWN tell to a recovered target would clear the marker, which recorded that
+  # the WIDE DRIFT payload was never delivered. A debt is not paid by the delivery
+  # of a different message about a different subject. The flag file is read here
+  # BEFORE this run appends to it (that happens further down), so its presence
+  # means a PREVIOUS week's re-read is still owed. Same guard as the daily's
+  # UNKNOWN branch (drift-check.sh).
+  WOUTSTANDING_NOTE=""
+  [ -f "$WFLAG" ] && WOUTSTANDING_NOTE=" SEPARATELY: $WFLAG is still outstanding from an earlier week (its wide drift, if any, was never actioned and the baseline has moved past it) and is untouched by this run — that re-read is still owed. Flag contents: $(head -c 500 "$WFLAG" | tr '\n' ' ')"
   prim_notify P1 "UNKNOWN: Fulcra primitives weekly wide check could not observe the surface ($(ts))" \
-    "$(printf '%s; ' "${UNKNOWN_REASONS[@]}")Baseline NOT advanced — a probe that cannot answer is not a clean week. Fix the probe, then re-run scripts/primitives-maintainer/weekly-review.sh. Probe-failure file: $WUNKNOWN."
+    "$(printf '%s; ' "${UNKNOWN_REASONS[@]}")Baseline NOT advanced — a probe that cannot answer is not a clean week. Fix the probe, then re-run scripts/primitives-maintainer/weekly-review.sh. Probe-failure file: $WUNKNOWN.$WOUTSTANDING_NOTE"
   # The re-read flag still drops: it is owed every week no matter what the probes
   # did, and a session doing it by hand is exactly what an UNKNOWN week needs.
   DRIFT_NOTE="wide fingerprint: UNKNOWN this week — probes could not observe the surface (see $WUNKNOWN). Re-read against the live surface by hand; do not trust a hash to have covered it."
@@ -397,6 +408,19 @@ if [ -n "$CHANGED" ]; then
   prim_notify P2 "WEEKLY WIDE-DRIFT: full human-eyes re-read of FULCRA-PRIMITIVES.md needed ($(ts))" \
     "Broad fingerprint changed — new endpoints/schemas, docs prose, or MCP surface the daily narrow check misses. WHAT MOVED: $(printf '%s' "$DRIFT_NOTE" | tr '\n' '; ') Re-read FULCRA-PRIMITIVES.md end-to-end, then rm $WFLAG. Flag file: $WFLAG."
   finish 1 "WIDE DRIFT: $(printf '%s' "$DRIFT_NOTE" | tr '\n' '; ')"
+fi
+# An unchanged week does NOT discharge an outstanding flag — it is exactly the
+# run that used to lose it. If a previous week's WIDE DRIFT notification failed,
+# WFLAG survived, but this path only set RC=1 and finished WITHOUT notifying;
+# once the target recovered, prim_flush cleared ALERT-UNDELIVERED.txt for a
+# payload nobody ever received. The debt evaporated on recovery. So: re-alert the
+# owed flag, and let prim_flush clear the marker only if THAT tell is proven
+# delivered. Same shape as the daily's outstanding branch (drift-check.sh).
+if [ -n "$OUTSTANDING" ]; then
+  log "no wide drift, but the weekly re-read is STILL OUTSTANDING: $WFLAG"
+  prim_notify P1 "OUTSTANDING: Fulcra primitives weekly re-read still unactioned ($(ts))" \
+    "No wide drift vs last week, but $WFLAG is still present — an earlier weekly re-read (and any wide drift it recorded) was never actioned, and the baseline has already moved past it, so that file is the only record. Re-read FULCRA-PRIMITIVES.md end-to-end for EVERY entry in it, then rm $WFLAG. Flag contents: $(head -c 800 "$WFLAG" | tr '\n' ' ')"
+  finish "$RC" "OUTSTANDING — an earlier weekly re-read is still unactioned ($WFLAG)"
 fi
 log "weekly review flag dropped; no wide drift vs last week ($CUR)"
 finish "$RC"

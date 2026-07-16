@@ -146,19 +146,32 @@ last beat 8 days earlier. `tell` returned 0. The drift was found by hand. So:
 
 | | Rule |
 |---|---|
-| **Target** | The **role** `fulcra-primitives-maintainer`, never a named agent. Sessions stop; the role outlives them, and whoever holds it is by definition who should act. |
+| **Target** | Configured as the **role** `fulcra-primitives-maintainer`, never a named agent. Sessions stop; the role outlives them, and whoever holds it is by definition who should act. But the role is an **address-book entry, not an address** — see *Addressing* below. |
 | **Sender** | Resolved at runtime from `PRIMITIVES_AGENT` / `FULCRA_COORD_AGENT` — the same var the engine reads. Unset, we omit `--from` and let **coord-engine's own** resolver derive `coord-reconcile:<hostname>`; a script that mints its own id is a second resolver that agrees with the engine right up until it doesn't. |
-| **Reachability** | Verified **every run, including clean ones** — routing rot costs nothing until the day it matters, which is the day you find out. Reachable = `roles status` says HELD/CONTESTED **with a fresh holder** (or, for `PRIMITIVES_TARGET_KIND=agent`, `presence show` says live/idle — the engine's own broadcast reach). |
+| **Addressing** | The role is resolved to a **holder identity** at send time and the `tell` goes *there*. A directive addressed to a role name is folded **only** by a live `listen`: in `coord_engine`, `cmd_inbox`, `cmd_briefing` and `query.needs_me` all fold *without* `held_roles`, so a holder running an ordinary heartbeat never sees it. An agent-addressed directive is folded by every consumer path. |
+| **Reachability** | Verified **every run, including clean ones** — routing rot costs nothing until the day it matters, which is the day you find out. Reachable = a fresh lease **and** `presence` vouching for that holder (live/idle — the engine's own broadcast reach). A lease alone is **not** accepted: it proves someone *holds* the role, not that anything *consumes* it. |
 | **Fail-closed** | A lookup that errors or does not parse is **UNKNOWN → a problem**, never "assume it's fine". "Nobody is listening" and "I could not check" are both loud; neither is a pass. |
-| **Delivery** | `tell`'s rc is checked and a nonzero rc (e.g. the slug-prefix collision that returns 1 "already exists") is a **delivery failure**, not a log line. It used to be logged — to a file nothing reads. |
+| **Delivery** | `tell`'s rc is checked and a nonzero rc (e.g. the slug-prefix collision that returns 1 "already exists") is a **delivery failure**, not a log line. It used to be logged — to a file nothing reads. An rc 0 to an *unresolved* address is also not delivery, and is booked as a problem. |
 | **Loud locally** | Any of the above failing writes `ALERT-UNDELIVERED.txt`, prints to stderr, and exits **3** on a run that would otherwise have exited 0. A dead mailbox cannot tell you it is dead, so the local side has to. |
 
-A vacant role is *deliberately* a visible local failure rather than a fallback to
-some other recipient: silently redirecting a P1 to whoever is around is how a
-mailbox becomes wrong without anyone noticing. Fix it by giving the role a holder
-(`coord-engine roles claim fulcra fulcra-primitives-maintainer --agent <id>`);
-the next run that can deliver clears the marker itself. Fleet-wide, the engine's
-own `coord-engine escalate` sweep is what turns a vacant role into a P1 at its
+**A fresh lease is not a listener.** The reachability rule above is deliberately
+stricter than "is the role held", because the first version of this file accepted
+HELD + a fresh holder and then addressed the `tell` to the role *name* — which
+reproduced the 2026-07-16 failure one level up: `tell` returns 0, the marker
+clears, and a holder who never runs `listen` never sees the alert. What the check
+proves is that the identity being addressed is **beating** and that the directive
+lands in a fold that identity's watcher runs. What it does *not* prove is that a
+human read it — only an ack proves that, and an ack cannot be awaited in-band.
+Hence the outstanding-flag replay: an owed alert is **re-sent** on later runs
+rather than trusted to one `tell` (see *The markers*).
+
+A vacant — or dark — role is *deliberately* a visible local failure rather than a
+fallback to some other recipient: silently redirecting a P1 to whoever is around
+is how a mailbox becomes wrong without anyone noticing. Fix it by giving the role
+a holder that both leases **and** beats (`coord-engine roles claim fulcra
+fulcra-primitives-maintainer --agent <id>` + a live `presence beat`); the next run
+that can deliver clears the marker itself. Fleet-wide, the engine's own
+`coord-engine escalate` sweep is what turns a vacant role into a P1 at its
 maintainer — these jobs report their own reachability, they don't reimplement it.
 
 ### The markers
@@ -172,8 +185,8 @@ alert file is the **only** surviving record of what changed. So the markers in
 |---|---|---|
 | `DRIFT-ALERT.txt` | Real drift was observed; a `FULCRA-PRIMITIVES.md` rewrite is owed. | A session that did the rewrite, with `rm`. **Nothing in the script ever truncates it.** A second drift *appends*; every run that finds it re-alerts P1 ("OUTSTANDING"). |
 | `PROBE-UNKNOWN.txt` | A probe could not answer; the surface was not observed. | The next run whose probes answer — the script removes it itself. |
-| `ALERT-UNDELIVERED.txt` | Nobody could be shown to have received this run's alert (target vacant/stale/unverifiable, or the `tell` was dropped). Whatever else the run said, treat it as unheard. | The next run whose target answers — the script removes it itself. |
-| `WEEKLY-REVIEW-DUE.txt` | The weekly human-eyes re-read is owed. Dropped every week; **appended to** while outstanding, since once the weekly baseline moves past a wide drift this file is its only record. | A session that did the re-read, with `rm`. |
+| `ALERT-UNDELIVERED.txt` | Nobody could be shown to have received this run's alert (role vacant, no reachable holder, target unverifiable, or the `tell` was dropped). Whatever else the run said, treat it as unheard. | The next run whose target answers **and whose owed alerts were re-sent** — the script removes it itself. |
+| `WEEKLY-REVIEW-DUE.txt` | The weekly human-eyes re-read is owed. Dropped every week; **appended to** while outstanding, since once the weekly baseline moves past a wide drift this file is its only record. | A session that did the re-read, with `rm`. Like `DRIFT-ALERT.txt`, every later run that finds it **re-alerts** ("OUTSTANDING") — including an UNKNOWN week, which carries it in that week's alert. An unchanged week does not discharge it. |
 | `WEEKLY-PROBE-UNKNOWN.txt` | A weekly probe could not answer. Its **own** file, not `PROBE-UNKNOWN.txt`: the two jobs share a state dir, and a weekly debt cleared by a healthy daily run would be discharged by something that never checked it. | The next weekly run whose probes answer. |
 
 They are separate because they are different debts, with different owners and
@@ -199,8 +212,8 @@ human, and more specifically.
 | `PRIMITIVES_STATE_DIR` | `<checkout>/.primitives-state` | Point a test run at a scratch state dir. **Always set this when trying either script out** — a live run mutates the real baseline. |
 | `PRIMITIVES_COORD_ENGINE` | `coord-engine` on `PATH` | Point at a stub to capture the tell instead of posting it. |
 | `PRIMITIVES_AGENT` / `FULCRA_COORD_AGENT` | *(unset — coord-engine derives `coord-reconcile:<hostname>`)* | The identity alerts are sent **as**. Never hardcode one in a script or plist template. |
-| `PRIMITIVES_TARGET` | `fulcra-primitives-maintainer` | Who alerts are **for**. A role by default. |
-| `PRIMITIVES_TARGET_KIND` | `role` | `role` verifies via `roles status`; `agent` verifies via `presence show` liveness. Changes only *how* reachability is checked, never *whether*. |
+| `PRIMITIVES_TARGET` | `fulcra-primitives-maintainer` | Who alerts are **for**. A role by default; resolved to a holder identity before sending. |
+| `PRIMITIVES_TARGET_KIND` | `role` | `role` resolves holders via `roles status`, then requires `presence` to vouch for one; `agent` takes the configured id as the candidate and requires the same. Changes only *how* the address is resolved, never *whether* it is verified — **both** kinds end at presence. |
 | `PRIMITIVES_TEAM` | `fulcra` | Coord team to post to. |
 | `PRIMITIVES_SPEC_URL`, `PRIMITIVES_MCP_URL`, `PRIMITIVES_PYPI_URL` | production | Redirect a probe (testing; `file://` works). |
 | `PRIMITIVES_DOCS_{OVERVIEW,API,MCP}_URL` | the docs **origin** (see above — the vanity domain drops the path) | Weekly only. Redirect a docs probe. |
@@ -226,15 +239,20 @@ The role pushes the doc **directly to `main`** (doc-only); everything else,
 including this tooling, goes through the normal PR + review flow.
 
 1. Clone the repo to a dedicated checkout.
-2. **Claim the role the alerts are addressed to**, or nothing this tooling
-   detects reaches anyone. This is the install step, not a nicety — the scripts
-   check it on every run and exit 3 if it is vacant:
+2. **Claim the role the alerts are addressed to — and keep beating**, or nothing
+   this tooling detects reaches anyone. This is the install step, not a nicety —
+   the scripts check it on every run and exit 3 if it fails:
    ```bash
    coord-engine roles claim fulcra fulcra-primitives-maintainer --agent <your-id>
    coord-engine roles status fulcra fulcra-primitives-maintainer   # expect HELD
+   coord-engine presence show fulcra                               # expect <your-id> live/idle
    ```
+   Both halves are load-bearing, and the second is the one that is easy to miss.
    The lease has a 24h SLA, so a session that stops holding it makes the role
-   vacant — and the next run says so, loudly, instead of pretending.
+   vacant. But a **fresh lease is not enough**: the alert is delivered to the
+   holder's *identity*, and presence has to vouch for it. A holder that leases the
+   role and then goes dark is a role that is HELD and reaches nobody — the next run
+   says so, loudly, instead of pretending.
 3. Copy the plist templates from [`launchd/`](launchd), replacing
    `__CHECKOUT__` with the absolute path of your checkout, into
    `~/Library/LaunchAgents/`, then `launchctl load -w` each. The daily job runs

@@ -33,18 +33,38 @@ bad()  { FAIL=$((FAIL+1)); red   "  FAIL: $*"; }
 
 # --- fixtures ---------------------------------------------------------------
 
+# Same two-axis stub as test-drift-check.sh:
+#   FAKE_ROLE_STATUS     -> the lease  (default HELD, fresh holder `stub-holder`)
+#   FAKE_HOLDER_LIVENESS -> whether that holder is actually beating (default live;
+#                           "ABSENT" drops it from the roster entirely)
+#   FAKE_TELL_RC         -> fail the tell
+# The roster is keyed on agent IDENTITIES — a role name never appears in one.
 cat > "$WORK/fake-coord-engine" <<'CE'
 #!/bin/bash
 case "$1 ${2:-}" in
   "roles status")
-    printf '{"team":"%s","role":"%s","status":"HELD","fresh_holders":["stub-holder"]}\n' "$3" "$4"
+    st="${FAKE_ROLE_STATUS:-HELD}"
+    if [ "$st" = "HELD" ]; then
+      printf '{"team":"%s","role":"%s","status":"HELD","fresh_holders":["stub-holder"]}\n' "$3" "$4"
+    else
+      printf '{"team":"%s","role":"%s","status":"%s","fresh_holders":[]}\n' "$3" "$4" "$st"
+    fi
     exit 0 ;;
   "presence show")
-    printf '[{"agent":"%s","liveness":"live","last_seen":"2026-07-16T21:00:00Z"}]\n' \
-      "${PRIMITIVES_TARGET:-fulcra-primitives-maintainer}"
+    if [ "${FAKE_HOLDER_LIVENESS:-live}" = "ABSENT" ]; then
+      printf '[]\n'
+    else
+      printf '[{"agent":"stub-holder","liveness":"%s","last_seen":"2026-07-16T21:00:00Z"}]\n' \
+        "${FAKE_HOLDER_LIVENESS:-live}"
+    fi
     exit 0 ;;
   "tell "*)
-    printf '%s\n' "$*" >> "${TELL_LOG:-/dev/null}"; exit 0 ;;
+    printf '%s\n' "$*" >> "${TELL_LOG:-/dev/null}"
+    if [ -n "${FAKE_TELL_RC:-}" ] && [ "${FAKE_TELL_RC}" != "0" ]; then
+      echo "directive failed: task already exists" >&2
+      exit "$FAKE_TELL_RC"
+    fi
+    exit 0 ;;
 esac
 echo "fake-coord-engine: unhandled: $*" >&2
 exit 64
@@ -332,6 +352,109 @@ if [ -n "$BAD_IDIOM" ]; then
   bad "a failure can still be mistaken for an observation: $BAD_IDIOM"
 else
   ok "no default-as-observation idiom in weekly-review.sh"
+fi
+
+echo
+echo "19. a fresh role lease is NOT proof the alert reached anyone"
+# The trap this whole file exists to close, one level up. `roles status` says
+# HELD with a fresh holder — the lease is perfect — but the holder is not beating,
+# so nothing is consuming the role. A directive addressed to a ROLE NAME is folded
+# ONLY by a live `listen`: coord_engine's cmd_inbox, cmd_briefing and
+# query.needs_me all fold WITHOUT held_roles (verified in packages/coord-engine),
+# so a lease-holder who never runs `listen` never sees it. Accepting the lease as
+# reachability would clear the marker on a payload nobody could receive — `tell`
+# returning 0 all the way.
+S="$WORK/t19"; run "$S" FAKE_ROLE_STATUS=HELD FAKE_HOLDER_LIVENESS=stale
+[ "$RC" = "3" ] && ok "fresh lease + unreachable holder is exit 3, not a clean week" \
+  || bad "expected 3, got $RC — a fresh lease was accepted as reachability"
+has "$S/ALERT-UNDELIVERED.txt" "fresh holder, but no holder is reachable" \
+  && ok "marker refuses the lease as evidence, and says why" \
+  || bad "marker does not name the trap: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+has "$S/ALERT-UNDELIVERED.txt" "stub-holder liveness=stale" \
+  && ok "marker names the holder and its liveness" \
+  || bad "marker does not name the holder: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+# The marker must SURVIVE. This is the discharge-on-a-proxy failure in its purest
+# form: the lease looked healthy, so the debt looked paid.
+[ -f "$S/ALERT-UNDELIVERED.txt" ] && ok "marker NOT cleared by a healthy-looking lease" \
+  || bad "marker was cleared"
+# And the absent-holder variant: a lease naming a holder that has never beaten.
+S="$WORK/t19b"; run "$S" FAKE_ROLE_STATUS=HELD FAKE_HOLDER_LIVENESS=ABSENT
+[ "$RC" = "3" ] && ok "fresh lease + holder with no presence shard is exit 3" \
+  || bad "expected 3, got $RC"
+has "$S/ALERT-UNDELIVERED.txt" "has no presence shard" \
+  && ok "marker names the never-beaten holder" \
+  || bad "marker does not name it: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+
+echo
+echo "20. the tell is addressed to the HOLDER IDENTITY, never the role name"
+# The other half of the fix: even with a live holder, addressing the ROLE would
+# leave the alert visible only to `listen`. The resolved identity is folded by
+# inbox/needs-me/briefing AND listen — every consumer path.
+S="$WORK/t20"; run "$S"                                    # baseline week
+: > "$S/tells.txt"
+run "$S" PRIMITIVES_SPEC_URL="file://$WORK/openapi-moved.json" \
+  FAKE_ROLE_STATUS=HELD FAKE_HOLDER_LIVENESS=live          # real wide drift -> a tell
+if grep -q "tell fulcra stub-holder" "$S/tells.txt" 2>/dev/null; then
+  ok "tell addressed to the resolved holder identity"
+else
+  bad "tell not addressed to the holder: $(cat "$S/tells.txt" 2>/dev/null)"
+fi
+if grep -q "tell fulcra fulcra-primitives-maintainer" "$S/tells.txt" 2>/dev/null; then
+  bad "tell was addressed to the ROLE NAME — only \`listen\` folds that"
+else
+  ok "no tell addressed to the bare role name"
+fi
+
+echo
+echo "21. a missed weekly alert is NOT discarded on the next healthy run"
+# Week 1: real wide drift, and the tell FAILS. WFLAG is owed, marker written.
+# Week 2: target healthy again, nothing changed. The old code set OUTSTANDING=yes,
+# exited 1, and never notified — so prim_flush cleared ALERT-UNDELIVERED.txt for a
+# payload that was never delivered. The debt evaporated on recovery.
+S="$WORK/t21"; mkdir -p "$S"
+run "$S"                                                   # week 0: baseline only
+: > "$S/tells.txt"
+run "$S" PRIMITIVES_SPEC_URL="file://$WORK/openapi-moved.json" FAKE_TELL_RC=1
+[ -f "$S/WEEKLY-REVIEW-DUE.txt" ] && ok "week 1: re-read flag owed" || bad "no flag"
+[ -f "$S/ALERT-UNDELIVERED.txt" ] && ok "week 1: failed tell left the marker" \
+  || bad "no marker after a failed tell"
+if [ "$RC" = "1" ] || [ "$RC" = "3" ]; then ok "week 1: loud (rc=$RC)"; else bad "week 1 rc=$RC"; fi
+# The baseline has ALREADY moved past the drift — that is why the flag file is the
+# only surviving record, and why losing it loses the drift itself.
+# Week 2 — same (moved) surface, so nothing changed; target recovered; flag owed.
+: > "$S/tells.txt"
+run "$S" PRIMITIVES_SPEC_URL="file://$WORK/openapi-moved.json"
+if grep -q "OUTSTANDING: Fulcra primitives weekly re-read still unactioned" "$S/tells.txt" 2>/dev/null; then
+  ok "week 2: the owed alert IS re-delivered on the unchanged week"
+else
+  bad "week 2: the owed alert was never re-sent: $(cat "$S/tells.txt" 2>/dev/null)"
+fi
+grep -q "stub-holder" "$S/tells.txt" && ok "week 2: replay went to the holder identity" \
+  || bad "week 2: replay not addressed to the holder"
+[ "$RC" = "1" ] && ok "week 2: exit 1 — the re-read is still owed" || bad "expected 1, got $RC"
+# ONLY NOW may the marker clear: the owed payload was proven delivered first.
+[ -f "$S/ALERT-UNDELIVERED.txt" ] \
+  && bad "marker survived a run whose owed alert WAS delivered" \
+  || ok "week 2: marker cleared only AFTER the owed alert was delivered"
+
+echo
+echo "22. an UNKNOWN week does not discharge an outstanding re-read either"
+# The same class as 21, one branch over, and the one I nearly shipped: the UNKNOWN
+# branch notifies about the PROBE failure and exits 2 BEFORE 21's replay is ever
+# reached. If an earlier week's re-read is still owed, that older debt goes
+# unmentioned — yet a successful UNKNOWN tell to a recovered target clears
+# ALERT-UNDELIVERED.txt, which may be recording that the OLDER payload was never
+# delivered. A debt is not paid by the delivery of a different message about a
+# different subject, so the UNKNOWN alert has to carry it.
+S="$WORK/t22"; mkdir -p "$S"
+run "$S"                                   # week 1: drops the flag (owed every week)
+: > "$S/tells.txt"
+run "$S" PRIMITIVES_SPEC_URL="file://$WORK/nonexistent.json"   # week 2: probes UNKNOWN
+[ "$RC" = "2" ] && ok "UNKNOWN week is exit 2" || bad "expected 2, got $RC"
+if grep -q "still outstanding from an earlier week" "$S/tells.txt" 2>/dev/null; then
+  ok "the UNKNOWN alert carries the older owed re-read to the same reader"
+else
+  bad "the UNKNOWN alert dropped the outstanding debt: $(cat "$S/tells.txt" 2>/dev/null)"
 fi
 
 echo

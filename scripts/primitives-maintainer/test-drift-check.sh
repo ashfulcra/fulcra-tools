@@ -113,10 +113,26 @@ chmod +x "$WORK/fake-cli"
 #   tell           -> append to $TELL_LOG instead of posting  (FAKE_TELL_RC to fail it)
 #   roles status   -> FAKE_ROLE_STATUS (default HELD); "UNKNOWN" exits 1 like the
 #                     real engine does when the lease listing is unreadable
-#   presence show  -> a roster where the target has FAKE_LIVENESS (default live);
-#                     "ABSENT" omits it entirely
+#   presence show  -> a roster. Two INDEPENDENT axes, because a role and its
+#                     holder are different things and the whole point of the
+#                     resolver is that a lease on one says nothing about the other:
+#                       FAKE_HOLDER_LIVENESS -> the role's fresh holder,
+#                                               `stub-holder` (default live)
+#                       FAKE_LIVENESS        -> the configured target itself, only
+#                                               listed when kind=agent (default live)
+#                     "ABSENT" omits that agent from the roster entirely.
+#
+# Note what the roster is keyed on: agent IDENTITIES. The real engine's
+# `fresh_holders` are agent ids and presence shards are per-agent — a ROLE NAME
+# never appears in a roster. An earlier stub listed the role name as though it
+# were an agent, which only type-checked because the code under test was itself
+# addressing the role. Fixtures that model the bug cannot catch it.
 cat > "$WORK/fake-coord-engine" <<'CE'
 #!/bin/bash
+add_agent() {
+  [ -n "$entries" ] && entries="$entries,"
+  entries="$entries{\"agent\":\"$1\",\"liveness\":\"$2\",\"last_seen\":\"2026-07-16T21:00:00Z\"}"
+}
 case "$1 ${2:-}" in
   "roles status")
     st="${FAKE_ROLE_STATUS:-HELD}"
@@ -131,12 +147,13 @@ case "$1 ${2:-}" in
     fi
     exit 0 ;;
   "presence show")
-    if [ "${FAKE_LIVENESS:-live}" = "ABSENT" ]; then
-      printf '[{"agent":"somebody-else","liveness":"live","last_seen":"2026-07-16T21:00:00Z"}]\n'
-    else
-      printf '[{"agent":"%s","liveness":"%s","last_seen":"2026-07-16T21:00:00Z"}]\n' \
-        "${PRIMITIVES_TARGET:-fulcra-primitives-maintainer}" "${FAKE_LIVENESS:-live}"
+    entries=""
+    [ "${FAKE_HOLDER_LIVENESS:-live}" = "ABSENT" ] \
+      || add_agent "stub-holder" "${FAKE_HOLDER_LIVENESS:-live}"
+    if [ "${PRIMITIVES_TARGET_KIND:-role}" = "agent" ] && [ "${FAKE_LIVENESS:-live}" != "ABSENT" ]; then
+      add_agent "${PRIMITIVES_TARGET:-fulcra-primitives-maintainer}" "${FAKE_LIVENESS:-live}"
     fi
+    printf '[%s]\n' "$entries"
     exit 0 ;;
   "tell "*)
     printf '%s\n' "$*" >> "${TELL_LOG:-/dev/null}"
@@ -335,12 +352,22 @@ has "$S/PROBE-UNKNOWN.txt" "sentinel scope openid absent" && ok "mcp sentinel na
 # second half did not, and the run looked identical to a clean one.
 
 echo
-echo "14. the tell is addressed to the ROLE and sent by the resolved identity"
+echo "14. the tell is addressed to the ROLE'S RESOLVED HOLDER, sent by the resolved identity"
+# This test used to assert the opposite — `tell fulcra fulcra-primitives-maintainer`,
+# the ROLE NAME — and it was wrong in the way the whole file is about. Addressing a
+# role reaches only a live `listen`: coord_engine's cmd_inbox, cmd_briefing and
+# query.needs_me all fold without held_roles, so a lease-holder running an ordinary
+# heartbeat never sees it and `tell` still returns 0. The role stays the CONFIGURED
+# target (sessions stop; roles outlive them) but is resolved to a holder identity at
+# send time, which every consumer path folds.
 S="$WORK/t14"; run "$S" FULCRA_COORD_AGENT=claude-code:test-host:primitives
 run "$S" FULCRA_COORD_AGENT=claude-code:test-host:primitives \
   FAKE_VERBS="auth catalog data-type tag user-info record"
-has "$S/tells.txt" "tell fulcra fulcra-primitives-maintainer" && ok "addressed to the role" \
-  || bad "not addressed to the role: $(cat "$S/tells.txt")"
+has "$S/tells.txt" "tell fulcra stub-holder" && ok "addressed to the role's resolved holder" \
+  || bad "not addressed to the holder identity: $(cat "$S/tells.txt")"
+! grep -q "tell fulcra fulcra-primitives-maintainer" "$S/tells.txt" \
+  && ok "never addressed to the bare role name" \
+  || bad "addressed to the ROLE NAME — only a live \`listen\` folds that: $(cat "$S/tells.txt")"
 has "$S/tells.txt" "--from claude-code:test-host:primitives" && ok "sender resolved from the env" \
   || bad "sender not resolved: $(cat "$S/tells.txt")"
 ! grep -q "claude-code:Mac:" "$S/tells.txt" && ok "no baked-in host identity" \
@@ -434,6 +461,37 @@ run "$S" PRIMITIVES_TARGET_KIND=agent PRIMITIVES_TARGET=nobody-here FAKE_LIVENES
 [ "$RC" = "3" ] && ok "target absent from the roster -> exit 3" || bad "expected 3, got $RC"
 has "$S/ALERT-UNDELIVERED.txt" "has no presence shard" && ok "marker distinguishes absent from stale" \
   || bad "absent not named: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+
+echo
+echo "22. a fresh role lease is NOT proof the alert reached anyone"
+# Test 16 covers a role NOBODY holds. This is the harder one, and the one that was
+# shipped: the role IS held, the lease IS fresh — `roles status` says HELD with a
+# fresh holder — and the alert still reaches nobody, because the holder is not
+# beating and a role-addressed directive is folded ONLY by a live `listen`
+# (coord_engine's cmd_inbox / cmd_briefing / query.needs_me all fold without
+# held_roles). A lease proves someone holds the role. It proves nothing consumes
+# it. Accepting it here would clear the marker on a healthy-looking proxy while
+# `tell` returned 0 — the 2026-07-16 failure, rebuilt one level up.
+S="$WORK/t22"; run "$S" FAKE_ROLE_STATUS=HELD FAKE_HOLDER_LIVENESS=stale
+[ "$RC" = "3" ] && ok "fresh lease + unreachable holder -> exit 3, not a silent 0" \
+  || bad "expected 3, got $RC — the lease was accepted as reachability"
+has "$S/ALERT-UNDELIVERED.txt" "fresh holder, but no holder is reachable" \
+  && ok "marker refuses the lease as evidence and names the trap" \
+  || bad "marker does not name it: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+has "$S/ALERT-UNDELIVERED.txt" "stub-holder liveness=stale" \
+  && ok "marker names the holder that was not listening" \
+  || bad "holder not named: $(cat "$S/ALERT-UNDELIVERED.txt" 2>/dev/null)"
+[ -f "$S/ALERT-UNDELIVERED.txt" ] && ok "marker NOT cleared by a healthy-looking lease" \
+  || bad "marker was cleared on a fresh lease alone"
+# Drift + a fresh lease whose holder is dark: the drift exit code must survive, and
+# the marker must carry the drift (same contract as test 18's dead path).
+run "$S" FAKE_ROLE_STATUS=HELD FAKE_HOLDER_LIVENESS=stale \
+  FAKE_VERBS="auth catalog data-type tag user-info record"
+[ "$RC" = "1" ] && ok "drift + fresh-but-dark holder: exit stays 1, never masked by 3" \
+  || bad "expected 1, got $RC"
+has "$S/ALERT-UNDELIVERED.txt" "WHAT THIS RUN WAS TRYING TO SAY" \
+  && ok "the undelivered drift is written down locally" \
+  || bad "marker lost the drift payload"
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
