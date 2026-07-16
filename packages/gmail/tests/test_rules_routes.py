@@ -85,6 +85,25 @@ def client():
     return _build_client(msgs)
 
 
+def test_search_preserves_list_order_under_parallel_fetch(client):
+    # _fetch runs get_message calls in a thread pool; the response must still
+    # follow list_message_ids order (the operator sees newest-first as Gmail
+    # returned them), not thread completion order.
+    r = client.post("/api/gmail/rules/search", json={"account_id": "acct", "q": "x"})
+    assert r.status_code == 200
+    ids = [m["message_id"] for m in r.json()["messages"]]
+    assert ids == sorted(ids, key=lambda x: ids.index(x))  # stable
+    assert ids == ["1", "2"]  # FakeGmailClient insertion order
+
+
+def test_ui_has_search_feedback_and_no_blocking_alert(client):
+    html = client.get("/api/gmail/rules/ui").text
+    assert "Searching…" in html          # loading state
+    assert "Search failed:" in html      # error surface
+    assert "setStatus" in html           # inline status replaces alert()
+    assert "alert('Saved')" not in html  # the save alert blocked the page
+
+
 def test_search_returns_headers_no_body(client):
     r = client.post("/api/gmail/rules/search", json={"account_id": "acct", "q": "receipt"})
     assert r.status_code == 200
@@ -152,6 +171,12 @@ def test_ui_page_renders_builder(client):
     # The page must read the daemon's web token from the fulcra_token cookie
     # (how the collect frontend delivers it), not a non-existent localStorage key.
     assert "fulcra_token=" in html
+    # ...and self-bootstrap the cookie when the page is opened directly in a
+    # browser that never loaded the dashboard root (which is what sets it):
+    # ensureToken() fetches / once, and the token is read per-request so a
+    # cookie that arrives after page load still takes effect.
+    assert "ensureToken" in html
+    assert "getToken()" in html
     # The edit workflow: an edit affordance that issues a PUT, and a merge over
     # the full rule (editBody) so unedited fields aren't dropped on save.
     assert "editRule(" in html

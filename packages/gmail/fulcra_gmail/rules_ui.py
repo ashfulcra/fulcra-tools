@@ -31,13 +31,21 @@ RULES_UI_HTML = r"""<!doctype html>
  <input id="relay_priority" placeholder="P2" size="3"></div>
 <div class="row m"><input id="name" placeholder="rule name"><input id="rid" placeholder="rule id">
  <button onclick="save()">Save rule</button></div>
+<div id="status" class="m" style="display:none;font-weight:600"></div>
 <hr><h1>Rules</h1><div id="rules"></div>
 <script>
-const TOKEN = (document.cookie.match(/(?:^|;\s*)fulcra_token=([^;]+)/) || [])[1]
-  || localStorage.getItem('fulcra-web-token') || '';
-const H = {'Content-Type':'application/json','Authorization':'Bearer '+TOKEN};
+function getToken(){return (document.cookie.match(/(?:^|;\s*)fulcra_token=([^;]+)/) || [])[1]
+  || localStorage.getItem('fulcra-web-token') || '';}
+async function ensureToken(){
+  // The daemon sets the fulcra_token cookie on GET / (the dashboard root).
+  // If this page is opened directly in a browser that never loaded the
+  // dashboard, bootstrap the cookie with one same-origin fetch of /.
+  if(getToken())return;
+  try{await fetch('/', {credentials:'same-origin', cache:'no-store'});}catch(e){}
+}
 let RESULTS=[], LABEL={}, CHIPS=[], EDITING=null, EDIT_RULE=null;
 async function api(path, body, method){const m=method||(body?'POST':'GET');
+  const H={'Content-Type':'application/json','Authorization':'Bearer '+getToken()};
   const r=await fetch(path,{method:m,headers:H,
   body:body?JSON.stringify(body):undefined});if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json();}
 function acct(){return document.getElementById('acct').value;}
@@ -46,7 +54,13 @@ async function loadAccounts(){try{const d=await api('/api/gmail/rules/accounts')
    `<option value="${esc(a.account_id)}">${esc(a.email)} (${esc(a.status)})</option>`).join('');
   }catch(e){document.getElementById('acct').innerHTML='';}}
 async function search(){const q=document.getElementById('q').value;
-  const d=await api('/api/gmail/rules/search',{account_id:acct(),q});RESULTS=d.messages;render();}
+  const box=document.getElementById('results');
+  box.innerHTML='<em>Searching… (fetching matching messages)</em>';
+  try{
+    const d=await api('/api/gmail/rules/search',{account_id:acct(),q});
+    RESULTS=d.messages;render();
+    if(!RESULTS.length)box.innerHTML='<em>No messages matched that search.</em>';
+  }catch(e){box.innerHTML='<em>Search failed: '+esc(e.message)+'</em>';}}
 function render(){document.getElementById('results').innerHTML=RESULTS.map(m=>`
   <div class="msg"><div class="sub">${esc(m.subject)}</div><div class="frm">${esc(m.from)} · ${esc(m.date)}</div>
   <div class="row"><button class="sec" onclick="mark('${m.message_id}','pos')">✓ match</button>
@@ -100,8 +114,11 @@ async function save(){
   try{
     if(EDITING){await api('/api/gmail/rules/'+encodeURIComponent(EDITING),editBody(),'PUT');}
     else{await api('/api/gmail/rules',draft());}
-    EDITING=null;EDIT_RULE=null;await loadRules();alert('Saved');}
-  catch(e){alert('Save failed: '+e.message);}}
+    EDITING=null;EDIT_RULE=null;await loadRules();setStatus('Rule saved.');}
+  catch(e){setStatus('Save failed: '+e.message);}}
+function setStatus(msg){const el=document.getElementById('status');
+  el.textContent=msg;el.style.display='block';
+  clearTimeout(setStatus._t);setStatus._t=setTimeout(()=>{el.style.display='none';},6000);}
 async function editRule(id){const r=await api('/api/gmail/rules/'+encodeURIComponent(id));
   EDITING=id;EDIT_RULE=r;
   document.getElementById('rid').value=r.id; document.getElementById('name').value=r.name;
@@ -125,6 +142,5 @@ async function toggleRule(id,en){await api('/api/gmail/rules/'+id+'/enabled',{en
 async function delRule(id){if(confirm('Delete '+id+'?')){await api('/api/gmail/rules/'+encodeURIComponent(id),null,'DELETE');loadRules();}}
 function val(id){return document.getElementById(id).value.trim();}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-loadAccounts();
-loadRules();
+(async()=>{await ensureToken();loadAccounts();loadRules();})();
 </script></body></html>"""

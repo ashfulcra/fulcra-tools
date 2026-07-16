@@ -51,10 +51,13 @@ under `skills/`, each package with its own README, build, and tests.
   never a path/key segment), crash-safe (append-only per-account ledger + a
   contiguous-frontier watermark), landing selected emails in Fulcra Files and
   relaying matches over the coord bus. The load-bearing agent-facing facts:
-  the OAuth client is **External / unverified**, so `gmail.readonly` (a restricted
-  scope) carries a **100-account lifetime cap** until Google verification + the
-  annual CASA assessment; **no subject/from/body is ever logged** (privacy-safe
-  reason codes only). Task-by-task module breakdown, the OAuth clickpath, and the
+  the OAuth client is an **External, published-unverified, Desktop-app** client
+  (Desktop because the relay IS a local desktop app: Google treats a Desktop
+  client's secret as non-confidential, which is what lets ONE shared client ship
+  to many installs; the `127.0.0.1` loopback redirect needs no registration), so
+  `gmail.readonly` (a restricted scope) carries a **100-account lifetime cap**
+  until Google verification + the annual CASA assessment; **no subject/from/body
+  is ever logged** (privacy-safe reason codes only). Task-by-task module breakdown, the OAuth clickpath, and the
   ledger/relay/pipeline design live in
   [`packages/gmail/README.md`](packages/gmail/README.md) — read it before touching
   the relay.
@@ -228,7 +231,10 @@ it (not on PyPI).
     minute-granular, reconcile reuses a prior summaries row only when the doc is unchanged by mtime AND
     byte size AND its mtime-minute is provably closed before the last reconcile read — so a doc touched
     twice in one clock-minute is reparsed, never trusted stale. (The honest narrow guarantee; not a
-    general sub-minute exactness claim.)
+    general sub-minute exactness claim.) A row projected by an older `row_from_frontmatter` (stamp
+    `sv` != current `ROW_SCHEMA_VERSION` — e.g. a pre-text-cap row) is likewise reparsed once, so a
+    projection change (like the summaries text cap) self-heals the whole index within one full pass
+    rather than waiting for each task to organically change.
   - **A freshness overlay surfaces new docs THIS read.** Every summaries-index fold (`inbox`, `listen`,
     `briefing`, `needs-me`, `board`, `status`) lists the task dir once and unions in any doc written
     since the last reconcile, so a directive delivered between heartbeats surfaces now, not a
@@ -236,6 +242,29 @@ it (not on PyPI).
     time, default 10s) and **degrades the `inbox` source visibly** when capped, budget-breached, or a
     listed doc is unreadable — capped-but-visible, never silent truncation. A fresh team (no index yet)
     is unchanged.
+  - **Acks are folded change-driven, and reuse needs positive evidence.** Listing every ack dir every
+    pass costs one op per dir (~280 on the live bus), so reconcile asks the store what changed
+    (`/input/v1/file/recent_changes`) since the instant it last provably folded acks through — the ack
+    fold's OWN anchor (`acks_folded_through` in summaries.json), not `generated_at` — and re-folds only
+    those slugs. A prior `acked_by` is reused ONLY when the store answered and did not name that slug;
+    every unknown — no change query, a query error, no anchor, a slug the prior aggregate never carried,
+    a changed slug that wouldn't list — falls back to the full fold and logs why. **No false advance:** a
+    fold that couldn't read what it meant to leaves the anchor where it was, so the change it missed is
+    still inside the next pass's window instead of consumed by this one; a failed listing preserves the
+    prior `acked_by` rather than un-acking the task; and the whole-pass fast path declines while that
+    anchor is behind `generated_at`, so a quiet beat can't skip the fold that still owes a read. A forced full fold every `COORD_ACKS_FULL_EVERY`
+    passes (default 12, ~4h at a 20-min heartbeat) bounds anything the query could miss, and carries the
+    orphan-shard GC.
+  - **summaries.json is one shared doc written by many hosts at many versions — a top-level key added
+    in version N is wiped by any host older than N.** The whole fleet reconciles ONE index, and an older
+    host rebuilds the document from the key set it knows and writes it over everyone else's. This is not
+    theoretical: it is why `acks_folded_through` (added in v1.6.8) does not survive on the live bus while
+    any pre-1.6.8 host still reconciles — its passes delete the anchor, so the change-driven fold above
+    silently degrades to a full fold every pass. Since v1.6.9 `build_aggregate` carries unknown top-level
+    keys through, which stops the next occurrence of this class but cannot fix a host that predates the
+    passthrough. **A new top-level key is live only once the whole fleet is upgraded** — check
+    `fleet health` before assuming a fold-state key is doing anything, and never rebuild the aggregate
+    from a fixed key set.
 
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and
@@ -442,24 +471,22 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   easier — a documented raw REST call is a legitimate tool, not a last resort.
   Still prefer the `fulcra` CLI / Python lib when you have a shell and a verb
   exists; the MCP server is read-only.
-- **Records are write-via-ingest.** Two write paths, both in the OpenAPI spec
-  (spec-verified 2026-07-08):
-  - **Typed (preferred, new):** `POST /ingest/v1/record/{data_type}` takes an
-    **unwrapped** record payload for that data type, and accepts jsonlines for
-    batch (one record per line). Discover types via `GET /data/v1/catalog`
-    (`recordable`/`api_version` fields) and the record shape via
-    `GET /data/v1/catalog/{data_type}/{api_version}/schema`. Caveat: custom
-    data types still reference the annotation id in the record's `sources`.
-  - **Legacy:** `POST /ingest/v1/record` with a wrapped `DataRecordV1`
-    (`data_type` rides in `metadata`) — published in the spec. The old JSONL
-    batch path `POST /ingest/v1/record/batch` is **NOT in the published
-    OpenAPI** (works in production; treat as retirement-eligible) — prefer the
-    typed endpoint's jsonlines mode for new code.
-
-  There is **no record-level delete/replace and no `fulcra` record-write/delete
-  CLI verb yet** (the CLI verbs will be built on the typed endpoints) — model
-  corrections as new (superseding) records. When the CLI record verbs land, the
-  primitives doc gets a full re-verification, not a patch — flag it on the bus.
+- **Records have CLI verbs as of 0.1.37** (2026-07-15) — `fulcra record
+  DATA_TYPE [VALUE]` and `fulcra delete DATA_TYPE [RECORD_ID]`, both with
+  `-f/--file` and JSON/JSONL on stdin for batch; `fulcra catalog
+  --recordable-only` lists the types they accept, and the lib gained
+  `record_data_type`/`validate_records`. Use them when you have a shell rather
+  than hand-rolling ingest POSTs. The raw ingest endpoints
+  (`POST /ingest/v1/record/{data_type}`, typed and preferred; the wrapped
+  `DataRecordV1` legacy path; the unpublished `/batch`) are still first-class
+  when you need them — the primitives doc covers all three and the custom-type
+  `sources` caveat.
+- **Records are still append-only. `delete` is a tombstone, not an erasure** —
+  the CLI implements it by recording a `DeletedRecord` through the same ingest
+  path, and there is no record-delete lib method. There is no hard delete and no
+  update/replace verb, so corrections are modeled as new records, not edits:
+  write a superseding record, or delete-then-re-record. What 0.1.37 changed is
+  availability, not semantics.
 - **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
   It defaults to off (inert); leave it there — an accidental `on` has caused
   duplicate-record proliferation. Its successor is the heartbeat **projection

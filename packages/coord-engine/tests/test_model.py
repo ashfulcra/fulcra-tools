@@ -123,3 +123,14 @@ def test_cap_bad_env_falls_back_to_default(monkeypatch):
         row = model.row_from_frontmatter(
             {"type": "Task", "title": "t" * 5000}, name="foo", path="task/foo.md")
         assert len(row["title"]) == model.DEFAULT_SUMMARY_TEXT_CAP, bad
+
+
+# --- row schema-version stamp (self-healing row projection) --------------------
+
+
+def test_row_carries_current_schema_version_stamp():
+    # Every freshly projected row stamps the current row-schema version so
+    # reconcile can force-reparse rows built by an OLDER projection (e.g. the
+    # pre-#388 uncapped rows).
+    row = model.row_from_frontmatter({"type": "Task"}, name="foo", path="task/foo.md")
+    assert row["sv"] == model.ROW_SCHEMA_VERSION

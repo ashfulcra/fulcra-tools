@@ -74,8 +74,12 @@ def _success_html(result) -> str:
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
         "<title>Gmail account connected</title></head><body>"
         f"<h1>Gmail account {action}</h1>"
-        "<p>You can close this tab and return to Fulcra Collect. "
-        "Run the add-account step again to connect another account.</p>"
+        "<p><strong>Next: <a href='/api/gmail/rules/ui'>build your filter "
+        "rules</a></strong> — search this inbox, mark example emails, and the "
+        "builder drafts a rule you preview and save.</p>"
+        "<p>Or <a href='/api/oauth/gmail/add-account/start'>connect another "
+        "account</a>, or <a href='/'>return to the Fulcra Collect "
+        "dashboard</a>.</p>"
         "</body></html>"
     )
 

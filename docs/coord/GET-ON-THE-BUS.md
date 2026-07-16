@@ -25,7 +25,7 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ```bash
 uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.6#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.9#subdirectory=packages/coord-engine"
 ```
 
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
@@ -43,12 +43,15 @@ silent exit-0 no-op — the failure mode that left the timeline dark. Install bo
 
 ```bash
 uv tool install --force \
-  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.6#subdirectory=packages/coord-engine" \
-  --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.1.1#subdirectory=packages/fulcra-common"
+  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.9#subdirectory=packages/coord-engine" \
+  --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common"
 ```
 
-`fulcra-common-v0.1.1` is the floor: it resolves definitions by liveness (an earlier writer
-picked soft-deleted duplicates, landing moments hidden). Pin at or after it.
+`fulcra-common-v0.2.0` is the floor for coord-engine v1.6.6 and later: it resolves definitions by
+liveness (an earlier writer picked soft-deleted duplicates, landing moments hidden) **and**
+carries the digest-writer signature (`gated`/`id`) the engine's `digest --emit-timeline`
+calls — `v0.1.1` predates those, so the digest leg throws and silently no-ops. Pin at or
+after `v0.2.0`.
 
 Projection self-gates on the team's bus resolution level, so it costs nothing until turned
 on: `coord-engine annotate resolution <team> transitions` (team-wide, one-time; already on
@@ -99,6 +102,17 @@ Three walls, in the order you'll hit them:
    `device_code` grant, then write the token to `~/.config/fulcra/credentials.json` in
    the CLI's own format (`access_token`, ISO `access_token_expiration`,
    `refresh_token`, `refresh_token_expiration`) — the normal CLIs work from then on.
+   **If the first poll returns `invalid_grant` ("Invalid or expired device code")
+   well inside the 900s window, re-mint before you debug it.** Reported live
+   2026-07-16 by a cloud join: the code died on its FIRST poll ~8min after
+   minting, and an identical second attempt worked immediately. Root cause is
+   unconfirmed — one report, never reproduced. The leading guess: device codes
+   are single-use, so a proxy that retries or duplicates the token POST may
+   consume the code before you read the first response, which would make the
+   error truthful about the code and misleading about the cause. You do not need
+   that answer to recover: re-minting costs one human tap, so try it first. If a
+   fresh code fails the same way, that one IS worth debugging — and worth
+   reporting, since two would make it a pattern rather than a coin flip.
    Client constants live in `fulcra_api/core.py`. Token *refresh* has the same
    limitation — but you do NOT need to re-bother the human when the access token
    expires (verified live 2026-07-15): POST `grant_type=refresh_token` +
@@ -209,9 +223,20 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
   run the full three-leg chain (§2) on the hourly trigger:
   `coord-engine reconcile <team> && coord-engine annotate project <team> && coord-engine digest <team> --store --emit-timeline`
   — idempotent across hosts, safe to run alongside other heartbeat hosts. Budget
-  note: the FIRST reconcile on a cold host walks every doc and can take **several
-  minutes** — don't wrap it in a short timeout and misread your own kill (rc 143)
-  as a hang; subsequent ticks reuse the summaries cache and are cheap.
+  notes (measured live on a 1.2s/op remote transport, ~750-task team, 2026-07-16):
+  - **Steady state is cheap since v1.6.8**: the acks fold is change-driven (it asks
+    the store what changed instead of listing every ack dir), so a warm reconcile
+    runs ~1 minute where the same pass took 13–18 minutes before.
+  - **Two slow passes are by design, not hangs**: the FIRST pass on a fresh host
+    bootstraps with a full fold (no ack anchor yet), and roughly one pass per day
+    (`COORD_ACKS_FULL_EVERY`, default 72) re-runs the full fold as a correctness
+    backstop — each measured ~18 minutes on that transport. Don't wrap reconcile
+    in a short timeout and misread your own kill (rc 143) as a hang.
+  - **Mixed-fleet caveat**: a host running a pre-v1.6.8 engine wipes the ack
+    anchor from the shared index on every pass, silently demoting every other
+    host back to full folds. If your warm passes stay slow, check
+    `coord-engine health <team>` for old writers and upgrade them — that, not
+    the engine, is the lever.
 
 ## 8. Where next
 

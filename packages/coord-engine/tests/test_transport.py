@@ -11,6 +11,7 @@ soft return) ever escapes a transport method.
 import os
 import subprocess
 import time
+import urllib.error
 
 import pytest
 
@@ -201,3 +202,92 @@ def test_bad_env_timeout_falls_back_to_default(monkeypatch, bad):
         tr.FulcraFileTransport(command=["fulcra-api"]).timeout
         == tr.DEFAULT_TRANSPORT_TIMEOUT
     )
+
+
+# --- recent_changes: the ack fold's evidence source. UNKNOWN is None, always ---
+#
+# The contract the ack fold rests on: this method NEVER raises and NEVER invents
+# an empty list. Every failure (no token, HTTP 500 on an over-wide window, a
+# timeout, a body it can't parse) returns None = UNKNOWN, which the caller must
+# read as "fall back to the full fold" — never as "nothing changed".
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _with_urlopen(monkeypatch, handler):
+    seen = {}
+
+    def urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["auth"] = req.headers.get("Authorization")
+        seen["timeout"] = timeout
+        return handler()
+
+    monkeypatch.setattr(tr.urllib.request, "urlopen", urlopen)
+    return seen
+
+
+def _authed(monkeypatch) -> tr.FulcraFileTransport:
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "tok-123")
+    return tr.FulcraFileTransport(command=list(MISSING), timeout=7.0)
+
+
+def test_recent_changes_returns_the_files_list(monkeypatch):
+    seen = _with_urlopen(monkeypatch, lambda: _FakeResponse(
+        b'{"files": [{"full_name": "/team/r/_coord/acks/a/amy.md", "size": 12}]}'))
+    monkeypatch.delenv("FULCRA_API_BASE", raising=False)
+    out = _authed(monkeypatch).recent_changes("2026-07-01T00:00:00Z", "2026-07-01T06:00:00Z")
+    assert out == [{"full_name": "/team/r/_coord/acks/a/amy.md", "size": 12}]
+    assert seen["url"] == ("https://api.fulcradynamics.com/input/v1/file/recent_changes"
+                           "?start_time=2026-07-01T00%3A00%3A00Z"
+                           "&end_time=2026-07-01T06%3A00%3A00Z")
+    assert seen["auth"] == "Bearer tok-123"
+    assert seen["timeout"] == 7.0   # bounded like every other op
+
+
+def test_recent_changes_honors_api_base_override(monkeypatch):
+    seen = _with_urlopen(monkeypatch, lambda: _FakeResponse(b'{"files": []}'))
+    monkeypatch.setenv("FULCRA_API_BASE", "https://api.example.test/")
+    assert _authed(monkeypatch).recent_changes("a", "b") == []
+    assert seen["url"].startswith("https://api.example.test/input/v1/file/recent_changes?")
+
+
+def test_recent_changes_returns_none_on_http_error(monkeypatch):
+    """The endpoint fails LOUD (500 on an over-wide window) rather than
+    truncating — that must surface as UNKNOWN, not as an empty change set."""
+    def boom():
+        raise urllib.error.HTTPError("u", 500, "server error", {}, None)
+    _with_urlopen(monkeypatch, boom)
+    assert _authed(monkeypatch).recent_changes("a", "b") is None
+
+
+def test_recent_changes_returns_none_on_unparseable_body(monkeypatch):
+    for body in (b"not json", b'{"files": "nope"}', b'[]', b'{}'):
+        _with_urlopen(monkeypatch, lambda body=body: _FakeResponse(body))
+        assert _authed(monkeypatch).recent_changes("a", "b") is None, body
+
+
+def test_recent_changes_returns_none_without_a_token(monkeypatch):
+    # no FULCRA_ACCESS_TOKEN and no runnable CLI -> no token -> UNKNOWN, and no
+    # request is attempted.
+    monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
+    called = _with_urlopen(monkeypatch, lambda: _FakeResponse(b'{"files": []}'))
+    assert tr.FulcraFileTransport(command=list(MISSING), timeout=5.0).recent_changes(
+        "a", "b") is None
+    assert "url" not in called
+
+
+def test_recent_changes_returns_none_on_token_timeout(monkeypatch):
+    monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
+    assert _slow().recent_changes("a", "b") is None

@@ -280,6 +280,35 @@ class Plugin:
             raise ValueError("default_interval is only valid for a scheduled plugin")
 
 
+#: Refresh the stored Fulcra token this many seconds BEFORE its exp claim, so
+#: a token that expires mid-run doesn't 401 halfway through a plugin's uploads.
+_JWT_EXPIRY_SKEW_S = 120
+
+
+def _jwt_expired(token: str, *, skew_s: int = _JWT_EXPIRY_SKEW_S) -> bool:
+    """True iff `token` is a JWT whose ``exp`` is past (or within `skew_s`).
+
+    Fulcra bearer tokens are JWTs, so expiry is checkable locally instead of
+    burning an upload on a guaranteed 401. Anything unparseable (not a JWT,
+    bad base64, no exp) returns False — treat it as opaque and behave exactly
+    as before this check existed.
+    """
+    import base64
+    import json as _json
+    import time
+
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp")
+        if exp is None:
+            return False
+        return time.time() >= float(exp) - skew_s
+    except Exception:  # noqa: BLE001 — unparseable == opaque, not expired
+        return False
+
+
 @dataclass
 class RunContext:
     """Passed into `Plugin.run`. The hub builds it in the worker process."""
@@ -396,8 +425,22 @@ class RunContext:
         """
         from . import credentials
         token = credentials.get_user_secret("bearer-token")
-        if token:
+        if token and not _jwt_expired(token):
             return token
+        if token:
+            # Stored token is expired (or unreadably close to it). The routes
+            # side has refreshed on 401 since SP5; workers never did — so an
+            # expired stored token made EVERY plugin upload 401, the per-rule
+            # fail-soft swallowed it, and runs reported "no new data" while
+            # dropping every match (live incident 2026-07-16: 21 matched
+            # emails silently dropped). Refresh through the same helper the
+            # routes use; it re-stores the fresh token as a side effect.
+            fresh = credentials.refresh_fulcra_access_token()
+            if fresh:
+                return fresh
+            self.log.warning(
+                "fulcra_token: stored token expired and refresh failed — "
+                "falling back to env/CLI")
         # Fall back to the fulcra-common path (env var + CLI subprocess).
         # BaseFulcraClient.get_token() raises RuntimeError when the CLI is
         # missing or fails; catch that so callers can treat it the same as
