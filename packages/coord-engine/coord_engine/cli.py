@@ -501,13 +501,21 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     # disambiguator (`_roles_listing_names`) now exists and its cost lands only
     # on the already-degraded path.
     raw_doc = transport.read(_role_doc_path(team, role))
-    if raw_doc is None:
+    reg = okf.parse_frontmatter(raw_doc)
+    if reg is None:
+        # A read miss and a body that won't PARSE are the same fact — no usable
+        # doc — so they take the same path (2026-07-16: the `raw_doc is None`
+        # guard let a listed-but-unparseable doc fall through to `or {}`, i.e.
+        # onto the 24h default SLA and a confident VACANT at rc 0, which is the
+        # precise collapse the comment above forbids. `_role_fresh_holders` was
+        # fixed for the identical hole in the same round; both surfaces must agree
+        # or the "same fold" contract between them is a lie).
         names = _roles_listing_names(transport, team)
         if names is None or f"{role}.md" in names:
-            print(f"role doc unreadable for {role} in team/{team} — "
-                  f"state unknown, degraded transport, retry", file=sys.stderr)
+            print(f"role doc unusable for {role} in team/{team} — state unknown "
+                  f"(unreadable or corrupt), retry", file=sys.stderr)
             return 1
-    reg = okf.parse_frontmatter(raw_doc) or {}
+        reg = {}  # genuinely absent -> default-SLA fallback (leases without a doc)
     policy = reg.get("policy") or "shared"
     try:
         sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
@@ -3572,20 +3580,24 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             continue
         role = n[:-3]; checked += 1
         doc = transport.read(_role_doc_path(args.team, role))
-        if doc is None:
+        reg = okf.parse_frontmatter(doc)
+        if reg is None:
             # FAIL CLOSED (review fix): this doc was JUST LISTED by the parent
-            # roles/ scan, so a None read is knowably transient-or-deleted — never
-            # a live role to judge under DEFAULT_SLA_HOURS. Falling through with
-            # the 24h default would collapse a longer-SLA role's window and fire a
-            # false VACANT escalation (the incident vector, on the acting path).
-            # Skip: transient -> retried next sweep (correct); deleted -> role
-            # gone (also correct). `roles status` now applies the same
-            # disambiguation on its doc-None path (via _roles_listing_names) —
-            # both surfaces agree that listed-but-unreadable is UNKNOWN.
-            print(f"escalate: role doc unreadable for {role} — state unknown, "
-                  f"skipped (degraded transport, retry)", file=sys.stderr)
+            # roles/ scan, so no usable doc is knowably transient-or-deleted-or-
+            # corrupt — never a live role to judge under DEFAULT_SLA_HOURS.
+            # Falling through with the 24h default would collapse a longer-SLA
+            # role's window and fire a false VACANT escalation (the incident
+            # vector, on the acting path). Skip: transient -> retried next sweep
+            # (correct); deleted -> role gone (also correct); corrupt -> a human
+            # must fix the doc, and a P1 minted off a doc we cannot read is noise
+            # at best. 2026-07-16: this guard read `doc is None`, so an unparseable
+            # body sailed past it into exactly the false escalation the comment
+            # describes — the same one-line class as `_role_fresh_holders` and
+            # `roles status`, which were fixed in the same round. All three
+            # surfaces agree: no usable doc for a LISTED role is UNKNOWN.
+            print(f"escalate: role doc unusable for {role} — state unknown, "
+                  f"skipped (unreadable or corrupt, retry)", file=sys.stderr)
             continue
-        reg = okf.parse_frontmatter(doc) or {}
         try:
             sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
         except (TypeError, ValueError):

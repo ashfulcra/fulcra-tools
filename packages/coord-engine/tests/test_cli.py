@@ -68,6 +68,37 @@ def test_cli_roles_status_held(capsys):
     assert "HELD" in capsys.readouterr().out
 
 
+def test_cli_roles_status_malformed_doc_is_unknown_not_default_sla(capsys):
+    # The same one-line class as `_role_fresh_holders`: the guard tested
+    # `raw_doc is None`, so a LISTED role whose doc is corrupt or truncated sailed
+    # past it into `parse_frontmatter(...) or {}` — collapsing a long-SLA role onto
+    # the 24h default and printing a confident VACANT at rc 0. A body that won't
+    # parse is UNKNOWN, exactly like a read that failed: rc 1, no state asserted.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md", "not frontmatter\n")  # listed, unusable
+    t.put("team/r/roles/reviewer/leases/ash.md",  # a lease FRESH under the real SLA
+          f"---\ntype: Lease\nagent: ash\ntimestamp: {_now_iso()}\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "state unknown" in cap.err
+    assert "VACANT" not in cap.out, "must not assert a state off a doc it cannot read"
+
+
+def test_cli_roles_escalate_skips_malformed_doc_no_false_vacancy(capsys):
+    # Same class on the ACTING path, where it mints a P1: an unparseable doc for a
+    # listed role must be skipped as UNKNOWN, never judged under the 24h default.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md", "not frontmatter\n")
+    t.put("team/r/roles/reviewer/leases/ash.md",  # stale ONLY under the default SLA
+          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    cap = capsys.readouterr()
+    assert "state unknown" in cap.err
+    assert "VACANT" not in cap.out
+    # and no escalation task was written off a doc we could not read
+    assert not [p for p in t.store if "/task/" in p], sorted(t.store)
+
+
 def test_cli_roles_status_vacant_escalation_due(capsys):
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")

@@ -219,7 +219,8 @@ it (not on PyPI).
   role-based identity outlive a session). ONE resolver: `cli._held_roles_for_rows` — never resolve
   roles a second way, or the folds silently disagree about a lease. It returns `(held, unresolved)`,
   and **`unresolved` is the load-bearing half**: a role whose lease state is UNKNOWN (transport
-  failure, unreadable lease shard, or a role doc listed-but-unreadable — see `_role_fresh_holders`) is
+  failure, unreadable lease shard, a role doc that is listed but missing/truncated/**unparseable**, or
+  a **budget cut** leaving a candidate unscanned or scanned partway — see `_role_fresh_holders`) is
   neither held nor not-held. Folding it into an empty held-set renders a clean, role-blind queue that
   is **indistinguishable from "you have no role work"** — the same silent failure as a clean-empty
   read, and worse, because the doc promise above would then be true-except-when-it-silently-isn't.
@@ -227,9 +228,21 @@ it (not on PyPI).
   `role_degraded` key on the `briefing` bundle; a list element on `inbox`/`needs-me`) plus the text
   line. **Ship-gate: a new fold that answers "what needs this agent" resolves roles through that one
   helper and surfaces `unresolved`, with a red-first test proving a failed lookup is visible.**
-  Cost is bounded by ONE `roles/` listing per pass, which settles which assignees are roles at all, so
-  the literal-agent-id majority costs zero reads; the prefilter is per-pass, never cached across
-  passes (leases change, and a newly-registered role must route on the very next fold).
+  **Only a complete, successfully parsed listing is negative membership evidence.** A failed read and
+  a failed parse are the same fact — we don't know what that document says — so neither may answer
+  "is this a role" in the negative once the `roles/` listing has said it IS one. The one non-degraded
+  absence is a doc miss for a name that listing affirmatively does not contain (the literal-agent-id
+  case). Grep any new fold for a `parse`/`read` failure that returns a value comparing equal to a
+  legitimate state; that is the whole bug class, and it has now hidden in this fold twice.
+  Cost per pass is **`1 + Σ(2 + L_r)` ops** over the roles the open work references (`L_r` = that
+  role's lease shards — one per agent that claimed it and never `roles release`-d, so it tracks
+  lifetime churn and is unbounded in principle: a role with ten shards is 13 ops, measured). ONE
+  `roles/` listing settles which assignees are roles at all, so the literal-agent-id majority costs
+  zero reads and a team with no role-addressed open work pays nothing; the prefilter is per-pass,
+  never cached across passes (leases change, and a newly-registered role must route on the very next
+  fold). Because no op count bounds LATENCY when each op can burn a transport timeout, the pass also
+  runs under one cumulative `COORD_ROLE_FOLD_BUDGET` (default 20s) opened ahead of that listing — a
+  cut marks every unfinished candidate `unresolved`, never "not held".
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
