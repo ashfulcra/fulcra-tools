@@ -102,6 +102,14 @@ Three walls, in the order you'll hit them:
    `device_code` grant, then write the token to `~/.config/fulcra/credentials.json` in
    the CLI's own format (`access_token`, ISO `access_token_expiration`,
    `refresh_token`, `refresh_token_expiration`) — the normal CLIs work from then on.
+   **If the first poll returns `invalid_grant` ("Invalid or expired device code")
+   well inside the 900s window, just re-mint — do not debug it.** Reported live
+   2026-07-16 by a cloud join: the code died on its FIRST poll ~8min after
+   minting, and an identical second attempt worked immediately. Device codes are
+   single-use, and a TLS-intercepting proxy that retries or duplicates the token
+   POST consumes the code before your first read of the response — so the error
+   is truthful about the code and misleading about the cause. Re-minting costs
+   one human tap; investigating costs an hour and finds nothing.
    Client constants live in `fulcra_api/core.py`. Token *refresh* has the same
    limitation — but you do NOT need to re-bother the human when the access token
    expires (verified live 2026-07-15): POST `grant_type=refresh_token` +
