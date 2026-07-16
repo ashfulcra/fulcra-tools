@@ -142,3 +142,63 @@ def test_add_account_bridge_delegates(monkeypatch):
     assert calls["begin"] == collect_plugin.REDIRECT_URI
     collect_plugin.complete_add_account("nonce", "code")
     assert calls["complete"] == ("nonce", "code")
+
+
+def test_run_raises_when_all_rule_polls_fail(monkeypatch):
+    """Fail-soft is per-rule; when EVERY poll fails the run must FAIL, not
+    report 'no new data' (2026-07-16: expired Fulcra token 401'd every upload
+    and 21 matched emails dropped silently behind a green run)."""
+    import pytest
+
+    class FakeRegistry:
+        def list_accounts(self):
+            return [FakeAccount("acct-ok", "a@example.com", "active")]
+
+    def exploding_poll(**kw):
+        raise RuntimeError("upload 401: Jwt is expired")
+
+    monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
+    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "poll_account_rule", exploding_poll)
+
+    config = {"rules": [{
+        "id": "r1", "version": 1, "name": "R1", "match": "subject:x",
+        "actions": ["file"],
+    }]}
+    with pytest.raises(RuntimeError, match=r"all 1/1 rule poll\(s\) failed"):
+        PLUGIN.run(_ctx(config, emit=lambda e: None))
+
+
+def test_run_partial_poll_failure_stays_soft(monkeypatch):
+    """One rule failing while another succeeds keeps the fail-soft behavior."""
+    class FakeRegistry:
+        def list_accounts(self):
+            return [FakeAccount("acct-ok", "a@example.com", "active")]
+
+    calls = []
+
+    def flaky_poll(**kw):
+        calls.append(kw["rule"].id)
+        if kw["rule"].id == "bad":
+            raise RuntimeError("boom")
+        from fulcra_gmail.pipeline import PollResult
+        return PollResult(account_id=kw["account_id"], rule_id=kw["rule"].id,
+                          rule_version=kw["rule"].version, candidates=1,
+                          effective=1, processed=1, blocked=False, cursor=1)
+
+    monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
+    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "poll_account_rule", flaky_poll)
+
+    config = {"rules": [
+        {"id": "bad", "version": 1, "name": "B", "match": "x", "actions": ["file"]},
+        {"id": "good", "version": 1, "name": "G", "match": "y", "actions": ["file"]},
+    ]}
+    PLUGIN.run(_ctx(config, emit=lambda e: None))  # must NOT raise
+    assert calls == ["bad", "good"]

@@ -873,3 +873,55 @@ def test_set_credential_delegates_to_injected_backend():
     ctx.set_credential("refresh_token", "new-refresh")
     assert written == [("access_token", "new-access"),
                        ("refresh_token", "new-refresh")]
+
+
+def _fake_jwt(exp_epoch: float) -> str:
+    """Fabricate an unsigned JWT with the given exp claim (structure only)."""
+    import base64
+    import json as _json
+    payload = base64.urlsafe_b64encode(
+        _json.dumps({"exp": exp_epoch}).encode()).decode().rstrip("=")
+    return f"eyJhbGciOiJub25lIn0.{payload}.sig"
+
+
+def test_fulcra_token_refreshes_expired_stored_token(monkeypatch):
+    """An expired stored JWT is refreshed via the same helper the routes use
+    (live incident 2026-07-16: workers uploaded with an expired stored token,
+    every upload 401'd, and runs reported success while dropping all matches)."""
+    import time
+    from fulcra_collect import credentials
+    expired = _fake_jwt(time.time() - 3600)
+    monkeypatch.setattr(credentials, "get_user_secret",
+                        lambda key: expired if key == "bearer-token" else None)
+    monkeypatch.setattr(credentials, "refresh_fulcra_access_token",
+                        lambda: "fresh-token")
+    ctx = _make_bare_ctx()
+    assert ctx.fulcra_token() == "fresh-token"
+
+
+def test_fulcra_token_keeps_valid_stored_token(monkeypatch):
+    import time
+    from fulcra_collect import credentials
+    valid = _fake_jwt(time.time() + 7200)
+    monkeypatch.setattr(credentials, "get_user_secret",
+                        lambda key: valid if key == "bearer-token" else None)
+    refreshed = []
+    monkeypatch.setattr(credentials, "refresh_fulcra_access_token",
+                        lambda: refreshed.append(1) or "nope")
+    ctx = _make_bare_ctx()
+    assert ctx.fulcra_token() == valid
+    assert not refreshed
+
+
+def test_fulcra_token_expired_with_failed_refresh_falls_back_to_cli(monkeypatch):
+    import time
+    from fulcra_collect import credentials
+    expired = _fake_jwt(time.time() - 10)
+    monkeypatch.setattr(credentials, "get_user_secret",
+                        lambda key: expired if key == "bearer-token" else None)
+    monkeypatch.setattr(credentials, "refresh_fulcra_access_token", lambda: None)
+    import fulcra_common
+    monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token",
+                        lambda self: "cli-token")
+    ctx = _make_bare_ctx()
+    assert ctx.fulcra_token() == "cli-token"
