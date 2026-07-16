@@ -17,6 +17,46 @@ Background: FULCRA-PRIMITIVES.md at the repo root.
    Send `Authorization: Bearer <access_token>` on every call below.
    NEVER show the token to the user or store it anywhere visible.
 
+### 1a. Headless device flow without a browser on this host
+
+Instead of opening a browser locally, request the code, have the human approve on
+another device, then poll:
+`POST /oauth/device/code` returns `verification_uri_complete` + `device_code`;
+print the URL for the human; poll `/oauth/token` with the `device_code` grant
+until it stops returning `authorization_pending`. This is the same three calls,
+just split across devices.
+
+### 1b. Writing the CLI credential file + refreshing (shell host on a proxied sandbox)
+
+When the host *does* have the `fulcra`/`coord-engine` CLIs but the CLI's own login
+can't run (e.g. its device flow uses raw `http.client` and bypasses an
+intercepting `HTTPS_PROXY`), drive the flow above with a proxy-aware HTTP client
+and write the result to `~/.config/fulcra/credentials.json` so the CLIs work from
+then on. **Exact schema** (all four fields; timestamps are ISO-8601 **local, naive**
+— the CLI compares against `datetime.now()`, so a tz-aware value raises):
+
+```json
+{
+  "access_token": "<from /oauth/token>",
+  "access_token_expiration": "<now + expires_in seconds, ISO local naive>",
+  "refresh_token": "<from /oauth/token>",
+  "refresh_token_expiration": "<now + ~30 days, ISO local naive>"
+}
+```
+
+The Auth0 token response gives `expires_in` (seconds), not an absolute time —
+convert it: `access_token_expiration = now + expires_in`. Auth0 does not return a
+refresh-token lifetime here; use a conservative `now + 30 days`.
+
+**Refresh (no human re-prompt):** when the access token nears expiry,
+`POST https://fulcra.us.auth0.com/oauth/token` form
+`grant_type=refresh_token`, `client_id=48p3VbMnr5kMuJAUe9gJ9vjmdWLdnqZt`,
+`refresh_token=<stored>` → `{access_token, expires_in, refresh_token?}`. Recompute
+`access_token_expiration` from the new `expires_in`; if the response includes a new
+`refresh_token` (rotation), replace the stored one and its expiration; rewrite the
+file. The refresh token is valid for ~30 days, so a long-running host self-renews
+without prompting a human again.
+
 ## 2. Read the compiled preferences (one GET each)
 
 1. `GET /input/v1/file_upload?path=prefs&state=uploaded` → find your doc and its

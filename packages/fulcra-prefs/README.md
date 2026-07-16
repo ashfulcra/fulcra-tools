@@ -82,16 +82,18 @@ fulcra auth login --get-auth-url            # prints a verification URL + device
 fulcra auth login --device-code <DEVICE_CODE>
 ```
 
-This is the tier-2 onboarding path for remote agents. Two caveats on
+This two-step form still uses the CLI, so it is the **tier-1** onboarding path for
+browserless hosts (tier 2 is the raw-HTTP/no-shell fallback). Two caveats on
 proxy-intercepting sandboxes (e.g. some cloud CI): the auth CLI's device flow uses
 raw `http.client` and can bypass an `HTTPS_PROXY`, and access tokens expire
-(~24 h) with refresh subject to the same limitation — so on a locked-down sandbox
-you may need to drive the same Auth0 device-code exchange with a proxy-aware HTTP
-client and write the result to `~/.config/fulcra/credentials.json` in the CLI's
-format. See the tier-2 raw-HTTP reference
-([`skill/references/fulcra-prefs-tier2-http.md`](skill/references/fulcra-prefs-tier2-http.md))
-for the device-flow endpoints; the same recipe refreshes an expiring token via the
-`refresh_token` grant without re-prompting a human.
+(~24 h). When the CLI login itself can't run, drive the same Auth0 device-code
+exchange with a proxy-aware HTTP client and write the result to
+`~/.config/fulcra/credentials.json`. The exact credential-file schema (the four
+fields, with the ISO-local-naive expiration conversion from `expires_in`) and the
+`refresh_token`-grant refresh recipe — which renews an expiring token without
+re-prompting a human — are documented in §1b ("Writing the CLI credential file + refreshing") of the
+raw-HTTP reference
+([`skill/references/fulcra-prefs-tier2-http.md`](skill/references/fulcra-prefs-tier2-http.md)).
 
 ---
 
