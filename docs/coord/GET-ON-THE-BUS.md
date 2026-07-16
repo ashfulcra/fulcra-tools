@@ -47,7 +47,7 @@ uv tool install --force \
   --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common"
 ```
 
-`fulcra-common-v0.2.0` is the floor coord-engine v1.6.6 needs: it resolves definitions by
+`fulcra-common-v0.2.0` is the floor for coord-engine v1.6.6 and later: it resolves definitions by
 liveness (an earlier writer picked soft-deleted duplicates, landing moments hidden) **and**
 carries the digest-writer signature (`gated`/`id`) the engine's `digest --emit-timeline`
 calls — `v0.1.1` predates those, so the digest leg throws and silently no-ops. Pin at or
@@ -214,7 +214,13 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
   — idempotent across hosts, safe to run alongside other heartbeat hosts. Budget
   note: the FIRST reconcile on a cold host walks every doc and can take **several
   minutes** — don't wrap it in a short timeout and misread your own kill (rc 143)
-  as a hang; subsequent ticks reuse the summaries cache and are cheap.
+  as a hang; subsequent ticks reuse the summaries cache and are cheaper. On a
+  large team, though, even warm reconciles carry a read tail that grows with
+  history (per-task ack folds + the retention scan), and on remote transports
+  that tail has been observed to exceed a 10-minute budget at ~700 tasks
+  (live, 2026-07-15; bounding it is tracked for v1.6.8) — if reconcile keeps
+  timing out from your host, coordinate on the bus for a faster host to run the
+  reconcile leg and keep the `annotate project` + `digest` legs yourself.
 
 ## 8. Where next
 
