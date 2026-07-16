@@ -157,25 +157,33 @@ fulcra-coord doctor       # must report CLI reachable and File commands OK
 If it still reports 0.12.0, the reinstall didn't replace the on-PATH binary —
 check that `~/.local/bin` is ahead of any other `fulcra-coord` on `PATH`.
 
-### Client bump: fulcra-api ≥ 0.1.33
+### Client bump: fulcra-api ≥ 0.1.37
 
 The fleet's **fulcra-api client** is what fulcra-coord shells out to for the
 brokerless bus file transport (`file list/download/upload/stat/delete`). Bump it
 to the latest released version:
 
 ```bash
-uv tool install 'fulcra-api==0.1.33' --force
+uv tool install 'fulcra-api>=0.1.37' --force
 uv tool list | grep fulcra-api   # confirm the bump took
 fulcra-coord doctor              # confirm the invoked client is file-capable
 ```
 
+This is a **floor, not a pin.** It originally read `fulcra-api==0.1.33`, which
+was correct on the day and is now actively destructive: run today it downgrades
+a host, removing the top-level `record` and `delete` verbs (0.1.37) and the
+`share` group (0.1.36), and re-introducing the share-422 that 0.1.38 fixed.
+Section 3 is still the live per-host procedure — the 0.14.0/0.15.x sections
+above point at it — so it must stay runnable as written. 0.1.37 is the floor
+because that is where the record surface landed; take the latest.
+
 **Gotcha (real, just hit):** On some hosts, `fulcra-api` was installed from a
 now-deleted local source path (e.g. `/private/tmp/fulcra-api-python`), so `uv tool
 upgrade fulcra-api` FAILS with "Distribution not found at: file://…". Use the
-explicit version form (`uv tool install 'fulcra-api==0.1.33' --force`) above to
-move such a host onto the released build. If a host intentionally runs a LOCAL/dev
-build of fulcra-api (e.g. for unreleased features), point it at that source
-instead — don't blindly force it to PyPI.
+floor form (`uv tool install 'fulcra-api>=0.1.37' --force`) above to move such a
+host onto the released build. If a host intentionally runs a LOCAL/dev build of
+fulcra-api (e.g. for unreleased features), point it at that source instead —
+don't blindly force it to PyPI.
 
 `uv tool install` updates the uv-tool shim; it does **not** override an explicit
 `FULCRA_CLI_COMMAND`. If `fulcra-coord doctor` still reports a local/dev command,
@@ -184,10 +192,12 @@ Otherwise update/unset `FULCRA_CLI_COMMAND` in the host shell/launchd environmen
 and reinstall listener/heartbeat jobs so background processes inherit the same
 client that `doctor` reports.
 
-The `fulcra-api` `file` command surface is unchanged 0.1.32→0.1.33 (identical
-command set; the delta is internal), so this bump is safe and loses nothing — it's
-stay-on-latest-client hygiene. The `File commands: OK` check from the verification
-section below still applies.
+The `fulcra-api` `file` command surface — the only part of the client fulcra-coord
+depends on — is unchanged 0.1.32→0.1.38 (identical command set: `delete download
+list restore stat upload`; the deltas are internal or elsewhere in the CLI), so
+taking the latest is safe and loses nothing. Staying behind is what loses
+something. The `File commands: OK` check from the verification section below
+still applies.
 
 ## 4. Post-deploy verification
 
