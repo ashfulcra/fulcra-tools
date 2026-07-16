@@ -118,6 +118,20 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
            for row in aggregate.aggregate_rows(prior_agg)):
         log.info("fast path declined: prior aggregate has stale-schema rows", team=team)
         return False
+    # Same rule, other sub-fold: the fast path may only fire when EVERY sub-fold is
+    # SETTLED. The ack fold advances its own anchor only when it read everything it
+    # meant to (see ACKS_ANCHOR_KEY); an anchor behind generated_at means it is owed
+    # a change from BEFORE this window — which this probe cannot see, because it
+    # asks about generated_at onward. Skipping here would strand that change until
+    # the periodic backstop, defeating the held anchor entirely. So: decline until
+    # the ack fold settles, then resume. (A legacy aggregate has no anchor at all —
+    # nothing has ever been verified — and declines the same way, until one full
+    # pass records a conclusive fold.)
+    if (prior_agg or {}).get(ACKS_ANCHOR_KEY) != gen:
+        log.info("fast path declined: ack fold owes a pass (anchor behind generated_at)",
+                 team=team, ack_anchor=(prior_agg or {}).get(ACKS_ANCHOR_KEY),
+                 generated_at=gen)
+        return False
     age = age_hours(gen, now)
     if age is None or age < 0 or age > MAX_FAST_PATH_HOURS:
         return False

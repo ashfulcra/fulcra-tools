@@ -248,7 +248,8 @@ it (not on PyPI).
     a changed slug that wouldn't list — falls back to the full fold and logs why. **No false advance:** a
     fold that couldn't read what it meant to leaves the anchor where it was, so the change it missed is
     still inside the next pass's window instead of consumed by this one; a failed listing preserves the
-    prior `acked_by` rather than un-acking the task. A forced full fold every `COORD_ACKS_FULL_EVERY`
+    prior `acked_by` rather than un-acking the task; and the whole-pass fast path declines while that
+    anchor is behind `generated_at`, so a quiet beat can't skip the fold that still owes a read. A forced full fold every `COORD_ACKS_FULL_EVERY`
     passes (default 12, ~4h at a 20-min heartbeat) bounds anything the query could miss, and carries the
     orphan-shard GC.
 

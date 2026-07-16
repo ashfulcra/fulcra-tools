@@ -837,3 +837,61 @@ def test_acks_conclusive_full_fold_advances_the_anchor():
     assert _anchor(t) == "2026-07-01T16:05:00Z"
     _reconciled(t, now="2026-07-01T16:15:00Z")         # no query support -> full fold
     assert _anchor(t) == "2026-07-01T16:15:00Z"
+
+
+# --- the global fast path may only fire when EVERY sub-fold is settled (codex r2) ---
+#
+# Holding the ack anchor is necessary but useless if a pass can skip the fold that
+# reads it. The fast path builds its window from generated_at, which advances even
+# on a pass whose ack fold was inconclusive — so it would happily skip over an ack
+# change that is still owed, and the held anchor would never be queried. Same shape
+# as the v1.6.7 stale-schema-stamp guard: settle first, then skip.
+
+def test_fast_path_declines_while_the_ack_fold_owes_a_pass():
+    """The two-pass recovery: an inconclusive ack fold at 16:40 must not be
+    stranded by a quiet global feed at 16:45. Both transport capabilities are
+    live, which is the whole point — `updates` sees nothing in the 16:40->16:45
+    window, but the ack fold is still owed the 16:06 change from BEFORE it."""
+    t = _seeded()                                      # anchor == generated_at == 16:05
+    changes = [{"full_name": "/team/r/_coord/acks/b/dan.md",
+                "state": "uploaded", "uploaded_at": "2026-07-01T16:06:00Z"}]
+    _with_recent_changes(t, _windowed_changes(changes))
+    t.put("team/r/_coord/acks/b/dan.md",
+          "---\ntype: Ack\nagent: dan\ntimestamp: 2026-07-01T16:06:00Z\n---\n")
+    _fail_list_for(t, "team/r/_coord/acks/b/")
+    _reconciled(t, now="2026-07-01T16:40:00Z")         # inconclusive: anchor held...
+    assert _anchor(t) == "2026-07-01T16:05:00Z"        # ...at 16:05, generated_at at 16:40
+    assert _acked(t)["b"] == ["bob"]
+
+    t.list_dir = FakeTransport.list_dir.__get__(t)     # transport recovers
+    _with_updates(t, [])                               # global feed: nothing since 16:40
+    log, stream = _capture_log()
+    res = reconcile.reconcile(t, "r", now="2026-07-01T16:45:00Z", today="2026-07-01",
+                              host="h", logger=log)
+    assert not res.get("fast_path"), "ack evidence is inconclusive — must not skip the fold"
+    assert "ack fold" in stream.getvalue()             # declined for its OWN reason
+    assert _acked(t)["b"] == ["bob", "dan"]            # the 16:06 ack finally lands
+    assert _anchor(t) == "2026-07-01T16:45:00Z"        # conclusive -> anchor advances
+
+
+def test_fast_path_resumes_once_the_ack_fold_is_settled():
+    """The guard is a settle-first rule, not a permanent block: once a fold is
+    conclusive (anchor == generated_at), a quiet beat takes the fast path again."""
+    t = _seeded()
+    _with_recent_changes(t, [])
+    _reconciled(t, now="2026-07-01T16:15:00Z")         # conclusive incremental fold
+    assert _anchor(t) == "2026-07-01T16:15:00Z"
+    _with_updates(t, [])
+    assert _reconciled(t, now="2026-07-01T16:20:00Z").get("fast_path") is True
+
+
+def test_fast_path_declines_on_a_legacy_aggregate_without_an_ack_anchor():
+    """A pre-1.6.8 aggregate has never had a conclusive ack fold recorded. Skipping
+    on the strength of its generated_at would reuse acks nothing ever verified."""
+    t = _seeded()
+    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    agg.pop(reconcile.ACKS_ANCHOR_KEY)
+    t.store["team/r/_coord/summaries.json"] = json.dumps(agg)
+    _with_updates(t, [])
+    assert not _reconciled(t, now="2026-07-01T16:15:00Z").get("fast_path")
+    assert _anchor(t) == "2026-07-01T16:15:00Z"        # full pass settles it
