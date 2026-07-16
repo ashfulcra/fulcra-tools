@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from coord_engine import cli, okf, reconcile, tasks
+from coord_engine import budget, cli, okf, reconcile, tasks
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
@@ -206,6 +206,38 @@ def test_role_doc_unreadable_while_listed_is_degraded_not_a_non_role(capsys):
     assert b["role_degraded"]["roles"] == ["reviewer"]
 
 
+class RoleDocMalformed(FakeTransport):
+    """The role doc READS, but its body is not frontmatter — corrupt or truncated."""
+
+    def read(self, path):
+        if path == cli._role_doc_path(TEAM, "reviewer"):
+            return "not frontmatter\n"
+        return super().read(path)
+
+
+def test_role_doc_malformed_while_listed_is_degraded_not_a_non_role(capsys):
+    # Same rule as the read-None case above, and the reviewer-reproduced hole in
+    # the code written to close that class: a body that does not PARSE is not
+    # evidence that the name isn't a role. The roles/ listing has already proved
+    # `reviewer` IS a registered role, so an unusable doc is UNKNOWN. Treating the
+    # failed parse as affirmative "not a role" served the holder a clean, empty
+    # queue with no marker at all — a failure that type-checks as success.
+    t = _team_with_role_directive(RoleDocMalformed)
+    b = _briefing(t, "bob", capsys)
+    assert b["role_degraded"] == {"type": "role-degraded", "roles": ["reviewer"]}
+    # and the queue must NOT read as a clean "nothing for you"
+    assert [r["name"] for r in b["inbox"]] == []
+    assert [r["name"] for r in b["needs_me"]] == []
+
+
+def test_role_doc_malformed_while_listed_is_loud_in_text(capsys):
+    t = _team_with_role_directive(RoleDocMalformed)
+    assert cli.main(["briefing", TEAM, "-a", "bob"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "role resolution degraded: reviewer" in out
+    assert "unknown" in out
+
+
 def test_literal_agent_assignee_is_not_degraded(capsys):
     # A directive addressed to another literal agent id is affirmatively NOT a
     # role (absent from the roles/ listing) — resolving it must stay quiet.
@@ -282,6 +314,112 @@ def test_role_resolution_is_one_pass_for_both_folds(capsys):
     _briefing(t, "bob", capsys)
     assert t.reads.count(cli._role_doc_path(TEAM, "reviewer")) == 1
     assert t.lists.count(cli._leases_prefix(TEAM, "reviewer")) == 1
+
+
+def test_multi_lease_role_costs_a_read_per_shard(capsys):
+    # The HONEST bound, pinned. This docstring used to claim `1 + 3R` ops, R =
+    # distinct roles — and the claim was false and shipped anyway. Every LISTED
+    # lease shard is read, and shards accumulate per claiming agent forever (only
+    # `roles release` prunes one), so the real cost is 1 + sum(2 + L_r): one role
+    # with ten shards is 13 ops, not the 4 that `1 + 3R` predicts. `3R` is just the
+    # L_r == 1 case. If a future change makes the cost formula in
+    # `_held_roles_for_rows` false again, this test says so in op counts.
+    t = ListCountingTransport()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")
+    for i in range(9):  # nine agents who claimed the role and never released
+        _put_lease(t, "reviewer", f"ghost{i}")
+    _put_directive(t, "role-do-1", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    t.lists.clear(); t.reads.clear()
+    b = _briefing(t, "bob", capsys)
+    assert [r["name"] for r in b["inbox"]] == ["role-do-1"]  # still routes
+    role_ops = ([p for p in t.reads if "/roles/" in p]
+                + [p for p in t.lists if "/roles/" in p])
+    # 1 roles/ listing + 1 doc read + 1 leases listing + 10 shard reads
+    assert len(role_ops) == 13, sorted(role_ops)
+    assert len([p for p in t.reads if "/leases/" in p]) == 10
+
+
+# --- the wall-clock bound: a budget cut is UNKNOWN, not "no roles" --------
+
+class RoleClockTransport(FakeTransport):
+    """A degraded transport, deterministically: every op under `roles/` advances a
+    fake monotonic clock by `cost` seconds instead of sleeping. No wall clock, no
+    flake, and only the role fold's ops spend time — so a cut here is unambiguously
+    the role budget's, not another section's."""
+
+    def __init__(self):
+        super().__init__()
+        self.clock = 0.0
+        self.cost = 0.0
+
+    def _tick(self, path):
+        if "/roles/" in path:
+            self.clock += self.cost
+
+    def read(self, path):
+        self._tick(path)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        self._tick(prefix)
+        return super().list_dir(prefix)
+
+
+def _slow_role_team(monkeypatch, budget_seconds, *, cost=1.0):
+    t = _team_with_role_directive(RoleClockTransport)
+    t.cost = cost  # setup above ran free; the fold pays
+    monkeypatch.setattr(budget.time, "monotonic", lambda: t.clock)
+    monkeypatch.setenv("COORD_ROLE_FOLD_BUDGET", str(budget_seconds))
+    return t
+
+
+def test_role_budget_cut_before_any_role_marks_candidates_unresolved(capsys, monkeypatch):
+    # The roles/ listing alone spends the budget. `reviewer` is then never scanned
+    # — and an unscanned candidate is UNKNOWN. Rendering the empty held-set we
+    # happen to have would serve bob a role-blind queue because the clock ran out:
+    # the same silent failure as before, triggered by latency instead of a missing
+    # fold. Bob DOES hold this role and role-do-1 IS his work.
+    t = _slow_role_team(monkeypatch, 0.5)
+    b = _briefing(t, "bob", capsys)
+    assert b["role_degraded"] == {"type": "role-degraded", "roles": ["reviewer"]}
+    assert [r["name"] for r in b["inbox"]] == []
+    assert not [r for r in b["needs_me"] if r.get("name") == "role-do-1"]
+
+
+def test_role_budget_cut_mid_role_marks_it_unresolved(capsys, monkeypatch):
+    # The partial-scan half: the budget survives the roles/ listing and the doc
+    # read, then the LEASE listing spends it with shards still unread. A lease we
+    # never read is UNKNOWN exactly as if its read had failed — the role must not
+    # fold out as "bob isn't a holder".
+    t = _slow_role_team(monkeypatch, 2.5)  # listing + doc read fit; shard reads do not
+    b = _briefing(t, "bob", capsys)
+    assert b["role_degraded"] == {"type": "role-degraded", "roles": ["reviewer"]}
+    assert [r["name"] for r in b["inbox"]] == []
+    assert not [r for r in b["needs_me"] if r.get("name") == "role-do-1"]
+
+
+def test_role_budget_cut_is_loud_on_inbox_and_needs_me(capsys, monkeypatch):
+    # The cut must reach the verbs agents actually run, in text — not just the
+    # briefing bundle's json.
+    t = _slow_role_team(monkeypatch, 0.5)
+    assert cli.main(["inbox", TEAM, "-a", "bob"], transport=t) == 0
+    assert "role resolution degraded: reviewer" in capsys.readouterr().out
+    assert cli.main(["needs-me", TEAM, "--agent", "bob"], transport=t) == 0
+    assert "role resolution degraded: reviewer" in capsys.readouterr().out
+
+
+def test_role_fold_completing_late_is_not_degraded(capsys, monkeypatch):
+    # The other side of the rule: a COMPLETED fold is definitive knowledge, so
+    # finishing late must not degrade it. Only an UNREAD op is unknown. Without
+    # this, a tight budget would degrade every fold whose last read happened to
+    # land on the boundary — and a marker that fires on healthy folds is a marker
+    # agents learn to ignore.
+    t = _slow_role_team(monkeypatch, 4.5)  # listing + doc + lease listing + shard = 4
+    b = _briefing(t, "bob", capsys)
+    assert "role_degraded" not in b
+    assert [r["name"] for r in b["inbox"]] == ["role-do-1"]
 
 
 # --- the pure fold --------------------------------------------------------

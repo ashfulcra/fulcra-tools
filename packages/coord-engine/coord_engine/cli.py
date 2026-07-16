@@ -727,6 +727,15 @@ DEFAULT_REVIEW_FOLD_BUDGET = 45.0
 #: opens when the add-on stack begins and is spent cumulatively across sections;
 #: pending-reviews keeps its own independent COORD_REVIEW_FOLD_BUDGET (sooner wins).
 DEFAULT_BRIEFING_BUDGET = 60.0
+#: Cumulative deadline (seconds) for ONE role-resolution pass (`_held_roles_for_rows`)
+#: — the fold `briefing` / `inbox` / `needs-me` / `listen` all run, i.e. every agent,
+#: every tick. Its cost is 1 + sum(2 + lease_shards) over the roles the open work
+#: references (see `_held_roles_for_rows`), and lease shards accumulate per claiming
+#: agent forever (only `roles release` prunes one), so an unbudgeted pass could spend
+#: one transport timeout per role doc, per lease listing AND per shard before the hot
+#: path renders anything. 20s is a generous ~25 ops at the measured ~0.8s/op — far
+#: past the 4-7 a real team pays — while still bounding a degraded transport.
+DEFAULT_ROLE_FOLD_BUDGET = 20.0
 #: Per-tick bound (seconds) for the listener's dir-only review-slug classification
 #: pass. That set is PERMANENT and growing (soft deletes leave every review dir
 #: forever), so an unbudgeted pass could spend N x transport-timeout on a degraded
@@ -756,6 +765,15 @@ def _briefing_budget() -> float:
     what the next one gets; pending-reviews keeps its own independent
     ``COORD_REVIEW_FOLD_BUDGET`` (whichever bound is sooner wins)."""
     return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
+
+
+def _role_fold_budget() -> float:
+    """Cumulative deadline (seconds) for one role-resolution pass. Env
+    ``COORD_ROLE_FOLD_BUDGET`` (see the DEFAULT_ROLE_FOLD_BUDGET rationale). Its own
+    knob, like ``COORD_REVIEW_FOLD_BUDGET``: role resolution runs BEFORE the
+    briefing/needs-me add-on stack opens its budget (the held set is an input to the
+    inbox fold, not an add-on section), so it cannot spend that one."""
+    return config.env_float("COORD_ROLE_FOLD_BUDGET", DEFAULT_ROLE_FOLD_BUDGET)
 
 
 def _listen_classify_budget() -> float:
@@ -940,6 +958,7 @@ def _roles_listing_names(transport: Any, team: str) -> Optional[set[str]]:
 def _role_fresh_holders(
     transport: Any, team: str, name: str, *, now: str,
     listing_cache: Optional[dict[str, Any]] = None,
+    deadline: Optional[Deadline] = None,
 ) -> tuple[list[str], bool]:
     """Fresh lease holders of role name per the CANONICAL fold: the role
     doc's own sla_hours (falling back to the default) fed to
@@ -955,42 +974,71 @@ def _role_fresh_holders(
     - a JUST-LISTED lease shard reads None or unparseable (previously ``or {}``
       dropped its timestamp and silently folded the holder out as stale — a
       fail-open vacancy INSIDE the fold);
-    - the role-doc read returns None while the name IS present in the roles/
-      listing (or that listing itself raised): listed-but-unreadable is a
-      transport failure, not a non-role.
+    - no USABLE role document — the read returned None, or returned a body that
+      does not parse as frontmatter — for a name the roles/ listing SHOWS is a
+      registered role (or while that listing itself raised, leaving membership
+      unknown);
+    - ``deadline`` expires with role state still unread (see below).
 
-    A doc-read None with the name ABSENT from the listing is a genuine non-role
-    (``([], True)``) — the literal-agent-id case stays non-degraded, as does a
-    doc that reads fine but isn't frontmatter (affirmative knowledge: not a
-    role). ``listing_cache`` (a per-tick/per-fold dict) memoizes the one roles/
-    listing across role-shaped assignees; pass the same dict for every call in
-    a pass."""
+    **Only a complete, successfully parsed LISTING is negative membership
+    evidence.** The one non-degraded absence is a doc-read miss for a name the
+    listing affirmatively does NOT contain (``([], True)`` — the literal-agent-id
+    case). A failed read and a failed PARSE are the same fact: we do not know what
+    that document says. Until 2026-07-16 an unparseable body short-circuited to
+    "affirmative non-role" — but the listing has already proved the name IS a
+    role, so a truncated or malformed doc served its holder a clean, role-blind
+    queue with no ``role-degraded`` marker at all (reviewer-reproduced: a
+    ``reviewer.md`` of ``"not frontmatter"`` emitted an empty inbox AND an empty
+    needs_me, silently). A parse result is not evidence about registration; the
+    listing is.
+
+    ``deadline`` bounds the role's own fan-out (its doc read, its lease listing,
+    and a read per lease shard — unbounded in the shard count, since shards
+    accumulate per claiming agent). Checked before each blocking op that follows
+    another, per the module deadline discipline: an overrun is detected
+    immediately after the op that caused it, overshoot is bounded by ONE op, and a
+    COMPLETED fold is never degraded merely for finishing late (its answer is
+    definitive knowledge — keep it). ``None`` -> unbounded, for the direct callers
+    (`roles status`, atc) that are not on the hot path.
+
+    ``listing_cache`` (a per-tick/per-fold dict) memoizes the one roles/ listing
+    across role-shaped assignees; pass the same dict for every call in a pass."""
     if "/" in name:
         return [], True  # a role name is a single path segment; anything else is not a role
+    dl = deadline if deadline is not None else Deadline(None)  # None -> never expires
     raw_doc = transport.read(_role_doc_path(team, name))
     reg = okf.parse_frontmatter(raw_doc)
     if reg is None:
-        if raw_doc is not None:
-            return [], True  # read fine, just not a role doc -> affirmative non-role
+        # No usable role document: absent, empty, truncated, or unparseable. Which
+        # of those it is does not matter here — none of them is evidence about
+        # whether `name` is a registered role. Only the listing answers that.
         cache = listing_cache if listing_cache is not None else {}
         if "names" not in cache:
             cache["names"] = _roles_listing_names(transport, team)
         names = cache["names"]
         if names is None or f"{name}.md" in names:
             # roles/ listing unreadable (membership unknown) OR the doc is listed
-            # yet unreadable (transport failure): UNKNOWN, fail closed.
+            # yet unusable (transport failure / corrupt doc): UNKNOWN, fail closed.
             return [], False
         return [], True  # genuinely absent -> not a role (literal agent id case)
     try:
         sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
     except (TypeError, ValueError):
         sla = roles.DEFAULT_SLA_HOURS
+    if dl.expired():
+        return [], False  # the doc read spent the budget; the lease state is UNREAD
     leases: list[dict[str, Any]] = []
     try:
         for f in transport.list_dir(_leases_prefix(team, name)):
             fn = f.get("name") or ""
             if f.get("is_dir") or not fn.endswith(".md"):
                 continue
+            if dl.expired():
+                # The listing (or the previous shard read) spent the budget with
+                # shards still unread. A lease we never read is UNKNOWN, exactly as
+                # if its read had failed — folding the rest out would assert a
+                # vacancy we did not observe.
+                return [], False
             fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn))
             if fm is None:
                 # Listed shard, failed/unparseable read: this lease's freshness is
@@ -1038,27 +1086,52 @@ def _role_degraded_line(r: dict[str, Any]) -> str:
 def _held_roles_for_rows(
     transport: Any, team: str, agent: str, rows: list[dict[str, Any]], *,
     now: str, skip_slugs: "Optional[set[str]]" = None,
+    deadline_seconds: Optional[float] = None,
 ) -> tuple[set[str], set[str]]:
     """Roles ``agent`` holds a FRESH lease on, among the role-shaped assignees the
     given rows actually reference. Returns ``(held, unresolved)``.
 
-    The candidate set is the bound that keeps this affordable on the hot path:
-    only DISTINCT foreign assignees on OPEN rows are probed, and the roles/ LISTING
-    (one op, cached for the pass) settles which of them are roles at all — so the
-    literal-agent-id majority costs ZERO reads, and only genuine roles pay a
-    doc read + a lease listing + a shard read. A team with no role-addressed open
-    work pays nothing. Self / ``*`` / ``@backlog`` / path-shaped assignees are
-    skipped without a read. ``skip_slugs`` lets `listen` narrow further to UNSEEN
-    directives (an already-fired id needs no route). This is the whole added cost
-    on `briefing`, the hot path, and a transport op is a `fulcra-api` subprocess +
-    HTTPS round trip (~0.8s measured), so the shape matters: **1 + 3R ops**, R =
-    distinct ROLES the open work actually references — 7 ops on a 132-open-row
-    team with 6 distinct foreign assignees, 2 of them roles (the same team costs
-    11 without the listing prefilter, and 133 if every assignee is probed). The 3
-    per role — doc read (its own ``sla_hours``), lease listing, shard read — is the
-    price of a FAIL-CLOSED answer: reading the agent's own lease shard directly
+    The candidate set is the first bound: only DISTINCT foreign assignees on OPEN
+    rows are probed, and the roles/ LISTING (one op, cached for the pass) settles
+    which of them are roles at all — so the literal-agent-id majority costs ZERO
+    reads, and only genuine roles pay. A team with no role-addressed open work pays
+    nothing. Self / ``*`` / ``@backlog`` / path-shaped assignees are skipped without
+    a read. ``skip_slugs`` lets `listen` narrow further to UNSEEN directives (an
+    already-fired id needs no route).
+
+    **The honest op bound** (corrected 2026-07-16 — the docstring here previously
+    claimed a tidy ``1 + 3R``, which was simply false, and the claim propagated to
+    the PR that shipped it). A pass costs::
+
+        1 + SUM over probed roles r of (2 + L_r)
+
+    ops: one roles/ listing, then per probed role a doc read + a lease listing +
+    ``L_r`` shard reads. ``L_r`` is the number of ``.md`` shards in the role's
+    leases/ prefix — one per agent that has ever claimed the role and not
+    ``roles release``-d it. Nothing prunes an abandoned shard, so ``L_r`` tracks
+    lifetime holder CHURN, not current holders, and is unbounded in principle: a
+    role with ten lease shards costs 13 ops, not 4. ``3R`` is only the ``L_r == 1``
+    special case. "Probed roles" = the candidates the roles/ listing confirms are
+    roles; if that listing RAISES, membership is unknown and EVERY candidate is
+    probed at 1 op (its doc read) plus the lease terms for those whose docs parse.
+    A transport op is a `fulcra-api` subprocess + HTTPS round trip (~0.8s measured)
+    and this runs on `briefing` — the hot path — so the terms matter. The per-role
+    ops buy a FAIL-CLOSED answer: reading the agent's own lease shard directly
     would be 1 op, but ``read()`` can't tell absent from failed, which is exactly
     why ``_held_roles`` (the older sweep) reports a transport outage as "no roles".
+
+    **The wall-clock bound** is what actually holds under a degraded transport,
+    because no op count bounds LATENCY when each op can burn a full transport
+    timeout. One cumulative ``COORD_ROLE_FOLD_BUDGET`` deadline opens here — before
+    the roles/ listing, which is itself a blocking op (the recurring pre-budget
+    class) — and is spent across the listing, every role, and every lease shard
+    within a role. Total latency is the budget plus ONE transport timeout of
+    overshoot, no matter how many roles or shards exist.
+
+    On a budget cut every candidate not FINISHED — unscanned, or scanned partway —
+    lands in ``unresolved``, never in "not held". Running out of time is UNKNOWN,
+    the same as a failed read: serving a role-blind queue because the clock ran out
+    is the exact failure this fold exists to close.
 
     The prefilter is PER PASS, never persistent: leases change, and a name later
     registered as a role must route on the very next fold (the staleness hole that
@@ -1069,6 +1142,8 @@ def _held_roles_for_rows(
     MUST surface it (``_role_degraded_row``) rather than let it fold into "no
     roles" — that would be the original silent bug one layer down.
     """
+    if deadline_seconds is None:
+        deadline_seconds = _role_fold_budget()
     candidates: set[str] = set()
     for r in rows:
         if r.get("status") not in directives.OPEN_STATUSES:
@@ -1084,6 +1159,13 @@ def _held_roles_for_rows(
     held: set[str] = set()
     unresolved: set[str] = set()
     listing_cache: dict[str, Any] = {}  # one roles/ listing per pass
+    # The pass's ONE deadline opens HERE — ahead of the roles/ listing, not after
+    # it. That listing is a blocking op like any other, and a deadline opened past
+    # it leaves a transport timeout sitting AHEAD of the budget (the pre-budget
+    # class the review fold was bitten by). Everything below spends this same
+    # deadline cumulatively: the listing, each role's doc + lease listing, and each
+    # lease shard read within a role.
+    dl = Deadline.open(deadline_seconds)
     if candidates:
         # Prime the cache `_role_fresh_holders` already consults, and use it to
         # drop candidates that are affirmatively NOT roles before paying a read
@@ -1095,9 +1177,22 @@ def _held_roles_for_rows(
         names = listing_cache["names"]
         if names is not None:
             candidates = {c for c in candidates if f"{c}.md" in names}
-    for role in sorted(candidates):
+    ordered = sorted(candidates)
+    for i, role in enumerate(ordered):
+        if dl.expired():
+            # Budget cut. Every candidate we have not FINISHED is UNKNOWN — mark
+            # the whole tail unresolved and stop. The alternative (return what we
+            # got) renders a role-blind queue that is indistinguishable from "you
+            # hold no roles", which is the silent failure this fold exists to
+            # close, now triggered by a slow transport instead of a missing fold.
+            # A candidate scanned PARTWAY degrades inside `_role_fresh_holders`
+            # (it shares this deadline) and comes back ok=False, so it lands in
+            # `unresolved` through the branch below — no candidate can be dropped
+            # by the clock without being reported.
+            unresolved.update(ordered[i:])
+            break
         holders, ok = _role_fresh_holders(transport, team, role, now=now,
-                                          listing_cache=listing_cache)
+                                          listing_cache=listing_cache, deadline=dl)
         if not ok:
             unresolved.add(role)
             continue
