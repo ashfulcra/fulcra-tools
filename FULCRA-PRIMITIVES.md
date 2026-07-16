@@ -15,10 +15,13 @@ so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-13 on
 
 - **`fulcra record` and `fulcra delete` shipped in 0.1.37** (2026-07-15).
   Annotation **records** — not just definitions — now have first-class CLI
-  write and delete verbs, and the lib has `record_data_type`. This is the
-  event the 07-13 stamp named as this doc's rewrite trigger; §Annotations is
-  rewritten around it. **Tier 1 no longer hand-rolls ingest POSTs for
-  records.**
+  write and delete verbs, and the lib has `record_data_type`. `delete` is a
+  **tombstone, not an erasure**: it appends a `DeletedRecord` through the same
+  ingest path, so the data model is still append-only and there is still no
+  update or replace. What 0.1.37 changed is availability, not semantics. This
+  is the event the 07-13 stamp named as this doc's rewrite trigger;
+  §Annotations is rewritten around it. **Tier 1 no longer hand-rolls ingest
+  POSTs for records.**
 - **`fulcra data-type schema`** — new subcommand, returns a data type's JSON
   schema (the discovery step before `record`). `data-type` is now
   `create|archive|restore|schema`.
@@ -132,8 +135,9 @@ is battle-tested at load.
   with `POST /{id}/cancel_deletion` to restore. JSON-schema discovery:
   `GET /user/v1alpha1/schema/annotation`.
 
-**Records** (instances on the timeline) are **CLI-writable and CLI-deletable as
-of 0.1.37** — this reversed the doc's long-standing "records are ingest-only"
+**Records** (instances on the timeline) became **CLI-writable as of 0.1.37**,
+with a `delete` verb that appends a tombstone rather than erasing anything
+(§below) — this reversed the doc's long-standing "records are ingest-only"
 guidance. If you have a shell, do **not** hand-roll ingest POSTs any more; the
 raw endpoints below are tier-2 material and background for reading old code.
 
@@ -195,8 +199,11 @@ the OpenAPI (spec-confirmed, not re-round-tripped):
   unless `--api-version` says otherwise).
 - **Deletion at tier 2** is this same endpoint: `POST
   /ingest/v1/record/DeletedRecord` with `{"record_id": <uuid>, "data_type":
-  <base type>}`. Live (401 unauth, probed 2026-07-16), and unpublished in the
-  spec like the rest of `/ingest`.
+  <base type>}`. Live (401 unauth, probed 2026-07-16) and published — it is an
+  instance of the `{data_type}` template above, which the spec carries. The
+  unpublished ingest route is `POST /ingest/v1/record/batch`: live (401,
+  probed 2026-07-16) but absent from the spec, which is why spec-absence is
+  never evidence a route is gone — probe it (404 = gone, 401 = exists).
 - **Schema discovery (stable v1 catalog):** `GET /data/v1/catalog` lists every
   type with `recordable` + `api_version` fields;
   `GET /data/v1/catalog/{data_type}/{api_version}/schema` returns the JSON Schema
