@@ -204,10 +204,21 @@ GC_GRACE_HOURS = 24.0  #: never GC a shard younger than this (or undatable)
 #: How many passes may fold acks incrementally before one full fold is FORCED
 #: (env ``COORD_ACKS_FULL_EVERY``; positive-finite, bad value -> this default).
 #: The backstop bounds the blast radius of a change the query never reported: a
-#: missed ack is corrected within this many passes (~4h at the 20-min heartbeat),
-#: it can never persist indefinitely. It also carries the orphan-shard GC, which
-#: only rides the full fold. ``1`` disables the incremental path entirely.
-DEFAULT_ACKS_FULL_EVERY = 12
+#: missed ack is corrected within this many passes, so it can never persist
+#: indefinitely. It also carries the orphan-shard GC, which only rides the full
+#: fold. ``1`` disables the incremental path entirely.
+#:
+#: Why 72 and not 12: a forced full fold was MEASURED at 1091s (~18min) on a
+#: 1.2s/op remote transport. At 12 (~4h on a 20-min heartbeat) that is an
+#: 18-minute stall every four hours on every remote host — a real cost to pay
+#: for a check whose subject, the change query, was verified complete against an
+#: independent listing (31/31, zero missed). 72 puts the true-full at ~daily on
+#: the same heartbeat: still bounded, still catches a silently-dropped change
+#: within a day, at a twenty-fourth of the tax. The right end state is a
+#: change-driven backstop (query a WIDE window since the last CONCLUSIVE full
+#: fold, reserving a true-full for anchor-loss/doubt) — that is a design change,
+#: not a constant, so it is queued rather than rushed in here.
+DEFAULT_ACKS_FULL_EVERY = 72
 
 #: Key under which the aggregate carries the count of consecutive INCREMENTAL ack
 #: folds since the last full one — the backstop's counter. It lives in
