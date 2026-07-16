@@ -105,10 +105,14 @@ def broadcast_state(
 def renotify(
     rows: list[dict[str, Any]], acks: dict[str, list[str]], agent: str, *,
     now: Optional[str] = None, min_priority: str = "P1",
+    held_roles: "Optional[set[str] | list[str]]" = None,
 ) -> list[dict[str, Any]]:
     """Unacked directives at/above ``min_priority`` — the re-notify surface
-    (P0 outranks P1). Same gates as ``inbox``."""
+    (P0 outranks P1). Same gates as ``inbox``, including role routing: this is a
+    strict filter OVER ``inbox``, so it takes ``held_roles`` for the same reason
+    (a role-routed P0 nobody re-notifies is the loudest version of the silence
+    this module's role expansion exists to prevent)."""
     order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
     ceiling = order.get(min_priority, 1)
-    return [r for r in inbox(rows, acks, agent, now=now)
+    return [r for r in inbox(rows, acks, agent, now=now, held_roles=held_roles)
             if order.get(str(r.get("priority")), 9) <= ceiling]

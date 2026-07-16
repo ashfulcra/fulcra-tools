@@ -213,6 +213,23 @@ it (not on PyPI).
   is a ship-gate: a new aggregate-backed read consumes `_load_rows_status` (never `_load_rows`) and
   surfaces the marker on `ok is False`, with a red-first test asserting no clean-empty under a degraded
   transport.**
+- **Role routing is the same contract, one layer in — a role you hold is an address.** A directive
+  assigned to a ROLE is directed at whoever holds a fresh lease on it, so `briefing`, `inbox`,
+  `needs-me`, and `listen` all fold role-routed work into the holder's queue (that is what makes
+  role-based identity outlive a session). ONE resolver: `cli._held_roles_for_rows` — never resolve
+  roles a second way, or the folds silently disagree about a lease. It returns `(held, unresolved)`,
+  and **`unresolved` is the load-bearing half**: a role whose lease state is UNKNOWN (transport
+  failure, unreadable lease shard, or a role doc listed-but-unreadable — see `_role_fresh_holders`) is
+  neither held nor not-held. Folding it into an empty held-set renders a clean, role-blind queue that
+  is **indistinguishable from "you have no role work"** — the same silent failure as a clean-empty
+  read, and worse, because the doc promise above would then be true-except-when-it-silently-isn't.
+  Every caller surfaces it as `_role_degraded_row` = `{"type": "role-degraded", "roles": […]}` (a
+  `role_degraded` key on the `briefing` bundle; a list element on `inbox`/`needs-me`) plus the text
+  line. **Ship-gate: a new fold that answers "what needs this agent" resolves roles through that one
+  helper and surfaces `unresolved`, with a red-first test proving a failed lookup is visible.**
+  Cost is bounded by ONE `roles/` listing per pass, which settles which assignees are roles at all, so
+  the literal-agent-id majority costs zero reads; the prefilter is per-pass, never cached across
+  passes (leases change, and a newly-registered role must route on the very next fold).
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
@@ -271,8 +288,8 @@ it (not on PyPI).
   [`packages/coord-engine`](packages/coord-engine/README.md).
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
-  against a per-agent state file — new **inbox directives plus directives routed to a role you hold a
-  fresh lease on** (a strict superset of the `inbox` fold; a lease handoff re-routes the very next tick),
+  against a per-agent state file — new **inbox directives, role-routed ones included** (the SAME fold
+  `inbox`/`briefing` now show — a lease handoff re-routes the very next tick),
   new **responses to directives you own** (the reply leg of `respond`), and new **verdicts on reviews you
   requested** (the await leg of `review request`, including the terminal `SETTLED <slug>` line). One event
   line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`; `--json` = one object per line);
@@ -281,8 +298,8 @@ it (not on PyPI).
   five independent sources (`inbox`, `responses`, `orphans`, `verdicts`, `roles`) — so a permanent orphan
   can't pin the flag and silence a fresh outage. `--once` **always exits 0** (no output = nothing new, not
   an error) — run it on a scheduler, or bare for a poll loop (`--interval`, SIGINT-clean). Every send verb
-  arms you with the exact `listen` line to run for replies. The deeper mechanics — role-expansion
-  asymmetry (which verb expands roles for directives vs reviews), the orphan/tombstone/unknown
+  arms you with the exact `listen` line to run for replies. The deeper mechanics — the
+  orphan/tombstone/unknown
   classification of dir-only review slugs, and the classify budgets (`COORD_LISTEN_CLASSIFY_BUDGET`) —
   live in [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md), the one skill the
   launchd/cron listener, live sessions, Codex, and headless all delegate to. (`review status` on a

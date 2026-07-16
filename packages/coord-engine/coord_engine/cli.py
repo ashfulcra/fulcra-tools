@@ -370,13 +370,21 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
+    now = _iso(_now())
     rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
-    got = query.needs_me(rows, args.agent, now=_iso(_now()))
+    # Role routing: work addressed to a role this agent holds IS work that needs
+    # this agent (see _held_roles_for_rows). An unresolved role is UNKNOWN and gets
+    # its own marker below — never folded into "no role work".
+    held_roles, unresolved_roles = _held_roles_for_rows(
+        transport, args.team, args.agent, rows, now=now)
+    got = query.needs_me(rows, args.agent, now=now, held_roles=held_roles)
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
     if not rows_ok:
         got = [_read_degraded_row(rows_reason)] + got
+    if unresolved_roles:
+        got = [_role_degraded_row(unresolved_roles)] + got
     # Shared add-on deadline (see _briefing_budget): opened here so the forge
     # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
     # own independent, already-shipped budget.
@@ -391,6 +399,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             if r.get("type") == _READ_DEGRADED:
                 print(f"  read degraded: {r.get('reason')} — task fold unknown "
                       f"(not empty), retry")
+            elif r.get("type") == _ROLE_DEGRADED:
+                print(_role_degraded_line(r))
             elif r.get("type") == "review-pending":
                 print(f"  [REVIEW] pending verdict: {r['name']} "
                       f"(required: {', '.join(r['pending_required'])})")
@@ -992,6 +1002,108 @@ def _role_fresh_holders(
         return [], False  # lease state UNKNOWN -> fail closed, never assert vacant
     return [str(l.get("agent"))
             for l in roles.fresh_holders(leases, now=now, sla_hours=sla)], True
+
+
+# --- role routing on the READ folds ---------------------------------------
+#
+# A directive assigned to a ROLE is directed at whoever holds a fresh lease on it
+# — the contract AGENTS.md states ("briefing prints your identity, role inboxes,
+# and everything that needs you") and the reason role-based identity exists at
+# all: work addressed to a role must outlive the session that was holding it.
+# `listen` honoured it from the start; `briefing` / `inbox` / `needs-me` did not,
+# so a role-addressed `tell` returned 0 and silently landed in a fold nobody read.
+#
+# ONE resolver for every caller (`_held_roles_for_rows`). The alternative — each
+# fold resolving roles its own way — is how the two paths diverged in the first
+# place, and the failure is invisible by construction (a fold that resolves no
+# roles looks exactly like an agent who holds none).
+_ROLE_DEGRADED = "role-degraded"
+
+
+def _role_degraded_row(roles_unknown: "set[str] | list[str]") -> dict[str, Any]:
+    """The marker for roles whose holder set could NOT be determined — shape
+    ``{type, roles}``, same family as ``review-role-degraded`` (which reports the
+    same UNKNOWN for the review fold). Never omitted: an unresolved role means
+    role-routed work may be missing from the fold, and "unknown" must never render
+    as "nothing for you"."""
+    return {"type": _ROLE_DEGRADED, "roles": sorted(roles_unknown)}
+
+
+def _role_degraded_line(r: dict[str, Any]) -> str:
+    return (f"  role resolution degraded: {', '.join(r.get('roles') or [])} — "
+            f"your role inbox is unknown (not empty); role-routed work may be "
+            f"missing, retry")
+
+
+def _held_roles_for_rows(
+    transport: Any, team: str, agent: str, rows: list[dict[str, Any]], *,
+    now: str, skip_slugs: "Optional[set[str]]" = None,
+) -> tuple[set[str], set[str]]:
+    """Roles ``agent`` holds a FRESH lease on, among the role-shaped assignees the
+    given rows actually reference. Returns ``(held, unresolved)``.
+
+    The candidate set is the bound that keeps this affordable on the hot path:
+    only DISTINCT foreign assignees on OPEN rows are probed, and the roles/ LISTING
+    (one op, cached for the pass) settles which of them are roles at all — so the
+    literal-agent-id majority costs ZERO reads, and only genuine roles pay a
+    doc read + a lease listing + a shard read. A team with no role-addressed open
+    work pays nothing. Self / ``*`` / ``@backlog`` / path-shaped assignees are
+    skipped without a read. ``skip_slugs`` lets `listen` narrow further to UNSEEN
+    directives (an already-fired id needs no route). This is the whole added cost
+    on `briefing`, the hot path, and a transport op is a `fulcra-api` subprocess +
+    HTTPS round trip (~0.8s measured), so the shape matters: **1 + 3R ops**, R =
+    distinct ROLES the open work actually references — 7 ops on a 132-open-row
+    team with 6 distinct foreign assignees, 2 of them roles (the same team costs
+    11 without the listing prefilter, and 133 if every assignee is probed). The 3
+    per role — doc read (its own ``sla_hours``), lease listing, shard read — is the
+    price of a FAIL-CLOSED answer: reading the agent's own lease shard directly
+    would be 1 op, but ``read()`` can't tell absent from failed, which is exactly
+    why ``_held_roles`` (the older sweep) reports a transport outage as "no roles".
+
+    The prefilter is PER PASS, never persistent: leases change, and a name later
+    registered as a role must route on the very next fold (the staleness hole that
+    got a persistent negative cache rejected for `listen` — see there).
+
+    ``unresolved`` is FAIL-CLOSED and load-bearing: a role whose lease state is
+    UNKNOWN (see ``_role_fresh_holders``) is neither held nor not-held. Callers
+    MUST surface it (``_role_degraded_row``) rather than let it fold into "no
+    roles" — that would be the original silent bug one layer down.
+    """
+    candidates: set[str] = set()
+    for r in rows:
+        if r.get("status") not in directives.OPEN_STATUSES:
+            continue
+        a = str(r.get("assignee") or "")
+        if not a or a in (agent, "*", directives.BACKLOG) or "/" in a:
+            continue
+        if skip_slugs is not None:
+            slug = str(r.get("name") or "")
+            if not slug or slug in skip_slugs:
+                continue
+        candidates.add(a)
+    held: set[str] = set()
+    unresolved: set[str] = set()
+    listing_cache: dict[str, Any] = {}  # one roles/ listing per pass
+    if candidates:
+        # Prime the cache `_role_fresh_holders` already consults, and use it to
+        # drop candidates that are affirmatively NOT roles before paying a read
+        # for them. A listing that RAISES (names is None) means membership is
+        # unknown: probe every candidate exactly as before — a role with a
+        # readable doc still resolves off its leases, and skipping here would
+        # manufacture a degraded marker for work we can in fact route.
+        listing_cache["names"] = _roles_listing_names(transport, team)
+        names = listing_cache["names"]
+        if names is not None:
+            candidates = {c for c in candidates if f"{c}.md" in names}
+    for role in sorted(candidates):
+        holders, ok = _role_fresh_holders(transport, team, role, now=now,
+                                          listing_cache=listing_cache)
+        if not ok:
+            unresolved.add(role)
+            continue
+        if agent in holders:
+            held.add(role)
+    return held, unresolved
 
 
 def _pending_reviews_for(
@@ -2086,20 +2198,28 @@ def _directed_inbox(transport: Any, team: str, agent: str,
 
 def _inbox_rows_status(transport: Any, team: str, agent: str, *,
                        include_backlog: bool = False
-                       ) -> tuple[list[dict[str, Any]], bool, str]:
-    """The open-directive fold `inbox` surfaces for `agent`, plus the readability
-    of the underlying summaries fold: ``ok`` False (with a ``reason``) when the
-    index/listing is UNKNOWN — see the public-read failure contract at
-    ``_read_degraded_row``. Extracted so `listen` awaits the SAME source `inbox`
-    shows — one inbox computation, no second implementation to drift. Never
-    raises: an unreadable summaries read folds to an empty list, but with
-    ``ok=False`` and a ``reason`` so EVERY caller (inbox, listen, briefing)
-    surfaces the degradation as the loud marker rather than mistaking UNKNOWN for
-    an empty inbox — the codex-reproduced silent clean-``[]`` that suppressed a
-    live unacked directive."""
+                       ) -> tuple[list[dict[str, Any]], bool, str, set[str]]:
+    """The open-directive fold `inbox` surfaces for `agent` — role-routed
+    directives included — plus the readability of the underlying summaries fold:
+    ``ok`` False (with a ``reason``) when the index/listing is UNKNOWN — see the
+    public-read failure contract at ``_read_degraded_row``. Extracted so `listen`
+    awaits the SAME source `inbox` shows — one inbox computation, no second
+    implementation to drift. Never raises: an unreadable summaries read folds to
+    an empty list, but with ``ok=False`` and a ``reason`` so EVERY caller (inbox,
+    listen, briefing) surfaces the degradation as the loud marker rather than
+    mistaking UNKNOWN for an empty inbox — the codex-reproduced silent clean-``[]``
+    that suppressed a live unacked directive.
+
+    The fourth element is the UNRESOLVED role set (``_held_roles_for_rows``): roles
+    whose holders could not be determined. The caller MUST surface it — see
+    ``_role_degraded_row``."""
     rows, ok, reason = _load_rows_status(transport, team)
+    held, unresolved = _held_roles_for_rows(transport, team, agent, rows,
+                                            now=_iso(_now()))
     return (_directed_inbox(transport, team, agent, rows,
-                            include_backlog=include_backlog), ok, reason)
+                            held_roles=held or None,
+                            include_backlog=include_backlog),
+            ok, reason, unresolved)
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
@@ -2115,16 +2235,20 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     # emit the `inbox-degraded` marker (json row / stderr notice) and RETAIN any
     # partial rows, NEVER a clean-``[]`` exit 0 that would suppress a live unacked
     # directive (the codex CRIT, live-reproduced).
-    got, ok, reason = _inbox_rows_status(transport, args.team, agent,
-                                         include_backlog=args.all)
+    got, ok, reason, unresolved_roles = _inbox_rows_status(
+        transport, args.team, agent, include_backlog=args.all)
     if args.json:
         rows_out = ([_read_degraded_row(reason, marker="inbox-degraded")] + got
                     if not ok else got)
+        if unresolved_roles:
+            rows_out = [_role_degraded_row(unresolved_roles)] + rows_out
         print(json.dumps(rows_out, indent=2))
         return 0
     if not ok:
         _surface_read_degraded(reason, json_mode=False, marker="inbox-degraded")
     print(f"inbox — {agent}: {len(got)} item(s)")
+    if unresolved_roles:  # always shown — an unknown role inbox must never hide
+        print(_role_degraded_line(_role_degraded_row(unresolved_roles)))
     for r in got:
         print(_line(r))
     return 0
@@ -2317,47 +2441,30 @@ def _listen_tick(transport: Any, team: str, agent: str,
         # The reason attributes WHICH leg failed (summaries index vs the freshness
         # overlay — different outages, same inbox source/streak).
         _fail("inbox", inbox_reason or "summaries index unreadable")
-    # Role expansion (contract gap): resolve fresh-lease holders ONLY for
-    # role-shaped assignees on UNSEEN open directives — one role-doc(+lease) read
-    # per distinct such assignee, deduped per tick (NOT persistent state: leases
-    # change). HONEST BOUND: a directive assigned to ANOTHER literal agent never
-    # enters this agent's inbox_ids, so its assignee is re-probed every tick (one
-    # role-doc read resolving to "not a role", no lease reads) for as long as the
-    # directive stays open — per-tick cost is O(distinct foreign assignees on open
-    # directives), small in practice. A persistent negative "not-a-role" cache was
-    # considered and REJECTED: read() can't distinguish absent from failed, and a
-    # name later registered as a role would be silently unroutable forever (a
-    # staleness hole worse than the read cost). Revisit only with a roles/-listing
-    # invalidation if fleets grow. id-diff is unchanged (the directive slug is the
-    # id regardless of the route), so a new role holder sees a directive iff its id
-    # is unseen in THEIR OWN state file (state is per-agent) — the holder-change
-    # semantics fall out.
-    candidate_roles: set[str] = set()
-    for r in rows:
-        if r.get("status") not in directives.OPEN_STATUSES:
-            continue
-        a = str(r.get("assignee") or "")
-        if not a or a in (agent, "*", directives.BACKLOG) or "/" in a:
-            continue
-        slug = str(r.get("name") or "")
-        if not slug or slug in inbox_ids:
-            continue  # already seen -> zero role-resolution cost
-        candidate_roles.add(a)
-    held_roles: set[str] = set()
-    roles_listing_cache: dict[str, Any] = {}  # one roles/ listing per tick (doc-None disambiguation)
-    for role in sorted(candidate_roles):
-        holders, ok = _role_fresh_holders(transport, team, role, now=now_iso,
-                                          listing_cache=roles_listing_cache)
-        if not ok:
-            # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent
-            # may miss role-routed work) on the DEDICATED `roles` source — never
-            # crash, never treat unknown as "not a holder" silently. Its own
-            # source is load-bearing: a chronic role degradation must not pin the
-            # inbox streak and mask a fresh summaries outage.
-            _fail("roles", f"role lease unknown for {role}")
-            continue
-        if agent in holders:
-            held_roles.add(role)
+    # Role expansion — the shared resolver (`_held_roles_for_rows`, which owns the
+    # candidate bound and the fail-closed contract), narrowed HERE to UNSEEN
+    # directives: an already-fired id needs no route, so a steady-state tick pays
+    # zero role reads. Not persistent state — leases change, so the resolution is
+    # per tick. HONEST BOUND: a directive assigned to ANOTHER literal agent never
+    # enters this agent's inbox_ids, so its assignee is re-probed every tick — but
+    # the resolver's roles/ listing settles it for free, so the re-probe costs no
+    # reads. A persistent negative "not-a-role" cache was considered and REJECTED:
+    # read() can't distinguish absent from failed, and a name later registered as a
+    # role would be silently unroutable forever (a staleness hole worse than the
+    # read cost); the per-pass listing is that invalidation, done fresh every tick.
+    # id-diff is unchanged (the directive slug is the id regardless of
+    # the route), so a new role holder sees a directive iff its id is unseen in
+    # THEIR OWN state file (state is per-agent) — the holder-change semantics fall
+    # out.
+    held_roles, unresolved_roles = _held_roles_for_rows(
+        transport, team, agent, rows, now=now_iso, skip_slugs=inbox_ids)
+    for role in sorted(unresolved_roles):
+        # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent may
+        # miss role-routed work) on the DEDICATED `roles` source — never crash,
+        # never treat unknown as "not a holder" silently. Its own source is
+        # load-bearing: a chronic role degradation must not pin the inbox streak
+        # and mask a fresh summaries outage.
+        _fail("roles", f"role lease unknown for {role}")
     inbox = _directed_inbox(transport, team, agent, rows,
                             held_roles=held_roles or None)
     for r in inbox:
@@ -2808,23 +2915,30 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: board section unavailable ({type(e).__name__})", file=sys.stderr)
         out["board"] = {}
+    # ONE role resolution for the whole bundle, shared by the inbox and needs-me
+    # sections (the two folds AGENTS.md calls "your work queue"). Both consume the
+    # same held set, so they can never disagree about a lease, and the lease read
+    # is paid once per briefing rather than once per section. Unresolved roles are
+    # UNKNOWN — surfaced below as `role_degraded`, never folded to "no roles".
     try:
-        acks = {str(r.get("name")): list(r.get("acked_by") or []) for r in rows}
-        stale_visible = directives.inbox(rows, acks, agent, now=now)
-        for r in stale_visible:
-            slug = str(r.get("name") or "")
-            if agent not in (acks.get(slug) or []) and transport.read(_ack_path(args.team, slug, agent)):
-                acks.setdefault(slug, []).append(agent)
-        out["inbox"] = directives.inbox(rows, acks, agent, now=now)
-        out["inbox"] = [
-            r for r in out["inbox"]
-            if transport.read(_ack_path(args.team, str(r.get("name")), agent)) is None
-        ]
+        held_roles, unresolved_roles = _held_roles_for_rows(
+            transport, args.team, agent, rows, now=now)
+    except Exception as e:
+        # The resolver never raises by contract; if it somehow does, the role set is
+        # UNKNOWN for EVERY role-shaped assignee in the bundle — say so, don't
+        # quietly serve a role-blind queue.
+        print(f"briefing: role resolution unavailable ({type(e).__name__})", file=sys.stderr)
+        held_roles, unresolved_roles = set(), {"(all)"}
+    if unresolved_roles:
+        out["role_degraded"] = _role_degraded_row(unresolved_roles)
+    try:
+        out["inbox"] = _directed_inbox(transport, args.team, agent, rows,
+                                       held_roles=held_roles or None)
     except Exception as e:
         print(f"briefing: inbox section unavailable ({type(e).__name__})", file=sys.stderr)
         out["inbox"] = []
     try:
-        out["needs_me"] = query.needs_me(rows, agent, now=now)
+        out["needs_me"] = query.needs_me(rows, agent, now=now, held_roles=held_roles)
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
@@ -2887,6 +3001,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in out["inbox"][:5]:
         print(_line(r))
     print(f"  needs-me: {len(out['needs_me'])} item(s)")
+    if out.get("role_degraded"):
+        # Always shown, and printed against BOTH counts above — the two sections it
+        # qualifies. Without it, an unresolved role renders as a clean queue that
+        # reads "no role work", which is the bug this whole change closes.
+        print(_role_degraded_line(out["role_degraded"]))
     pend_rows = [r for r in out["pending_reviews"]
                  if r.get("type") != "review-fold-degraded"]
     degraded_rows = [r for r in out["pending_reviews"]
