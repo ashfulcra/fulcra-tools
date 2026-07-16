@@ -353,9 +353,17 @@ echo "15. no shipped script assigns a hardcoded agent identity"
 # literal identity, so the prose explaining the bug does not trip it. Covers the
 # weekly too — the same line was in both, which is what a copy-pasted alert path
 # gets you.
+# The files are named, so a rename must fail the test rather than silently
+# grepping nothing and reporting clean — an assertion whose subject vanished is
+# not an assertion that passed.
+SHIPPED="$HERE/drift-check.sh $HERE/weekly-review.sh $HERE/lib-alert.sh"
+MISSING=""
+for f in $SHIPPED; do [ -f "$f" ] || MISSING="$MISSING $f"; done
 HARDCODED="$(grep -nE '^[^#]*[A-Za-z_]+=("|'"'"')?(claude-code|codex|openclaw|workbook):' \
-  "$HERE/drift-check.sh" "$HERE/weekly-review.sh" "$HERE/lib-alert.sh" 2>/dev/null || true)"
-if [ -n "$HARDCODED" ]; then
+  $SHIPPED 2>/dev/null || true)"
+if [ -n "$MISSING" ]; then
+  bad "cannot check for hardcoded identities — file(s) missing:$MISSING"
+elif [ -n "$HARDCODED" ]; then
   bad "a host/session identity is hardcoded: $HARDCODED"
 else
   ok "identity is resolved at runtime in every shipped script"
