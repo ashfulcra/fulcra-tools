@@ -239,6 +239,13 @@ it (not on PyPI).
     time, default 10s) and **degrades the `inbox` source visibly** when capped, budget-breached, or a
     listed doc is unreadable — capped-but-visible, never silent truncation. A fresh team (no index yet)
     is unchanged.
+  - **Acks are folded change-driven, and reuse needs positive evidence.** Listing every ack dir every
+    pass costs one op per dir (~280 on the live bus), so reconcile asks the store what changed since its
+    last pass (`/input/v1/file/recent_changes`) and re-folds only those slugs. A prior `acked_by` is
+    reused ONLY when the store answered and did not name that slug; every unknown — no change query, a
+    query error, no `generated_at` anchor, a slug the prior aggregate never carried — falls back to the
+    full fold and logs why. A forced full fold every `COORD_ACKS_FULL_EVERY` passes (default 12, ~4h at a
+    20-min heartbeat) bounds anything the query could miss, and carries the orphan-shard GC.
 
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and

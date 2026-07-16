@@ -480,3 +480,225 @@ def test_fast_path_resumes_once_all_rows_stamped():
     _with_updates(t, [])
     res = _reconciled(t, now="2026-07-01T12:30:00Z")
     assert res.get("fast_path") is True and res["parsed"] == 0
+
+
+# --- acks fold: change-driven via recent_changes (v1.6.8) ---
+#
+# The acks fold used to list EVERY ack dir every pass (280 listings on the live
+# bus = ~336s at a remote host's 1.2s/op). It now asks the store what changed and
+# re-folds only those slugs. These tests pin the invariant that makes that safe:
+# the incremental path is an OPTIMIZATION, and every way it can fail — no change
+# query, a query error, a bad anchor, feed-shape drift — falls back to the full
+# fold and says so. Nothing here may ever "assume unchanged".
+
+def _seed_acks(t):
+    """Three live tasks, each with one ack shard."""
+    for slug, agent in (("a", "amy"), ("b", "bob"), ("c", "cat")):
+        t.put(f"team/r/task/{slug}.md", _task(slug.upper(), "active"))
+        t.put(f"team/r/_coord/acks/{slug}/{agent}.md",
+              f"---\ntype: Ack\nagent: {agent}\ntimestamp: 2026-07-01T15:00:00Z\n---\n")
+    return t
+
+
+def _with_recent_changes(t, files):
+    """Attach the change-query capability to the fake. ``files`` is the endpoint's
+    flat entry list (or a callable returning one, or None to simulate a 500)."""
+    t.rc_calls = []
+
+    def recent_changes(start_iso, end_iso):
+        t.rc_calls.append((start_iso, end_iso))
+        return files(start_iso, end_iso) if callable(files) else files
+
+    t.recent_changes = recent_changes
+    return t
+
+
+def _spy_lists(t):
+    calls = []
+    orig = t.list_dir
+
+    def spy(prefix):
+        calls.append(prefix)
+        return orig(prefix)
+
+    t.list_dir = spy
+    return calls
+
+
+def _capture_log():
+    import io
+    from coord_engine.log import Logger
+    stream = io.StringIO()
+    return Logger("reconcile", level="info", stream=stream), stream
+
+
+def _ack_change(slug, agent):
+    return {"full_name": f"/team/r/_coord/acks/{slug}/{agent}.md",
+            "state": "uploaded", "uploaded_at": "2026-07-01T16:10:00Z"}
+
+
+def _acked(t):
+    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    return {r["name"]: r.get("acked_by") for r in agg["rows"]}
+
+
+def _seeded():
+    """A transport whose prior aggregate carries acked_by for every slug + a
+    generated_at anchor — the state a steady-cadence host reconciles from."""
+    t = _seed_acks(FakeTransport())
+    _reconciled(t, now="2026-07-01T16:05:00Z")
+    assert _acked(t) == {"a": ["amy"], "b": ["bob"], "c": ["cat"]}
+    return t
+
+
+def _ack_lists(calls):
+    return [c for c in calls if c.startswith("team/r/_coord/acks")]
+
+
+def test_acks_incremental_folds_only_changed_slugs():
+    t = _seeded()
+    _with_recent_changes(t, [_ack_change("b", "bob"),
+                             {"full_name": "/team/r/presence/x.md"}])  # irrelevant churn
+    t.put("team/r/_coord/acks/b/dan.md",
+          "---\ntype: Ack\nagent: dan\ntimestamp: 2026-07-01T16:10:00Z\n---\n")
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert _ack_lists(calls) == ["team/r/_coord/acks/b/"]   # ONE dir, not all three
+    assert _acked(t) == {"a": ["amy"], "b": ["bob", "dan"], "c": ["cat"]}
+    assert len(t.rc_calls) == 1
+
+
+def test_acks_unknown_change_query_falls_back_to_full_fold_and_says_so():
+    """A 500/timeout/unparseable response is UNKNOWN, never 'nothing changed'."""
+    t = _seeded()
+    _with_recent_changes(t, None)                      # the endpoint 500s
+    t.put("team/r/_coord/acks/b/dan.md",
+          "---\ntype: Ack\nagent: dan\ntimestamp: 2026-07-01T16:10:00Z\n---\n")
+    calls = _spy_lists(t)
+    log, stream = _capture_log()
+    reconcile.reconcile(t, "r", now="2026-07-01T16:15:00Z", today="2026-07-01",
+                        host="h", logger=log)
+    assert _ack_lists(calls) == ["team/r/_coord/acks/",   # the full fold: every dir
+                                 "team/r/_coord/acks/a/",
+                                 "team/r/_coord/acks/b/",
+                                 "team/r/_coord/acks/c/"]
+    assert _acked(t) == {"a": ["amy"], "b": ["bob", "dan"], "c": ["cat"]}
+    out = stream.getvalue()
+    assert "full fold" in out and "change query" in out   # degraded, loudly
+
+
+def test_acks_no_change_query_support_falls_back_to_full_fold():
+    t = _seeded()                                      # fake has no .recent_changes
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert "team/r/_coord/acks/" in _ack_lists(calls)
+    assert _acked(t) == {"a": ["amy"], "b": ["bob"], "c": ["cat"]}
+
+
+def test_acks_full_fold_without_generated_at_anchor():
+    """A legacy aggregate has no generated_at: there is no window to ask about, so
+    the pass must full-fold — not silently reuse the prior acks."""
+    t = _seeded()
+    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    agg.pop("generated_at")
+    t.store["team/r/_coord/summaries.json"] = json.dumps(agg)
+    _with_recent_changes(t, [])                        # query is healthy, anchor isn't
+    t.put("team/r/_coord/acks/b/dan.md",
+          "---\ntype: Ack\nagent: dan\ntimestamp: 2026-07-01T16:10:00Z\n---\n")
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert "team/r/_coord/acks/" in _ack_lists(calls)
+    assert t.rc_calls == []                            # never asked: no usable anchor
+    assert _acked(t)["b"] == ["bob", "dan"]
+
+
+def test_acks_malformed_change_entry_falls_back_to_full_fold():
+    t = _seeded()
+    _with_recent_changes(t, [_ack_change("b", "bob"), {}])   # shape drift -> doubt
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert "team/r/_coord/acks/" in _ack_lists(calls)
+
+
+def test_acks_new_slug_absent_from_prior_is_folded_not_assumed_empty():
+    """A task that wasn't in the prior aggregate has no prior acked_by to reuse —
+    its ack dir is folded even when the change query reports nothing for it."""
+    t = _seeded()
+    t.put("team/r/task/d.md", _task("D", "active"))
+    t.put("team/r/_coord/acks/d/eve.md",
+          "---\ntype: Ack\nagent: eve\ntimestamp: 2026-06-30T09:00:00Z\n---\n")
+    _with_recent_changes(t, [])
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert _ack_lists(calls) == ["team/r/_coord/acks/d/"]
+    assert _acked(t) == {"a": ["amy"], "b": ["bob"], "c": ["cat"], "d": ["eve"]}
+
+
+def test_acks_periodic_backstop_forces_a_full_fold(monkeypatch):
+    """A missed change can never persist indefinitely: every Nth pass full-folds
+    even while the change query is healthy."""
+    monkeypatch.setenv("COORD_ACKS_FULL_EVERY", "2")
+    t = _seeded()                                      # seed pass = a full fold
+    _with_recent_changes(t, [])
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")         # pass 1 -> incremental
+    assert _ack_lists(calls) == []
+    calls.clear()
+    _reconciled(t, now="2026-07-01T16:25:00Z")         # pass 2 -> backstop
+    assert "team/r/_coord/acks/" in _ack_lists(calls)
+    calls.clear()
+    _reconciled(t, now="2026-07-01T16:35:00Z")         # streak reset -> incremental
+    assert _ack_lists(calls) == []
+
+
+def test_acks_full_every_bad_value_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("COORD_ACKS_FULL_EVERY", "banana")
+    t = _seeded()
+    _with_recent_changes(t, [])
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert _ack_lists(calls) == []                     # default is > 1: incremental
+
+
+def test_acks_full_every_one_disables_the_incremental_path(monkeypatch):
+    monkeypatch.setenv("COORD_ACKS_FULL_EVERY", "1")
+    t = _seeded()
+    _with_recent_changes(t, [])
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    assert "team/r/_coord/acks/" in _ack_lists(calls)
+
+
+def test_acks_stale_anchor_falls_back_to_full_fold():
+    """An anchor older than the endpoint's usable window (a host that was down for
+    days) would 500 the query; don't spend the op — full-fold."""
+    t = _seeded()
+    _with_recent_changes(t, [])
+    calls = _spy_lists(t)
+    _reconciled(t, now="2026-07-05T16:15:00Z")         # 4 days after the anchor
+    assert "team/r/_coord/acks/" in _ack_lists(calls)
+    assert t.rc_calls == []
+
+
+def test_acks_gc_runs_on_full_fold_but_not_on_the_incremental_path():
+    """GC is cleanup, not correctness: it rides the full fold (which already lists
+    every dir) and is deliberately skipped on the incremental path, which never
+    sees the orphan dirs. It is never DROPPED — the backstop full fold collects."""
+    t = _seeded()
+    t.put("team/r/_coord/acks/ghost/amy.md",
+          "---\ntype: Ack\nagent: amy\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    _with_recent_changes(t, [])
+    _reconciled(t, now="2026-07-01T16:15:00Z")         # incremental: no GC
+    assert "team/r/_coord/acks/ghost/amy.md" in t.store
+    _with_recent_changes(t, None)                      # unknown -> full fold -> GC
+    _reconciled(t, now="2026-07-01T16:25:00Z")
+    assert "team/r/_coord/acks/ghost/amy.md" not in t.store
+
+
+def test_acks_change_query_window_covers_the_anchor_with_skew_margin():
+    t = _seeded()
+    _with_recent_changes(t, [])
+    _reconciled(t, now="2026-07-01T16:15:00Z")
+    (start, end), = t.rc_calls
+    # anchor 16:05 - 15min margin, now 16:15 + 15min margin
+    assert start == "2026-07-01T15:50:00Z" and end == "2026-07-01T16:30:00Z"

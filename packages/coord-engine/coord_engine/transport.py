@@ -11,16 +11,24 @@ limit — sub-minute double-edits are re-scanned on the next pass.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import signal
 import subprocess
 import tempfile
+import urllib.parse
+import urllib.request
 from typing import Any, Optional
 
 from . import config
 
 DEFAULT_COMMAND = ("fulcra-api",)
+
+#: Fulcra REST root. The file API is published in the OpenAPI spec; overridable
+#: for a staging host via ``FULCRA_API_BASE`` (same var name the other repo
+#: packages use).
+DEFAULT_API_BASE = "https://api.fulcradynamics.com"
 
 #: Per-op HARD upper bound (seconds). Overridable via ``COORD_TRANSPORT_TIMEOUT``
 #: or the constructor arg (which wins). Watchers run this tight (e.g. 8s) so the
@@ -191,18 +199,69 @@ class FulcraFileTransport:
         callers treat as "no evidence, do the full pass". The run is hard-bounded
         (``run_bounded``): a hung child tree returns None within the timeout, it
         cannot stall the fast path."""
-        import json as _json
         try:
             rc, out, _err = run_bounded(
                 [*self.command, "data-updates", period], self.timeout
             )
             if rc != 0:
                 return None
-            data = _json.loads(out)
+            data = json.loads(out)
             changes = data.get("file_changes")
             return changes if isinstance(changes, list) else None
         except Exception:
             return None
+
+    def _access_token(self) -> Optional[str]:
+        """A Fulcra bearer token, or None if one can't be had. Same source the
+        rest of the repo uses: ``FULCRA_ACCESS_TOKEN`` when set, else the stdout
+        of ``<cli> auth print-access-token`` (so this inherits the CLI's own
+        device-flow creds + refresh — no second auth path to keep alive). The
+        token is a credential: never logged, never returned to a caller. Any
+        failure -> None."""
+        env = os.environ.get("FULCRA_ACCESS_TOKEN")
+        if env and env.strip():
+            return env.strip()
+        try:
+            rc, out, _err = run_bounded(
+                [*self.command, "auth", "print-access-token"], self.timeout
+            )
+        except Exception:
+            return None
+        return (out or "").strip() or None if rc == 0 else None
+
+    def recent_changes(self, start_iso: str, end_iso: str) -> Optional[list]:
+        """Tree-wide what-changed query over ``[start_iso, end_iso]`` — the ack
+        fold's evidence source. Returns the endpoint's flat entry list (each
+        ``{full_name, size, state, uploaded_at, ...}``), or **None on ANY
+        failure**: no token, HTTP error (the endpoint 500s on an over-wide
+        window rather than truncating), timeout, or an unparseable body. Never
+        raises.
+
+        None means UNKNOWN, not "nothing changed" — the caller must fall back to
+        a full fold. Nothing about this method may ever be read as evidence of
+        absence.
+
+        REST, not CLI: ``GET /input/v1/file/recent_changes`` is published in the
+        OpenAPI spec but has no ``fulcra-api file`` verb, so this is the one op
+        the CLI can't carry. Auth still comes from the CLI (``_access_token``);
+        the call itself is stdlib ``urllib``, time-bounded by ``self.timeout``,
+        like every other op here."""
+        token = self._access_token()
+        if token is None:
+            return None
+        base = os.environ.get("FULCRA_API_BASE", DEFAULT_API_BASE).rstrip("/")
+        query = urllib.parse.urlencode({"start_time": start_iso, "end_time": end_iso})
+        req = urllib.request.Request(
+            f"{base}/input/v1/file/recent_changes?{query}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+        files = data.get("files") if isinstance(data, dict) else None
+        return files if isinstance(files, list) else None
 
     def _run(self, args: list[str], **kw: Any) -> subprocess.CompletedProcess:
         """Invoke ``fulcra-api file <args>``, HARD-bounded by ``self.timeout``.
