@@ -35,12 +35,21 @@
 #   - Docs prose, semantics behind an unchanged signature, and anything the
 #     CLI/spec do not expose. weekly-review.sh covers the first.
 #
-# FAIL-CLOSED. Every probe is checked against a positive control before any
-# result is trusted (see check_positive_controls). A probe that returns
-# empty/unparseable is UNKNOWN -> alert, never "no drift", and UNKNOWN never
-# advances the baseline. The failure this rebuild exists to fix (2026-07-16)
-# was a fingerprint that was structurally incapable of producing a hit, so a
-# scan whose empty result is not proven meaningful is treated as a failure.
+# FAIL-CLOSED. Every probe result is one of exactly two things: a real observed
+# value, or UNKNOWN. There is no third category, and in particular no default
+# that type-checks as data — no `or []`, no omitted key, no empty string that a
+# comparison would read as a legitimate state. A probe that cannot answer is
+# UNKNOWN -> alert, never "no drift", and UNKNOWN never advances the baseline.
+# Every probe is additionally checked against a positive control before its
+# result is trusted, because an absence of drift means nothing unless the probe
+# could have found some. The failure this rebuild exists to fix (2026-07-16) was
+# a fingerprint structurally incapable of producing a hit.
+#
+# The sub-probes obey the same rule as the probes. A failed group `--help` does
+# not mean "that group has no subcommands", and a failed `--beta --help` does
+# not mean "there is no beta surface" — today the beta surface is legitimately
+# empty, so an `or []` there produces the exact value a healthy run produces.
+# Any sub-probe failure rejects the WHOLE CLI fingerprint.
 #
 # Runs daily via launchd: com.fulcra.primitives-maintainer.plist
 set -uo pipefail
@@ -50,7 +59,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Overridable so tests/dry-runs never touch the live baseline.
 STATE="${PRIMITIVES_STATE_DIR:-$ROOT/.primitives-state}"
 BASELINE="$STATE/baseline.json"
+# The outstanding-DOC-WORK marker. Written on drift, cleared only by a session
+# that did the rewrite. Nothing in this script may truncate it — see UNKNOWN_MARK.
 ALERT="$STATE/DRIFT-ALERT.txt"
+# The outstanding-PROBE-FAILURE marker. Separate file on purpose: an UNKNOWN run
+# is a different debt (fix the probe) with a different owner and a different
+# discharge condition (the probe answering again). Writing probe-failure text
+# over DRIFT-ALERT.txt would destroy an unactioned "WHAT CHANGED" payload, and
+# the rewrite that was actually owed would never be seen.
+UNKNOWN_MARK="$STATE/PROBE-UNKNOWN.txt"
 LOG="$STATE/drift-check.log"
 # Overridable so a test run can capture the notification instead of posting it.
 CE="${PRIMITIVES_COORD_ENGINE:-$(command -v coord-engine || echo "$HOME/.local/bin/coord-engine")}"
@@ -67,8 +84,21 @@ SKIP_GH="${PRIMITIVES_SKIP_GH:-0}"
 # these are missing the parser is broken or the package did not run; that is
 # UNKNOWN, not "the CLI lost auth".
 CLI_SENTINELS="${PRIMITIVES_CLI_SENTINELS:-auth,user-info,catalog}"
+# Sentinel GROUPS that must come back with at least one observed subcommand.
+# Without this, a group whose help probe is broken is indistinguishable from a
+# group that genuinely has no subcommands, forever. `auth` (login,
+# print-access-token) is the oldest, most stable group; one is enough to prove
+# the group machinery can produce a hit.
+CLI_GROUP_SENTINELS="${PRIMITIVES_CLI_GROUP_SENTINELS:-auth}"
+# Base command for the CLI probe. Defaults to running the published package off
+# PyPI at the exact version observed above. Overridable so tests can drive a
+# stub CLI without a network round-trip.
+CLI_CMD="${PRIMITIVES_CLI_CMD:-}"
 # Sentinel path that must be present in any correctly-fetched spec.
 SPEC_SENTINEL="/user/v1alpha1/annotation"
+# Sentinel scope that must be present in any correctly-fetched MCP discovery
+# doc. Set empty to disable.
+MCP_SENTINEL="${PRIMITIVES_MCP_SENTINEL:-openid}"
 
 mkdir -p "$STATE"
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
@@ -90,28 +120,71 @@ PYPI_VER="$(curl -s --max-time 20 "$PYPI_URL" 2>/dev/null \
 # counted `@data_type.command` in fulcra_api/cli/data_types.py, which could
 # not see `record`/`delete` (top-level, different file, no such decorator) —
 # it missed 0.1.37 and 0.1.36 outright.
+#
+# Every sub-probe here returns an observation or raises. Nothing defaults. The
+# probe emits exactly one line: "OK <json>" or "FAIL <reason> | <reason>".
 CLI_JSON="UNKNOWN"
-if [ "$PYPI_VER" != "UNKNOWN" ] && command -v uvx >/dev/null 2>&1; then
-  CLI_JSON="$(PYPI_VER="$PYPI_VER" python3 - <<'PY' 2>/dev/null || echo UNKNOWN
-import json, os, re, subprocess
+CLI_PROBE_ERR=""
+if [ "$PYPI_VER" = "UNKNOWN" ]; then
+  CLI_PROBE_ERR="no published version observed, so there is no version to probe"
+elif [ -z "$CLI_CMD" ] && ! command -v uvx >/dev/null 2>&1; then
+  CLI_PROBE_ERR="uvx not on PATH (needed to run the published package)"
+else
+  CLI_OUT="$(PYPI_VER="$PYPI_VER" CLI_CMD="$CLI_CMD" python3 - <<'PY' 2>/dev/null
+import json, os, re, shlex, subprocess
 
 ver = os.environ["PYPI_VER"]
-BASE = ["uvx", "-q", "--from", f"fulcra-api=={ver}", "fulcra-api"]
+override = os.environ.get("CLI_CMD", "").strip()
+BASE = shlex.split(override) if override else [
+    "uvx", "-q", "--from", "fulcra-api==%s" % ver, "fulcra-api"]
 
 
-def help_text(args):
+class ProbeFailure(Exception):
+    """A command that was expected to answer did not. Never a value."""
+
+
+def label(args):
+    return " ".join(args) if args else "<top-level>"
+
+
+def tail(*streams):
+    for s in streams:
+        s = (s or "").strip()
+        if s:
+            return s.splitlines()[-1][:200]
+    return "no output"
+
+
+def run_help(args):
     try:
         r = subprocess.run(BASE + args + ["--help"], capture_output=True,
                            text=True, timeout=120)
-    except Exception:
-        return None
-    return r.stdout if r.returncode == 0 else None
+    except Exception as e:
+        raise ProbeFailure("%s: could not run --help (%s)" % (label(args), e))
+    return r.stdout, r.stderr, r.returncode
 
 
-def verbs(text):
-    """Parse a click 'Commands:' block. Command lines are exactly two spaces
-    then the name; wrapped descriptions are indented far deeper."""
-    if not text or "Commands:" not in text:
+def help_text(args):
+    """stdout of a successful --help. A nonzero exit is a failed probe, never
+    an observation: click exits 0 for --help on every real command, leaf or
+    group. Treating a failure as 'no output' is how a dead probe starts
+    reading as an empty surface."""
+    out, err, rc = run_help(args)
+    if rc != 0:
+        raise ProbeFailure("%s: --help exited %d (%s)"
+                           % (label(args), rc, tail(err, out)))
+    return out
+
+
+def verbs(text, what):
+    """Parse a click 'Commands:' block.
+
+    Returns None when there is no 'Commands:' block at all — that is a real
+    observation: a leaf command legitimately has no subcommands.
+    Raises when a block exists but yields no command lines: that is the parser
+    failing, and an empty list would be indistinguishable from a real surface.
+    """
+    if "Commands:" not in text:
         return None
     block = text.split("Commands:", 1)[1]
     out = []
@@ -121,27 +194,76 @@ def verbs(text):
             out.append(m.group(1))
         elif line.strip() and not line.startswith(" "):
             break
+    if not out:
+        raise ProbeFailure(
+            "%s: 'Commands:' block present but no command lines parsed" % what)
     return sorted(set(out))
 
 
-top = verbs(help_text([]))
-if not top:
-    raise SystemExit(1)
+def beta_verbs(top):
+    """Verbs visible only under --beta.
 
-groups = {}
-for v in top:
-    sub = verbs(help_text([v]))
-    if sub:
-        groups[v] = sub
+    Note the trap: the beta surface is CURRENTLY EMPTY on a healthy run, so a
+    failed probe defaulting to [] produces byte-for-byte the value a healthy
+    probe produces. It would compare clean forever. Hence: an empty list is
+    returned only when --beta actually ran and actually parsed.
+    A build with no --beta gate at all is a real observation too, but a
+    DIFFERENT one, so it gets its own value rather than collapsing into [].
+    """
+    out, err, rc = run_help(["--beta"])
+    if rc != 0:
+        blob = (err or "") + (out or "")
+        if re.search(r"no such option", blob, re.I) and "--beta" in blob:
+            return "NO_BETA_FLAG"
+        raise ProbeFailure("--beta: --help exited %d (%s)" % (rc, tail(err, out)))
+    sub = verbs(out, "--beta")
+    if sub is None:
+        raise ProbeFailure("--beta: --help has no 'Commands:' block")
+    return sorted(set(sub) - set(top))
 
-beta = verbs(help_text(["--beta"])) or []
-print(json.dumps({
-    "cli_verbs": top,
-    "cli_groups": groups,
-    "cli_beta_verbs": sorted(set(beta) - set(top)),
-}, sort_keys=True))
+
+errors = []
+result = {}
+try:
+    top = verbs(help_text([]), "<top-level>")
+    if top is None:
+        raise ProbeFailure("<top-level>: --help has no 'Commands:' block")
+    result["cli_verbs"] = top
+
+    # A group whose probe dies is NOT a group with no subcommands. Collect every
+    # failure (better diagnostics), then reject the whole fingerprint below.
+    groups = {}
+    for v in top:
+        try:
+            sub = verbs(help_text([v]), v)
+        except ProbeFailure as e:
+            errors.append(str(e))
+            continue
+        if sub is not None:
+            groups[v] = sub
+    result["cli_groups"] = groups
+
+    try:
+        result["cli_beta_verbs"] = beta_verbs(top)
+    except ProbeFailure as e:
+        errors.append(str(e))
+except ProbeFailure as e:
+    errors.append(str(e))
+except Exception as e:
+    errors.append("unexpected probe error: %r" % (e,))
+
+# Partial observation is not observation. One dead sub-probe rejects all of it.
+if errors:
+    print("FAIL " + " | ".join(errors))
+else:
+    print("OK " + json.dumps(result, sort_keys=True))
 PY
 )"
+  case "$CLI_OUT" in
+    "OK "*)   CLI_JSON="${CLI_OUT#OK }" ;;
+    "FAIL "*) CLI_PROBE_ERR="${CLI_OUT#FAIL }" ;;
+    *)        CLI_PROBE_ERR="probe produced no usable output (python3 missing, or it crashed before reporting)" ;;
+  esac
 fi
 [ -n "$CLI_JSON" ] || CLI_JSON="UNKNOWN"
 
@@ -200,22 +322,53 @@ UNKNOWN_REASONS=()
 [ "$MCP_SCOPES" = "UNKNOWN" ] && UNKNOWN_REASONS+=("mcp_scopes: fetch/parse failed ($MCP_URL)")
 [ "$CLI_HEAD" = "UNKNOWN" ] && UNKNOWN_REASONS+=("cli_head: gh api failed (set PRIMITIVES_SKIP_GH=1 to opt out explicitly)")
 if [ "$CLI_JSON" = "UNKNOWN" ]; then
-  UNKNOWN_REASONS+=("cli_verbs: could not run/parse published fulcra-api --help (uvx present? version resolvable?)")
+  UNKNOWN_REASONS+=("cli surface: ${CLI_PROBE_ERR:-could not run/parse published fulcra-api --help}")
 else
-  # The parse must contain known-stable verbs, or the parser — not the CLI —
-  # is what changed.
-  MISSING="$(CLI_JSON="$CLI_JSON" SENT="$CLI_SENTINELS" python3 -c '
+  # The control covers the WHOLE fingerprint, not just the top-level verbs. A
+  # healthy top-level parse next to a dead group/beta probe was the hole: it
+  # could be written as a first-run baseline, or compare clean forever.
+  CLI_CONTROL="$(CLI_JSON="$CLI_JSON" SENT="$CLI_SENTINELS" GSENT="$CLI_GROUP_SENTINELS" python3 -c '
 import json, os
+
+probs = []
 try:
-    v = set(json.loads(os.environ["CLI_JSON"])["cli_verbs"])
+    d = json.loads(os.environ["CLI_JSON"])
 except Exception:
-    print("PARSE"); raise SystemExit(0)
-print(",".join(sorted(s for s in os.environ["SENT"].split(",") if s not in v)))
-' 2>/dev/null || echo PARSE)"
-  [ -n "$MISSING" ] && UNKNOWN_REASONS+=("cli_verbs: positive control failed — sentinel verbs missing/unparseable: $MISSING")
+    print("cli fingerprint is not parseable JSON"); raise SystemExit(0)
+
+verbs, groups, beta = d.get("cli_verbs"), d.get("cli_groups"), d.get("cli_beta_verbs")
+
+if not isinstance(verbs, list) or not verbs:
+    probs.append("cli_verbs is not a non-empty list")
+else:
+    missing = sorted(s for s in os.environ["SENT"].split(",") if s and s not in verbs)
+    if missing:
+        probs.append("sentinel top-level verbs missing: " + ",".join(missing))
+
+if not isinstance(groups, dict):
+    probs.append("cli_groups is not a mapping")
+else:
+    for g in os.environ["GSENT"].split(","):
+        if not g:
+            continue
+        sub = groups.get(g)
+        if not isinstance(sub, list) or not sub:
+            probs.append("sentinel group %s came back with no observed subcommands "
+                         "(a group whose probe fails must never read as an empty group)" % g)
+
+if not (beta == "NO_BETA_FLAG" or isinstance(beta, list)):
+    probs.append("cli_beta_verbs is neither an observed list nor NO_BETA_FLAG")
+
+print("; ".join(probs))
+' 2>/dev/null || echo "control script itself failed")"
+  [ -n "$CLI_CONTROL" ] && UNKNOWN_REASONS+=("cli surface: positive control failed — $CLI_CONTROL")
 fi
 if [ "$SPEC_HASH" != "UNKNOWN" ] && ! grep -q "\"$SPEC_SENTINEL\"" "$SPEC" 2>/dev/null; then
   UNKNOWN_REASONS+=("spec_hash: positive control failed — sentinel path $SPEC_SENTINEL absent from fetched spec")
+fi
+if [ "$MCP_SCOPES" != "UNKNOWN" ] && [ -n "$MCP_SENTINEL" ] \
+   && ! printf '%s' ",$MCP_SCOPES," | grep -q ",$MCP_SENTINEL,"; then
+  UNKNOWN_REASONS+=("mcp_scopes: positive control failed — sentinel scope $MCP_SENTINEL absent from fetched discovery doc ($MCP_SCOPES)")
 fi
 
 # --- assemble fingerprint --------------------------------------------------
@@ -253,6 +406,11 @@ notify() {
 }
 
 # --- UNKNOWN: fail closed --------------------------------------------------
+# This branch writes UNKNOWN_MARK, never ALERT. An UNKNOWN run observed nothing,
+# so it has nothing to say about a drift that a previous run DID observe. The
+# earlier "WHAT CHANGED" payload is the only record of doc work that is owed;
+# overwriting it with probe-failure text discharges that debt silently — the
+# probe gets fixed, the marker gets removed, and the rewrite never happens.
 if [ ${#UNKNOWN_REASONS[@]} -gt 0 ]; then
   {
     echo "DRIFT CHECK UNKNOWN $(ts)"
@@ -263,11 +421,31 @@ if [ ${#UNKNOWN_REASONS[@]} -gt 0 ]; then
     printf '%s\n' "${UNKNOWN_REASONS[@]}"
     echo
     echo "PARTIAL: $CUR"
-  } > "$ALERT"
+    if [ -f "$ALERT" ]; then
+      echo
+      echo "NOTE: $ALERT is ALSO outstanding — an earlier run observed real drift"
+      echo "that has not been actioned. This file does not replace or clear it."
+      echo "Both debts are open: fix the probe (this file) AND do the rewrite."
+    fi
+    echo
+    echo "Clear this file (rm $UNKNOWN_MARK) only by making the probe answer; the"
+    echo "next successful run clears it for you."
+  } > "$UNKNOWN_MARK"
   log "UNKNOWN: ${UNKNOWN_REASONS[*]}"
+  OUTSTANDING_NOTE=""
+  [ -f "$ALERT" ] && OUTSTANDING_NOTE=" SEPARATELY: $ALERT is still outstanding from an earlier real drift and is untouched by this run — that rewrite is still owed."
   notify P1 "UNKNOWN: Fulcra primitives drift check could not observe the surface ($(ts))" \
-    "$(printf '%s; ' "${UNKNOWN_REASONS[@]}")Baseline NOT advanced — a probe that cannot answer is not a clean run. Fix the probe or the fingerprint, then re-run scripts/primitives-maintainer/drift-check.sh. Alert file: $ALERT."
+    "$(printf '%s; ' "${UNKNOWN_REASONS[@]}")Baseline NOT advanced — a probe that cannot answer is not a clean run. Fix the probe or the fingerprint, then re-run scripts/primitives-maintainer/drift-check.sh. Probe-failure file: $UNKNOWN_MARK.$OUTSTANDING_NOTE"
   exit 2
+fi
+
+# Probes answered. That discharges the probe-failure debt and only that debt:
+# UNKNOWN_MARK describes a condition that no longer holds. ALERT describes a doc
+# rewrite that is owed regardless of whether the probes are healthy today, so it
+# is deliberately not touched here — only a session that did the rewrite rm's it.
+if [ -f "$UNKNOWN_MARK" ]; then
+  log "probes recovered; clearing $UNKNOWN_MARK (ALERT, if present, left alone)"
+  rm -f "$UNKNOWN_MARK"
 fi
 
 # --- first run: write baseline, done ---------------------------------------
@@ -280,6 +458,13 @@ fi
 PREV="$(cat "$BASELINE")"
 
 # --- compare ---------------------------------------------------------------
+# NOTE on the `or {}` / `.get(k, [])` defaults below: they are describing, not
+# deciding. The drift DECISION is exact string equality on the whole fingerprint
+# ("$CUR" = "$PREV") and is computed independently of this renderer, and a
+# renderer that produces nothing is caught by the DIFF RENDERER FAILED guard,
+# which blocks rebaselining. So a default here can only mis-word an alert that is
+# already firing; it cannot manufacture a clean comparison. Do not copy this
+# pattern into a probe, where the same idiom IS the bug.
 DIFF="$(PREV="$PREV" CUR="$CUR" python3 - <<'PY'
 import json, os
 
@@ -322,7 +507,11 @@ fi
 # Name the trigger explicitly when a write verb moves, so nobody is routed to
 # the wrong file. The 2026-07-16 miss sent an agent to data_types.py to find a
 # `record` verb that lives one directory up.
-TRIGGER="$(printf '%s\n' "$DIFF" | grep -E '^cli_verbs: (ADDED|REMOVED).*\b(record|delete)\b' || true)"
+# Beta-gated too: a record/delete verb landing behind --beta is the same doc
+# event as one landing in the default surface, and tier-2 guidance shifts either
+# way. Only cli_groups is excluded — a subcommand named `delete` under `tag` is
+# routine and not the documented trigger.
+TRIGGER="$(printf '%s\n' "$DIFF" | grep -E '^cli_(verbs|beta_verbs): (ADDED|REMOVED).*\b(record|delete)\b' || true)"
 
 if [ "$CUR" = "$PREV" ]; then
   if [ -f "$ALERT" ]; then
@@ -338,6 +527,19 @@ if [ "$CUR" = "$PREV" ]; then
 fi
 
 # --- drift -----------------------------------------------------------------
+# APPEND. A second drift before the first is actioned must not overwrite the
+# first — same defect as the UNKNOWN branch had: the baseline has already moved
+# past the earlier change, so this file is the only surviving record of it. Every
+# unactioned "WHAT CHANGED" stays until a session clears the file.
+if [ -f "$ALERT" ]; then
+  {
+    echo
+    echo "==================================================================="
+    echo "ADDITIONAL DRIFT — everything above is STILL UNACTIONED. The"
+    echo "baseline has already moved past it, so this file is the only record."
+    echo "==================================================================="
+  } >> "$ALERT"
+fi
 {
   echo "DRIFT DETECTED $(ts)"
   echo
@@ -354,8 +556,9 @@ fi
   echo "NOW:  $CUR"
   echo "spec_sig: $SPEC_SIG"
   echo
-  echo "Clear this file (rm $ALERT) once FULCRA-PRIMITIVES.md is rewritten."
-} > "$ALERT"
+  echo "Clear this file (rm $ALERT) once FULCRA-PRIMITIVES.md is rewritten for"
+  echo "EVERY entry in it — not just the last one."
+} >> "$ALERT"
 log "DRIFT: $(printf '%s' "$DIFF" | tr '\n' '; ')"
 
 SUMMARY="WHAT CHANGED (fulcra-api $PYPI_VER): $(printf '%s' "$DIFF" | tr '\n' '; ')"
