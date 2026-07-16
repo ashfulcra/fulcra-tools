@@ -44,11 +44,14 @@ silent exit-0 no-op — the failure mode that left the timeline dark. Install bo
 ```bash
 uv tool install --force \
   "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.6#subdirectory=packages/coord-engine" \
-  --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.1.1#subdirectory=packages/fulcra-common"
+  --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common"
 ```
 
-`fulcra-common-v0.1.1` is the floor: it resolves definitions by liveness (an earlier writer
-picked soft-deleted duplicates, landing moments hidden). Pin at or after it.
+`fulcra-common-v0.2.0` is the floor coord-engine v1.6.6 needs: it resolves definitions by
+liveness (an earlier writer picked soft-deleted duplicates, landing moments hidden) **and**
+carries the digest-writer signature (`gated`/`id`) the engine's `digest --emit-timeline`
+calls — `v0.1.1` predates those, so the digest leg throws and silently no-ops. Pin at or
+after `v0.2.0`.
 
 Projection self-gates on the team's bus resolution level, so it costs nothing until turned
 on: `coord-engine annotate resolution <team> transitions` (team-wide, one-time; already on

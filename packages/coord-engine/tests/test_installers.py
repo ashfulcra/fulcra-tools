@@ -144,7 +144,7 @@ class TestHeartbeatBothPlatforms:
         r = _run("install-heartbeat.sh", ["--yes", "teamx"], env)
         assert r.returncode == 4, (r.returncode, r.stderr)
         assert "self-test FAILED" in r.stderr
-        assert "fulcra-common-v0.1.1" in r.stderr, "must print the reinstall recipe"
+        assert "fulcra-common-v0.2.0" in r.stderr, "must print the reinstall recipe"
 
     def test_uninstall_roundtrip_including_only_entry(self, env):
         # the pipefail bug class: uninstalling when ours is the ONLY entry must exit 0
