@@ -169,11 +169,12 @@ Each file is the selected email as JSON:
   "thread_id": "…",
   "headers": { "From": "…", "To": "…", "Subject": "…", "Date": "…" },
   "bodies": { "text/plain": "…", "text/html": "…" },
-  "attachments": [ { "filename": "…", "mimeType": "…", "size": 12345 } ]
+  "attachments": [ { "filename": "…", "mimeType": "…", "size": 12345, "attachmentId": "…" } ]
 }
 ```
 
-Attachments are metadata only — filename, type, size — not bytes.
+Attachments are metadata only — filename, type, size, and Gmail's opaque
+`attachmentId` — never the bytes.
 
 The path convention is stable, so an operator can point an agent at
 `/collect/gmail/…` and let it list-and-read on whatever schedule suits it. This
