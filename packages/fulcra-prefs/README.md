@@ -211,8 +211,10 @@ Signals are `MomentAnnotation` records posted to the typed ingest endpoint
 `POST /ingest/v1/record/{data_type}` (the base type in the path; the "Preference
 Signals" definition rides in the record's `sources`). As of `fulcra-api` 0.1.37
 this surface is first-class in the library and CLI — `FulcraAPI.record_data_type`
-and `fulcra record` — and records are now deletable via `FulcraAPI` / `fulcra
-delete` (tombstones). fulcra-prefs currently drives the endpoint directly through
+and `fulcra record`. Records can also be *logically* deleted: `fulcra delete`
+composes a tombstone client-side by appending a `DeletedRecord`
+(there is no dedicated library delete method; the lib exposes `record_data_type`
+and `validate_records`). fulcra-prefs currently drives the endpoint directly through
 its own transport (`store.ingest_signal`) so the offline outbox + shard cache stay
 in one place; adopting the library verbs (and `validate_records` for fail-loud
 pre-flight schema checks) is tracked in the write-path modernization. Each signal
@@ -336,15 +338,18 @@ and cross-platform compile consistency.
   unpublished) — get-records stays the supported baseline. On the *write* side,
   signals post via the typed ingest endpoint `POST /ingest/v1/record/{data_type}`
   (migrated from the legacy wrapped `/ingest/v1/record` in the 0.1.36 pass). Record
-  **delete/replace now exists** — `fulcra-api` 0.1.37 shipped record-write/delete
-  verbs (`fulcra record` / `fulcra delete`, lib `record_data_type` /
-  `validate_records`, `DeletedRecord` in the catalog) — so the old "corrections are
-  supersedes-only until CLI record commands ship" limitation no longer holds.
-  `compile` still resolves `supersedes` (a durable, auditable correction that keeps
-  history), but true revocation — deleting the underlying record so a value leaves
-  the timeline — is now possible; whether the Privacy Ledger's revoke should emit a
-  real `delete` tombstone vs. a superseding record is the open design question (see
-  the native-revocation design note under this reeval pass).
+  **write** is now first-class (`fulcra-api` 0.1.37: `fulcra record`, lib
+  `record_data_type` / `validate_records`), and a **logical delete** exists —
+  `fulcra delete` appends a `DeletedRecord` tombstone (via `record_data_type`) that
+  suppresses a record on read. There is still **no replace/update** operation at any
+  tier, and the tombstone is a suppression marker, not a verified physical erasure —
+  so corrections remain either `supersedes` (durable, auditable, reversible) or
+  tombstone-and-re-record. `compile` resolves `supersedes` today. Whether the
+  Privacy Ledger's revoke should additionally emit a `DeletedRecord` tombstone (to
+  suppress a disclosed value on read) vs. only supersede is the open design question
+  (see the write-path-0138 design note under this reeval pass); a real
+  right-to-be-forgotten guarantee would need a platform erasure/retention contract
+  that does not exist yet.
 - **Single-user.** The solver takes pre-compiled docs as input; there is no
   multi-user sync layer in v1.
 - **No MCP write path.** The Fulcra MCP exposes read operations today; capture
