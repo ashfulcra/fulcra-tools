@@ -51,10 +51,13 @@ under `skills/`, each package with its own README, build, and tests.
   never a path/key segment), crash-safe (append-only per-account ledger + a
   contiguous-frontier watermark), landing selected emails in Fulcra Files and
   relaying matches over the coord bus. The load-bearing agent-facing facts:
-  the OAuth client is **External / unverified**, so `gmail.readonly` (a restricted
-  scope) carries a **100-account lifetime cap** until Google verification + the
-  annual CASA assessment; **no subject/from/body is ever logged** (privacy-safe
-  reason codes only). Task-by-task module breakdown, the OAuth clickpath, and the
+  the OAuth client is an **External, published-unverified, Desktop-app** client
+  (Desktop because the relay IS a local desktop app: Google treats a Desktop
+  client's secret as non-confidential, which is what lets ONE shared client ship
+  to many installs; the `127.0.0.1` loopback redirect needs no registration), so
+  `gmail.readonly` (a restricted scope) carries a **100-account lifetime cap**
+  until Google verification + the annual CASA assessment; **no subject/from/body
+  is ever logged** (privacy-safe reason codes only). Task-by-task module breakdown, the OAuth clickpath, and the
   ledger/relay/pipeline design live in
   [`packages/gmail/README.md`](packages/gmail/README.md) — read it before touching
   the relay.

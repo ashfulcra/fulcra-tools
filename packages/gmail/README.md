@@ -38,10 +38,25 @@ rotates the token in place (no duplicate row); a new address mints a new
 
 ## Auth setup (operator)
 
-Create one **Internal / Web** OAuth client in the Workspace Cloud console (single
-redirect `http://127.0.0.1:9292/api/oauth/callback`), paste the client-id/secret,
-then run "Add account" once per Gmail account. Scope is `gmail.readonly` only —
-never modify/send/delete.
+Create one **External / Desktop app** OAuth client in the Cloud console, paste the
+client-id/secret, then run "Add account" once per Gmail account. Scope is
+`gmail.readonly` only — never modify/send/delete.
+
+- **External** (not Internal) so BOTH Workspace and personal `@gmail.com`
+  accounts can authorize. Publish it (status → In production) and leave it
+  **unverified**: users get a bypassable warning and up to **100 accounts
+  (lifetime)** can connect until Google verification + the annual CASA
+  restricted-scope assessment.
+- **Desktop app** (not Web application) because the relay IS a local desktop app.
+  There is **no redirect URI to register** — Desktop clients auto-allow the
+  loopback `http://127.0.0.1:9292/api/oauth/callback` this relay uses. Google also
+  treats a Desktop client's secret as **non-confidential** (designed to ship
+  inside distributed software), which is what lets ONE shared client serve many
+  installs.
+
+The wizard's `setup_steps` carry the exact Cloud-Console clickpath; this section
+and `AGENTS.md` must agree with it (asserted by
+`tests/test_operator_docs_agree.py`).
 
 ## Develop
 

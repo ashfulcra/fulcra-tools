@@ -10,7 +10,7 @@ opaque ``account_id``. One account's auth failure is fail-soft: it is skipped
 with a health warning while the others proceed.
 
 **Setup wizard.** ``setup_steps`` walk the operator through creating ONE
-Google *External Web* OAuth client, published unverified (exact Cloud-Console
+Google *External Desktop-app* OAuth client, published unverified (exact Cloud-Console
 click-path below — External so BOTH Workspace and personal ``@gmail.com``
 accounts can authorize; ``gmail.readonly`` is a restricted scope, so an
 unverified app shows a bypassable warning and is capped at 100 lifetime users
@@ -234,10 +234,15 @@ _CLOUD_CONSOLE_CLICKPATH = (
     "security assessment (CASA) through an empaneled assessor (cost and turnaround "
     "vary by tier/provider) — a later step, not needed to start.\n"
     "5. **APIs & Services → Credentials → + Create Credentials → OAuth client "
-    "ID** → **Application type: Web application**.\n"
-    "6. Under **Authorized redirect URIs** add EXACTLY: "
-    f"`{REDIRECT_URI}` (one entry, no trailing slash).\n"
-    "7. Create → copy the **Client ID** and **Client secret**.\n\n"
+    "ID** → **Application type: Desktop app** → name it → Create.\n"
+    "6. There is **no redirect-URI field** to fill in — Desktop clients "
+    f"auto-allow the loopback redirect this relay uses (`{REDIRECT_URI}`). "
+    "Desktop is the right type here: the relay is a local desktop app, and "
+    "Google treats a Desktop client's secret as **non-confidential** (it is "
+    "designed to be shipped inside distributed software), which is what lets "
+    "ONE shared client serve many installs.\n"
+    "7. Copy the **Client ID** and **Client secret** (the secret is shown "
+    "once).\n\n"
     "Scope requested: `https://www.googleapis.com/auth/gmail.readonly` ONLY — "
     "the relay never modifies, sends, or deletes mail."
 )
