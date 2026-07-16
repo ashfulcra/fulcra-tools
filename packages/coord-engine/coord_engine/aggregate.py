@@ -11,6 +11,11 @@ from typing import Any, Optional
 
 SCHEMA = "coord.teams.summaries.v1"
 
+#: The top-level keys this function OWNS: recomputed from scratch every pass, so
+#: whatever the prior aggregate held for them is authoritative-stale and gets
+#: overwritten. Every other top-level key is fold state — carried, not read.
+OWNED_KEYS = ("schema", "team", "generated_at", "reconcile_host", "rows", "warnings")
+
 
 def build_aggregate(
     team: str,
@@ -19,8 +24,33 @@ def build_aggregate(
     generated_at: str,
     reconcile_host: str,
     warnings: Optional[list[str]] = None,
+    state: Optional[dict[str, Any]] = None,
+    prior: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    return {
+    """Build the aggregate document one reconcile pass writes.
+
+    ``state`` is this pass's own fold state (e.g. the ack fold's anchor + streak)
+    merged in at the top level. ``prior`` is the aggregate this pass read; any
+    top-level key in it that this build does not own (``OWNED_KEYS``) is carried
+    forward untouched.
+
+    THE INVARIANT, and why the passthrough exists: **summaries.json is ONE shared
+    document written by MANY hosts at MANY versions, and any top-level key added
+    in version N is silently wiped by every host older than N** — an older host
+    rebuilds the document from the keys it knows about and writes the result over
+    everyone else's. That is not hypothetical: v1.6.8 added the ack fold's anchor
+    here, and on the live mixed fleet a v1.6.6 host (which predates the key)
+    deleted it on its very next pass, holding the ack fold on its full-fold
+    fallback permanently.
+
+    So: **never rebuild this document from a fixed key set.** Preserving unknown
+    keys cannot rescue us from a host that predates the passthrough itself — that
+    needs the fleet on >= v1.6.9 — but it stops the same defect recurring one
+    version later, when an older-but-still-preserving host meets a newer host's
+    fold state. A key you do not recognize belongs to a version you are not; carry
+    it.
+    """
+    out: dict[str, Any] = {
         "schema": SCHEMA,
         "team": team,
         "generated_at": generated_at,
@@ -28,6 +58,11 @@ def build_aggregate(
         "rows": rows,
         "warnings": warnings or [],
     }
+    if isinstance(prior, dict):
+        out.update({k: v for k, v in prior.items() if k not in OWNED_KEYS})
+    if state:
+        out.update(state)
+    return out
 
 
 def aggregate_rows(aggregate: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
