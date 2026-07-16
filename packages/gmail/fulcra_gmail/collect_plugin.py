@@ -121,6 +121,9 @@ def run(ctx: RunContext) -> None:
         CoordEngineRelayEmitter(relay_team) if relay_team else None
     )
 
+    attempted = 0
+    failed = 0
+    last_error = ""
     for account in accounts:
         if account.status == STATUS_AUTH_FAILED:
             ctx.log.warning("gmail: account %s is auth_failed — skipping (re-auth needed)",
@@ -135,6 +138,7 @@ def run(ctx: RunContext) -> None:
                 continue
             if not getattr(rule, "enabled", True):
                 continue
+            attempted += 1
             try:
                 result = poll_account_rule(
                     client=client, rule=rule, account_id=account.account_id,
@@ -142,6 +146,8 @@ def run(ctx: RunContext) -> None:
                     relay_emitter=relay_emitter,
                 )
             except Exception as exc:  # noqa: BLE001 — one rule's failure is soft
+                failed += 1
+                last_error = f"{type(exc).__name__}: {exc}"
                 ctx.log.warning("gmail: poll failed account=%s rule=%s: %s",
                                 account.account_id, rule.id, type(exc).__name__)
                 continue
@@ -150,6 +156,15 @@ def run(ctx: RunContext) -> None:
                 candidates=result.candidates, effective=result.effective,
                 processed=result.processed, blocked=result.blocked,
             )
+    if attempted and failed == attempted:
+        # Fail-soft is for ONE rule having a bad day while others proceed.
+        # When EVERY poll failed, "Ran successfully — no new data" is a lie
+        # that hides total outages (live incident 2026-07-16: an expired
+        # Fulcra token 401'd every upload and 21 matches dropped silently).
+        raise RuntimeError(
+            f"gmail: all {failed}/{attempted} rule poll(s) failed — "
+            f"last error: {last_error[:200]}"
+        )
 
 
 # ---------------------------------------------------------------------------
