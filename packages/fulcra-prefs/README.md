@@ -59,10 +59,12 @@ input order — tested, not aspirational (see `tests/test_determinism.py`).
 ## Install & auth
 
 ```
-uv tool install fulcra-prefs
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools#subdirectory=packages/fulcra-prefs"
 ```
 
-(From the workspace for now — PyPI release tracks the v1 stabilisation window.)
+(Not on PyPI yet — the release tracks the v1 stabilisation window, so `uv tool
+install fulcra-prefs` will NOT resolve. From a checkout:
+`uv tool install ./packages/fulcra-prefs`.)
 
 Requires a Fulcra account:
 
