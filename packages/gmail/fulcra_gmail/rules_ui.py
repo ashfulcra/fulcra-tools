@@ -31,6 +31,7 @@ RULES_UI_HTML = r"""<!doctype html>
  <input id="relay_priority" placeholder="P2" size="3"></div>
 <div class="row m"><input id="name" placeholder="rule name"><input id="rid" placeholder="rule id">
  <button onclick="save()">Save rule</button></div>
+<div id="status" class="m" style="display:none;font-weight:600"></div>
 <hr><h1>Rules</h1><div id="rules"></div>
 <script>
 function getToken(){return (document.cookie.match(/(?:^|;\s*)fulcra_token=([^;]+)/) || [])[1]
@@ -53,7 +54,13 @@ async function loadAccounts(){try{const d=await api('/api/gmail/rules/accounts')
    `<option value="${esc(a.account_id)}">${esc(a.email)} (${esc(a.status)})</option>`).join('');
   }catch(e){document.getElementById('acct').innerHTML='';}}
 async function search(){const q=document.getElementById('q').value;
-  const d=await api('/api/gmail/rules/search',{account_id:acct(),q});RESULTS=d.messages;render();}
+  const box=document.getElementById('results');
+  box.innerHTML='<em>Searching… (fetching matching messages)</em>';
+  try{
+    const d=await api('/api/gmail/rules/search',{account_id:acct(),q});
+    RESULTS=d.messages;render();
+    if(!RESULTS.length)box.innerHTML='<em>No messages matched that search.</em>';
+  }catch(e){box.innerHTML='<em>Search failed: '+esc(e.message)+'</em>';}}
 function render(){document.getElementById('results').innerHTML=RESULTS.map(m=>`
   <div class="msg"><div class="sub">${esc(m.subject)}</div><div class="frm">${esc(m.from)} · ${esc(m.date)}</div>
   <div class="row"><button class="sec" onclick="mark('${m.message_id}','pos')">✓ match</button>
@@ -107,8 +114,11 @@ async function save(){
   try{
     if(EDITING){await api('/api/gmail/rules/'+encodeURIComponent(EDITING),editBody(),'PUT');}
     else{await api('/api/gmail/rules',draft());}
-    EDITING=null;EDIT_RULE=null;await loadRules();alert('Saved');}
-  catch(e){alert('Save failed: '+e.message);}}
+    EDITING=null;EDIT_RULE=null;await loadRules();setStatus('Rule saved.');}
+  catch(e){setStatus('Save failed: '+e.message);}}
+function setStatus(msg){const el=document.getElementById('status');
+  el.textContent=msg;el.style.display='block';
+  clearTimeout(setStatus._t);setStatus._t=setTimeout(()=>{el.style.display='none';},6000);}
 async function editRule(id){const r=await api('/api/gmail/rules/'+encodeURIComponent(id));
   EDITING=id;EDIT_RULE=r;
   document.getElementById('rid').value=r.id; document.getElementById('name').value=r.name;

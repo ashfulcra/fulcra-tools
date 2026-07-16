@@ -116,14 +116,28 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
     guard = [Depends(ctx.require_token)]
 
     def _fetch(account_id: str, ids: list[str], *, cap: int = _SEARCH_PAGE) -> list[dict]:
+        """Fetch messages by id, in parallel, preserving input order.
+
+        Serial fetches made a 25-result search take ~15s (live measurement);
+        a small thread pool brings it to a few seconds. GmailClient rides on
+        httpx.Client (thread-safe for concurrent requests); the worst
+        concurrent-refresh case is a few redundant token mints, which Google
+        permits. The token is warmed once up front to make even that rare.
+        """
         registry = make_registry()
         client = make_client(account_id, registry)
-        out = []
-        for mid in ids[:cap]:
-            msg = client.get_message(mid, format="full")
-            if msg is not None:
-                out.append(msg)
-        return out
+        wanted = ids[:cap]
+        if not wanted:
+            return []
+        warm = client.get_message(wanted[0], format="full")
+        rest = wanted[1:]
+        results: list[dict | None] = [warm]
+        if rest:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(8, len(rest))) as pool:
+                results.extend(pool.map(
+                    lambda mid: client.get_message(mid, format="full"), rest))
+        return [m for m in results if m is not None]
 
     @app.get("/api/gmail/rules", dependencies=guard)
     def list_rules():

@@ -85,6 +85,25 @@ def client():
     return _build_client(msgs)
 
 
+def test_search_preserves_list_order_under_parallel_fetch(client):
+    # _fetch runs get_message calls in a thread pool; the response must still
+    # follow list_message_ids order (the operator sees newest-first as Gmail
+    # returned them), not thread completion order.
+    r = client.post("/api/gmail/rules/search", json={"account_id": "acct", "q": "x"})
+    assert r.status_code == 200
+    ids = [m["message_id"] for m in r.json()["messages"]]
+    assert ids == sorted(ids, key=lambda x: ids.index(x))  # stable
+    assert ids == ["1", "2"]  # FakeGmailClient insertion order
+
+
+def test_ui_has_search_feedback_and_no_blocking_alert(client):
+    html = client.get("/api/gmail/rules/ui").text
+    assert "Searching…" in html          # loading state
+    assert "Search failed:" in html      # error surface
+    assert "setStatus" in html           # inline status replaces alert()
+    assert "alert('Saved')" not in html  # the save alert blocked the page
+
+
 def test_search_returns_headers_no_body(client):
     r = client.post("/api/gmail/rules/search", json={"account_id": "acct", "q": "receipt"})
     assert r.status_code == 200
