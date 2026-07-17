@@ -1,10 +1,11 @@
 # coord-tracker-bridge
 
-`coord-tracker-bridge` is the provider-neutral projection core for mirroring
-coord work into an external tracker. Phase 1 is intentionally pure: it defines
-normalized source snapshots, a complete-identity state ledger, a versioned
-projection policy, and a deterministic diff plan. It performs no network calls
-and no tracker mutations.
+`coord-tracker-bridge` mirrors coord work into an external tracker without
+making that tracker authoritative. Its provider-neutral core defines normalized
+source snapshots, a complete-identity state ledger, a versioned projection
+policy, and a deterministic diff plan. Phase 2 adds a `coord-engine --json`
+source adapter, a Linear GraphQL adapter, and explicit operator-controlled run
+phases.
 
 The package fixes the unsafe shortcuts in the original Linear probe:
 
@@ -15,6 +16,11 @@ The package fixes the unsafe shortcuts in the original Linear probe:
 - policies declare field ownership and a bounded managed-label taxonomy;
 - planning is diff-before-mutate and deterministic, so adapters can retry a
   partially executed run until it converges.
+- issues, labels, projects, per-issue labels, comments, and inbound events are
+  paginated; rate-limit retries use bounded exponential backoff;
+- a singleton lease covers each `(source, tracker, policy)` run;
+- full source identity is stored in the ledger and provider metadata, so a
+  create that succeeds just before a ledger-write crash is rediscovered.
 
 ## Core contract
 
@@ -31,12 +37,32 @@ plan = build_plan(snapshot, tracker_records, BridgeLedger.load("state.json"), lo
 ```
 
 The policy bundled at `coord_tracker_bridge/policies/default-v1.json` is a
-starting point. Resource creation, tracker I/O, source adapters, singleton
-leases, and bounded retry/backoff are deliberately phase-2 concerns. Command
-intake and expectation evaluation are not part of this package phase.
+starting point. Command intake and expectation evaluation remain disabled and
+out of scope.
+
+## Run phases
+
+Set `LINEAR_API_KEY` and either `LINEAR_TEAM_ID` or `--linear-team-id`. Then use
+the phases in order:
+
+```bash
+coord-tracker-bridge plan --coord-team fulcra
+coord-tracker-bridge apply-resources --coord-team fulcra
+coord-tracker-bridge sync --coord-team fulcra
+```
+
+- `plan` is read-only and shows projection changes plus missing bounded
+  taxonomy resources.
+- `apply-resources` is the only phase that creates labels or projects.
+- `sync` refuses a non-empty resource plan; it never silently creates resources.
+  It also refuses an overlapping run holding the same source/tracker/policy
+  lease.
+
+State defaults to `~/.local/state/coord-tracker-bridge`. Secrets are environment
+references only. GraphQL failures never log variables or source content.
 
 ## Test
 
 ```bash
-uv run --package coord-tracker-bridge pytest packages/coord-tracker-bridge/tests -q
+uv run --package coord-tracker-bridge --extra dev --no-editable pytest packages/coord-tracker-bridge/tests -q
 ```
