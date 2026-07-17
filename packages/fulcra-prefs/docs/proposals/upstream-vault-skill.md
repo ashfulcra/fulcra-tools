@@ -1,7 +1,9 @@
 # Proposal: a new official `fulcra-vault` skill (locked notes + hot-context injection)
 
 **Status:** draft (reeval epic phase-4, item 2) · **Author:** fulcra-prefs-maintainer
-**Target venue:** `fulcradynamics/agent-skills` (issue → PR from an `ashfulcra` fork)
+**Target venue:** `fulcradynamics/community-skills` (operator ruling 2026-07-16:
+`agent-skills` is core-only; community proposals go to community-skills. Filed by
+coord-maintainer, who has fulcradynamics access — this session cannot reach that repo.)
 **Source of record:** phase-3 realignment verdict (`artifact/2026-07-04-prefs-vault-realignment-verdict.md`, APPROVED)
 
 > Staged in-repo for codex-prefs review before any external post. This proposes a
@@ -110,8 +112,9 @@ dependency-free prose expression of the same conventions.
 
 ## Open questions for upstream maintainers
 
-1. Is a vault skill in scope for `agent-skills`, or preferred as a standalone doc
-   that only *references* the best-effort collision-detection convention?
+1. Venue settled: `community-skills` (per the operator's core-only ruling for
+   `agent-skills`). Open: full skill vs. a standalone doc that only *references* the
+   best-effort collision-detection convention?
 2. Should the **best-effort-write-over-LWW** recipe (with its documented residual race) be its own small,
    general skill (usable by any Files writer) that the vault skill references,
    rather than living inside the vault skill? (We lean toward extracting it — it is

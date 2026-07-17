@@ -1,7 +1,9 @@
 # Proposal: audiences + consent levels for the official `fulcra-prefs` skill
 
 **Status:** draft (reeval epic phase-4, item 1) · **Author:** fulcra-prefs-maintainer
-**Target venue:** `fulcradynamics/agent-skills` (issue → PR from an `ashfulcra` fork)
+**Target venue:** `fulcradynamics/community-skills` (operator ruling 2026-07-16:
+`agent-skills` is core-only; community proposals go to community-skills. Filed by
+coord-maintainer, who has fulcradynamics access — this session cannot reach that repo.)
 **Source of record:** phase-3 realignment verdict (`artifact/2026-07-04-prefs-vault-realignment-verdict.md`, APPROVED)
 
 > This is the issue/PR text we intend to file upstream, staged here for codex-prefs
