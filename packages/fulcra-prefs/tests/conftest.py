@@ -117,6 +117,17 @@ class FakeFulcraAPI:
             return b'{"upload_id": "00000000-0000-0000-0000-000000000000"}'
         raise NotImplementedError(path)
 
+    # --- typed record write (mirrors FulcraAPI.record_data_type 0.1.37) ---
+    # Real: record_data_type(data_type, records, api_version="v1alpha1") POSTs the
+    # LIST as x-jsonl to /ingest/v1/record/{data_type} and returns {upload_id}.
+    def record_data_type(self, data_type, records, api_version="v1alpha1"):
+        if self.fail_ingest:
+            raise ConnectionError("simulated ingest outage")
+        for r in records:
+            self.ingested.append(r)
+            self.ingest_paths.append(f"/ingest/v1/record/{data_type}")
+        return {"upload_id": "00000000-0000-0000-0000-000000000000"}
+
     # --- schema pre-flight (mirrors FulcraAPI.validate_records 0.1.37) ---
     # Real signature: validate_records(data_type, records, api_version="v1alpha1")
     # -> list of (record_index, error_message, ValidationError); [] if all valid.
