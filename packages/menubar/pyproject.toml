@@ -74,6 +74,7 @@ requires = [
     "fulcra-dayone",
     "fulcra-attention",
     "fulcra-csv-importer",
+    "fulcra-gmail",
     "tomlkit>=0.12",
     # macOS GUI stack.
     "rumps>=0.4",
@@ -86,4 +87,9 @@ requires = [
 
 [tool.briefcase.app.fulcra-menubar.macOS]
 universal_build = false
+# pyarrow (pulled in by fulcra-api → fulcra-common) ships arm64 macOS wheels
+# tagged macosx_12_0; Briefcase's default macosx_11_0 target rejected them
+# ("no matching distributions"), which emptied app_packages. Pin the target to
+# 12.0 so pip selects pyarrow's arm64 wheels.
+min_os_version = "12.0"
 info."LSUIElement" = true   # menubar app — no dock icon
