@@ -517,10 +517,15 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
             return 1
         reg = {}  # genuinely absent -> default-SLA fallback (leases without a doc)
     policy = reg.get("policy") or "shared"
-    try:
-        sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
-    except (TypeError, ValueError):
-        sla = roles.DEFAULT_SLA_HOURS
+    sla = roles.parse_sla_hours(reg.get("sla_hours"))
+    if sla is None:
+        # A readable doc whose `sla_hours` is EXPLICITLY invalid: same fact as an
+        # unreadable one — the SLA is unknown, so every state below (HELD / VACANT /
+        # escalation_due) would be asserted off a window we invented. rc 1, assert
+        # nothing. Absent/blank keeps the default and prints normally.
+        print(f"unusable sla_hours ({reg.get('sla_hours')!r}) for {role} in "
+              f"team/{team} — state unknown; fix the role doc", file=sys.stderr)
+        return 1
     try:
         entries = transport.list_dir(_leases_prefix(team, role))
         leases: Optional[list[dict[str, Any]]] = []
@@ -986,6 +991,11 @@ def _role_fresh_holders(
       does not parse as frontmatter — for a name the roles/ listing SHOWS is a
       registered role (or while that listing itself raised, leaving membership
       unknown);
+    - the doc parses but its ``sla_hours`` is EXPLICITLY INVALID (``abc``, a
+      negative, a non-finite): the operator stated a window and it did not parse,
+      so there is nothing to measure freshness against. An ABSENT or blank
+      ``sla_hours`` is NOT this case — the field is optional and omitting it
+      legitimately selects the default (``roles.parse_sla_hours`` draws the line);
     - ``deadline`` expires with role state still unread (see below).
 
     **Only a complete, successfully parsed LISTING is negative membership
@@ -1029,10 +1039,13 @@ def _role_fresh_holders(
             # yet unusable (transport failure / corrupt doc): UNKNOWN, fail closed.
             return [], False
         return [], True  # genuinely absent -> not a role (literal agent id case)
-    try:
-        sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
-    except (TypeError, ValueError):
-        sla = roles.DEFAULT_SLA_HOURS
+    sla = roles.parse_sla_hours(reg.get("sla_hours"))
+    if sla is None:
+        # The doc parsed, but its `sla_hours` did not: an EXPLICITLY invalid value.
+        # UNKNOWN — freshness has no window to be measured against. Absent/blank
+        # still means "use the default" and resolves normally; see
+        # `roles.parse_sla_hours` for why those two are not the same fact.
+        return [], False
     if dl.expired():
         return [], False  # the doc read spent the budget; the lease state is UNREAD
     leases: list[dict[str, Any]] = []
@@ -3598,10 +3611,20 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             print(f"escalate: role doc unusable for {role} — state unknown, "
                   f"skipped (unreadable or corrupt, retry)", file=sys.stderr)
             continue
-        try:
-            sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
-        except (TypeError, ValueError):
-            sla = roles.DEFAULT_SLA_HOURS
+        sla = roles.parse_sla_hours(reg.get("sla_hours"))
+        if sla is None:
+            # An EXPLICITLY invalid `sla_hours` on the ACTING path. Judging the role
+            # under the 24h default would collapse an unknown (possibly much longer)
+            # window and fire a false VACANT — the incident vector this function's
+            # doc-guard above already names, reached through the value instead of
+            # the document. A P1 to a human minted off an SLA we invented is worse
+            # than noise; a malformed field is a doc fix, not an escalation. Skip:
+            # the sweep retries every heartbeat, so a repaired doc escalates on the
+            # next pass if it genuinely is vacant.
+            print(f"escalate: unusable sla_hours ({reg.get('sla_hours')!r}) for "
+                  f"{role} — state unknown, skipped (fix the role doc)",
+                  file=sys.stderr)
+            continue
         # Dormancy: a deliberately-parked role (future dormant_until) is exempt from
         # the mechanical vacancy sweep regardless of lease state — the parked role
         # is vacant BY DESIGN, so re-firing a P1 every heartbeat host, daily, is the

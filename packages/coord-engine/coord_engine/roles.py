@@ -8,6 +8,7 @@ wrapper + CLI live in ``cli.py``.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -68,6 +69,52 @@ def classify(
     if policy == "exclusive" and len(fresh) >= 2:
         return CONTESTED
     return HELD if fresh else VACANT
+
+
+def parse_sla_hours(value: Any) -> Optional[float]:
+    """Fold a role doc's ``sla_hours`` field into the SLA to fold leases under, or
+    ``None`` meaning UNKNOWN — the caller must fail closed.
+
+    The distinction this exists to draw, and the reason it is one function rather
+    than three call sites (2026-07-16):
+
+    - **absent / blank** (key missing, ``null``, bare ``sla_hours:``, or empty
+      string) -> ``DEFAULT_SLA_HOURS``. The field is OPTIONAL, and omitting it is a
+      legitimate statement: "the default applies". Substituting the default here is
+      honouring an intent, not guessing at one.
+    - **explicitly invalid** (``abc``, ``true``, a list, negative, zero, ``inf``,
+      ``nan``) -> ``None``, i.e. UNKNOWN. The operator SET this field and it does
+      not parse; we cannot know what window they meant, so lease freshness is
+      unknowable and no answer about it is honest.
+
+    Until 2026-07-16 all three role surfaces ran ``float(reg.get("sla_hours") or
+    DEFAULT_SLA_HOURS)`` under a bare ``except``, which mapped BOTH cases onto the
+    default. That is the module's load-bearing rule inverted: an unparseable
+    ``sla_hours: abc`` produced a confident, undegraded answer about lease
+    freshness (reviewer-reproduced: a lease 36h old under a doc whose real SLA
+    might well be 720h folded to ``([], True)`` — a clean "not a holder", no
+    ``role-degraded`` marker, silently dropping role-routed work or minting a false
+    vacancy). A default is never a substitute for a value someone explicitly set
+    and got wrong. Same fact-class as a failed read and a failed parse: we do not
+    know, so we say so.
+
+    Non-positive is UNKNOWN rather than honoured-literally on purpose: a 0h or
+    negative window makes every lease stale forever, so treating it as intent would
+    mint an escalation storm off what is, in practice, always a typo.
+    """
+    if value is None:
+        return DEFAULT_SLA_HOURS
+    if isinstance(value, str) and not value.strip():
+        return DEFAULT_SLA_HOURS  # blank -> unset -> the default applies
+    if isinstance(value, bool):
+        return None  # `sla_hours: true` is a stated intent, and not a number
+    try:
+        sla = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(sla) or sla <= 0:
+        return None
+    return sla
 
 
 def dormant_state(dormant_until: Optional[str], *, now: str) -> tuple[bool, bool]:

@@ -99,6 +99,65 @@ def test_cli_roles_escalate_skips_malformed_doc_no_false_vacancy(capsys):
     assert not [p for p in t.store if "/task/" in p], sorted(t.store)
 
 
+def test_cli_roles_status_invalid_sla_is_unknown_not_default(capsys):
+    # Same fact-class as the malformed doc above, reached through the VALUE: the doc
+    # parses, but its `sla_hours` was explicitly set and doesn't. Every state below
+    # it (HELD/VACANT/escalation_due) would be asserted off a 24h window we invented,
+    # so: rc 1, assert nothing.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: abc\n---\n")
+    t.put("team/r/roles/reviewer/leases/ash.md",  # stale ONLY under the default SLA
+          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "state unknown" in cap.err
+    assert "VACANT" not in cap.out, "must not assert a state off an SLA it invented"
+
+
+def test_cli_roles_status_absent_sla_still_defaults(capsys):
+    # The distinction: an OMITTED optional `sla_hours` is a well-formed doc, not an
+    # unknown one. It must still fold under the default at rc 0.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
+    t.put("team/r/roles/reviewer/leases/ash.md",
+          f"---\ntype: Lease\nagent: ash\ntimestamp: {_now_iso()}\n---\n")
+    assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
+    import json as _json
+    res = _json.loads(capsys.readouterr().out)
+    assert res["status"] == "HELD"
+    assert res["sla_hours"] == 24.0
+
+
+def test_cli_roles_escalate_skips_invalid_sla_no_p1_minted(capsys):
+    # The ACTING path. A malformed SLA must never manufacture an escalation to a
+    # human: under the 24h default this lease reads VACANT and mints a P1, but the
+    # doc's real window is unknowable — it could make the lease perfectly fresh.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          "---\ntype: Role\nsla_hours: abc\nmaintainer: ash\n---\n")
+    t.put("team/r/roles/reviewer/leases/ash.md",  # stale ONLY under the default SLA
+          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    cap = capsys.readouterr()
+    assert "state unknown" in cap.err
+    assert "escalated" not in cap.out.replace("0 escalated", "")
+    assert not [p for p in t.store if "/task/" in p], \
+        "no P1 may be minted off an SLA we could not read"
+    assert not [p for p in t.store if "escalation" in p], sorted(t.store)
+
+
+def test_cli_roles_escalate_absent_sla_still_escalates(capsys):
+    # And the over-correction guard: a doc that omits `sla_hours` is well-formed, so
+    # a genuinely vacant role must STILL escalate under the default.
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nmaintainer: ash\n---\n")
+    t.put("team/r/roles/reviewer/leases/ash.md",
+          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert "escalated reviewer -> ash" in capsys.readouterr().out
+    assert [p for p in t.store if "/task/" in p], "absent SLA must not suppress"
+
+
 def test_cli_roles_status_vacant_escalation_due(capsys):
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")

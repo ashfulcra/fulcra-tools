@@ -219,9 +219,9 @@ it (not on PyPI).
   role-based identity outlive a session). ONE resolver: `cli._held_roles_for_rows` — never resolve
   roles a second way, or the folds silently disagree about a lease. It returns `(held, unresolved)`,
   and **`unresolved` is the load-bearing half**: a role whose lease state is UNKNOWN (transport
-  failure, unreadable lease shard, a role doc that is listed but missing/truncated/**unparseable**, or
-  a **budget cut** leaving a candidate unscanned or scanned partway — see `_role_fresh_holders`) is
-  neither held nor not-held. Folding it into an empty held-set renders a clean, role-blind queue that
+  failure, unreadable lease shard, a role doc that is listed but missing/truncated/**unparseable**, an
+  **explicitly invalid `sla_hours`**, or a **budget cut** leaving a candidate unscanned or scanned
+  partway — see `_role_fresh_holders`) is neither held nor not-held. Folding it into an empty held-set renders a clean, role-blind queue that
   is **indistinguishable from "you have no role work"** — the same silent failure as a clean-empty
   read, and worse, because the doc promise above would then be true-except-when-it-silently-isn't.
   Every caller surfaces it as `_role_degraded_row` = `{"type": "role-degraded", "roles": […]}` (a
@@ -232,8 +232,15 @@ it (not on PyPI).
   a failed parse are the same fact — we don't know what that document says — so neither may answer
   "is this a role" in the negative once the `roles/` listing has said it IS one. The one non-degraded
   absence is a doc miss for a name that listing affirmatively does not contain (the literal-agent-id
-  case). Grep any new fold for a `parse`/`read` failure that returns a value comparing equal to a
-  legitimate state; that is the whole bug class, and it has now hidden in this fold twice.
+  case). The same rule reaches one level further in, to the FIELD: an **explicitly invalid** value is
+  UNKNOWN, and a default is never a substitute for a value someone set and got wrong (`sla_hours: abc`
+  fed `roles.parse_sla_hours`'s predecessor a 24h window nobody asked for, and every surface then
+  answered confidently off it). An **absent or blank** optional field is the opposite case — the
+  default IS the stated intent, and treating it as UNKNOWN would degrade every well-formed doc. Fold
+  that distinction ONCE, in `roles.py`, and let the callers fail closed on `None`.
+  Grep any new fold for a `parse`/`read` failure **or an unusable explicit value** that returns
+  something comparing equal to a legitimate state; that is the whole bug class, and it has now hidden
+  in this fold three times.
   Cost per pass is **`1 + Σ(2 + L_r)` ops** over the roles the open work references (`L_r` = that
   role's lease shards — one per agent that claimed it and never `roles release`-d, so it tracks
   lifetime churn and is unbounded in principle: a role with ten shards is 13 ops, measured). ONE
