@@ -85,6 +85,32 @@ def test_ingest_signal_bare_data_type_has_no_annotation_source(fake_api):
     assert rec["sources"][1] == "com.fulcra-prefs.capture.claude-code"
 
 
+def test_ingest_preflight_is_loud_but_non_fatal(fake_api, capsys):
+    """validate_records pre-flight (0.1.37 adoption): a schema-invalid record
+    emits a loud, precise stderr warning but STILL ingests — non-fatal, the
+    server stays the authority; nothing is lost or blocked."""
+    fake_api.validation_errors = "recorded_at: 'nope' is not a 'date-time'"
+    store = FulcraStore(fake_api)
+    store.ingest_signal(make_signal(id=None), data_type="MomentAnnotation/def-123")
+    assert len(fake_api.ingested) == 1                       # non-fatal: still posted
+    err = capsys.readouterr().err
+    assert "pre-ingest schema warning" in err and "recorded_at" in err  # loud + precise
+
+def test_ingest_no_warning_when_valid(fake_api, capsys):
+    store = FulcraStore(fake_api)
+    store.ingest_signal(make_signal(id=None), data_type="MomentAnnotation/def-123")
+    assert len(fake_api.ingested) == 1
+    assert "schema warning" not in capsys.readouterr().err
+
+def test_ingest_preflight_skips_on_schema_outage(fake_api, capsys):
+    """A catalog/schema-fetch failure must never block or noise the ingest —
+    validation silently degrades to skip and the record posts normally."""
+    fake_api.fail_validate = True
+    store = FulcraStore(fake_api)
+    store.ingest_signal(make_signal(id=None), data_type="MomentAnnotation/def-123")
+    assert len(fake_api.ingested) == 1
+    assert capsys.readouterr().err == ""
+
 def test_typed_body_and_endpoint_map_from_canonical_envelope():
     """typed_body/typed_ingest_endpoint translate the canonical build_record
     envelope (kept for the outbox spool + shard cache) to the typed wire shape."""

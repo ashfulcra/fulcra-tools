@@ -40,6 +40,7 @@ Real-library shape notes (fulcra_api.core.FulcraAPI, verified v0.1.36):
 from __future__ import annotations
 import io
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from .schema import (Signal, canonical_json, parse_record, temp_signal_id,
                      CAPTURE_SOURCE_PREFIX, ANNOTATION_SOURCE_PREFIX)
@@ -196,10 +197,37 @@ class FulcraStore:
     def delete_file(self, file_id: str) -> None:
         self._api.delete_file(file_id)
 
+    def _validate_before_ingest(self, base_type: str, body: dict) -> None:
+        """Best-effort, NON-FATAL pre-flight (fulcra-api 0.1.37 `validate_records`).
+
+        Validates the typed body against the catalog JSON Schema for `base_type`
+        and, on any error, emits a loud, precise stderr warning naming the field —
+        turning an opaque server 4xx into an early, legible diagnostic. It never
+        blocks the ingest, never raises, and never changes the data path: a
+        missing `validate_records` method (older lib / fake), a schema-fetch
+        failure (catalog outage), or any other error silently skips validation
+        and lets the server stay the authority. (Design deviation from the #408
+        note's "skip+spool on invalid": spooling a schema-invalid record only
+        defers a doomed POST, so we warn-and-proceed instead. Schema caching /
+        batch validation are tracked follow-ups.)
+        """
+        validate = getattr(self._api, "validate_records", None)
+        if validate is None:
+            return
+        try:
+            errors = validate(base_type, [body])
+        except Exception:
+            return  # catalog/schema unavailable — skip, proceed with ingest
+        for _idx, message, _err in (errors or []):
+            print(f"fulcra-prefs: pre-ingest schema warning ({base_type}): "
+                  f"{message}", file=sys.stderr)
+
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         record = build_record(sig, data_type)
+        body = typed_body(record)
+        self._validate_before_ingest(record["metadata"]["data_type"], body)
         self._api.fulcra_api(typed_ingest_endpoint(record),
-                             data=typed_body(record), method="POST")
+                             data=body, method="POST")
 
     def read_signal_records(self, definition_id: str | None,
                             start_time=None, end_time=None) -> list[Signal]:
