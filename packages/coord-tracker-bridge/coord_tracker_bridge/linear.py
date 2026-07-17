@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 import httpx
 
 from .ledger import BridgeLedger
-from .model import ManagedRecord, Snapshot, SourceIdentity
+from .model import ManagedRecord, Snapshot, SourceIdentity, WorkRecord
 from .policy import Policy
 from .projection import Change, ChangeKind
 
@@ -296,7 +296,11 @@ class LinearTrackerAdapter:
         return self.client.paginate("InboundEvents", EVENTS_QUERY, "auditEntries", {"team": self.team_id})
 
     def plan_marker_adoptions(
-        self, snapshot: Snapshot, ledger: BridgeLedger, policy: Policy
+        self,
+        snapshot: Snapshot,
+        ledger: BridgeLedger,
+        policy: Policy,
+        resolve_slug: Callable[[str], WorkRecord | None] | None = None,
     ) -> tuple[MarkerAdoption, ...]:
         """Match legacy ``[bus:xxxxxxxx]`` titles to full source identities.
 
@@ -308,10 +312,6 @@ class LinearTrackerAdapter:
 
         candidates: dict[str, Any] = {}
         for item in snapshot.items:
-            if item.archived or item.lane not in policy.included_lanes:
-                continue
-            if policy.included_origins and item.origin not in policy.included_origins:
-                continue
             slug = item.source.item_id
             if slug in candidates:
                 raise LinearError(f"legacy footer slug {slug!r} matches multiple source rows")
@@ -338,8 +338,12 @@ class LinearTrackerAdapter:
                 )
             slug = footer_matches[0].group(1)
             item = candidates.get(slug)
+            if item is None and resolve_slug is not None:
+                item = resolve_slug(slug)
             if item is None:
-                raise LinearError(f"legacy footer slug {slug!r} has no included source row")
+                raise LinearError(f"legacy footer slug {slug!r} has no source row")
+            if item.source.item_id != slug:
+                raise LinearError(f"legacy slug resolver returned the wrong source row for {slug!r}")
             marker = matches[0].group(1)
             expected_marker = slug[-8:]
             if marker != expected_marker:

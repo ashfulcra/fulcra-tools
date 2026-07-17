@@ -287,12 +287,43 @@ def test_unknown_legacy_marker_fails_before_any_mutation():
         response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
     ])
 
-    with pytest.raises(LinearError, match="no included source row"):
+    with pytest.raises(LinearError, match="no source row"):
         LinearTrackerAdapter(LinearClient(transport), "team").plan_marker_adoptions(
             snapshot, BridgeLedger(), load_policy()
         )
 
     assert len(transport.payloads) == 1
+
+
+def test_legacy_adoption_resolves_terminal_task_absent_from_hot_snapshot():
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "completed-task-deadbeef")
+    terminal = WorkRecord(
+        source, "tasks", "Completed", "done", origin="fleet", archived=True
+    )
+    snapshot = Snapshot(
+        (), True, (), {"tasks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    issue = {
+        "id": "LIN-legacy",
+        "title": "Completed [bus:deadbeef]",
+        "description": "bus slug: `completed-task-deadbeef`",
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
+    ])
+    resolved = []
+
+    def resolve(slug):
+        resolved.append(slug)
+        return terminal
+
+    adoptions = LinearTrackerAdapter(
+        LinearClient(transport), "team"
+    ).plan_marker_adoptions(snapshot, BridgeLedger(), load_policy(), resolve)
+
+    assert [adoption.source for adoption in adoptions] == [source]
+    assert resolved == ["completed-task-deadbeef"]
 
 
 def test_legacy_adoption_rejects_source_already_mapped_to_another_issue():

@@ -225,6 +225,34 @@ class EngineSourceAdapter:
     def source_id(self) -> str:
         return f"{self.provider}:{self.team}"
 
+    def resolve_legacy_slug(self, slug: str) -> WorkRecord | None:
+        """Resolve one hot or archived task slug for one-time tracker adoption."""
+
+        payload, error = self._read(
+            EngineCapability("tasks", ("search", self.team, slug, "--archived"))
+        )
+        if (
+            error is not None
+            or not isinstance(payload, list)
+            or self._degraded_evidence(payload) is not None
+        ):
+            raise ValueError(f"legacy slug lookup failed for {slug!r}")
+        matches = [
+            row
+            for row in payload
+            if isinstance(row, dict)
+            and str(row.get("id") or row.get("name") or "") == slug
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ValueError(f"legacy slug lookup is ambiguous for {slug!r}")
+        row = matches[0]
+        record = self._work_record(row, "tasks", str(row.get("status") or "unknown"))
+        if record is None:
+            raise ValueError(f"legacy slug lookup returned an invalid row for {slug!r}")
+        return record
+
     def _capabilities(self) -> tuple[EngineCapability, ...]:
         return (
             EngineCapability("tasks", ("board", self.team)),

@@ -66,7 +66,7 @@ class Tracker:
             ))
         return provider_id
 
-    def plan_marker_adoptions(self, _snapshot, _ledger, _policy):
+    def plan_marker_adoptions(self, _snapshot, _ledger, _policy, _resolve_slug=None):
         return tuple(self.adoptions)
 
     def apply_marker_adoption(self, adoption):

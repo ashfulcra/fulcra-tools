@@ -86,14 +86,16 @@ team contains v0.25 title markers. The authoritative mapping is the
 bridge-owned description footer ``bus slug: `<full-slug>` ``; the title marker is
 only a consistency cross-check against the slug's final eight characters,
 which are not necessarily hexadecimal. Every marked issue must contain exactly
-one footer naming exactly one policy-included source row, and every full slug
-must be unique; missing footers, marker mismatches, unknowns, collisions, or
-identity conflicts abort before mutations. Each successful issue update strips
-the title marker, writes full source identity and capability metadata, then
-atomically persists the ledger entry. A crash between the provider update and
-ledger write converges on retry from provider metadata. Re-run `plan` afterward
-and keep cutover held unless its create set matches the approved projection
-surface.
+one footer naming exactly one source row, and every full slug must be unique.
+Rows excluded from the hot projection are eligible for identity adoption;
+terminal task slugs are resolved by an exact archived search, then the normal
+completeness-gated plan closes them. Missing footers, marker mismatches, unknown
+or ambiguous archived lookups, collisions, or identity conflicts abort before
+mutations. Each successful issue update strips the title marker, writes full
+source identity and capability metadata, then atomically persists the ledger
+entry. A crash between the provider update and ledger write converges on retry
+from provider metadata. Re-run `plan` afterward and keep cutover held unless its
+create set matches the approved projection surface.
 
 Use `--source teams` to read the strict base-teams convention directly. The
 teams source requires `type: Task`, an explicit stable `id`, a title, a valid

@@ -31,7 +31,7 @@ class TrackerAdapter(Protocol):
 
     def apply_change(self, change) -> str: ...
 
-    def plan_marker_adoptions(self, snapshot, ledger, policy): ...
+    def plan_marker_adoptions(self, snapshot, ledger, policy, resolve_slug=None): ...
 
     def apply_marker_adoption(self, adoption) -> None: ...
 
@@ -141,7 +141,12 @@ class BridgeService:
             # its ledger write.
             self._heal_ledger(ledger, self.tracker.list_managed_records(ledger))
 
-            adoptions = self.tracker.plan_marker_adoptions(snapshot, ledger, self.policy)
+            adoptions = self.tracker.plan_marker_adoptions(
+                snapshot,
+                ledger,
+                self.policy,
+                getattr(self.source, "resolve_legacy_slug", None),
+            )
             applied = 0
             for adoption in adoptions:
                 self.tracker.apply_marker_adoption(adoption)

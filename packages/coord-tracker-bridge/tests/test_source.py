@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from coord_tracker_bridge import (
     BridgeLedger,
     CapabilityState,
@@ -25,6 +27,37 @@ def runner_for(payloads):
             return 1, "", str(value)
         return 0, json.dumps(value), ""
     return run
+
+
+def test_engine_source_resolves_terminal_legacy_slug_from_archived_search():
+    def run(argv, _timeout):
+        assert argv == (
+            "coord-engine", "search", "fulcra", "task-done", "--archived", "--json"
+        )
+        return 0, json.dumps([{
+            "id": "task-done",
+            "title": "Done",
+            "status": "done",
+            "priority": "P2",
+        }]), ""
+
+    record = EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
+
+    assert record is not None
+    assert record.source == SourceIdentity("coord-engine", "fulcra/tasks", "task-done")
+    assert record.capability == "tasks"
+    assert record.lane == "done"
+
+
+def test_engine_source_rejects_degraded_archived_search():
+    def run(_argv, _timeout):
+        return 0, json.dumps([{
+            "type": "read-degraded",
+            "reason": "summaries index unreadable",
+        }]), ""
+
+    with pytest.raises(ValueError, match="legacy slug lookup failed"):
+        EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
 
 
 def test_engine_source_normalizes_each_capability_and_sanitizes_text():
