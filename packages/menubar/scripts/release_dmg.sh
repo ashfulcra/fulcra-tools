@@ -39,6 +39,11 @@
 #   FULCRA_NOTARY_PROFILE  (default "fulcra-notary") notarytool keychain profile.
 #   FULCRA_SKIP_NOTARIZE   (optional) set to 1 to sign + build the dmg but skip
 #                          notarization (for a local signing smoke test).
+#   FULCRA_ALLOW_GATEKEEPER_FAIL
+#                          (optional) set to 1 to KEEP a dmg that Gatekeeper
+#                          rejected, for diagnosis. Still exits non-zero and
+#                          never reports success — a rejected dmg is not
+#                          shippable.
 set -euo pipefail
 
 : "${FULCRA_SIGN_IDENTITY:?set FULCRA_SIGN_IDENTITY to your 'Developer ID Application: …' identity}"
@@ -99,8 +104,30 @@ fi
 echo "=== 7/7  notarize + staple (profile: $NOTARY_PROFILE) ==="
 xcrun notarytool submit "$OUT_DMG" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$OUT_DMG"
-echo "--- Gatekeeper assessment ---"
-spctl -a -t open --context context:primary-signature -v "$OUT_DMG" || true
 xcrun stapler validate "$OUT_DMG"
 
-echo "Built (signed + notarized + stapled): $OUT_DMG"
+# The Gatekeeper assessment is the release gate, not a formality: a dmg can be
+# notarized AND stapled and still be rejected (signing or policy problems), and
+# a rejected dmg is one a beta tester cannot open normally. Treat a rejection as
+# a build failure — never print the success line after one.
+echo "--- Gatekeeper assessment ---"
+if spctl -a -t open --context context:primary-signature -v "$OUT_DMG"; then
+  echo "Built (signed + notarized + stapled): $OUT_DMG"
+  exit 0
+fi
+
+if [ "${FULCRA_ALLOW_GATEKEEPER_FAIL:-0}" = "1" ]; then
+  echo "" >&2
+  echo "NOT DISTRIBUTABLE: Gatekeeper REJECTED $OUT_DMG." >&2
+  echo "Kept for diagnosis only because FULCRA_ALLOW_GATEKEEPER_FAIL=1." >&2
+  echo "Beta testers will NOT be able to open this dmg normally. Do not ship it." >&2
+  exit 1
+fi
+
+echo "" >&2
+echo "ERROR: Gatekeeper REJECTED $OUT_DMG — it is signed and notarized but will" >&2
+echo "       not open normally on a beta tester's machine." >&2
+echo "       Inspect: spctl -a -t open --context context:primary-signature -vv \"$OUT_DMG\"" >&2
+echo "       Notarization log: xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE" >&2
+echo "       To keep the artifact for diagnosis anyway: FULCRA_ALLOW_GATEKEEPER_FAIL=1" >&2
+exit 1
