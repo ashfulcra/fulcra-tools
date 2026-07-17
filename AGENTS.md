@@ -207,8 +207,11 @@ it (not on PyPI).
   `forge-degraded` / `presence-degraded` / `threads-degraded`; `inbox` stamps its named
   `inbox-degraded` type), carried IN the `--json` result (a list element, or a reserved
   `read-degraded` key on the counts/board/digest objects, so stdout stays one parseable value) and as a
-  stderr notice in text mode, while retaining any partial rows. This is the README's *"fails loud, never
-  silent"* property; `threads` is the reference implementation. The hazard it closes: a silently-empty
+  stderr notice in text mode, while retaining any partial rows. When one bounded pass encounters
+  multiple independent failures (for example, an unreadable fresh doc followed by overlay-cap
+  truncation), `reason` preserves both facts instead of letting the later bound clobber the earlier
+  transport failure. This is the README's *"fails loud, never silent"* property; `threads` is the
+  reference implementation. The hazard it closes: a silently-empty
   task fold that reads "all clear" while a live unacked directive is merely unreadable. **This contract
   is a ship-gate: a new aggregate-backed read consumes `_load_rows_status` (never `_load_rows`) and
   surfaces the marker on `ok is False`, with a red-first test asserting no clean-empty under a degraded
