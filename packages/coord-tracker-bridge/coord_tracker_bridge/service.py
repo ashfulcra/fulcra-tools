@@ -77,18 +77,22 @@ class BridgeService:
             build_plan(snapshot, records, ledger, self.policy), resources, snapshot, tuple(records)
         )
 
-    def apply_resources(self) -> ResourcePlan:
-        plan = self.plan().resources
-        self.tracker.apply_resources(plan)
-        return plan
-
-    def sync(self) -> SyncResult:
-        lease = FileLease(
+    def _lease(self) -> FileLease:
+        return FileLease(
             self.lease_directory,
             str(getattr(self.source, "source_id", self.source.provider)),
             str(getattr(self.tracker, "tracker_id", self.tracker.provider)),
             self.policy.hash,
         )
+
+    def apply_resources(self) -> ResourcePlan:
+        with self._lease():
+            plan = self.plan().resources
+            self.tracker.apply_resources(plan)
+            return plan
+
+    def sync(self) -> SyncResult:
+        lease = self._lease()
         with lease:
             bridge_plan = self.plan()
             if bridge_plan.resources.labels or bridge_plan.resources.projects:

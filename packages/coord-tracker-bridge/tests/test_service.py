@@ -6,6 +6,9 @@ from coord_tracker_bridge import (
     BridgeLedger,
     BridgeService,
     CapabilityState,
+    FileLease,
+    LeaseHeld,
+    LinearError,
     ManagedRecord,
     ResourceMissing,
     ResourcePlan,
@@ -52,20 +55,28 @@ class Tracker:
         provider_id = change.provider_id or "LIN-created"
         if change.kind == "create":
             self.records.append(ManagedRecord(
-                provider_id, change.source, "tasks", dict(change.fields), False
+                provider_id,
+                change.source,
+                str(change.fields["source_capability"]),
+                dict(change.fields),
+                False,
             ))
         return provider_id
 
 
-def snapshot():
+def snapshot(capability="tasks"):
     identity = SourceIdentity("coord-engine", "fulcra", "task-1")
-    record = WorkRecord(identity, "tasks", "Task", "active", origin="fleet")
-    return Snapshot((record,), True, (), {"tasks": CapabilityState.COMPLETE}, NOW)
+    record = WorkRecord(identity, capability, "Task", "active", origin="fleet")
+    return Snapshot((record,), True, (), {capability: CapabilityState.COMPLETE}, NOW)
 
 
-def service(tmp_path, tracker):
+def service(tmp_path, tracker, source_snapshot=None):
     return BridgeService(
-        Source(snapshot()), tracker, load_policy(), tmp_path / "ledger.json", tmp_path / "leases"
+        Source(source_snapshot or snapshot()),
+        tracker,
+        load_policy(),
+        tmp_path / "ledger.json",
+        tmp_path / "leases",
     )
 
 
@@ -99,6 +110,24 @@ def test_apply_resources_is_explicit_phase(tmp_path):
     assert tracker.applied_resources == [plan]
 
 
+def test_apply_resources_rejects_overlapping_mutation_run(tmp_path):
+    tracker = Tracker(resources=ResourcePlan(("lane:active",), ()))
+    bridge = service(tmp_path, tracker)
+    lease = FileLease(
+        tmp_path / "leases",
+        bridge.source.provider,
+        bridge.tracker.provider,
+        bridge.policy.hash,
+        owner="first",
+    )
+    lease.acquire()
+
+    with pytest.raises(LeaseHeld, match="first"):
+        bridge.apply_resources()
+
+    lease.release()
+
+
 def test_sync_persists_ledger_after_provider_mutation(tmp_path):
     tracker = Tracker()
     result = service(tmp_path, tracker).sync()
@@ -108,9 +137,23 @@ def test_sync_persists_ledger_after_provider_mutation(tmp_path):
     assert ledger.get(SourceIdentity("coord-engine", "fulcra", "task-1")).tracker_record_id == "LIN-created"
 
 
-def test_retry_converges_after_create_succeeds_before_ledger_write(tmp_path, monkeypatch):
+def test_sync_does_not_persist_ledger_when_provider_rejects_mutation(tmp_path):
+    class RejectingTracker(Tracker):
+        def apply_change(self, change):
+            raise LinearError("semantic mutation failure")
+
+    with pytest.raises(LinearError, match="semantic mutation failure"):
+        service(tmp_path, RejectingTracker()).sync()
+
+    assert not (tmp_path / "ledger.json").exists()
+
+
+@pytest.mark.parametrize("capability", ["asks", "threads"])
+def test_retry_converges_after_create_succeeds_before_ledger_write(
+    tmp_path, monkeypatch, capability
+):
     tracker = Tracker()
-    bridge = service(tmp_path, tracker)
+    bridge = service(tmp_path, tracker, snapshot(capability))
     real_save = BridgeLedger.save
     calls = [0]
 
@@ -129,4 +172,6 @@ def test_retry_converges_after_create_succeeds_before_ledger_write(tmp_path, mon
     assert bridge.sync().applied == 0
     assert len(tracker.records) == 1
     healed = BridgeLedger.load(tmp_path / "ledger.json")
-    assert healed.get(SourceIdentity("coord-engine", "fulcra", "task-1")).tracker_record_id == "LIN-created"
+    entry = healed.get(SourceIdentity("coord-engine", "fulcra", "task-1"))
+    assert entry.tracker_record_id == "LIN-created"
+    assert entry.capability == capability

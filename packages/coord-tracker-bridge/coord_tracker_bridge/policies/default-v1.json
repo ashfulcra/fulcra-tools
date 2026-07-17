@@ -35,6 +35,7 @@
     "origin": "source",
     "workstream": "source",
     "source_identity": "source",
+    "source_capability": "source",
     "policy_version": "source",
     "policy_hash": "source"
   }

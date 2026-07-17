@@ -5,6 +5,7 @@ from .lease import FileLease, LeaseHeld
 from .linear import (
     GraphQLResponse,
     LinearClient,
+    LinearError,
     LinearTrackerAdapter,
     ResourceMissing,
     ResourcePlan,
@@ -36,6 +37,7 @@ __all__ = [
     "LedgerEntry",
     "LeaseHeld",
     "LinearClient",
+    "LinearError",
     "LinearTrackerAdapter",
     "ManagedRecord",
     "Plan",

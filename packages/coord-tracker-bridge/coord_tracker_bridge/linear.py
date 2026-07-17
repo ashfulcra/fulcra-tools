@@ -131,6 +131,21 @@ class LinearClient:
                 raise LinearError(f"{operation}: invalid pagination cursor")
             cursor = str(next_cursor)
 
+    def execute_mutation(
+        self,
+        operation: str,
+        query: str,
+        root: str,
+        variables: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """Execute a mutation and require Linear's semantic success flag."""
+
+        data = self.execute(operation, query, variables)
+        result = data.get(root)
+        if not isinstance(result, Mapping) or result.get("success") is not True:
+            raise LinearError(f"{operation}: mutation did not succeed")
+        return result
+
 
 ISSUES_QUERY = """query Issues($team:ID!,$after:String){issues(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id title description priority dueDate state{id name type} project{id name}} pageInfo{hasNextPage endCursor}}}"""
 LABELS_QUERY = """query Labels($team:ID!,$after:String){issueLabels(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
@@ -141,17 +156,36 @@ EVENTS_QUERY = """query InboundEvents($team:ID!,$after:String){auditEntries(filt
 SCHEMA_QUERY = """query Schema($team:ID!){team(id:$team){id key states{nodes{id name type}}}}"""
 
 
-def encode_source_metadata(source: SourceIdentity, fields: Mapping[str, Any] | None = None) -> str:
-    value = {"source": source.to_dict(), "fields": dict(fields or {})}
+def encode_source_metadata(
+    source: SourceIdentity,
+    fields: Mapping[str, Any] | None = None,
+    *,
+    capability: str,
+) -> str:
+    if not capability.strip():
+        raise ValueError("source capability must be non-empty")
+    value = {
+        "source": source.to_dict(),
+        "capability": capability,
+        "fields": dict(fields or {}),
+    }
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 def append_source_metadata(
-    description: str, source: SourceIdentity, fields: Mapping[str, Any] | None = None
+    description: str,
+    source: SourceIdentity,
+    fields: Mapping[str, Any] | None = None,
+    *,
+    capability: str,
 ) -> str:
     clean = strip_source_metadata(description)
-    marker = f"{METADATA_PREFIX}{encode_source_metadata(source, fields)}{METADATA_SUFFIX}"
+    marker = (
+        f"{METADATA_PREFIX}"
+        f"{encode_source_metadata(source, fields, capability=capability)}"
+        f"{METADATA_SUFFIX}"
+    )
     return f"{clean.rstrip()}\n\n{marker}".lstrip()
 
 
@@ -170,6 +204,8 @@ def parse_bridge_metadata(description: str) -> Mapping[str, Any] | None:
         if "source" not in value:  # phase-1 probe compatibility
             value = {"source": value, "fields": {}}
         SourceIdentity.from_dict(value["source"])
+        if "capability" in value and not str(value["capability"]).strip():
+            return None
         return value
     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
         return None
@@ -204,6 +240,7 @@ class LinearTrackerAdapter:
         self.team_id = team_id
         self._metadata_by_source: dict[str, dict[str, Any]] = {}
         self._description_by_source: dict[str, str] = {}
+        self._capability_by_source: dict[str, str] = {}
 
     @property
     def tracker_id(self) -> str:
@@ -257,15 +294,26 @@ class LinearTrackerAdapter:
                 source = entry.source
             if source is None:
                 continue
+            metadata_capability = str((metadata or {}).get("capability") or "").strip()
+            if entry and metadata_capability and metadata_capability != entry.capability:
+                raise LinearError(
+                    f"managed issue {provider_id!r} capability metadata conflicts with ledger"
+                )
+            capability = entry.capability if entry else metadata_capability
+            if not capability:
+                raise LinearError(
+                    f"managed issue {provider_id!r} has no trusted source capability metadata"
+                )
             internal = dict((metadata or {}).get("fields") or {})
             self._metadata_by_source[source.key] = internal
             self._description_by_source[source.key] = strip_source_metadata(description)
+            self._capability_by_source[source.key] = capability
             labels = tuple(str(label.get("name")) for label in self.list_issue_labels(provider_id))
             state = issue.get("state") or {}
             records.append(ManagedRecord(
                 provider_id=provider_id,
                 source=source,
-                capability=entry.capability if entry else "tasks",
+                capability=capability,
                 fields={
                     "title": issue.get("title"),
                     "description": strip_source_metadata(description),
@@ -275,6 +323,10 @@ class LinearTrackerAdapter:
                     "project": (issue.get("project") or {}).get("name"),
                     "due_at": issue.get("dueDate"),
                     "source_identity": source.to_dict(),
+                    # Preserve what is durably present at the provider. If an
+                    # older marker lacks this field but the ledger knows it,
+                    # the pure diff emits a metadata-healing update.
+                    "source_capability": metadata_capability or None,
                     **internal,
                 },
                 closed=str(state.get("type", "")).lower() in {"completed", "canceled"},
@@ -291,15 +343,17 @@ class LinearTrackerAdapter:
 
     def apply_resources(self, plan: ResourcePlan) -> None:
         for label in plan.labels:
-            self.client.execute(
+            self.client.execute_mutation(
                 "CreateLabel",
                 "mutation CreateLabel($input:IssueLabelCreateInput!){issueLabelCreate(input:$input){success}}",
+                "issueLabelCreate",
                 {"input": {"teamId": self.team_id, "name": label}},
             )
         for project in plan.projects:
-            self.client.execute(
+            self.client.execute_mutation(
                 "CreateProject",
                 "mutation CreateProject($input:ProjectCreateInput!){projectCreate(input:$input){success}}",
+                "projectCreate",
                 {"input": {"teamIds": [self.team_id], "name": project}},
             )
 
@@ -348,31 +402,45 @@ class LinearTrackerAdapter:
         internal = dict(self._metadata_by_source.get(source.key, {}))
         internal.update({key: fields[key] for key in internal_names if key in fields})
         metadata_changed = any(key in fields for key in internal_names)
-        if "description" in fields or metadata_changed or ensure_metadata:
+        capability = str(
+            fields.get("source_capability", self._capability_by_source.get(source.key, "")) or ""
+        ).strip()
+        capability_changed = "source_capability" in fields
+        if "description" in fields or metadata_changed or capability_changed or ensure_metadata:
+            if not capability:
+                raise LinearError("source capability is required in provider metadata")
             visible = str(fields.get("description", self._description_by_source.get(source.key, "")) or "")
-            output["description"] = append_source_metadata(visible, source, internal)
+            output["description"] = append_source_metadata(
+                visible, source, internal, capability=capability
+            )
         return output
 
     def add_comment(self, issue_id: str, body: str) -> str:
-        data = self.client.execute(
+        result = self.client.execute_mutation(
             "AddComment",
-            "mutation AddComment($input:CommentCreateInput!){commentCreate(input:$input){comment{id}}}",
+            "mutation AddComment($input:CommentCreateInput!){commentCreate(input:$input){success comment{id}}}",
+            "commentCreate",
             {"input": {"issueId": issue_id, "body": body}},
         )
-        return str(data["commentCreate"]["comment"]["id"])
+        comment = result.get("comment")
+        if not isinstance(comment, Mapping) or not comment.get("id"):
+            raise LinearError("AddComment: missing created comment")
+        return str(comment["id"])
 
     def set_due_date(self, issue_id: str, due_date: str | None) -> None:
-        self.client.execute(
+        self.client.execute_mutation(
             "SetDueDate",
             "mutation SetDueDate($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}",
+            "issueUpdate",
             {"id": issue_id, "input": {"dueDate": due_date}},
         )
 
     def apply_change(self, change: Change) -> str:
         if change.kind is ChangeKind.CLOSE:
-            self.client.execute(
+            self.client.execute_mutation(
                 "CloseIssue",
                 "mutation CloseIssue($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}",
+                "issueUpdate",
                 {"id": change.provider_id, "input": {"stateId": self._state_id("completed")}},
             )
             return str(change.provider_id)
@@ -381,15 +449,20 @@ class LinearTrackerAdapter:
         )
         if change.kind is ChangeKind.CREATE:
             payload["teamId"] = self.team_id
-            data = self.client.execute(
+            result = self.client.execute_mutation(
                 "CreateIssue",
-                "mutation CreateIssue($input:IssueCreateInput!){issueCreate(input:$input){issue{id}}}",
+                "mutation CreateIssue($input:IssueCreateInput!){issueCreate(input:$input){success issue{id}}}",
+                "issueCreate",
                 {"input": payload},
             )
-            return str(data["issueCreate"]["issue"]["id"])
-        self.client.execute(
+            issue = result.get("issue")
+            if not isinstance(issue, Mapping) or not issue.get("id"):
+                raise LinearError("CreateIssue: missing created issue")
+            return str(issue["id"])
+        self.client.execute_mutation(
             "UpdateIssue",
             "mutation UpdateIssue($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}",
+            "issueUpdate",
             {"id": change.provider_id, "input": payload},
         )
         return str(change.provider_id)

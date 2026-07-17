@@ -1,3 +1,6 @@
+import base64
+import json
+
 import pytest
 
 from coord_tracker_bridge import (
@@ -6,7 +9,10 @@ from coord_tracker_bridge import (
     ChangeKind,
     GraphQLResponse,
     LinearClient,
+    LinearError,
     LinearTrackerAdapter,
+    LedgerEntry,
+    ResourcePlan,
     SourceIdentity,
 )
 from coord_tracker_bridge.linear import (
@@ -83,20 +89,25 @@ def test_errors_never_echo_graphql_variables():
 def test_provider_metadata_round_trip_uses_full_identity_not_title():
     source = SourceIdentity("coord-engine", "fulcra", "alpha-12345678")
     description = append_source_metadata(
-        "operator-visible body", source, {"policy_version": "2", "owner": "ash"}
+        "operator-visible body",
+        source,
+        {"policy_version": "2", "owner": "ash"},
+        capability="asks",
     )
 
     assert parse_source_metadata(description) == source
     assert parse_bridge_metadata(description)["fields"] == {"policy_version": "2", "owner": "ash"}
+    assert parse_bridge_metadata(description)["capability"] == "asks"
     assert strip_source_metadata(description) == "operator-visible body"
     assert "alpha-12345678" not in description
 
 
-def test_created_before_ledger_write_is_rediscovered_from_provider_metadata():
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+@pytest.mark.parametrize("capability", ["asks", "threads"])
+def test_created_before_ledger_write_preserves_capability_from_provider_metadata(capability):
+    source = SourceIdentity("coord-engine", f"fulcra/{capability}", "item-1")
     issue = {
         "id": "LIN-1", "title": "Task",
-        "description": append_source_metadata("body", source),
+        "description": append_source_metadata("body", source, capability=capability),
         "state": {"type": "started"}, "labels": {"nodes": []}, "project": None,
     }
     transport = FakeTransport([
@@ -107,7 +118,50 @@ def test_created_before_ledger_write_is_rediscovered_from_provider_metadata():
 
     records = adapter.list_managed_records(BridgeLedger())
 
-    assert [(record.provider_id, record.source) for record in records] == [("LIN-1", source)]
+    assert [(record.provider_id, record.source, record.capability) for record in records] == [
+        ("LIN-1", source, capability)
+    ]
+
+
+def test_provider_metadata_without_capability_fails_closed_without_ledger():
+    source = SourceIdentity("coord-engine", "fulcra/asks", "ask-1")
+    description = append_source_metadata("body", source, capability="asks")
+    decoded = dict(parse_bridge_metadata(description))
+    decoded.pop("capability")
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(decoded, sort_keys=True, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+    issue = {
+        "id": "LIN-1",
+        "title": "Ask",
+        "description": f"<!-- coord-tracker-bridge:source={encoded} -->",
+        "state": {"type": "started"},
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
+    ])
+
+    with pytest.raises(LinearError, match="no trusted source capability"):
+        LinearTrackerAdapter(LinearClient(transport), "team").list_managed_records(BridgeLedger())
+
+
+def test_provider_capability_conflict_with_ledger_fails_closed():
+    source = SourceIdentity("coord-engine", "fulcra/asks", "ask-1")
+    issue = {
+        "id": "LIN-1",
+        "title": "Ask",
+        "description": append_source_metadata("body", source, capability="threads"),
+        "state": {"type": "started"},
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
+    ])
+    ledger = BridgeLedger([
+        LedgerEntry(source, "asks", "linear", "LIN-1", "1", "hash")
+    ])
+
+    with pytest.raises(LinearError, match="conflicts with ledger"):
+        LinearTrackerAdapter(LinearClient(transport), "team").list_managed_records(ledger)
 
 
 def test_issue_labels_paginate_independently_of_issue_page():
@@ -131,9 +185,63 @@ def test_partial_update_does_not_wipe_description_or_labels():
     assert transport.payloads[0]["variables"]["input"] == {"title": "Renamed"}
 
 
+def test_false_success_update_is_rejected():
+    transport = FakeTransport([response({"issueUpdate": {"success": False}})])
+    adapter = LinearTrackerAdapter(LinearClient(transport), "team")
+    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+
+    with pytest.raises(LinearError, match="mutation did not succeed"):
+        adapter.apply_change(Change(ChangeKind.UPDATE, source, "LIN-1", {"title": "Renamed"}))
+
+
+def test_create_persists_capability_in_provider_metadata():
+    transport = FakeTransport([
+        response({"issueCreate": {"success": True, "issue": {"id": "LIN-1"}}}),
+    ])
+    adapter = LinearTrackerAdapter(LinearClient(transport), "team")
+    source = SourceIdentity("coord-engine", "fulcra/asks", "ask-1")
+
+    provider_id = adapter.apply_change(Change(
+        ChangeKind.CREATE,
+        source,
+        None,
+        {"title": "Ask", "description": "body", "source_capability": "asks"},
+    ))
+
+    description = transport.payloads[0]["variables"]["input"]["description"]
+    assert provider_id == "LIN-1"
+    assert parse_bridge_metadata(description)["capability"] == "asks"
+
+
+def test_false_success_close_is_rejected():
+    transport = FakeTransport([
+        response({"team": {"states": {"nodes": [{"id": "done", "type": "completed"}]}}}),
+        response({"issueUpdate": {"success": False}}),
+    ])
+    adapter = LinearTrackerAdapter(LinearClient(transport), "team")
+    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+
+    with pytest.raises(LinearError, match="mutation did not succeed"):
+        adapter.apply_change(Change(ChangeKind.CLOSE, source, "LIN-1", {}))
+
+
+@pytest.mark.parametrize(
+    ("plan", "root"),
+    [
+        (ResourcePlan(("lane:active",), ()), "issueLabelCreate"),
+        (ResourcePlan((), ("Workstream",)), "projectCreate"),
+    ],
+)
+def test_false_success_resource_creation_is_rejected(plan, root):
+    transport = FakeTransport([response({root: {"success": False}})])
+
+    with pytest.raises(LinearError, match="mutation did not succeed"):
+        LinearTrackerAdapter(LinearClient(transport), "team").apply_resources(plan)
+
+
 def test_comment_and_due_date_are_semantic_operations():
     transport = FakeTransport([
-        response({"commentCreate": {"comment": {"id": "comment-1"}}}),
+        response({"commentCreate": {"success": True, "comment": {"id": "comment-1"}}}),
         response({"issueUpdate": {"success": True}}),
     ])
     adapter = LinearTrackerAdapter(LinearClient(transport), "team")
