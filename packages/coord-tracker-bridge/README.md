@@ -5,7 +5,9 @@ making that tracker authoritative. Its provider-neutral core defines normalized
 source snapshots, a complete-identity state ledger, a versioned projection
 policy, and a deterministic diff plan. Phase 2 adds a `coord-engine --json`
 source adapter, a Linear GraphQL adapter, and explicit operator-controlled run
-phases.
+phases. Phase 3 adds a lower-fidelity, read-only `teams` source that reads only
+typed task documents under `team/<team>/task/` and never depends on derived
+coord-engine views.
 
 The package fixes the unsafe shortcuts in the original Linear probe:
 
@@ -50,6 +52,14 @@ coord-tracker-bridge plan --coord-team fulcra
 coord-tracker-bridge apply-resources --coord-team fulcra
 coord-tracker-bridge sync --coord-team fulcra
 ```
+
+Use `--source teams` to read the strict base-teams convention directly. The
+teams source requires `type: Task`, an explicit stable `id`, a title, a valid
+status, and typed tags in every task document. `index.md` and `log.md` are
+ignored as derived artifacts. Any ambiguous listing, read, parse, duplicate ID,
+or unexpected entry degrades the task capability and suppresses absence-based
+closes. Asks, threads, health, due dates, expectations, and command intake are
+reported as `UNSUPPORTED`; they are never represented as clean empty results.
 
 - `plan` is read-only and shows projection changes plus missing bounded
   taxonomy resources.

@@ -21,7 +21,7 @@ from .model import (
 from .policy import Policy, load_policy
 from .projection import Change, ChangeKind, Plan, build_plan
 from .service import BridgePlan, BridgeService, SyncResult
-from .source import EngineSourceAdapter
+from .source import EngineSourceAdapter, FulcraTeamsTransport, TeamsSourceAdapter, TeamsTransportError
 
 __all__ = [
     "BridgeLedger",
@@ -33,6 +33,7 @@ __all__ = [
     "Diagnostic",
     "EngineSourceAdapter",
     "FileLease",
+    "FulcraTeamsTransport",
     "GraphQLResponse",
     "LedgerEntry",
     "LeaseHeld",
@@ -47,9 +48,11 @@ __all__ = [
     "Snapshot",
     "SourceIdentity",
     "SyncResult",
+    "TeamsSourceAdapter",
+    "TeamsTransportError",
     "WorkRecord",
     "build_plan",
     "load_policy",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -83,7 +83,10 @@ under `skills/`, each package with its own README, build, and tests.
   creates labels/projects, and a singleton lease rejects overlapping
   source/tracker/policy runs. It never infers identity from titles, and an
   incomplete capability suppresses destructive closes only for that scope.
-  Command intake and expectation evaluation remain explicitly out of scope.
+  The optional `--source teams` adapter is strict and read-only over typed
+  `team/<team>/task/*.md` documents; ambiguous list/read/parse results degrade
+  tasks, while unsupported capabilities remain explicitly unsupported. Command
+  intake and expectation evaluation remain explicitly out of scope.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "coord-tracker-bridge"
-version = "0.2.0"
+version = "0.3.0"
 description = "Tracker-agnostic projection core for coord work records"
 readme = "README.md"
 requires-python = ">=3.12"
