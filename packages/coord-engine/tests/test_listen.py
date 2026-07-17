@@ -1097,6 +1097,55 @@ def test_absent_role_doc_unchanged_nonrole():
     assert (holders, ok) == ([], True)
 
 
+def test_invalid_sla_hours_is_unknown_not_default_sla():
+    # Reviewer's exact reproduction. A role doc that PARSES but whose `sla_hours`
+    # the operator explicitly got wrong: the window is unknowable, so bob's 36h-old
+    # lease can be neither fresh nor stale. Before the fix this folded to
+    # ([], True) — a clean, confident "bob is not a holder" with no degradation,
+    # off a 24h default nobody asked for.
+    t = FakeTransport()
+    t.put(cli._role_doc_path(TEAM, "reviewer"),
+          "---\ntype: Role\npolicy: shared\nsla_hours: abc\n---\n")
+    _put_lease(t, "reviewer", "bob", ts="2026-07-15T12:00:00Z")
+    holders, ok = cli._role_fresh_holders(t, TEAM, "reviewer",
+                                          now="2026-07-17T00:00:00Z")
+    assert (holders, ok) == ([], False), \
+        "explicitly-invalid sla_hours is UNKNOWN, never the default"
+
+
+def test_absent_sla_hours_still_uses_the_default_undegraded():
+    # The other half of the distinction, and the one a careless fix breaks: a doc
+    # that simply OMITS the optional `sla_hours` is well-formed. It must resolve
+    # off the default, undegraded — "unset" is not "unknown".
+    t = FakeTransport()
+    t.put(cli._role_doc_path(TEAM, "reviewer"), "---\ntype: Role\npolicy: shared\n---\n")
+    _put_lease(t, "reviewer", "bob", ts="2026-07-16T23:00:00Z")  # 1h old, fresh at 24h
+    assert cli._role_fresh_holders(t, TEAM, "reviewer",
+                                   now="2026-07-17T00:00:00Z") == (["bob"], True)
+    # blank (`sla_hours:` with no value) is the same statement
+    t.put(cli._role_doc_path(TEAM, "reviewer"),
+          "---\ntype: Role\npolicy: shared\nsla_hours:\n---\n")
+    assert cli._role_fresh_holders(t, TEAM, "reviewer",
+                                   now="2026-07-17T00:00:00Z") == (["bob"], True)
+
+
+def test_invalid_sla_hours_surfaces_role_degraded_in_the_fold(capsys):
+    # And the UNKNOWN must reach the READER: `_held_roles_for_rows` puts the role in
+    # `unresolved`, so the fold emits a `role-degraded` row instead of serving bob a
+    # role-blind queue that looks exactly like "nothing for you".
+    t = FakeTransport()
+    t.put(cli._role_doc_path(TEAM, "reviewer"),
+          "---\ntype: Role\npolicy: shared\nsla_hours: abc\n---\n")
+    _put_lease(t, "reviewer", "bob")
+    _put_directive(t, "role-do-t", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    rows = [{"name": "role-do-t", "status": "proposed", "assignee": "reviewer"}]
+    held, unresolved = cli._held_roles_for_rows(t, TEAM, "bob", rows, now=NOW)
+    assert (held, unresolved) == (set(), {"reviewer"})
+    assert cli._role_degraded_row(unresolved) == {"type": "role-degraded",
+                                                  "roles": ["reviewer"]}
+
+
 def test_foreign_literal_assignee_no_roles_degradation(capsys):
     # A directive assigned to another literal agent (no role doc anywhere) must
     # not produce a roles failure while listening as a third party.

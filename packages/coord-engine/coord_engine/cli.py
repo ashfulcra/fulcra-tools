@@ -370,13 +370,21 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
+    now = _iso(_now())
     rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
-    got = query.needs_me(rows, args.agent, now=_iso(_now()))
+    # Role routing: work addressed to a role this agent holds IS work that needs
+    # this agent (see _held_roles_for_rows). An unresolved role is UNKNOWN and gets
+    # its own marker below — never folded into "no role work".
+    held_roles, unresolved_roles = _held_roles_for_rows(
+        transport, args.team, args.agent, rows, now=now)
+    got = query.needs_me(rows, args.agent, now=now, held_roles=held_roles)
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
     if not rows_ok:
         got = [_read_degraded_row(rows_reason)] + got
+    if unresolved_roles:
+        got = [_role_degraded_row(unresolved_roles)] + got
     # Shared add-on deadline (see _briefing_budget): opened here so the forge
     # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
     # own independent, already-shipped budget.
@@ -391,6 +399,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             if r.get("type") == _READ_DEGRADED:
                 print(f"  read degraded: {r.get('reason')} — task fold unknown "
                       f"(not empty), retry")
+            elif r.get("type") == _ROLE_DEGRADED:
+                print(_role_degraded_line(r))
             elif r.get("type") == "review-pending":
                 print(f"  [REVIEW] pending verdict: {r['name']} "
                       f"(required: {', '.join(r['pending_required'])})")
@@ -491,18 +501,31 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     # disambiguator (`_roles_listing_names`) now exists and its cost lands only
     # on the already-degraded path.
     raw_doc = transport.read(_role_doc_path(team, role))
-    if raw_doc is None:
+    reg = okf.parse_frontmatter(raw_doc)
+    if reg is None:
+        # A read miss and a body that won't PARSE are the same fact — no usable
+        # doc — so they take the same path (2026-07-16: the `raw_doc is None`
+        # guard let a listed-but-unparseable doc fall through to `or {}`, i.e.
+        # onto the 24h default SLA and a confident VACANT at rc 0, which is the
+        # precise collapse the comment above forbids. `_role_fresh_holders` was
+        # fixed for the identical hole in the same round; both surfaces must agree
+        # or the "same fold" contract between them is a lie).
         names = _roles_listing_names(transport, team)
         if names is None or f"{role}.md" in names:
-            print(f"role doc unreadable for {role} in team/{team} — "
-                  f"state unknown, degraded transport, retry", file=sys.stderr)
+            print(f"role doc unusable for {role} in team/{team} — state unknown "
+                  f"(unreadable or corrupt), retry", file=sys.stderr)
             return 1
-    reg = okf.parse_frontmatter(raw_doc) or {}
+        reg = {}  # genuinely absent -> default-SLA fallback (leases without a doc)
     policy = reg.get("policy") or "shared"
-    try:
-        sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
-    except (TypeError, ValueError):
-        sla = roles.DEFAULT_SLA_HOURS
+    sla = roles.parse_sla_hours(reg.get("sla_hours"))
+    if sla is None:
+        # A readable doc whose `sla_hours` is EXPLICITLY invalid: same fact as an
+        # unreadable one — the SLA is unknown, so every state below (HELD / VACANT /
+        # escalation_due) would be asserted off a window we invented. rc 1, assert
+        # nothing. Absent/blank keeps the default and prints normally.
+        print(f"unusable sla_hours ({reg.get('sla_hours')!r}) for {role} in "
+              f"team/{team} — state unknown; fix the role doc", file=sys.stderr)
+        return 1
     try:
         entries = transport.list_dir(_leases_prefix(team, role))
         leases: Optional[list[dict[str, Any]]] = []
@@ -717,6 +740,15 @@ DEFAULT_REVIEW_FOLD_BUDGET = 45.0
 #: opens when the add-on stack begins and is spent cumulatively across sections;
 #: pending-reviews keeps its own independent COORD_REVIEW_FOLD_BUDGET (sooner wins).
 DEFAULT_BRIEFING_BUDGET = 60.0
+#: Cumulative deadline (seconds) for ONE role-resolution pass (`_held_roles_for_rows`)
+#: — the fold `briefing` / `inbox` / `needs-me` / `listen` all run, i.e. every agent,
+#: every tick. Its cost is 1 + sum(2 + lease_shards) over the roles the open work
+#: references (see `_held_roles_for_rows`), and lease shards accumulate per claiming
+#: agent forever (only `roles release` prunes one), so an unbudgeted pass could spend
+#: one transport timeout per role doc, per lease listing AND per shard before the hot
+#: path renders anything. 20s is a generous ~25 ops at the measured ~0.8s/op — far
+#: past the 4-7 a real team pays — while still bounding a degraded transport.
+DEFAULT_ROLE_FOLD_BUDGET = 20.0
 #: Per-tick bound (seconds) for the listener's dir-only review-slug classification
 #: pass. That set is PERMANENT and growing (soft deletes leave every review dir
 #: forever), so an unbudgeted pass could spend N x transport-timeout on a degraded
@@ -746,6 +778,15 @@ def _briefing_budget() -> float:
     what the next one gets; pending-reviews keeps its own independent
     ``COORD_REVIEW_FOLD_BUDGET`` (whichever bound is sooner wins)."""
     return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
+
+
+def _role_fold_budget() -> float:
+    """Cumulative deadline (seconds) for one role-resolution pass. Env
+    ``COORD_ROLE_FOLD_BUDGET`` (see the DEFAULT_ROLE_FOLD_BUDGET rationale). Its own
+    knob, like ``COORD_REVIEW_FOLD_BUDGET``: role resolution runs BEFORE the
+    briefing/needs-me add-on stack opens its budget (the held set is an input to the
+    inbox fold, not an add-on section), so it cannot spend that one."""
+    return config.env_float("COORD_ROLE_FOLD_BUDGET", DEFAULT_ROLE_FOLD_BUDGET)
 
 
 def _listen_classify_budget() -> float:
@@ -930,6 +971,7 @@ def _roles_listing_names(transport: Any, team: str) -> Optional[set[str]]:
 def _role_fresh_holders(
     transport: Any, team: str, name: str, *, now: str,
     listing_cache: Optional[dict[str, Any]] = None,
+    deadline: Optional[Deadline] = None,
 ) -> tuple[list[str], bool]:
     """Fresh lease holders of role name per the CANONICAL fold: the role
     doc's own sla_hours (falling back to the default) fed to
@@ -945,42 +987,79 @@ def _role_fresh_holders(
     - a JUST-LISTED lease shard reads None or unparseable (previously ``or {}``
       dropped its timestamp and silently folded the holder out as stale — a
       fail-open vacancy INSIDE the fold);
-    - the role-doc read returns None while the name IS present in the roles/
-      listing (or that listing itself raised): listed-but-unreadable is a
-      transport failure, not a non-role.
+    - no USABLE role document — the read returned None, or returned a body that
+      does not parse as frontmatter — for a name the roles/ listing SHOWS is a
+      registered role (or while that listing itself raised, leaving membership
+      unknown);
+    - the doc parses but its ``sla_hours`` is EXPLICITLY INVALID (``abc``, a
+      negative, a non-finite): the operator stated a window and it did not parse,
+      so there is nothing to measure freshness against. An ABSENT or blank
+      ``sla_hours`` is NOT this case — the field is optional and omitting it
+      legitimately selects the default (``roles.parse_sla_hours`` draws the line);
+    - ``deadline`` expires with role state still unread (see below).
 
-    A doc-read None with the name ABSENT from the listing is a genuine non-role
-    (``([], True)``) — the literal-agent-id case stays non-degraded, as does a
-    doc that reads fine but isn't frontmatter (affirmative knowledge: not a
-    role). ``listing_cache`` (a per-tick/per-fold dict) memoizes the one roles/
-    listing across role-shaped assignees; pass the same dict for every call in
-    a pass."""
+    **Only a complete, successfully parsed LISTING is negative membership
+    evidence.** The one non-degraded absence is a doc-read miss for a name the
+    listing affirmatively does NOT contain (``([], True)`` — the literal-agent-id
+    case). A failed read and a failed PARSE are the same fact: we do not know what
+    that document says. Until 2026-07-16 an unparseable body short-circuited to
+    "affirmative non-role" — but the listing has already proved the name IS a
+    role, so a truncated or malformed doc served its holder a clean, role-blind
+    queue with no ``role-degraded`` marker at all (reviewer-reproduced: a
+    ``reviewer.md`` of ``"not frontmatter"`` emitted an empty inbox AND an empty
+    needs_me, silently). A parse result is not evidence about registration; the
+    listing is.
+
+    ``deadline`` bounds the role's own fan-out (its doc read, its lease listing,
+    and a read per lease shard — unbounded in the shard count, since shards
+    accumulate per claiming agent). Checked before each blocking op that follows
+    another, per the module deadline discipline: an overrun is detected
+    immediately after the op that caused it, overshoot is bounded by ONE op, and a
+    COMPLETED fold is never degraded merely for finishing late (its answer is
+    definitive knowledge — keep it). ``None`` -> unbounded, for the direct callers
+    (`roles status`, atc) that are not on the hot path.
+
+    ``listing_cache`` (a per-tick/per-fold dict) memoizes the one roles/ listing
+    across role-shaped assignees; pass the same dict for every call in a pass."""
     if "/" in name:
         return [], True  # a role name is a single path segment; anything else is not a role
+    dl = deadline if deadline is not None else Deadline(None)  # None -> never expires
     raw_doc = transport.read(_role_doc_path(team, name))
     reg = okf.parse_frontmatter(raw_doc)
     if reg is None:
-        if raw_doc is not None:
-            return [], True  # read fine, just not a role doc -> affirmative non-role
+        # No usable role document: absent, empty, truncated, or unparseable. Which
+        # of those it is does not matter here — none of them is evidence about
+        # whether `name` is a registered role. Only the listing answers that.
         cache = listing_cache if listing_cache is not None else {}
         if "names" not in cache:
             cache["names"] = _roles_listing_names(transport, team)
         names = cache["names"]
         if names is None or f"{name}.md" in names:
             # roles/ listing unreadable (membership unknown) OR the doc is listed
-            # yet unreadable (transport failure): UNKNOWN, fail closed.
+            # yet unusable (transport failure / corrupt doc): UNKNOWN, fail closed.
             return [], False
         return [], True  # genuinely absent -> not a role (literal agent id case)
-    try:
-        sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
-    except (TypeError, ValueError):
-        sla = roles.DEFAULT_SLA_HOURS
+    sla = roles.parse_sla_hours(reg.get("sla_hours"))
+    if sla is None:
+        # The doc parsed, but its `sla_hours` did not: an EXPLICITLY invalid value.
+        # UNKNOWN — freshness has no window to be measured against. Absent/blank
+        # still means "use the default" and resolves normally; see
+        # `roles.parse_sla_hours` for why those two are not the same fact.
+        return [], False
+    if dl.expired():
+        return [], False  # the doc read spent the budget; the lease state is UNREAD
     leases: list[dict[str, Any]] = []
     try:
         for f in transport.list_dir(_leases_prefix(team, name)):
             fn = f.get("name") or ""
             if f.get("is_dir") or not fn.endswith(".md"):
                 continue
+            if dl.expired():
+                # The listing (or the previous shard read) spent the budget with
+                # shards still unread. A lease we never read is UNKNOWN, exactly as
+                # if its read had failed — folding the rest out would assert a
+                # vacancy we did not observe.
+                return [], False
             fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn))
             if fm is None:
                 # Listed shard, failed/unparseable read: this lease's freshness is
@@ -992,6 +1071,155 @@ def _role_fresh_holders(
         return [], False  # lease state UNKNOWN -> fail closed, never assert vacant
     return [str(l.get("agent"))
             for l in roles.fresh_holders(leases, now=now, sla_hours=sla)], True
+
+
+# --- role routing on the READ folds ---------------------------------------
+#
+# A directive assigned to a ROLE is directed at whoever holds a fresh lease on it
+# — the contract AGENTS.md states ("briefing prints your identity, role inboxes,
+# and everything that needs you") and the reason role-based identity exists at
+# all: work addressed to a role must outlive the session that was holding it.
+# `listen` honoured it from the start; `briefing` / `inbox` / `needs-me` did not,
+# so a role-addressed `tell` returned 0 and silently landed in a fold nobody read.
+#
+# ONE resolver for every caller (`_held_roles_for_rows`). The alternative — each
+# fold resolving roles its own way — is how the two paths diverged in the first
+# place, and the failure is invisible by construction (a fold that resolves no
+# roles looks exactly like an agent who holds none).
+_ROLE_DEGRADED = "role-degraded"
+
+
+def _role_degraded_row(roles_unknown: "set[str] | list[str]") -> dict[str, Any]:
+    """The marker for roles whose holder set could NOT be determined — shape
+    ``{type, roles}``, same family as ``review-role-degraded`` (which reports the
+    same UNKNOWN for the review fold). Never omitted: an unresolved role means
+    role-routed work may be missing from the fold, and "unknown" must never render
+    as "nothing for you"."""
+    return {"type": _ROLE_DEGRADED, "roles": sorted(roles_unknown)}
+
+
+def _role_degraded_line(r: dict[str, Any]) -> str:
+    return (f"  role resolution degraded: {', '.join(r.get('roles') or [])} — "
+            f"your role inbox is unknown (not empty); role-routed work may be "
+            f"missing, retry")
+
+
+def _held_roles_for_rows(
+    transport: Any, team: str, agent: str, rows: list[dict[str, Any]], *,
+    now: str, skip_slugs: "Optional[set[str]]" = None,
+    deadline_seconds: Optional[float] = None,
+) -> tuple[set[str], set[str]]:
+    """Roles ``agent`` holds a FRESH lease on, among the role-shaped assignees the
+    given rows actually reference. Returns ``(held, unresolved)``.
+
+    The candidate set is the first bound: only DISTINCT foreign assignees on OPEN
+    rows are probed, and the roles/ LISTING (one op, cached for the pass) settles
+    which of them are roles at all — so the literal-agent-id majority costs ZERO
+    reads, and only genuine roles pay. A team with no role-addressed open work pays
+    nothing. Self / ``*`` / ``@backlog`` / path-shaped assignees are skipped without
+    a read. ``skip_slugs`` lets `listen` narrow further to UNSEEN directives (an
+    already-fired id needs no route).
+
+    **The honest op bound** (corrected 2026-07-16 — the docstring here previously
+    claimed a tidy ``1 + 3R``, which was simply false, and the claim propagated to
+    the PR that shipped it). A pass costs::
+
+        1 + SUM over probed roles r of (2 + L_r)
+
+    ops: one roles/ listing, then per probed role a doc read + a lease listing +
+    ``L_r`` shard reads. ``L_r`` is the number of ``.md`` shards in the role's
+    leases/ prefix — one per agent that has ever claimed the role and not
+    ``roles release``-d it. Nothing prunes an abandoned shard, so ``L_r`` tracks
+    lifetime holder CHURN, not current holders, and is unbounded in principle: a
+    role with ten lease shards costs 13 ops, not 4. ``3R`` is only the ``L_r == 1``
+    special case. "Probed roles" = the candidates the roles/ listing confirms are
+    roles; if that listing RAISES, membership is unknown and EVERY candidate is
+    probed at 1 op (its doc read) plus the lease terms for those whose docs parse.
+    A transport op is a `fulcra-api` subprocess + HTTPS round trip (~0.8s measured)
+    and this runs on `briefing` — the hot path — so the terms matter. The per-role
+    ops buy a FAIL-CLOSED answer: reading the agent's own lease shard directly
+    would be 1 op, but ``read()`` can't tell absent from failed, which is exactly
+    why ``_held_roles`` (the older sweep) reports a transport outage as "no roles".
+
+    **The wall-clock bound** is what actually holds under a degraded transport,
+    because no op count bounds LATENCY when each op can burn a full transport
+    timeout. One cumulative ``COORD_ROLE_FOLD_BUDGET`` deadline opens here — before
+    the roles/ listing, which is itself a blocking op (the recurring pre-budget
+    class) — and is spent across the listing, every role, and every lease shard
+    within a role. Total latency is the budget plus ONE transport timeout of
+    overshoot, no matter how many roles or shards exist.
+
+    On a budget cut every candidate not FINISHED — unscanned, or scanned partway —
+    lands in ``unresolved``, never in "not held". Running out of time is UNKNOWN,
+    the same as a failed read: serving a role-blind queue because the clock ran out
+    is the exact failure this fold exists to close.
+
+    The prefilter is PER PASS, never persistent: leases change, and a name later
+    registered as a role must route on the very next fold (the staleness hole that
+    got a persistent negative cache rejected for `listen` — see there).
+
+    ``unresolved`` is FAIL-CLOSED and load-bearing: a role whose lease state is
+    UNKNOWN (see ``_role_fresh_holders``) is neither held nor not-held. Callers
+    MUST surface it (``_role_degraded_row``) rather than let it fold into "no
+    roles" — that would be the original silent bug one layer down.
+    """
+    if deadline_seconds is None:
+        deadline_seconds = _role_fold_budget()
+    candidates: set[str] = set()
+    for r in rows:
+        if r.get("status") not in directives.OPEN_STATUSES:
+            continue
+        a = str(r.get("assignee") or "")
+        if not a or a in (agent, "*", directives.BACKLOG) or "/" in a:
+            continue
+        if skip_slugs is not None:
+            slug = str(r.get("name") or "")
+            if not slug or slug in skip_slugs:
+                continue
+        candidates.add(a)
+    held: set[str] = set()
+    unresolved: set[str] = set()
+    listing_cache: dict[str, Any] = {}  # one roles/ listing per pass
+    # The pass's ONE deadline opens HERE — ahead of the roles/ listing, not after
+    # it. That listing is a blocking op like any other, and a deadline opened past
+    # it leaves a transport timeout sitting AHEAD of the budget (the pre-budget
+    # class the review fold was bitten by). Everything below spends this same
+    # deadline cumulatively: the listing, each role's doc + lease listing, and each
+    # lease shard read within a role.
+    dl = Deadline.open(deadline_seconds)
+    if candidates:
+        # Prime the cache `_role_fresh_holders` already consults, and use it to
+        # drop candidates that are affirmatively NOT roles before paying a read
+        # for them. A listing that RAISES (names is None) means membership is
+        # unknown: probe every candidate exactly as before — a role with a
+        # readable doc still resolves off its leases, and skipping here would
+        # manufacture a degraded marker for work we can in fact route.
+        listing_cache["names"] = _roles_listing_names(transport, team)
+        names = listing_cache["names"]
+        if names is not None:
+            candidates = {c for c in candidates if f"{c}.md" in names}
+    ordered = sorted(candidates)
+    for i, role in enumerate(ordered):
+        if dl.expired():
+            # Budget cut. Every candidate we have not FINISHED is UNKNOWN — mark
+            # the whole tail unresolved and stop. The alternative (return what we
+            # got) renders a role-blind queue that is indistinguishable from "you
+            # hold no roles", which is the silent failure this fold exists to
+            # close, now triggered by a slow transport instead of a missing fold.
+            # A candidate scanned PARTWAY degrades inside `_role_fresh_holders`
+            # (it shares this deadline) and comes back ok=False, so it lands in
+            # `unresolved` through the branch below — no candidate can be dropped
+            # by the clock without being reported.
+            unresolved.update(ordered[i:])
+            break
+        holders, ok = _role_fresh_holders(transport, team, role, now=now,
+                                          listing_cache=listing_cache, deadline=dl)
+        if not ok:
+            unresolved.add(role)
+            continue
+        if agent in holders:
+            held.add(role)
+    return held, unresolved
 
 
 def _pending_reviews_for(
@@ -2086,20 +2314,28 @@ def _directed_inbox(transport: Any, team: str, agent: str,
 
 def _inbox_rows_status(transport: Any, team: str, agent: str, *,
                        include_backlog: bool = False
-                       ) -> tuple[list[dict[str, Any]], bool, str]:
-    """The open-directive fold `inbox` surfaces for `agent`, plus the readability
-    of the underlying summaries fold: ``ok`` False (with a ``reason``) when the
-    index/listing is UNKNOWN — see the public-read failure contract at
-    ``_read_degraded_row``. Extracted so `listen` awaits the SAME source `inbox`
-    shows — one inbox computation, no second implementation to drift. Never
-    raises: an unreadable summaries read folds to an empty list, but with
-    ``ok=False`` and a ``reason`` so EVERY caller (inbox, listen, briefing)
-    surfaces the degradation as the loud marker rather than mistaking UNKNOWN for
-    an empty inbox — the codex-reproduced silent clean-``[]`` that suppressed a
-    live unacked directive."""
+                       ) -> tuple[list[dict[str, Any]], bool, str, set[str]]:
+    """The open-directive fold `inbox` surfaces for `agent` — role-routed
+    directives included — plus the readability of the underlying summaries fold:
+    ``ok`` False (with a ``reason``) when the index/listing is UNKNOWN — see the
+    public-read failure contract at ``_read_degraded_row``. Extracted so `listen`
+    awaits the SAME source `inbox` shows — one inbox computation, no second
+    implementation to drift. Never raises: an unreadable summaries read folds to
+    an empty list, but with ``ok=False`` and a ``reason`` so EVERY caller (inbox,
+    listen, briefing) surfaces the degradation as the loud marker rather than
+    mistaking UNKNOWN for an empty inbox — the codex-reproduced silent clean-``[]``
+    that suppressed a live unacked directive.
+
+    The fourth element is the UNRESOLVED role set (``_held_roles_for_rows``): roles
+    whose holders could not be determined. The caller MUST surface it — see
+    ``_role_degraded_row``."""
     rows, ok, reason = _load_rows_status(transport, team)
+    held, unresolved = _held_roles_for_rows(transport, team, agent, rows,
+                                            now=_iso(_now()))
     return (_directed_inbox(transport, team, agent, rows,
-                            include_backlog=include_backlog), ok, reason)
+                            held_roles=held or None,
+                            include_backlog=include_backlog),
+            ok, reason, unresolved)
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
@@ -2115,16 +2351,20 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     # emit the `inbox-degraded` marker (json row / stderr notice) and RETAIN any
     # partial rows, NEVER a clean-``[]`` exit 0 that would suppress a live unacked
     # directive (the codex CRIT, live-reproduced).
-    got, ok, reason = _inbox_rows_status(transport, args.team, agent,
-                                         include_backlog=args.all)
+    got, ok, reason, unresolved_roles = _inbox_rows_status(
+        transport, args.team, agent, include_backlog=args.all)
     if args.json:
         rows_out = ([_read_degraded_row(reason, marker="inbox-degraded")] + got
                     if not ok else got)
+        if unresolved_roles:
+            rows_out = [_role_degraded_row(unresolved_roles)] + rows_out
         print(json.dumps(rows_out, indent=2))
         return 0
     if not ok:
         _surface_read_degraded(reason, json_mode=False, marker="inbox-degraded")
     print(f"inbox — {agent}: {len(got)} item(s)")
+    if unresolved_roles:  # always shown — an unknown role inbox must never hide
+        print(_role_degraded_line(_role_degraded_row(unresolved_roles)))
     for r in got:
         print(_line(r))
     return 0
@@ -2317,47 +2557,30 @@ def _listen_tick(transport: Any, team: str, agent: str,
         # The reason attributes WHICH leg failed (summaries index vs the freshness
         # overlay — different outages, same inbox source/streak).
         _fail("inbox", inbox_reason or "summaries index unreadable")
-    # Role expansion (contract gap): resolve fresh-lease holders ONLY for
-    # role-shaped assignees on UNSEEN open directives — one role-doc(+lease) read
-    # per distinct such assignee, deduped per tick (NOT persistent state: leases
-    # change). HONEST BOUND: a directive assigned to ANOTHER literal agent never
-    # enters this agent's inbox_ids, so its assignee is re-probed every tick (one
-    # role-doc read resolving to "not a role", no lease reads) for as long as the
-    # directive stays open — per-tick cost is O(distinct foreign assignees on open
-    # directives), small in practice. A persistent negative "not-a-role" cache was
-    # considered and REJECTED: read() can't distinguish absent from failed, and a
-    # name later registered as a role would be silently unroutable forever (a
-    # staleness hole worse than the read cost). Revisit only with a roles/-listing
-    # invalidation if fleets grow. id-diff is unchanged (the directive slug is the
-    # id regardless of the route), so a new role holder sees a directive iff its id
-    # is unseen in THEIR OWN state file (state is per-agent) — the holder-change
-    # semantics fall out.
-    candidate_roles: set[str] = set()
-    for r in rows:
-        if r.get("status") not in directives.OPEN_STATUSES:
-            continue
-        a = str(r.get("assignee") or "")
-        if not a or a in (agent, "*", directives.BACKLOG) or "/" in a:
-            continue
-        slug = str(r.get("name") or "")
-        if not slug or slug in inbox_ids:
-            continue  # already seen -> zero role-resolution cost
-        candidate_roles.add(a)
-    held_roles: set[str] = set()
-    roles_listing_cache: dict[str, Any] = {}  # one roles/ listing per tick (doc-None disambiguation)
-    for role in sorted(candidate_roles):
-        holders, ok = _role_fresh_holders(transport, team, role, now=now_iso,
-                                          listing_cache=roles_listing_cache)
-        if not ok:
-            # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent
-            # may miss role-routed work) on the DEDICATED `roles` source — never
-            # crash, never treat unknown as "not a holder" silently. Its own
-            # source is load-bearing: a chronic role degradation must not pin the
-            # inbox streak and mask a fresh summaries outage.
-            _fail("roles", f"role lease unknown for {role}")
-            continue
-        if agent in holders:
-            held_roles.add(role)
+    # Role expansion — the shared resolver (`_held_roles_for_rows`, which owns the
+    # candidate bound and the fail-closed contract), narrowed HERE to UNSEEN
+    # directives: an already-fired id needs no route, so a steady-state tick pays
+    # zero role reads. Not persistent state — leases change, so the resolution is
+    # per tick. HONEST BOUND: a directive assigned to ANOTHER literal agent never
+    # enters this agent's inbox_ids, so its assignee is re-probed every tick — but
+    # the resolver's roles/ listing settles it for free, so the re-probe costs no
+    # reads. A persistent negative "not-a-role" cache was considered and REJECTED:
+    # read() can't distinguish absent from failed, and a name later registered as a
+    # role would be silently unroutable forever (a staleness hole worse than the
+    # read cost); the per-pass listing is that invalidation, done fresh every tick.
+    # id-diff is unchanged (the directive slug is the id regardless of
+    # the route), so a new role holder sees a directive iff its id is unseen in
+    # THEIR OWN state file (state is per-agent) — the holder-change semantics fall
+    # out.
+    held_roles, unresolved_roles = _held_roles_for_rows(
+        transport, team, agent, rows, now=now_iso, skip_slugs=inbox_ids)
+    for role in sorted(unresolved_roles):
+        # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent may
+        # miss role-routed work) on the DEDICATED `roles` source — never crash,
+        # never treat unknown as "not a holder" silently. Its own source is
+        # load-bearing: a chronic role degradation must not pin the inbox streak
+        # and mask a fresh summaries outage.
+        _fail("roles", f"role lease unknown for {role}")
     inbox = _directed_inbox(transport, team, agent, rows,
                             held_roles=held_roles or None)
     for r in inbox:
@@ -2808,23 +3031,30 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: board section unavailable ({type(e).__name__})", file=sys.stderr)
         out["board"] = {}
+    # ONE role resolution for the whole bundle, shared by the inbox and needs-me
+    # sections (the two folds AGENTS.md calls "your work queue"). Both consume the
+    # same held set, so they can never disagree about a lease, and the lease read
+    # is paid once per briefing rather than once per section. Unresolved roles are
+    # UNKNOWN — surfaced below as `role_degraded`, never folded to "no roles".
     try:
-        acks = {str(r.get("name")): list(r.get("acked_by") or []) for r in rows}
-        stale_visible = directives.inbox(rows, acks, agent, now=now)
-        for r in stale_visible:
-            slug = str(r.get("name") or "")
-            if agent not in (acks.get(slug) or []) and transport.read(_ack_path(args.team, slug, agent)):
-                acks.setdefault(slug, []).append(agent)
-        out["inbox"] = directives.inbox(rows, acks, agent, now=now)
-        out["inbox"] = [
-            r for r in out["inbox"]
-            if transport.read(_ack_path(args.team, str(r.get("name")), agent)) is None
-        ]
+        held_roles, unresolved_roles = _held_roles_for_rows(
+            transport, args.team, agent, rows, now=now)
+    except Exception as e:
+        # The resolver never raises by contract; if it somehow does, the role set is
+        # UNKNOWN for EVERY role-shaped assignee in the bundle — say so, don't
+        # quietly serve a role-blind queue.
+        print(f"briefing: role resolution unavailable ({type(e).__name__})", file=sys.stderr)
+        held_roles, unresolved_roles = set(), {"(all)"}
+    if unresolved_roles:
+        out["role_degraded"] = _role_degraded_row(unresolved_roles)
+    try:
+        out["inbox"] = _directed_inbox(transport, args.team, agent, rows,
+                                       held_roles=held_roles or None)
     except Exception as e:
         print(f"briefing: inbox section unavailable ({type(e).__name__})", file=sys.stderr)
         out["inbox"] = []
     try:
-        out["needs_me"] = query.needs_me(rows, agent, now=now)
+        out["needs_me"] = query.needs_me(rows, agent, now=now, held_roles=held_roles)
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
@@ -2887,6 +3117,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in out["inbox"][:5]:
         print(_line(r))
     print(f"  needs-me: {len(out['needs_me'])} item(s)")
+    if out.get("role_degraded"):
+        # Always shown, and printed against BOTH counts above — the two sections it
+        # qualifies. Without it, an unresolved role renders as a clean queue that
+        # reads "no role work", which is the bug this whole change closes.
+        print(_role_degraded_line(out["role_degraded"]))
     pend_rows = [r for r in out["pending_reviews"]
                  if r.get("type") != "review-fold-degraded"]
     degraded_rows = [r for r in out["pending_reviews"]
@@ -3358,24 +3593,38 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             continue
         role = n[:-3]; checked += 1
         doc = transport.read(_role_doc_path(args.team, role))
-        if doc is None:
+        reg = okf.parse_frontmatter(doc)
+        if reg is None:
             # FAIL CLOSED (review fix): this doc was JUST LISTED by the parent
-            # roles/ scan, so a None read is knowably transient-or-deleted — never
-            # a live role to judge under DEFAULT_SLA_HOURS. Falling through with
-            # the 24h default would collapse a longer-SLA role's window and fire a
-            # false VACANT escalation (the incident vector, on the acting path).
-            # Skip: transient -> retried next sweep (correct); deleted -> role
-            # gone (also correct). `roles status` now applies the same
-            # disambiguation on its doc-None path (via _roles_listing_names) —
-            # both surfaces agree that listed-but-unreadable is UNKNOWN.
-            print(f"escalate: role doc unreadable for {role} — state unknown, "
-                  f"skipped (degraded transport, retry)", file=sys.stderr)
+            # roles/ scan, so no usable doc is knowably transient-or-deleted-or-
+            # corrupt — never a live role to judge under DEFAULT_SLA_HOURS.
+            # Falling through with the 24h default would collapse a longer-SLA
+            # role's window and fire a false VACANT escalation (the incident
+            # vector, on the acting path). Skip: transient -> retried next sweep
+            # (correct); deleted -> role gone (also correct); corrupt -> a human
+            # must fix the doc, and a P1 minted off a doc we cannot read is noise
+            # at best. 2026-07-16: this guard read `doc is None`, so an unparseable
+            # body sailed past it into exactly the false escalation the comment
+            # describes — the same one-line class as `_role_fresh_holders` and
+            # `roles status`, which were fixed in the same round. All three
+            # surfaces agree: no usable doc for a LISTED role is UNKNOWN.
+            print(f"escalate: role doc unusable for {role} — state unknown, "
+                  f"skipped (unreadable or corrupt, retry)", file=sys.stderr)
             continue
-        reg = okf.parse_frontmatter(doc) or {}
-        try:
-            sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
-        except (TypeError, ValueError):
-            sla = roles.DEFAULT_SLA_HOURS
+        sla = roles.parse_sla_hours(reg.get("sla_hours"))
+        if sla is None:
+            # An EXPLICITLY invalid `sla_hours` on the ACTING path. Judging the role
+            # under the 24h default would collapse an unknown (possibly much longer)
+            # window and fire a false VACANT — the incident vector this function's
+            # doc-guard above already names, reached through the value instead of
+            # the document. A P1 to a human minted off an SLA we invented is worse
+            # than noise; a malformed field is a doc fix, not an escalation. Skip:
+            # the sweep retries every heartbeat, so a repaired doc escalates on the
+            # next pass if it genuinely is vacant.
+            print(f"escalate: unusable sla_hours ({reg.get('sla_hours')!r}) for "
+                  f"{role} — state unknown, skipped (fix the role doc)",
+                  file=sys.stderr)
+            continue
         # Dormancy: a deliberately-parked role (future dormant_until) is exempt from
         # the mechanical vacancy sweep regardless of lease state — the parked role
         # is vacant BY DESIGN, so re-firing a P1 every heartbeat host, daily, is the

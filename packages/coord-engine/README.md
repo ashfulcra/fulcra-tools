@@ -80,6 +80,7 @@ disable a bound or make an op hang.
 | `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`). |
 | `COORD_BRIEFING_BUDGET` | `60` | seconds | Aggregate deadline for the `briefing`/`needs-me` transport-heavy add-on stack (chiefly the forge-feedback fan-out); opened once, spent cumulatively across sections. |
 | `COORD_LISTEN_CLASSIFY_BUDGET` | `10` | seconds | Per-tick bound on the `listen` daemon's dir-only review-slug classification pass. |
+| `COORD_ROLE_FOLD_BUDGET` | `20` | seconds | Cumulative deadline for one role-resolution pass (`_held_roles_for_rows`), which `briefing`/`inbox`/`needs-me`/`listen` all run. Spent across the `roles/` listing, each role's doc + lease listing, and each lease shard read; a cut marks every unfinished candidate `unresolved` and emits `role-degraded`. |
 | `COORD_OVERLAY_BUDGET` | `10` | seconds | Time bound on the freshness overlay's fresh-doc reads (the cap bounds read COUNT; this bounds TIME). |
 | `COORD_OVERLAY_CAP` | `16` | count | Max fresh (unsummarized) task docs the overlay reads per surface-read before truncating (visibly). |
 | `COORD_SUMMARY_TEXT_CAP` | `280` | chars | Per-field cap on `title`/`description` in a summaries row (ellipsis-marked). The index stays a *summary* — the full payload lives in the task doc; uncapped multi-KB directive payloads inflate `_coord/summaries.json` past what remote transports can read inside the fold budgets. |
