@@ -62,4 +62,23 @@ def test_engine_source_honors_embedded_degraded_rows():
         clock=lambda: NOW,
     )
 
-    assert adapter.snapshot().capabilities["tasks"] is CapabilityState.DEGRADED
+    snapshot = adapter.snapshot()
+    assert snapshot.capabilities["tasks"] is CapabilityState.DEGRADED
+    assert snapshot.diagnostics[0].message == "$.read-degraded: unknown"
+
+
+def test_engine_source_parses_jsonl_folds_and_uses_slow_health_bound():
+    seen = {}
+
+    def run(argv, timeout):
+        seen[argv[1]] = timeout
+        if argv[1] == "threads":
+            return 0, '{"id":"thread-1","title":"One"}\n{"id":"thread-2","title":"Two"}\n', ""
+        return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
+
+    snapshot = EngineSourceAdapter(
+        "fulcra", runner=run, timeout=12.0, health_timeout=345.0, clock=lambda: NOW
+    ).snapshot()
+
+    assert [item.source.item_id for item in snapshot.items] == ["thread-1", "thread-2"]
+    assert seen == {"board": 12.0, "asks": 12.0, "threads": 12.0, "health": 345.0}
