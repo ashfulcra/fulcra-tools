@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coord-tracker-bridge"
+version = "0.1.0"
+description = "Tracker-agnostic projection core for coord work records"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{name = "Ash", email = "114089064+ashfulcra@users.noreply.github.com"}]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/ashfulcra/fulcra-tools"
+Repository = "https://github.com/ashfulcra/fulcra-tools"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+packages = ["coord_tracker_bridge"]

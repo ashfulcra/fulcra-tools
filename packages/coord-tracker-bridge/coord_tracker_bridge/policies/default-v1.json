@@ -1,0 +1,41 @@
+{
+  "version": "1",
+  "lane_states": {
+    "active": "started",
+    "blocked": "started",
+    "proposed": "unstarted",
+    "waiting": "unstarted",
+    "backlog": "backlog",
+    "done": "completed"
+  },
+  "priority": {"P1": 1, "P2": 3, "P3": 4},
+  "managed_labels": [
+    "lane:active",
+    "lane:blocked",
+    "lane:backlog",
+    "kind:task",
+    "kind:directive",
+    "origin:ash",
+    "origin:fleet"
+  ],
+  "max_managed_labels": 16,
+  "workstream_projects": {},
+  "included_origins": ["ash", "fleet"],
+  "close_absent": true,
+  "field_ownership": {
+    "title": "source",
+    "description": "source",
+    "semantic_state": "source",
+    "priority": "source",
+    "labels": "merge",
+    "project": "source",
+    "due_at": "source",
+    "owner": "source",
+    "assignee": "source",
+    "origin": "source",
+    "workstream": "source",
+    "source_identity": "source",
+    "policy_version": "source",
+    "policy_hash": "source"
+  }
+}
