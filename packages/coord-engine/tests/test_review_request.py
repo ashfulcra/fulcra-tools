@@ -9,7 +9,7 @@ failure where a reviewer acked directives and the obligation vanished.
 import json
 import time
 
-from coord_engine import cli, okf, reconcile
+from coord_engine import budget, cli, okf, reconcile
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
@@ -34,7 +34,13 @@ class CountingTransport(FakeTransport):
 
 
 class SlowTransport(CountingTransport):
-    """Every read/list sleeps — models a degraded transport for budget tests."""
+    """Every read/list sleeps — models a degraded transport for budget tests.
+
+    Only for tests whose assertion is one-sided ("the budget DID cut"): a real
+    sleep can only ever push elapsed time UP, which is the direction those
+    assertions want, so runner load cannot falsify them. Any test that also needs
+    an upper bound on elapsed time (a runtime threshold, or "the later phase must
+    still get served") must use `ClockTransport` instead — see its docstring."""
 
     def __init__(self, delay=0.03):
         super().__init__()
@@ -47,6 +53,51 @@ class SlowTransport(CountingTransport):
     def list_dir(self, prefix):
         time.sleep(self.delay)
         return super().list_dir(prefix)
+
+
+class ClockTransport(CountingTransport):
+    """A degraded transport, deterministically: every op whose path `_spends`
+    advances a FAKE monotonic clock by `cost` seconds instead of sleeping (the
+    `RoleClockTransport` idiom from test_role_inboxes.py).
+
+    Why not `SlowTransport` + `assert elapsed < X`: that shape combines real
+    sleeps with a runtime threshold, so it cannot distinguish the thing under test
+    (the fold performed too many transport ops) from scheduler noise (the runner
+    was busy). It passes on a fast laptop and fails on a loaded CI runner, and
+    raising the threshold only moves the luck. The quantity we actually care about
+    — "the budget CUT the scan" — is an OP COUNT, which is deterministic.
+
+    Charging only the ops under test also sharpens the claim: a cut here is
+    unambiguously THIS loop's budget, not a sibling phase's. Pair with
+    `_pin_clock`."""
+
+    cost = 0.0  # set on the instance once setup is done, so setup runs free
+
+    def __init__(self):
+        super().__init__()
+        self.clock = 0.0
+
+    def _spends(self, path):
+        raise NotImplementedError
+
+    def _tick(self, path):
+        if self._spends(path):
+            self.clock += self.cost
+
+    def read(self, path):
+        self._tick(path)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        self._tick(prefix)
+        return super().list_dir(prefix)
+
+
+def _pin_clock(monkeypatch, t):
+    """Point the budget mechanics' clock at the transport's fake one. Every
+    deadline in the fold (`Deadline.open`/`.expired`/`.reserve`) reads
+    `budget.time.monotonic`, so this one seam makes the whole fold deterministic."""
+    monkeypatch.setattr(budget.time, "monotonic", lambda: t.clock)
 
 
 def _approve(t, slug, reviewer="rev"):
@@ -272,12 +323,24 @@ def test_single_slug_transport_error_skipped_and_counted(capsys):
     assert len(deg) == 1 and deg[0]["skipped"] == 1, deg
 
 
-def test_single_slug_many_verdicts_bounded_by_budget(capsys):
+class VerdictShardClock(ClockTransport):
+    """Only verdict-shard reads spend time — so a budget cut is unambiguously the
+    per-verdict loop's, not the verdicts listing's or the doc read's."""
+
+    def _spends(self, path):
+        return "/verdicts/rev" in path
+
+
+def test_single_slug_many_verdicts_bounded_by_budget(capsys, monkeypatch):
     # F2: the budget was checked only BETWEEN slugs, so ONE review with many
     # verdict shards read every shard unbounded (N x transport.timeout) with no
     # degraded marker. The deadline must be threaded into the per-verdict loop:
     # the fold stops mid-slug, counts it skipped, and surfaces the marker.
-    t = SlowTransport(delay=0.02)
+    #
+    # Asserted as an OP COUNT on a fake clock, not a runtime (see ClockTransport):
+    # "the budget cut the scan" is a deterministic fact about how many shards were
+    # read; wall-clock elapsed conflates it with runner load.
+    t = VerdictShardClock()
     cli.main(["review", "request", "r", "pr-big", "--of", "url",
               "--reviewer", "alice"], transport=t)
     for i in range(40):
@@ -285,13 +348,16 @@ def test_single_slug_many_verdicts_bounded_by_budget(capsys):
               f"---\ntype: Verdict\nreviewer: rev{i:02d}\nverdict: approve\n---\n")
     capsys.readouterr()
     t.reads.clear()
-    start = time.monotonic()
-    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
-    elapsed = time.monotonic() - start
-    # Bounded: reading all 40 shards would take ~0.8s; the budget must cut it off.
-    assert elapsed < 0.4, f"per-slug verdict reads must respect the budget, took {elapsed:.3f}s"
+    t.cost = 1.0  # setup above ran free; the fold pays 1s per shard read
+    _pin_clock(monkeypatch, t)
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=5.0)
     shard_reads = [r for r in t.reads if "/verdicts/rev" in r]
+    # The load-bearing bound: the scan stops mid-slug instead of reading all 40.
     assert len(shard_reads) < 40, f"budget must stop mid-slug, read {len(shard_reads)}/40"
+    # And it stops exactly where the budget says: the loop checks the deadline
+    # before and after each read, so shard 5 takes the clock to 5.0 == the 5.0s
+    # deadline and the after-check breaks. Overshoot is bounded by ONE read.
+    assert len(shard_reads) == 5, f"a 5s budget buys 5 x 1s reads, got {len(shard_reads)}"
     deg = [r for r in out if r.get("type") == "review-fold-degraded"]
     assert len(deg) == 1, "a mid-slug budget breach must surface a degraded marker"
     # coherent accounting: the cut-off slug is counted (scanned) AND skipped.
@@ -917,7 +983,15 @@ def test_needs_me_tombstone_absent_orphan_degraded_present(capsys):
     assert "pr-unk" in out, "a degraded orphan classification must print"
 
 
-def test_dir_classification_runs_under_the_fold_budget(capsys):
+class GhostListingClock(ClockTransport):
+    """Only the ghost dirs' verdicts listings spend time — so a cut is
+    unambiguously the classification loop's reserved sub-budget."""
+
+    def _spends(self, path):
+        return "/verdicts/" in path and "ghost-" in path
+
+
+def test_dir_classification_runs_under_the_fold_budget(capsys, monkeypatch):
     # Pre-budget seam (coordinator review): the dir-classification loop and its
     # per-dir verdicts listings must run UNDER the fold's own deadline — 15
     # tombstones on a degraded transport must never buy N x timeout of unbudgeted
@@ -927,28 +1001,33 @@ def test_dir_classification_runs_under_the_fold_budget(capsys):
     # unclassified dirs roll into ONE aggregate degraded row ({unclassified: k})
     # and the fold proceeds to the doc scan with the reserved remainder — a real
     # pending review is still served.
-    class SlowGhostListings(CountingTransport):
-        def list_dir(self, prefix):
-            if "/verdicts/" in prefix and "ghost-" in prefix:
-                time.sleep(0.3)  # a degraded transport's slow dir listing
-            return super().list_dir(prefix)
-
-    t = SlowGhostListings()
+    # This test is a SQUEEZE — classification must be cut early enough that the
+    # doc scan still gets served — so it needs both a lower and an UPPER bound on
+    # time spent. Real sleeps cannot give the upper one: the sleep + in-memory work
+    # had to fit under the budget with only slack to spare, which is why it already
+    # flaked on the macOS runner at 0.05s and got its threshold raised to 0.5s
+    # (moving the luck, not fixing it). On a fake clock the arithmetic is exact.
+    t = GhostListingClock()
     cli.main(["review", "request", "r", "pr-live", "--of", "url",
               "--reviewer", "alice"], transport=t)
     for i in range(6):
         t.put(f"team/r/review/ghost-{i}/", "")  # six soft-delete ghosts
     capsys.readouterr()
-    # the deadline is real wall-clock: keep sleep >> reserved-half >> in-memory
-    # scan cost, or a slow CI VM blows the whole budget before the doc scan and
-    # the final assert flakes (observed on the macOS runner at 0.05s)
-    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.5)
+    t.cost = 3.0  # setup ran free; each ghost listing costs 3s of the fake clock
+    _pin_clock(monkeypatch, t)
+    # 8s budget -> classification is reserved half (cut at 4s), so ghost listings
+    # 1 and 2 fit (clock 3, then 6) and the 3rd is refused: 4 dirs stay
+    # unclassified. The doc scan then inherits a clock at 6s against the full 8s
+    # deadline — room to serve pr-live, deterministically.
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=8.0)
     agg = [r for r in out if r.get("type") == "review-orphan-degraded"
            and r.get("unclassified")]
-    assert len(agg) == 1 and agg[0]["unclassified"] >= 1, \
-        f"breach must emit ONE aggregate unclassified row, got {out}"
+    assert len(agg) == 1 and agg[0]["unclassified"] == 4, \
+        f"breach must emit ONE aggregate unclassified row for the 4 refused, got {out}"
     ghost_lists = [p for p in t.lists if "/verdicts/" in p and "ghost-" in p]
     assert len(ghost_lists) < 6, "classification must stop at the deadline, not run out"
+    assert len(ghost_lists) == 2, \
+        f"the reserved 4s half buys 2 x 3s listings, got {len(ghost_lists)}"
     assert any(r.get("type") == "review-pending" and r.get("name") == "pr-live"
                for r in out), "doc-scan rows must still be served after the breach"
 
