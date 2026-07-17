@@ -85,6 +85,32 @@ def test_ingest_signal_bare_data_type_has_no_annotation_source(fake_api):
     assert rec["sources"][1] == "com.fulcra-prefs.capture.claude-code"
 
 
+def test_ingest_prefers_record_data_type(fake_api):
+    """0.1.37 adoption: the lib wrapper record_data_type is used when present,
+    receiving the base type + a single-element list of the typed body."""
+    calls = []
+    orig = fake_api.record_data_type
+    def spy(dt, recs, api_version="v1alpha1"):
+        calls.append((dt, list(recs)))
+        return orig(dt, recs, api_version)
+    fake_api.record_data_type = spy
+    FulcraStore(fake_api).ingest_signal(make_signal(id=None),
+                                        data_type="MomentAnnotation/def-123")
+    assert len(calls) == 1
+    dt, recs = calls[0]
+    assert dt == "MomentAnnotation" and len(recs) == 1
+    assert json.loads(recs[0]["note"])["key"] == "dining.cuisine.thai"
+
+def test_ingest_falls_back_to_raw_post_without_record_data_type(fake_api):
+    """Older libs / fakes lacking record_data_type still ingest via the raw
+    typed POST — same wire shape, base type in the path."""
+    fake_api.record_data_type = None            # simulate a lib without the wrapper
+    FulcraStore(fake_api).ingest_signal(make_signal(id=None),
+                                        data_type="MomentAnnotation/def-123")
+    assert fake_api.ingest_paths[0] == "/ingest/v1/record/MomentAnnotation"
+    assert len(fake_api.ingested) == 1
+    assert set(fake_api.ingested[0]) == {"note", "recorded_at", "sources"}
+
 def test_ingest_preflight_is_loud_but_non_fatal(fake_api, capsys):
     """validate_records pre-flight (0.1.37 adoption): a schema-invalid record
     emits a loud, precise stderr warning but STILL ingests — non-fatal, the

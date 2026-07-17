@@ -91,6 +91,23 @@ def typed_ingest_endpoint(record: dict) -> str:
     return f"/ingest/v1/record/{record['metadata']['data_type']}"
 
 
+def post_typed_record(api, record: dict) -> None:
+    """POST a canonical build_record envelope to the typed ingest surface,
+    preferring the fulcra-api 0.1.37 library wrapper `record_data_type` and
+    falling back to the raw generic request on older libs (or a fake that lacks
+    it). `record_data_type` batches a LIST, so a single record ships as `[body]`;
+    the wire shape (base type in the path, unwrapped `{note, recorded_at,
+    sources}` body) is identical either way. Single source of truth for the
+    write, shared by `store.ingest_signal` and `outbox.flush`."""
+    base_type = record["metadata"]["data_type"]
+    body = typed_body(record)
+    rdt = getattr(api, "record_data_type", None)
+    if rdt is not None:
+        rdt(base_type, [body])
+    else:
+        api.fulcra_api(typed_ingest_endpoint(record), data=body, method="POST")
+
+
 def typed_body(record: dict) -> dict:
     """Translate the canonical DataRecordV1 envelope (build_record output) into
     the UNWRAPPED body the typed endpoint expects. Mapping verified against the
@@ -224,10 +241,9 @@ class FulcraStore:
 
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         record = build_record(sig, data_type)
-        body = typed_body(record)
-        self._validate_before_ingest(record["metadata"]["data_type"], body)
-        self._api.fulcra_api(typed_ingest_endpoint(record),
-                             data=body, method="POST")
+        self._validate_before_ingest(record["metadata"]["data_type"],
+                                     typed_body(record))
+        post_typed_record(self._api, record)
 
     def read_signal_records(self, definition_id: str | None,
                             start_time=None, end_time=None) -> list[Signal]:
