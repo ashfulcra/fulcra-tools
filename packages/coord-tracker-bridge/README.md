@@ -46,7 +46,9 @@ The engine source accepts both one JSON document and JSONL output from
 `coord-engine --json` folds; `threads` currently uses JSONL. Embedded degraded
 markers fail the affected capability closed and diagnostics name their exact
 JSON path, marker type, and reason instead of emitting an anonymous “degraded
-row.” Ordinary engine folds are bounded at 180 seconds. Fleet health is a
+row.” Schema-invalid rows likewise degrade their capability—even when other
+rows are usable—so a partial enumeration can never authorize closes. Ordinary
+engine folds are bounded at 180 seconds. Fleet health is a
 known slower aggregate and has its own configurable adapter bound, 360 seconds
 by default (`EngineSourceAdapter(..., health_timeout=...)`).
 

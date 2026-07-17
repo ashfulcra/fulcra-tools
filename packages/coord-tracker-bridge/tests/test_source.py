@@ -1,7 +1,17 @@
 import json
 from datetime import datetime, timezone
 
-from coord_tracker_bridge import CapabilityState, EngineSourceAdapter
+from coord_tracker_bridge import (
+    BridgeLedger,
+    CapabilityState,
+    ChangeKind,
+    EngineSourceAdapter,
+    LedgerEntry,
+    ManagedRecord,
+    SourceIdentity,
+    build_plan,
+    load_policy,
+)
 
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=timezone.utc)
@@ -82,3 +92,24 @@ def test_engine_source_parses_jsonl_folds_and_uses_slow_health_bound():
 
     assert [item.source.item_id for item in snapshot.items] == ["thread-1", "thread-2"]
     assert seen == {"board": 12.0, "asks": 12.0, "threads": 12.0, "health": 345.0}
+
+
+def test_schema_invalid_jsonl_row_degrades_scope_and_suppresses_close():
+    def run(argv, _timeout):
+        if argv[1] == "threads":
+            return 0, '{"id":"present","title":"Present"}\n{"title":"missing id"}\n', ""
+        return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
+
+    snapshot = EngineSourceAdapter("fulcra", runner=run, clock=lambda: NOW).snapshot()
+    missing = SourceIdentity("coord-engine", "fulcra/threads", "gone")
+    policy = load_policy()
+    ledger = BridgeLedger([
+        LedgerEntry(missing, "threads", "linear", "LIN-gone", policy.version, policy.hash)
+    ])
+    managed = [ManagedRecord("LIN-gone", missing, "threads", {}, False)]
+
+    plan = build_plan(snapshot, managed, ledger, policy)
+
+    assert snapshot.capabilities["threads"] is CapabilityState.DEGRADED
+    assert snapshot.diagnostics[0].message == "$[1]: missing stable id/name"
+    assert all(change.kind is not ChangeKind.CLOSE for change in plan.changes)

@@ -324,23 +324,59 @@ class EngineSourceAdapter:
                     sanitize_text(degraded_evidence, limit=500),
                 ))
                 continue
-            states[capability.name] = CapabilityState.COMPLETE
+            normalized: list[WorkRecord] = []
+            normalization_error: str | None = None
             if capability.name == "tasks" and isinstance(payload, dict):
                 for lane, rows in payload.items():
                     if not isinstance(rows, list):
-                        continue
-                    for row in rows:
-                        if isinstance(row, dict):
+                        normalization_error = f"$.{lane}: expected list, got {type(rows).__name__}"
+                        break
+                    for index, row in enumerate(rows):
+                        path = f"$.{lane}[{index}]"
+                        if not isinstance(row, dict):
+                            normalization_error = f"{path}: expected object, got {type(row).__name__}"
+                            break
+                        try:
                             record = self._work_record(row, "tasks", str(lane))
-                            if record:
-                                items.append(record)
+                        except (TypeError, ValueError) as exc:
+                            normalization_error = f"{path}: {type(exc).__name__}"
+                            break
+                        if record is None:
+                            normalization_error = f"{path}: missing stable id/name"
+                            break
+                        normalized.append(record)
+                    if normalization_error:
+                        break
+            elif capability.name == "tasks":
+                normalization_error = f"$: expected object, got {type(payload).__name__}"
             elif isinstance(payload, list):
                 lane = "ask" if capability.name == "asks" else capability.name
-                for row in payload:
-                    if isinstance(row, dict) and not str(row.get("type", "")).endswith("degraded"):
+                for index, row in enumerate(payload):
+                    path = f"$[{index}]"
+                    if not isinstance(row, dict):
+                        normalization_error = f"{path}: expected object, got {type(row).__name__}"
+                        break
+                    try:
                         record = self._work_record(row, capability.name, lane)
-                        if record:
-                            items.append(record)
+                    except (TypeError, ValueError) as exc:
+                        normalization_error = f"{path}: {type(exc).__name__}"
+                        break
+                    if record is None:
+                        normalization_error = f"{path}: missing stable id/name"
+                        break
+                    normalized.append(record)
+            else:
+                normalization_error = f"$: expected list, got {type(payload).__name__}"
+            items.extend(normalized)
+            if normalization_error:
+                states[capability.name] = CapabilityState.DEGRADED
+                diagnostics.append(Diagnostic(
+                    capability.name,
+                    "source-schema-degraded",
+                    sanitize_text(normalization_error, limit=500),
+                ))
+            else:
+                states[capability.name] = CapabilityState.COMPLETE
         complete = all(state is CapabilityState.COMPLETE for name, state in states.items()
                        if name in {"tasks", "asks", "threads", "health"})
         return Snapshot(tuple(items), complete, tuple(diagnostics), states, self.clock())
