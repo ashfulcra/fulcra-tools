@@ -51,6 +51,8 @@ class FakeFulcraAPI:
         self.fail_ingest = False
         self.fail_upload = False
         self.fail_read = False
+        self.validation_errors = None   # set to a message string to simulate a schema error
+        self.fail_validate = False      # set True to simulate a catalog/schema-fetch outage
 
     @staticmethod
     def _abs(path: str) -> str:
@@ -114,6 +116,16 @@ class FakeFulcraAPI:
             self.ingest_paths.append(path)
             return b'{"upload_id": "00000000-0000-0000-0000-000000000000"}'
         raise NotImplementedError(path)
+
+    # --- schema pre-flight (mirrors FulcraAPI.validate_records 0.1.37) ---
+    # Real signature: validate_records(data_type, records, api_version="v1alpha1")
+    # -> list of (record_index, error_message, ValidationError); [] if all valid.
+    def validate_records(self, data_type, records, api_version="v1alpha1"):
+        if self.fail_validate:
+            raise ConnectionError("simulated catalog/schema-fetch outage")
+        if self.validation_errors:
+            return [(0, self.validation_errors, None)]
+        return []
 
     # --- record reads (mirrors FulcraAPI.moment_annotations) ---
     # Real signature: moment_annotations(start_time, end_time, source=None,
