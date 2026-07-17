@@ -350,6 +350,14 @@ class LinearTrackerAdapter:
                 raise LinearError(f"legacy footer slug {slug!r} appears on multiple issues")
             seen_slugs.add(slug)
 
+            source_entry = ledger.get(item.source)
+            if (
+                source_entry is not None
+                and source_entry.tracker_record_id != provider_id
+            ):
+                raise LinearError(
+                    f"legacy footer slug {slug!r} is already mapped to another issue"
+                )
             metadata = parse_bridge_metadata(description)
             if metadata is not None:
                 existing_source = SourceIdentity.from_dict(metadata["source"])

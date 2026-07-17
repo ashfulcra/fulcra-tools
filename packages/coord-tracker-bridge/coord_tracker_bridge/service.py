@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Iterable, Protocol
 
 from .lease import FileLease
 from .ledger import BridgeLedger, LedgerEntry
-from .linear import ResourceMissing, ResourcePlan
+from .linear import LinearError, ResourceMissing, ResourcePlan
 from .model import ManagedRecord, Snapshot
 from .policy import Policy
 from .projection import Plan, build_plan
@@ -89,6 +89,40 @@ class BridgeService:
             self.policy.hash,
         )
 
+    def _heal_ledger(
+        self, ledger: BridgeLedger, records: Iterable[ManagedRecord]
+    ) -> None:
+        """Preflight provider identity uniqueness, then heal missing entries."""
+
+        records_by_source: dict[str, ManagedRecord] = {}
+        for record in records:
+            prior_record = records_by_source.get(record.source.key)
+            if prior_record is not None and prior_record.provider_id != record.provider_id:
+                raise LinearError(
+                    f"source {record.source.key!r} appears on multiple provider records"
+                )
+            records_by_source[record.source.key] = record
+            entry = ledger.get(record.source)
+            if entry is not None and entry.tracker_record_id != record.provider_id:
+                raise LinearError(
+                    f"source {record.source.key!r} ledger identity conflicts with provider metadata"
+                )
+
+        healed = False
+        for record in records_by_source.values():
+            if ledger.get(record.source) is None:
+                ledger.upsert(LedgerEntry(
+                    source=record.source,
+                    capability=record.capability,
+                    tracker_provider=self.tracker.provider,
+                    tracker_record_id=record.provider_id,
+                    policy_version=self.policy.version,
+                    policy_hash=self.policy.hash,
+                ))
+                healed = True
+        if healed:
+            ledger.save(self.ledger_path)
+
     def apply_resources(self) -> ResourcePlan:
         with self._lease():
             plan = self.plan().resources
@@ -105,20 +139,7 @@ class BridgeService:
             # Heal any issue already carrying full provider metadata. This is
             # the retry leg when a prior run mutated Linear but crashed before
             # its ledger write.
-            healed = False
-            for record in self.tracker.list_managed_records(ledger):
-                if ledger.get(record.source) is None:
-                    ledger.upsert(LedgerEntry(
-                        source=record.source,
-                        capability=record.capability,
-                        tracker_provider=self.tracker.provider,
-                        tracker_record_id=record.provider_id,
-                        policy_version=self.policy.version,
-                        policy_hash=self.policy.hash,
-                    ))
-                    healed = True
-            if healed:
-                ledger.save(self.ledger_path)
+            self._heal_ledger(ledger, self.tracker.list_managed_records(ledger))
 
             adoptions = self.tracker.plan_marker_adoptions(snapshot, ledger, self.policy)
             applied = 0
@@ -143,20 +164,7 @@ class BridgeService:
             if bridge_plan.resources.labels or bridge_plan.resources.projects:
                 raise ResourceMissing("resource plan is non-empty; run apply-resources explicitly")
             ledger = self._ledger()
-            healed = False
-            for record in bridge_plan.managed_records:
-                if ledger.get(record.source) is None:
-                    ledger.upsert(LedgerEntry(
-                        source=record.source,
-                        capability=record.capability,
-                        tracker_provider=self.tracker.provider,
-                        tracker_record_id=record.provider_id,
-                        policy_version=self.policy.version,
-                        policy_hash=self.policy.hash,
-                    ))
-                    healed = True
-            if healed:
-                ledger.save(self.ledger_path)
+            self._heal_ledger(ledger, bridge_plan.managed_records)
             capability_by_source = {
                 item.source.key: item.capability for item in bridge_plan.snapshot.items
             }

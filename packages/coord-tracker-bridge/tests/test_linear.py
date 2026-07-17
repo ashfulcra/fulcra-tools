@@ -295,6 +295,33 @@ def test_unknown_legacy_marker_fails_before_any_mutation():
     assert len(transport.payloads) == 1
 
 
+def test_legacy_adoption_rejects_source_already_mapped_to_another_issue():
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "role-vacant-example-h24h-sla")
+    snapshot = Snapshot(
+        (WorkRecord(source, "tasks", "Canonical", "active", origin="fleet"),),
+        True, (), {"tasks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    ledger = BridgeLedger([LedgerEntry(
+        source, "tasks", "linear", "LIN-owned", "2", "policy-hash"
+    )])
+    issue = {
+        "id": "LIN-legacy",
+        "title": "Legacy [bus:h24h-sla]",
+        "description": "bus slug: `role-vacant-example-h24h-sla`",
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
+    ])
+
+    with pytest.raises(LinearError, match="already mapped to another issue"):
+        LinearTrackerAdapter(LinearClient(transport), "team").plan_marker_adoptions(
+            snapshot, ledger, load_policy()
+        )
+
+    assert len(transport.payloads) == 1
+
+
 @pytest.mark.parametrize(
     ("title", "description", "message"),
     [

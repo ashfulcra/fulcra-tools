@@ -173,6 +173,22 @@ def test_adopt_markers_persists_full_identity_after_provider_mutation(tmp_path):
     assert entry.capability == "tasks"
 
 
+def test_adopt_markers_rejects_duplicate_provider_metadata_before_writes(tmp_path):
+    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    records = [
+        ManagedRecord("LIN-A", source, "tasks", {}, False),
+        ManagedRecord("LIN-B", source, "tasks", {}, False),
+    ]
+    tracker = Tracker(records=records)
+    bridge = service(tmp_path, tracker)
+
+    with pytest.raises(LinearError, match="appears on multiple provider records"):
+        bridge.adopt_markers()
+
+    assert tracker.applied_adoptions == []
+    assert not (tmp_path / "ledger.json").exists()
+
+
 @pytest.mark.parametrize("capability", ["asks", "threads"])
 def test_retry_converges_after_create_succeeds_before_ledger_write(
     tmp_path, monkeypatch, capability
