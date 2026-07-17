@@ -13,7 +13,7 @@ naming. Role establishment and escalation remain raw `fulcra-api file` calls aga
 ```bash
 # roles/<name>.md — type: Role, with policy / sla_hours / maintainer in frontmatter;
 # complete worked examples live in ../examples/
-uv tool run fulcra-api file upload /tmp/reviewer.md "team/<team>/roles/reviewer.md"
+fulcra-api file upload /tmp/reviewer.md "team/<team>/roles/reviewer.md"
 ```
 (A `roles/index.md` is optional — the engine folds role status from the directory
 listing; add one only as human courtesy.)
@@ -49,10 +49,10 @@ misses the real shard — the lease then goes stale instead of released.)
 it. The raw per-role equivalent:
 ```bash
 # 1. first-writer-wins daily marker (dedupe)
-uv tool run fulcra-api file upload /tmp/escalation.md \
+fulcra-api file upload /tmp/escalation.md \
   "team/<team>/roles/reviewer/escalations/$(date -u +%Y-%m-%d).md"
 # 2. notify the maintainer via the teams inbox lifecycle
-uv tool run fulcra-api file upload /tmp/notice.md \
+fulcra-api file upload /tmp/notice.md \
   "team/<team>/member/<maintainer>/inbox/$(date -u +%Y%m%d-%H%M%S)_<you>_role-vacant-reviewer.md"
 ```
 
@@ -66,7 +66,7 @@ agent-side convention. Set `dormant_until: <ISO>` in the role doc:
 ```bash
 # roles/<name>.md frontmatter — add alongside policy / sla_hours / maintainer:
 #   dormant_until: 2026-08-01T00:00:00Z
-uv tool run fulcra-api file upload /tmp/reviewer.md "team/<team>/roles/reviewer.md"
+fulcra-api file upload /tmp/reviewer.md "team/<team>/roles/reviewer.md"
 ```
 While that date is future, the mechanical `escalate` sweep **suppresses the role's vacancy escalation**
 on every heartbeat host, and `roles status` reports `DORMANT (until <ts>)`:

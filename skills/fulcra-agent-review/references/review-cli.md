@@ -77,7 +77,7 @@ presence-of-file, so writing it (and only it) is what removes you from
    - **direct requirement** (`required: alice`) → `verdicts/alice.md`.
    ```bash
    # filename = the required token, e.g. reviewer.md — type: Verdict, verdict: approve|changes
-   uv tool run fulcra-api file upload /tmp/verdict.md \
+   fulcra-api file upload /tmp/verdict.md \
      "team/<team>/review/<review-slug>/verdicts/reviewer.md"
    ```
    ```yaml
