@@ -64,7 +64,7 @@ Environment variables:
 | `FULCRA_SIGN_IDENTITY` | yes | — | Developer ID Application identity (full name or 40-hex fingerprint). |
 | `FULCRA_NOTARY_PROFILE` | no | `fulcra-notary` | notarytool keychain profile name. |
 | `FULCRA_SKIP_NOTARIZE` | no | `0` | set `1` to sign + build the dmg but skip notarization (local signing smoke test). |
-| `FULCRA_ALLOW_GATEKEEPER_FAIL` | no | `0` | set `1` to keep a Gatekeeper-rejected dmg for diagnosis. Still exits non-zero and never reports success — a rejected dmg is not shippable. |
+| `FULCRA_ALLOW_GATEKEEPER_FAIL` | no | `0` | set `1` to retain a Gatekeeper-rejected dmg for diagnosis — quarantined to `<name>.REJECTED.dmg`, never left at the release path. Default: the rejected dmg is deleted. Either way the run exits non-zero and never reports success. |
 
 ## What the script does
 
@@ -80,10 +80,13 @@ Environment variables:
 6. Signs the `.dmg` (`codesign --timestamp`).
 7. Notarizes (`notarytool submit --wait`), staples (`stapler staple`), and
    validates the staple.
-8. Runs the Gatekeeper assessment (`spctl`) as the **release gate**. A dmg can
-   be notarized and stapled and still be rejected, and a rejected dmg is one a
-   beta tester cannot open — so a rejection fails the build loudly rather than
-   printing a success line.
+8. Runs the Gatekeeper assessment (`spctl`, in `gatekeeper_gate.sh`) as the
+   **release gate**. A dmg can be notarized and stapled and still be rejected,
+   and a rejected dmg is one a beta tester cannot open — so a rejection fails
+   the build loudly and, crucially, does **not** leave a rejected image at the
+   release path: by default it is deleted, or with
+   `FULCRA_ALLOW_GATEKEEPER_FAIL=1` moved to `<name>.REJECTED.dmg`. The success
+   line prints only after an accepted assessment.
 
 ## Verify a built dmg
 
