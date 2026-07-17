@@ -349,6 +349,34 @@ class EngineSourceAdapter:
                         break
             elif capability.name == "tasks":
                 normalization_error = f"$: expected object, got {type(payload).__name__}"
+            elif capability.name == "health" and isinstance(payload, dict):
+                hosts = payload.get("hosts")
+                if not isinstance(hosts, list):
+                    normalization_error = f"$.hosts: expected list, got {type(hosts).__name__}"
+                else:
+                    for index, row in enumerate(hosts):
+                        path = f"$.hosts[{index}]"
+                        if not isinstance(row, dict):
+                            normalization_error = f"{path}: expected object, got {type(row).__name__}"
+                            break
+                        host = sanitize_text(row.get("host"), limit=500)
+                        if not host.strip():
+                            normalization_error = f"{path}: missing stable host"
+                            break
+                        normalized_row = dict(row)
+                        normalized_row["id"] = host
+                        normalized_row.setdefault("title", host)
+                        try:
+                            record = self._work_record(normalized_row, "health", "health")
+                        except (TypeError, ValueError) as exc:
+                            normalization_error = f"{path}: {type(exc).__name__}"
+                            break
+                        if record is None:
+                            normalization_error = f"{path}: missing stable host"
+                            break
+                        normalized.append(record)
+            elif capability.name == "health":
+                normalization_error = f"$: expected object, got {type(payload).__name__}"
             elif isinstance(payload, list):
                 lane = "ask" if capability.name == "asks" else capability.name
                 for index, row in enumerate(payload):

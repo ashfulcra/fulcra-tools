@@ -34,7 +34,7 @@ def test_engine_source_normalizes_each_capability_and_sanitizes_text():
             "board": {"active": [{"id": "task-1", "title": "Task\u0000 title", "tags": ["kind:task"]}]},
             "asks": [{"id": "ask-1", "title": "Question"}],
             "threads": [],
-            "health": [],
+            "health": {"healthy": True, "fresh": 0, "total": 0, "hosts": [], "continuity_stale": []},
         }),
         clock=lambda: NOW,
     )
@@ -50,7 +50,7 @@ def test_engine_source_normalizes_each_capability_and_sanitizes_text():
 def test_engine_source_degrades_only_failed_capability_and_never_returns_clean_complete():
     adapter = EngineSourceAdapter(
         "fulcra",
-        runner=runner_for({"board": RuntimeError("secret source failure"), "asks": [], "threads": [], "health": []}),
+        runner=runner_for({"board": RuntimeError("secret source failure"), "asks": [], "threads": [], "health": {"hosts": []}}),
         clock=lambda: NOW,
     )
 
@@ -67,7 +67,7 @@ def test_engine_source_honors_embedded_degraded_rows():
         "fulcra",
         runner=runner_for({
             "board": {"active": [], "read-degraded": {"reason": "unknown"}},
-            "asks": [], "threads": [], "health": [],
+            "asks": [], "threads": [], "health": {"hosts": []},
         }),
         clock=lambda: NOW,
     )
@@ -84,13 +84,18 @@ def test_engine_source_parses_jsonl_folds_and_uses_slow_health_bound():
         seen[argv[1]] = timeout
         if argv[1] == "threads":
             return 0, '{"id":"thread-1","title":"One"}\n{"id":"thread-2","title":"Two"}\n', ""
+        if argv[1] == "health":
+            return 0, json.dumps({"healthy": True, "fresh": 1, "total": 1,
+                                  "hosts": [{"host": "builder-1", "stale": False, "tasks": 10}],
+                                  "continuity_stale": []}), ""
         return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
 
     snapshot = EngineSourceAdapter(
         "fulcra", runner=run, timeout=12.0, health_timeout=345.0, clock=lambda: NOW
     ).snapshot()
 
-    assert [item.source.item_id for item in snapshot.items] == ["thread-1", "thread-2"]
+    assert [item.source.item_id for item in snapshot.items] == ["thread-1", "thread-2", "builder-1"]
+    assert snapshot.capabilities["health"] is CapabilityState.COMPLETE
     assert seen == {"board": 12.0, "asks": 12.0, "threads": 12.0, "health": 345.0}
 
 
@@ -98,6 +103,8 @@ def test_schema_invalid_jsonl_row_degrades_scope_and_suppresses_close():
     def run(argv, _timeout):
         if argv[1] == "threads":
             return 0, '{"id":"present","title":"Present"}\n{"title":"missing id"}\n', ""
+        if argv[1] == "health":
+            return 0, json.dumps({"hosts": []}), ""
         return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
 
     snapshot = EngineSourceAdapter("fulcra", runner=run, clock=lambda: NOW).snapshot()

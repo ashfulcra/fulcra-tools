@@ -50,7 +50,9 @@ row.” Schema-invalid rows likewise degrade their capability—even when other
 rows are usable—so a partial enumeration can never authorize closes. Ordinary
 engine folds are bounded at 180 seconds. Fleet health is a
 known slower aggregate and has its own configurable adapter bound, 360 seconds
-by default (`EngineSourceAdapter(..., health_timeout=...)`).
+by default (`EngineSourceAdapter(..., health_timeout=...)`). Its JSON view is
+an object; each entry in `hosts` becomes a health record keyed by the stable
+`host` value, while an invalid hosts collection degrades health fail-closed.
 
 ## Run phases
 
