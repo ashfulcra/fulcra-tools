@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,6 +47,11 @@ _log = logging.getLogger("fulcra_gmail.relay")
 
 #: Default coord-engine binary (matches the installed uv-tool shim).
 DEFAULT_COORD_BINARY = "coord-engine"
+#: Absolute-path override for the coord-engine binary.
+_COORD_BIN_ENV = "FULCRA_COORD_ENGINE_BIN"
+#: Where coord-engine actually installs, in resolution order. The daemon's
+#: launchd PATH covers none of these, so they must be searched explicitly.
+_FALLBACK_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
 #: Directive sender identity — opaque, non-PII.
 RELAY_SENDER = "gmail-relay"
 #: Fallback priority when a relay rule omits ``relay_priority``.
@@ -104,12 +111,56 @@ class RelayEmitterProtocol(Protocol):
     def exists(self, directive: "RelayDirective") -> bool: ...
 
 
+def resolve_coord_binary(binary: str = DEFAULT_COORD_BINARY) -> str:
+    """Resolve ``binary`` to an absolute path, or raise with an actionable message.
+
+    A bare ``coord-engine`` is NOT safe to exec from the daemon. Collect runs
+    under **launchd**, which hands it a minimal PATH (``/usr/bin:/bin:…``) that
+    excludes ``~/.local/bin`` — where the uv-tool shim lives. So the bare name
+    resolves in an interactive shell (and in a hand-run worker) while raising
+    ``FileNotFoundError`` inside the daemon: every relay poll fails, and the
+    all-polls-failed guard then takes the whole plugin down. Resolve to an
+    absolute path here instead of trusting the inherited PATH.
+
+    Order: ``FULCRA_COORD_ENGINE_BIN`` → an already-absolute ``binary`` →
+    ``PATH`` → the known install dirs.
+    """
+    override = os.environ.get(_COORD_BIN_ENV)
+    if override:
+        return override
+    if os.path.isabs(binary):
+        return binary
+    found = shutil.which(binary)
+    if found:
+        return found
+    for d in _FALLBACK_BIN_DIRS:
+        candidate = os.path.join(os.path.expanduser(d), binary)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    searched = ", ".join(_FALLBACK_BIN_DIRS)
+    raise FileNotFoundError(
+        f"{binary!r} not found: the gmail relay needs it to deliver directives. "
+        f"Looked on PATH and in {searched}. Install coord-engine, or set "
+        f"{_COORD_BIN_ENV} to its absolute path. NOTE: the collect daemon runs "
+        f"under launchd with a minimal PATH, so adding a directory to your "
+        f"shell PATH is not enough."
+    )
+
+
 def _subprocess_run(binary: str) -> Callable[[list[str]], tuple[int, str]]:
-    """Return a ``run(argv)`` that shells out to the coord-engine binary."""
+    """Return a ``run(argv)`` that shells out to the coord-engine binary.
+
+    Resolution is lazy (first call, then cached): resolving at construction
+    would let a missing coord-engine break plugin startup even for operators
+    whose rules never relay.
+    """
+    resolved: list[str] = []
 
     def _run(argv: list[str]) -> tuple[int, str]:
-        proc = subprocess.run(  # noqa: S603 — fixed binary, non-shell
-            [binary, *argv],
+        if not resolved:
+            resolved.append(resolve_coord_binary(binary))
+        proc = subprocess.run(  # noqa: S603 — resolved binary, non-shell
+            [resolved[0], *argv],
             capture_output=True,
             text=True,
             timeout=60,

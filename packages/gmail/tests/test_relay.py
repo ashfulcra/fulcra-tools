@@ -7,13 +7,20 @@ outbox_key + rule id only).
 """
 from __future__ import annotations
 
+import pytest
+
 from fulcra_gmail import ledger as ledger_mod
 from fulcra_gmail.relay import (
+    DEFAULT_COORD_BINARY,
     CoordEngineRelayEmitter,
     RelayDirective,
     build_directive,
+    resolve_coord_binary,
 )
 from fulcra_gmail.rules import parse_rules
+
+#: The PATH launchd actually hands the collect daemon — no ~/.local/bin.
+_LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def _rule(**over):
@@ -32,6 +39,50 @@ def _rule(**over):
 
 def _outbox():
     return ledger_mod.outbox_key("acct-1", "m1", "receipts", 3)
+
+
+def test_resolves_from_install_dir_under_the_daemons_minimal_path(tmp_path, monkeypatch):
+    """The regression: under launchd's PATH the bare name is unresolvable.
+
+    coord-engine installs to ~/.local/bin, which is NOT on the PATH launchd
+    gives the daemon — so exec'ing the bare name raised FileNotFoundError, every
+    relay poll failed, and the all-polls-failed guard took the whole gmail
+    plugin down (68 consecutive failures, nothing filed). Resolution must fall
+    back to the real install dir rather than trusting PATH.
+    """
+    fake_bin = tmp_path / ".local" / "bin"
+    fake_bin.mkdir(parents=True)
+    shim = fake_bin / DEFAULT_COORD_BINARY
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim.chmod(0o755)
+
+    monkeypatch.setenv("PATH", _LAUNCHD_PATH)          # what the daemon gets
+    monkeypatch.delenv("FULCRA_COORD_ENGINE_BIN", raising=False)
+    monkeypatch.setattr("fulcra_gmail.relay._FALLBACK_BIN_DIRS", (str(fake_bin),))
+
+    assert resolve_coord_binary() == str(shim)
+
+
+def test_env_override_wins(monkeypatch):
+    monkeypatch.setenv("FULCRA_COORD_ENGINE_BIN", "/custom/coord-engine")
+    assert resolve_coord_binary() == "/custom/coord-engine"
+
+
+def test_absolute_binary_passes_through(monkeypatch):
+    monkeypatch.delenv("FULCRA_COORD_ENGINE_BIN", raising=False)
+    assert resolve_coord_binary("/opt/x/coord-engine") == "/opt/x/coord-engine"
+
+
+def test_missing_binary_raises_actionable_error(tmp_path, monkeypatch):
+    """A genuinely absent coord-engine must say what to do — not a bare ENOENT."""
+    monkeypatch.setenv("PATH", _LAUNCHD_PATH)
+    monkeypatch.delenv("FULCRA_COORD_ENGINE_BIN", raising=False)
+    monkeypatch.setattr("fulcra_gmail.relay._FALLBACK_BIN_DIRS", (str(tmp_path / "nope"),))
+    with pytest.raises(FileNotFoundError) as exc:
+        resolve_coord_binary()
+    msg = str(exc.value)
+    assert "FULCRA_COORD_ENGINE_BIN" in msg
+    assert "launchd" in msg
 
 
 def test_directive_is_byte_stable_function_of_outbox_key():
