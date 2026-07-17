@@ -28,6 +28,7 @@ addopts = "--import-mode=importlib"
 pythonpath = [
     "packages/collect/tests",
     "packages/coord-engine/tests",
+    "packages/coord-tracker-bridge",
     "packages/dayone/tests",
     "packages/fde-engine/tests",
     "packages/labs/tests",

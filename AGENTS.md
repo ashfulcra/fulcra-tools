@@ -75,6 +75,13 @@ under `skills/`, each package with its own README, build, and tests.
   `packages/fulcra-coord` and `packages/fulcra-coord-files`
   are the **first-generation, LEGACY** layer — kept for provenance and the
   annotations helper only. **Don't build anything new on them.**
+- **`packages/coord-tracker-bridge`** — the alpha, provider-neutral projection
+  core for reflecting coord work into external trackers. Phase 1 is pure and
+  offline: normalized snapshots, a full source-identity ledger, versioned
+  policy, and diff plans. It never infers identity from titles, and an
+  incomplete capability suppresses destructive closes for that scope. Tracker
+  I/O and source adapters are separately gated phases; command intake and
+  expectation evaluation are explicitly out of scope for this phase.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 

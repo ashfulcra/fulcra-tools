@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "coord-engine",
+    "coord-tracker-bridge",
     "fde-engine",
     "fulcra-attention",
     "fulcra-collect",
@@ -144,6 +145,20 @@ wheels = [
 [[package]]
 name = "coord-engine"
 source = { editable = "packages/coord-engine" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'" }]
+provides-extras = ["dev"]
+
+[[package]]
+name = "coord-tracker-bridge"
+version = "0.1.0"
+source = { editable = "packages/coord-tracker-bridge" }
 
 [package.optional-dependencies]
 dev = [
@@ -371,7 +386,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "fulcra-common"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "packages/fulcra-common" }
 dependencies = [
     { name = "fulcra-api" },
