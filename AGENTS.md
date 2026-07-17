@@ -76,12 +76,14 @@ under `skills/`, each package with its own README, build, and tests.
   are the **first-generation, LEGACY** layer — kept for provenance and the
   annotations helper only. **Don't build anything new on them.**
 - **`packages/coord-tracker-bridge`** — the alpha, provider-neutral projection
-  core for reflecting coord work into external trackers. Phase 1 is pure and
-  offline: normalized snapshots, a full source-identity ledger, versioned
-  policy, and diff plans. It never infers identity from titles, and an
-  incomplete capability suppresses destructive closes for that scope. Tracker
-  I/O and source adapters are separately gated phases; command intake and
-  expectation evaluation are explicitly out of scope for this phase.
+  core for reflecting coord work into external trackers. It ships normalized
+  snapshots, a full source-identity ledger, versioned policy, a pure diff plan,
+  a `coord-engine --json` source, and a paginated/retrying Linear adapter. Run
+  `plan` first, `apply-resources` explicitly, then `sync`; ordinary sync never
+  creates labels/projects, and a singleton lease rejects overlapping
+  source/tracker/policy runs. It never infers identity from titles, and an
+  incomplete capability suppresses destructive closes only for that scope.
+  Command intake and expectation evaluation remain explicitly out of scope.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 

@@ -51,6 +51,7 @@ def managed(item_id: str, *, title="Task", capability="tasks", closed=False, fie
         "origin": "fleet",
         "workstream": None,
         "source_identity": source(item_id).to_dict(),
+        "source_capability": capability,
         "policy_version": "1",
         "policy_hash": POLICY.hash,
     }

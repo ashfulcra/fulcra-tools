@@ -48,6 +48,7 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
         "origin": item.origin,
         "workstream": item.workstream,
         "source_identity": item.source.to_dict(),
+        "source_capability": item.capability,
         "policy_version": policy.version,
         "policy_hash": policy.hash,
     }
