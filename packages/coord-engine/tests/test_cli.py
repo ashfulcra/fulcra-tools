@@ -786,6 +786,24 @@ def test_overlay_cap_truncates_deterministically_and_degrades():
     assert served == {f"fresh-{i:02d}" for i in range(16)}   # sorted-name determinism
 
 
+def test_overlay_read_failure_reason_survives_cap_truncation():
+    """Read failure and cap truncation must both remain visible."""
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    _put_fresh_docs(t, 20)
+    orig_read = t.read
+    t.read = lambda p: None if p == "team/r/task/fresh-03.md" else orig_read(p)
+
+    rows, ok, reason = cli._load_rows_status(t, "r")
+
+    assert ok is False
+    assert "fresh-03.md unreadable" in reason
+    assert "truncated" in reason and "16 of 20" in reason
+    assert {r["name"] for r in rows} == (
+        {f"fresh-{i:02d}" for i in range(16)} - {"fresh-03"}
+    )
+
+
 def test_overlay_cap_env_override_honored(monkeypatch):
     t = FakeTransport()
     cli.main(["reconcile", "r"], transport=t)

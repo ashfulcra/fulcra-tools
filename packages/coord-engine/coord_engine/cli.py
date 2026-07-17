@@ -137,7 +137,8 @@ def _fresh_overlay_rows(
         starve a surface read/watcher tick; checked AFTER each read, the after-op
         discipline). Everything read so far is still served. When both the budget
         and the cap trip, the budget reason wins (it is the truthful one — the cap
-        wasn't what stopped us).
+        wasn't what stopped us). Independent failures compose: an unreadable-doc
+        reason is preserved alongside a later budget/cap truncation reason.
     Parse-garbage / not-a-Task docs remain sanctioned SILENT skips (mirrors
     reconcile's own tolerance). Cost: one extra ``list_dir`` per row load, plus one
     ``read`` per genuinely-new (unsummarized) slug, at most the cap, within the
@@ -162,7 +163,8 @@ def _fresh_overlay_rows(
     absent.sort(key=lambda p: p[0])  # deterministic served subset under the cap
     cap = _overlay_cap()
     overlay: list[dict[str, Any]] = []
-    ok, reason = True, ""
+    ok = True
+    reasons: list[str] = []
     served = 0
     budget_breached = False
     for name, entry in absent[:cap]:
@@ -178,7 +180,7 @@ def _fresh_overlay_rows(
             # list and read) keeps this continue-and-degrade path — only the
             # budget check below stops the slow bleed.
             ok = False
-            reason = f"task-dir overlay: fresh doc {name} unreadable"
+            reasons.append(f"task-dir overlay: fresh doc {name} unreadable")
         else:
             try:
                 fm = okf.parse_frontmatter(raw)
@@ -195,13 +197,13 @@ def _fresh_overlay_rows(
             break
     if budget_breached and served < len(absent):
         ok = False
-        reason = (f"task-dir overlay budget exhausted: served {served} of "
-                  f"{len(absent)} fresh docs")
+        reasons.append(f"task-dir overlay budget exhausted: served {served} of "
+                       f"{len(absent)} fresh docs")
     elif len(absent) > cap:
         ok = False
-        reason = (f"task-dir overlay truncated: served {cap} of {len(absent)} "
-                  f"fresh docs (COORD_OVERLAY_CAP={cap})")
-    return overlay, ok, reason
+        reasons.append(f"task-dir overlay truncated: served {cap} of {len(absent)} "
+                       f"fresh docs (COORD_OVERLAY_CAP={cap})")
+    return overlay, ok, "; ".join(reasons)
 
 
 def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool, str]:
