@@ -358,24 +358,27 @@ class TeamsSourceAdapter:
     def _diagnostic(path: str, code: str) -> Diagnostic:
         return Diagnostic("tasks", code, sanitize_text(path, limit=500))
 
-    def _record(self, name: str, document: str) -> tuple[WorkRecord | None, Diagnostic | None]:
+    def _record(
+        self, name: str, document: str
+    ) -> tuple[WorkRecord | None, Diagnostic | None, str | None]:
         fields = _parse_teams_frontmatter(document)
         path = f"{self.task_root}{name}"
         if fields is None:
-            return None, self._diagnostic(path, "teams-parse-degraded")
+            return None, self._diagnostic(path, "teams-parse-degraded"), None
         if fields.get("type") != "Task":
-            return None, self._diagnostic(path, "teams-type-degraded")
+            return None, self._diagnostic(path, "teams-type-degraded"), None
         item_id = sanitize_text(fields.get("id"), limit=500).strip()
+        claimed_id = item_id or None
         title = sanitize_text(fields.get("title"), limit=500).strip()
         lane = sanitize_text(fields.get("status"), limit=50).strip()
         tags = fields.get("tags")
         if not item_id or not title or lane not in self.VALID_LANES or not isinstance(tags, list):
-            return None, self._diagnostic(path, "teams-schema-degraded")
+            return None, self._diagnostic(path, "teams-schema-degraded"), claimed_id
         if any(not isinstance(tag, str) or not tag.strip() for tag in tags):
-            return None, self._diagnostic(path, "teams-schema-degraded")
+            return None, self._diagnostic(path, "teams-schema-degraded"), claimed_id
         archived = fields.get("archived", False)
         if not isinstance(archived, bool):
-            return None, self._diagnostic(path, "teams-schema-degraded")
+            return None, self._diagnostic(path, "teams-schema-degraded"), claimed_id
         origin = sanitize_text(fields.get("origin"), limit=100).strip()
         workstream = sanitize_text(fields.get("workstream"), limit=200).strip()
         return WorkRecord(
@@ -392,7 +395,7 @@ class TeamsSourceAdapter:
             tags=tuple(sanitize_text(tag, limit=100) for tag in tags),
             archived=archived,
             due_at=None,
-        ), None
+        ), None, claimed_id
 
     def snapshot(self) -> Snapshot:
         deadline = self.monotonic() + self.snapshot_timeout
@@ -405,6 +408,7 @@ class TeamsSourceAdapter:
         }
         diagnostics: list[Diagnostic] = []
         records_by_id: dict[str, WorkRecord] = {}
+        claimed_ids: set[str] = set()
         colliding_ids: set[str] = set()
         revision_parts: list[str] = []
         degraded = False
@@ -500,16 +504,19 @@ class TeamsSourceAdapter:
                 diagnostics.append(self._diagnostic(path, "teams-read-degraded"))
                 continue
             revision_parts.append(hashlib.sha256(document.encode()).hexdigest())
-            record, error = self._record(name, document)
+            record, error, claimed_id = self._record(name, document)
+            if claimed_id is not None:
+                if claimed_id in claimed_ids:
+                    colliding_ids.add(claimed_id)
+                    degraded = True
+                    diagnostics.append(self._diagnostic(path, "teams-duplicate-id-degraded"))
+                claimed_ids.add(claimed_id)
             if error is not None:
                 degraded = True
                 diagnostics.append(error)
                 continue
             assert record is not None
-            if record.source.item_id in records_by_id:
-                degraded = True
-                colliding_ids.add(record.source.item_id)
-                diagnostics.append(self._diagnostic(path, "teams-duplicate-id-degraded"))
+            if record.source.item_id in colliding_ids:
                 continue
             records_by_id[record.source.item_id] = record
         for item_id in colliding_ids:

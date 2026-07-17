@@ -118,6 +118,24 @@ def test_duplicate_explicit_ids_degrade_without_emitting_duplicate():
     assert not build_plan(snapshot, [], BridgeLedger(), load_policy()).changes
 
 
+def test_schema_invalid_duplicate_claim_removes_valid_record_and_all_mutations():
+    root = "team/fulcra/task/"
+    snapshot = adapter(MemoryTransport(
+        [{"name": "a.md"}, {"name": "b.md"}],
+        {
+            root + "a.md": task("same"),
+            root + "b.md": task("same", status="mystery"),
+        },
+    )).snapshot()
+
+    assert not snapshot.complete
+    assert not snapshot.items
+    assert {value.code for value in snapshot.diagnostics} == {
+        "teams-schema-degraded", "teams-duplicate-id-degraded"
+    }
+    assert not build_plan(snapshot, [], BridgeLedger(), load_policy()).changes
+
+
 def test_unexpected_entry_and_read_cap_degrade_instead_of_authorizing_absence():
     transport = MemoryTransport(
         [{"name": "nested/", "is_dir": True}, {"name": "task.md"}],
