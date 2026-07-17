@@ -60,6 +60,10 @@ ignored as derived artifacts. Any ambiguous listing, read, parse, duplicate ID,
 or unexpected entry degrades the task capability and suppresses absence-based
 closes. Asks, threads, health, due dates, expectations, and command intake are
 reported as `UNSUPPORTED`; they are never represented as clean empty results.
+Colliding stable IDs remove every colliding record from the snapshot, and task
+downloads run concurrently under one whole-snapshot deadline (30 seconds by
+default); an incomplete batch degrades tasks instead of authorizing mutations
+from a partial enumeration.
 
 - `plan` is read-only and shows projection changes plus missing bounded
   taxonomy resources.

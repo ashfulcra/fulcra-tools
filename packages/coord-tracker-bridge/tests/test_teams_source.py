@@ -1,8 +1,17 @@
+import time
 from datetime import datetime, timezone
 
 import pytest
 
-from coord_tracker_bridge import CapabilityState, FulcraTeamsTransport, TeamsSourceAdapter, TeamsTransportError
+from coord_tracker_bridge import (
+    BridgeLedger,
+    CapabilityState,
+    FulcraTeamsTransport,
+    TeamsSourceAdapter,
+    TeamsTransportError,
+    build_plan,
+    load_policy,
+)
 
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=timezone.utc)
@@ -104,8 +113,9 @@ def test_duplicate_explicit_ids_degrade_without_emitting_duplicate():
     )).snapshot()
 
     assert not snapshot.complete
-    assert len(snapshot.items) == 1
+    assert not snapshot.items
     assert snapshot.diagnostics[0].code == "teams-duplicate-id-degraded"
+    assert not build_plan(snapshot, [], BridgeLedger(), load_policy()).changes
 
 
 def test_unexpected_entry_and_read_cap_degrade_instead_of_authorizing_absence():
@@ -148,3 +158,35 @@ def test_default_teams_transport_uses_only_read_only_fulcra_file_commands():
         ("fulcra-api", "file", "list", "team/fulcra/task/"),
         ("fulcra-api", "file", "download", "team/fulcra/task/task.md", "-"),
     ]
+
+
+def test_many_slow_downloads_respect_one_snapshot_deadline():
+    names = [f"task-{index}.md" for index in range(40)]
+    observed_timeouts = []
+
+    def runner(argv, timeout):
+        if argv[2] == "list":
+            lines = [f"10B 2026-07-17 12:00PM UTC {name}" for name in names]
+            return 0, "\n".join(lines), ""
+        observed_timeouts.append(timeout)
+        time.sleep(0.05)
+        name = argv[3].rsplit("/", 1)[-1]
+        return 0, task(name.removesuffix(".md")), ""
+
+    source = TeamsSourceAdapter(
+        "fulcra",
+        transport=FulcraTeamsTransport(runner=runner, timeout=5.0),
+        clock=lambda: NOW,
+        snapshot_timeout=0.08,
+        read_workers=2,
+    )
+    started = time.monotonic()
+
+    snapshot = source.snapshot()
+
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.3
+    assert not snapshot.complete
+    assert snapshot.capabilities["tasks"] is CapabilityState.DEGRADED
+    assert any(value.code == "teams-snapshot-timeout" for value in snapshot.diagnostics)
+    assert observed_timeouts and max(observed_timeouts) <= 0.08

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -56,8 +58,11 @@ class FulcraTeamsTransport:
         self.command = command
 
     def list_dir(self, prefix: str) -> list[Mapping[str, Any]]:
+        return self.list_dir_bounded(prefix, timeout=self.timeout)
+
+    def list_dir_bounded(self, prefix: str, *, timeout: float) -> list[Mapping[str, Any]]:
         code, stdout, _stderr = self.runner(
-            (*self.command, "file", "list", prefix), self.timeout
+            (*self.command, "file", "list", prefix), min(self.timeout, timeout)
         )
         if code != 0:
             raise TeamsTransportError(f"list {prefix!r} failed")
@@ -85,6 +90,45 @@ class FulcraTeamsTransport:
             (*self.command, "file", "download", path, "-"), self.timeout
         )
         return stdout if code == 0 else None
+
+    def read_many(
+        self,
+        paths: Sequence[str],
+        *,
+        timeout: float,
+        max_workers: int,
+    ) -> tuple[Mapping[str, str | None], bool]:
+        """Download a bounded concurrent batch under one aggregate deadline."""
+
+        deadline = time.monotonic() + max(timeout, 0.0)
+
+        def read_one(path: str) -> str | None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            code, stdout, _stderr = self.runner(
+                (*self.command, "file", "download", path, "-"),
+                min(self.timeout, remaining),
+            )
+            return stdout if code == 0 else None
+
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {executor.submit(read_one, path): path for path in paths}
+        done, pending = wait(futures, timeout=max(timeout, 0.0))
+        for future in pending:
+            future.cancel()
+        values: dict[str, str | None] = {}
+        for future in done:
+            path = futures[future]
+            try:
+                values[path] = future.result()
+            except Exception:
+                values[path] = None
+        for future in pending:
+            values[futures[future]] = None
+        executor.shutdown(wait=False, cancel_futures=True)
+        complete = not pending
+        return values, complete
 
 
 def _parse_teams_frontmatter(text: str) -> Mapping[str, Any] | None:
@@ -288,13 +332,19 @@ class TeamsSourceAdapter:
         transport: TeamsTransport | None = None,
         clock: Callable[[], datetime] | None = None,
         max_files: int = 1_000,
+        snapshot_timeout: float = 30.0,
+        read_workers: int = 32,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        if max_files < 1:
-            raise ValueError("max_files must be positive")
+        if max_files < 1 or snapshot_timeout <= 0 or read_workers < 1:
+            raise ValueError("max_files, snapshot_timeout, and read_workers must be positive")
         self.team = team
         self.transport = transport or FulcraTeamsTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.max_files = max_files
+        self.snapshot_timeout = snapshot_timeout
+        self.read_workers = read_workers
+        self.monotonic = monotonic
 
     @property
     def source_id(self) -> str:
@@ -345,6 +395,7 @@ class TeamsSourceAdapter:
         ), None
 
     def snapshot(self) -> Snapshot:
+        deadline = self.monotonic() + self.snapshot_timeout
         unsupported = {
             name: CapabilityState.UNSUPPORTED
             for name in (
@@ -353,11 +404,30 @@ class TeamsSourceAdapter:
             )
         }
         diagnostics: list[Diagnostic] = []
-        items: list[WorkRecord] = []
+        records_by_id: dict[str, WorkRecord] = {}
+        colliding_ids: set[str] = set()
         revision_parts: list[str] = []
         degraded = False
+        remaining = max(0.0, deadline - self.monotonic())
         try:
-            entries = self.transport.list_dir(self.task_root)
+            list_bounded = getattr(self.transport, "list_dir_bounded", None)
+            if callable(list_bounded):
+                entries = list_bounded(self.task_root, timeout=remaining)
+            else:
+                executor = ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(self.transport.list_dir, self.task_root)
+                try:
+                    done, _pending = wait((future,), timeout=remaining)
+                    if not done:
+                        future.cancel()
+                        raise TimeoutError("teams listing exceeded snapshot deadline")
+                    entries = future.result()
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+        except (TimeoutError, subprocess.TimeoutExpired):
+            entries = []
+            degraded = True
+            diagnostics.append(self._diagnostic(self.task_root, "teams-snapshot-timeout"))
         except Exception:
             entries = []
             degraded = True
@@ -366,7 +436,7 @@ class TeamsSourceAdapter:
             degraded = True
             diagnostics.append(self._diagnostic(self.task_root, "teams-list-truncated"))
             entries = entries[:self.max_files]
-        seen_ids: set[str] = set()
+        candidate_entries: list[tuple[Mapping[str, Any], str, str]] = []
         for entry in entries:
             name = str(entry.get("name") or "")
             revision_parts.append(
@@ -379,10 +449,52 @@ class TeamsSourceAdapter:
                 diagnostics.append(self._diagnostic(f"{self.task_root}{name}", "teams-entry-degraded"))
                 continue
             path = f"{self.task_root}{name}"
-            try:
-                document = self.transport.read(path)
-            except Exception:
-                document = None
+            candidate_entries.append((entry, name, path))
+
+        remaining = max(0.0, deadline - self.monotonic())
+        documents: Mapping[str, str | None] = {}
+        batch_complete = True
+        if candidate_entries and remaining <= 0:
+            batch_complete = False
+        elif candidate_entries:
+            paths = [path for _entry, _name, path in candidate_entries]
+            read_many = getattr(self.transport, "read_many", None)
+            if callable(read_many):
+                try:
+                    documents, batch_complete = read_many(
+                        paths, timeout=remaining, max_workers=self.read_workers
+                    )
+                except Exception:
+                    documents = {path: None for path in paths}
+                    batch_complete = False
+            else:
+                executor = ThreadPoolExecutor(max_workers=self.read_workers)
+                futures = {executor.submit(self.transport.read, path): path for path in paths}
+                done, pending = wait(futures, timeout=remaining)
+                for future in pending:
+                    future.cancel()
+                mutable: dict[str, str | None] = {}
+                for future in done:
+                    try:
+                        mutable[futures[future]] = future.result()
+                    except Exception:
+                        mutable[futures[future]] = None
+                for future in pending:
+                    mutable[futures[future]] = None
+                executor.shutdown(wait=False, cancel_futures=True)
+                documents = mutable
+                batch_complete = not pending
+        if not batch_complete:
+            degraded = True
+            diagnostics.append(self._diagnostic(self.task_root, "teams-snapshot-timeout"))
+
+        for _entry, name, path in candidate_entries:
+            if self.monotonic() >= deadline:
+                degraded = True
+                if not any(value.code == "teams-snapshot-timeout" for value in diagnostics):
+                    diagnostics.append(self._diagnostic(self.task_root, "teams-snapshot-timeout"))
+                break
+            document = documents.get(path)
             if document is None:
                 degraded = True
                 diagnostics.append(self._diagnostic(path, "teams-read-degraded"))
@@ -394,17 +506,19 @@ class TeamsSourceAdapter:
                 diagnostics.append(error)
                 continue
             assert record is not None
-            if record.source.item_id in seen_ids:
+            if record.source.item_id in records_by_id:
                 degraded = True
+                colliding_ids.add(record.source.item_id)
                 diagnostics.append(self._diagnostic(path, "teams-duplicate-id-degraded"))
                 continue
-            seen_ids.add(record.source.item_id)
-            items.append(record)
+            records_by_id[record.source.item_id] = record
+        for item_id in colliding_ids:
+            records_by_id.pop(item_id, None)
         states = {"tasks": CapabilityState.DEGRADED if degraded else CapabilityState.COMPLETE}
         states.update(unsupported)
         revision = hashlib.sha256("\n".join(revision_parts).encode()).hexdigest()
         return Snapshot(
-            tuple(items),
+            tuple(records_by_id[item_id] for item_id in sorted(records_by_id)),
             not degraded,
             tuple(diagnostics),
             states,
