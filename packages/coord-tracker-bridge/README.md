@@ -22,7 +22,13 @@ The package fixes the unsafe shortcuts in the original Linear probe:
   paginated; rate-limit retries use bounded exponential backoff;
 - a singleton lease covers each `(source, tracker, policy)` run;
 - full source identity is stored in the ledger and provider metadata, so a
-  create that succeeds just before a ledger-write crash is rediscovered.
+  create that succeeds just before a ledger-write crash is rediscovered;
+- policy v2 is an explicit lane allowlist: omission means exclusion, and the
+  bundled operator surface is only `active`, `blocked`, derived `backlog`,
+  `asks`, and `threads-missed`;
+- the one-time `adopt-markers` phase migrates v0.25 `[bus:xxxxxxxx]` issues to
+  full provider metadata plus the ledger before ordinary sync can duplicate
+  them.
 
 ## Core contract
 
@@ -38,12 +44,21 @@ from coord_tracker_bridge import BridgeLedger, build_plan, load_policy
 plan = build_plan(snapshot, tracker_records, BridgeLedger.load("state.json"), load_policy())
 ```
 
-The policy bundled at `coord_tracker_bridge/policies/default-v1.json` is a
-starting point. Command intake and expectation evaluation remain disabled and
-out of scope.
+The policy bundled at `coord_tracker_bridge/policies/default-v2.json` is an
+explicit allowlist. A lane absent from `included_lanes` is excluded; there is
+no fallback that projects its raw status. The bundled surface contains only
+`active`, `blocked`, `backlog`, `asks`, and `threads-missed`. Engine task rows
+in `proposed` or `waiting` with `assignee: @backlog` derive to `backlog`;
+ordinary proposed/waiting rows remain excluded. Asks and dropped-thread rows
+derive to `asks` and `threads-missed`. A managed item that positively moves
+outside the allowlist is closed. Command intake and expectation evaluation
+remain disabled and out of scope.
 
 The engine source accepts both one JSON document and JSONL output from
-`coord-engine --json` folds; `threads` currently uses JSONL. Embedded degraded
+`coord-engine --json` folds; `threads` currently uses JSONL. Valid JSONL rows
+survive an interleaved prose degraded-marker line, while the line text is
+bounded into diagnostics and the affected capability remains degraded, so the
+partial read cannot authorize absence-based closes. Embedded degraded
 markers fail the affected capability closed and diagnostics name their exact
 JSON path, marker type, and reason instead of emitting an anonymous “degraded
 row.” Schema-invalid rows likewise degrade their capability—even when other
@@ -61,9 +76,24 @@ the phases in order:
 
 ```bash
 coord-tracker-bridge plan --coord-team fulcra
+coord-tracker-bridge adopt-markers --coord-team fulcra
 coord-tracker-bridge apply-resources --coord-team fulcra
 coord-tracker-bridge sync --coord-team fulcra
 ```
+
+Run `adopt-markers` once before the first package-managed sync when the Linear
+team contains v0.25 title markers. The authoritative mapping is the
+bridge-owned description footer ``bus slug: `<full-slug>` ``; the title marker is
+only a consistency cross-check against the slug's final eight characters,
+which are not necessarily hexadecimal. Every marked issue must contain exactly
+one footer naming exactly one policy-included source row, and every full slug
+must be unique; missing footers, marker mismatches, unknowns, collisions, or
+identity conflicts abort before mutations. Each successful issue update strips
+the title marker, writes full source identity and capability metadata, then
+atomically persists the ledger entry. A crash between the provider update and
+ledger write converges on retry from provider metadata. Re-run `plan` afterward
+and keep cutover held unless its create set matches the approved projection
+surface.
 
 Use `--source teams` to read the strict base-teams convention directly. The
 teams source requires `type: Task`, an explicit stable `id`, a title, a valid
@@ -79,6 +109,8 @@ from a partial enumeration.
 
 - `plan` is read-only and shows projection changes plus missing bounded
   taxonomy resources.
+- `adopt-markers` is the explicit one-time migration for legacy Linear issues;
+  ordinary `sync` never infers identity from a title.
 - `apply-resources` is the only phase that creates labels or projects.
 - `sync` refuses a non-empty resource plan; it never silently creates resources.
   It also refuses an overlapping run holding the same source/tracker/policy

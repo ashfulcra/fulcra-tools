@@ -1,10 +1,10 @@
 from coord_tracker_bridge.cli import _service, build_parser, main
 
 
-def test_cli_exposes_only_three_gated_phases():
+def test_cli_exposes_only_explicit_gated_phases():
     parser = build_parser()
 
-    for phase in ("plan", "apply-resources", "sync"):
+    for phase in ("plan", "adopt-markers", "apply-resources", "sync"):
         assert parser.parse_args([phase, "--linear-team-id", "team"]).phase == phase
 
     assert parser.parse_args(["plan", "--source", "teams"]).source == "teams"

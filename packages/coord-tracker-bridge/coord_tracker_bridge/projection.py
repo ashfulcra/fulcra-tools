@@ -38,7 +38,7 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
     return {
         "title": item.title,
         "description": item.description,
-        "semantic_state": policy.lane_states.get(item.lane, item.lane),
+        "semantic_state": policy.lane_states[item.lane],
         "priority": policy.priority.get(item.priority, policy.priority.get("P2", 3)),
         "labels": labels,
         "project": policy.workstream_projects.get(item.workstream or ""),
@@ -85,6 +85,17 @@ def build_plan(
 
     for item in sorted(snapshot.items, key=lambda value: value.source):
         key = item.source.key
+        if item.lane not in policy.included_lanes:
+            diagnostics.append(Diagnostic(item.capability, "lane-excluded", item.lane))
+            existing = managed_by_source.get(key)
+            if existing and not existing.closed:
+                changes.append(Change(
+                    ChangeKind.CLOSE,
+                    item.source,
+                    existing.provider_id,
+                    MappingProxyType({}),
+                ))
+            continue
         if policy.included_origins and item.origin not in policy.included_origins:
             diagnostics.append(Diagnostic(item.capability, "origin-excluded", item.source.key))
             continue

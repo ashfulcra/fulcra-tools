@@ -30,7 +30,9 @@ def item(item_id: str, *, title: str = "Task", capability: str = "tasks", archiv
 
 
 def ledger_entry(item_id: str, capability: str = "tasks") -> LedgerEntry:
-    return LedgerEntry(source(item_id), capability, "linear", f"LIN-{item_id}", "1", POLICY.hash)
+    return LedgerEntry(
+        source(item_id), capability, "linear", f"LIN-{item_id}", POLICY.version, POLICY.hash
+    )
 
 
 def snapshot(items, capabilities, *, complete=True):
@@ -52,7 +54,7 @@ def managed(item_id: str, *, title="Task", capability="tasks", closed=False, fie
         "workstream": None,
         "source_identity": source(item_id).to_dict(),
         "source_capability": capability,
-        "policy_version": "1",
+        "policy_version": POLICY.version,
         "policy_hash": POLICY.hash,
     }
     default.update(fields or {})
@@ -187,4 +189,35 @@ def test_same_short_suffixes_create_distinct_records():
 
     assert [change.source.item_id for change in plan.changes] == [
         "alpha-12345678", "beta-12345678"
+    ]
+
+
+def test_lane_allowlist_omission_excludes_instead_of_falling_through():
+    proposed = WorkRecord(
+        source("proposal-1"), "tasks", "Proposal", "proposed", origin="fleet"
+    )
+
+    plan = build_plan(
+        snapshot([proposed], {"tasks": CapabilityState.COMPLETE}),
+        [], BridgeLedger(), POLICY,
+    )
+
+    assert plan.changes == ()
+    assert [(d.scope, d.code, d.message) for d in plan.diagnostics] == [
+        ("tasks", "lane-excluded", "proposed")
+    ]
+
+
+def test_moving_managed_item_out_of_allowlist_closes_it_from_positive_evidence():
+    done = WorkRecord(
+        source("task-1"), "tasks", "Done", "done", origin="fleet"
+    )
+
+    plan = build_plan(
+        snapshot([done], {"tasks": CapabilityState.DEGRADED}, complete=False),
+        [managed("task-1")], BridgeLedger([ledger_entry("task-1")]), POLICY,
+    )
+
+    assert [(change.kind, change.provider_id) for change in plan.changes] == [
+        (ChangeKind.CLOSE, "LIN-task-1")
     ]

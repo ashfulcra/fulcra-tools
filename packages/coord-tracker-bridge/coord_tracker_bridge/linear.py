@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Protocol
@@ -11,13 +12,16 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 import httpx
 
 from .ledger import BridgeLedger
-from .model import ManagedRecord, SourceIdentity
+from .model import ManagedRecord, Snapshot, SourceIdentity
+from .policy import Policy
 from .projection import Change, ChangeKind
 
 
 LINEAR_API = "https://api.linear.app/graphql"
 METADATA_PREFIX = "<!-- coord-tracker-bridge:source="
 METADATA_SUFFIX = " -->"
+LEGACY_TITLE_MARKER = re.compile(r"(?<!\w)\[bus:([^\]\r\n]{8})\](?!\w)")
+LEGACY_SLUG_FOOTER = re.compile(r"(?m)^bus slug: `([^`\r\n]+)`\s*$")
 
 
 class LinearError(RuntimeError):
@@ -26,6 +30,16 @@ class LinearError(RuntimeError):
 
 class ResourceMissing(LinearError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class MarkerAdoption:
+    provider_id: str
+    source: SourceIdentity
+    capability: str
+    title: str
+    description: str
+    fields: Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +294,106 @@ class LinearTrackerAdapter:
 
     def list_inbound_events(self) -> list[Mapping[str, Any]]:
         return self.client.paginate("InboundEvents", EVENTS_QUERY, "auditEntries", {"team": self.team_id})
+
+    def plan_marker_adoptions(
+        self, snapshot: Snapshot, ledger: BridgeLedger, policy: Policy
+    ) -> tuple[MarkerAdoption, ...]:
+        """Match legacy ``[bus:xxxxxxxx]`` titles to full source identities.
+
+        The bridge-owned description footer carries the authoritative full
+        slug. The title marker is only a consistency check against the slug's
+        final eight characters; those characters are not necessarily hex.
+        Unknowns and collisions fail the entire migration before mutation.
+        """
+
+        candidates: dict[str, Any] = {}
+        for item in snapshot.items:
+            if item.archived or item.lane not in policy.included_lanes:
+                continue
+            if policy.included_origins and item.origin not in policy.included_origins:
+                continue
+            slug = item.source.item_id
+            if slug in candidates:
+                raise LinearError(f"legacy footer slug {slug!r} matches multiple source rows")
+            candidates[slug] = item
+
+        ledger_by_provider = {entry.tracker_record_id: entry for entry in ledger}
+        seen_slugs: set[str] = set()
+        planned: list[MarkerAdoption] = []
+        for issue in self.list_issues():
+            title = str(issue.get("title") or "")
+            matches = list(LEGACY_TITLE_MARKER.finditer(title))
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise LinearError(f"legacy issue {issue.get('id')!r} has multiple bus markers")
+            provider_id = str(issue.get("id") or "").strip()
+            if not provider_id:
+                raise LinearError("legacy marked issue has no provider id")
+            description = str(issue.get("description") or "")
+            footer_matches = list(LEGACY_SLUG_FOOTER.finditer(description))
+            if len(footer_matches) != 1:
+                raise LinearError(
+                    f"legacy issue {provider_id!r} must have exactly one bus slug footer"
+                )
+            slug = footer_matches[0].group(1)
+            item = candidates.get(slug)
+            if item is None:
+                raise LinearError(f"legacy footer slug {slug!r} has no included source row")
+            marker = matches[0].group(1)
+            expected_marker = slug[-8:]
+            if marker != expected_marker:
+                raise LinearError(
+                    f"legacy issue {provider_id!r} marker does not match footer slug suffix"
+                )
+            if slug in seen_slugs:
+                raise LinearError(f"legacy footer slug {slug!r} appears on multiple issues")
+            seen_slugs.add(slug)
+
+            metadata = parse_bridge_metadata(description)
+            if metadata is not None:
+                existing_source = SourceIdentity.from_dict(metadata["source"])
+                if existing_source != item.source:
+                    raise LinearError(
+                        f"legacy issue {provider_id!r} metadata conflicts with marker source"
+                    )
+            entry = ledger_by_provider.get(provider_id)
+            if entry is not None and entry.source != item.source:
+                raise LinearError(
+                    f"legacy issue {provider_id!r} ledger identity conflicts with marker source"
+                )
+            clean_title = LEGACY_TITLE_MARKER.sub("", title)
+            clean_title = re.sub(r"\s{2,}", " ", clean_title).strip()
+            if not clean_title:
+                clean_title = item.title
+            fields = dict((metadata or {}).get("fields") or {})
+            fields.update({"policy_version": policy.version, "policy_hash": policy.hash})
+            planned.append(MarkerAdoption(
+                provider_id=provider_id,
+                source=item.source,
+                capability=item.capability,
+                title=clean_title,
+                description=strip_source_metadata(description),
+                fields=fields,
+            ))
+        return tuple(sorted(planned, key=lambda adoption: adoption.provider_id))
+
+    def apply_marker_adoption(self, adoption: MarkerAdoption) -> None:
+        description = append_source_metadata(
+            adoption.description,
+            adoption.source,
+            adoption.fields,
+            capability=adoption.capability,
+        )
+        self.client.execute_mutation(
+            "AdoptIssue",
+            "mutation AdoptIssue($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}",
+            "issueUpdate",
+            {"id": adoption.provider_id, "input": {
+                "title": adoption.title,
+                "description": description,
+            }},
+        )
 
     def list_managed_records(self, ledger: BridgeLedger) -> list[ManagedRecord]:
         ledger_by_provider = {entry.tracker_record_id: entry for entry in ledger}

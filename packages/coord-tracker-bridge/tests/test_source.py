@@ -120,3 +120,48 @@ def test_schema_invalid_jsonl_row_degrades_scope_and_suppresses_close():
     assert snapshot.capabilities["threads"] is CapabilityState.DEGRADED
     assert snapshot.diagnostics[0].message == "$[1]: missing stable id/name"
     assert all(change.kind is not ChangeKind.CLOSE for change in plan.changes)
+
+
+def test_engine_source_derives_curated_backlog_and_named_auxiliary_lanes():
+    adapter = EngineSourceAdapter(
+        "fulcra",
+        runner=runner_for({
+            "board": {
+                "proposed": [{"id": "later-1", "title": "Later", "assignee": "@backlog"}],
+                "waiting": [{"id": "wait-1", "title": "Wait", "assignee": "agent"}],
+            },
+            "asks": [{"id": "ask-1", "title": "Ask"}],
+            "threads": [{"id": "thread-1", "title": "Missed"}],
+            "health": {"hosts": []},
+        }),
+        clock=lambda: NOW,
+    )
+
+    snapshot = adapter.snapshot()
+
+    assert [(item.source.item_id, item.lane) for item in snapshot.items] == [
+        ("later-1", "backlog"),
+        ("wait-1", "waiting"),
+        ("ask-1", "asks"),
+        ("thread-1", "threads-missed"),
+    ]
+
+
+def test_prose_degraded_line_keeps_valid_jsonl_rows_but_degrades_capability():
+    def run(argv, _timeout):
+        if argv[1] == "threads":
+            return 0, (
+                '{"id":"thread-1","title":"One"}\n'
+                'THREADS DEGRADED: fold budget exhausted\n'
+                '{"id":"thread-2","title":"Two"}\n'
+            ), ""
+        if argv[1] == "health":
+            return 0, json.dumps({"hosts": []}), ""
+        return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
+
+    snapshot = EngineSourceAdapter("fulcra", runner=run, clock=lambda: NOW).snapshot()
+
+    assert [item.source.item_id for item in snapshot.items] == ["thread-1", "thread-2"]
+    assert snapshot.capabilities["threads"] is CapabilityState.DEGRADED
+    assert snapshot.diagnostics[0].code == "source-line-degraded"
+    assert snapshot.diagnostics[0].message == "line 2: THREADS DEGRADED: fold budget exhausted"

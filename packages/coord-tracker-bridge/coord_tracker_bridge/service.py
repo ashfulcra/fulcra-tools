@@ -31,6 +31,10 @@ class TrackerAdapter(Protocol):
 
     def apply_change(self, change) -> str: ...
 
+    def plan_marker_adoptions(self, snapshot, ledger, policy): ...
+
+    def apply_marker_adoption(self, adoption) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class BridgePlan:
@@ -90,6 +94,47 @@ class BridgeService:
             plan = self.plan().resources
             self.tracker.apply_resources(plan)
             return plan
+
+    def adopt_markers(self) -> int:
+        """One-time, crash-convergent adoption of legacy tracker markers."""
+
+        with self._lease():
+            ledger = self._ledger()
+            snapshot = self.source.snapshot()
+
+            # Heal any issue already carrying full provider metadata. This is
+            # the retry leg when a prior run mutated Linear but crashed before
+            # its ledger write.
+            healed = False
+            for record in self.tracker.list_managed_records(ledger):
+                if ledger.get(record.source) is None:
+                    ledger.upsert(LedgerEntry(
+                        source=record.source,
+                        capability=record.capability,
+                        tracker_provider=self.tracker.provider,
+                        tracker_record_id=record.provider_id,
+                        policy_version=self.policy.version,
+                        policy_hash=self.policy.hash,
+                    ))
+                    healed = True
+            if healed:
+                ledger.save(self.ledger_path)
+
+            adoptions = self.tracker.plan_marker_adoptions(snapshot, ledger, self.policy)
+            applied = 0
+            for adoption in adoptions:
+                self.tracker.apply_marker_adoption(adoption)
+                ledger.upsert(LedgerEntry(
+                    source=adoption.source,
+                    capability=adoption.capability,
+                    tracker_provider=self.tracker.provider,
+                    tracker_record_id=adoption.provider_id,
+                    policy_version=self.policy.version,
+                    policy_hash=self.policy.hash,
+                ))
+                ledger.save(self.ledger_path)
+                applied += 1
+            return applied
 
     def sync(self) -> SyncResult:
         lease = self._lease()

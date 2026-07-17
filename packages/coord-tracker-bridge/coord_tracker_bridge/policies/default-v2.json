@@ -1,12 +1,12 @@
 {
-  "version": "1",
+  "version": "2",
+  "included_lanes": ["active", "blocked", "backlog", "asks", "threads-missed"],
   "lane_states": {
     "active": "started",
     "blocked": "started",
-    "proposed": "unstarted",
-    "waiting": "unstarted",
     "backlog": "backlog",
-    "done": "completed"
+    "asks": "unstarted",
+    "threads-missed": "unstarted"
   },
   "priority": {"P1": 1, "P2": 3, "P3": 4},
   "managed_labels": [

@@ -1,10 +1,12 @@
 import base64
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from coord_tracker_bridge import (
     BridgeLedger,
+    CapabilityState,
     Change,
     ChangeKind,
     GraphQLResponse,
@@ -13,7 +15,10 @@ from coord_tracker_bridge import (
     LinearTrackerAdapter,
     LedgerEntry,
     ResourcePlan,
+    Snapshot,
     SourceIdentity,
+    WorkRecord,
+    load_policy,
 )
 from coord_tracker_bridge.linear import (
     append_source_metadata,
@@ -237,6 +242,91 @@ def test_false_success_resource_creation_is_rejected(plan, root):
 
     with pytest.raises(LinearError, match="mutation did not succeed"):
         LinearTrackerAdapter(LinearClient(transport), "team").apply_resources(plan)
+
+
+def test_legacy_marker_adoption_uses_footer_and_checks_arbitrary_slug_suffix():
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "role-vacant-example-h24h-sla")
+    snapshot = Snapshot(
+        (WorkRecord(source, "tasks", "Canonical", "active", origin="fleet"),),
+        True, (), {"tasks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    issue = {
+        "id": "LIN-1",
+        "title": "Legacy title [bus:h24h-sla]",
+        "description": "body\n\n---\nbus slug: `role-vacant-example-h24h-sla`",
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
+        response({"issueUpdate": {"success": True}}),
+    ])
+    adapter = LinearTrackerAdapter(LinearClient(transport), "team")
+
+    adoptions = adapter.plan_marker_adoptions(snapshot, BridgeLedger(), load_policy())
+    adapter.apply_marker_adoption(adoptions[0])
+
+    assert adoptions[0].source == source
+    mutation = transport.payloads[1]["variables"]
+    assert mutation["input"]["title"] == "Legacy title"
+    metadata = parse_bridge_metadata(mutation["input"]["description"])
+    assert SourceIdentity.from_dict(metadata["source"]) == source
+    assert metadata["capability"] == "tasks"
+
+
+def test_unknown_legacy_marker_fails_before_any_mutation():
+    snapshot = Snapshot(
+        (), True, (), {"tasks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    issue = {
+        "id": "LIN-1",
+        "title": "Unknown [bus:deadbeef]",
+        "description": "bus slug: `unknown-task-deadbeef`",
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
+    ])
+
+    with pytest.raises(LinearError, match="no included source row"):
+        LinearTrackerAdapter(LinearClient(transport), "team").plan_marker_adoptions(
+            snapshot, BridgeLedger(), load_policy()
+        )
+
+    assert len(transport.payloads) == 1
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "message"),
+    [
+        ("Legacy [bus:h24h-sla]", "body", "exactly one bus slug footer"),
+        (
+            "Legacy [bus:deadbeef]",
+            "bus slug: `role-vacant-example-h24h-sla`",
+            "marker does not match footer slug suffix",
+        ),
+    ],
+)
+def test_legacy_adoption_rejects_missing_footer_or_marker_mismatch(
+    title, description, message
+):
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "role-vacant-example-h24h-sla")
+    snapshot = Snapshot(
+        (WorkRecord(source, "tasks", "Canonical", "active", origin="fleet"),),
+        True, (), {"tasks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    transport = FakeTransport([
+        response({"issues": {"nodes": [{
+            "id": "LIN-1", "title": title, "description": description,
+        }], "pageInfo": {"hasNextPage": False}}}),
+    ])
+
+    with pytest.raises(LinearError, match=message):
+        LinearTrackerAdapter(LinearClient(transport), "team").plan_marker_adoptions(
+            snapshot, BridgeLedger(), load_policy()
+        )
+
+    assert len(transport.payloads) == 1
 
 
 def test_comment_and_due_date_are_semantic_operations():
