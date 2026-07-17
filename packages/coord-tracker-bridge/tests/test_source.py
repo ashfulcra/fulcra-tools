@@ -60,6 +60,15 @@ def test_engine_source_rejects_degraded_archived_search():
         EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
 
 
+def test_engine_source_rejects_duplicate_exact_archived_search_matches():
+    def run(_argv, _timeout):
+        row = {"id": "task-done", "title": "Done", "status": "done"}
+        return 0, json.dumps([row, {**row, "archived": "2026-06"}]), ""
+
+    with pytest.raises(ValueError, match="legacy slug lookup is ambiguous"):
+        EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
+
+
 def test_engine_source_normalizes_each_capability_and_sanitizes_text():
     adapter = EngineSourceAdapter(
         "fulcra",

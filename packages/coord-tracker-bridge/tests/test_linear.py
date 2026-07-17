@@ -326,6 +326,33 @@ def test_legacy_adoption_resolves_terminal_task_absent_from_hot_snapshot():
     assert resolved == ["completed-task-deadbeef"]
 
 
+def test_legacy_adoption_rejects_degraded_terminal_lookup_before_mutation():
+    snapshot = Snapshot(
+        (), True, (), {"tasks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    issue = {
+        "id": "LIN-legacy",
+        "title": "Completed [bus:deadbeef]",
+        "description": "bus slug: `completed-task-deadbeef`",
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}}),
+    ])
+    ledger = BridgeLedger()
+
+    def resolve(_slug):
+        raise ValueError("legacy slug lookup failed")
+
+    with pytest.raises(ValueError, match="legacy slug lookup failed"):
+        LinearTrackerAdapter(LinearClient(transport), "team").plan_marker_adoptions(
+            snapshot, ledger, load_policy(), resolve
+        )
+
+    assert len(transport.payloads) == 1
+    assert len(ledger) == 0
+
+
 def test_legacy_adoption_rejects_source_already_mapped_to_another_issue():
     source = SourceIdentity("coord-engine", "fulcra/tasks", "role-vacant-example-h24h-sla")
     snapshot = Snapshot(
