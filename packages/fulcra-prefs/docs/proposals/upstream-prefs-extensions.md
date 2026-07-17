@@ -1,25 +1,31 @@
-# Proposal: audiences + consent levels for the official `fulcra-prefs` skill
+# Proposal: a **community** skill layering consented multi-audience disclosure on the core `fulcra-prefs` skill
 
 **Status:** draft (reeval epic phase-4, item 1) · **Author:** fulcra-prefs-maintainer
-**Target venue:** `fulcradynamics/agent-skills` (issue → PR from an `ashfulcra` fork)
+**Target venue:** `fulcradynamics/community-skills` (operator ruling 2026-07-16:
+`agent-skills` is core-only; community proposals go to community-skills. Filed by
+coord-maintainer, who has fulcradynamics access — this session cannot reach that repo.)
 **Source of record:** phase-3 realignment verdict (`artifact/2026-07-04-prefs-vault-realignment-verdict.md`, APPROVED)
 
-> This is the issue/PR text we intend to file upstream, staged here for codex-prefs
-> review before it leaves the repo. No code ships from this doc — it proposes
-> conventions and an optional schema field for the official annotation-based
-> preference skill.
+> This is the issue/PR text we intend to file to `fulcradynamics/community-skills`,
+> staged here for review before it leaves the repo. No code ships from this doc, and
+> it changes **nothing** in the core `agent-skills` skill: it proposes a *community*
+> skill that adds consented multi-audience disclosure on top of the core prefs
+> records **additively** — the core skill ignores the extra `consent` field, so no
+> core schema change is required.
 
 ## Context
 
-The official `fulcra-prefs` skill stores preferences as `MomentAnnotation`
-"User Preference" records shaped `{key, value, scope, strength}` with newest-wins
-resolution. The `fulcra-tools` package of the same name (a reference implementation
-that predates the official skill) additionally supports **audiences**, **consent
-levels**, session-start **injection**, and **solver participation**. The name
-collision is resolved in the official skill's favor; this proposal upstreams the
-two extensions that are generally useful and schema-compatible — audiences and
-consent — so the official skill can serve multi-agent and disclosure-gated use
-cases without a separate package.
+The **core** `fulcra-prefs` skill (in `agent-skills`) stores preferences as
+`MomentAnnotation` "User Preference" records shaped `{key, value, scope, strength}`
+with newest-wins resolution. The `fulcra-tools` package of the same name (a
+reference implementation that predates the core skill) additionally supports
+**audiences**, **consent levels**, session-start **injection**, and **solver
+participation**. The name collision is resolved in the core skill's favor; this
+proposal packages the two generally-useful, additive capabilities — audiences and
+consent — as a **community skill** that reads and writes the *same* core records
+and adds the consented-disclosure logic on top. Because the additions are additive
+fields the core skill ignores, the community skill serves multi-agent and
+disclosure-gated use cases **without changing the core skill**.
 
 The design goal is **additive and backward-compatible**: a record written without
 these fields behaves exactly as today.
@@ -72,13 +78,13 @@ Disclosing a record's value to audience `A` for purpose `P` is permitted **iff**
 ## Extension 2 — disclosure records are audit events, not preferences
 
 Each disclosure (a compile *for* an audience) emits a **disclosure record** — but
-it must **not** enter ordinary preference synthesis. Under the official skill's
+it must **not** enter ordinary preference synthesis. Under the core skill's
 single `User Preference` stream, an audit entry keyed like a preference would
 otherwise be folded into newest-wins resolution and pollute working context.
 
 Proposal: disclosure records carry a distinct marker (a reserved kind/type, e.g.
-`kind: "consent.disclosure"`, or a dedicated data-type) and the compiler
-**excludes** them from preference synthesis while retaining them as the audit
+`kind: "consent.disclosure"`, or a dedicated data-type) and the community skill's
+compile **excludes** them from preference synthesis while retaining them as the audit
 stream (the "Privacy Ledger"). The exclusion rule is part of the contract, not an
 implementation detail — a reader that folds disclosure records into preferences is
 non-conformant.
@@ -86,12 +92,12 @@ non-conformant.
 ## Injection — a convention, not a CLI verb
 
 The reference package injects a compiled preference block at session start via a
-CLI (`inject --platform`). The official surface has no such verb, and the nearest
-official pattern is **session-start prose** (cf. `fulcra-situational-awareness`).
-We propose documenting preference injection as a **session-start convention** in
-the skill text: at session start, read the compiled preference view and prepend it
-to working context. This keeps the official skill CLI-free (prose over
-`fulcra-api`) while giving agents the same load-at-start behavior.
+CLI (`inject --platform`). The core skills have no such verb, and the nearest core
+pattern is **session-start prose** (cf. `fulcra-situational-awareness`). The
+community skill documents preference injection as a **session-start convention**:
+at session start, read the compiled preference view and prepend it to working
+context. This keeps the community skill CLI-free (prose over `fulcra-api`) while
+giving agents the same load-at-start behavior.
 
 ## What stays package-side (explicitly out of scope for this proposal)
 
@@ -99,8 +105,9 @@ to working context. This keeps the official skill CLI-free (prose over
   engine) stays in the `fulcra-tools` package until the sharing primitive ships
   (parked per operator direction 2026-06-17).
 - The compiler's half-life decay math and deterministic conflict resolution remain
-  the reference implementation's concern; this proposal does not ask the official
-  skill to adopt the decay model, only the two disclosure-facing extensions.
+  the reference implementation's concern; this proposal does not ask the core
+  skill to adopt the decay model, and asks it to change nothing — the community
+  skill layers only the two disclosure-facing capabilities.
 
 ## Compatibility summary
 
@@ -115,7 +122,7 @@ Every change is additive and fail-closed: a reader that understands none of it s
 today's private-by-default behavior; a reader that half-understands it must deny
 disclosure rather than guess.
 
-## Open questions for upstream maintainers
+## Open questions for community-skills reviewers
 
 1. `consent.level` as a closed enum (`read`/`solve`) in the schema, or an open
    string with documented well-known values + fail-closed on unknown? (We lean
@@ -123,5 +130,8 @@ disclosure rather than guess.
 2. Marker for disclosure/audit records: a reserved `kind` value on the shared
    preference stream, or a dedicated data-type? Either works provided synthesis
    excludes them by contract.
-3. Venue: issue-first for discussion, then PR against the skill's `SKILL.md` +
-   schema doc.
+3. Filing shape: a community skill in `community-skills` (issue-first for
+   discussion, then the skill's `SKILL.md`). The `consent` field is additive, so it
+   needs **no** core-skill schema change — the core skill ignores unknown fields. If
+   the core maintainers ever want to bless `consent` in the core schema, that is a
+   separate `agent-skills` ask, not part of this community proposal.
