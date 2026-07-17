@@ -61,7 +61,9 @@ def _diff(desired: Mapping[str, Any], actual: Mapping[str, Any], policy: Policy)
             continue
         current = actual.get(field)
         if owner == "merge" and field == "labels":
-            wanted = tuple(dict.fromkeys((*tuple(current or ()), *tuple(wanted or ()))))
+            managed = set(policy.managed_labels)
+            tracker_owned = tuple(label for label in tuple(current or ()) if label not in managed)
+            wanted = tuple(dict.fromkeys((*tracker_owned, *tuple(wanted or ()))))
         if current != wanted:
             changed[field] = wanted
     return changed
@@ -87,7 +89,10 @@ def build_plan(
             continue
         existing = managed_by_source.get(key)
         if item.archived:
-            if existing and not existing.closed and snapshot.absence_is_authoritative(item.capability):
+            # This is explicit positive evidence from a present source record,
+            # not a close inferred from absence. Snapshot completeness only
+            # gates the separate absent-ledger pass below.
+            if existing and not existing.closed:
                 changes.append(Change(ChangeKind.CLOSE, item.source, existing.provider_id, MappingProxyType({})))
             continue
         wanted = _desired(item, policy)

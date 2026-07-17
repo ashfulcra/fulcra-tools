@@ -129,17 +129,40 @@ def test_tracker_owned_field_is_preserved(tmp_path):
     assert "title" not in (plan.changes[0].fields if plan.changes else {})
 
 
-def test_archived_item_closes_and_reappearing_item_reopens():
+def test_managed_label_transition_replaces_stale_label_and_preserves_operator_label():
+    blocked = managed(
+        "task-1",
+        fields={"labels": ("lane:blocked", "kind:task", "operator:keep")},
+    )
+    plan = build_plan(
+        snapshot([item("task-1")], {"tasks": CapabilityState.COMPLETE}),
+        [blocked], BridgeLedger([ledger_entry("task-1")]), POLICY,
+    )
+
+    assert plan.changes[0].fields["labels"] == (
+        "operator:keep", "lane:active", "kind:task"
+    )
+
+
+def test_explicit_archived_item_closes_even_when_snapshot_is_globally_incomplete():
     closed = build_plan(
-        snapshot([item("task-1", archived=True)], {"tasks": CapabilityState.COMPLETE}),
+        snapshot(
+            [item("task-1", archived=True)],
+            {"tasks": CapabilityState.DEGRADED},
+            complete=False,
+        ),
         [managed("task-1")], BridgeLedger([ledger_entry("task-1")]), POLICY,
     )
+
+    assert closed.changes[0].kind is ChangeKind.CLOSE
+
+
+def test_reappearing_item_reopens():
     reopened = build_plan(
         snapshot([item("task-1")], {"tasks": CapabilityState.COMPLETE}),
         [managed("task-1", closed=True)], BridgeLedger([ledger_entry("task-1")]), POLICY,
     )
 
-    assert closed.changes[0].kind is ChangeKind.CLOSE
     assert reopened.changes[0].kind is ChangeKind.REOPEN
 
 
