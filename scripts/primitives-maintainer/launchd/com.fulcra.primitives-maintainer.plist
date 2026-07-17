@@ -20,6 +20,20 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- OPTIONAL, and host-specific: the coord identity these alerts are
+             sent AS. launchd jobs do not inherit your shell environment, so if
+             you want a named sender it has to be here. Uncomment and put THIS
+             host's identity in it:
+
+               <key>FULCRA_COORD_AGENT</key>
+               <string>claude-code:your-host:fulcra-primitives-maintainer</string>
+
+             Left out, coord-engine derives coord-reconcile:<hostname> itself and
+             the alert still delivers — the sender only addresses the reply leg.
+             Do NOT ship a value here: an identity that is right on one host is a
+             dead mailbox on every other one, which is the bug this file's
+             history is about. The address that must be right is the TARGET, and
+             that is a role, resolved and verified at runtime. -->
     </dict>
     <key>StandardOutPath</key>
     <string>__CHECKOUT__/.primitives-state/launchd.out.log</string>

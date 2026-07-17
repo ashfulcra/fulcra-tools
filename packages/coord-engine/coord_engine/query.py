@@ -29,21 +29,30 @@ def board(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
 
 
 def needs_me(
-    rows: list[dict[str, Any]], agent: str, *, now: Optional[str] = None
+    rows: list[dict[str, Any]], agent: str, *, now: Optional[str] = None,
+    held_roles: "Optional[set[str] | list[str]]" = None,
 ) -> list[dict[str, Any]]:
-    """Open rows assigned to ``agent`` or naming it in ``blocked_on``, gated on
-    ``not_before`` (an item scheduled for the future is hidden until ``now``).
+    """Open rows assigned to ``agent``, assigned to a ROLE ``agent`` holds
+    (``held_roles``), or naming it in ``blocked_on``, gated on ``not_before`` (an
+    item scheduled for the future is hidden until ``now``).
 
     ``now`` is an ISO-8601 string; ISO sorts lexically so string compare is a
     valid time compare. If ``now`` is None the gate is skipped.
+
+    ``held_roles`` is the caller's resolved role set (a lease read — see
+    ``cli._held_roles_for_rows``); None/empty leaves behavior unchanged. Note this
+    is deliberately NOT ``directives.is_directed_at``: needs-me is the fold for
+    work that is *yours*, so a broadcast (``*``) still does not enter it.
     """
+    roles = set(held_roles or ())
     out: list[dict[str, Any]] = []
     for r in rows:
         if r.get("status") not in OPEN_STATUSES:
             continue
         assignee = r.get("assignee")
         blocked_on = r.get("blocked_on") or ""
-        if assignee != agent and agent not in str(blocked_on):
+        if (assignee != agent and assignee not in roles
+                and agent not in str(blocked_on)):
             continue
         nb = r.get("not_before")
         if nb and now is not None and str(nb) > now:

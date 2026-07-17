@@ -33,8 +33,10 @@ coord team `fulcra` on 2026-07-04.)
 | Script | Cadence | What it checks |
 |---|---|---|
 | `drift-check.sh` | daily | Fingerprints the **published** agent-facing surface — the top-level verb list and per-group subcommands of `fulcra-api <version> --help` for the version currently on PyPI, the PyPI version itself, the full path→methods map of the OpenAPI spec, MCP OAuth scopes, and `fulcra-api-python` main HEAD — vs `.primitives-state/baseline.json`. Covers the documented full-rewrite trigger for the part that is mechanically visible: `record` and `delete` are **top-level CLI verbs**, so one landing or vanishing moves `cli_verbs` and the alert names it. See the claim/limit table below for what it does **not** see. |
-| `test-drift-check.sh` | on change | Regression suite for `drift-check.sh`. Runs the real script against scratch state dirs, a stub CLI, `file://` probe URLs and a stub `coord-engine` — no network, no bus, no live baseline. Run it before shipping a change to the daily check: `./test-drift-check.sh` (`-v` to see each run's output). |
-| `weekly-review.sh` | weekly | Wide fingerprint — full path+method set, all schema names, docs page + MCP discovery hashes — vs `weekly-baseline.json`, **and** always drops `WEEKLY-REVIEW-DUE.txt` so a session does a genuine end-to-end human-eyes re-read (catches docs prose / new MCP tools a hash can't judge). |
+| `lib-alert.sh` | sourced by both | The shared alert path: sender resolution, the role target, reachability verification, rc-checked delivery, and `ALERT-UNDELIVERED.txt`. Sourced rather than copied — this half of the system had the same bug in both scripts precisely because it was copy-pasted into both. |
+| `test-drift-check.sh` | on change | Regression suite for `drift-check.sh` and the alert path. Runs the real script against scratch state dirs, a stub CLI, `file://` probe URLs and a stub `coord-engine` — no network, no bus, no live baseline. Run it before shipping a change to the daily check: `./test-drift-check.sh` (`-v` to see each run's output). |
+| `weekly-review.sh` | weekly | Wide fingerprint — full path+method set, all schema names, docs page + MCP discovery hashes — vs `weekly-baseline.json`, **and** always drops `WEEKLY-REVIEW-DUE.txt` so a session does a genuine end-to-end human-eyes re-read (catches docs prose / new MCP tools a hash can't judge). Fails closed on the same terms as the daily. |
+| `test-weekly-review.sh` | on change | Regression suite for `weekly-review.sh`. Same shape as the daily's: real script, scratch state dir, stub `coord-engine`, `file://` probe URLs. |
 
 ### What `drift-check.sh` can and cannot see
 
@@ -48,9 +50,9 @@ Read this before treating a clean run as coverage.
 | A release that changes the surface | yes | `pypi_version` + `cli_verbs` |
 | REST endpoints: any path added, removed, or re-methoded | yes | `spec_hash` over the full path→methods map |
 | Unreleased changes on `fulcra-api-python` main | partial | `cli_head` — a HEAD sha only; says *something* changed, not what |
-| **MCP tool list** | **no** | `mcp_scopes` is OAuth `scopes_supported` only. A new MCP write tool under an existing scope moves nothing here, and tools/list needs an authenticated session. `weekly-review.sh`'s human-eyes pass is the only coverage. |
+| **MCP tool list** | **no** | `mcp_scopes` is OAuth `scopes_supported` only. A new MCP write tool under an existing scope moves nothing here, and tools/list needs an authenticated session. `weekly-review.sh`'s **human-eyes pass** is the only coverage — its `docs_mcp` hash is a page hash, not a tool list. |
 | **Datashare REST endpoints** | **no** | They are not in `openapi.json` at all (verified 2026-07-16: 53 paths, zero datashare paths), so `spec_hash` cannot see them. The CLI `share` group in `cli_groups` is the only coverage. |
-| Docs prose; semantics changing behind an unchanged signature | **no** | Nothing mechanical can. `weekly-review.sh` covers the docs half. |
+| Docs prose; semantics changing behind an unchanged signature | **no** | Nothing mechanical can judge these. `weekly-review.sh` hashes the docs pages — see its limits below before counting that as coverage. |
 
 The daily check **fails closed.** Every probe result is either a real observed
 value or `UNKNOWN`. There is no third category — no default that type-checks as
@@ -86,27 +88,110 @@ This is deliberate: on 2026-07-16 this script missed `record`/`delete` landing i
 not produce a hit no matter what the CLI did. A scan whose empty result is not
 proven meaningful is worse than no scan.
 
-On drift either script posts an alert to the **coord** team bus (`coord-engine
-tell fulcra …`) into the `claude-code:Mac:fulcra-primitives-maintainer` inbox —
-the role that acts on it. `drift-check.sh` names **what** changed (which verbs
-appeared/disappeared, which version, which group) in both the tell and
-`.primitives-state/DRIFT-ALERT.txt`, and flags a `record`/`delete` move as the
-full-rewrite trigger at P1.
+### What `weekly-review.sh` can and cannot see
 
-### The two markers
+The weekly fails closed on exactly the daily's terms — a probe result is a real
+observed value or `UNKNOWN`, never a default, and `UNKNOWN` never advances
+`weekly-baseline.json`. Until 2026-07-16 every probe here fell back to the
+literal string `FAIL`, which is a legal fingerprint value, so it was rebaselined
+like any observation: a **transient** outage alerted once, baked `FAIL` in, and
+then *recovery* alerted as drift; a **persistent** outage sat at `FAIL == FAIL`
+and reported clean forever. The docs probes were worse — a dead URL fed the
+hasher an empty string and produced `sha256("")`, a stable, real-looking hash
+that never moves again.
+
+| Probe | Control |
+|---|---|
+| `wide_spec` | the fetched spec must parse, have a non-empty `paths`, and contain the sentinel path (`/user/v1alpha1/annotation`) — a valid OpenAPI doc for *someone else's* API hashes just as cleanly |
+| `docs_overview`, `docs_api`, `docs_mcp` | the fetched page's **`<title>`** must contain that page's sentinel, **and** no two docs probes may return the same hash |
+| `mcp_disc` | the fetched discovery doc must contain the sentinel scope (`openid`) |
+
+**The docs probes read the origin (`fulcradynamics.github.io/developer-docs/`),
+not `docs.fulcradynamics.com`.** Verified live 2026-07-16: the vanity domain
+301-redirects *every* path to the docs root, dropping the path — `/api-reference/`,
+`/mcp-server/`, even `/sitemap.xml` all return the home page at HTTP 200. So all
+three docs probes were fetching **one document** and hashing it three times:
+`docs_api` and `docs_mcp` had never observed the pages they are named after, a
+nonexistent URL produced the same clean hash as a real one, and this was the only
+mechanical docs coverage the repo claimed. It is the same shape as the
+fingerprint #407 removed from the daily — a probe structurally incapable of
+producing a hit.
+
+Two controls now stand between that and a clean week, because the failure passes
+every obvious check (the fetch succeeds, the page is real, the hash is stable):
+the **title** check identifies *which* document was served, and the **collision**
+check catches the general case — three distinct pages cannot hash identically, so
+if they do, the probes are not observing three pages. `curl -f` cannot see any of
+this; a redirect to the wrong page is a 200.
+
+Known limits, so a clean week is not read as more than it is: `/api-reference/`
+renders client-side from the OpenAPI spec, so its ~216 chars of server-side text
+make `docs_api` a **thin** observation (it moves on structural change, not on
+prose) — the spec it renders is covered properly by `wide_spec`. And `docs_mcp`
+is a page hash, not the MCP tool list; nothing mechanical here sees that.
+
+## The alert path (`lib-alert.sh`)
+
+On drift either script posts to the **coord** team bus (`coord-engine tell fulcra
+…`). `drift-check.sh` names **what** changed (which verbs appeared/disappeared,
+which version, which group) in both the tell and `.primitives-state/DRIFT-ALERT.txt`,
+and flags a `record`/`delete` move as the full-rewrite trigger at P1.
+
+**The alert path is part of the probe.** A detector that pages a dead mailbox
+reports silence exactly as convincingly as a detector that sees nothing. On
+2026-07-16 the daily fired correctly at 16:11:50 with real drift and its P1 went
+to `claude-code:Mac:fulcra-primitives-maintainer` — one host's session identity,
+hardcoded in a script that ships to every host (both scripts had the same line),
+last beat 8 days earlier. `tell` returned 0. The drift was found by hand. So:
+
+| | Rule |
+|---|---|
+| **Target** | Configured as the **role** `fulcra-primitives-maintainer`, never a named agent. Sessions stop; the role outlives them, and whoever holds it is by definition who should act. But the role is an **address-book entry, not an address** — see *Addressing* below. |
+| **Sender** | Resolved at runtime from `PRIMITIVES_AGENT` / `FULCRA_COORD_AGENT` — the same var the engine reads. Unset, we omit `--from` and let **coord-engine's own** resolver derive `coord-reconcile:<hostname>`; a script that mints its own id is a second resolver that agrees with the engine right up until it doesn't. |
+| **Addressing** | The role is resolved to a **holder identity** at send time and the `tell` goes *there*. A directive addressed to a role name is folded **only** by a live `listen`: in `coord_engine`, `cmd_inbox`, `cmd_briefing` and `query.needs_me` all fold *without* `held_roles`, so a holder running an ordinary heartbeat never sees it. An agent-addressed directive is folded by every consumer path. |
+| **Reachability** | Verified **every run, including clean ones** — routing rot costs nothing until the day it matters, which is the day you find out. Reachable = a fresh lease **and** `presence` vouching for that holder (live/idle — the engine's own broadcast reach). A lease alone is **not** accepted: it proves someone *holds* the role, not that anything *consumes* it. |
+| **Fail-closed** | A lookup that errors or does not parse is **UNKNOWN → a problem**, never "assume it's fine". "Nobody is listening" and "I could not check" are both loud; neither is a pass. |
+| **Delivery** | `tell`'s rc is checked and a nonzero rc (e.g. the slug-prefix collision that returns 1 "already exists") is a **delivery failure**, not a log line. It used to be logged — to a file nothing reads. An rc 0 to an *unresolved* address is also not delivery, and is booked as a problem. |
+| **Loud locally** | Any of the above failing writes `ALERT-UNDELIVERED.txt`, prints to stderr, and exits **3** on a run that would otherwise have exited 0. A dead mailbox cannot tell you it is dead, so the local side has to. |
+
+**A fresh lease is not a listener.** The reachability rule above is deliberately
+stricter than "is the role held", because the first version of this file accepted
+HELD + a fresh holder and then addressed the `tell` to the role *name* — which
+reproduced the 2026-07-16 failure one level up: `tell` returns 0, the marker
+clears, and a holder who never runs `listen` never sees the alert. What the check
+proves is that the identity being addressed is **beating** and that the directive
+lands in a fold that identity's watcher runs. What it does *not* prove is that a
+human read it — only an ack proves that, and an ack cannot be awaited in-band.
+Hence the outstanding-flag replay: an owed alert is **re-sent** on later runs
+rather than trusted to one `tell` (see *The markers*).
+
+A vacant — or dark — role is *deliberately* a visible local failure rather than a
+fallback to some other recipient: silently redirecting a P1 to whoever is around
+is how a mailbox becomes wrong without anyone noticing. Fix it by giving the role
+a holder that both leases **and** beats (`coord-engine roles claim fulcra
+fulcra-primitives-maintainer --agent <id>` + a live `presence beat`); the next run
+that can deliver clears the marker itself. Fleet-wide, the engine's own
+`coord-engine escalate` sweep is what turns a vacant role into a P1 at its
+maintainer — these jobs report their own reachability, they don't reimplement it.
+
+### The markers
 
 The baseline advances after a drift so the same change is not re-*discovered*
 daily — but that does not clear the debt, and once the baseline has moved the
-alert file is the **only** surviving record of what changed. So there are two
-markers in `.primitives-state/`, deliberately separate:
+alert file is the **only** surviving record of what changed. So the markers in
+`.primitives-state/` are deliberately separate — one debt each:
 
 | File | Means | Cleared by |
 |---|---|---|
 | `DRIFT-ALERT.txt` | Real drift was observed; a `FULCRA-PRIMITIVES.md` rewrite is owed. | A session that did the rewrite, with `rm`. **Nothing in the script ever truncates it.** A second drift *appends*; every run that finds it re-alerts P1 ("OUTSTANDING"). |
 | `PROBE-UNKNOWN.txt` | A probe could not answer; the surface was not observed. | The next run whose probes answer — the script removes it itself. |
+| `ALERT-UNDELIVERED.txt` | Nobody could be shown to have received this run's alert (role vacant, no reachable holder, target unverifiable, or the `tell` was dropped). Whatever else the run said, treat it as unheard. | The next run whose target answers **and whose owed alerts were re-sent** — the script removes it itself. |
+| `WEEKLY-REVIEW-DUE.txt` | The weekly human-eyes re-read is owed. Dropped every week; **appended to** while outstanding, since once the weekly baseline moves past a wide drift this file is its only record. | A session that did the re-read, with `rm`. Like `DRIFT-ALERT.txt`, every later run that finds it **re-alerts** ("OUTSTANDING") — including an UNKNOWN week, which carries it in that week's alert. An unchanged week does not discharge it. |
+| `WEEKLY-PROBE-UNKNOWN.txt` | A weekly probe could not answer. Its **own** file, not `PROBE-UNKNOWN.txt`: the two jobs share a state dir, and a weekly debt cleared by a healthy daily run would be discharged by something that never checked it. | The next weekly run whose probes answer. |
 
 They are separate because they are different debts, with different owners and
-different discharge conditions. Collapsing them loses data in one direction:
+different discharge conditions: fix the doc, fix the probe, fix the routing.
+Collapsing them loses data in one direction:
 an offline run overwriting `DRIFT-ALERT.txt` with probe-failure text would mean
 that once someone fixed the probe and cleared the marker, the rewrite that was
 actually owed is gone — silently. An `UNKNOWN` run observed nothing, so it has
@@ -115,16 +200,25 @@ drift alert instead, and leaves it alone.
 
 A drift the script could not characterize does not advance the baseline at all.
 
-Exit codes: `0` clean, `1` drift or outstanding unactioned alert, `2` UNKNOWN
-(probe failure).
+Exit codes (both scripts): `0` clean, `1` drift or an outstanding unactioned
+alert/re-read, `2` UNKNOWN (probe failure), `3` the alert path could not deliver
+on a run that was otherwise clean. 3 never masks 1 or 2 — those already summon a
+human, and more specifically.
 
 ### Env knobs
 
 | Var | Default | Use |
 |---|---|---|
-| `PRIMITIVES_STATE_DIR` | `<checkout>/.primitives-state` | Point a test run at a scratch state dir. **Always set this when trying the script out** — a live run mutates the real baseline. |
+| `PRIMITIVES_STATE_DIR` | `<checkout>/.primitives-state` | Point a test run at a scratch state dir. **Always set this when trying either script out** — a live run mutates the real baseline. |
 | `PRIMITIVES_COORD_ENGINE` | `coord-engine` on `PATH` | Point at a stub to capture the tell instead of posting it. |
+| `PRIMITIVES_AGENT` / `FULCRA_COORD_AGENT` | *(unset — coord-engine derives `coord-reconcile:<hostname>`)* | The identity alerts are sent **as**. Never hardcode one in a script or plist template. |
+| `PRIMITIVES_TARGET` | `fulcra-primitives-maintainer` | Who alerts are **for**. A role by default; resolved to a holder identity before sending. |
+| `PRIMITIVES_TARGET_KIND` | `role` | `role` resolves holders via `roles status`, then requires `presence` to vouch for one; `agent` takes the configured id as the candidate and requires the same. Changes only *how* the address is resolved, never *whether* it is verified — **both** kinds end at presence. |
+| `PRIMITIVES_TEAM` | `fulcra` | Coord team to post to. |
 | `PRIMITIVES_SPEC_URL`, `PRIMITIVES_MCP_URL`, `PRIMITIVES_PYPI_URL` | production | Redirect a probe (testing; `file://` works). |
+| `PRIMITIVES_DOCS_{OVERVIEW,API,MCP}_URL` | the docs **origin** (see above — the vanity domain drops the path) | Weekly only. Redirect a docs probe. |
+| `PRIMITIVES_DOCS_{OVERVIEW,API,MCP}_SENTINEL` | `Fulcra Developer Docs`, `REST API Reference`, `Fulcra MCP Server` | Weekly only. The fragment that must appear in each page's `<title>` — i.e. proof the URL served *that* page. |
+| `PRIMITIVES_DOCS_MIN_CHARS` | `120` | Weekly only. Floor on extracted prose; below it, an error page or empty shell is assumed. |
 | `PRIMITIVES_SKIP_GH` | `0` | Set `1` on a host with no `gh` auth. Records `cli_head: disabled` — an explicit opt-out on the record, rather than a probe that silently always fails. |
 | `PRIMITIVES_CLI_SENTINELS` | `auth,user-info,catalog` | Top-level verbs the CLI parse must contain for its result to be trusted. |
 | `PRIMITIVES_CLI_GROUP_SENTINELS` | `auth` | Groups that must come back with ≥1 observed subcommand. Proves the group sub-probe can produce a hit. |
@@ -144,15 +238,25 @@ at the checkout root and is gitignored.
 The role pushes the doc **directly to `main`** (doc-only); everything else,
 including this tooling, goes through the normal PR + review flow.
 
-1. Clone the repo to a dedicated checkout. coord takes identity per-command via
-   `--agent`/`--from` (no persisted identity to set); announce presence once:
+1. Clone the repo to a dedicated checkout.
+2. **Claim the role the alerts are addressed to — and keep beating**, or nothing
+   this tooling detects reaches anyone. This is the install step, not a nicety —
+   the scripts check it on every run and exit 3 if it fails:
    ```bash
-   coord-engine presence beat fulcra --agent claude-code:<host>:fulcra-primitives-maintainer \
-     --workstream fulcra-primitives
+   coord-engine roles claim fulcra fulcra-primitives-maintainer --agent <your-id>
+   coord-engine roles status fulcra fulcra-primitives-maintainer   # expect HELD
+   coord-engine presence show fulcra                               # expect <your-id> live/idle
    ```
-2. Copy the plist templates from [`launchd/`](launchd), replacing
+   Both halves are load-bearing, and the second is the one that is easy to miss.
+   The lease has a 24h SLA, so a session that stops holding it makes the role
+   vacant. But a **fresh lease is not enough**: the alert is delivered to the
+   holder's *identity*, and presence has to vouch for it. A holder that leases the
+   role and then goes dark is a role that is HELD and reaches nobody — the next run
+   says so, loudly, instead of pretending.
+3. Copy the plist templates from [`launchd/`](launchd), replacing
    `__CHECKOUT__` with the absolute path of your checkout, into
    `~/Library/LaunchAgents/`, then `launchctl load -w` each. The daily job runs
    ~09:13, the weekly ~Sun 09:27 (off-minute on purpose — see fleet-friendly
-   scheduling).
-3. First run writes the baseline; subsequent runs alert only on change.
+   scheduling). launchd does not inherit your shell environment: if you want a
+   named sender, set `FULCRA_COORD_AGENT` in the plist (see the note in it).
+4. First run writes the baseline; subsequent runs alert only on change.
