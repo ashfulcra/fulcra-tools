@@ -13,13 +13,14 @@ from .lease import LeaseHeld
 from .linear import HttpxGraphQLTransport, LinearClient, LinearError, LinearTrackerAdapter
 from .policy import load_policy
 from .service import BridgePlan, BridgeService
-from .source import EngineSourceAdapter
+from .source import EngineSourceAdapter, TeamsSourceAdapter
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coord-tracker-bridge")
     parser.add_argument("phase", choices=("plan", "apply-resources", "sync"))
     parser.add_argument("--coord-team", default=os.environ.get("COORD_TEAM", "fulcra"))
+    parser.add_argument("--source", choices=("engine", "teams"), default="engine")
     parser.add_argument("--principal", default="ash")
     parser.add_argument("--linear-team-id", default=os.environ.get("LINEAR_TEAM_ID"))
     parser.add_argument("--policy", type=Path)
@@ -36,9 +37,14 @@ def _service(args: argparse.Namespace) -> BridgeService:
     if not api_key or not args.linear_team_id:
         raise LinearError("LINEAR_API_KEY and --linear-team-id/LINEAR_TEAM_ID are required")
     policy = load_policy(args.policy)
-    state_key = f"{args.coord_team}-{args.linear_team_id}-{policy.hash[:12]}"
+    state_key = f"{args.source}-{args.coord_team}-{args.linear_team_id}-{policy.hash[:12]}"
+    source = (
+        EngineSourceAdapter(args.coord_team, principal=args.principal)
+        if args.source == "engine"
+        else TeamsSourceAdapter(args.coord_team)
+    )
     return BridgeService(
-        EngineSourceAdapter(args.coord_team, principal=args.principal),
+        source,
         LinearTrackerAdapter(LinearClient(HttpxGraphQLTransport(api_key)), args.linear_team_id),
         policy,
         args.state_dir / f"{state_key}.json",
