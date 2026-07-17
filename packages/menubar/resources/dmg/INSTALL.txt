@@ -1,0 +1,39 @@
+Fulcra Collect — beta install
+==============================
+
+This disk image contains two pieces:
+
+  • Fulcra Collect.app         — the app that collects your data into Fulcra.
+  • Fulcra Attention Extension — a Chrome extension that records what you read
+                                 in the browser (optional; set up separately).
+
+
+1. Install the app
+------------------
+Drag "Fulcra Collect.app" onto the Applications folder in this window, then
+launch it from Applications. A Fulcra icon appears in your menu bar (top-right
+of the screen) — click it to open the app.
+
+On first launch the app walks you through:
+  • signing in to Fulcra,
+  • starting the background collector,
+  • and connecting the sources you want (including Gmail).
+
+
+2. Set up the browser extension (optional)
+------------------------------------------
+The attention extension is loaded manually in Chrome:
+
+  1. Copy the "Fulcra Attention Extension" folder from this disk image to a
+     permanent location — for example your Documents folder. (Don't leave it on
+     the mounted disk image; Chrome needs the folder to stay put.)
+  2. Open Chrome and go to:  chrome://extensions
+  3. Turn on "Developer mode" (top-right toggle).
+  4. Click "Load unpacked" and choose the folder you copied in step 1.
+  5. Click the Fulcra Attention icon in the toolbar and sign in.
+
+The extension sends data straight to Fulcra on its own — nothing else to
+configure.
+
+
+Questions or trouble: support@fulcradynamics.com
