@@ -1,4 +1,4 @@
-# Proposal: a new official `fulcra-vault` skill (locked notes + hot-context injection)
+# Proposal: a new **community** `fulcra-vault` skill (locked notes + hot-context injection)
 
 **Status:** draft (reeval epic phase-4, item 2) · **Author:** fulcra-prefs-maintainer
 **Target venue:** `fulcradynamics/community-skills` (operator ruling 2026-07-16:
@@ -7,18 +7,20 @@ coord-maintainer, who has fulcradynamics access — this session cannot reach th
 **Source of record:** phase-3 realignment verdict (`artifact/2026-07-04-prefs-vault-realignment-verdict.md`, APPROVED)
 
 > Staged in-repo for codex-prefs review before any external post. This proposes a
-> new official skill (prose over `fulcra-api file`); no package code ships from it.
+> new community skill (prose over `fulcra-api file`) for `fulcradynamics/community-skills`;
+> no package code ships from it, and it changes nothing in the core `agent-skills` repo.
 > The `fulcra-tools/packages/fulcra-vault` CLI remains the power-user reference
 > implementation.
 
 ## Why a new skill (the gap)
 
-Nothing in the official `agent-skills` repo covers a **shared, durable knowledge
+Nothing in the core `agent-skills` repo covers a **shared, durable knowledge
 vault**: markdown notes agents and humans co-edit, wikilinks + backlinks, owned
 sections for safe agent edits, a rendered hot-context file, or the concurrency
-discipline needed to write to it safely. The official surface is prose over the
-`fulcra-api` CLI with no package dependency; a vault skill fits that shape exactly
-— it is entirely `fulcra-api file` operations plus conventions.
+discipline needed to write to it safely. The core skills are prose over the
+`fulcra-api` CLI with no package dependency; a **community** vault skill built on
+that same surface fits alongside them — it is entirely `fulcra-api file` operations
+plus conventions, layered on the core, not a change to it.
 
 ## Writing safely to LWW files: best-effort collision detection (NOT compare-and-set)
 
@@ -81,7 +83,7 @@ once so any Files writer adopts the pattern **and** its caveats.
 ## HOT.md session-start injection — a convention, not a hook installer
 
 The reference package ships a hook installer that injects `HOT.md` at session
-start. To stay CLI-free and match the official pattern (cf.
+start. To stay CLI-free and match the core skills' pattern (cf.
 `fulcra-situational-awareness`), the skill documents injection as a **session-start
 convention**: at session start, download and prepend `vault/HOT.md`. Hosts that
 want automation wire it themselves; the skill only states the convention.
@@ -90,7 +92,7 @@ want automation wire it themselves; the skill only states the convention.
 
 For sync / "what changed in the vault since last visit," `fulcra data-updates
 <range>` (incremental record+file change feed) is attractive versus list+stat
-polling. **But it is an unpublished endpoint**, so the *official, portable* skill
+polling. **But it is an unpublished endpoint**, so the portable community skill
 must not depend on it: an unpublished API cannot be part of the contract, and this
 repo's tests cannot make it one.
 
@@ -107,10 +109,10 @@ tests; the upstream skill text ships polling as the contract and mentions
 The `fulcra-vault` CLI (`init` / `write-section` / `append-log` / `backlinks` /
 `reindex` / `map` / `rename` / `delete` / `install-hooks`) remains the reference
 implementation in `fulcra-tools` — it is the ergonomic power-user surface and the
-place the locking/rename logic is tested. The official skill is the portable,
+place the locking/rename logic is tested. The community skill is the portable,
 dependency-free prose expression of the same conventions.
 
-## Open questions for upstream maintainers
+## Open questions for community-skills reviewers
 
 1. Venue settled: `community-skills` (per the operator's core-only ruling for
    `agent-skills`). Open: full skill vs. a standalone doc that only *references* the
