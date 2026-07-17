@@ -151,6 +151,32 @@ def _existing_def_row(uuid="def-existing", name=None, created_at="2026-01-01T00:
     }
 
 
+def test_unstubbed_emit_paths_fail_closed(monkeypatch):
+    """Both public urllib-backed emit paths are hermetic by default."""
+    _stub_cli(monkeypatch, catalog_lines=[_existing_def_row()])
+
+    assert ann.emit_projection_annotation(
+        note="update: Alpha",
+        tags=["agent-tasks", "update"],
+        recorded_at="2026-07-09T09:00:00Z",
+    ) is False
+
+    task = {
+        "id": "20260709-alpha",
+        "title": "Alpha",
+        "workstream": "tests",
+        "tags": ["kind:test"],
+        "events": [
+            {"at": "2026-07-09T09:00:00Z", "type": "complete"},
+        ],
+    }
+    assert ann.emit_lifecycle_annotation(
+        lifecycle="complete",
+        task=task,
+        agent="codex-coder",
+    ) is False
+
+
 # ---------------------------------------------------------------------------
 # Typed endpoint: path / content-type / body-per-line
 # ---------------------------------------------------------------------------
