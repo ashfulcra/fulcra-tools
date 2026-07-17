@@ -26,8 +26,9 @@ over consented slices, with every disclosure on the record.
 one immutable, timestamped record on your Fulcra timeline. `capture` builds a
 typed signal — kind, dot-namespaced key, scope (`global` or
 `platform:claude-code`), signed strength (−1..1, where negative means aversion),
-confidence, and a half-life — then POSTs it to the Fulcra ingest API as a
-`MomentAnnotation` record linked to your "Preference Signals" definition. If the
+confidence, and a half-life — then records it to the Fulcra timeline as a
+`MomentAnnotation` record (via the typed ingest surface) linked to your
+"Preference Signals" definition. If the
 network's down, the signal spools to a local outbox and uploads on the next run.
 Nothing is lost, and the deterministic temp-id means even a "this replaces my old
 preference" reference survives the offline gap.
@@ -206,13 +207,23 @@ Claude Code, ChatGPT, Codex, OpenClaw, and Hermes.
 
 ## How it works
 
-Signals are annotation records posted to `/ingest/v1/record` via the Fulcra
-ingest API. Each signal carries a key (dot-namespaced), a typed value, a strength
-in [-1, 1] (negative = aversion), a half-life, and a scope (`global` or
-`platform:<name>`). The `capture` command posts the record and also writes a
-per-signal *write-through cache shard* under `prefs/signals-cache/` — one file
-per signal id, so concurrent captures never race on a shared file, and a signal
-captured offline still reaches compile after the next flush.
+Signals are `MomentAnnotation` records posted to the typed ingest endpoint
+`POST /ingest/v1/record/{data_type}` (the base type in the path; the "Preference
+Signals" definition rides in the record's `sources`). As of `fulcra-api` 0.1.37
+this surface is first-class in the library and CLI — `FulcraAPI.record_data_type`
+and `fulcra record`. Records can also be *logically* deleted: `fulcra delete`
+composes a tombstone client-side by appending a `DeletedRecord`
+(there is no dedicated library delete method; the lib exposes `record_data_type`
+and `validate_records`). fulcra-prefs currently drives the endpoint directly through
+its own transport (`store.ingest_signal`) so the offline outbox + shard cache stay
+in one place; adopting the library verbs (and `validate_records` for fail-loud
+pre-flight schema checks) is tracked in the write-path modernization. Each signal
+carries a key (dot-namespaced), a typed value, a strength in [-1, 1]
+(negative = aversion), a half-life, and a scope (`global` or `platform:<name>`).
+The `capture` command posts the record and also writes a per-signal
+*write-through cache shard* under `prefs/signals-cache/` — one file per signal id,
+so concurrent captures never race on a shared file, and a signal captured offline
+still reaches compile after the next flush.
 
 Compile reads signals **authoritatively from get-records** (so a capture from
 *any* platform is visible — including shell-less tier-2 agents that only POST to
@@ -324,13 +335,21 @@ and cross-platform compile consistency.
   pruning shards once their records are confirmed. A future incremental read could
   adopt the `fulcra data-updates <range>` change feed as an *optional* fast path,
   but only gated on that endpoint's published availability (it is currently
-  unpublished) — get-records stays the supported baseline. The remaining workaround
-  is the *write* side — signals are posted via the typed ingest endpoint
-  `POST /ingest/v1/record/{data_type}` (migrated from the legacy wrapped
-  `/ingest/v1/record` in the 0.1.36 pass) and there's no record-level delete/replace
-  yet, so corrections are modeled as `supersedes` rather than true deletes. Native
-  revocation lands when CLI annotation
-  (record) commands ship; tracked on the bus.
+  unpublished) — get-records stays the supported baseline. On the *write* side,
+  signals post via the typed ingest endpoint `POST /ingest/v1/record/{data_type}`
+  (migrated from the legacy wrapped `/ingest/v1/record` in the 0.1.36 pass). Record
+  **write** is now first-class (`fulcra-api` 0.1.37: `fulcra record`, lib
+  `record_data_type` / `validate_records`), and a **logical delete** exists —
+  `fulcra delete` appends a `DeletedRecord` tombstone (via `record_data_type`) that
+  suppresses a record on read. There is still **no replace/update** operation at any
+  tier, and the tombstone is a suppression marker, not a verified physical erasure —
+  so corrections remain either `supersedes` (durable, auditable, reversible) or
+  tombstone-and-re-record. `compile` resolves `supersedes` today. Whether the
+  Privacy Ledger's revoke should additionally emit a `DeletedRecord` tombstone (to
+  suppress a disclosed value on read) vs. only supersede is the open design question
+  (see the write-path-0138 design note under this reeval pass); a real
+  right-to-be-forgotten guarantee would need a platform erasure/retention contract
+  that does not exist yet.
 - **Single-user.** The solver takes pre-compiled docs as input; there is no
   multi-user sync layer in v1.
 - **No MCP write path.** The Fulcra MCP exposes read operations today; capture
