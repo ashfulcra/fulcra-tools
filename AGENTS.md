@@ -87,6 +87,10 @@ under `skills/`, each package with its own README, build, and tests.
   `team/<team>/task/*.md` documents; ambiguous list/read/parse results degrade
   tasks, while unsupported capabilities remain explicitly unsupported. Command
   intake and expectation evaluation remain explicitly out of scope.
+  The engine source accepts both JSON documents and JSONL folds (including
+  `threads --json`), identifies the exact degraded marker path/reason in its
+  diagnostics, and gives the intentionally slow fleet-health fold a separate
+  six-minute bound while keeping other folds at three minutes.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 

@@ -41,7 +41,7 @@ def engine_runner(*, degraded=False):
         "board": {"active": [{"id": "task-1", "title": "Task"}]},
         "asks": [],
         "threads": [],
-        "health": [],
+        "health": {"hosts": []},
     }
 
     def run(argv, _timeout):

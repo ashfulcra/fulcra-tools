@@ -194,6 +194,7 @@ def _parse_teams_frontmatter(text: str) -> Mapping[str, Any] | None:
 class EngineCapability:
     name: str
     argv: tuple[str, ...]
+    timeout: float | None = None
 
 
 class EngineSourceAdapter:
@@ -208,12 +209,16 @@ class EngineSourceAdapter:
         principal: str = "ash",
         runner: CommandRunner = subprocess_runner,
         timeout: float = 180.0,
+        health_timeout: float = 360.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if timeout <= 0 or health_timeout <= 0:
+            raise ValueError("source timeouts must be positive")
         self.team = team
         self.principal = principal
         self.runner = runner
         self.timeout = timeout
+        self.health_timeout = health_timeout
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     @property
@@ -225,30 +230,53 @@ class EngineSourceAdapter:
             EngineCapability("tasks", ("board", self.team)),
             EngineCapability("asks", ("asks", self.team)),
             EngineCapability("threads", ("threads", self.team, "--for", self.principal)),
-            EngineCapability("health", ("health", self.team)),
+            # Fleet health is intentionally slow: the live 13-host fold takes
+            # 2-5 minutes, so it gets a separate bounded allowance.
+            EngineCapability("health", ("health", self.team), self.health_timeout),
         )
 
     def _read(self, capability: EngineCapability) -> tuple[Any | None, Diagnostic | None]:
         argv = ("coord-engine", *capability.argv, "--json")
         try:
-            code, stdout, stderr = self.runner(argv, self.timeout)
+            code, stdout, stderr = self.runner(argv, capability.timeout or self.timeout)
             if code != 0:
                 raise RuntimeError(sanitize_text(stderr, limit=300) or f"exit {code}")
-            return json.loads(stdout), None
+            try:
+                return json.loads(stdout), None
+            except json.JSONDecodeError:
+                # Some engine folds (notably `threads --json`) are JSONL, not
+                # one JSON document. Preserve ordered rows while still failing
+                # closed if any non-empty line is invalid JSON.
+                lines = [line for line in stdout.splitlines() if line.strip()]
+                if not lines:
+                    raise
+                return [json.loads(line) for line in lines], None
         except Exception as exc:
             # Source stderr can contain task text. Diagnostics stay useful but
             # redact payload-bearing exception strings by default.
             return None, Diagnostic(capability.name, "source-degraded", type(exc).__name__)
 
     @staticmethod
-    def _degraded(value: Any) -> bool:
+    def _degraded_evidence(value: Any, path: str = "$") -> str | None:
         if isinstance(value, dict):
-            if value.get("type", "").endswith("degraded") or "read-degraded" in value:
-                return True
-            return any(EngineSourceAdapter._degraded(item) for item in value.values())
+            marker_type = str(value.get("type", ""))
+            if marker_type.endswith("degraded"):
+                reason = sanitize_text(value.get("reason"), limit=240)
+                return f"{path}: type={marker_type}" + (f" reason={reason}" if reason else "")
+            if "read-degraded" in value:
+                marker = value["read-degraded"]
+                reason = sanitize_text(marker.get("reason"), limit=240) if isinstance(marker, dict) else sanitize_text(marker, limit=240)
+                return f"{path}.read-degraded" + (f": {reason}" if reason else "")
+            for key, item in value.items():
+                evidence = EngineSourceAdapter._degraded_evidence(item, f"{path}.{key}")
+                if evidence:
+                    return evidence
         if isinstance(value, list):
-            return any(EngineSourceAdapter._degraded(item) for item in value)
-        return False
+            for index, item in enumerate(value):
+                evidence = EngineSourceAdapter._degraded_evidence(item, f"{path}[{index}]")
+                if evidence:
+                    return evidence
+        return None
 
     def _work_record(self, row: Mapping[str, Any], capability: str, lane: str) -> WorkRecord | None:
         item_id = sanitize_text(row.get("id") or row.get("name"), limit=500)
@@ -288,27 +316,95 @@ class EngineSourceAdapter:
         }
         for capability in self._capabilities():
             payload, error = self._read(capability)
-            if error is not None or self._degraded(payload):
+            degraded_evidence = self._degraded_evidence(payload)
+            if error is not None or degraded_evidence:
                 states[capability.name] = CapabilityState.DEGRADED
-                diagnostics.append(error or Diagnostic(capability.name, "source-degraded", "degraded row"))
+                diagnostics.append(error or Diagnostic(
+                    capability.name, "source-degraded",
+                    sanitize_text(degraded_evidence, limit=500),
+                ))
                 continue
-            states[capability.name] = CapabilityState.COMPLETE
+            normalized: list[WorkRecord] = []
+            normalization_error: str | None = None
             if capability.name == "tasks" and isinstance(payload, dict):
                 for lane, rows in payload.items():
                     if not isinstance(rows, list):
-                        continue
-                    for row in rows:
-                        if isinstance(row, dict):
+                        normalization_error = f"$.{lane}: expected list, got {type(rows).__name__}"
+                        break
+                    for index, row in enumerate(rows):
+                        path = f"$.{lane}[{index}]"
+                        if not isinstance(row, dict):
+                            normalization_error = f"{path}: expected object, got {type(row).__name__}"
+                            break
+                        try:
                             record = self._work_record(row, "tasks", str(lane))
-                            if record:
-                                items.append(record)
+                        except (TypeError, ValueError) as exc:
+                            normalization_error = f"{path}: {type(exc).__name__}"
+                            break
+                        if record is None:
+                            normalization_error = f"{path}: missing stable id/name"
+                            break
+                        normalized.append(record)
+                    if normalization_error:
+                        break
+            elif capability.name == "tasks":
+                normalization_error = f"$: expected object, got {type(payload).__name__}"
+            elif capability.name == "health" and isinstance(payload, dict):
+                hosts = payload.get("hosts")
+                if not isinstance(hosts, list):
+                    normalization_error = f"$.hosts: expected list, got {type(hosts).__name__}"
+                else:
+                    for index, row in enumerate(hosts):
+                        path = f"$.hosts[{index}]"
+                        if not isinstance(row, dict):
+                            normalization_error = f"{path}: expected object, got {type(row).__name__}"
+                            break
+                        host = sanitize_text(row.get("host"), limit=500)
+                        if not host.strip():
+                            normalization_error = f"{path}: missing stable host"
+                            break
+                        normalized_row = dict(row)
+                        normalized_row["id"] = host
+                        normalized_row.setdefault("title", host)
+                        try:
+                            record = self._work_record(normalized_row, "health", "health")
+                        except (TypeError, ValueError) as exc:
+                            normalization_error = f"{path}: {type(exc).__name__}"
+                            break
+                        if record is None:
+                            normalization_error = f"{path}: missing stable host"
+                            break
+                        normalized.append(record)
+            elif capability.name == "health":
+                normalization_error = f"$: expected object, got {type(payload).__name__}"
             elif isinstance(payload, list):
                 lane = "ask" if capability.name == "asks" else capability.name
-                for row in payload:
-                    if isinstance(row, dict) and not str(row.get("type", "")).endswith("degraded"):
+                for index, row in enumerate(payload):
+                    path = f"$[{index}]"
+                    if not isinstance(row, dict):
+                        normalization_error = f"{path}: expected object, got {type(row).__name__}"
+                        break
+                    try:
                         record = self._work_record(row, capability.name, lane)
-                        if record:
-                            items.append(record)
+                    except (TypeError, ValueError) as exc:
+                        normalization_error = f"{path}: {type(exc).__name__}"
+                        break
+                    if record is None:
+                        normalization_error = f"{path}: missing stable id/name"
+                        break
+                    normalized.append(record)
+            else:
+                normalization_error = f"$: expected list, got {type(payload).__name__}"
+            items.extend(normalized)
+            if normalization_error:
+                states[capability.name] = CapabilityState.DEGRADED
+                diagnostics.append(Diagnostic(
+                    capability.name,
+                    "source-schema-degraded",
+                    sanitize_text(normalization_error, limit=500),
+                ))
+            else:
+                states[capability.name] = CapabilityState.COMPLETE
         complete = all(state is CapabilityState.COMPLETE for name, state in states.items()
                        if name in {"tasks", "asks", "threads", "health"})
         return Snapshot(tuple(items), complete, tuple(diagnostics), states, self.clock())
