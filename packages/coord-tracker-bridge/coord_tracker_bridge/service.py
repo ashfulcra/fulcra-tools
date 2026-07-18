@@ -8,7 +8,7 @@ from typing import Iterable, Protocol
 
 from .lease import FileLease
 from .ledger import BridgeLedger, LedgerEntry
-from .linear import LinearError, ResourceMissing, ResourcePlan
+from .linear import LinearError, MarkerAdoption, ResourceMissing, ResourcePlan
 from .model import ManagedRecord, Snapshot
 from .policy import Policy
 from .projection import Plan, build_plan
@@ -31,7 +31,9 @@ class TrackerAdapter(Protocol):
 
     def apply_change(self, change) -> str: ...
 
-    def plan_marker_adoptions(self, snapshot, ledger, policy, resolve_slug=None): ...
+    def plan_marker_adoptions(
+        self, snapshot, ledger, policy, resolve_slug=None, resolve_slugs=None
+    ): ...
 
     def apply_marker_adoption(self, adoption) -> None: ...
 
@@ -90,7 +92,11 @@ class BridgeService:
         )
 
     def _heal_ledger(
-        self, ledger: BridgeLedger, records: Iterable[ManagedRecord]
+        self,
+        ledger: BridgeLedger,
+        records: Iterable[ManagedRecord],
+        *,
+        persist: bool = True,
     ) -> None:
         """Preflight provider identity uniqueness, then heal missing entries."""
 
@@ -120,7 +126,7 @@ class BridgeService:
                     policy_hash=self.policy.hash,
                 ))
                 healed = True
-        if healed:
+        if healed and persist:
             ledger.save(self.ledger_path)
 
     def apply_resources(self) -> ResourcePlan:
@@ -130,7 +136,7 @@ class BridgeService:
             return plan
 
     def adopt_markers(self) -> int:
-        """One-time, crash-convergent adoption of legacy tracker markers."""
+        """MUTATE Linear and the ledger to adopt legacy tracker markers."""
 
         with self._lease():
             ledger = self._ledger()
@@ -146,6 +152,7 @@ class BridgeService:
                 ledger,
                 self.policy,
                 getattr(self.source, "resolve_legacy_slug", None),
+                getattr(self.source, "resolve_legacy_slugs", None),
             )
             applied = 0
             for adoption in adoptions:
@@ -161,6 +168,22 @@ class BridgeService:
                 ledger.save(self.ledger_path)
                 applied += 1
             return applied
+
+    def preview_marker_adoptions(self) -> tuple[MarkerAdoption, ...]:
+        """Plan legacy marker adoption without provider or ledger mutation."""
+
+        with self._lease():
+            ledger = self._ledger()
+            snapshot = self.source.snapshot()
+            records = self.tracker.list_managed_records(ledger)
+            self._heal_ledger(ledger, records, persist=False)
+            return self.tracker.plan_marker_adoptions(
+                snapshot,
+                ledger,
+                self.policy,
+                getattr(self.source, "resolve_legacy_slug", None),
+                getattr(self.source, "resolve_legacy_slugs", None),
+            )
 
     def sync(self) -> SyncResult:
         lease = self._lease()

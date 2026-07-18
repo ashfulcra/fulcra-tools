@@ -69,6 +69,24 @@ def test_engine_source_rejects_duplicate_exact_archived_search_matches():
         EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
 
 
+def test_engine_source_batches_legacy_slug_resolution():
+    def run(argv, _timeout):
+        slug = argv[3]
+        return 0, json.dumps([{
+            "id": slug,
+            "title": slug,
+            "status": "done",
+        }]), ""
+
+    records = EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slugs(
+        ("task-a", "task-b", "task-a")
+    )
+
+    assert tuple(records) == ("task-a", "task-b")
+    assert records["task-a"].source.item_id == "task-a"
+    assert records["task-b"].source.item_id == "task-b"
+
+
 def test_engine_source_normalizes_each_capability_and_sanitizes_text():
     adapter = EngineSourceAdapter(
         "fulcra",

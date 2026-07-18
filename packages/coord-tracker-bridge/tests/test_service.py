@@ -66,7 +66,14 @@ class Tracker:
             ))
         return provider_id
 
-    def plan_marker_adoptions(self, _snapshot, _ledger, _policy, _resolve_slug=None):
+    def plan_marker_adoptions(
+        self,
+        _snapshot,
+        _ledger,
+        _policy,
+        _resolve_slug=None,
+        _resolve_slugs=None,
+    ):
         return tuple(self.adoptions)
 
     def apply_marker_adoption(self, adoption):
@@ -171,6 +178,26 @@ def test_adopt_markers_persists_full_identity_after_provider_mutation(tmp_path):
     entry = BridgeLedger.load(tmp_path / "ledger.json").get(source)
     assert entry.tracker_record_id == "LIN-legacy"
     assert entry.capability == "tasks"
+
+
+def test_preview_marker_adoptions_never_mutates_provider_or_ledger(tmp_path):
+    tracker = Tracker(records=[ManagedRecord(
+        "LIN-managed",
+        SourceIdentity("coord-engine", "fulcra", "already-managed"),
+        "tasks",
+        {},
+        False,
+    )])
+    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    tracker.adoptions = [MarkerAdoption(
+        "LIN-legacy", source, "tasks", "Task", "body", {}
+    )]
+    bridge = service(tmp_path, tracker)
+
+    assert bridge.preview_marker_adoptions() == tuple(tracker.adoptions)
+
+    assert tracker.applied_adoptions == []
+    assert not (tmp_path / "ledger.json").exists()
 
 
 def test_adopt_markers_rejects_duplicate_provider_metadata_before_writes(tmp_path):

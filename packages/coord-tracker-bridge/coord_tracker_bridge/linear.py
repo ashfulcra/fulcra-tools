@@ -301,6 +301,9 @@ class LinearTrackerAdapter:
         ledger: BridgeLedger,
         policy: Policy,
         resolve_slug: Callable[[str], WorkRecord | None] | None = None,
+        resolve_slugs: Callable[
+            [tuple[str, ...]], Mapping[str, WorkRecord | None]
+        ] | None = None,
     ) -> tuple[MarkerAdoption, ...]:
         """Match legacy ``[bus:xxxxxxxx]`` titles to full source identities.
 
@@ -328,10 +331,26 @@ class LinearTrackerAdapter:
                 continue
             raise LinearError(f"legacy footer slug {slug!r} matches multiple source rows")
 
+        issues = self.list_issues()
+        resolved: Mapping[str, WorkRecord | None] = {}
+        if resolve_slugs is not None:
+            missing: list[str] = []
+            for issue in issues:
+                if not LEGACY_TITLE_MARKER.search(str(issue.get("title") or "")):
+                    continue
+                footer_matches = list(
+                    LEGACY_SLUG_FOOTER.finditer(str(issue.get("description") or ""))
+                )
+                if len(footer_matches) == 1:
+                    slug = footer_matches[0].group(1)
+                    if slug not in candidates:
+                        missing.append(slug)
+            resolved = resolve_slugs(tuple(dict.fromkeys(missing)))
+
         ledger_by_provider = {entry.tracker_record_id: entry for entry in ledger}
         seen_slugs: set[str] = set()
         planned: list[MarkerAdoption] = []
-        for issue in self.list_issues():
+        for issue in issues:
             title = str(issue.get("title") or "")
             matches = list(LEGACY_TITLE_MARKER.finditer(title))
             if not matches:
@@ -349,6 +368,8 @@ class LinearTrackerAdapter:
                 )
             slug = footer_matches[0].group(1)
             item = candidates.get(slug)
+            if item is None:
+                item = resolved.get(slug)
             if item is None and resolve_slug is not None:
                 item = resolve_slug(slug)
             if item is None:

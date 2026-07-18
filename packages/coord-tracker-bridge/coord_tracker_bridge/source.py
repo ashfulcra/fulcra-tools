@@ -253,6 +253,20 @@ class EngineSourceAdapter:
             raise ValueError(f"legacy slug lookup returned an invalid row for {slug!r}")
         return record
 
+    def resolve_legacy_slugs(
+        self, slugs: Sequence[str]
+    ) -> dict[str, WorkRecord | None]:
+        """Resolve legacy slugs concurrently for the one-time adoption gate."""
+
+        ordered = tuple(dict.fromkeys(slugs))
+        if not ordered:
+            return {}
+        with ThreadPoolExecutor(max_workers=min(8, len(ordered))) as pool:
+            futures = {
+                slug: pool.submit(self.resolve_legacy_slug, slug) for slug in ordered
+            }
+            return {slug: futures[slug].result() for slug in ordered}
+
     def _capabilities(self) -> tuple[EngineCapability, ...]:
         return (
             EngineCapability("tasks", ("board", self.team)),

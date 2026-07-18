@@ -383,6 +383,48 @@ def test_legacy_adoption_resolves_terminal_task_absent_from_hot_snapshot():
     assert resolved == ["completed-task-deadbeef"]
 
 
+def test_legacy_adoption_batches_terminal_task_resolution():
+    slugs = ("completed-task-deadbeef", "completed-task-cafebabe")
+    snapshot = Snapshot(
+        (), True, (), {"tasks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    issues = [
+        {
+            "id": f"LIN-{index}",
+            "title": f"Completed [bus:{slug[-8:]}]",
+            "description": f"bus slug: `{slug}`",
+        }
+        for index, slug in enumerate(slugs, 1)
+    ]
+    transport = FakeTransport([
+        response({"issues": {"nodes": issues, "pageInfo": {"hasNextPage": False}}}),
+    ])
+    calls = []
+
+    def resolve_many(requested):
+        calls.append(requested)
+        return {
+            slug: WorkRecord(
+                SourceIdentity("coord-engine", "fulcra/tasks", slug),
+                "tasks", "Completed", "done", origin="fleet", archived=True,
+            )
+            for slug in requested
+        }
+
+    def resolve_one(_slug):
+        raise AssertionError("scalar resolver must not run after a batch hit")
+
+    adoptions = LinearTrackerAdapter(
+        LinearClient(transport), "team"
+    ).plan_marker_adoptions(
+        snapshot, BridgeLedger(), load_policy(), resolve_one, resolve_many
+    )
+
+    assert calls == [slugs]
+    assert tuple(adoption.source.item_id for adoption in adoptions) == slugs
+
+
 def test_legacy_adoption_rejects_degraded_terminal_lookup_before_mutation():
     snapshot = Snapshot(
         (), True, (), {"tasks": CapabilityState.COMPLETE},

@@ -76,16 +76,26 @@ the phases in order:
 
 ```bash
 coord-tracker-bridge plan --coord-team fulcra
+coord-tracker-bridge adopt-markers --dry-run --coord-team fulcra
 coord-tracker-bridge adopt-markers --coord-team fulcra
 coord-tracker-bridge apply-resources --coord-team fulcra
 coord-tracker-bridge sync --coord-team fulcra
 ```
 
-Run `adopt-markers` once before the first package-managed sync when the Linear
-team contains v0.25 title markers. The authoritative mapping is the
-bridge-owned description footer ``bus slug: `<full-slug>` ``; the title marker is
-only a consistency cross-check against the slug's final eight characters,
-which are not necessarily hexadecimal. Every marked issue must contain exactly
+Run `adopt-markers --dry-run` first and inspect every provider/source mapping.
+The preview reads Linear and coord source state but writes neither Linear nor
+the ledger. It exercises the full adoption resolver, including archived task
+lookups; those lookups are batched concurrently because remote archives can be
+slow.
+
+**`adopt-markers` without `--dry-run` is MUTATING.** It strips title markers,
+writes provider metadata, and persists ledger entries. Run it once before the
+first package-managed sync only after the dry-run mapping is approved and only
+when the Linear team contains v0.25 title markers. The authoritative mapping
+is the bridge-owned description footer ``bus slug: `<full-slug>` ``; the title
+marker is only a consistency cross-check against the slug's final eight
+characters, which are not necessarily hexadecimal. Every marked issue must
+contain exactly
 one footer naming exactly one source row, and every full slug must be unique.
 Rows excluded from the hot projection are eligible for identity adoption;
 terminal task slugs are resolved by an exact archived search, then the normal
@@ -111,8 +121,10 @@ from a partial enumeration.
 
 - `plan` is read-only and shows projection changes plus missing bounded
   taxonomy resources.
-- `adopt-markers` is the explicit one-time migration for legacy Linear issues;
-  ordinary `sync` never infers identity from a title.
+- `adopt-markers --dry-run` previews the complete legacy identity mapping and
+  performs no provider or ledger writes.
+- `adopt-markers` is the explicit **mutating** one-time migration for legacy
+  Linear issues; ordinary `sync` never infers identity from a title.
 - `apply-resources` is the only phase that creates labels or projects.
 - `sync` refuses a non-empty resource plan; it never silently creates resources.
   It also refuses an overlapping run holding the same source/tracker/policy

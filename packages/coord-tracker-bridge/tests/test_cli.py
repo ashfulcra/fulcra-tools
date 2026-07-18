@@ -1,4 +1,8 @@
+import json
+
 from coord_tracker_bridge.cli import _service, build_parser, main
+from coord_tracker_bridge.linear import MarkerAdoption
+from coord_tracker_bridge.model import SourceIdentity
 
 
 def test_cli_exposes_only_explicit_gated_phases():
@@ -15,6 +19,40 @@ def test_cli_fails_loud_without_linear_credentials(monkeypatch, capsys):
 
     assert main(["plan", "--linear-team-id", "team"]) == 2
     assert "LINEAR_API_KEY" in capsys.readouterr().err
+
+
+def test_cli_rejects_dry_run_for_non_adoption_phase(monkeypatch, capsys):
+    monkeypatch.setenv("LINEAR_API_KEY", "test-key")
+
+    assert main(["plan", "--dry-run", "--linear-team-id", "team"]) == 2
+    assert "only valid with adopt-markers" in capsys.readouterr().err
+
+
+def test_cli_adoption_dry_run_emits_mapping_without_mutating(monkeypatch, capsys):
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "task-1")
+    adoption = MarkerAdoption("LIN-1", source, "tasks", "Task", "body", {})
+
+    class Service:
+        def preview_marker_adoptions(self):
+            return (adoption,)
+
+        def adopt_markers(self):
+            raise AssertionError("mutating path must not run")
+
+    monkeypatch.setenv("LINEAR_API_KEY", "test-key")
+    monkeypatch.setattr("coord_tracker_bridge.cli._service", lambda _args: Service())
+
+    assert main(["adopt-markers", "--dry-run", "--linear-team-id", "team"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "adoptions": [{
+            "capability": "tasks",
+            "provider_id": "LIN-1",
+            "source": source.to_dict(),
+        }],
+        "count": 1,
+        "dry_run": True,
+    }
 
 
 def test_source_modes_use_distinct_ledger_paths(monkeypatch, tmp_path):
