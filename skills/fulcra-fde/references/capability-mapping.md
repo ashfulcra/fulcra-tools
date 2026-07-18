@@ -32,7 +32,7 @@ For each product need from the interview findings, name the primitive:
 |---|---|
 | A stream Fulcra already collects (HRV, location, workouts, sleep, …) | **reuse the existing data type** — find it in `fulcra catalog`, read via `fulcra get-records` / metric & event helpers (don't recreate it) |
 | A stream genuinely novel to this product | annotation **definitions** (`fulcra data-type create`: moment, duration, boolean, numeric, scale) |
-| Writing timeline data | records via **`fulcra record`** (CLI, 0.1.37+) or the lib's `record_data_type` — the tier-1 path; raw REST ingest (tier 2) is the lower-level fallback. Delete via **`fulcra delete`** (a tombstone, not an erasure); corrections can also super­sede. Writing to a *custom* type has a 404 trap → see **Writing records** below |
+| Writing timeline data | records via **`fulcra record`** (CLI, 0.1.37+) or the lib's `record_data_type` — the tier-1 path; raw REST ingest (tier 2) is the lower-level fallback. Delete via **`fulcra delete`** (a tombstone, not an erasure); corrections can also supersede. Writing to a *custom* type has a 404 trap → see **Writing records** below |
 | Documents, images, arbitrary state | file library (`fulcra file ...`) — versioned, path-addressed |
 | Grouping/labeling | tags (`fulcra tag ...`) |
 | Reading data back | `fulcra get-records`, catalog, time series, sleep/location/calendar helpers |
@@ -45,9 +45,12 @@ For each product need from the interview findings, name the primitive:
 The real-data mandate means you *will* write records to the custom types you
 create. Since CLI 0.1.37 the tier-1 path is **`fulcra record <DATA_TYPE>`**
 (and the lib's `record_data_type`, with `validate_records` for a fail-loud
-schema pre-flight); `fulcra delete` removes a record via a tombstone. Prefer
-those. The REST ingest endpoints below remain the **tier-2 fallback** and are
-still what you need for the custom-definition `sources` trap;
+schema pre-flight); `fulcra delete` suppresses a record on reads via a `DeletedRecord`
+tombstone (not an erasure). Prefer those. The tier-1 CLI/lib resolves a custom
+definition for you — `fulcra record <Base>/<definition-uuid>` supplies the
+`sources` entry automatically, so the 404 trap below is **only** a concern for
+direct REST/lib (tier-2) callers, who must construct the base-type request and
+`sources` entry by hand;
 `FULCRA-PRIMITIVES.md` §Records is the source of truth (it carries the
 live-verification dates — re-check it, the platform moves fast):
 
@@ -78,7 +81,7 @@ a design-around:
 | Standing gap (verify against current primitives doc) | Design-around |
 |---|---|
 | No webhooks / push | poll `data-updates` on a schedule (Collect-daemon pattern) |
-| No record delete/replace | model corrections as superseding records; fold at read time |
+| No record update/replace | model corrections as superseding records; fold at read time. (`fulcra delete` exists since 0.1.37 — a `DeletedRecord` tombstone that suppresses on reads, not a true erasure) |
 | MCP is read-only | writer agents need shell (tier 1) or REST (tier 2) |
 | No cross-user reads (datashare unreleased) | single-account fallback + documented path to user-owned |
 | No server-side compute | local-*compute* daemons; anything hosted is the user's own infra |
