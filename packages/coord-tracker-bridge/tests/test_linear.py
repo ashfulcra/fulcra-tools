@@ -2,6 +2,7 @@ import base64
 import json
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 
 from coord_tracker_bridge import (
@@ -79,6 +80,71 @@ def test_rate_limit_retry_is_bounded_and_honors_retry_after():
     assert client.execute("Probe", "query Probe{ok}") == {"ok": True}
     assert sleeps == [0.5]
     assert len(transport.payloads) == 2
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["INTERNAL_ERROR", "SERVER_ERROR", "SERVICE_UNAVAILABLE", "TIMEOUT"],
+)
+def test_transient_graphql_errors_retry_with_exponential_backoff(code):
+    sleeps = []
+    transport = FakeTransport([
+        response({}, errors=[{"extensions": {"code": code}}]),
+        response({"ok": True}),
+    ])
+    client = LinearClient(transport, max_attempts=3, base_backoff=0.4, sleeper=sleeps.append)
+
+    assert client.execute("IssueLabels", "query", {"issue": "secret-id"}) == {"ok": True}
+    assert sleeps == [0.4]
+    assert len(transport.payloads) == 2
+
+
+def test_transport_errors_retry_and_surface_sanitized_type():
+    class BrokenTransport:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, payload):
+            self.calls += 1
+            raise httpx.ReadTimeout("secret request content")
+
+    transport = BrokenTransport()
+    sleeps = []
+    client = LinearClient(transport, max_attempts=3, base_backoff=0.25, sleeper=sleeps.append)
+
+    with pytest.raises(LinearError) as error:
+        client.execute("IssueLabels", "query", {"issue": "secret-id"})
+
+    assert transport.calls == 3
+    assert sleeps == [0.25, 0.5]
+    assert "transport=ReadTimeout" in str(error.value)
+    assert "secret" not in str(error.value)
+
+
+def test_terminal_error_surfaces_http_status_and_graphql_code_without_variables():
+    transport = FakeTransport([
+        response({}, status=400, errors=[{"extensions": {"code": "BAD_USER_INPUT"}}]),
+    ])
+    client = LinearClient(transport, max_attempts=3)
+
+    with pytest.raises(LinearError) as error:
+        client.execute("IssueLabels", "query", {"issue": "secret-id"})
+
+    assert "http_status=400" in str(error.value)
+    assert "graphql_codes=BAD_USER_INPUT" in str(error.value)
+    assert "secret-id" not in str(error.value)
+
+
+def test_invalid_retry_after_falls_back_to_exponential_backoff():
+    sleeps = []
+    transport = FakeTransport([
+        response({}, status=429, headers={"retry-after": "not-a-number"}),
+        response({"ok": True}),
+    ])
+    client = LinearClient(transport, max_attempts=2, base_backoff=0.3, sleeper=sleeps.append)
+
+    assert client.execute("Probe", "query Probe{ok}") == {"ok": True}
+    assert sleeps == [0.3]
 
 
 def test_errors_never_echo_graphql_variables():

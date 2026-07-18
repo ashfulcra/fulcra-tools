@@ -65,8 +65,11 @@ class HttpxGraphQLTransport:
         response = self._client.post("", json=payload)
         try:
             body = response.json()
-        except ValueError as exc:
-            raise LinearError(f"non-JSON Linear response ({response.status_code})") from exc
+        except ValueError:
+            # Preserve the HTTP status so the client can apply its normal
+            # retry policy. Never include the response body: an upstream
+            # proxy can echo request content, including source text.
+            body = {"errors": [{"extensions": {"code": "NON_JSON_RESPONSE"}}]}
         return GraphQLResponse(response.status_code, body, response.headers)
 
 
@@ -90,14 +93,57 @@ class LinearClient:
 
     @staticmethod
     def _retryable(response: GraphQLResponse) -> bool:
-        if response.status_code in {408, 429, 500, 502, 503, 504}:
+        if response.status_code in {408, 429} or response.status_code >= 500:
             return True
         errors = response.body.get("errors") if isinstance(response.body, Mapping) else None
-        return bool(errors and any(
-            str(error.get("extensions", {}).get("code", "")).upper()
-            in {"RATELIMITED", "RATE_LIMITED", "INTERNAL_SERVER_ERROR"}
-            for error in errors if isinstance(error, Mapping)
-        ))
+        transient_codes = {
+            "GATEWAY_TIMEOUT",
+            "INTERNAL_ERROR",
+            "INTERNAL_SERVER_ERROR",
+            "RATE_LIMITED",
+            "RATELIMITED",
+            "SERVER_ERROR",
+            "SERVICE_UNAVAILABLE",
+            "TIMEOUT",
+            "TOO_MANY_REQUESTS",
+        }
+        for error in errors or ():
+            if not isinstance(error, Mapping):
+                continue
+            extensions = error.get("extensions")
+            extensions = extensions if isinstance(extensions, Mapping) else {}
+            code = str(extensions.get("code", "")).upper()
+            try:
+                status = int(extensions.get("status", 0))
+            except (TypeError, ValueError):
+                status = 0
+            if code in transient_codes or status in {408, 429} or status >= 500:
+                return True
+        return False
+
+    @staticmethod
+    def _failure_detail(response: GraphQLResponse) -> str:
+        """Return useful provider diagnostics without request/variable data."""
+
+        codes: list[str] = []
+        errors = response.body.get("errors") if isinstance(response.body, Mapping) else None
+        for error in errors or ():
+            if not isinstance(error, Mapping):
+                continue
+            extensions = error.get("extensions")
+            extensions = extensions if isinstance(extensions, Mapping) else {}
+            code = str(extensions.get("code", "")).strip()
+            if code and code not in codes:
+                codes.append(code)
+        suffix = f", graphql_codes={','.join(codes)}" if codes else ""
+        return f"http_status={response.status_code}{suffix}"
+
+    def _sleep_before_retry(self, attempt: int, retry_after: str | None = None) -> None:
+        try:
+            delay = float(retry_after) if retry_after else self.base_backoff * (2**attempt)
+        except (TypeError, ValueError):
+            delay = self.base_backoff * (2**attempt)
+        self.sleeper(min(max(delay, 0.0), 30.0))
 
     def execute(
         self, operation: str, query: str, variables: Mapping[str, Any] | None = None
@@ -106,7 +152,16 @@ class LinearClient:
         # never included in exception strings or logs.
         payload = {"operationName": operation, "query": query, "variables": dict(variables or {})}
         for attempt in range(self.max_attempts):
-            response = self.transport.post(payload)
+            try:
+                response = self.transport.post(payload)
+            except (httpx.TransportError, TimeoutError, ConnectionError) as exc:
+                if attempt + 1 >= self.max_attempts:
+                    raise LinearError(
+                        f"{operation}: Linear transport failed after {attempt + 1} attempt(s) "
+                        f"(transport={type(exc).__name__})"
+                    ) from exc
+                self._sleep_before_retry(attempt)
+                continue
             errors = response.body.get("errors") if isinstance(response.body, Mapping) else None
             if response.status_code < 400 and not errors:
                 data = response.body.get("data")
@@ -114,10 +169,12 @@ class LinearClient:
                     raise LinearError(f"{operation}: missing data")
                 return data
             if not self._retryable(response) or attempt + 1 >= self.max_attempts:
-                raise LinearError(f"{operation}: Linear request failed after {attempt + 1} attempt(s)")
+                raise LinearError(
+                    f"{operation}: Linear request failed after {attempt + 1} attempt(s) "
+                    f"({self._failure_detail(response)})"
+                )
             retry_after = response.headers.get("retry-after")
-            delay = float(retry_after) if retry_after else self.base_backoff * (2**attempt)
-            self.sleeper(min(delay, 30.0))
+            self._sleep_before_retry(attempt, retry_after)
         raise AssertionError("unreachable")
 
     def paginate(
