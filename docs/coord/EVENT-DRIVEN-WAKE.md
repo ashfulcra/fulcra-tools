@@ -43,8 +43,15 @@ and recommends a dedicated token plus a constrained network boundary:
 
 ## Relay contract
 
-A future central relay may replace per-host polling, but it must preserve these
-properties:
+Fulcra Files currently exposes `recent_changes`, not a change webhook/SSE
+subscription (the [platform capability map](../../skills/fulcra-fde/references/capability-mapping.md)
+records “No webhooks / push”). A
+central relay can therefore consolidate the fleet to **one model-free watcher**
+and fan out native wakes, but it cannot honestly eliminate the final source
+watcher until Fulcra adds a signed change-delivery surface. Per-session/model
+listeners can still disappear; the remaining poll is cheap infrastructure.
+
+That future central relay must preserve these properties:
 
 - authenticated source and destination; dedicated, rotatable capabilities;
 - allowlisted team, agent, harness, and target session identifiers;
