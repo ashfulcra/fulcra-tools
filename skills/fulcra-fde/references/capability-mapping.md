@@ -32,7 +32,7 @@ For each product need from the interview findings, name the primitive:
 |---|---|
 | A stream Fulcra already collects (HRV, location, workouts, sleep, …) | **reuse the existing data type** — find it in `fulcra catalog`, read via `fulcra get-records` / metric & event helpers (don't recreate it) |
 | A stream genuinely novel to this product | annotation **definitions** (`fulcra data-type create`: moment, duration, boolean, numeric, scale) |
-| Writing timeline data | records via **ingest** (no `fulcra` CLI write verb — REST tier 2 or the lib); no record edit/delete (corrections = superseding records). Writing to a *custom* type has a 404 trap → see **Writing records** below |
+| Writing timeline data | records via **`fulcra record`** (CLI, 0.1.37+) or the lib's `record_data_type` — the tier-1 path; raw REST ingest (tier 2) is the lower-level fallback. Delete via **`fulcra delete`** (a tombstone, not an erasure); corrections can also super­sede. Writing to a *custom* type has a 404 trap → see **Writing records** below |
 | Documents, images, arbitrary state | file library (`fulcra file ...`) — versioned, path-addressed |
 | Grouping/labeling | tags (`fulcra tag ...`) |
 | Reading data back | `fulcra get-records`, catalog, time series, sleep/location/calendar helpers |
@@ -43,10 +43,13 @@ For each product need from the interview findings, name the primitive:
 ## Writing records (and the custom-type 404 trap)
 
 The real-data mandate means you *will* write records to the custom types you
-create — and there is **no `fulcra` CLI verb (or lib method) to write a
-record** (as of CLI 0.1.35). The write path is REST ingest (tier 2). Two
-endpoints; `FULCRA-PRIMITIVES.md` §Records is the source of truth (it carries
-the live-verification dates — re-check it, the platform moves fast):
+create. Since CLI 0.1.37 the tier-1 path is **`fulcra record <DATA_TYPE>`**
+(and the lib's `record_data_type`, with `validate_records` for a fail-loud
+schema pre-flight); `fulcra delete` removes a record via a tombstone. Prefer
+those. The REST ingest endpoints below remain the **tier-2 fallback** and are
+still what you need for the custom-definition `sources` trap;
+`FULCRA-PRIMITIVES.md` §Records is the source of truth (it carries the
+live-verification dates — re-check it, the platform moves fast):
 
 - **Typed endpoint (preferred, live-verified 2026-07-08):**
   `POST /ingest/v1/record/{base_type}` — `{base_type}` is a path segment
