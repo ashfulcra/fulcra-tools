@@ -46,11 +46,19 @@ The real-data mandate means you *will* write records to the custom types you
 create. Since CLI 0.1.37 the tier-1 path is **`fulcra record <DATA_TYPE>`**
 (and the lib's `record_data_type`, with `validate_records` for a fail-loud
 schema pre-flight); `fulcra delete` suppresses a record on reads via a `DeletedRecord`
-tombstone (not an erasure). Prefer those. The tier-1 CLI/lib resolves a custom
-definition for you — `fulcra record <Base>/<definition-uuid>` supplies the
-`sources` entry automatically, so the 404 trap below is **only** a concern for
-direct REST/lib (tier-2) callers, who must construct the base-type request and
-`sources` entry by hand;
+tombstone (not an erasure). Prefer those. Three write paths, and the
+custom-definition `sources` trap below hits two of them:
+
+- **CLI** — `fulcra record <Base>/<definition-uuid>`: the `Base/<uuid>`
+  shorthand is CLI-only; it resolves the definition and supplies the `sources`
+  entry for you, so the 404 trap does **not** apply.
+- **Library (`record_data_type`, tier 1)** — must POST the **base** type and
+  pass an explicit `sources` entry itself; the shorthand is not available in
+  the lib.
+- **Raw REST (tier 2)** — same as the lib: base type + hand-built `sources`.
+
+So the trap below is a concern for the **library and raw-REST callers**, who
+construct the base-type request and `sources` entry by hand;
 `FULCRA-PRIMITIVES.md` §Records is the source of truth (it carries the
 live-verification dates — re-check it, the platform moves fast):
 
