@@ -15,7 +15,10 @@ if [[ -z "$TOKEN" ]]; then
   }
   # Secrets in a scheduler environment or plist are easy to expose. Prefer a
   # root/user-readable file and reject group/world permission bits.
-  MODE="$(stat -f '%Lp' "$TOKEN_FILE" 2>/dev/null || stat -c '%a' "$TOKEN_FILE" 2>/dev/null || true)"
+  case "$(uname -s)" in
+    Darwin) MODE="$(stat -f '%Lp' "$TOKEN_FILE" 2>/dev/null || true)" ;;
+    *) MODE="$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || true)" ;;
+  esac
   case "$MODE" in
     600|400) ;;
     *) echo "openclaw wake: token file must have mode 0600 or 0400" >&2; exit 2 ;;

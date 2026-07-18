@@ -321,6 +321,18 @@ class TestOpenClawWakeAdapter:
         assert r.returncode == 0, r.stderr
         assert "Authorization: Bearer file-secret" in capture.read_text()
 
+    def test_rejects_group_readable_token_file(self, tmp_path):
+        token = tmp_path / "token"
+        token.write_text("not-private")
+        token.chmod(0o640)
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+                 "OPENCLAW_HOOK_TOKEN_FILE": str(token)}, timeout=20)
+        assert r.returncode == 2
+        assert "mode 0600 or 0400" in r.stderr
+
 
 class TestWakeCmdThreatModel:
     """The guards reject exactly what could break out of the two embeddings:
