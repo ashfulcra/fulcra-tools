@@ -147,6 +147,18 @@ it (not on PyPI).
   needs you including reviews you owe. Start there — never watch a narrower
   surface (a bare inbox or a single view file misses role-addressed work and
   pending reviews).
+- **Quiet listeners must stay model-free.** Use one `coord-engine listen` owner
+  per agent identity and wake a model-backed harness only for a new event or a
+  newly reported degradation. The bundled scheduled tick emits nothing on a
+  healthy quiet pass; `COORD_LISTENER_VERBOSE=1` is diagnostics only. Never
+  suppress `LISTEN DEGRADED`: degradation is actionable, does not clear the
+  queue, and the awakened session must apply the targeted fallback before it
+  reports quiet. Host listeners should use the bundled adaptive cadence: poll
+  frequently while events are arriving and through a configurable hot tail,
+  then back off locally to a longer idle interval. A skipped tick must not call
+  the bus or a model; without source-side push, idle cadence is maximum pickup
+  latency. Model-backed harness automations that cannot reschedule themselves
+  retain a coarse safety net instead of emulating adaptation in prompt text.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
