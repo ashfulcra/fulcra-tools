@@ -982,6 +982,99 @@ def test_retention_keeps_hot_task_when_shard_move_fails(capsys):
     assert "team/r/_coord/acks/olddone/amy-abc123.md" in t.store
 
 
+def _old_task(title, status):
+    return (f"---\ntype: Task\ntitle: {title}\nid: {title.lower()}\nstatus: {status}\n"
+            "timestamp: 2020-01-15T00:00:00Z\n---\nold body")
+
+
+def _old_verdict(reviewer, verdict="approve"):
+    return ("---\ntype: Verdict\n"
+            f"reviewer: {reviewer}\nverdict: {verdict}\n"
+            "timestamp: 2020-01-16T00:00:00Z\n---\n")
+
+
+def test_retention_archives_old_proposed_but_never_active_or_waiting(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/old-proposed.md", _old_task("Old-proposed", "proposed"),
+          mtime="2020-01-15 12:00PM UTC")
+    t.put("team/r/task/recent-proposed.md", _old_task("Recent-proposed", "proposed"))
+    t.put("team/r/task/old-active.md", _old_task("Old-active", "active"))
+    t.put("team/r/task/old-waiting.md", _old_task("Old-waiting", "waiting"))
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    assert "team/r/task/old-proposed.md" not in t.store
+    assert "team/r/task/archive/2020-01/old-proposed.md" in t.store
+    assert "team/r/task/recent-proposed.md" in t.store
+    assert "team/r/task/old-active.md" in t.store
+    assert "team/r/task/old-waiting.md" in t.store
+
+
+def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
+    t = FakeTransport()
+    # Eligible: no review doc, exactly one old codex-reviewer verdict.
+    t.put("team/r/review/settled/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+    t.put("team/r/review/recent/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"))
+    # Multi-reviewer and non-codex singletons are never settled-single reviews.
+    t.put("team/r/review/multi/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"))
+    t.put("team/r/review/multi/verdicts/coord-maintainer.md",
+          _old_verdict("coord-maintainer"))
+    t.put("team/r/review/other/verdicts/coord-maintainer.md",
+          _old_verdict("coord-maintainer"))
+    # A live review doc excludes the directory even when its verdict shape matches.
+    t.put("team/r/review/live.md", "---\ntype: Review\nrequired: codex-reviewer\n---\n")
+    t.put("team/r/review/live/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"))
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    src = "team/r/review/settled/verdicts/codex-reviewer.md"
+    dst = ("team/r/_coord/archive/reviews/2020-01/settled/verdicts/"
+           "codex-reviewer.md")
+    assert src not in t.store and dst in t.store
+    assert "team/r/review/recent/verdicts/codex-reviewer.md" in t.store
+    assert "team/r/review/multi/verdicts/codex-reviewer.md" in t.store
+    assert "team/r/review/multi/verdicts/coord-maintainer.md" in t.store
+    assert "team/r/review/other/verdicts/coord-maintainer.md" in t.store
+    assert "team/r/review/live/verdicts/codex-reviewer.md" in t.store
+
+
+def test_retention_orphan_verdict_listing_raise_is_loud_and_non_destructive(capsys):
+    class FailVerdictListingTransport(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/unknown/verdicts/":
+                from coord_engine.transport import TransportError
+                raise TransportError("verdict listing unavailable")
+            return super().list_dir(prefix)
+
+    t = FailVerdictListingTransport()
+    src = "team/r/review/unknown/verdicts/codex-reviewer.md"
+    t.put(src, _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+    cap = capsys.readouterr()
+    assert src in t.store
+    assert not any("_coord/archive/reviews/" in p for p in t.store)
+    assert "unknown" in cap.err and "listing" in cap.err
+
+
+def test_review_restore_moves_archived_orphan_verdict_back(capsys):
+    t = FakeTransport()
+    hot = "team/r/review/settled/verdicts/codex-reviewer.md"
+    cold = ("team/r/_coord/archive/reviews/2020-01/settled/verdicts/"
+            "codex-reviewer.md")
+    t.put(hot, _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    assert hot not in t.store and cold in t.store
+
+    assert cli.main(["review", "restore", "r", "settled"], transport=t) == 0
+    assert hot in t.store and cold not in t.store
+    assert "restored review settled" in capsys.readouterr().out
+
+
 def test_task_restore_and_search_archived(capsys):
     import json as _j
     t = FakeTransport()
