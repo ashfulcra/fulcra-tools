@@ -313,9 +313,20 @@ class LinearTrackerAdapter:
         candidates: dict[str, Any] = {}
         for item in snapshot.items:
             slug = item.source.item_id
-            if slug in candidates:
-                raise LinearError(f"legacy footer slug {slug!r} matches multiple source rows")
-            candidates[slug] = item
+            prior = candidates.get(slug)
+            if prior is None:
+                candidates[slug] = item
+                continue
+            capabilities = {prior.capability, item.capability}
+            if capabilities == {"tasks", "threads"}:
+                # ``threads`` is a derived observation of a task, not a second
+                # source identity.  Adoption must use the canonical task row so
+                # its durable namespace/capability is written to the ledger.
+                # Keep every other collision fail-closed.
+                if item.capability == "tasks":
+                    candidates[slug] = item
+                continue
+            raise LinearError(f"legacy footer slug {slug!r} matches multiple source rows")
 
         ledger_by_provider = {entry.tracker_record_id: entry for entry in ledger}
         seen_slugs: set[str] = set()

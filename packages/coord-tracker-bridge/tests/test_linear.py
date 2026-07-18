@@ -273,6 +273,63 @@ def test_legacy_marker_adoption_uses_footer_and_checks_arbitrary_slug_suffix():
     assert metadata["capability"] == "tasks"
 
 
+@pytest.mark.parametrize("canonical_first", [True, False])
+def test_legacy_marker_adoption_prefers_task_over_derived_thread(canonical_first):
+    slug = "website-v2-queue-complete-759208b7"
+    task_source = SourceIdentity("coord-engine", "fulcra/tasks", slug)
+    thread_source = SourceIdentity("coord-engine", "fulcra/threads", slug)
+    task = WorkRecord(task_source, "tasks", "Canonical", "done", origin="fleet")
+    thread = WorkRecord(
+        thread_source, "threads", "Dropped", "threads-missed", origin="fleet"
+    )
+    items = (task, thread) if canonical_first else (thread, task)
+    snapshot = Snapshot(
+        items, True, (),
+        {"tasks": CapabilityState.COMPLETE, "threads": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    issue = {
+        "id": "LIN-1",
+        "title": "Legacy [bus:759208b7]",
+        "description": f"bus slug: `{slug}`",
+    }
+    transport = FakeTransport([
+        response({
+            "issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False}}
+        }),
+    ])
+
+    adoptions = LinearTrackerAdapter(
+        LinearClient(transport), "team"
+    ).plan_marker_adoptions(snapshot, BridgeLedger(), load_policy())
+
+    assert adoptions[0].source == task_source
+    assert adoptions[0].capability == "tasks"
+
+
+def test_legacy_marker_adoption_rejects_non_derived_slug_collision():
+    slug = "duplicate-task-deadbeef"
+    snapshot = Snapshot(
+        (
+            WorkRecord(
+                SourceIdentity("coord-engine", "fulcra/tasks", slug),
+                "tasks", "Canonical", "active", origin="fleet",
+            ),
+            WorkRecord(
+                SourceIdentity("coord-engine", "fulcra/asks", slug),
+                "asks", "Ask", "asks", origin="fleet",
+            ),
+        ),
+        True, (),
+        {"tasks": CapabilityState.COMPLETE, "asks": CapabilityState.COMPLETE},
+        datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    adapter = LinearTrackerAdapter(LinearClient(FakeTransport([])), "team")
+
+    with pytest.raises(LinearError, match="matches multiple source rows"):
+        adapter.plan_marker_adoptions(snapshot, BridgeLedger(), load_policy())
+
+
 def test_unknown_legacy_marker_fails_before_any_mutation():
     snapshot = Snapshot(
         (), True, (), {"tasks": CapabilityState.COMPLETE},
