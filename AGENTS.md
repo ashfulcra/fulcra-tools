@@ -147,6 +147,13 @@ it (not on PyPI).
   needs you including reviews you owe. Start there — never watch a narrower
   surface (a bare inbox or a single view file misses role-addressed work and
   pending reviews).
+- **Quiet listeners must stay model-free.** Use one `coord-engine listen` owner
+  per agent identity and wake a model-backed harness only for a new event or a
+  newly reported degradation. The bundled scheduled tick emits nothing on a
+  healthy quiet pass; `COORD_LISTENER_VERBOSE=1` is diagnostics only. Never
+  suppress `LISTEN DEGRADED`: degradation is actionable, does not clear the
+  queue, and the awakened session must apply the targeted fallback before it
+  reports quiet.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never

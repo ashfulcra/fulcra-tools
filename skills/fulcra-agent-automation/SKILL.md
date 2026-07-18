@@ -131,7 +131,12 @@ seconds and exits cleanly on SIGINT.
   ./scripts/install-listener.sh --uninstall <team> <agent>
   ```
   On NEW events it posts a macOS notification (or a log line) and, only if you consented to `--wake-cmd`
-  at install, runs your wake command. `--yes` skips BOTH the schedule prompt and the wake-command
+  at install, runs your wake command. A healthy quiet tick emits nothing by default
+  (`COORD_LISTENER_VERBOSE=1` restores diagnostic quiet lines). Listener stderr is never discarded:
+  a newly emitted `LISTEN DEGRADED` diagnostic is forwarded and also wakes the consented adapter so
+  the session can run the targeted fallback. Wake adapters receive fixed advisory environment fields
+  (`COORD_LISTENER_TEAM`, `COORD_LISTENER_AGENT`, `COORD_LISTENER_DEGRADED`,
+  `COORD_LISTENER_OUTPUT`) and must still fetch the authoritative briefing. `--yes` skips BOTH the schedule prompt and the wake-command
   acknowledgement — only use it when that consent was already given. Hardened like the heartbeat:
   validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent project's wake
   silently 401'd on exactly this), `plutil` lint, install-time self-test.
@@ -150,6 +155,11 @@ seconds and exits cleanly on SIGINT.
   ```bash
   coord-engine listen <team> --agent <agent>
   ```
+
+For push-capable harnesses and the fleet security contract, see
+[`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). OpenClaw can use the
+bundled fixed adapter at `scripts/wake/openclaw.sh`; Codex Desktop and Claude Code UI sessions retain
+their documented safety nets until those products expose an exact-session inbound wake surface.
 
 **Single-flight — one watcher identity per agent.** Run exactly one listener per `<agent>` on a host:
 the per-agent state file is not a concurrency lock, so two listeners for the same agent (or a canonical
@@ -226,12 +236,14 @@ and the same settings.json, so the same installer covers it.
 
 **Codex** — `hooks.json` merge + app-thread automation.
 ```bash
-python3 scripts/codex/install_codex_watch.py <team> <agent> [--codex-dir DIR] [--thread-id ID] [--uninstall] [--dry-run]
+python3 scripts/codex/install_codex_watch.py <team> <agent> [--codex-dir DIR] [--thread-id ID] [--interval-minutes N] [--uninstall] [--dry-run]
 ```
 Merges SessionStart (matcher `startup|resume|clear|compact`) + PreCompact entries into
 `~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord-first app-thread automation
 under `~/.codex/automations/coord-watch-<agent>/` whose prompt embeds contract rules 1–3 and ticks the
-inbox. The consent-gated `wake.json` host-wake layer is **deliberately not shipped** (security ruling:
+inbox. The default safety-net cadence is 30 minutes (override with `--interval-minutes`), replacing the
+old 5-minute model-backed poll while Codex Desktop has no documented inbound exact-task wake API.
+The consent-gated `wake.json` host-wake layer is **deliberately not shipped** (security ruling:
 it spawns headless `codex exec` with approvals/sandbox bypassed; the coord listener already covers
 wake). Deployment precondition: on the first real host, verify the SessionStart hook actually fires
 before relying on hook-based automation seeding — pass `--thread-id` for the deterministic path if you
@@ -243,7 +255,8 @@ python3 scripts/openclaw/install_openclaw.py <team> <agent> [--workspace DIR] [-
 ```
 Merges a `fulcra-agent`-fenced block (`<!-- fulcra-agent:begin … -->` / `<!-- fulcra-agent:end -->`)
 into the workspace's `HEARTBEAT.md` and `BOOT.md`, embedding contract rules 1–2 for OpenClaw to read at
-boot and on each heartbeat tick. Rule 3 (park on shutdown) is **not** embedded — the prose-block layer
+boot and on each heartbeat tick. The managed blocks are intentionally compact because OpenClaw reads
+them repeatedly; detailed doctrine stays in this skill. Rule 3 (park on shutdown) is **not automated** — the prose-block layer
 has no shutdown hook to fire it, so it must be followed as prose. This is the **prose-block layer
 only** — no hooks-dir machinery. It
 validates marker balance before any write and **refuses (exit 1) on unbalanced or crossed markers**

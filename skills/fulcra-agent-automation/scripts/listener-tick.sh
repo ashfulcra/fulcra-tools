@@ -5,7 +5,10 @@
 # install-listener.sh creates (or manually). On NEW events since the last tick —
 # new inbox directives OR responses to directives this agent owns — a macOS
 # notification (osascript) or a log line, and optionally a consent-gated wake
-# command. Exit 0 always (a tick never fails the schedule).
+# command. Quiet ticks emit nothing by default. Transport/engine degradation is
+# forwarded to stderr and wakes the consented adapter once (``listen`` itself
+# de-duplicates degradation per source/streak). Exit 0 always (a tick never
+# fails the schedule).
 #
 # Usage: listener-tick.sh <team> <agent> [wake-cmd...]
 set -euo pipefail
@@ -35,14 +38,24 @@ if [[ -n "$STATE_FILE" && ! -e "$STATE_FILE" && -f "$ITEMS_FILE" ]]; then
   printf '{"inbox_ids":[%s],"response_keys":[],"slug_owned":{}}\n' "$SEED" > "$STATE_FILE" || true
 fi
 
-# Delegate one tick. Each new event prints a line to stdout; a degraded transport
-# prints LISTEN DEGRADED to stderr. The verb advances its own state; never fail
-# the schedule (|| true), matching the old contract.
-OUT="$(coord-engine listen "$TEAM" --agent "$AGENT" --once 2>/dev/null || true)"
+# Delegate one tick. Keep stderr: LISTEN DEGRADED is fail-visible evidence, not
+# scheduler noise. A temporary file avoids merging diagnostics into the event
+# count while preserving multi-line errors exactly.
+ERR_FILE="$(mktemp "$STATE_DIR/listener-error.XXXXXX")"
+trap 'rm -f "$ERR_FILE"' EXIT
+OUT="$(coord-engine listen "$TEAM" --agent "$AGENT" --once 2>"$ERR_FILE" || true)"
+ERR="$(cat "$ERR_FILE")"
+[ -z "$ERR" ] || printf '%s\n' "$ERR" >&2
 NEW="$(printf '%s\n' "$OUT" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+DEGRADED=0
+[ -z "$ERR" ] || DEGRADED=1
 
-if [[ "$NEW" -gt 0 ]]; then
-  MSG="coord: ${NEW} new event(s) for ${AGENT} in team/${TEAM}"
+if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 ]]; then
+  if [[ "$NEW" -gt 0 ]]; then
+    MSG="coord: ${NEW} new event(s) for ${AGENT} in team/${TEAM}"
+  else
+    MSG="coord: listener degraded for ${AGENT} in team/${TEAM}"
+  fi
   echo "$(date -u +%FT%TZ) $MSG"
   if command -v osascript >/dev/null 2>&1; then
     # display only; TEAM/AGENT are validated by the installer, but escape quotes anyway
@@ -51,9 +64,13 @@ if [[ "$NEW" -gt 0 ]]; then
   fi
   if [[ "$#" -gt 0 ]]; then
     # consent-gated wake command (installer requires explicit --wake-cmd)
-    "$@" || echo "$(date -u +%FT%TZ) wake command failed (exit $?)" >&2
+    # Fixed metadata lets harness adapters fetch the authoritative briefing;
+    # event text is advisory only and is never interpreted as shell source.
+    env COORD_LISTENER_TEAM="$TEAM" COORD_LISTENER_AGENT="$AGENT" \
+      COORD_LISTENER_DEGRADED="$DEGRADED" COORD_LISTENER_OUTPUT="$OUT" \
+      "$@" || echo "$(date -u +%FT%TZ) wake command failed (exit $?)" >&2
   fi
-else
+elif [[ "${COORD_LISTENER_VERBOSE:-0}" == "1" ]]; then
   echo "$(date -u +%FT%TZ) no new events for ${AGENT}/${TEAM}"
 fi
 exit 0

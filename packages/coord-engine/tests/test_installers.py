@@ -9,6 +9,7 @@ record their invocations. The crontab shim persists to a file with real
 `-l` / stdin-replace semantics so dedup and uninstall are exercised honestly.
 """
 
+import json
 import os
 import plistlib
 import re
@@ -218,6 +219,107 @@ class TestListenerBothPlatforms:
             assert len(_plists(env)) == 1
         else:
             assert len(_cron_lines(env)) == 1
+
+
+class TestListenerTick:
+    def _run_tick(self, tmp_path, once_stdout="", once_stderr="", *, verbose=False):
+        shims = tmp_path / "shims"
+        shims.mkdir()
+        engine = shims / "coord-engine"
+        engine.write_text(
+            "#!/bin/sh\n"
+            "case \" $* \" in\n"
+            "  *' --state-path '*) printf '%s\\n' \"$COORD_TEST_STATE\" ;;\n"
+            "  *) printf '%s' \"$COORD_TEST_STDOUT\"; "
+            "printf '%s' \"$COORD_TEST_STDERR\" >&2 ;;\n"
+            "esac\n")
+        engine.chmod(0o755)
+        env = {
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{shims}:/usr/bin:/bin",
+            "COORD_LISTENER_STATE": str(tmp_path / "state"),
+            "COORD_TEST_STATE": str(tmp_path / "state" / "listen.json"),
+            "COORD_TEST_STDOUT": once_stdout,
+            "COORD_TEST_STDERR": once_stderr,
+            "COORD_LISTENER_VERBOSE": "1" if verbose else "0",
+        }
+        return subprocess.run(
+            ["bash", str(SCRIPTS / "listener-tick.sh"), "teamx", "agent"],
+            capture_output=True, text=True, env=env, timeout=20)
+
+    def test_quiet_tick_is_silent_by_default(self, tmp_path):
+        r = self._run_tick(tmp_path)
+        assert r.returncode == 0
+        assert r.stdout == "" and r.stderr == ""
+
+    def test_quiet_tick_can_be_verbose(self, tmp_path):
+        r = self._run_tick(tmp_path, verbose=True)
+        assert r.returncode == 0
+        assert "no new events" in r.stdout
+
+    def test_degradation_is_fail_visible(self, tmp_path):
+        r = self._run_tick(tmp_path, once_stderr="LISTEN DEGRADED: inbox unreadable\n")
+        assert r.returncode == 0
+        assert "LISTEN DEGRADED: inbox unreadable" in r.stderr
+        assert "listener degraded" in r.stdout
+
+
+class TestOpenClawWakeAdapter:
+    def test_posts_fixed_authenticated_wake(self, tmp_path):
+        shims = tmp_path / "shims"
+        shims.mkdir()
+        curl = shims / "curl"
+        capture = tmp_path / "curl-args"
+        curl.write_text(
+            '#!/bin/sh\n'
+            'printf "%s\\n" "$@" > "$CURL_CAPTURE"\n')
+        curl.chmod(0o755)
+        env = {
+            "PATH": f"{shims}:/usr/bin:/bin",
+            "CURL_CAPTURE": str(capture),
+            "OPENCLAW_HOOK_TOKEN": "secret-token",
+            "COORD_LISTENER_TEAM": "teamx",
+            "COORD_LISTENER_AGENT": "agent",
+            "COORD_LISTENER_DEGRADED": "1",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True, env=env, timeout=20)
+        assert r.returncode == 0, r.stderr
+        args = capture.read_text().splitlines()
+        assert "Authorization: Bearer secret-token" in args
+        assert "http://127.0.0.1:18789/hooks/wake" in args
+        payload = json.loads(args[args.index("--data-binary") + 1])
+        assert payload["mode"] == "now"
+        assert "teamx" in payload["text"] and "agent" in payload["text"]
+        assert "targeted fallback" in payload["text"]
+
+    def test_requires_token_before_network(self, tmp_path):
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, timeout=20)
+        assert r.returncode != 0
+        assert "set OPENCLAW_HOOK_TOKEN or create" in r.stderr
+
+    def test_reads_private_scheduler_token_file(self, tmp_path):
+        shims = tmp_path / "shims"
+        shims.mkdir()
+        curl = shims / "curl"
+        capture = tmp_path / "curl-args"
+        curl.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CURL_CAPTURE"\n')
+        curl.chmod(0o755)
+        token = tmp_path / ".config" / "coord-engine" / "openclaw-hook-token"
+        token.parent.mkdir(parents=True)
+        token.write_text("file-secret\n")
+        token.chmod(0o600)
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": f"{shims}:/usr/bin:/bin", "HOME": str(tmp_path),
+                 "CURL_CAPTURE": str(capture)}, timeout=20)
+        assert r.returncode == 0, r.stderr
+        assert "Authorization: Bearer file-secret" in capture.read_text()
 
 
 class TestWakeCmdThreatModel:
