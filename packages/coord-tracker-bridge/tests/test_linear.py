@@ -22,11 +22,17 @@ from coord_tracker_bridge import (
     load_policy,
 )
 from coord_tracker_bridge.linear import (
+    ISSUE_LABELS_QUERY,
     append_source_metadata,
     parse_bridge_metadata,
     parse_source_metadata,
     strip_source_metadata,
 )
+
+
+def test_issue_by_id_query_uses_linear_root_string_type():
+    assert "$issue:String!" in ISSUE_LABELS_QUERY
+    assert "$issue:ID!" not in ISSUE_LABELS_QUERY
 
 
 class FakeTransport:

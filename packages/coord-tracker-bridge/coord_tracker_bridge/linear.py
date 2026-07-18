@@ -222,7 +222,7 @@ ISSUES_QUERY = """query Issues($team:ID!,$after:String){issues(filter:{team:{id:
 LABELS_QUERY = """query Labels($team:ID!,$after:String){issueLabels(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 PROJECTS_QUERY = """query Projects($team:ID!,$after:String){projects(filter:{accessibleTeams:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 COMMENTS_QUERY = """query Comments($issue:ID!,$after:String){comments(filter:{issue:{id:{eq:$issue}}},first:100,after:$after){nodes{id body createdAt user{id}} pageInfo{hasNextPage endCursor}}}"""
-ISSUE_LABELS_QUERY = """query IssueLabels($issue:ID!,$after:String){issue(id:$issue){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}"""
+ISSUE_LABELS_QUERY = """query IssueLabels($issue:String!,$after:String){issue(id:$issue){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}"""
 EVENTS_QUERY = """query InboundEvents($team:ID!,$after:String){auditEntries(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id type createdAt actor{id} metadata} pageInfo{hasNextPage endCursor}}}"""
 SCHEMA_QUERY = """query Schema($team:ID!){team(id:$team){id key states{nodes{id name type}}}}"""
 
