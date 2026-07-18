@@ -96,12 +96,16 @@ fi
 # count while preserving multi-line errors exactly.
 ERR_FILE="$(mktemp "$STATE_DIR/listener-error.XXXXXX")"
 trap 'rm -f "$ERR_FILE"' EXIT
-OUT="$(coord-engine listen "$TEAM" --agent "$AGENT" --once 2>"$ERR_FILE" || true)"
+RC=0
+OUT="$(coord-engine listen "$TEAM" --agent "$AGENT" --once 2>"$ERR_FILE")" || RC=$?
 ERR="$(cat "$ERR_FILE")"
 [ -z "$ERR" ] || printf '%s\n' "$ERR" >&2
+if [[ "$RC" -ne 0 && -z "$ERR" ]]; then
+  printf 'LISTEN DEGRADED: engine exited %s (no stderr)\n' "$RC" >&2
+fi
 NEW="$(printf '%s\n' "$OUT" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
 DEGRADED=0
-[ -z "$ERR" ] || DEGRADED=1
+[[ -z "$ERR" && "$RC" -eq 0 ]] || DEGRADED=1
 
 if [[ "$ADAPTIVE" == "1" ]]; then
   # A real event or degradation means work is active. A fresh install also

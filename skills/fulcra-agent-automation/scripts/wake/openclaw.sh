@@ -26,12 +26,24 @@ if [[ -z "$TOKEN" ]]; then
   TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
 fi
 [[ -n "$TOKEN" ]] || { echo "openclaw wake: token is empty" >&2; exit 2; }
+# curl reads the authorization header from stdin config so the bearer never
+# appears in argv/process listings. Reject config-string metacharacters rather
+# than attempting to quote an operator-provided secret into curl's config syntax.
+case "$TOKEN" in
+  *$'\r'*|*$'\n'*|*'"'*|*\\*)
+    echo "openclaw wake: token contains unsupported characters" >&2; exit 2 ;;
+esac
 TEAM="${COORD_LISTENER_TEAM:-unknown}"
 AGENT="${COORD_LISTENER_AGENT:-unknown}"
 DEGRADED="${COORD_LISTENER_DEGRADED:-0}"
 
 case "$URL" in
-  http://*|https://*) ;;
+  https://*) ;;
+  http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*|\
+  http://localhost|http://localhost:*|http://localhost/*|\
+  http://\[::1\]|http://\[::1\]:*|http://\[::1\]/*) ;;
+  http://*)
+    echo "openclaw wake: refuse plaintext token to non-loopback host; use https" >&2; exit 2 ;;
   *) echo "openclaw wake: OPENCLAW_HOOK_URL must be http(s)" >&2; exit 2 ;;
 esac
 
@@ -46,8 +58,8 @@ print(json.dumps({
 PY
 )"
 
-curl --fail --silent --show-error --max-time 15 \
-  -X POST "$URL" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  --data-binary "$PAYLOAD" >/dev/null
+printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" \
+  | curl --fail --silent --show-error --max-time 15 \
+      -X POST "$URL" \
+      -H "Content-Type: application/json" \
+      --data-binary "$PAYLOAD" -K - >/dev/null

@@ -39,8 +39,10 @@ chmod 600 "$HOME/.config/coord-engine/openclaw-hook-token"
 ```
 
 The scheduled adapter defaults to the loopback Gateway URL. For a non-default
-trusted endpoint, use a small operator-owned wrapper that sets
+trusted endpoint, use HTTPS and a small operator-owned wrapper that sets
 `OPENCLAW_HOOK_URL`; do not put the bearer token in a cron line or plist.
+Plaintext HTTP is accepted only for loopback destinations, and the bearer
+header is fed to curl through stdin config so it never appears in process argv.
 
 The adapter sends only a fixed wake instruction plus validated team/agent
 metadata. It does not forward an event body as executable text. OpenClaw's

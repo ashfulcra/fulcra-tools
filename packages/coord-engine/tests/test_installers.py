@@ -245,7 +245,7 @@ class TestListenerBothPlatforms:
 
 class TestListenerTick:
     def _run_tick(self, tmp_path, once_stdout="", once_stderr="", *, verbose=False,
-                  adaptive=False, now=None, force=False):
+                  adaptive=False, now=None, force=False, once_exit=0):
         shims = tmp_path / "shims"
         shims.mkdir(exist_ok=True)
         engine = shims / "coord-engine"
@@ -255,7 +255,8 @@ class TestListenerTick:
             "case \" $* \" in\n"
             "  *' --state-path '*) printf '%s\\n' \"$COORD_TEST_STATE\" ;;\n"
             "  *) printf '%s' \"$COORD_TEST_STDOUT\"; "
-            "printf '%s' \"$COORD_TEST_STDERR\" >&2 ;;\n"
+            "printf '%s' \"$COORD_TEST_STDERR\" >&2; "
+            "exit \"${COORD_TEST_EXIT:-0}\" ;;\n"
             "esac\n")
         engine.chmod(0o755)
         env = {
@@ -265,6 +266,7 @@ class TestListenerTick:
             "COORD_TEST_STATE": str(tmp_path / "state" / "listen.json"),
             "COORD_TEST_STDOUT": once_stdout,
             "COORD_TEST_STDERR": once_stderr,
+            "COORD_TEST_EXIT": str(once_exit),
             "COORD_TEST_CALLS": str(tmp_path / "calls.log"),
             "COORD_LISTENER_VERBOSE": "1" if verbose else "0",
         }
@@ -296,6 +298,16 @@ class TestListenerTick:
         assert r.returncode == 0
         assert "LISTEN DEGRADED: inbox unreadable" in r.stderr
         assert "listener degraded" in r.stdout
+
+    def test_nonzero_empty_stderr_is_degraded_and_keeps_active_cadence(self, tmp_path):
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        cadence.write_text("active_until=1500\nnext_due=1500\n")
+        r = self._run_tick(tmp_path, adaptive=True, now=2000, once_exit=137)
+        assert r.returncode == 0
+        assert "LISTEN DEGRADED: engine exited 137 (no stderr)" in r.stderr
+        assert "listener degraded" in r.stdout
+        assert cadence.read_text() == "active_until=2300\nnext_due=2060\n"
 
     def test_adaptive_tick_stays_hot_then_backs_off(self, tmp_path):
         first = self._run_tick(tmp_path, adaptive=True, now=1000)
@@ -366,11 +378,13 @@ class TestOpenClawWakeAdapter:
         capture = tmp_path / "curl-args"
         curl.write_text(
             '#!/bin/sh\n'
-            'printf "%s\\n" "$@" > "$CURL_CAPTURE"\n')
+            'printf "%s\\n" "$@" > "$CURL_CAPTURE"\n'
+            'cat > "$CURL_STDIN_CAPTURE"\n')
         curl.chmod(0o755)
         env = {
             "PATH": f"{shims}:/usr/bin:/bin",
             "CURL_CAPTURE": str(capture),
+            "CURL_STDIN_CAPTURE": str(tmp_path / "curl-stdin"),
             "OPENCLAW_HOOK_TOKEN": "secret-token",
             "COORD_LISTENER_TEAM": "teamx",
             "COORD_LISTENER_AGENT": "agent",
@@ -381,7 +395,9 @@ class TestOpenClawWakeAdapter:
             capture_output=True, text=True, env=env, timeout=20)
         assert r.returncode == 0, r.stderr
         args = capture.read_text().splitlines()
-        assert "Authorization: Bearer secret-token" in args
+        assert all("secret-token" not in arg for arg in args)
+        assert (tmp_path / "curl-stdin").read_text() == (
+            'header = "Authorization: Bearer secret-token"\n')
         assert "http://127.0.0.1:18789/hooks/wake" in args
         payload = json.loads(args[args.index("--data-binary") + 1])
         assert payload["mode"] == "now"
@@ -401,7 +417,10 @@ class TestOpenClawWakeAdapter:
         shims.mkdir()
         curl = shims / "curl"
         capture = tmp_path / "curl-args"
-        curl.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CURL_CAPTURE"\n')
+        curl.write_text(
+            '#!/bin/sh\n'
+            'printf "%s\\n" "$@" > "$CURL_CAPTURE"\n'
+            'cat > "$CURL_STDIN_CAPTURE"\n')
         curl.chmod(0o755)
         token = tmp_path / ".config" / "coord-engine" / "openclaw-hook-token"
         token.parent.mkdir(parents=True)
@@ -411,9 +430,23 @@ class TestOpenClawWakeAdapter:
             ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
             capture_output=True, text=True,
             env={"PATH": f"{shims}:/usr/bin:/bin", "HOME": str(tmp_path),
-                 "CURL_CAPTURE": str(capture)}, timeout=20)
+                 "CURL_CAPTURE": str(capture),
+                 "CURL_STDIN_CAPTURE": str(tmp_path / "curl-stdin")}, timeout=20)
         assert r.returncode == 0, r.stderr
-        assert "Authorization: Bearer file-secret" in capture.read_text()
+        assert "file-secret" not in capture.read_text()
+        assert (tmp_path / "curl-stdin").read_text() == (
+            'header = "Authorization: Bearer file-secret"\n')
+
+    def test_rejects_plaintext_token_to_non_loopback_host(self, tmp_path):
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+                 "OPENCLAW_HOOK_TOKEN": "secret-token",
+                 "OPENCLAW_HOOK_URL": "http://gateway.example/hooks/wake"},
+            timeout=20)
+        assert r.returncode == 2
+        assert "refuse plaintext token to non-loopback host" in r.stderr
 
     def test_rejects_group_readable_token_file(self, tmp_path):
         token = tmp_path / "token"
