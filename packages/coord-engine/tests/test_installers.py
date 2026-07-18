@@ -9,6 +9,7 @@ record their invocations. The crontab shim persists to a file with real
 `-l` / stdin-replace semantics so dedup and uninstall are exercised honestly.
 """
 
+import json
 import os
 import plistlib
 import re
@@ -190,7 +191,11 @@ class TestListenerBothPlatforms:
             pl = plistlib.loads(plists[0].read_bytes())
             assert pl["Label"] == plists[0].name[:-len(".plist")]
             assert pl["StartInterval"] == 10 * 60
-            assert any("listener-tick" in str(a) for a in pl["ProgramArguments"])
+            args = [str(a) for a in pl["ProgramArguments"]]
+            assert any("listener-tick" in a for a in args)
+            assert args[1:9] == ["--adaptive", "--active-minutes", "10",
+                                  "--tail-minutes", "30", "--idle-minutes", "30",
+                                  "teamx"]
             assert "teamx" in pl["ProgramArguments"]           # from codex-reviewer's pin
             assert "coord-maintainer" in pl["ProgramArguments"]
             envd = pl["EnvironmentVariables"]
@@ -201,6 +206,24 @@ class TestListenerBothPlatforms:
         else:
             lines = _cron_lines(env)
             assert len(lines) == 1 and "listener-tick" in lines[0]
+            assert "--adaptive --active-minutes 10 --tail-minutes 30 --idle-minutes 30" in lines[0]
+
+    def test_fixed_mode_preserves_legacy_tick_contract(self, env):
+        r = _run("install-listener.sh", [*self.ARGS, "--fixed"], env)
+        assert r.returncode == 0, r.stderr
+        if env["platform"] == "Darwin":
+            args = [str(a) for a in plistlib.loads(_plists(env)[0].read_bytes())["ProgramArguments"]]
+            assert args[1:3] == ["teamx", "coord-maintainer"]
+            assert "--adaptive" not in args
+        else:
+            assert "--adaptive" not in _cron_lines(env)[0]
+
+    def test_rejects_idle_interval_shorter_than_active(self, env):
+        r = _run("install-listener.sh",
+                 ["--yes", "teamx", "coord-maintainer", "10", "--idle-minutes", "5"], env)
+        assert r.returncode == 2
+        assert "idle-minutes" in r.stderr
+        assert _plists(env) == [] and _cron_lines(env) == []
 
     def test_uninstall_roundtrip(self, env):
         assert _run("install-listener.sh", self.ARGS, env).returncode == 0
@@ -218,6 +241,224 @@ class TestListenerBothPlatforms:
             assert len(_plists(env)) == 1
         else:
             assert len(_cron_lines(env)) == 1
+
+
+class TestListenerTick:
+    def _run_tick(self, tmp_path, once_stdout="", once_stderr="", *, verbose=False,
+                  adaptive=False, now=None, force=False, once_exit=0):
+        shims = tmp_path / "shims"
+        shims.mkdir(exist_ok=True)
+        engine = shims / "coord-engine"
+        engine.write_text(
+            "#!/bin/sh\n"
+            "echo \"coord-engine $*\" >> \"$COORD_TEST_CALLS\"\n"
+            "case \" $* \" in\n"
+            "  *' --state-path '*) printf '%s\\n' \"$COORD_TEST_STATE\" ;;\n"
+            "  *) printf '%s' \"$COORD_TEST_STDOUT\"; "
+            "printf '%s' \"$COORD_TEST_STDERR\" >&2; "
+            "exit \"${COORD_TEST_EXIT:-0}\" ;;\n"
+            "esac\n")
+        engine.chmod(0o755)
+        env = {
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{shims}:/usr/bin:/bin",
+            "COORD_LISTENER_STATE": str(tmp_path / "state"),
+            "COORD_TEST_STATE": str(tmp_path / "state" / "listen.json"),
+            "COORD_TEST_STDOUT": once_stdout,
+            "COORD_TEST_STDERR": once_stderr,
+            "COORD_TEST_EXIT": str(once_exit),
+            "COORD_TEST_CALLS": str(tmp_path / "calls.log"),
+            "COORD_LISTENER_VERBOSE": "1" if verbose else "0",
+        }
+        if now is not None:
+            env["COORD_LISTENER_NOW_EPOCH"] = str(now)
+        if force:
+            env["COORD_LISTENER_FORCE"] = "1"
+        args = ["bash", str(SCRIPTS / "listener-tick.sh")]
+        if adaptive:
+            args += ["--adaptive", "--active-minutes", "1",
+                     "--tail-minutes", "5", "--idle-minutes", "30"]
+        args += ["teamx", "agent"]
+        return subprocess.run(
+            args,
+            capture_output=True, text=True, env=env, timeout=20)
+
+    def test_quiet_tick_is_silent_by_default(self, tmp_path):
+        r = self._run_tick(tmp_path)
+        assert r.returncode == 0
+        assert r.stdout == "" and r.stderr == ""
+
+    def test_quiet_tick_can_be_verbose(self, tmp_path):
+        r = self._run_tick(tmp_path, verbose=True)
+        assert r.returncode == 0
+        assert "no new events" in r.stdout
+
+    def test_degradation_is_fail_visible(self, tmp_path):
+        r = self._run_tick(tmp_path, once_stderr="LISTEN DEGRADED: inbox unreadable\n")
+        assert r.returncode == 0
+        assert "LISTEN DEGRADED: inbox unreadable" in r.stderr
+        assert "listener degraded" in r.stdout
+
+    def test_nonzero_empty_stderr_is_degraded_and_keeps_active_cadence(self, tmp_path):
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        cadence.write_text("active_until=1500\nnext_due=1500\n")
+        r = self._run_tick(tmp_path, adaptive=True, now=2000, once_exit=137)
+        assert r.returncode == 0
+        assert "LISTEN DEGRADED: engine exited 137 (no stderr)" in r.stderr
+        assert "listener degraded" in r.stdout
+        assert cadence.read_text() == "active_until=2300\nnext_due=2060\n"
+
+    def test_adaptive_tick_stays_hot_then_backs_off(self, tmp_path):
+        first = self._run_tick(tmp_path, adaptive=True, now=1000)
+        assert first.returncode == 0
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        assert cadence.read_text() == "active_until=1300\nnext_due=1060\n"
+        calls_after_first = (tmp_path / "calls.log").read_text().splitlines()
+
+        skipped = self._run_tick(tmp_path, adaptive=True, now=1030)
+        assert skipped.returncode == 0 and skipped.stdout == ""
+        assert (tmp_path / "calls.log").read_text().splitlines() == calls_after_first
+
+        cold = self._run_tick(tmp_path, adaptive=True, now=1310)
+        assert cold.returncode == 0
+        assert cadence.read_text() == "active_until=1300\nnext_due=3110\n"
+
+    def test_adaptive_event_reheats_listener_and_force_bypasses_due_gate(self, tmp_path):
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        forced = self._run_tick(tmp_path, once_stdout="DIRECTIVE work\n",
+                                adaptive=True, now=1030, force=True)
+        assert "1 new event" in forced.stdout
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        assert cadence.read_text() == "active_until=1330\nnext_due=1090\n"
+
+    def test_explicit_activity_marker_restarts_tail_without_an_event(self, tmp_path):
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        cadence.write_text("active_until=900\nnext_due=900\n")
+        shims = tmp_path / "shims"
+        env = {
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{shims}:/usr/bin:/bin",
+            "COORD_LISTENER_STATE": str(tmp_path / "state"),
+            "COORD_TEST_STATE": str(tmp_path / "state" / "listen.json"),
+            "COORD_TEST_STDOUT": "",
+            "COORD_TEST_STDERR": "",
+            "COORD_TEST_CALLS": str(tmp_path / "calls.log"),
+            "COORD_LISTENER_NOW_EPOCH": "1100",
+            "COORD_LISTENER_MARK_ACTIVE": "1",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "listener-tick.sh"), "--adaptive",
+             "--active-minutes", "1", "--tail-minutes", "5",
+             "--idle-minutes", "30", "teamx", "agent"],
+            capture_output=True, text=True, env=env, timeout=20)
+        assert r.returncode == 0
+        assert cadence.read_text() == "active_until=1400\nnext_due=1160\n"
+
+    def test_adaptive_malformed_state_fails_open(self, tmp_path):
+        state = tmp_path / "state"
+        state.mkdir()
+        # The exact key is intentionally discovered by a first real tick; then
+        # corrupt both fields and prove the next run polls rather than sleeping.
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        cadence = next(state.glob("*.cadence"))
+        cadence.write_text("active_until=oops\nnext_due=never\n")
+        before = len((tmp_path / "calls.log").read_text().splitlines())
+        self._run_tick(tmp_path, adaptive=True, now=1001)
+        after = len((tmp_path / "calls.log").read_text().splitlines())
+        assert after > before
+
+
+class TestOpenClawWakeAdapter:
+    def test_posts_fixed_authenticated_wake(self, tmp_path):
+        shims = tmp_path / "shims"
+        shims.mkdir()
+        curl = shims / "curl"
+        capture = tmp_path / "curl-args"
+        curl.write_text(
+            '#!/bin/sh\n'
+            'printf "%s\\n" "$@" > "$CURL_CAPTURE"\n'
+            'cat > "$CURL_STDIN_CAPTURE"\n')
+        curl.chmod(0o755)
+        env = {
+            "PATH": f"{shims}:/usr/bin:/bin",
+            "CURL_CAPTURE": str(capture),
+            "CURL_STDIN_CAPTURE": str(tmp_path / "curl-stdin"),
+            "OPENCLAW_HOOK_TOKEN": "secret-token",
+            "COORD_LISTENER_TEAM": "teamx",
+            "COORD_LISTENER_AGENT": "agent",
+            "COORD_LISTENER_DEGRADED": "1",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True, env=env, timeout=20)
+        assert r.returncode == 0, r.stderr
+        args = capture.read_text().splitlines()
+        assert all("secret-token" not in arg for arg in args)
+        assert (tmp_path / "curl-stdin").read_text() == (
+            'header = "Authorization: Bearer secret-token"\n')
+        assert "http://127.0.0.1:18789/hooks/wake" in args
+        payload = json.loads(args[args.index("--data-binary") + 1])
+        assert payload["mode"] == "now"
+        assert "teamx" in payload["text"] and "agent" in payload["text"]
+        assert "targeted fallback" in payload["text"]
+
+    def test_requires_token_before_network(self, tmp_path):
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, timeout=20)
+        assert r.returncode != 0
+        assert "set OPENCLAW_HOOK_TOKEN or create" in r.stderr
+
+    def test_reads_private_scheduler_token_file(self, tmp_path):
+        shims = tmp_path / "shims"
+        shims.mkdir()
+        curl = shims / "curl"
+        capture = tmp_path / "curl-args"
+        curl.write_text(
+            '#!/bin/sh\n'
+            'printf "%s\\n" "$@" > "$CURL_CAPTURE"\n'
+            'cat > "$CURL_STDIN_CAPTURE"\n')
+        curl.chmod(0o755)
+        token = tmp_path / ".config" / "coord-engine" / "openclaw-hook-token"
+        token.parent.mkdir(parents=True)
+        token.write_text("file-secret\n")
+        token.chmod(0o600)
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": f"{shims}:/usr/bin:/bin", "HOME": str(tmp_path),
+                 "CURL_CAPTURE": str(capture),
+                 "CURL_STDIN_CAPTURE": str(tmp_path / "curl-stdin")}, timeout=20)
+        assert r.returncode == 0, r.stderr
+        assert "file-secret" not in capture.read_text()
+        assert (tmp_path / "curl-stdin").read_text() == (
+            'header = "Authorization: Bearer file-secret"\n')
+
+    def test_rejects_plaintext_token_to_non_loopback_host(self, tmp_path):
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+                 "OPENCLAW_HOOK_TOKEN": "secret-token",
+                 "OPENCLAW_HOOK_URL": "http://gateway.example/hooks/wake"},
+            timeout=20)
+        assert r.returncode == 2
+        assert "refuse plaintext token to non-loopback host" in r.stderr
+
+    def test_rejects_group_readable_token_file(self, tmp_path):
+        token = tmp_path / "token"
+        token.write_text("not-private")
+        token.chmod(0o640)
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "openclaw.sh")],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+                 "OPENCLAW_HOOK_TOKEN_FILE": str(token)}, timeout=20)
+        assert r.returncode == 2
+        assert "mode 0600 or 0400" in r.stderr
 
 
 class TestWakeCmdThreatModel:

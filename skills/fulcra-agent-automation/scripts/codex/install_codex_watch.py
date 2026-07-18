@@ -49,7 +49,8 @@ generations may exist on a real host:
 
 CLI:
   python3 install_codex_watch.py <team> <agent>
-      [--codex-dir DIR] [--thread-id ID] [--uninstall] [--dry-run]
+      [--codex-dir DIR] [--thread-id ID] [--interval-minutes N]
+      [--uninstall] [--dry-run]
 
 ``--dry-run`` prints the would-be hooks.json + automation body + prompt and
 writes nothing.
@@ -72,7 +73,10 @@ AUTOMATION_ID_PREFIX = "coord-watch-"
 # coord2-era names of THIS installer, recognized for in-place migration only.
 LEGACY_MANAGED_DIRNAME = "fulcra-coord2-hooks"
 LEGACY_AUTOMATION_ID_PREFIX = "coord2-watch-"
-WATCH_INTERVAL_MIN = 5
+# Codex Desktop currently has no documented inbound webhook that resumes an
+# exact existing app task. Keep a low-frequency safety net; supported push
+# adapters (for example OpenClaw) should use the model-free listener instead.
+WATCH_INTERVAL_MIN = 30
 # Marker carried once in hooks.json (as a trailing shell comment on the
 # SessionStart command — inert under sh -c) and as the automation prompt's
 # first line, so re-runs converge and audits can grep one string.
@@ -87,22 +91,12 @@ _EVENTS: "dict[str, tuple[str, str | None]]" = {
 
 COORD_WATCH_PROMPT = """\
 [coord watch — managed by fulcra-agent-automation/scripts/codex; do not hand-edit]
-You are {agent} on coord team {team}. Each tick, in order:
-1. coord-engine continuity resume {team} {agent}
-2. coord-engine briefing {team} --agent {agent}     # THE entry fold: identity+role inboxes+needs-me incl pending reviews
-3. For each REVIEW REQUEST (from briefing or inbox): extract its exact slug; do the review;
-   write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
-   use the exact name the request's `required:` list names you by (your role, not a session identity);
-   verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
-   ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
-4. Other actionable work: handle end-to-end.
-5. After each completed item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
-6. coord-engine usage log {team} --account <acct> --tier <tier> --units <est>   # ATC, when accounts are declared
-7. Before session end: coord-engine continuity park {team} --agent {agent} --objective "..."
-8. LAST, after every command above: compose your human-visible report as the tick's final
-   output. Text followed by more tool activity may never render — "sent" is not "delivered".
-   Anything that MUST reach someone goes on the bus (ask, review doc, snapshot), not in
-   session text. If nothing actionable, the final output is exactly WATCH_OK.
+You are {agent} on coord team {team}. Apply the fulcra-agent-automation tick contract:
+resume continuity, run `coord-engine briefing {team} --agent {agent}` once, and handle every
+surfaced item end-to-end. A degraded section is not clear: use its documented targeted
+fallback. For reviews, write and verify the exact required verdict before acking. Snapshot
+material work, refresh presence/held-role leases, then report last. If nothing is actionable,
+the final output is exactly WATCH_OK.
 """
 
 SESSION_START_SH = """\
@@ -268,7 +262,7 @@ def _parse_simple_toml_fields(text: str) -> dict:
 
 def install_automation(team: str, agent: str, codex_dir: Path, *,
                        thread_id: "str | None", uninstall: bool,
-                       dry_run: bool) -> dict:
+                       dry_run: bool, interval_minutes: int = WATCH_INTERVAL_MIN) -> dict:
     """Install/update our coord watch automation. Preserves created_at and
     (absent an explicit --thread-id) the existing target thread on re-runs;
     with no thread id at all, defers (SessionStart hook seeds it later)."""
@@ -312,7 +306,7 @@ def install_automation(team: str, agent: str, codex_dir: Path, *,
         f"name = {_toml_str('coord watch (' + agent + ')')}\n"
         f"prompt = {_toml_str(prompt)}\n"
         'status = "ACTIVE"\n'
-        f'rrule = "FREQ=MINUTELY;INTERVAL={WATCH_INTERVAL_MIN}"\n'
+        f'rrule = "FREQ=MINUTELY;INTERVAL={interval_minutes}"\n'
         f"target_thread_id = {_toml_str(str(thread))}\n"
         f"created_at = {created_at}\n"
         f"updated_at = {now_ms}\n"
@@ -333,7 +327,10 @@ def install_automation(team: str, agent: str, codex_dir: Path, *,
 
 def install(team: str, agent: str, *, codex_dir: Path,
             thread_id: "str | None" = None, uninstall: bool = False,
-            dry_run: bool = False) -> dict:
+            dry_run: bool = False,
+            interval_minutes: int = WATCH_INTERVAL_MIN) -> dict:
+    if interval_minutes < 1:
+        raise ValueError("interval_minutes must be >= 1")
     hooks_path = codex_dir / "hooks.json"
     hooks_dir = codex_dir / MANAGED_DIRNAME
     legacy_hooks_dir = codex_dir / LEGACY_MANAGED_DIRNAME
@@ -362,7 +359,8 @@ def install(team: str, agent: str, *, codex_dir: Path,
 
     plan["automation"] = install_automation(
         team, agent, codex_dir, thread_id=thread_id,
-        uninstall=uninstall, dry_run=dry_run)
+        uninstall=uninstall, dry_run=dry_run,
+        interval_minutes=interval_minutes)
 
     if dry_run:
         plan["would_write_hooks_json"] = config
@@ -417,6 +415,9 @@ def main(argv: "list[str] | None" = None) -> int:
     p.add_argument("--thread-id", default=None,
                    help="app thread id for the watch automation (else preserved "
                         "from the existing managed automation, else hook-seeded)")
+    p.add_argument("--interval-minutes", type=int, default=WATCH_INTERVAL_MIN,
+                   help="Codex safety-net cadence (default 30; push-capable "
+                        "harnesses should use the model-free listener)")
     p.add_argument("--uninstall", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args(argv)
@@ -424,7 +425,8 @@ def main(argv: "list[str] | None" = None) -> int:
                  else Path.home() / ".codex")
     plan = install(args.team, args.agent, codex_dir=codex_dir,
                    thread_id=args.thread_id, uninstall=args.uninstall,
-                   dry_run=args.dry_run)
+                   dry_run=args.dry_run,
+                   interval_minutes=args.interval_minutes)
     print(json.dumps(plan, indent=2))
     return 0
 

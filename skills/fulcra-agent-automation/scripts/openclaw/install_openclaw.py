@@ -93,41 +93,20 @@ _LEGACY_END = "<!-- fulcra-coord2:end -->"
 # `<task>`, `<acct>`, `<tier>`, `<est>`, the `"..."`, and HEARTBEAT_OK are
 # literal prose the agent fills in / emits at run time.
 HEARTBEAT_BLOCK = """\
-On each heartbeat, as {agent} on coord team {team}, in order:
-1. coord-engine continuity resume {team} {agent}
-2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
-3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
-   write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
-   use the exact name the request's `required:` list names you by (your role, not a session identity);
-   verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
-   ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
-4. Handle any other actionable work end-to-end.
-5. After each completed item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
-6. coord-engine usage log {team} --account <acct> --tier <tier> --units <est>   # ATC, when accounts are declared
-7. Before session end: coord-engine continuity park {team} --agent {agent} --objective "..."
-8. LAST, after every command above: compose your human-visible report as the tick's final
-   output. Text followed by more tool activity may never render — "sent" is not "delivered".
-   Anything that MUST reach someone goes on the bus (ask, review doc, snapshot), not in
-   session text. If nothing is actionable, the final output is exactly HEARTBEAT_OK.
+On each heartbeat, as {agent} on coord team {team}: resume continuity and run
+`coord-engine briefing {team} --agent {agent}` once. Handle every surfaced item end-to-end.
+A degraded section is not clear; apply its documented targeted fallback. For reviews, write
+and verify the exact required verdict before acking. Snapshot material work, refresh presence
+and held-role leases, park before session end, then report last. If nothing is actionable,
+the final output is exactly HEARTBEAT_OK.
 """
 
 BOOT_BLOCK = """\
-On boot, as {agent} on coord team {team}, before any new work, in order:
-1. coord-engine continuity resume {team} {agent}
-2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
-3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
-   write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
-   use the exact name the request's `required:` list names you by (your role, not a session identity);
-   verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
-   ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
-4. Handle any other actionable work end-to-end.
-5. After each completed item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
-6. coord-engine usage log {team} --account <acct> --tier <tier> --units <est>   # ATC, when accounts are declared
-7. Before session end: coord-engine continuity park {team} --agent {agent} --objective "..."
-8. LAST, after every command above: compose your human-visible report as the session's final
-   output. Text followed by more tool activity may never render — "sent" is not "delivered".
-   Anything that MUST reach someone goes on the bus (ask, review doc, snapshot), not in
-   session text.
+On boot, as {agent} on coord team {team}: resume continuity and run
+`coord-engine briefing {team} --agent {agent}` once before new work. A degraded section is not
+clear; apply its documented targeted fallback. For reviews, write and verify the exact required
+verdict before acking. Handle other work end-to-end, snapshot material work, refresh presence
+and held-role leases, park before session end, then report last.
 """
 
 # Canonical workspace basename -> block body template. These are the ONLY files

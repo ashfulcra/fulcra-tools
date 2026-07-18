@@ -102,6 +102,24 @@ class TestCodex:
         assert not any(cx.LEGACY_MANAGED_DIRNAME in c or cx.LEGACY_MANAGED_MARKER in c
                        for c in cmds)
         assert "coord2" not in toml            # toml embeds no fixture path
+        assert 'rrule = "FREQ=MINUTELY;INTERVAL=30"' in toml
+
+    def test_watch_interval_is_configurable_and_validated(self, tmp_path):
+        d = tmp_path / "codex"
+        cx.install("teamx", "agent", codex_dir=d, thread_id="thr-1",
+                   interval_minutes=90)
+        toml = (d / "automations" / "coord-watch-agent" / "automation.toml").read_text()
+        assert 'rrule = "FREQ=MINUTELY;INTERVAL=90"' in toml
+        with pytest.raises(ValueError, match="interval_minutes"):
+            cx.install("teamx", "agent", codex_dir=d, thread_id="thr-1",
+                       interval_minutes=0)
+
+    def test_watch_prompt_is_compact_but_keeps_safety_contract(self):
+        prompt = cx.COORD_WATCH_PROMPT.format(team="teamx", agent="agent")
+        assert len(prompt) < 900
+        assert "briefing teamx --agent agent" in prompt
+        assert "degraded section is not clear" in prompt
+        assert "write and verify the exact required verdict before acking" in prompt
 
     def test_migrates_coord2_era_host_in_place(self, tmp_path):
         d = tmp_path / "codex"
@@ -317,6 +335,10 @@ class TestOpenClaw:
         assert oc._BEGIN in hb and oc._END in hb
         assert "coord2" not in hb and "fulcra-agent:begin" in hb
         assert "on coord team teamx" in hb
+        managed = hb.split(oc._BEGIN, 1)[1].split(oc._END, 1)[0]
+        assert len(managed) < 800
+        assert "degraded section is not clear" in managed
+        assert "write and verify the exact required verdict before acking" in " ".join(managed.split())
 
     def test_migrates_coord2_era_fence_preserving_user_content(self, tmp_path):
         # a workspace with an OLD coord2 fence around a body, plus USER prose
