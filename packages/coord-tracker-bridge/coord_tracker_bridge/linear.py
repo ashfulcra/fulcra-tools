@@ -612,7 +612,8 @@ class LinearTrackerAdapter:
             output["stateId"] = self._state_id(str(fields["semantic_state"]))
 
         internal_names = {
-            "owner", "assignee", "origin", "workstream", "policy_version", "policy_hash"
+            "owner", "assignee", "origin", "workstream", "source_lane",
+            "policy_version", "policy_hash"
         }
         internal = dict(self._metadata_by_source.get(source.key, {}))
         internal.update({key: fields[key] for key in internal_names if key in fields})

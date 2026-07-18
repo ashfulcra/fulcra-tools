@@ -49,6 +49,7 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
         "workstream": item.workstream,
         "source_identity": item.source.to_dict(),
         "source_capability": item.capability,
+        "source_lane": item.lane,
         "policy_version": policy.version,
         "policy_hash": policy.hash,
     }
@@ -131,4 +132,28 @@ def build_plan(
                 Diagnostic(entry.capability, "close-suppressed", f"absence not authoritative for {key}")
             )
 
-    return Plan(tuple(changes), tuple(diagnostics))
+    close_item_ids = {
+        change.source.item_id for change in changes if change.kind is ChangeKind.CLOSE
+    }
+    safe_changes: list[Change] = []
+    for change in changes:
+        if change.kind is ChangeKind.CREATE:
+            capability = str(change.fields.get("source_capability") or "").strip()
+            lane = str(change.fields.get("source_lane") or "").strip()
+            if not capability or not lane:
+                diagnostics.append(Diagnostic(
+                    capability or "projection",
+                    "create-suppressed-unresolved-source",
+                    change.source.item_id,
+                ))
+                continue
+            if change.source.item_id in close_item_ids:
+                diagnostics.append(Diagnostic(
+                    capability,
+                    "create-suppressed-conflicting-close",
+                    change.source.item_id,
+                ))
+                continue
+        safe_changes.append(change)
+
+    return Plan(tuple(safe_changes), tuple(diagnostics))

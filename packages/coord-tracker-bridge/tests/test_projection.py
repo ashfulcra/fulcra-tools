@@ -54,6 +54,7 @@ def managed(item_id: str, *, title="Task", capability="tasks", closed=False, fie
         "workstream": None,
         "source_identity": source(item_id).to_dict(),
         "source_capability": capability,
+        "source_lane": "active",
         "policy_version": POLICY.version,
         "policy_hash": POLICY.hash,
     }
@@ -176,6 +177,52 @@ def test_deleted_tracker_record_is_recreated_from_source():
     )
 
     assert plan.changes[0].kind is ChangeKind.CREATE
+    assert plan.changes[0].fields["source_capability"] == "tasks"
+    assert plan.changes[0].fields["source_lane"] == "active"
+
+
+def test_create_is_suppressed_when_same_slug_is_also_closed():
+    task_source = SourceIdentity("coord-engine", "fulcra/tasks", "terminal-task")
+    thread_source = SourceIdentity("coord-engine", "fulcra/threads", "terminal-task")
+    derived_thread = WorkRecord(
+        thread_source,
+        "threads",
+        "Terminal task",
+        "threads-missed",
+        origin="fleet",
+    )
+    task_record = ManagedRecord(
+        "LIN-terminal-task",
+        task_source,
+        "tasks",
+        {},
+        False,
+    )
+    task_ledger = LedgerEntry(
+        task_source,
+        "tasks",
+        "linear",
+        "LIN-terminal-task",
+        POLICY.version,
+        POLICY.hash,
+    )
+
+    plan = build_plan(
+        snapshot(
+            [derived_thread],
+            {"tasks": CapabilityState.COMPLETE, "threads": CapabilityState.COMPLETE},
+        ),
+        [task_record],
+        BridgeLedger([task_ledger]),
+        POLICY,
+    )
+
+    assert [(change.kind, change.source) for change in plan.changes] == [
+        (ChangeKind.CLOSE, task_source)
+    ]
+    assert [(diagnostic.scope, diagnostic.code, diagnostic.message) for diagnostic in plan.diagnostics] == [
+        ("threads", "create-suppressed-conflicting-close", "terminal-task")
+    ]
 
 
 def test_same_short_suffixes_create_distinct_records():

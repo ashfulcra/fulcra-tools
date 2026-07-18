@@ -282,12 +282,19 @@ def test_create_persists_capability_in_provider_metadata():
         ChangeKind.CREATE,
         source,
         None,
-        {"title": "Ask", "description": "body", "source_capability": "asks"},
+        {
+            "title": "Ask",
+            "description": "body",
+            "source_capability": "asks",
+            "source_lane": "asks",
+        },
     ))
 
     description = transport.payloads[0]["variables"]["input"]["description"]
     assert provider_id == "LIN-1"
-    assert parse_bridge_metadata(description)["capability"] == "asks"
+    metadata = parse_bridge_metadata(description)
+    assert metadata["capability"] == "asks"
+    assert metadata["fields"]["source_lane"] == "asks"
 
 
 def test_false_success_close_is_rejected():
