@@ -700,6 +700,60 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
     return 1
 
 
+def _review_archive_months(transport: Any, team: str) -> Optional[list[str]]:
+    try:
+        return [
+            str(e.get("name") or "").rstrip("/")
+            for e in transport.list_dir(rec.review_archive_prefix(team))
+            if e.get("is_dir") and e.get("name")
+        ]
+    except TransportError:
+        return None
+
+
+def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
+    """Restore a cold-archived settled-single verdict to the hot review path."""
+    months = _review_archive_months(transport, args.team)
+    if months is None:
+        print("review restore failed: archive root listing unknown", file=sys.stderr)
+        return 1
+    for month in sorted(months, reverse=True):
+        cold_prefix = (
+            f"{rec.review_archive_prefix(args.team)}{month}/{args.slug}/verdicts/"
+        )
+        try:
+            entries = transport.list_dir(cold_prefix)
+        except TransportError:
+            print(f"review restore failed: archive listing unknown for {args.slug}",
+                  file=sys.stderr)
+            return 1
+        files = [
+            str(e.get("name") or "") for e in entries
+            if not e.get("is_dir") and str(e.get("name") or "").endswith(".md")
+        ]
+        if not files:
+            continue
+        if files != ["codex-reviewer.md"]:
+            print(f"review restore failed: unexpected archived verdict shape for {args.slug}",
+                  file=sys.stderr)
+            return 1
+        filename = files[0]
+        src = cold_prefix + filename
+        dst = f"team/{args.team}/review/{args.slug}/verdicts/{filename}"
+        if transport.read(dst) is not None:
+            print(f"review restore failed: {args.slug} already exists in the hot path",
+                  file=sys.stderr)
+            return 1
+        if rec._crash_safe_move(transport, src, dst):
+            print(f"restored review {args.slug} from reviews/{month}/")
+            return 0
+        print(f"review restore failed: verified move from reviews/{month}/ failed",
+              file=sys.stderr)
+        return 1
+    print(f"review restore failed: {args.slug} not found in the archive", file=sys.stderr)
+    return 1
+
+
 def cmd_task_done(args: argparse.Namespace, transport: Any) -> int:
     path = _task_path(args.team, args.name)
     try:
@@ -3846,7 +3900,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("reconcile", help="scan + heal a team's task views")
     r.add_argument("team")
     r.add_argument("--retention-days", dest="retention_days",
-                   help="archive terminal tasks older than N days (or env COORD_RETENTION_DAYS)")
+                   help="archive quiet terminal/proposed tasks and settled-single orphan reviews older than N days (or env COORD_RETENTION_DAYS)")
     r.set_defaults(func=cmd_reconcile)
 
     s = sub.add_parser("status", help="counts by status")
@@ -4127,6 +4181,9 @@ def build_parser() -> argparse.ArgumentParser:
     rvs = rvsub.add_parser("status", help="APPROVED/CHANGES/PENDING from reviewers' verdicts")
     rvs.add_argument("team"); rvs.add_argument("slug"); add_json(rvs)
     rvs.set_defaults(func=cmd_review_status)
+    rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
+    rvr.add_argument("team"); rvr.add_argument("slug")
+    rvr.set_defaults(func=cmd_review_restore)
 
     ct = sub.add_parser("continuity", help="structured resumable snapshots (fulcra-agent-continuity)")
     ctsub = ct.add_subparsers(dest="continuity_command", required=True)
