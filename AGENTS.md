@@ -259,7 +259,15 @@ it (not on PyPI).
   that distinction ONCE, in `roles.py`, and let the callers fail closed on `None`.
   Grep any new fold for a `parse`/`read` failure **or an unusable explicit value** that returns
   something comparing equal to a legitimate state; that is the whole bug class, and it has now hidden
-  in this fold three times.
+  in this fold four times — the fourth being the WRITE path (`continuity park` via `_held_roles`),
+  which the read-fold sweep left behind. There it is worse: `park` runs as a session EXITS, so a
+  swallowed listing that read as "you hold no roles" printed *"nothing to park"* and exited 0, silently
+  discarding the checkpoint the next session resumes from, with nobody watching. `_held_roles` now
+  returns `(held, ok)` and delegates per-role state to `_role_fresh_holders`; on `ok is False` park
+  fails **non-zero** and says the checkpoint was NOT written, so the operator can retry while the
+  context is still alive. **Ship-gate extends to write paths: a command that ACTS on the roles you hold
+  (not just reports them) resolves through the one helper and refuses to act on UNKNOWN rather than
+  treating it as "nothing to do".**
   Cost per pass is **`1 + Σ(2 + L_r)` ops** over the roles the open work references (`L_r` = that
   role's lease shards — one per agent that claimed it and never `roles release`-d, so it tracks
   lifetime churn and is unbounded in principle: a role with ten shards is 13 ops, measured). ONE
