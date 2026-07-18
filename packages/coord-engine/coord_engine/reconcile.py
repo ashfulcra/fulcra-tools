@@ -500,6 +500,10 @@ def archive_prefix(team: str) -> str:
     return f"team/{team}/task/archive/"
 
 
+def review_archive_prefix(team: str) -> str:
+    return f"team/{team}/_coord/archive/reviews/"
+
+
 def _retention_marker_path(team: str) -> str:
     return f"team/{team}/_coord/retention/last-run.json"
 
@@ -523,11 +527,24 @@ def _crash_safe_move(transport: Any, src: str, dst: str) -> bool:
     return transport.delete(src) if hasattr(transport, "delete") else False
 
 
+def _quiet_mtime_old_enough(value: Any, *, now: str, days: float) -> bool:
+    """True only when the store mtime is known and older than the quiet window."""
+    modified = aggregate._parse_store_mtime(value) if value else None
+    current = _parse_iso_utc(now)
+    if modified is None or current is None:
+        return False
+    return current - modified > timedelta(days=days)
+
+
 def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: str,
                    days: float, log: Any) -> tuple[list, list[str], dict]:
-    """Archive terminal tasks older than ``days``: move the task doc to
-    task/archive/<YYYY-MM>/ and its ack/response shards to _coord/archive/,
-    verified move-not-delete, capped per pass, throttled to once per day."""
+    """Cold-archive quiet work older than ``days``, reversibly and fail-closed.
+
+    Eligible tasks are terminal or ``proposed``; ``active``/``waiting`` are never
+    retention candidates. A doc-less review directory is eligible only when its
+    verdict listing is KNOWN and proves exactly one ``codex-reviewer`` verdict.
+    Every move is copy -> verify -> delete, capped per pass and throttled daily.
+    """
     notes: list[str] = []
     archived_map: dict = {}  # slug -> (month, title), for the log's Archived bullets
     marker = transport.read(_retention_marker_path(team))
@@ -539,8 +556,16 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
         ts = r.get("timestamp")
         age = age_hours(ts, now)
         old_enough = age != float("inf") and age > days * 24.0
+        status = r.get("status")
+        eligible_status = status in model.TERMINAL_STATUSES
+        if status == "proposed":
+            # Proposed work is archived only after BOTH its semantic timestamp and
+            # its store mtime have been quiet for the window. A recent hand-edit
+            # that forgot to refresh frontmatter must keep the task hot.
+            eligible_status = _quiet_mtime_old_enough(
+                r.get("mtime"), now=now, days=days)
         if (archived < RETENTION_CAP_PER_PASS and old_enough
-                and r.get("status") in model.TERMINAL_STATUSES and ts):
+                and eligible_status and ts):
             slug = str(r.get("name"))
             month = str(ts)[:7]  # YYYY-MM
             # malformed timestamp would mint a garbage archive dir — keep hot instead
@@ -576,11 +601,80 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                     transport.delete(dst)
             notes.append(f"retention: move FAILED for {slug}; kept")
         keep.append(r)
+
+    # Verdict-only review dirs are a separate cold population. The review-root
+    # listing positively proves which slugs have no live review doc; a raised
+    # listing is UNKNOWN, never an empty set. Per-slug verdict listings obey the
+    # same rule. Empty tombstones, multi-verdict dirs, and non-codex singletons are
+    # deliberately excluded rather than guessed settled.
+    review_archived = 0
+    review_prefix = f"team/{team}/review/"
+    try:
+        review_entries = transport.list_dir(review_prefix)
+    except TransportError:
+        review_entries = None
+        notes.append("retention: review root listing UNKNOWN; no orphan reviews archived")
+    if review_entries is not None:
+        doc_slugs = {
+            str(e.get("name"))[:-3]
+            for e in review_entries
+            if not e.get("is_dir") and str(e.get("name") or "").endswith(".md")
+        }
+        dir_slugs = sorted({
+            str(e.get("name") or "").rstrip("/")
+            for e in review_entries if e.get("is_dir")
+        } - doc_slugs)
+        for slug in dir_slugs:
+            if archived >= RETENTION_CAP_PER_PASS:
+                break
+            verdict_prefix = f"{review_prefix}{slug}/verdicts/"
+            try:
+                verdict_entries = transport.list_dir(verdict_prefix)
+            except TransportError:
+                notes.append(
+                    f"retention: review {slug} verdict listing UNKNOWN; kept hot")
+                continue
+            verdict_files = sorted(
+                str(e.get("name") or "") for e in verdict_entries
+                if not e.get("is_dir") and str(e.get("name") or "").endswith(".md")
+            )
+            if verdict_files != ["codex-reviewer.md"]:
+                continue
+            filename = verdict_files[0]
+            src = verdict_prefix + filename
+            raw = transport.read(src)
+            fm = okf.parse_frontmatter(raw)
+            if fm is None:
+                notes.append(f"retention: review {slug} verdict unreadable; kept hot")
+                continue
+            if fm.get("type") != "Verdict" or fm.get("reviewer") != "codex-reviewer":
+                continue
+            verdict_entry = next(e for e in verdict_entries if e.get("name") == filename)
+            if not _quiet_mtime_old_enough(
+                verdict_entry.get("mtime"), now=now, days=days
+            ):
+                continue
+            ts = fm.get("timestamp")
+            age = age_hours(ts, now)
+            if age == float("inf") or age <= days * 24.0:
+                continue
+            month = str(ts)[:7]
+            if len(month) != 7 or month[4] != "-" or not (month[:4] + month[5:]).isdigit():
+                notes.append(f"retention: review {slug} has a non-ISO timestamp; kept hot")
+                continue
+            dst = f"{review_archive_prefix(team)}{month}/{slug}/verdicts/{filename}"
+            if _crash_safe_move(transport, src, dst):
+                archived += 1
+                review_archived += 1
+                notes.append(f"retention: archived review {slug} -> reviews/{month}/")
+            else:
+                notes.append(f"retention: review move FAILED for {slug}; kept")
     if marker is None or today not in marker:
         transport.write(_retention_marker_path(team),
                         json.dumps({"last_run": today, "archived": archived}))
     if archived:
-        log.info("retention", team=team, archived=archived)
+        log.info("retention", team=team, archived=archived,
+                 review_archived=review_archived)
     return keep, notes, archived_map
 
 
@@ -726,10 +820,13 @@ def reconcile(
         override=retention_days,
         aliases=("FULCRA_COORD_RETENTION_DAYS",),
     )
-    if days > 0 and rows:
+    if days > 0:
         rows, notes, archived_map = _run_retention(
             transport, team, rows, now=now, today=today, days=days, log=log)
-        warnings.extend(n for n in notes if "FAILED" in n or "kept hot" in n)
+        warnings.extend(
+            n for n in notes
+            if "FAILED" in n or "kept hot" in n or "UNKNOWN" in n
+        )
 
     # --- ack fold + shard-GC sub-pass ---
     # Change-driven: re-fold only the slugs the store says changed since our last

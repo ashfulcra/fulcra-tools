@@ -91,6 +91,12 @@ under `skills/`, each package with its own README, build, and tests.
   `threads --json`), identifies the exact degraded marker path/reason in its
   diagnostics, and gives the intentionally slow fleet-health fold a separate
   six-minute bound while keeping other folds at three minutes.
+- Coord retention remains opt-in via `COORD_RETENTION_DAYS` or
+  `reconcile --retention-days`: it cold-archives old terminal **and proposed**
+  tasks, plus only doc-less review dirs positively proven to contain exactly one
+  old `codex-reviewer` verdict. Empty tombstones, multi-verdict/non-codex dirs,
+  and UNKNOWN listings stay hot. Moves are copy-verified, never destructive-only,
+  and reverse through `task restore` or `review restore`.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 
