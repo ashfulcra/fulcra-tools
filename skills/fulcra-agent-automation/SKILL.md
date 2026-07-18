@@ -126,8 +126,10 @@ seconds and exits cleanly on SIGINT.
 - **launchd / cron (unattended host):** the bundled installer — unchanged UX. The scheduled job's tick
   delegates to `listen --once` and keeps the notification + consent-gated wake around it.
   ```bash
-  ./scripts/install-listener.sh <team> <agent> [interval-minutes]           # notify only (default 10m)
-  ./scripts/install-listener.sh <team> <agent> 10 --wake-cmd "…headless…"   # + consent-gated wake
+  ./scripts/install-listener.sh <team> <agent> [active-minutes]            # adaptive: default 1m/30m tail/30m idle
+  ./scripts/install-listener.sh <team> <agent> 1 --tail-minutes 30 --idle-minutes 60
+  ./scripts/install-listener.sh <team> <agent> 1 --wake-cmd "…headless…"    # + consent-gated wake
+  ./scripts/install-listener.sh <team> <agent> 10 --fixed                  # legacy fixed cadence
   ./scripts/install-listener.sh --uninstall <team> <agent>
   ```
   On NEW events it posts a macOS notification (or a log line) and, only if you consented to `--wake-cmd`
@@ -137,7 +139,12 @@ seconds and exits cleanly on SIGINT.
   the session can run the targeted fallback. Wake adapters receive fixed advisory environment fields
   (`COORD_LISTENER_TEAM`, `COORD_LISTENER_AGENT`, `COORD_LISTENER_DEGRADED`,
   `COORD_LISTENER_OUTPUT`) and must still fetch the authoritative briefing. `--yes` skips BOTH the schedule prompt and the wake-command
-  acknowledgement — only use it when that consent was already given. Hardened like the heartbeat:
+  acknowledgement — only use it when that consent was already given. By default the scheduler ticks
+  every active minute, but the model-free tick uses a local due-time gate: events and degradation keep
+  it hot for the configured tail, then healthy quiet polling backs off to `--idle-minutes`. The idle
+  interval is the maximum added pickup latency until Fulcra exposes push; `--fixed` preserves the old
+  behavior. `COORD_LISTENER_FORCE=1` bypasses only the due gate, while
+  `COORD_LISTENER_MARK_ACTIVE=1` also restarts the hot tail for trusted lifecycle adapters. Hardened like the heartbeat:
   validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent project's wake
   silently 401'd on exactly this), `plutil` lint, install-time self-test.
 - **Claude Code live session:** THE one command is `coord-engine listen` wrapped in the harness's

@@ -191,7 +191,11 @@ class TestListenerBothPlatforms:
             pl = plistlib.loads(plists[0].read_bytes())
             assert pl["Label"] == plists[0].name[:-len(".plist")]
             assert pl["StartInterval"] == 10 * 60
-            assert any("listener-tick" in str(a) for a in pl["ProgramArguments"])
+            args = [str(a) for a in pl["ProgramArguments"]]
+            assert any("listener-tick" in a for a in args)
+            assert args[1:9] == ["--adaptive", "--active-minutes", "10",
+                                  "--tail-minutes", "30", "--idle-minutes", "30",
+                                  "teamx"]
             assert "teamx" in pl["ProgramArguments"]           # from codex-reviewer's pin
             assert "coord-maintainer" in pl["ProgramArguments"]
             envd = pl["EnvironmentVariables"]
@@ -202,6 +206,24 @@ class TestListenerBothPlatforms:
         else:
             lines = _cron_lines(env)
             assert len(lines) == 1 and "listener-tick" in lines[0]
+            assert "--adaptive --active-minutes 10 --tail-minutes 30 --idle-minutes 30" in lines[0]
+
+    def test_fixed_mode_preserves_legacy_tick_contract(self, env):
+        r = _run("install-listener.sh", [*self.ARGS, "--fixed"], env)
+        assert r.returncode == 0, r.stderr
+        if env["platform"] == "Darwin":
+            args = [str(a) for a in plistlib.loads(_plists(env)[0].read_bytes())["ProgramArguments"]]
+            assert args[1:3] == ["teamx", "coord-maintainer"]
+            assert "--adaptive" not in args
+        else:
+            assert "--adaptive" not in _cron_lines(env)[0]
+
+    def test_rejects_idle_interval_shorter_than_active(self, env):
+        r = _run("install-listener.sh",
+                 ["--yes", "teamx", "coord-maintainer", "10", "--idle-minutes", "5"], env)
+        assert r.returncode == 2
+        assert "idle-minutes" in r.stderr
+        assert _plists(env) == [] and _cron_lines(env) == []
 
     def test_uninstall_roundtrip(self, env):
         assert _run("install-listener.sh", self.ARGS, env).returncode == 0
@@ -222,12 +244,14 @@ class TestListenerBothPlatforms:
 
 
 class TestListenerTick:
-    def _run_tick(self, tmp_path, once_stdout="", once_stderr="", *, verbose=False):
+    def _run_tick(self, tmp_path, once_stdout="", once_stderr="", *, verbose=False,
+                  adaptive=False, now=None, force=False):
         shims = tmp_path / "shims"
-        shims.mkdir()
+        shims.mkdir(exist_ok=True)
         engine = shims / "coord-engine"
         engine.write_text(
             "#!/bin/sh\n"
+            "echo \"coord-engine $*\" >> \"$COORD_TEST_CALLS\"\n"
             "case \" $* \" in\n"
             "  *' --state-path '*) printf '%s\\n' \"$COORD_TEST_STATE\" ;;\n"
             "  *) printf '%s' \"$COORD_TEST_STDOUT\"; "
@@ -241,10 +265,20 @@ class TestListenerTick:
             "COORD_TEST_STATE": str(tmp_path / "state" / "listen.json"),
             "COORD_TEST_STDOUT": once_stdout,
             "COORD_TEST_STDERR": once_stderr,
+            "COORD_TEST_CALLS": str(tmp_path / "calls.log"),
             "COORD_LISTENER_VERBOSE": "1" if verbose else "0",
         }
+        if now is not None:
+            env["COORD_LISTENER_NOW_EPOCH"] = str(now)
+        if force:
+            env["COORD_LISTENER_FORCE"] = "1"
+        args = ["bash", str(SCRIPTS / "listener-tick.sh")]
+        if adaptive:
+            args += ["--adaptive", "--active-minutes", "1",
+                     "--tail-minutes", "5", "--idle-minutes", "30"]
+        args += ["teamx", "agent"]
         return subprocess.run(
-            ["bash", str(SCRIPTS / "listener-tick.sh"), "teamx", "agent"],
+            args,
             capture_output=True, text=True, env=env, timeout=20)
 
     def test_quiet_tick_is_silent_by_default(self, tmp_path):
@@ -262,6 +296,66 @@ class TestListenerTick:
         assert r.returncode == 0
         assert "LISTEN DEGRADED: inbox unreadable" in r.stderr
         assert "listener degraded" in r.stdout
+
+    def test_adaptive_tick_stays_hot_then_backs_off(self, tmp_path):
+        first = self._run_tick(tmp_path, adaptive=True, now=1000)
+        assert first.returncode == 0
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        assert cadence.read_text() == "active_until=1300\nnext_due=1060\n"
+        calls_after_first = (tmp_path / "calls.log").read_text().splitlines()
+
+        skipped = self._run_tick(tmp_path, adaptive=True, now=1030)
+        assert skipped.returncode == 0 and skipped.stdout == ""
+        assert (tmp_path / "calls.log").read_text().splitlines() == calls_after_first
+
+        cold = self._run_tick(tmp_path, adaptive=True, now=1310)
+        assert cold.returncode == 0
+        assert cadence.read_text() == "active_until=1300\nnext_due=3110\n"
+
+    def test_adaptive_event_reheats_listener_and_force_bypasses_due_gate(self, tmp_path):
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        forced = self._run_tick(tmp_path, once_stdout="DIRECTIVE work\n",
+                                adaptive=True, now=1030, force=True)
+        assert "1 new event" in forced.stdout
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        assert cadence.read_text() == "active_until=1330\nnext_due=1090\n"
+
+    def test_explicit_activity_marker_restarts_tail_without_an_event(self, tmp_path):
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        cadence.write_text("active_until=900\nnext_due=900\n")
+        shims = tmp_path / "shims"
+        env = {
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{shims}:/usr/bin:/bin",
+            "COORD_LISTENER_STATE": str(tmp_path / "state"),
+            "COORD_TEST_STATE": str(tmp_path / "state" / "listen.json"),
+            "COORD_TEST_STDOUT": "",
+            "COORD_TEST_STDERR": "",
+            "COORD_TEST_CALLS": str(tmp_path / "calls.log"),
+            "COORD_LISTENER_NOW_EPOCH": "1100",
+            "COORD_LISTENER_MARK_ACTIVE": "1",
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPTS / "listener-tick.sh"), "--adaptive",
+             "--active-minutes", "1", "--tail-minutes", "5",
+             "--idle-minutes", "30", "teamx", "agent"],
+            capture_output=True, text=True, env=env, timeout=20)
+        assert r.returncode == 0
+        assert cadence.read_text() == "active_until=1400\nnext_due=1160\n"
+
+    def test_adaptive_malformed_state_fails_open(self, tmp_path):
+        state = tmp_path / "state"
+        state.mkdir()
+        # The exact key is intentionally discovered by a first real tick; then
+        # corrupt both fields and prove the next run polls rather than sleeping.
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        cadence = next(state.glob("*.cadence"))
+        cadence.write_text("active_until=oops\nnext_due=never\n")
+        before = len((tmp_path / "calls.log").read_text().splitlines())
+        self._run_tick(tmp_path, adaptive=True, now=1001)
+        after = len((tmp_path / "calls.log").read_text().splitlines())
+        assert after > before
 
 
 class TestOpenClawWakeAdapter:

@@ -6,15 +6,22 @@ newly reported degraded source) invokes one fixed, operator-approved harness
 adapter. The awakened session then runs the authoritative `briefing` fold; the
 notification text is advisory, never the source of truth.
 
+The host listener is adaptive by default. It polls every active minute while
+work is arriving and for a configurable hot tail, then a local due-time gate
+reduces source reads to the configured idle cadence. The scheduler may still
+invoke the tiny shell tick each active minute, but skipped ticks do not call
+`coord-engine`, Fulcra, or a model. Without source-side push, the idle interval
+is the maximum added pickup latency for the next item.
+
 ## Harness matrix
 
 | Harness | Event-driven path | Fallback |
 | --- | --- | --- |
-| OpenClaw Gateway | Supported: authenticated `POST /hooks/wake`; use `scripts/wake/openclaw.sh` | Existing Gateway heartbeat |
+| OpenClaw Gateway | Adaptive model-free listener → authenticated `POST /hooks/wake`; use `scripts/wake/openclaw.sh` | Existing Gateway heartbeat |
 | Claude Managed Agents | Supported by its session events API: send `user.message` to an idle persisted session | Scheduled deployment |
-| Claude Code local/desktop | No inbound hook into an exact interactive UI session is documented. A foreground `coord-engine listen` can surface events while the session is live; do not start a competing resume client automatically. | SessionStart briefing plus host notification |
+| Claude Code local/desktop | Host adaptive listener handles cold sessions; a foreground `coord-engine listen` can surface events while live. No exact interactive-session inbound hook is documented, so do not start a competing resume client automatically. | SessionStart briefing plus host notification |
 | Claude Code web/cloud UI | No exact-session inbound wake is documented. Do not substitute a different Managed Agents session without explicit migration. | Platform scheduled routine / host-tier owner |
-| Codex Desktop | No documented inbound webhook resumes an exact existing app task. The installer therefore uses a compact 30-minute safety-net automation, configurable with `--interval-minutes`. | SessionStart briefing |
+| Codex Desktop | No documented inbound webhook resumes an exact existing app task. The host listener can adapt notifications, but model-backed app automations cannot safely self-reschedule; the installer therefore retains a compact 30-minute safety net configurable with `--interval-minutes`. | SessionStart briefing |
 | Codex app-server integration | A trusted integration can `thread/resume` and `turn/start` over local stdio/socket transport, but this is a separate app-server runtime and is not assumed to awaken the Desktop UI task. | Codex Desktop safety net |
 
 ## OpenClaw deployment
@@ -27,7 +34,7 @@ install -d -m 700 "$HOME/.config/coord-engine"
 printf '%s' 'dedicated-secret' > "$HOME/.config/coord-engine/openclaw-hook-token"
 chmod 600 "$HOME/.config/coord-engine/openclaw-hook-token"
 ./skills/fulcra-agent-automation/scripts/install-listener.sh \
-  <team> <agent> 1 --wake-cmd \
+  <team> <agent> 1 --tail-minutes 30 --idle-minutes 30 --wake-cmd \
   "$PWD/skills/fulcra-agent-automation/scripts/wake/openclaw.sh"
 ```
 
@@ -40,6 +47,12 @@ metadata. It does not forward an event body as executable text. OpenClaw's
 official guidance requires bearer authentication, rejects query-string tokens,
 and recommends a dedicated token plus a constrained network boundary:
 <https://docs.openclaw.ai/webhook>.
+
+For a sleep-heavy fleet, increase `--idle-minutes` (for example to 60) while
+keeping the one-minute active cadence and a 30-minute tail. Use `--fixed` only
+for a harness whose own scheduler already provides an adaptive/push contract.
+An operator or trusted lifecycle hook may run a forced tick with
+`COORD_LISTENER_MARK_ACTIVE=1`; untrusted event payloads must never control it.
 
 ## Relay contract
 
