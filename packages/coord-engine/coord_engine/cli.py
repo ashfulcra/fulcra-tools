@@ -3801,6 +3801,11 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
         print(f"  skipped {line}", file=sys.stderr)
     for line in fb.get("notes", []):
         print(f"  note {line}", file=sys.stderr)
+    if fb.get("degraded"):
+        print(budget_mod.fold_degraded_line(
+            fb["degraded"], label="forge sweep",
+            remedy="feedback state is partial, retry", noun="PR"), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -3820,6 +3825,11 @@ def cmd_forge_feedback(args: argparse.Namespace, transport: Any) -> int:
         print(f"  skipped {line}", file=sys.stderr)
     for line in fb.get("notes", []):
         print(f"  note {line}", file=sys.stderr)
+    if fb.get("degraded"):
+        print(budget_mod.fold_degraded_line(
+            fb["degraded"], label="forge sweep",
+            remedy="feedback state is partial, retry", noun="PR"), file=sys.stderr)
+        return 1
     return 0
 
 

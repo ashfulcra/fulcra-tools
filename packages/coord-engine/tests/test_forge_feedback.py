@@ -381,6 +381,95 @@ def test_gh_failure_on_one_pr_is_reported_and_pass_continues():
     assert "team/r/_coord/forge/feedback/o-r-99/review-PRR_9.md" in t.store
 
 
+def test_direct_sweep_budget_cuts_review_discovery_fail_visible(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(forge.budget.time, "monotonic", lambda: clock["now"])
+
+    class SlowReadTransport(FakeTransport):
+        def read(self, path):
+            got = super().read(path)
+            clock["now"] += 2.0
+            return got
+
+    t = SlowReadTransport()
+    _review_doc(t)
+    calls = []
+    res = forge.feedback_sweep(
+        t, "r", runner=lambda args: calls.append(args), deadline_seconds=1)
+    assert calls == []  # budget spent in discovery: no forge calls start
+    assert res["degraded"] == {
+        "type": "forge-sweep-degraded", "scanned": 0, "total": 1,
+        "skipped": 1,
+    }
+
+
+def test_direct_sweep_budget_checks_after_each_forge_surface(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(forge.budget.time, "monotonic", lambda: clock["now"])
+    t = FakeTransport()
+    _watch(t)
+    calls = []
+
+    def slow_runner(args):
+        calls.append(args)
+        clock["now"] += 2.0
+        return _fixtures()["reviews"]
+
+    res = forge.feedback_sweep(t, "r", runner=slow_runner, deadline_seconds=1)
+    assert len(calls) == 1  # no inline/comment calls after the first overrun
+    assert res["degraded"]["type"] == "forge-sweep-degraded"
+    assert res["skipped"] == ["o-r-42: budget exhausted"]
+
+
+def test_direct_sweep_budget_stops_feedback_write_fanout(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(forge.budget.time, "monotonic", lambda: clock["now"])
+
+    class SlowWriteTransport(FakeTransport):
+        writes = 0
+
+        def write(self, path, content):
+            got = super().write(path, content)
+            if "/feedback/" in path:
+                self.writes += 1
+                clock["now"] += 2.0
+            return got
+
+    t = SlowWriteTransport()
+    _watch(t)
+    res = forge.feedback_sweep(
+        t, "r", runner=_runner_for(_fixtures(reviews=[_REVIEW])),
+        deadline_seconds=1)
+    assert t.writes == 1
+    assert res["items"] == 1  # the landed shard remains honestly counted
+    assert res["degraded"]["type"] == "forge-sweep-degraded"
+    assert res["skipped"] == ["o-r-42: budget exhausted"]
+
+
+def test_direct_feedback_cli_returns_nonzero_on_budget_degradation(
+        monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.forge_mod, "feedback_sweep",
+        lambda *_args, **_kwargs: {
+            "prs": 0,
+            "items": 0,
+            "skipped": [],
+            "notes": [],
+            "degraded": {
+                "type": "forge-sweep-degraded",
+                "scanned": 0,
+                "total": 0,
+            },
+        },
+    )
+    args = build_parser().parse_args(["forge", "feedback", "r"])
+    args.runner = lambda _args: None  # bypass the optional gh-presence guard
+    assert args.func(args, FakeTransport()) == 1
+    captured = capsys.readouterr()
+    assert "forge sweep fold degraded" in captured.err
+    assert "partial" in captured.err
+
+
 # --- (g) v1 mirror behavior untouched -------------------------------------
 
 def test_mirror_return_contract_is_unchanged():
