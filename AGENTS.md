@@ -220,6 +220,10 @@ it (not on PyPI).
   group and is SIGKILLed whole on timeout (a hung child can't leak a pipe-holding tree past the bound).
   The per-op bound is `COORD_TRANSPORT_TIMEOUT` (float seconds, default 30; unparseable/≤0/NaN/inf →
   default) — **run it TIGHT on a watcher (e.g. 8s)** so the fold budgets above buy real responsiveness.
+  The direct `forge feedback` fallback also has one cumulative
+  `COORD_FORGE_SWEEP_BUDGET` (default 60s) spanning review/watch discovery and
+  the per-PR three-surface sweep; a cut returns non-zero with a
+  `forge-sweep-degraded` marker rather than hanging or reporting a clean partial.
   Every `COORD_*` tuning knob (default, unit, what it bounds), the shared positive-finite parse policy,
   and the `FULCRA_COORD_*` legacy-prefix rule are catalogued in one place:
   [`packages/coord-engine/README.md` → Environment / tuning](packages/coord-engine/README.md#environment--tuning).

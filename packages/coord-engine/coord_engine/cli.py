@@ -391,7 +391,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
     # own independent, already-shipped budget.
     add_on = Deadline.open(_briefing_budget())
-    got += _pending_reviews_for(transport, args.team, args.agent)
+    got += _pending_reviews_for(
+        transport, args.team, args.agent, deadline=add_on.instant)
     got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
     if args.json:
         print(json.dumps(got, indent=2))
@@ -1279,7 +1280,8 @@ def _held_roles_for_rows(
 
 
 def _pending_reviews_for(
-    transport: Any, team: str, agent: str, *, deadline_seconds: Optional[float] = None
+    transport: Any, team: str, agent: str, *, deadline_seconds: Optional[float] = None,
+    deadline: Optional[float] = None,
 ) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: the top listing failing yields []
@@ -1309,6 +1311,24 @@ def _pending_reviews_for(
     pre-fold (like task rows) — tracked on the bus."""
     if deadline_seconds is None:
         deadline_seconds = _review_fold_budget()
+    # The review fold owns a standalone budget, but bundled callers also have a
+    # shared aggregate deadline.  Spend whichever expires first.  Before this
+    # clamp, ``briefing`` claimed one cumulative add-on budget while reviews
+    # silently opened a fresh 45-second window; on a team with 193 historical
+    # review directories the session wake could expire here before current tasks
+    # were rendered.  Accept the absolute instant so time already spent by an
+    # earlier bundled section is preserved rather than reset.
+    # Preserve the standalone fold's historical measurable-progress contract:
+    # its own budget opens after the top-level listing.  A bundled caller passes
+    # an already-open absolute deadline, which *must* include that listing time.
+    dl: Optional[Deadline] = None
+    if deadline is not None:
+        # Re-open from the smaller REMAINING budget rather than constructing from
+        # the absolute instant.  ``Deadline.reserve`` needs the retained budget
+        # value to protect the doc scan from orphan-classification starvation;
+        # the bare constructor deliberately has no reservable budget.
+        remaining = max(0.0, deadline - time.monotonic())
+        dl = Deadline.open(min(deadline_seconds, remaining))
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
@@ -1332,7 +1352,10 @@ def _pending_reviews_for(
     total = len(slug_entries)
     scanned = 0
     skipped = 0
-    dl = Deadline.open(deadline_seconds)  # absolute monotonic instant (F2)
+    if dl is None:
+        dl = Deadline.open(deadline_seconds)
+    if dl.expired():
+        return [budget_mod.degraded_row("review-fold-degraded", 0, total)]
     # Dir-only review slugs (a `<slug>/` dir with no `<slug>.md` doc) are invisible
     # to the doc-keyed scan below. Classify each via the tombstone three-way (one
     # verdicts listing apiece): a dir with real verdict shards is an ORPHAN (surface
@@ -3153,7 +3176,8 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # the whole add-on stack is bounded cumulatively. pending-reviews keeps its own
     # tighter, already-shipped budget (whichever bound is sooner).
     try:
-        out["pending_reviews"] = _pending_reviews_for(transport, args.team, agent)
+        out["pending_reviews"] = _pending_reviews_for(
+            transport, args.team, agent, deadline=add_on.instant)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
@@ -3801,6 +3825,11 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
         print(f"  skipped {line}", file=sys.stderr)
     for line in fb.get("notes", []):
         print(f"  note {line}", file=sys.stderr)
+    if fb.get("degraded"):
+        print(budget_mod.fold_degraded_line(
+            fb["degraded"], label="forge sweep",
+            remedy="feedback state is partial, retry", noun="PR"), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -3820,6 +3849,11 @@ def cmd_forge_feedback(args: argparse.Namespace, transport: Any) -> int:
         print(f"  skipped {line}", file=sys.stderr)
     for line in fb.get("notes", []):
         print(f"  note {line}", file=sys.stderr)
+    if fb.get("degraded"):
+        print(budget_mod.fold_degraded_line(
+            fb["degraded"], label="forge sweep",
+            remedy="feedback state is partial, retry", noun="PR"), file=sys.stderr)
+        return 1
     return 0
 
 

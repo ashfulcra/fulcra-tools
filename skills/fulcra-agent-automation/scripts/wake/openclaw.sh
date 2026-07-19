@@ -36,6 +36,9 @@ esac
 TEAM="${COORD_LISTENER_TEAM:-unknown}"
 AGENT="${COORD_LISTENER_AGENT:-unknown}"
 DEGRADED="${COORD_LISTENER_DEGRADED:-0}"
+EVENT_REFS="${COORD_LISTENER_EVENT_REFS:-}"
+[[ -z "$EVENT_REFS" || "$EVENT_REFS" =~ ^[A-Z]+:[A-Za-z0-9:_.-]+(,[A-Z]+:[A-Za-z0-9:_.-]+)*$ ]] || {
+  echo "openclaw wake: invalid event refs" >&2; exit 2; }
 
 case "$URL" in
   https://*) ;;
@@ -47,12 +50,13 @@ case "$URL" in
   *) echo "openclaw wake: OPENCLAW_HOOK_URL must be http(s)" >&2; exit 2 ;;
 esac
 
-PAYLOAD="$(python3 - "$TEAM" "$AGENT" "$DEGRADED" <<'PY'
+PAYLOAD="$(python3 - "$TEAM" "$AGENT" "$DEGRADED" "$EVENT_REFS" <<'PY'
 import json, sys
-team, agent, degraded = sys.argv[1:]
+team, agent, degraded, refs = sys.argv[1:]
 reason = "listener degradation; apply targeted fallback" if degraded == "1" else "new coordination event"
+ref_text = f" Compact event references (kind:canonical-slug only): {refs}." if refs else ""
 print(json.dumps({
-    "text": f"Coord wake for {agent} on team {team}: {reason}. Resume continuity, run the authoritative briefing once, and handle surfaced work.",
+    "text": f"Coord wake for {agent} on team {team}: {reason}.{ref_text} Resume continuity, run the authoritative briefing once, and handle surfaced work.",
     "mode": "now",
 }, separators=(",", ":")))
 PY
