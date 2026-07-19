@@ -1723,6 +1723,35 @@ def test_briefing_text_includes_pending_reviews(capsys):
     assert "pr-5" in out
 
 
+def test_briefing_shared_budget_bounds_pending_review_fold(capsys, monkeypatch):
+    """Reviews must not reset the aggregate briefing clock.
+
+    A large permanent review history used to open a fresh 45-second window after
+    the shared add-on budget was already spent, starving the current-work output
+    on heartbeat wakes.  A slow top-level review listing is enough to reproduce
+    the deadline reset without creating hundreds of fixtures.
+    """
+    class SlowReviewTransport(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/":
+                _time.sleep(0.03)
+            return super().list_dir(prefix)
+
+    monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
+    monkeypatch.setenv("COORD_REVIEW_FOLD_BUDGET", "60")
+    t = SlowReviewTransport()
+    _seed_review(t, "pr-5", "me")
+
+    start = _time.monotonic()
+    assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
+    elapsed = _time.monotonic() - start
+    out = json.loads(capsys.readouterr().out)
+
+    assert elapsed < 1.0, "pending reviews must not reset the shared briefing budget"
+    assert any(r.get("type") == "review-fold-degraded"
+               for r in out["pending_reviews"]), out["pending_reviews"]
+
+
 def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):
     import json as _j
     from coord_engine.tasks import agent_key
