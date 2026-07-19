@@ -138,10 +138,19 @@ seconds and exits cleanly on SIGINT.
   a newly emitted `LISTEN DEGRADED` diagnostic is forwarded and also wakes the consented adapter so
   the session can run the targeted fallback. Wake adapters receive fixed advisory environment fields
   (`COORD_LISTENER_TEAM`, `COORD_LISTENER_AGENT`, `COORD_LISTENER_DEGRADED`,
-  `COORD_LISTENER_OUTPUT`) and must still fetch the authoritative briefing. `--yes` skips BOTH the schedule prompt and the wake-command
+  `COORD_LISTENER_RETRY`, `COORD_LISTENER_EVENT_REFS`) plus the legacy advisory
+  `COORD_LISTENER_OUTPUT`, and must still fetch the authoritative briefing.
+  `COORD_LISTENER_EVENT_REFS` contains only validated `KIND:canonical-slug` pairs;
+  adapters may use it for targeted orientation but must never evaluate it as code.
+  Raw titles, outcomes, authors, and bodies remain excluded from bundled wake
+  prompts. `--yes` skips BOTH the schedule prompt and the wake-command
   acknowledgement — only use it when that consent was already given. By default the scheduler ticks
-  every active minute, but the model-free tick uses a local due-time gate: events and degradation keep
-  it hot for the configured tail, then healthy quiet polling backs off to `--idle-minutes`. The idle
+  every active minute, but the model-free tick uses a local due-time gate: affirmative events keep
+  the work tail hot, healthy quiet polling backs off to `--idle-minutes`, and degradation follows a
+  separate exponential retry backoff capped at that idle cadence. A failed wake is durably retried on
+  later ticks even though `listen` has already advanced its event cursor; wake
+  delivery has its own exponential backoff capped at the idle cadence, so a
+  persistently unavailable harness cannot spawn a model attempt every hot minute. The idle
   interval is the maximum added pickup latency until Fulcra exposes push; `--fixed` preserves the old
   behavior. `COORD_LISTENER_FORCE=1` bypasses only the due gate, while
   `COORD_LISTENER_MARK_ACTIVE=1` also restarts the hot tail for trusted lifecycle adapters. Hardened like the heartbeat:
@@ -166,7 +175,13 @@ seconds and exits cleanly on SIGINT.
 For push-capable harnesses and the fleet security contract, see
 [`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). OpenClaw can use the
 bundled fixed adapter at `scripts/wake/openclaw.sh`; Codex Desktop and Claude Code UI sessions retain
-their documented safety nets until those products expose an exact-session inbound wake surface.
+the documented safety nets appropriate to their harness. Codex's stable exact-thread adapter is
+`scripts/wake/codex.sh`; it uses `codex exec resume` without bypassing approvals or sandboxing:
+```bash
+COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<repo> \
+  ./scripts/install-listener.sh <team> <agent> 1 \
+  --wake-cmd "COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<repo> /absolute/path/to/scripts/wake/codex.sh"
+```
 
 **Single-flight — one watcher identity per agent.** Run exactly one listener per `<agent>` on a host:
 the per-agent state file is not a concurrency lock, so two listeners for the same agent (or a canonical
@@ -249,10 +264,11 @@ Merges SessionStart (matcher `startup|resume|clear|compact`) + PreCompact entrie
 `~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord-first app-thread automation
 under `~/.codex/automations/coord-watch-<agent>/` whose prompt embeds contract rules 1–3 and ticks the
 inbox. The default safety-net cadence is 30 minutes (override with `--interval-minutes`), replacing the
-old 5-minute model-backed poll while Codex Desktop has no documented inbound exact-task wake API.
-The consent-gated `wake.json` host-wake layer is **deliberately not shipped** (security ruling:
-it spawns headless `codex exec` with approvals/sandbox bypassed; the coord listener already covers
-wake). Deployment precondition: on the first real host, verify the SessionStart hook actually fires
+old 5-minute model-backed poll. For event-driven wake, pair its exact thread id with
+`scripts/wake/codex.sh` through the consent-gated listener command above. The adapter uses the stable
+`codex exec resume <SESSION_ID>` interface, never passes
+`--dangerously-bypass-approvals-and-sandbox`, and never places raw bus event text in the prompt; the
+resumed agent fetches authoritative briefing state. Deployment precondition: on the first real host, verify the SessionStart hook actually fires
 before relying on hook-based automation seeding — pass `--thread-id` for the deterministic path if you
 already know the watch thread.
 

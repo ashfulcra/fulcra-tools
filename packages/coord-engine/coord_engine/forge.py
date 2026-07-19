@@ -16,7 +16,20 @@ import re
 import shutil
 from typing import Any, Callable, Optional
 
+from . import budget, config
 from . import transport as _transport
+
+DEFAULT_FORGE_SWEEP_BUDGET = 60.0
+
+
+def _forge_sweep_budget(override: Optional[float] = None) -> float:
+    """Whole direct feedback-sweep budget."""
+    return config.env_float(
+        "COORD_FORGE_SWEEP_BUDGET",
+        DEFAULT_FORGE_SWEEP_BUDGET,
+        override=override,
+    )
+
 
 _PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 _SLUG = re.compile(r"[^a-z0-9]+")
@@ -222,43 +235,104 @@ def _parse_comments(raw: Optional[str]) -> list[dict[str, Any]]:
     return out
 
 
-def _discover_prs(transport: Any, team: str, repo: Optional[str]) -> dict[str, str]:
-    """{pr_url: pr_slug} for PRs that are either a review artifact (existing
-    discovery) or in the watch registry. Best-effort per source."""
+def _discover_prs(
+    transport: Any, team: str, repo: Optional[str], *, deadline: budget.Deadline
+) -> tuple[dict[str, str], dict[str, int | bool]]:
+    """Discover ``{pr_url: pr_slug}`` within the shared deadline.
+
+    PRs may come from review artifacts or the watch registry. The metadata
+    reports scanned/total/skipped discovery documents so callers can distinguish
+    a genuinely empty registry from a partial fold.
+    """
     from . import okf
     from .transport import TransportError
 
     prs: dict[str, str] = {}
+    scanned = total = skipped = 0
+    degraded = False
     review_prefix = f"team/{team}/review/"
     try:
-        for e in transport.list_dir(review_prefix):
+        if deadline.expired():
+            return prs, {"scanned": 0, "total": 0, "skipped": 0, "degraded": True}
+        review_entries = transport.list_dir(review_prefix)
+        if deadline.expired():
+            return prs, {"scanned": 0, "total": 0, "skipped": 0, "degraded": True}
+        review_entries = [
+            e for e in review_entries
+            if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
+            and (e.get("name") or "") != "index.md"
+        ]
+        total += len(review_entries)
+        for i, e in enumerate(review_entries):
+            if deadline.expired():
+                degraded = True
+                skipped += len(review_entries) - i
+                break
             n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
-                continue
-            fm = okf.parse_frontmatter(transport.read(review_prefix + n)) or {}
+            raw = transport.read(review_prefix + n)
+            scanned += 1
+            unreadable = raw is None
+            if unreadable:
+                skipped += 1
+                degraded = True
+            if deadline.expired():
+                degraded = True
+                if not unreadable:
+                    skipped += 1
+                skipped += len(review_entries) - i - 1
+                break
+            fm = okf.parse_frontmatter(raw) or {}
             url = parse_pr_url(review_artifact(fm), repo=repo)
             if url:
                 prs[url] = pr_slug(url)
     except TransportError:
-        pass
+        degraded = True
     watch_prefix = f"team/{team}/_coord/forge/watch/"
     try:
-        for e in transport.list_dir(watch_prefix):
+        if deadline.expired():
+            return prs, {"scanned": scanned, "total": total,
+                         "skipped": skipped, "degraded": True}
+        watch_entries = transport.list_dir(watch_prefix)
+        if deadline.expired():
+            return prs, {"scanned": scanned, "total": total,
+                         "skipped": skipped, "degraded": True}
+        watch_entries = [
+            e for e in watch_entries
+            if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
+        ]
+        total += len(watch_entries)
+        for i, e in enumerate(watch_entries):
+            if deadline.expired():
+                degraded = True
+                skipped += len(watch_entries) - i
+                break
             n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md"):
-                continue
-            fm = okf.parse_frontmatter(transport.read(watch_prefix + n)) or {}
+            raw = transport.read(watch_prefix + n)
+            scanned += 1
+            unreadable = raw is None
+            if unreadable:
+                skipped += 1
+                degraded = True
+            if deadline.expired():
+                degraded = True
+                if not unreadable:
+                    skipped += 1
+                skipped += len(watch_entries) - i - 1
+                break
+            fm = okf.parse_frontmatter(raw) or {}
             url = parse_pr_url(fm.get("url"), repo=repo)
             if url:
                 prs[url] = pr_slug(url)
     except TransportError:
-        pass
-    return prs
+        degraded = True
+    return prs, {"scanned": scanned, "total": total,
+                 "skipped": skipped, "degraded": degraded}
 
 
 def _sweep_pr(
     transport: Any, team: str, slug: str, url: str, *,
     runner: Callable[[list[str]], Optional[str]],
+    deadline: Optional[budget.Deadline] = None,
 ) -> dict[str, Any]:
     """Sweep one PR's three surfaces → shards. Returns {items, gh_ok,
     author_unknown}. gh_ok is False only when EVERY call returned None (a gh
@@ -270,8 +344,17 @@ def _sweep_pr(
     m = _PR_URL.search(url)
     owner_repo, num = (m.group(1), m.group(2)) if m else (None, None)
     reviews_raw = runner(["gh", "pr", "view", url, "--json", "author,reviews"])
+    if deadline is not None and deadline.expired():
+        return {"items": 0, "gh_ok": False, "unavailable": [],
+                "author_unknown": False, "budget_exhausted": True}
     inline_raw = runner(["gh", "api", f"repos/{owner_repo}/pulls/{num}/comments"])
+    if deadline is not None and deadline.expired():
+        return {"items": 0, "gh_ok": False, "unavailable": [],
+                "author_unknown": False, "budget_exhausted": True}
     comments_raw = runner(["gh", "pr", "view", url, "--json", "comments"])
+    if deadline is not None and deadline.expired():
+        return {"items": 0, "gh_ok": False, "unavailable": [],
+                "author_unknown": False, "budget_exhausted": True}
     # Per-surface availability, not just the aggregate. A partial failure (one
     # surface None while others return) previously reported clean, silently
     # recreating the motivating blind spot (a persistently failing reviews
@@ -292,6 +375,11 @@ def _sweep_pr(
     items = 0
     for surface, lst in surfaces:
         for it in lst:
+            if deadline is not None and deadline.expired():
+                return {"items": items, "gh_ok": gh_ok,
+                        "unavailable": unavailable,
+                        "author_unknown": pr_author is None and items > 0,
+                        "budget_exhausted": True}
             node = it.get("node_id")
             if not node:
                 continue  # can't key it without a node id
@@ -316,36 +404,57 @@ def _sweep_pr(
             }
             if transport.write(path, okf.render_frontmatter(fm) + "\n" + body + "\n"):
                 items += 1
+            if deadline is not None and deadline.expired():
+                return {"items": items, "gh_ok": gh_ok,
+                        "unavailable": unavailable,
+                        "author_unknown": pr_author is None and items > 0,
+                        "budget_exhausted": True}
     return {"items": items, "gh_ok": gh_ok, "unavailable": unavailable,
-            "author_unknown": pr_author is None and items > 0}
+            "author_unknown": pr_author is None and items > 0,
+            "budget_exhausted": False}
 
 
 def feedback_sweep(
     transport: Any, team: str, *,
     runner: Callable[[list[str]], Optional[str]] = default_runner,
     repo: Optional[str] = None,
+    deadline_seconds: Optional[float] = None,
 ) -> dict[str, Any]:
-    """One three-surface sweep over every discovered PR. Returns
-    {prs, items, skipped, notes}. Never crashes: a per-PR failure adds a report
-    line to ``skipped`` and the pass continues. Shards deliberately carry no
-    wall-clock (node-id keyed → idempotent), so no ``now`` is threaded through.
-    ``notes`` records non-fatal observations — e.g. a PR whose author was
-    unknown, so self-skip could not be applied (items still ingested)."""
-    prs = _discover_prs(transport, team, repo)
+    """One budgeted three-surface sweep over every discovered PR.
+
+    Returns ``{prs, items, skipped, notes, degraded}``. A per-PR failure adds a
+    report line and the pass continues; exhausting the shared discovery + forge
+    deadline stops new work and returns a fail-visible degraded marker. Shards
+    deliberately carry no wall-clock (node-id keyed → idempotent), so no
+    ``now`` is threaded through. ``notes`` records non-fatal observations.
+    """
+    dl = budget.Deadline.open(_forge_sweep_budget(deadline_seconds))
+    prs, discovery = _discover_prs(transport, team, repo, deadline=dl)
     prs_checked = items_written = 0
     skipped: list[str] = []
     notes: list[str] = []
-    for url, slug in sorted(prs.items()):
+    degraded = bool(discovery["degraded"])
+    ordered = sorted(prs.items())
+    for i, (url, slug) in enumerate(ordered):
+        if dl.expired():
+            degraded = True
+            skipped.extend(f"{s}: budget exhausted" for _u, s in ordered[i:])
+            break
         prs_checked += 1
         try:
-            res = _sweep_pr(transport, team, slug, url, runner=runner)
+            res = _sweep_pr(transport, team, slug, url, runner=runner, deadline=dl)
         except Exception as ex:  # never-crash: isolate one PR's blast radius
             skipped.append(f"{slug}: {type(ex).__name__}")
             continue
+        items_written += res["items"]
+        if res.get("budget_exhausted"):
+            degraded = True
+            skipped.append(f"{slug}: budget exhausted")
+            skipped.extend(f"{s}: budget exhausted" for _u, s in ordered[i + 1:])
+            break
         if not res["gh_ok"]:
             skipped.append(f"{slug}: gh unavailable")
             continue
-        items_written += res["items"]
         # A partially-failed sweep (some surfaces healthy) still lands its
         # healthy items, but each unavailable surface is noted so the blind spot
         # is visible rather than reported clean.
@@ -353,5 +462,24 @@ def feedback_sweep(
             notes.append(f"{slug}: {surface} surface unavailable")
         if res.get("author_unknown"):
             notes.append(f"{slug}: author unknown — self-skip not applied")
-    return {"prs": prs_checked, "items": items_written,
-            "skipped": skipped, "notes": notes}
+    marker = None
+    if degraded:
+        discovery_skipped = int(discovery["skipped"])
+        # Count skipped discovery documents as unknown PR work units. This
+        # keeps the fold internally consistent (never "1 skipped of 0") while
+        # remaining conservative when a timed-out document might duplicate a
+        # PR that was already discovered from the other source.
+        total = len(ordered) + discovery_skipped
+        marker = budget.degraded_row(
+            "forge-sweep-degraded",
+            prs_checked,
+            total,
+            len(skipped) + discovery_skipped,
+        )
+    return {
+        "prs": prs_checked,
+        "items": items_written,
+        "skipped": skipped,
+        "notes": notes,
+        "degraded": marker,
+    }

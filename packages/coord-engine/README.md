@@ -79,6 +79,7 @@ disable a bound or make an op hang.
 | `COORD_TRANSPORT_TIMEOUT` | `30` | seconds | Hard per-op bound on every `fulcra-api file` subprocess. Constructor arg wins; run it TIGHT on a watcher (e.g. `8`) so the fold budgets buy real responsiveness. |
 | `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`). |
 | `COORD_BRIEFING_BUDGET` | `60` | seconds | Aggregate deadline for the `briefing`/`needs-me` transport-heavy add-on stack (chiefly the forge-feedback fan-out); opened once, spent cumulatively across sections. |
+| `COORD_FORGE_SWEEP_BUDGET` | `60` | seconds | Aggregate deadline for the direct `forge feedback` fallback: review/watch discovery plus its per-PR three-surface sweep. Breach is fail-visible and returns non-zero with a `forge-sweep-degraded` marker. |
 | `COORD_LISTEN_CLASSIFY_BUDGET` | `10` | seconds | Per-tick bound on the `listen` daemon's dir-only review-slug classification pass. |
 | `COORD_ROLE_FOLD_BUDGET` | `20` | seconds | Cumulative deadline for one role-resolution pass (`_held_roles_for_rows`), which `briefing`/`inbox`/`needs-me`/`listen` all run. Spent across the `roles/` listing, each role's doc + lease listing, and each lease shard read; a cut marks every unfinished candidate `unresolved` and emits `role-degraded`. |
 | `COORD_OVERLAY_BUDGET` | `10` | seconds | Time bound on the freshness overlay's fresh-doc reads (the cap bounds read COUNT; this bounds TIME). |

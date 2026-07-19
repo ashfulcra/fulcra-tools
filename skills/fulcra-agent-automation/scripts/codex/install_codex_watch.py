@@ -21,11 +21,12 @@ adapter mechanics onto the coord engine, in three layers:
     the first app session's id — so an already-armed watch thread can never be
     stolen by a later (possibly headless) session.
 
-DELIBERATELY OMITTED (security scope ruling): the legacy ``wake.json``
-host-wake layer. It spawns headless ``codex exec`` sessions with
-``--dangerously-bypass-approvals-and-sandbox`` — a consent-gated,
-security-sensitive surface not shipped in this pass. The existing coord
-listener already covers wake.
+EVENT WAKE: the legacy ``wake.json`` layer remains omitted because it bypassed
+approvals and sandboxing. The separate consent-gated listener now ships a safe
+fixed adapter at ``scripts/wake/codex.sh`` using the stable
+``codex exec resume <SESSION_ID>`` interface with the resumed thread's ordinary
+policy. This installer retains the coarse automation as a safety net; fleet
+deployment pairs its exact thread id with that adapter.
 
 COEXISTENCE + MIGRATION: this installer keys everything on the marker
 ``fulcra-agent-hooks`` and automation id prefix ``coord-watch-``. Two other
@@ -73,9 +74,9 @@ AUTOMATION_ID_PREFIX = "coord-watch-"
 # coord2-era names of THIS installer, recognized for in-place migration only.
 LEGACY_MANAGED_DIRNAME = "fulcra-coord2-hooks"
 LEGACY_AUTOMATION_ID_PREFIX = "coord2-watch-"
-# Codex Desktop currently has no documented inbound webhook that resumes an
-# exact existing app task. Keep a low-frequency safety net; supported push
-# adapters (for example OpenClaw) should use the model-free listener instead.
+# Keep a low-frequency safety net. Exact-thread event wake is separately
+# consent-gated through scripts/wake/codex.sh; the automation remains useful
+# for missed-event recovery and hosts where the listener is not installed.
 WATCH_INTERVAL_MIN = 30
 # Marker carried once in hooks.json (as a trailing shell comment on the
 # SessionStart command — inert under sh -c) and as the automation prompt's

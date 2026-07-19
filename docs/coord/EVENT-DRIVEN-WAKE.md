@@ -11,7 +11,16 @@ work is arriving and for a configurable hot tail, then a local due-time gate
 reduces source reads to the configured idle cadence. The scheduler may still
 invoke the tiny shell tick each active minute, but skipped ticks do not call
 `coord-engine`, Fulcra, or a model. Without source-side push, the idle interval
-is the maximum added pickup latency for the next item.
+is the maximum added pickup latency for the next item. Transport degradation
+uses a separate exponential retry backoff capped at the idle cadence, so an
+outage cannot pin the listener hot. A failed harness wake is durably retried;
+advancing the bus event cursor cannot silently lose delivery. Wake delivery
+uses its own exponential backoff capped at the idle cadence, preventing a
+persistently unavailable harness from spawning attempts every hot minute.
+Bundled adapters also receive a compact, validated delta containing only event
+kind and canonical slug (for example `DIRECTIVE:fix-listener-123`). This lets a
+resumed session orient directly without forwarding bus-controlled titles,
+outcomes, authors, or bodies into its wake prompt.
 
 ## Harness matrix
 
@@ -21,8 +30,8 @@ is the maximum added pickup latency for the next item.
 | Claude Managed Agents | Supported by its session events API: send `user.message` to an idle persisted session | Scheduled deployment |
 | Claude Code local/desktop | Host adaptive listener handles cold sessions; a foreground `coord-engine listen` can surface events while live. No exact interactive-session inbound hook is documented, so do not start a competing resume client automatically. | SessionStart briefing plus host notification |
 | Claude Code web/cloud UI | No exact-session inbound wake is documented. Do not substitute a different Managed Agents session without explicit migration. | Platform scheduled routine / host-tier owner |
-| Codex Desktop | No documented inbound webhook resumes an exact existing app task. The host listener can adapt notifications, but model-backed app automations cannot safely self-reschedule; the installer therefore retains a compact 30-minute safety net configurable with `--interval-minutes`. | SessionStart briefing |
-| Codex app-server integration | A trusted integration can `thread/resume` and `turn/start` over local stdio/socket transport, but this is a separate app-server runtime and is not assumed to awaken the Desktop UI task. | Codex Desktop safety net |
+| Codex Desktop | Adaptive listener → `scripts/wake/codex.sh` → stable `codex exec resume <SESSION_ID>`. It resumes the exact persisted thread without bypassing approvals/sandboxing or forwarding raw event text. | Compact app-thread safety automation, configurable with `--interval-minutes` |
+| Codex app-server integration | A trusted integration can alternatively `thread/resume` and `turn/start` over local stdio/socket transport. | `codex exec resume` adapter |
 
 ## OpenClaw deployment
 
@@ -44,8 +53,8 @@ trusted endpoint, use HTTPS and a small operator-owned wrapper that sets
 Plaintext HTTP is accepted only for loopback destinations, and the bearer
 header is fed to curl through stdin config so it never appears in process argv.
 
-The adapter sends only a fixed wake instruction plus validated team/agent
-metadata. It does not forward an event body as executable text. OpenClaw's
+The adapter sends only a fixed wake instruction, validated team/agent metadata,
+and the kind/slug delta. It does not forward an event body as executable text. OpenClaw's
 official guidance requires bearer authentication, rejects query-string tokens,
 and recommends a dedicated token plus a constrained network boundary:
 <https://docs.openclaw.ai/webhook>.
@@ -55,6 +64,25 @@ keeping the one-minute active cadence and a 30-minute tail. Use `--fixed` only
 for a harness whose own scheduler already provides an adaptive/push contract.
 An operator or trusted lifecycle hook may run a forced tick with
 `COORD_LISTENER_MARK_ACTIVE=1`; untrusted event payloads must never control it.
+
+## Codex deployment
+
+Use the thread id already written to the managed Codex automation and an
+absolute repository path. Installing the unattended wake command requires the
+same explicit consent as every listener adapter:
+
+```bash
+./skills/fulcra-agent-automation/scripts/install-listener.sh \
+  <team> <agent> 1 --tail-minutes 30 --idle-minutes 30 --wake-cmd \
+  "COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<absolute-repo-path> $PWD/skills/fulcra-agent-automation/scripts/wake/codex.sh"
+```
+
+The adapter invokes the documented `codex exec resume` surface with `--all`
+so launchd's working directory does not hide the target session. It deliberately
+does not pass `--dangerously-bypass-approvals-and-sandbox`: the resumed thread's
+ordinary policy remains the authority boundary. Keep the safety automation until
+real event delivery has been observed on that host; after verification, increase
+its cadence to a coarse recovery interval such as six hours.
 
 ## Relay contract
 
