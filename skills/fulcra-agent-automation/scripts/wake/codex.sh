@@ -17,8 +17,8 @@ CWD="${COORD_CODEX_CWD:-}"
 EVENT_REFS="${COORD_LISTENER_EVENT_REFS:-}"
 
 [[ "$TEAM" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "codex wake: invalid team" >&2; exit 2; }
-[[ "$AGENT" =~ ^[A-Za-z0-9:_.-]+$ ]] || { echo "codex wake: invalid agent" >&2; exit 2; }
-[[ "$THREAD_ID" =~ ^[A-Za-z0-9:_.-]+$ ]] || { echo "codex wake: invalid thread id" >&2; exit 2; }
+[[ "$AGENT" =~ ^[A-Za-z0-9][A-Za-z0-9:_.-]*$ ]] || { echo "codex wake: invalid agent" >&2; exit 2; }
+[[ "$THREAD_ID" =~ ^[A-Za-z0-9][A-Za-z0-9:_.-]*$ ]] || { echo "codex wake: invalid thread id" >&2; exit 2; }
 [[ -z "$EVENT_REFS" || "$EVENT_REFS" =~ ^[A-Z]+:[A-Za-z0-9:_.-]+(,[A-Z]+:[A-Za-z0-9:_.-]+)*$ ]] || {
   echo "codex wake: invalid event refs" >&2; exit 2; }
 command -v codex >/dev/null 2>&1 || { echo "codex wake: codex CLI not found" >&2; exit 127; }

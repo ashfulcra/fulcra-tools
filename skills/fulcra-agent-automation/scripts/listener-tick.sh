@@ -117,8 +117,8 @@ DEGRADED=0
 EVENT_REFS="$(printf '%s\n' "$OUT" | awk '
   /^(DIRECTIVE|RESPONSE|VERDICT|SETTLED|ORPHAN) / {
     kind=$1; slug=$2
-    if (length(slug) <= 200 && slug ~ /^[A-Za-z0-9_.:-]+$/) {
-      if (seen++) printf ","
+    if (count < 20 && length(slug) <= 200 && slug ~ /^[A-Za-z0-9_.:-]+$/) {
+      if (count++) printf ","
       printf "%s:%s", kind, slug
     }
   }
@@ -166,13 +166,19 @@ PENDING_WAKE=0
 WAKE_FAILURE_STREAK=0
 WAKE_RETRY_DUE=0
 PENDING_WAKE_DUE=0
+PENDING_EVENT_REFS=""
 if [[ -f "$WAKE_PENDING_FILE" ]]; then
   PENDING_WAKE=1
   WAKE_FAILURE_STREAK="$(awk -F= '$1 == "failure_streak" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
   WAKE_RETRY_DUE="$(awk -F= '$1 == "retry_due" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
+  PENDING_EVENT_REFS="$(awk -F= '$1 == "event_refs" {sub(/^[^=]*=/, ""); print; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
   [[ "$WAKE_FAILURE_STREAK" =~ ^[0-9]+$ ]] || WAKE_FAILURE_STREAK=0
   [[ "$WAKE_RETRY_DUE" =~ ^[0-9]+$ ]] || WAKE_RETRY_DUE=0
+  [[ -z "$PENDING_EVENT_REFS" || "$PENDING_EVENT_REFS" =~ ^[A-Z]+:[A-Za-z0-9:_.-]+(,[A-Z]+:[A-Za-z0-9:_.-]+)*$ ]] || PENDING_EVENT_REFS=""
   (( NOW >= WAKE_RETRY_DUE )) && PENDING_WAKE_DUE=1
+fi
+if [[ "$NEW" -eq 0 && "$PENDING_WAKE_DUE" -eq 1 && -n "$PENDING_EVENT_REFS" ]]; then
+  EVENT_REFS="$PENDING_EVENT_REFS"
 fi
 if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 ||
       ( "$PENDING_WAKE_DUE" -eq 1 && "$#" -gt 0 ) ]]; then
@@ -212,8 +218,9 @@ if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 ||
       done
       WAKE_RETRY_DUE=$(( NOW + WAKE_RETRY_MINUTES * 60 ))
       PENDING_TMP="$(mktemp "$STATE_DIR/listener-wake-pending.XXXXXX")"
-      printf 'failed_at=%s\nexit=%s\nfailure_streak=%s\nretry_due=%s\n' \
-        "$NOW" "$WAKE_RC" "$WAKE_FAILURE_STREAK" "$WAKE_RETRY_DUE" > "$PENDING_TMP"
+      printf 'failed_at=%s\nexit=%s\nfailure_streak=%s\nretry_due=%s\nevent_refs=%s\n' \
+        "$NOW" "$WAKE_RC" "$WAKE_FAILURE_STREAK" "$WAKE_RETRY_DUE" \
+        "$EVENT_REFS" > "$PENDING_TMP"
       mv "$PENDING_TMP" "$WAKE_PENDING_FILE"
       echo "$(date -u +%FT%TZ) wake command failed (exit ${WAKE_RC}); retry armed for epoch ${WAKE_RETRY_DUE}" >&2
     fi

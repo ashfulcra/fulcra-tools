@@ -1752,6 +1752,25 @@ def test_briefing_shared_budget_bounds_pending_review_fold(capsys, monkeypatch):
                for r in out["pending_reviews"]), out["pending_reviews"]
 
 
+def test_bundled_review_deadline_retains_reservable_budget(monkeypatch):
+    """The bundled absolute clamp must not disable the classification reserve."""
+    seen = []
+    original = cli.Deadline.reserve
+
+    def spy_reserve(self, fraction):
+        seen.append(self._budget)
+        return original(self, fraction)
+
+    monkeypatch.setattr(cli.Deadline, "reserve", spy_reserve)
+    t = FakeTransport()
+    cli._pending_reviews_for(
+        t, "r", "me", deadline_seconds=5.0,
+        deadline=_time.monotonic() + 2.0)
+
+    assert seen and seen[0] is not None
+    assert 0 < seen[0] <= 2.0
+
+
 def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):
     import json as _j
     from coord_engine.tasks import agent_key

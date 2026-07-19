@@ -1323,8 +1323,12 @@ def _pending_reviews_for(
     # an already-open absolute deadline, which *must* include that listing time.
     dl: Optional[Deadline] = None
     if deadline is not None:
-        own = Deadline.open(deadline_seconds)
-        dl = Deadline(deadline if own.instant is None else min(deadline, own.instant))
+        # Re-open from the smaller REMAINING budget rather than constructing from
+        # the absolute instant.  ``Deadline.reserve`` needs the retained budget
+        # value to protect the doc scan from orphan-classification starvation;
+        # the bare constructor deliberately has no reservable budget.
+        remaining = max(0.0, deadline - time.monotonic())
+        dl = Deadline.open(min(deadline_seconds, remaining))
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}

@@ -410,7 +410,8 @@ class TestListenerTick:
         assert first.returncode == 0
         pending = next((tmp_path / "state").glob("*.wake-pending"))
         assert pending.is_file() and pending.read_text() == \
-            "failed_at=1000\nexit=75\nfailure_streak=1\nretry_due=1060\n"
+            "failed_at=1000\nexit=75\nfailure_streak=1\nretry_due=1060\n" \
+            "event_refs=DIRECTIVE:work\n"
         assert "retry armed" in first.stderr
         assert (tmp_path / "wake-calls.log").read_text().splitlines() == \
             ["wake retry=0 refs=DIRECTIVE:work"]
@@ -423,7 +424,8 @@ class TestListenerTick:
         assert second.returncode == 0 and "retrying pending wake" in second.stdout
         assert not pending.exists()
         assert (tmp_path / "wake-calls.log").read_text().splitlines() == \
-            ["wake retry=0 refs=DIRECTIVE:work", "wake retry=1 refs="]
+            ["wake retry=0 refs=DIRECTIVE:work",
+             "wake retry=1 refs=DIRECTIVE:work"]
 
     def test_failed_wake_retry_backoff_is_exponential_and_capped(self, tmp_path):
         self._run_tick(
@@ -446,6 +448,15 @@ class TestListenerTick:
         wake = (tmp_path / "wake-calls.log").read_text()
         assert "refs=DIRECTIVE:safe-work,RESPONSE:owned-1" in wake
         assert "attacker" not in wake and "arbitrary shell" not in wake
+
+    def test_wake_event_refs_are_capped(self, tmp_path):
+        out = "".join(f"DIRECTIVE work-{i}\n" for i in range(30))
+        r = self._run_tick(tmp_path, once_stdout=out, wake_exit=0)
+        assert r.returncode == 0
+        refs = (tmp_path / "wake-calls.log").read_text().split("refs=", 1)[1]
+        assert len(refs.split(",")) == 20
+        assert "DIRECTIVE:work-19" in refs
+        assert "DIRECTIVE:work-20" not in refs
 
 
 class TestOpenClawWakeAdapter:
@@ -548,6 +559,13 @@ class TestCodexWakeAdapter:
             ["bash", str(SCRIPTS / "wake" / "codex.sh")],
             capture_output=True, text=True, env=env, timeout=20)
         assert bad.returncode == 2 and "invalid thread id" in bad.stderr
+
+        env["COORD_CODEX_THREAD_ID"] = "--dangerously-bypass-approvals-and-sandbox"
+        option_shaped = subprocess.run(
+            ["bash", str(SCRIPTS / "wake" / "codex.sh")],
+            capture_output=True, text=True, env=env, timeout=20)
+        assert option_shaped.returncode == 2
+        assert "invalid thread id" in option_shaped.stderr
 
     def test_requires_token_before_network(self, tmp_path):
         r = subprocess.run(
