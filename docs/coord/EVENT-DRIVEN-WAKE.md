@@ -14,7 +14,9 @@ invoke the tiny shell tick each active minute, but skipped ticks do not call
 is the maximum added pickup latency for the next item. Transport degradation
 uses a separate exponential retry backoff capped at the idle cadence, so an
 outage cannot pin the listener hot. A failed harness wake is durably retried;
-advancing the bus event cursor cannot silently lose delivery.
+advancing the bus event cursor cannot silently lose delivery. Wake delivery
+uses its own exponential backoff capped at the idle cadence, preventing a
+persistently unavailable harness from spawning attempts every hot minute.
 Bundled adapters also receive a compact, validated delta containing only event
 kind and canonical slug (for example `DIRECTIVE:fix-listener-123`). This lets a
 resumed session orient directly without forwarding bus-controlled titles,

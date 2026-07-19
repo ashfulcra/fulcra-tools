@@ -163,8 +163,19 @@ if [[ "$ADAPTIVE" == "1" ]]; then
 fi
 
 PENDING_WAKE=0
-[[ -f "$WAKE_PENDING_FILE" ]] && PENDING_WAKE=1
-if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 || ( "$PENDING_WAKE" -eq 1 && "$#" -gt 0 ) ]]; then
+WAKE_FAILURE_STREAK=0
+WAKE_RETRY_DUE=0
+PENDING_WAKE_DUE=0
+if [[ -f "$WAKE_PENDING_FILE" ]]; then
+  PENDING_WAKE=1
+  WAKE_FAILURE_STREAK="$(awk -F= '$1 == "failure_streak" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
+  WAKE_RETRY_DUE="$(awk -F= '$1 == "retry_due" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
+  [[ "$WAKE_FAILURE_STREAK" =~ ^[0-9]+$ ]] || WAKE_FAILURE_STREAK=0
+  [[ "$WAKE_RETRY_DUE" =~ ^[0-9]+$ ]] || WAKE_RETRY_DUE=0
+  (( NOW >= WAKE_RETRY_DUE )) && PENDING_WAKE_DUE=1
+fi
+if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 ||
+      ( "$PENDING_WAKE_DUE" -eq 1 && "$#" -gt 0 ) ]]; then
   if [[ "$NEW" -gt 0 ]]; then
     MSG="coord: ${NEW} new event(s) for ${AGENT} in team/${TEAM}"
   elif [[ "$PENDING_WAKE" -eq 1 && "$DEGRADED" -eq 0 ]]; then
@@ -191,10 +202,20 @@ if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 || ( "$PENDING_WAKE" -eq 1 && "$#" -gt 0
     if [[ "$WAKE_RC" -eq 0 ]]; then
       rm -f "$WAKE_PENDING_FILE"
     else
+      WAKE_FAILURE_STREAK=$(( WAKE_FAILURE_STREAK + 1 ))
+      WAKE_RETRY_MINUTES="$ACTIVE_MINUTES"
+      WAKE_RETRY_STEP=1
+      while (( WAKE_RETRY_STEP < WAKE_FAILURE_STREAK && WAKE_RETRY_MINUTES < IDLE_MINUTES )); do
+        WAKE_RETRY_MINUTES=$(( WAKE_RETRY_MINUTES * 2 ))
+        (( WAKE_RETRY_MINUTES > IDLE_MINUTES )) && WAKE_RETRY_MINUTES="$IDLE_MINUTES"
+        WAKE_RETRY_STEP=$(( WAKE_RETRY_STEP + 1 ))
+      done
+      WAKE_RETRY_DUE=$(( NOW + WAKE_RETRY_MINUTES * 60 ))
       PENDING_TMP="$(mktemp "$STATE_DIR/listener-wake-pending.XXXXXX")"
-      printf 'failed_at=%s\nexit=%s\n' "$NOW" "$WAKE_RC" > "$PENDING_TMP"
+      printf 'failed_at=%s\nexit=%s\nfailure_streak=%s\nretry_due=%s\n' \
+        "$NOW" "$WAKE_RC" "$WAKE_FAILURE_STREAK" "$WAKE_RETRY_DUE" > "$PENDING_TMP"
       mv "$PENDING_TMP" "$WAKE_PENDING_FILE"
-      echo "$(date -u +%FT%TZ) wake command failed (exit ${WAKE_RC}); retry armed" >&2
+      echo "$(date -u +%FT%TZ) wake command failed (exit ${WAKE_RC}); retry armed for epoch ${WAKE_RETRY_DUE}" >&2
     fi
   fi
 elif [[ "${COORD_LISTENER_VERBOSE:-0}" == "1" ]]; then

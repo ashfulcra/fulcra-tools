@@ -148,7 +148,9 @@ seconds and exits cleanly on SIGINT.
   every active minute, but the model-free tick uses a local due-time gate: affirmative events keep
   the work tail hot, healthy quiet polling backs off to `--idle-minutes`, and degradation follows a
   separate exponential retry backoff capped at that idle cadence. A failed wake is durably retried on
-  later ticks even though `listen` has already advanced its event cursor. The idle
+  later ticks even though `listen` has already advanced its event cursor; wake
+  delivery has its own exponential backoff capped at the idle cadence, so a
+  persistently unavailable harness cannot spawn a model attempt every hot minute. The idle
   interval is the maximum added pickup latency until Fulcra exposes push; `--fixed` preserves the old
   behavior. `COORD_LISTENER_FORCE=1` bypasses only the due gate, while
   `COORD_LISTENER_MARK_ACTIVE=1` also restarts the hot tail for trusted lifecycle adapters. Hardened like the heartbeat:
