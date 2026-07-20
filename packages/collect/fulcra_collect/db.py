@@ -14,16 +14,24 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import config_dir
 
-LATEST_VERSION = 5
+LATEST_VERSION = 6
+
+# Plugin KV is deliberately small state, not a document store.  The limits
+# keep a misbehaving long-lived plugin from turning state.db into an unbounded
+# payload sink while still leaving ample room for cursors and per-entity state.
+PLUGIN_KV_MAX_KEY_BYTES = 256
+PLUGIN_KV_MAX_VALUE_BYTES = 64 * 1024
+PLUGIN_KV_MAX_DEPTH = 32
 
 _LOG = logging.getLogger("fulcra_collect.db")
 
@@ -176,6 +184,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < 5:
         _migration_005_definition_validated_at(conn)
         _record_version(conn, 5)
+    if current < 6:
+        _migration_006_plugin_kv(conn)
+        _record_version(conn, 6)
 
 
 def _migration_001_initial(conn: sqlite3.Connection) -> None:
@@ -358,6 +369,28 @@ def _migration_005_definition_validated_at(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_006_plugin_kv(conn: sqlite3.Connection) -> None:
+    """Add generic, plugin-scoped JSON state.
+
+    ``plugin_id`` is part of the primary key rather than a foreign key to
+    ``plugin_state``: a plugin may need durable state before its first run has
+    produced a PluginState row, and deleting run-history must not erase its
+    cursors.  The worker binds plugin_id into RunContext, so plugin code never
+    chooses another plugin's namespace.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS plugin_kv (
+            plugin_id TEXT NOT NULL,
+            key       TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (plugin_id, key)
+        )
+        """,
+    )
+
+
 # ---- low-level CRUD used by state.py --------------------------------
 
 
@@ -510,6 +543,159 @@ def unclaim_dedup_keys(conn: sqlite3.Connection, keys: Iterable[str]) -> None:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+
+
+# ---- generic plugin-scoped KV state ---------------------------------
+
+
+def _validate_plugin_kv_key(key: str) -> None:
+    if not isinstance(key, str):
+        raise TypeError("plugin KV key must be a string")
+    size = len(key.encode("utf-8"))
+    if size == 0:
+        raise ValueError("plugin KV key must not be empty")
+    if size > PLUGIN_KV_MAX_KEY_BYTES:
+        raise ValueError(
+            f"plugin KV key exceeds {PLUGIN_KV_MAX_KEY_BYTES} UTF-8 bytes",
+        )
+
+
+def _validate_plugin_kv_value(value: object, *, depth: int = 0) -> None:
+    """Accept only losslessly JSON-compatible values.
+
+    Python's encoder silently coerces non-string dictionary keys, accepts
+    NaN/Infinity by default, and can recurse until the interpreter limit.  A
+    durable state API should reject all three rather than read back a value
+    different from the one the plugin wrote.
+    """
+    if depth > PLUGIN_KV_MAX_DEPTH:
+        raise ValueError(
+            f"plugin KV value exceeds maximum depth {PLUGIN_KV_MAX_DEPTH}",
+        )
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("plugin KV floats must be finite")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_plugin_kv_value(item, depth=depth + 1)
+        return
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            if not isinstance(item_key, str):
+                raise TypeError("plugin KV object keys must be strings")
+            _validate_plugin_kv_value(item_value, depth=depth + 1)
+        return
+    raise TypeError(
+        "plugin KV value must contain only JSON types "
+        "(null, bool, number, string, list, object)",
+    )
+
+
+def _encode_plugin_kv_value(value: object) -> str:
+    _validate_plugin_kv_value(value)
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if len(encoded.encode("utf-8")) > PLUGIN_KV_MAX_VALUE_BYTES:
+        raise ValueError(
+            f"plugin KV value exceeds {PLUGIN_KV_MAX_VALUE_BYTES} UTF-8 bytes",
+        )
+    return encoded
+
+
+def get_plugin_kv(conn: sqlite3.Connection, plugin_id: str, key: str,
+                  default: object = None) -> object:
+    """Return one value from ``plugin_id``'s namespace, or ``default``."""
+    _validate_plugin_kv_key(key)
+    row = conn.execute(
+        "SELECT value_json FROM plugin_kv WHERE plugin_id = ? AND key = ?",
+        (plugin_id, key),
+    ).fetchone()
+    if row is None:
+        return default
+    return json.loads(row["value_json"])
+
+
+def set_plugin_kv(conn: sqlite3.Connection, plugin_id: str, key: str,
+                  value: object) -> None:
+    """Atomically create or replace one plugin-scoped JSON value."""
+    _validate_plugin_kv_key(key)
+    encoded = _encode_plugin_kv_value(value)
+    conn.execute(
+        """
+        INSERT INTO plugin_kv (plugin_id, key, value_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(plugin_id, key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        """,
+        (plugin_id, key, encoded, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def update_plugin_kv(
+    conn: sqlite3.Connection,
+    plugin_id: str,
+    key: str,
+    update: Callable[[object], object],
+    *,
+    default: object = None,
+) -> object:
+    """Atomically read, transform, and persist one plugin-scoped value.
+
+    ``BEGIN IMMEDIATE`` serialises writers before the read, so concurrent
+    workers cannot both observe the same old value and lose an update.  The
+    callback runs while the SQLite write lock is held; it must therefore be
+    quick and side-effect free.  If it raises or returns an invalid/oversized
+    value the transaction is rolled back and the original value remains.
+    """
+    _validate_plugin_kv_key(key)
+    if not callable(update):
+        raise TypeError("plugin KV update must be callable")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM plugin_kv "
+            "WHERE plugin_id = ? AND key = ?",
+            (plugin_id, key),
+        ).fetchone()
+        current = default if row is None else json.loads(row["value_json"])
+        value = update(current)
+        encoded = _encode_plugin_kv_value(value)
+        conn.execute(
+            """
+            INSERT INTO plugin_kv (plugin_id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(plugin_id, key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            """,
+            (plugin_id, key, encoded,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        conn.execute("COMMIT")
+        return value
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def delete_plugin_kv(conn: sqlite3.Connection, plugin_id: str,
+                     key: str) -> bool:
+    """Atomically delete one key; return whether a row existed."""
+    _validate_plugin_kv_key(key)
+    cur = conn.execute(
+        "DELETE FROM plugin_kv WHERE plugin_id = ? AND key = ?",
+        (plugin_id, key),
+    )
+    return cur.rowcount == 1
 
 
 def all_plugin_ids(conn: sqlite3.Connection) -> list[str]:

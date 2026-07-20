@@ -729,6 +729,56 @@ def test_resolved_definition_id_raises_when_factory_not_set():
 
 
 # ---------------------------------------------------------------------------
+# RunContext plugin-scoped KV state
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_kv_methods_delegate_without_exposing_plugin_id():
+    calls: list[tuple] = []
+    ctx = RunContext(
+        plugin_id="home-assistant",
+        config={},
+        credentials={},
+        state=None,
+        log=logging.getLogger("test"),
+        _emit=lambda evt: None,
+        _plugin_kv_get=lambda key, default: calls.append(
+            ("get", key, default)
+        ) or {"seen": 1},
+        _plugin_kv_set=lambda key, value: calls.append(("set", key, value)),
+        _plugin_kv_update=lambda key, update, default: calls.append(
+            ("update", key, default)
+        ) or update(default),
+        _plugin_kv_delete=lambda key: calls.append(("delete", key)) or True,
+    )
+
+    assert ctx.kv_get("entity", {}) == {"seen": 1}
+    ctx.kv_set("entity", {"seen": 2})
+    assert ctx.kv_update(
+        "count", lambda current: current + 1, default=0,
+    ) == 1
+    assert ctx.kv_delete("entity") is True
+    assert calls == [
+        ("get", "entity", {}),
+        ("set", "entity", {"seen": 2}),
+        ("update", "count", 0),
+        ("delete", "entity"),
+    ]
+
+
+@pytest.mark.parametrize("method,args", [
+    ("kv_get", ("key",)),
+    ("kv_set", ("key", 1)),
+    ("kv_update", ("key", lambda current: current)),
+    ("kv_delete", ("key",)),
+])
+def test_plugin_kv_methods_fail_loudly_without_backend(method, args):
+    ctx = _make_bare_ctx()
+    with pytest.raises(RuntimeError, match="KV backend unavailable"):
+        getattr(ctx, method)(*args)
+
+
+# ---------------------------------------------------------------------------
 # RunContext.fulcra_token() — user-level credential store (B9)
 # ---------------------------------------------------------------------------
 

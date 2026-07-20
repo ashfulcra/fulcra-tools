@@ -6,7 +6,10 @@ guard. Higher-level round-trip behaviour is covered in test_state.py.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
@@ -322,3 +325,117 @@ def test_migration_005_adds_definition_validated_at_to_existing_dbs(tmp_path):
     db.migrate(conn)
     row = db.fetch_plugin_state(conn, "legacy")
     assert row["definition_validated_at"] is None
+
+
+# ---- plugin_kv ------------------------------------------------------
+
+
+def test_plugin_kv_table_has_scoped_composite_primary_key(collect_home):
+    conn = db.open()
+    cols = {
+        r["name"] for r in conn.execute("PRAGMA table_info(plugin_kv)")
+    }
+    assert cols == {"plugin_id", "key", "value_json", "updated_at"}
+    pk = [
+        r["name"]
+        for r in conn.execute("PRAGMA table_info(plugin_kv)")
+        if r["pk"]
+    ]
+    assert pk == ["plugin_id", "key"]
+
+
+def test_plugin_kv_round_trip_delete_and_plugin_isolation(collect_home):
+    conn = db.open()
+    value = {"cursor": 7, "ready": True, "items": [None, 1.25, "x"]}
+    db.set_plugin_kv(conn, "alpha", "checkpoint", value)
+    db.set_plugin_kv(conn, "beta", "checkpoint", {"cursor": 99})
+
+    assert db.get_plugin_kv(conn, "alpha", "checkpoint") == value
+    assert db.get_plugin_kv(conn, "beta", "checkpoint") == {"cursor": 99}
+    assert db.get_plugin_kv(conn, "alpha", "missing", "fallback") == "fallback"
+    assert db.delete_plugin_kv(conn, "alpha", "checkpoint") is True
+    assert db.delete_plugin_kv(conn, "alpha", "checkpoint") is False
+    assert db.get_plugin_kv(conn, "alpha", "checkpoint") is None
+    assert db.get_plugin_kv(conn, "beta", "checkpoint") == {"cursor": 99}
+
+
+@pytest.mark.parametrize("value", [
+    ("tuple",),
+    {1: "non-string-key"},
+    float("nan"),
+    float("inf"),
+])
+def test_plugin_kv_rejects_non_json_values(collect_home, value):
+    with pytest.raises((TypeError, ValueError)):
+        db.set_plugin_kv(db.open(), "alpha", "bad", value)
+
+
+def test_plugin_kv_enforces_key_and_value_size_limits(collect_home):
+    conn = db.open()
+    with pytest.raises(ValueError, match="must not be empty"):
+        db.set_plugin_kv(conn, "alpha", "", 1)
+    with pytest.raises(ValueError, match="key exceeds"):
+        db.set_plugin_kv(
+            conn, "alpha", "é" * (db.PLUGIN_KV_MAX_KEY_BYTES // 2 + 1), 1,
+        )
+    with pytest.raises(ValueError, match="value exceeds"):
+        db.set_plugin_kv(
+            conn, "alpha", "huge", "x" * db.PLUGIN_KV_MAX_VALUE_BYTES,
+        )
+
+
+def test_plugin_kv_update_rolls_back_when_callback_fails(collect_home):
+    conn = db.open()
+    db.set_plugin_kv(conn, "alpha", "counter", 4)
+
+    def fail(_current):
+        raise RuntimeError("nope")
+
+    with pytest.raises(RuntimeError, match="nope"):
+        db.update_plugin_kv(conn, "alpha", "counter", fail)
+    assert db.get_plugin_kv(conn, "alpha", "counter") == 4
+
+
+def test_plugin_kv_update_has_no_lost_updates_under_concurrency(collect_home):
+    import threading
+
+    conn = db.open()
+    db.set_plugin_kv(conn, "alpha", "counter", 0)
+    home = collect_home
+    count = 20
+    barrier = threading.Barrier(count)
+
+    def increment():
+        thread_conn = db.open(home / "state.db")
+        barrier.wait()
+        db.update_plugin_kv(
+            thread_conn, "alpha", "counter", lambda current: current + 1,
+        )
+
+    threads = [threading.Thread(target=increment) for _ in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert db.get_plugin_kv(conn, "alpha", "counter") == count
+
+
+def test_plugin_kv_persists_across_worker_processes(collect_home):
+    """A service worker restart must see state written by its predecessor."""
+    env = dict(os.environ)
+    env["FULCRA_COLLECT_HOME"] = str(collect_home)
+    write = (
+        "from fulcra_collect import db; "
+        "db.set_plugin_kv(db.open(), 'service', 'cursor', {'page': 12})"
+    )
+    read = (
+        "from fulcra_collect import db; "
+        "print(db.get_plugin_kv(db.open(), 'service', 'cursor')['page'])"
+    )
+    subprocess.run([sys.executable, "-c", write], env=env, check=True)
+    result = subprocess.run(
+        [sys.executable, "-c", read], env=env, check=True,
+        capture_output=True, text=True,
+    )
+    assert result.stdout.strip() == "12"
