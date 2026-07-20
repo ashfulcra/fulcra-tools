@@ -373,6 +373,16 @@ it (not on PyPI).
   live in [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md), the one skill the
   launchd/cron listener, live sessions, Codex, and headless all delegate to. (`review status` on a
   tombstone slug is terminal rc 1 — see [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md).)
+- **Idle-listener reaping (standing, operator-set 2026-07-20).** An agent whose
+  listener has run **2 days (48h) with no work** — no events, directives,
+  reviews, or responses surfaced or handled in that window — **parks a
+  continuity checkpoint to the bus and stands down its listener**:
+  `coord-engine continuity park <team> --agent <self> --objective "<what you
+  watch>" --next "resume on directed wake or new assignment"`, then stop the
+  poll loop. A directed wake or a new assignment resumes it
+  (`continuity resume`). Dormant watchers must not burn compute indefinitely;
+  the parked checkpoint loses nothing. Applies to every agent, coord-boss
+  included.
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything
