@@ -365,8 +365,9 @@ it (not on PyPI).
   a quiet tick prints NOTHING. It never advances state over an unread tick (a failed read re-surfaces the
   pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** across
   five independent sources (`inbox`, `responses`, `orphans`, `verdicts`, `roles`) — so a permanent orphan
-  can't pin the flag and silence a fresh outage. `--once` **always exits 0** (no output = nothing new, not
-  an error) — run it on a scheduler, or bare for a poll loop (`--interval`, SIGINT-clean). Every send verb
+  can't pin the flag and silence a fresh outage. `--once` exits **3** when its tick captured degraded
+  sources; exit 0 means clean/nothing-new — run it on a scheduler, or bare for a poll loop (`--interval`,
+  SIGINT-clean). Every send verb
   arms you with the exact `listen` line to run for replies. The deeper mechanics — the
   orphan/tombstone/unknown
   classification of dir-only review slugs, and the classify budgets (`COORD_LISTEN_CLASSIFY_BUDGET`) —
