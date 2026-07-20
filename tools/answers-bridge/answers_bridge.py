@@ -83,8 +83,41 @@ TYPE_LABEL = {"factual": "type:factual", "future": "type:future-work",
               "future-work": "type:future-work", "both": "type:both"}
 
 
+def bus_read(path):
+    """Read a bus file; None if absent/unreadable (degraded reads as absent —
+    callers must only use this where a false-absent is safe)."""
+    cp = subprocess.run(["fulcra-api", "file", "download", path, "-"],
+                        capture_output=True, text=True, timeout=60)
+    return cp.stdout if cp.returncode == 0 else None
+
+
+def _project_issues():
+    out, cursor = [], None
+    while True:
+        page = gql("query($p:ID!,$c:String){issues(filter:{project:{id:{eq:$p}}},first:100,after:$c)"
+                   "{nodes{id identifier title url description state{name} labels{nodes{id name}}} "
+                   "pageInfo{hasNextPage endCursor}}}", {"p": IDS["project_id"], "c": cursor})["issues"]
+        out += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+    return out
+
+
+def _find_card_by_aid(aid):
+    """Existing card for a bus answer id, keyed by the shard path in the card
+    body (the durable identity), never the title."""
+    needle = f"answers/{aid}.md"
+    for n in _project_issues():
+        if needle in (n.get("description") or ""):
+            return n
+    return None
+
+
 def cmd_capture(a):
-    """Create/refresh one answer card + bus shard."""
+    """Create/refresh one answer card + bus shard. Idempotent by answer id:
+    a re-run (or a retry after a lost Linear response) UPDATES the existing
+    card found via the shard path in its body instead of creating a duplicate."""
     aid = a.get("id") or mk_id(a["q"], a.get("by", "?"))
     typ = TYPE_LABEL.get((a.get("type") or "factual").lower(), "type:factual")
     lbls = [IDS["labels"]["qa-answer"], IDS["labels"][typ]]
@@ -95,14 +128,19 @@ def cmd_capture(a):
             f"---\nanswered by: {a.get('by','?')}  ·  type: {typ.split(':')[1]}"
             f"  ·  bus: `team/{TEAM}/answers/{aid}.md`\n"
             f"(check off = mark Done · label `promote` to turn this into a bus task)")
-    # bus shard (durable record)
+    # bus shard (durable record; same-path write is naturally idempotent)
     shard = (f"---\ntype: Answer\nid: {aid}\nby: {a.get('by','?')}\n"
              f"answer_type: {typ.split(':')[1]}\nts: {a.get('ts','')}\n---\n"
              f"Q: {a['q'].strip()}\n\nA: {a['a'].strip()}\n")
     ok = bus_write(f"team/{TEAM}/answers/{aid}.md", shard)
     if not ok:
         print(f"DEGRADED: bus shard write failed for {aid}", file=sys.stderr)
-    # Linear card
+    existing = _find_card_by_aid(aid)
+    if existing:
+        gql("mutation($i:String!,$in:IssueUpdateInput!){issueUpdate(id:$i,input:$in){success}}",
+            {"i": existing["id"], "in": {"title": title, "description": body, "labelIds": lbls}})
+        print(f"refreshed {aid} -> {existing['identifier']} {existing['url']}")
+        return 0 if ok else 2
     inp = {"teamId": IDS["team_id"], "projectId": IDS["project_id"],
            "title": title, "description": body,
            "stateId": IDS["states"]["open"], "labelIds": lbls}
@@ -110,19 +148,6 @@ def cmd_capture(a):
             {"in": inp})["issueCreate"]["issue"]
     print(f"carded {aid} -> {r['identifier']} {r['url']}")
     return 0 if ok else 2
-
-
-def _project_issues():
-    out, cursor = [], None
-    while True:
-        page = gql("query($p:ID!,$c:String){issues(filter:{project:{id:{eq:$p}}},first:100,after:$c)"
-                   "{nodes{id identifier title url state{name} labels{nodes{id name}}} "
-                   "pageInfo{hasNextPage endCursor}}}", {"p": IDS["project_id"], "c": cursor})["issues"]
-        out += page["nodes"]
-        if not page["pageInfo"]["hasNextPage"]:
-            break
-        cursor = page["pageInfo"]["endCursor"]
-    return out
 
 
 def cmd_list(a):
@@ -137,34 +162,67 @@ def cmd_list(a):
 
 
 def cmd_promote(a):
-    """Cards labeled `promote` and not yet `filed` -> bus backlog task, link back."""
+    """Cards labeled `promote` and not yet `filed` -> bus backlog task, link back.
+
+    Retry-safe across the bus/Linear boundary: a durable receipt shard
+    (team/<team>/answers/_promotions/<card>.md) is written the moment the bus
+    task exists, BEFORE the Linear finalize. If finalize fails, the next run
+    reads the receipt, skips task creation, and only retries the finalize — a
+    card can never file the same task twice. The receipt is keyed by the
+    card's immutable Linear identifier (deterministic promotion key)."""
     promote_id = IDS["labels"]["promote"]; filed_id = IDS["labels"]["filed"]
     n_done = 0
+    degraded = False
     for n in _project_issues():
         names = {l["name"] for l in n["labels"]["nodes"]}
         if "promote" not in names or "filed" in names:
             continue
         title = n["title"]
-        cp = subprocess.run(
-            ["coord-engine", "later", TEAM, title[:160], "-w", "ash-answers",
-             "-s", f"Promoted from Ash Answers card {n['identifier']} ({n['url']})",
-             "--from", "ash"],
-            capture_output=True, text=True, timeout=60)
-        if cp.returncode != 0:
-            print(f"DEGRADED: later failed for {n['identifier']}: {cp.stderr.strip()[-160:]}", file=sys.stderr)
+        receipt_path = f"team/{TEAM}/answers/_promotions/{n['identifier']}.md"
+        receipt = bus_read(receipt_path)
+        if receipt is not None:
+            m = re.search(r"^slug:\s*(\S+)", receipt, re.M)
+            slug = m.group(1) if m else ""
+            print(f"retrying finalize for {n['identifier']} (task already filed: {slug or '?'})")
+        else:
+            cp = subprocess.run(
+                ["coord-engine", "later", TEAM, title[:160], "-w", "ash-answers",
+                 "-s", f"Promoted from Ash Answers card {n['identifier']} ({n['url']})",
+                 "--from", "ash"],
+                capture_output=True, text=True, timeout=60)
+            if cp.returncode != 0:
+                print(f"DEGRADED: later failed for {n['identifier']}: {cp.stderr.strip()[-160:]}", file=sys.stderr)
+                degraded = True
+                continue
+            slug = ""
+            m = re.search(r"directive\s+(\S+)\s*->", cp.stdout)  # `directive <slug> -> @backlog`
+            if m: slug = m.group(1)
+            if not bus_write(receipt_path,
+                             f"---\ntype: PromotionReceipt\ncard: {n['identifier']}\n"
+                             f"slug: {slug}\n---\n"):
+                # Task exists but the receipt didn't land: FAIL LOUD and do NOT
+                # finalize — finalizing would hide that a retry after this point
+                # could double-file. Operator/next run resolves via the printed slug.
+                print(f"DEGRADED: receipt write failed for {n['identifier']} after task "
+                      f"{slug or title[:60]} was filed — NOT finalizing; resolve receipt first",
+                      file=sys.stderr)
+                degraded = True
+                continue
+        try:
+            cur = [l["id"] for l in n["labels"]["nodes"]] + [filed_id]
+            gql("mutation($i:String!,$in:IssueUpdateInput!){issueUpdate(id:$i,input:$in){success}}",
+                {"i": n["id"], "in": {"labelIds": cur, "stateId": IDS["states"]["done"]}})
+            gql("mutation($in:CommentCreateInput!){commentCreate(input:$in){success}}",
+                {"in": {"issueId": n["id"], "body": f"Filed to bus backlog: `{slug or title[:60]}` (workstream ash-answers)."}})
+        except Exception as e:
+            print(f"DEGRADED: Linear finalize failed for {n['identifier']} ({e}); "
+                  f"receipt retained — next run retries finalize only", file=sys.stderr)
+            degraded = True
             continue
-        slug = ""
-        m = re.search(r"directive\s+(\S+)\s*->", cp.stdout)  # `directive <slug> -> @backlog`
-        if m: slug = m.group(1)
-        cur = [l["id"] for l in n["labels"]["nodes"]] + [filed_id]
-        gql("mutation($i:String!,$in:IssueUpdateInput!){issueUpdate(id:$i,input:$in){success}}",
-            {"i": n["id"], "in": {"labelIds": cur, "stateId": IDS["states"]["done"]}})
-        gql("mutation($in:CommentCreateInput!){commentCreate(input:$in){success}}",
-            {"in": {"issueId": n["id"], "body": f"Filed to bus backlog: `{slug or title[:60]}` (workstream ash-answers)."}})
         print(f"promoted {n['identifier']} -> bus task {slug or '(slug?)'}")
         n_done += 1
-    print(f"promote: {n_done} card(s) filed")
-    return 0
+    print(f"promote: {n_done} card(s) filed" + (" [DEGRADED]" if degraded else ""))
+    return 2 if degraded else 0
 
 
 def main():
