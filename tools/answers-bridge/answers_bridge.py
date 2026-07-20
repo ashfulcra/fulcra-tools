@@ -84,11 +84,46 @@ TYPE_LABEL = {"factual": "type:factual", "future": "type:future-work",
 
 
 def bus_read(path):
-    """Read a bus file; None if absent/unreadable (degraded reads as absent —
-    callers must only use this where a false-absent is safe)."""
+    """Read a bus file; None on failure. NEVER use None to infer absence —
+    absence is only proven by a successful bus_list that omits the name."""
     cp = subprocess.run(["fulcra-api", "file", "download", path, "-"],
                         capture_output=True, text=True, timeout=60)
     return cp.stdout if cp.returncode == 0 else None
+
+
+def bus_list(dirpath):
+    """List a bus directory. Returns the set of entry names on success, or
+    None on ANY failure — callers must fail closed on None (a degraded listing
+    is UNKNOWN existence, never absence)."""
+    cp = subprocess.run(["fulcra-api", "file", "list", dirpath],
+                        capture_output=True, text=True, timeout=60)
+    if cp.returncode != 0:
+        return None
+    names = set()
+    for line in cp.stdout.splitlines():
+        parts = line.split()
+        if parts:
+            names.add(parts[-1])
+    return names
+
+
+def _board_has_title(title):
+    """True/False if the board fold definitively shows/omits a task with this
+    exact title; None if the fold is unavailable (callers fail closed)."""
+    cp = subprocess.run(["coord-engine", "board", TEAM, "--json"],
+                        capture_output=True, text=True, timeout=180)
+    if cp.returncode != 0:
+        return None
+    try:
+        d = json.loads(cp.stdout)
+    except json.JSONDecodeError:
+        return None
+    for lane in d.values() if isinstance(d, dict) else []:
+        if isinstance(lane, list):
+            for row in lane:
+                if isinstance(row, dict) and row.get("title") == title:
+                    return True
+    return False
 
 
 def _project_issues():
@@ -161,16 +196,35 @@ def cmd_list(a):
     return 0
 
 
+def _receipt_body(card, status, slug=""):
+    return (f"---\ntype: PromotionReceipt\ncard: {card}\nstatus: {status}\n"
+            f"slug: {slug}\n---\n")
+
+
 def cmd_promote(a):
     """Cards labeled `promote` and not yet `filed` -> bus backlog task, link back.
 
-    Retry-safe across the bus/Linear boundary: a durable receipt shard
-    (team/<team>/answers/_promotions/<card>.md) is written the moment the bus
-    task exists, BEFORE the Linear finalize. If finalize fails, the next run
-    reads the receipt, skips task creation, and only retries the finalize — a
-    card can never file the same task twice. The receipt is keyed by the
-    card's immutable Linear identifier (deterministic promotion key)."""
+    Retry-safe with DURABLE dedupe across every partial-failure window, via a
+    two-phase receipt (team/<team>/answers/_promotions/<card>.md, keyed by the
+    card's immutable Linear identifier):
+      intent  (status: pending) written BEFORE `coord-engine later` runs
+      filed   (status: filed, slug) written after `later` succeeds
+      finalize (Linear label+Done+comment) runs only with a filed receipt
+    Recovery rules: receipt existence comes from ONE directory listing per run
+    (a degraded listing skips the whole pass fail-closed — UNKNOWN is never
+    absence); an unreadable individual receipt skips that card; `pending` with
+    no slug resolves via the board fold (task present -> adopt as filed; absent
+    -> re-run `later`; fold unavailable -> skip fail-closed); `filed` skips
+    `later` and retries the finalize only. No path re-runs `later` while the
+    task's existence is unknown."""
     promote_id = IDS["labels"]["promote"]; filed_id = IDS["labels"]["filed"]
+    receipts_dir = f"team/{TEAM}/answers/_promotions/"
+    existing_receipts = bus_list(receipts_dir)
+    if existing_receipts is None:
+        print("DEGRADED: promotions listing unavailable — skipping promote pass "
+              "(existence UNKNOWN, fail closed)", file=sys.stderr)
+        print("promote: 0 card(s) filed [DEGRADED]")
+        return 2
     n_done = 0
     degraded = False
     for n in _project_issues():
@@ -178,36 +232,70 @@ def cmd_promote(a):
         if "promote" not in names or "filed" in names:
             continue
         title = n["title"]
-        receipt_path = f"team/{TEAM}/answers/_promotions/{n['identifier']}.md"
-        receipt = bus_read(receipt_path)
-        if receipt is not None:
-            m = re.search(r"^slug:\s*(\S+)", receipt, re.M)
-            slug = m.group(1) if m else ""
-            print(f"retrying finalize for {n['identifier']} (task already filed: {slug or '?'})")
-        else:
+        receipt_name = f"{n['identifier']}.md"
+        receipt_path = receipts_dir + receipt_name
+        status, slug = None, ""
+        if receipt_name in existing_receipts:
+            raw = bus_read(receipt_path)
+            if raw is None:
+                print(f"DEGRADED: receipt for {n['identifier']} exists but is unreadable — "
+                      f"skipping card (never re-file on an unreadable receipt)", file=sys.stderr)
+                degraded = True
+                continue
+            sm = re.search(r"^status:[ \t]*(\S+)", raw, re.M)
+            gm = re.search(r"^slug:[ \t]*(\S+)", raw, re.M)
+            status = sm.group(1) if sm else "pending"  # legacy receipts = filed pre-status
+            if not sm and gm:
+                status = "filed"
+            slug = gm.group(1) if gm else ""
+        if status == "pending" and not slug:
+            # Ambiguous window: intent written, unknown whether `later` ran.
+            # Resolve against the board — never blind-retry.
+            present = _board_has_title(title[:160])
+            if present is None:
+                print(f"DEGRADED: board fold unavailable resolving {n['identifier']} — "
+                      f"skipping card fail-closed", file=sys.stderr)
+                degraded = True
+                continue
+            if present:
+                status = "filed"
+                bus_write(receipt_path, _receipt_body(n["identifier"], "filed", ""))
+            else:
+                status = None  # proven absent -> safe to (re)create below
+        if status is None:
+            # Phase 1: durable intent BEFORE the task write. If the intent
+            # can't land, we don't create — the dedupe state must exist first.
+            if not bus_write(receipt_path, _receipt_body(n["identifier"], "pending")):
+                print(f"DEGRADED: intent receipt write failed for {n['identifier']} — "
+                      f"not creating task", file=sys.stderr)
+                degraded = True
+                continue
+            existing_receipts.add(receipt_name)
+            # Phase 2: create. Engine contract: nonzero rc = nothing written.
             cp = subprocess.run(
                 ["coord-engine", "later", TEAM, title[:160], "-w", "ash-answers",
                  "-s", f"Promoted from Ash Answers card {n['identifier']} ({n['url']})",
                  "--from", "ash"],
                 capture_output=True, text=True, timeout=60)
             if cp.returncode != 0:
-                print(f"DEGRADED: later failed for {n['identifier']}: {cp.stderr.strip()[-160:]}", file=sys.stderr)
-                degraded = True
-                continue
-            slug = ""
-            m = re.search(r"directive\s+(\S+)\s*->", cp.stdout)  # `directive <slug> -> @backlog`
-            if m: slug = m.group(1)
-            if not bus_write(receipt_path,
-                             f"---\ntype: PromotionReceipt\ncard: {n['identifier']}\n"
-                             f"slug: {slug}\n---\n"):
-                # Task exists but the receipt didn't land: FAIL LOUD and do NOT
-                # finalize — finalizing would hide that a retry after this point
-                # could double-file. Operator/next run resolves via the printed slug.
-                print(f"DEGRADED: receipt write failed for {n['identifier']} after task "
-                      f"{slug or title[:60]} was filed — NOT finalizing; resolve receipt first",
+                bus_write(receipt_path, _receipt_body(n["identifier"], "pending"))
+                print(f"DEGRADED: later failed for {n['identifier']}: {cp.stderr.strip()[-160:]}",
                       file=sys.stderr)
                 degraded = True
                 continue
+            m = re.search(r"directive\s+(\S+)\s*->", cp.stdout)  # `directive <slug> -> @backlog`
+            slug = m.group(1) if m else ""
+            # Phase 3: mark filed. If THIS write fails the receipt stays
+            # `pending` — the next run resolves via the board (finds the task,
+            # adopts it); it can never blind-re-run `later`.
+            if not bus_write(receipt_path, _receipt_body(n["identifier"], "filed", slug)):
+                print(f"DEGRADED: filed-receipt write failed for {n['identifier']} "
+                      f"(task {slug or title[:60]} created; next run adopts via board)",
+                      file=sys.stderr)
+                degraded = True
+                continue
+        else:
+            print(f"retrying finalize for {n['identifier']} (task already filed: {slug or '?'})")
         try:
             cur = [l["id"] for l in n["labels"]["nodes"]] + [filed_id]
             gql("mutation($i:String!,$in:IssueUpdateInput!){issueUpdate(id:$i,input:$in){success}}",
