@@ -106,10 +106,14 @@ Three walls, in the order you'll hit them:
    well inside the 900s window, re-mint before you debug it.** Reported live
    2026-07-16 by a cloud join: the code died on its FIRST poll ~8min after
    minting, and an identical second attempt worked immediately. Root cause is
-   unconfirmed — one report, never reproduced. The leading guess: device codes
-   are single-use, so a proxy that retries or duplicates the token POST may
-   consume the code before you read the first response, which would make the
-   error truthful about the code and misleading about the cause. You do not need
+   unconfirmed. The leading guess, from the same reporter after a second
+   symptom on the same box: device codes are single-use, and a container or
+   proxy torn down mid-flight can lose the token *response* while the server
+   has already consumed the code — so the poll you experience as your FIRST
+   was really your second, and the error is truthful about the code while
+   telling you nothing about the cause. (An earlier guess here blamed a proxy
+   *retrying* the POST; the lost-response version needs no such misbehaviour
+   and fits a first-poll failure better, so it replaced it.) You do not need
    that answer to recover: re-minting costs one human tap, so try it first. If a
    fresh code fails the same way, that one IS worth debugging — and worth
    reporting, since two would make it a pattern rather than a coin flip.
