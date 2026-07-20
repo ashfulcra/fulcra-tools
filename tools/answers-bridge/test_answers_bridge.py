@@ -190,6 +190,53 @@ def test_promote_pending_with_board_unavailable_fails_closed(bridge, monkeypatch
     assert bridge.cmd_promote({}) == 2
 
 
+def test_board_degraded_fold_is_unknown_not_absence(bridge, monkeypatch):
+    """An rc-0 board fold carrying a degraded marker must return None (absence
+    unproven), never False — presence stays provable from the same fold."""
+    def board_json(payload):
+        def fake_run(argv, **kw):
+            assert argv[:2] == ["coord-engine", "board"]
+            return types.SimpleNamespace(returncode=0, stdout=payload, stderr="")
+        return fake_run
+
+    import json as _json
+    # degraded marker row + title absent -> None
+    monkeypatch.setattr(bridge.subprocess, "run", board_json(_json.dumps(
+        {"active": [{"type": "read-degraded", "reason": "summaries unreadable"}]})))
+    assert bridge._board_has_title("the promoted question") is None
+    # degraded lane key + title absent -> None
+    monkeypatch.setattr(bridge.subprocess, "run", board_json(_json.dumps(
+        {"read-degraded": [{"type": "read-degraded", "reason": "x"}], "active": []})))
+    assert bridge._board_has_title("the promoted question") is None
+    # degraded marker BUT title present -> True (presence provable from partial fold)
+    monkeypatch.setattr(bridge.subprocess, "run", board_json(_json.dumps(
+        {"active": [{"type": "review-fold-degraded", "scanned": 1, "total": 9},
+                    {"title": "the promoted question", "id": "x-1"}]})))
+    assert bridge._board_has_title("the promoted question") is True
+    # clean fold, absent -> False (the only provable absence)
+    monkeypatch.setattr(bridge.subprocess, "run", board_json(_json.dumps(
+        {"active": [{"title": "other", "id": "y"}], "waiting": []})))
+    assert bridge._board_has_title("the promoted question") is False
+
+
+def test_promote_adoption_receipt_failure_blocks_finalize(bridge, monkeypatch):
+    """Board resolution proves the task exists, but the adopted (filed) receipt
+    cannot be persisted -> the finalize must NOT run (filed receipt is its
+    precondition), pass exits degraded."""
+    sim = BusSim()
+    sim.files["team/fulcra/answers/_promotions/BUS-95.md"] = \
+        "---\ntype: PromotionReceipt\ncard: BUS-95\nstatus: pending\nslug: \n---\n"
+    sim.install(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "bus_write", lambda p, c: False)
+    monkeypatch.setattr(bridge, "_project_issues", lambda: [_card("BUS-95", "b", ("promote",))])
+    monkeypatch.setattr(bridge, "_board_has_title", lambda t: True)
+    monkeypatch.setattr(bridge.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("later must not run")))
+    monkeypatch.setattr(bridge, "gql",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no finalize")))
+    assert bridge.cmd_promote({}) == 2
+
+
 def test_promote_finalize_failure_never_double_files(bridge, monkeypatch):
     """Linear finalize fails after a clean file -> retry finalizes only."""
     sim = BusSim()

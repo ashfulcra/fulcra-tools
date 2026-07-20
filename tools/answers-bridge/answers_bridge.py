@@ -108,8 +108,12 @@ def bus_list(dirpath):
 
 
 def _board_has_title(title):
-    """True/False if the board fold definitively shows/omits a task with this
-    exact title; None if the fold is unavailable (callers fail closed)."""
+    """True if the board fold shows a task with this exact title (presence is
+    provable even from a partial fold); False ONLY if a clean, non-degraded
+    fold omits it; None whenever absence cannot be proven — nonzero rc,
+    unparseable output, or an rc-0 fold carrying ANY degraded marker (the
+    engine's contract: marker rows have a `type` ending `-degraded`, and
+    `board` can inject a `read-degraded` lane). Callers fail closed on None."""
     cp = subprocess.run(["coord-engine", "board", TEAM, "--json"],
                         capture_output=True, text=True, timeout=180)
     if cp.returncode != 0:
@@ -118,12 +122,22 @@ def _board_has_title(title):
         d = json.loads(cp.stdout)
     except json.JSONDecodeError:
         return None
-    for lane in d.values() if isinstance(d, dict) else []:
+    if not isinstance(d, dict):
+        return None
+    degraded = False
+    for lane_name, lane in d.items():
+        if isinstance(lane_name, str) and "degraded" in lane_name:
+            degraded = True
         if isinstance(lane, list):
             for row in lane:
-                if isinstance(row, dict) and row.get("title") == title:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("title") == title:
                     return True
-    return False
+                t = row.get("type")
+                if isinstance(t, str) and t.endswith("-degraded"):
+                    degraded = True
+    return None if degraded else False
 
 
 def _project_issues():
@@ -258,10 +272,16 @@ def cmd_promote(a):
                 degraded = True
                 continue
             if present:
+                # Persist the adoption BEFORE finalize — the filed receipt is
+                # the precondition of the finalize contract, not a best-effort.
+                if not bus_write(receipt_path, _receipt_body(n["identifier"], "filed", "")):
+                    print(f"DEGRADED: could not persist adopted receipt for "
+                          f"{n['identifier']} — skipping finalize", file=sys.stderr)
+                    degraded = True
+                    continue
                 status = "filed"
-                bus_write(receipt_path, _receipt_body(n["identifier"], "filed", ""))
             else:
-                status = None  # proven absent -> safe to (re)create below
+                status = None  # proven absent (clean fold) -> safe to (re)create below
         if status is None:
             # Phase 1: durable intent BEFORE the task write. If the intent
             # can't land, we don't create — the dedupe state must exist first.
