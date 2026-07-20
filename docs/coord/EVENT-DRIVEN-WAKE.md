@@ -26,26 +26,23 @@ outcomes, authors, or bodies into its wake prompt.
 
 | Harness | Event-driven path | Fallback |
 | --- | --- | --- |
-| OpenClaw Gateway | Adaptive model-free listener → authenticated `POST /hooks/wake`; use `scripts/wake/openclaw.sh` | Existing Gateway heartbeat |
+| OpenClaw Gateway | Adaptive model-free listener → authenticated `POST /hooks/wake`; use `skills/fulcra-agent-automation/scripts/wake/openclaw.sh` | Existing Gateway heartbeat |
 | Claude Managed Agents | Supported by its session events API: send `user.message` to an idle persisted session | Scheduled deployment |
 | Claude Code local/desktop | Host adaptive listener handles cold sessions; a foreground `coord-engine listen` can surface events while live. No exact interactive-session inbound hook is documented, so do not start a competing resume client automatically. | SessionStart briefing plus host notification |
 | Claude Code web/cloud UI | No exact-session inbound wake is documented. Do not substitute a different Managed Agents session without explicit migration. | Platform scheduled routine / host-tier owner |
-| Codex Desktop | Adaptive listener → `scripts/wake/codex.sh` → stable `codex exec resume <SESSION_ID>`. It resumes the exact persisted thread without bypassing approvals/sandboxing or forwarding raw event text. | Compact app-thread safety automation, configurable with `--interval-minutes` |
+| Codex Desktop | Adaptive listener → `skills/fulcra-agent-automation/scripts/wake/codex.sh` → stable `codex exec resume <thread-id>` (the Codex session id). It resumes the exact persisted thread without bypassing approvals/sandboxing or forwarding raw event text. | Compact app-thread safety automation, configurable with `--interval-minutes` |
 | Codex app-server integration | A trusted integration can alternatively `thread/resume` and `turn/start` over local stdio/socket transport. | `codex exec resume` adapter |
 
 ## OpenClaw deployment
 
 Enable Gateway hooks with a dedicated token and keep the endpoint behind
-loopback, a tailnet, or a trusted reverse proxy. Then install one listener:
-
-```bash
-install -d -m 700 "$HOME/.config/coord-engine"
-printf '%s' 'dedicated-secret' > "$HOME/.config/coord-engine/openclaw-hook-token"
-chmod 600 "$HOME/.config/coord-engine/openclaw-hook-token"
-./skills/fulcra-agent-automation/scripts/install-listener.sh \
-  <team> <agent> 1 --tail-minutes 30 --idle-minutes 30 --wake-cmd \
-  "$PWD/skills/fulcra-agent-automation/scripts/wake/openclaw.sh"
-```
+loopback, a tailnet, or a trusted reverse proxy. The bundled adapter reads its
+bearer token from `~/.config/coord-engine/openclaw-hook-token` (directory mode
+`0700`, file mode `0600`). Mechanics, flags, and adapter contracts —
+installer command lines, adaptive-cadence flags, wake env-var fields:
+[`fulcra-agent-automation` SKILL](../../skills/fulcra-agent-automation/SKILL.md)
+— the one home for listener/wake operations; the adapter is
+`skills/fulcra-agent-automation/scripts/wake/openclaw.sh`.
 
 The scheduled adapter defaults to the loopback Gateway URL. For a non-default
 trusted endpoint, use HTTPS and a small operator-owned wrapper that sets
@@ -67,15 +64,12 @@ An operator or trusted lifecycle hook may run a forced tick with
 
 ## Codex deployment
 
-Use the thread id already written to the managed Codex automation and an
+Use the `<thread-id>` already written to the managed Codex automation and an
 absolute repository path. Installing the unattended wake command requires the
-same explicit consent as every listener adapter:
-
-```bash
-./skills/fulcra-agent-automation/scripts/install-listener.sh \
-  <team> <agent> 1 --tail-minutes 30 --idle-minutes 30 --wake-cmd \
-  "COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<absolute-repo-path> $PWD/skills/fulcra-agent-automation/scripts/wake/codex.sh"
-```
+same explicit consent as every listener adapter. The installer command line and
+the adapter env contract (`COORD_CODEX_THREAD_ID`, `COORD_CODEX_CWD`):
+[`fulcra-agent-automation` SKILL §2](../../skills/fulcra-agent-automation/SKILL.md)
+— the one home for listener/wake operations.
 
 The adapter invokes the documented `codex exec resume` surface with `--all`
 so launchd's working directory does not hide the target session. It deliberately

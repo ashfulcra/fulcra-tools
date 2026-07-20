@@ -339,7 +339,7 @@ it (not on PyPI).
     still inside the next pass's window instead of consumed by this one; a failed listing preserves the
     prior `acked_by` rather than un-acking the task; and the whole-pass fast path declines while that
     anchor is behind `generated_at`, so a quiet beat can't skip the fold that still owes a read. A forced full fold every `COORD_ACKS_FULL_EVERY`
-    passes (default 12, ~4h at a 20-min heartbeat) bounds anything the query could miss, and carries the
+    passes (default 72, ~daily on a 20-min heartbeat) bounds anything the query could miss, and carries the
     orphan-shard GC.
   - **summaries.json is one shared doc written by many hosts at many versions — a top-level key added
     in version N is wiped by any host older than N.** The whole fleet reconciles ONE index, and an older
