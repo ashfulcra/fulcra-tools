@@ -1,0 +1,18 @@
+{
+ "project_id": "f52892bc-a6f5-43d4-af27-6d1a44546e00",
+ "project_url": "https://linear.app/ash-agent-coordination/project/ash-answers-f6061dbe0349",
+ "team_id": "2a9c37bf-a038-49a7-ad01-de8f8fc6ce5a",
+ "states": {
+  "open": "ecc9d999-62ca-424f-bf73-d03d20830b52",
+  "done": "391fc924-1462-4114-a49d-d54b0bb83599",
+  "progress": "fb1973a4-214c-4c3f-8d2d-5038c73d6c07"
+ },
+ "labels": {
+  "qa-answer": "393652c0-303b-4f15-9adb-621fd911e87c",
+  "type:factual": "8d953b5e-d419-4064-a27c-1e8defdf9408",
+  "type:future-work": "7997106e-cc22-48f6-9ae6-18970efd34b0",
+  "type:both": "252cffec-6e7c-4659-9b5c-33fd3add363a",
+  "promote": "9a8c2691-67ca-4c33-9020-d4e85513472a",
+  "filed": "a72689fc-cad2-4844-a495-cbc2baf4cb24"
+ }
+}
