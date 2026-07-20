@@ -83,63 +83,6 @@ TYPE_LABEL = {"factual": "type:factual", "future": "type:future-work",
               "future-work": "type:future-work", "both": "type:both"}
 
 
-def bus_read(path):
-    """Read a bus file; None on failure. NEVER use None to infer absence —
-    absence is only proven by a successful bus_list that omits the name."""
-    cp = subprocess.run(["fulcra-api", "file", "download", path, "-"],
-                        capture_output=True, text=True, timeout=60)
-    return cp.stdout if cp.returncode == 0 else None
-
-
-def bus_list(dirpath):
-    """List a bus directory. Returns the set of entry names on success, or
-    None on ANY failure — callers must fail closed on None (a degraded listing
-    is UNKNOWN existence, never absence)."""
-    cp = subprocess.run(["fulcra-api", "file", "list", dirpath],
-                        capture_output=True, text=True, timeout=60)
-    if cp.returncode != 0:
-        return None
-    names = set()
-    for line in cp.stdout.splitlines():
-        parts = line.split()
-        if parts:
-            names.add(parts[-1])
-    return names
-
-
-def _board_has_title(title):
-    """True if the board fold shows a task with this exact title (presence is
-    provable even from a partial fold); False ONLY if a clean, non-degraded
-    fold omits it; None whenever absence cannot be proven — nonzero rc,
-    unparseable output, or an rc-0 fold carrying ANY degraded marker (the
-    engine's contract: marker rows have a `type` ending `-degraded`, and
-    `board` can inject a `read-degraded` lane). Callers fail closed on None."""
-    cp = subprocess.run(["coord-engine", "board", TEAM, "--json"],
-                        capture_output=True, text=True, timeout=180)
-    if cp.returncode != 0:
-        return None
-    try:
-        d = json.loads(cp.stdout)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(d, dict):
-        return None
-    degraded = False
-    for lane_name, lane in d.items():
-        if isinstance(lane_name, str) and "degraded" in lane_name:
-            degraded = True
-        if isinstance(lane, list):
-            for row in lane:
-                if not isinstance(row, dict):
-                    continue
-                if row.get("title") == title:
-                    return True
-                t = row.get("type")
-                if isinstance(t, str) and t.endswith("-degraded"):
-                    degraded = True
-    return None if degraded else False
-
-
 def _project_issues():
     out, cursor = [], None
     while True:
@@ -210,35 +153,24 @@ def cmd_list(a):
     return 0
 
 
-def _receipt_body(card, status, slug=""):
-    return (f"---\ntype: PromotionReceipt\ncard: {card}\nstatus: {status}\n"
-            f"slug: {slug}\n---\n")
-
-
 def cmd_promote(a):
     """Cards labeled `promote` and not yet `filed` -> bus backlog task, link back.
 
-    Retry-safe with DURABLE dedupe across every partial-failure window, via a
-    two-phase receipt (team/<team>/answers/_promotions/<card>.md, keyed by the
-    card's immutable Linear identifier):
-      intent  (status: pending) written BEFORE `coord-engine later` runs
-      filed   (status: filed, slug) written after `later` succeeds
-      finalize (Linear label+Done+comment) runs only with a filed receipt
-    Recovery rules: receipt existence comes from ONE directory listing per run
-    (a degraded listing skips the whole pass fail-closed — UNKNOWN is never
-    absence); an unreadable individual receipt skips that card; `pending` with
-    no slug resolves via the board fold (task present -> adopt as filed; absent
-    -> re-run `later`; fold unavailable -> skip fail-closed); `filed` skips
-    `later` and retries the finalize only. No path re-runs `later` while the
-    task's existence is unknown."""
-    promote_id = IDS["labels"]["promote"]; filed_id = IDS["labels"]["filed"]
-    receipts_dir = f"team/{TEAM}/answers/_promotions/"
-    existing_receipts = bus_list(receipts_dir)
-    if existing_receipts is None:
-        print("DEGRADED: promotions listing unavailable — skipping promote pass "
-              "(existence UNKNOWN, fail closed)", file=sys.stderr)
-        print("promote: 0 card(s) filed [DEGRADED]")
-        return 2
+    Idempotent WITHOUT local state, by the engine's own delivery contract: a
+    directive's path carries a payload hash over (title, summary, next,
+    assignee) — never time — so identical payloads converge on ONE shard;
+    re-delivery prints `already delivered` and returns 0, with absence
+    confirmed store-side by the engine's listing (cli._write_directive). This
+    tool keeps the payload bit-stable per card (fixed title, summary keyed by
+    the card's immutable Linear identifier + URL, fixed assignee), so simply
+    re-running `later` for every still-unfiled card is safe across EVERY
+    partial-failure window: it either creates or dedupes. The card's `filed`
+    label is the only completion marker; a failed Linear finalize retries the
+    whole idempotent sequence on the next pass. Known edge (accepted +
+    intentional): editing a card's title between a failure and its retry
+    changes the message identity and files a task for the NEW title — the
+    title IS part of the payload by engine contract."""
+    filed_id = IDS["labels"]["filed"]
     n_done = 0
     degraded = False
     for n in _project_issues():
@@ -246,76 +178,21 @@ def cmd_promote(a):
         if "promote" not in names or "filed" in names:
             continue
         title = n["title"]
-        receipt_name = f"{n['identifier']}.md"
-        receipt_path = receipts_dir + receipt_name
-        status, slug = None, ""
-        if receipt_name in existing_receipts:
-            raw = bus_read(receipt_path)
-            if raw is None:
-                print(f"DEGRADED: receipt for {n['identifier']} exists but is unreadable — "
-                      f"skipping card (never re-file on an unreadable receipt)", file=sys.stderr)
-                degraded = True
-                continue
-            sm = re.search(r"^status:[ \t]*(\S+)", raw, re.M)
-            gm = re.search(r"^slug:[ \t]*(\S+)", raw, re.M)
-            status = sm.group(1) if sm else "pending"  # legacy receipts = filed pre-status
-            if not sm and gm:
-                status = "filed"
-            slug = gm.group(1) if gm else ""
-        if status == "pending" and not slug:
-            # Ambiguous window: intent written, unknown whether `later` ran.
-            # Resolve against the board — never blind-retry.
-            present = _board_has_title(title[:160])
-            if present is None:
-                print(f"DEGRADED: board fold unavailable resolving {n['identifier']} — "
-                      f"skipping card fail-closed", file=sys.stderr)
-                degraded = True
-                continue
-            if present:
-                # Persist the adoption BEFORE finalize — the filed receipt is
-                # the precondition of the finalize contract, not a best-effort.
-                if not bus_write(receipt_path, _receipt_body(n["identifier"], "filed", "")):
-                    print(f"DEGRADED: could not persist adopted receipt for "
-                          f"{n['identifier']} — skipping finalize", file=sys.stderr)
-                    degraded = True
-                    continue
-                status = "filed"
-            else:
-                status = None  # proven absent (clean fold) -> safe to (re)create below
-        if status is None:
-            # Phase 1: durable intent BEFORE the task write. If the intent
-            # can't land, we don't create — the dedupe state must exist first.
-            if not bus_write(receipt_path, _receipt_body(n["identifier"], "pending")):
-                print(f"DEGRADED: intent receipt write failed for {n['identifier']} — "
-                      f"not creating task", file=sys.stderr)
-                degraded = True
-                continue
-            existing_receipts.add(receipt_name)
-            # Phase 2: create. Engine contract: nonzero rc = nothing written.
-            cp = subprocess.run(
-                ["coord-engine", "later", TEAM, title[:160], "-w", "ash-answers",
-                 "-s", f"Promoted from Ash Answers card {n['identifier']} ({n['url']})",
-                 "--from", "ash"],
-                capture_output=True, text=True, timeout=60)
-            if cp.returncode != 0:
-                bus_write(receipt_path, _receipt_body(n["identifier"], "pending"))
-                print(f"DEGRADED: later failed for {n['identifier']}: {cp.stderr.strip()[-160:]}",
-                      file=sys.stderr)
-                degraded = True
-                continue
-            m = re.search(r"directive\s+(\S+)\s*->", cp.stdout)  # `directive <slug> -> @backlog`
-            slug = m.group(1) if m else ""
-            # Phase 3: mark filed. If THIS write fails the receipt stays
-            # `pending` — the next run resolves via the board (finds the task,
-            # adopts it); it can never blind-re-run `later`.
-            if not bus_write(receipt_path, _receipt_body(n["identifier"], "filed", slug)):
-                print(f"DEGRADED: filed-receipt write failed for {n['identifier']} "
-                      f"(task {slug or title[:60]} created; next run adopts via board)",
-                      file=sys.stderr)
-                degraded = True
-                continue
-        else:
-            print(f"retrying finalize for {n['identifier']} (task already filed: {slug or '?'})")
+        cp = subprocess.run(
+            ["coord-engine", "later", TEAM, title[:160], "-w", "ash-answers",
+             "-s", f"Promoted from Ash Answers card {n['identifier']} ({n['url']})",
+             "--from", "ash"],
+            capture_output=True, text=True, timeout=60)
+        if cp.returncode != 0:
+            print(f"DEGRADED: later failed for {n['identifier']}: {cp.stderr.strip()[-160:]}",
+                  file=sys.stderr)
+            degraded = True
+            continue
+        # Two success shapes: `directive <slug> -> @backlog` (created) and
+        # `directive <slug> already delivered` (deduped retry). Both are safe.
+        m = re.search(r"^directive\s+(\S+?)(?:\s*->|\s+already delivered)",
+                      cp.stdout, re.M)
+        slug = m.group(1) if m else ""
         try:
             cur = [l["id"] for l in n["labels"]["nodes"]] + [filed_id]
             gql("mutation($i:String!,$in:IssueUpdateInput!){issueUpdate(id:$i,input:$in){success}}",
@@ -324,7 +201,8 @@ def cmd_promote(a):
                 {"in": {"issueId": n["id"], "body": f"Filed to bus backlog: `{slug or title[:60]}` (workstream ash-answers)."}})
         except Exception as e:
             print(f"DEGRADED: Linear finalize failed for {n['identifier']} ({e}); "
-                  f"receipt retained — next run retries finalize only", file=sys.stderr)
+                  f"card stays unfiled — next pass re-runs the idempotent file",
+                  file=sys.stderr)
             degraded = True
             continue
         print(f"promoted {n['identifier']} -> bus task {slug or '(slug?)'}")
