@@ -2944,14 +2944,20 @@ def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
     json_mode = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", False))
 
-    def tick() -> None:
-        _run_listen_tick(transport, args.team, agent, state,
-                         json_mode=json_mode, verbose=verbose)
+    def tick() -> dict[str, list[str]]:
+        _events, failures = _run_listen_tick(
+            transport, args.team, agent, state,
+            json_mode=json_mode, verbose=verbose)
         _save_listen_state(state_path, state)
+        return failures
 
     if args.once:
-        tick()
-        return 0
+        failures = tick()
+        # A captured transport failure is data, not an exception.  Keep the
+        # pulse-once stderr contract in _run_listen_tick, but return a stable
+        # machine-readable status on *every* one-shot tick so schedulers do not
+        # mistake a suppressed second pulse for recovery.
+        return 3 if failures else 0
     interval = args.interval if args.interval and args.interval > 0 else 60
     try:
         while True:

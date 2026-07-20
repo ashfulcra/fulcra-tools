@@ -663,6 +663,31 @@ def test_cmd_listen_once_exits_zero(tmp_path, monkeypatch, capsys):
     assert saved["inbox_ids"] == ["once-1"]
 
 
+def test_cmd_listen_once_stays_nonzero_after_degraded_pulse_is_suppressed(
+        tmp_path, monkeypatch, capsys):
+    """Persistent captured failures stay machine-visible on every --once tick.
+
+    The human-readable marker is pulse-once, so tick two deliberately has no
+    stderr marker; its nonzero status is what keeps the shell backoff degraded.
+    """
+    monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path))
+
+    class SummariesFail(FakeTransport):
+        def read(self, path):
+            if path.endswith("summaries.json"):
+                raise TransportError("boom")
+            return super().read(path)
+
+    t = SummariesFail()
+    args = argparse.Namespace(team=TEAM, agent="bob", interval=60,
+                              once=True, verbose=False, json=False)
+    assert cli.cmd_listen(args, t) == 3
+    assert "LISTEN DEGRADED" in capsys.readouterr().err
+
+    assert cli.cmd_listen(args, t) == 3
+    assert "LISTEN DEGRADED" not in capsys.readouterr().err
+
+
 def test_cmd_listen_loop_sigint_clean_exit(tmp_path, monkeypatch):
     monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path))
     t = FakeTransport()

@@ -71,9 +71,32 @@ if [[ "$ADAPTIVE" == "1" && -f "$CADENCE_FILE" ]]; then
   [[ "$FAILURE_STREAK" =~ ^[0-9]+$ ]] || FAILURE_STREAK=0
 fi
 
-if [[ "$ADAPTIVE" == "1" && "${COORD_LISTENER_FORCE:-0}" != "1" && "$NOW" -lt "$NEXT_DUE" ]]; then
+# Load durable wake-retry state before the cadence gate.  A cold listener must
+# wake at min(next listener due, pending wake retry due); otherwise an already
+# due exact-session wake can be delayed by the full idle cadence.
+PENDING_WAKE=0
+WAKE_FAILURE_STREAK=0
+WAKE_RETRY_DUE=0
+PENDING_WAKE_DUE=0
+PENDING_EVENT_REFS=""
+if [[ -f "$WAKE_PENDING_FILE" ]]; then
+  PENDING_WAKE=1
+  WAKE_FAILURE_STREAK="$(awk -F= '$1 == "failure_streak" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
+  WAKE_RETRY_DUE="$(awk -F= '$1 == "retry_due" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
+  PENDING_EVENT_REFS="$(awk -F= '$1 == "event_refs" {sub(/^[^=]*=/, ""); print; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
+  [[ "$WAKE_FAILURE_STREAK" =~ ^[0-9]+$ ]] || WAKE_FAILURE_STREAK=0
+  [[ "$WAKE_RETRY_DUE" =~ ^[0-9]+$ ]] || WAKE_RETRY_DUE=0
+  [[ -z "$PENDING_EVENT_REFS" || "$PENDING_EVENT_REFS" =~ ^[A-Z]+:[A-Za-z0-9:_.-]+(,[A-Z]+:[A-Za-z0-9:_.-]+)*$ ]] || PENDING_EVENT_REFS=""
+  (( NOW >= WAKE_RETRY_DUE )) && PENDING_WAKE_DUE=1
+fi
+
+EFFECTIVE_DUE="$NEXT_DUE"
+if [[ "$PENDING_WAKE" == "1" && ( "$EFFECTIVE_DUE" -eq 0 || "$WAKE_RETRY_DUE" -lt "$EFFECTIVE_DUE" ) ]]; then
+  EFFECTIVE_DUE="$WAKE_RETRY_DUE"
+fi
+if [[ "$ADAPTIVE" == "1" && "${COORD_LISTENER_FORCE:-0}" != "1" && "$NOW" -lt "$EFFECTIVE_DUE" ]]; then
   if [[ "${COORD_LISTENER_VERBOSE:-0}" == "1" ]]; then
-    echo "$(date -u +%FT%TZ) adaptive listener not due until epoch ${NEXT_DUE} for ${AGENT}/${TEAM}"
+    echo "$(date -u +%FT%TZ) adaptive listener not due until epoch ${EFFECTIVE_DUE} for ${AGENT}/${TEAM}"
   fi
   exit 0
 fi
@@ -162,21 +185,6 @@ if [[ "$ADAPTIVE" == "1" ]]; then
   mv "$CADENCE_TMP" "$CADENCE_FILE"
 fi
 
-PENDING_WAKE=0
-WAKE_FAILURE_STREAK=0
-WAKE_RETRY_DUE=0
-PENDING_WAKE_DUE=0
-PENDING_EVENT_REFS=""
-if [[ -f "$WAKE_PENDING_FILE" ]]; then
-  PENDING_WAKE=1
-  WAKE_FAILURE_STREAK="$(awk -F= '$1 == "failure_streak" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
-  WAKE_RETRY_DUE="$(awk -F= '$1 == "retry_due" {print $2; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
-  PENDING_EVENT_REFS="$(awk -F= '$1 == "event_refs" {sub(/^[^=]*=/, ""); print; exit}' "$WAKE_PENDING_FILE" 2>/dev/null || true)"
-  [[ "$WAKE_FAILURE_STREAK" =~ ^[0-9]+$ ]] || WAKE_FAILURE_STREAK=0
-  [[ "$WAKE_RETRY_DUE" =~ ^[0-9]+$ ]] || WAKE_RETRY_DUE=0
-  [[ -z "$PENDING_EVENT_REFS" || "$PENDING_EVENT_REFS" =~ ^[A-Z]+:[A-Za-z0-9:_.-]+(,[A-Z]+:[A-Za-z0-9:_.-]+)*$ ]] || PENDING_EVENT_REFS=""
-  (( NOW >= WAKE_RETRY_DUE )) && PENDING_WAKE_DUE=1
-fi
 if [[ "$NEW" -eq 0 && "$PENDING_WAKE_DUE" -eq 1 && -n "$PENDING_EVENT_REFS" ]]; then
   EVENT_REFS="$PENDING_EVENT_REFS"
 fi

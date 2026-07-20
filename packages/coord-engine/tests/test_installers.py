@@ -340,6 +340,28 @@ class TestListenerTick:
         # The seventh retry is capped at the 30-minute idle cadence.
         assert "next_due=6460\n" in cadence.read_text()
 
+    def test_persistent_degradation_backs_off_after_pulse_once(self, tmp_path):
+        self._run_tick(tmp_path, adaptive=True, now=1000)
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        cadence.write_text("active_until=1300\nnext_due=1000\nfailure_streak=0\n")
+
+        first = self._run_tick(
+            tmp_path, adaptive=True, now=1000, once_exit=3,
+            once_stderr="LISTEN DEGRADED: transport\n")
+        assert first.returncode == 0
+        assert cadence.read_text() == \
+            "active_until=1300\nnext_due=1060\nfailure_streak=1\n"
+
+        # The engine suppresses the repeated human pulse, but its --once exit
+        # status remains degraded, so the shell must keep incrementing backoff.
+        second = self._run_tick(
+            tmp_path, adaptive=True, now=1060, once_exit=3,
+            once_stderr="")
+        assert second.returncode == 0
+        assert "engine exited 3" in second.stderr
+        assert cadence.read_text() == \
+            "active_until=1300\nnext_due=1180\nfailure_streak=2\n"
+
     def test_adaptive_tick_stays_hot_then_backs_off(self, tmp_path):
         first = self._run_tick(tmp_path, adaptive=True, now=1000)
         assert first.returncode == 0
@@ -426,6 +448,29 @@ class TestListenerTick:
         assert (tmp_path / "wake-calls.log").read_text().splitlines() == \
             ["wake retry=0 refs=DIRECTIVE:work",
              "wake retry=1 refs=DIRECTIVE:work"]
+
+    def test_due_wake_retry_preempts_cold_adaptive_listener_gate(self, tmp_path):
+        first = self._run_tick(
+            tmp_path, once_stdout="DIRECTIVE work\n", wake_exit=75,
+            adaptive=True, now=1000)
+        assert first.returncode == 0
+        pending = next((tmp_path / "state").glob("*.wake-pending"))
+        cadence = next((tmp_path / "state").glob("*.cadence"))
+        assert "retry_due=1060\n" in pending.read_text()
+
+        # Simulate a cold listener whose ordinary poll is much later.  The due
+        # wake retry is the effective cadence deadline and must run at 1060.
+        cadence.write_text("active_until=900\nnext_due=2800\nfailure_streak=0\n")
+        second = self._run_tick(
+            tmp_path, once_stdout="", wake_exit=0,
+            adaptive=True, now=1060)
+        assert second.returncode == 0
+        assert "retrying pending wake" in second.stdout
+        assert not pending.exists()
+        assert (tmp_path / "wake-calls.log").read_text().splitlines() == [
+            "wake retry=0 refs=DIRECTIVE:work",
+            "wake retry=1 refs=DIRECTIVE:work",
+        ]
 
     def test_failed_wake_retry_backoff_is_exponential_and_capped(self, tmp_path):
         self._run_tick(
