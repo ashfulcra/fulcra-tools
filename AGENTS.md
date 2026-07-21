@@ -107,6 +107,10 @@ under `skills/`, each package with its own README, build, and tests.
   `artifact/` namespace is consolidated into `artifacts/`. UNKNOWN listings stay
   hot, moves are copy-verified rather than destructive-only, and archived work
   reverses through `task restore` or `review restore`.
+- The one-shot `migrate` exporter and unused atomic `handoff` convenience verb
+  are retired. Reassign live work with `task update --assignee <agent> --next
+  "..."`; when another session needs resumable context, write the continuity
+  snapshot first and then reassign the task.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 
