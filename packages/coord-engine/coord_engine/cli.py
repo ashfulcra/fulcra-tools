@@ -2752,12 +2752,14 @@ def _listen_tick(transport: Any, team: str, agent: str,
             continue
         owner = str(r.get("owner") or "?")
         # A sender may be in its own audience: explicitly via a self-tell, or
-        # implicitly because every broadcast is addressed to ``*``.  Those rows
-        # are real inbox members (and must be consumed into the id-diff state),
-        # but waking the author for its own send is pure self-echo.  Suppress only
-        # the directive event; response/verdict sources below remain the reply
-        # legs for work the agent owns or requested.
-        if owner == agent:
+        # implicitly because every broadcast is addressed to ``*``.  Unscheduled
+        # rows are real inbox members (and must be consumed into id-diff state),
+        # but waking the author for its own send is pure self-echo.  A scheduled
+        # self-reminder is deliberately different: its future wake is the point,
+        # so a visible row carrying ``not_before`` must still fire.
+        # Suppress only the directive event; response/verdict sources below remain
+        # the reply legs for work the agent owns or requested.
+        if owner == agent and not r.get("not_before"):
             inbox_ids.add(slug)
             continue
         events.append({"type": "directive", "slug": slug,

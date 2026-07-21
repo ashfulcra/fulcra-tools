@@ -183,6 +183,53 @@ def test_cli_tell_and_broadcast_paths_do_not_echo_author_before_reconcile(send_a
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize("reconciled", [False, True])
+def test_visible_self_reminder_fires_once_in_overlay_and_summaries_windows(
+        reconciled, capsys):
+    t = FakeTransport()
+    _reconcile(t)  # establish the summaries anchor used by the freshness overlay
+    assert cli.main([
+        "remind", TEAM, "bob", "2026-07-10T00:15:00Z", "Self pickup",
+        "--from", "bob",
+    ], transport=t) == 0
+    capsys.readouterr()
+    if reconciled:
+        _reconcile(t)
+    state = _fresh_state()
+
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert [e["type"] for e in events] == ["directive"]
+    assert events[0]["owner"] == "bob"
+    assert "Self pickup" in capsys.readouterr().out
+
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                              json_mode=False, verbose=False)
+    assert failures2 == {}
+    assert events2 == []
+    assert capsys.readouterr().out == ""
+
+
+def test_other_authored_visible_reminder_still_fires(capsys):
+    t = FakeTransport()
+    _reconcile(t)
+    assert cli.main([
+        "remind", TEAM, "bob", "2026-07-10T00:15:00Z", "Alice pickup",
+        "--from", "alice",
+    ], transport=t) == 0
+    capsys.readouterr()
+
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
+                                            json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert [e["type"] for e in events] == ["directive"]
+    assert events[0]["owner"] == "alice"
+    assert "Alice pickup" in capsys.readouterr().out
+
+
 def test_id_diff_not_count_ack_plus_new_still_fires(capsys):
     """An ack removes A and a new B arrives — open count stays 1, but B is a NEW
     id and must fire (the id-diff-not-count lesson)."""
