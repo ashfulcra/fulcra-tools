@@ -147,6 +147,35 @@ def resolve_coord_binary(binary: str = DEFAULT_COORD_BINARY) -> str:
     )
 
 
+def _subprocess_env(resolved_binary: str) -> dict[str, str]:
+    """Env for the coord-engine subprocess with the install dirs ON ``PATH``.
+
+    Resolving the coord-engine binary to an absolute path is not enough: coord-
+    engine ITSELF shells out to ``fulcra-api`` for its bus transport, by bare
+    name. The collect daemon runs under launchd with a minimal PATH
+    (``/usr/bin:/bin:…``) that excludes ``~/.local/bin``, so that inner exec
+    fails — ``TransportError: exec failed: … No such file or directory:
+    'fulcra-api'`` — and every relay emit fails silently while the plugin still
+    reports success (observed: ~5 days of relay silence, 07-16→07-21, the
+    contiguous frontier frozen). Prepend the resolved binary's own directory
+    plus the known install dirs to PATH so coord-engine's child processes
+    resolve too. This is the code-side guard; a daemon PATH set in launchd is
+    the deployment-side one, and either alone suffices.
+    """
+    env = dict(os.environ)
+    prepend = [os.path.dirname(resolved_binary)] + [
+        os.path.expanduser(d) for d in _FALLBACK_BIN_DIRS
+    ]
+    existing = env.get("PATH", "")
+    parts = [p for p in prepend if p] + ([existing] if existing else [])
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    ordered = [p for p in os.pathsep.join(parts).split(os.pathsep)
+               if p and not (p in seen or seen.add(p))]
+    env["PATH"] = os.pathsep.join(ordered)
+    return env
+
+
 def _subprocess_run(binary: str) -> Callable[[list[str]], tuple[int, str]]:
     """Return a ``run(argv)`` that shells out to the coord-engine binary.
 
@@ -155,15 +184,18 @@ def _subprocess_run(binary: str) -> Callable[[list[str]], tuple[int, str]]:
     whose rules never relay.
     """
     resolved: list[str] = []
+    env_cache: list[dict[str, str]] = []
 
     def _run(argv: list[str]) -> tuple[int, str]:
         if not resolved:
             resolved.append(resolve_coord_binary(binary))
+            env_cache.append(_subprocess_env(resolved[0]))
         proc = subprocess.run(  # noqa: S603 — resolved binary, non-shell
             [resolved[0], *argv],
             capture_output=True,
             text=True,
             timeout=60,
+            env=env_cache[0],
         )
         return proc.returncode, proc.stdout
     return _run

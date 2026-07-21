@@ -7,6 +7,7 @@ outbox_key + rule id only).
 """
 from __future__ import annotations
 
+import os
 import pytest
 
 from fulcra_gmail import ledger as ledger_mod
@@ -14,6 +15,7 @@ from fulcra_gmail.relay import (
     DEFAULT_COORD_BINARY,
     CoordEngineRelayEmitter,
     RelayDirective,
+    _subprocess_env,
     build_directive,
     resolve_coord_binary,
 )
@@ -61,6 +63,26 @@ def test_resolves_from_install_dir_under_the_daemons_minimal_path(tmp_path, monk
     monkeypatch.setattr("fulcra_gmail.relay._FALLBACK_BIN_DIRS", (str(fake_bin),))
 
     assert resolve_coord_binary() == str(shim)
+
+
+def test_subprocess_env_puts_fulcra_api_on_path_under_launchd(monkeypatch):
+    """The 07-16→07-21 relay silence: coord-engine resolves, but it shells out
+    to fulcra-api by bare name, and the daemon's launchd PATH excludes
+    ~/.local/bin. The subprocess env must prepend the install dirs so
+    coord-engine's own child processes (fulcra-api) resolve.
+    """
+    monkeypatch.setenv("PATH", _LAUNCHD_PATH)  # what the daemon gets
+    env = _subprocess_env("/Users/someone/.local/bin/coord-engine")
+    parts = env["PATH"].split(":")
+    # The resolved binary's own dir is present (fulcra-api installs beside it).
+    assert "/Users/someone/.local/bin" in parts
+    # The known install dirs are present.
+    assert os.path.expanduser("~/.local/bin") in parts
+    # The daemon's original PATH is preserved (system tools still resolve).
+    assert "/usr/bin" in parts
+    # No empty or duplicate entries.
+    assert "" not in parts
+    assert len(parts) == len(set(parts))
 
 
 def test_env_override_wins(monkeypatch):
