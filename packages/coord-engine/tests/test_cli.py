@@ -1476,6 +1476,29 @@ def test_cli_briefing_respects_live_ack_shards(capsys):
     assert cli.main(["briefing", "r", "-a", "amy", "--json"], transport=t) == 0
     b = _j.loads(capsys.readouterr().out)
     assert b["inbox"] == []
+    assert b["needs_me"] == []
+
+    # History is opt-in and preserves both queue views for audit/debugging.
+    assert cli.main(["briefing", "r", "-a", "amy", "--all", "--json"], transport=t) == 0
+    history = _j.loads(capsys.readouterr().out)
+    slug = _dslug("Do it", assignee="amy")
+    assert [r["name"] for r in history["inbox"]] == [slug]
+    assert [r["name"] for r in history["needs_me"]] == [slug]
+
+
+def test_cli_inbox_all_includes_closed_directive_history(capsys):
+    import json as _j
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Answered"], transport=t)
+    slug = _dslug("Answered", assignee="amy")
+    cli.main(["respond", "r", slug, "-o", "done", "-a", "amy"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    assert _j.loads(capsys.readouterr().out) == []
+    cli.main(["inbox", "r", "-a", "amy", "--all", "--json"], transport=t)
+    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == [slug]
 
 
 def test_park_respects_per_role_sla(capsys):

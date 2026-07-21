@@ -66,14 +66,19 @@ def inbox(
     *,
     now: Optional[str] = None,
     include_backlog: bool = False,
+    include_history: bool = False,
     held_roles: "Optional[set[str] | list[str]]" = None,
 ) -> list[dict[str, Any]]:
-    """Open directives agent X still owes attention to: assigned to X, ``*``, or a
-    ROLE X holds (``held_roles``), not acked by X, ``not_before`` gate applied.
-    Priority-sorted. ``acks`` maps slug -> list of agents who acked."""
+    """Directives for agent X, defaulting to work that still needs attention.
+
+    The default view is open, unacked, and past its ``not_before`` gate. With
+    ``include_history`` the lifecycle/ack/time gates are bypassed so callers can
+    expose the full directed history behind an explicit ``--all``. Priority-
+    sorted. ``acks`` maps slug -> list of agents who acked.
+    """
     out: list[dict[str, Any]] = []
     for r in rows:
-        if r.get("status") not in OPEN_STATUSES:
+        if not include_history and r.get("status") not in OPEN_STATUSES:
             continue
         a = r.get("assignee")
         if a == BACKLOG and not include_backlog:
@@ -81,10 +86,10 @@ def inbox(
         if not is_directed_at(r, agent, held_roles):
             continue
         slug = str(r.get("name") or r.get("id") or "")
-        if agent in (acks.get(slug) or []):
+        if not include_history and agent in (acks.get(slug) or []):
             continue
         nb = r.get("not_before")
-        if nb and now is not None and str(nb) > now:
+        if not include_history and nb and now is not None and str(nb) > now:
             continue
         out.append(r)
     return sort_rows(out)

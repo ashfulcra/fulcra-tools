@@ -379,7 +379,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # its own marker below — never folded into "no role work".
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, args.team, args.agent, rows, now=now)
-    got = query.needs_me(rows, args.agent, now=now, held_roles=held_roles)
+    got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
+                         held_roles=held_roles, include_history=args.all)
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
@@ -2417,7 +2418,8 @@ def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
 def _directed_inbox(transport: Any, team: str, agent: str,
                     rows: list[dict[str, Any]], *,
                     held_roles: "Optional[set[str]]" = None,
-                    include_backlog: bool = False) -> list[dict[str, Any]]:
+                    include_backlog: bool = False,
+                    include_history: bool = False) -> list[dict[str, Any]]:
     """The open-directive fold over ALREADY-LOADED ``rows`` — directives assigned
     to ``agent``, ``*``, or a role in ``held_roles`` (role routing), with the same
     ack + read-your-write gating `inbox` applies. Split out from
@@ -2428,21 +2430,51 @@ def _directed_inbox(transport: Any, team: str, agent: str,
     acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
     stale_visible = directives.inbox(rows, acks, agent, now=now,
                                      include_backlog=include_backlog,
+                                     include_history=include_history,
                                      held_roles=held_roles)
+    if include_history:
+        return stale_visible
     for r in stale_visible:
         slug = str(r.get("name") or "")
         if agent not in (acks.get(slug) or []) and transport.read(_ack_path(team, slug, agent)):
             acks.setdefault(slug, []).append(agent)
     got = directives.inbox(rows, acks, agent, now=now,
-                           include_backlog=include_backlog, held_roles=held_roles)
+                           include_backlog=include_backlog,
+                           include_history=include_history,
+                           held_roles=held_roles)
     # read-your-write: an ack written since the last reconcile hides the item
     # for the acking agent immediately (live shard check, only for shown items).
     return [r for r in got
             if transport.read(_ack_path(team, str(r.get("name")), agent)) is None]
 
 
+def _needs_me_rows(transport: Any, team: str, agent: str,
+                   rows: list[dict[str, Any]], *, now: str,
+                   held_roles: "Optional[set[str]]" = None,
+                   include_history: bool = False) -> list[dict[str, Any]]:
+    """Needs-me with directive satisfaction and read-your-write semantics.
+
+    Reconciled ``acked_by`` hides old acknowledgements without transport work.
+    Only the remaining directive candidates pay one shard read so a fresh ack
+    disappears immediately instead of waiting for the next reconcile.
+    """
+    got = query.needs_me(rows, agent, now=now, held_roles=held_roles,
+                         include_history=include_history)
+    if include_history:
+        return got
+    out = []
+    for row in got:
+        tags = set(str(t) for t in (row.get("tags") or []))
+        if ("kind:directive" in tags
+                and transport.read(_ack_path(team, str(row.get("name")), agent)) is not None):
+            continue
+        out.append(row)
+    return out
+
+
 def _inbox_rows_status(transport: Any, team: str, agent: str, *,
-                       include_backlog: bool = False
+                       include_backlog: bool = False,
+                       include_history: bool = False,
                        ) -> tuple[list[dict[str, Any]], bool, str, set[str]]:
     """The open-directive fold `inbox` surfaces for `agent` — role-routed
     directives included — plus the readability of the underlying summaries fold:
@@ -2463,7 +2495,8 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
                                             now=_iso(_now()))
     return (_directed_inbox(transport, team, agent, rows,
                             held_roles=held or None,
-                            include_backlog=include_backlog),
+                            include_backlog=include_backlog,
+                            include_history=include_history),
             ok, reason, unresolved)
 
 
@@ -2481,7 +2514,8 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     # partial rows, NEVER a clean-``[]`` exit 0 that would suppress a live unacked
     # directive (the codex CRIT, live-reproduced).
     got, ok, reason, unresolved_roles = _inbox_rows_status(
-        transport, args.team, agent, include_backlog=args.all)
+        transport, args.team, agent, include_backlog=args.all,
+        include_history=args.all)
     if args.json:
         rows_out = ([_read_degraded_row(reason, marker="inbox-degraded")] + got
                     if not ok else got)
@@ -3218,13 +3252,17 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     if unresolved_roles:
         out["role_degraded"] = _role_degraded_row(unresolved_roles)
     try:
-        out["inbox"] = _directed_inbox(transport, args.team, agent, rows,
-                                       held_roles=held_roles or None)
+        out["inbox"] = _directed_inbox(
+            transport, args.team, agent, rows,
+            held_roles=held_roles or None, include_backlog=args.all,
+            include_history=args.all)
     except Exception as e:
         print(f"briefing: inbox section unavailable ({type(e).__name__})", file=sys.stderr)
         out["inbox"] = []
     try:
-        out["needs_me"] = query.needs_me(rows, agent, now=now, held_roles=held_roles)
+        out["needs_me"] = _needs_me_rows(
+            transport, args.team, agent, rows, now=now,
+            held_roles=held_roles, include_history=args.all)
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
@@ -4035,7 +4073,10 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("team"); add_json(b); b.set_defaults(func=cmd_board)
 
     nm = sub.add_parser("needs-me", help="open work assigned to / blocking an agent")
-    nm.add_argument("team"); nm.add_argument("--agent", required=True); add_json(nm)
+    nm.add_argument("team"); nm.add_argument("--agent", required=True)
+    nm.add_argument("--all", action="store_true",
+                    help="include acknowledged, closed, and future history")
+    add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
 
     sc = sub.add_parser("search", help="substring search over tasks")
@@ -4100,7 +4141,9 @@ def build_parser() -> argparse.ArgumentParser:
     ho.set_defaults(func=cmd_handoff)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
     ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
-    ib.add_argument("--all", action="store_true", help="include @backlog"); add_json(ib)
+    ib.add_argument("--all", action="store_true",
+                    help="include acknowledged, closed, future, and @backlog history")
+    add_json(ib)
     ib.set_defaults(func=cmd_inbox)
     ls = sub.add_parser("listen", help="await new directives + responses to directives you own (the reply leg of tell)")
     ls.add_argument("team"); ls.add_argument("--agent", "-a")
@@ -4205,7 +4248,10 @@ def build_parser() -> argparse.ArgumentParser:
     aw.set_defaults(func=cmd_answer)
 
     bf = sub.add_parser("briefing", help="one-call session-start bundle (tolerates absent add-ons)")
-    bf.add_argument("team"); bf.add_argument("--agent", "-a"); add_json(bf)
+    bf.add_argument("team"); bf.add_argument("--agent", "-a")
+    bf.add_argument("--all", action="store_true",
+                    help="include acknowledged, closed, and future queue history")
+    add_json(bf)
     bf.set_defaults(func=cmd_briefing)
 
     dg = sub.add_parser("digest", help="operator digest: blocked-on-you / upcoming / agents / stale")

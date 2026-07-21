@@ -15,7 +15,9 @@ coord-engine remind    <team> <assignee> <when> "<title>"        # when: ISO | 5
 coord-engine later     <team> "<title>"                          # @backlog
 coord-engine intent    <team> "<text>" --for <principal> [--by <when>] [--from <me>] [-p P1]
 coord-engine handoff   <team> <slug> --to <agent> [--checkpoint CHK-…] [-n "…"]
-coord-engine inbox     <team> --agent <X> [--json] [--all]       # --all includes @backlog
+coord-engine inbox     <team> --agent <X> [--json] [--all]       # --all = acknowledged/closed/future/@backlog history
+coord-engine needs-me  <team> --agent <X> [--json] [--all]       # same history opt-in
+coord-engine briefing  <team> --agent <X> [--json] [--all]       # same queue semantics in the session bundle
 coord-engine inbox     <team> --agent <X> --ack <slug>
 coord-engine respond   <team> <slug> --outcome "…" [-e "…"] [--agent <X>]
 coord-engine threads   <team> --for <principal> [--silence-days N] [--intent-grace-hours N] [--json]
