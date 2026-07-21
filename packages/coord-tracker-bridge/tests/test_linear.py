@@ -659,3 +659,13 @@ def test_comment_and_due_date_are_semantic_operations():
     adapter.set_due_date("LIN-1", "2026-07-18")
 
     assert [call["operationName"] for call in transport.payloads] == ["AddComment", "SetDueDate"]
+
+
+def test_schema_query_uses_string_variable_type():
+    # Linear's direct node lookup team(id:) takes String!, not ID! — sending
+    # ID! fails server-side validation (live 400 on the first fulcra sync,
+    # 2026-07-21). FakeTransport can't catch server validation, so pin the
+    # declaration itself.
+    from coord_tracker_bridge.linear import SCHEMA_QUERY
+    assert "$team:String!" in SCHEMA_QUERY
+    assert ":ID!" not in SCHEMA_QUERY

@@ -224,7 +224,10 @@ PROJECTS_QUERY = """query Projects($team:ID!,$after:String){projects(filter:{acc
 COMMENTS_QUERY = """query Comments($issue:ID!,$after:String){comments(filter:{issue:{id:{eq:$issue}}},first:100,after:$after){nodes{id body createdAt user{id}} pageInfo{hasNextPage endCursor}}}"""
 ISSUE_LABELS_QUERY = """query IssueLabels($issue:String!,$after:String){issue(id:$issue){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}"""
 EVENTS_QUERY = """query InboundEvents($team:ID!,$after:String){auditEntries(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id type createdAt actor{id} metadata} pageInfo{hasNextPage endCursor}}}"""
-SCHEMA_QUERY = """query Schema($team:ID!){team(id:$team){id key states{nodes{id name type}}}}"""
+SCHEMA_QUERY = """query Schema($team:String!){team(id:$team){id key states{nodes{id name type}}}}"""
+# team(id:) is a direct node lookup taking String!, unlike the filter comparators
+# (team:{id:{eq:}}) which accept ID — live 400 GRAPHQL_VALIDATION_FAILED on the
+# first fulcra sync, 2026-07-21.
 
 
 def encode_source_metadata(
