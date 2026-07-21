@@ -619,6 +619,17 @@ invisible. Any code shelling out to the `fulcra` CLI must resolve it via
 `credentials._find_fulcra_cli()` (PATH → `~/.local/bin` → homebrew), **never**
 bare `shutil.which("fulcra")`.
 
+**Second-order gotcha (bit the gmail relay twice):** resolving your OWN binary
+to an absolute path is not enough if that binary shells out further. The gmail
+relay resolves `coord-engine` to an absolute path (`relay.resolve_coord_binary`),
+but `coord-engine` ITSELF execs `fulcra-api` by bare name for its bus transport —
+so under the daemon's PATH the tell fails `TransportError: … No such file or
+directory: 'fulcra-api'` and every relay emit silently no-ops (5-day outage,
+07-16→07-21). When you shell out to a tool that itself shells out, pass an
+`env` whose `PATH` includes the install dirs (`relay._subprocess_env`), and set
+`EnvironmentVariables.PATH` in the daemon's launchd plist. Either fixes it;
+keep both so a plist regeneration can't silently reintroduce the outage.
+
 ### Keychain
 
 - User secrets (the Fulcra `bearer-token`) live in the OS keychain via
