@@ -118,9 +118,10 @@ directives before reporting, never conclude "no work" off a degraded read.
 ```
 coord-engine listen <team> --agent <agent> [--interval N=60] [--once] [--json] [--verbose]
 ```
-`--once` runs exactly one tick and **always exits 0** — a tick never fails the schedule, so a scheduler
-re-running it treats no output as "nothing new", not an error. Long-running mode loops at `--interval`
-seconds and exits cleanly on SIGINT.
+`--once` runs exactly one tick and exits **0** on a clean tick (including "nothing new") or **3** when
+the tick itself captured degradation (transport failure, unreadable source) — so a scheduler treats no
+output as "nothing new", while a monitoring wrapper can distinguish a degraded tick from a quiet one
+without parsing stderr. Long-running mode loops at `--interval` seconds and exits cleanly on SIGINT.
 
 ### Per-platform — pick the leg that matches how the agent runs
 - **launchd / cron (unattended host):** the bundled installer — unchanged UX. The scheduled job's tick

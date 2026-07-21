@@ -4053,7 +4053,7 @@ def build_parser() -> argparse.ArgumentParser:
     ls = sub.add_parser("listen", help="await new directives + responses to directives you own (the reply leg of tell)")
     ls.add_argument("team"); ls.add_argument("--agent", "-a")
     ls.add_argument("--interval", type=int, default=60, help="loop poll seconds (default 60; ignored with --once)")
-    ls.add_argument("--once", action="store_true", help="one tick then exit 0 — scheduler-friendly (a tick never fails the schedule)")
+    ls.add_argument("--once", action="store_true", help="one tick then exit — 0 clean or nothing-new, 3 if the tick captured degradation")
     ls.add_argument("--verbose", action="store_true", help="heartbeat quiet ticks to stderr")
     ls.add_argument("--state-path", action="store_true", dest="state_path",
                     help=argparse.SUPPRESS)  # print resolved state file path, no tick

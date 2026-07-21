@@ -10,9 +10,10 @@ for all storage I/O, so `fulcra-api` must be authenticated (`fulcra-api auth log
 
 ## Install / run
 
-Install once (like `fulcra-api`), then invoke via `uv tool run`:
+Install once, then invoke the bare binary (`coord-engine` is not on PyPI — `uvx`/`uv tool run`
+cannot resolve it). The pinned install command lives in
+[`packages/coord-engine/README.md`](../../../packages/coord-engine/README.md) — one home, don't copy it here.
 ```bash
-uv tool install coord-engine            # or, from source: uv tool install <fulcra-tools>/packages/coord-engine
 coord-engine reconcile <team>
 ```
 
