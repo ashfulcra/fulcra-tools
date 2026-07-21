@@ -3480,9 +3480,13 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # The degraded / UNKNOWN markers are ALWAYS shown and NEVER counted as pending
     # items: `review-fold-degraded` (expected tail truncation) and, incident-grade,
     # `review-head-degraded` (the caller's OWN review queue could not complete). A
-    # head marker counted as a pending item — or rendered through `_line` — would be
-    # the very defect this closes, so it is split out and dispatched, not tallied.
-    _review_degraded_markers = ("review-fold-degraded", "review-head-degraded")
+    # degraded/UNKNOWN marker counted as a pending item — or rendered through
+    # `_line` — misstates the queue (live: an orphan-classification marker read as
+    # "pending reviews: 1 item(s)" with zero actual reviews), so ALL markers are
+    # split out and dispatched, never tallied; only real review rows count.
+    _review_degraded_markers = (
+        "review-fold-degraded", "review-head-degraded",
+        "review-orphan-degraded", "review-role-degraded")
     pend_rows = [r for r in out["pending_reviews"]
                  if r.get("type") not in _review_degraded_markers]
     degraded_rows = [r for r in out["pending_reviews"]

@@ -98,3 +98,26 @@ def test_briefing_and_needs_me_emit_identical_head_degraded_line(capsys, monkeyp
 
     assert brief_lines and needs_lines, (brief_lines, needs_lines)
     assert brief_lines == needs_lines, (brief_lines, needs_lines)
+
+
+def test_briefing_degraded_markers_never_counted_as_pending(capsys, monkeypatch):
+    # Live 2026-07-21: an orphan-classification marker was tallied as
+    # "pending reviews: 1 item(s)" — the section claimed a pending review that
+    # does not exist. NO degraded/UNKNOWN marker may count as a pending item;
+    # only real review rows (review-pending, review-orphan) are tallied.
+    rows = [
+        {"type": "review-orphan-degraded", "unclassified": 15},
+        {"type": "review-role-degraded", "roles": ["reviewer"]},
+        _head_degraded_row(scanned=0, total=3),
+    ]
+    monkeypatch.setattr(cli, "_pending_reviews_for", lambda *a, **k: rows)
+    t = FakeTransport()
+    capsys.readouterr()
+    rc = cli.main(["briefing", "r", "--agent", "alice"], transport=t)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "pending reviews: 0 item(s)" in out, out
+    # Every marker still rendered — never hidden by the count fix.
+    assert "dir classification degraded" in out, out
+    assert "review role resolution degraded" in out, out
+    assert "review HEAD degraded" in out, out
