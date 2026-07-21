@@ -276,6 +276,42 @@ it (not on PyPI).
   is a ship-gate: a new aggregate-backed read consumes `_load_rows_status` (never `_load_rows`) and
   surfaces the marker on `ok is False`, with a red-first test asserting no clean-empty under a degraded
   transport.**
+- **`--json` purity: stdout is ALWAYS one parseable value.** Under `--json`, NO prose ever reaches
+  stdout — every degraded/notice line becomes a JSON row or a reserved key (the `_read_degraded_row`
+  family), or goes to `file=sys.stderr`; there is no third option. Each fold verb's `--json` branch is
+  exactly one `json.dumps` of the single result (`status`/`board`/`digest` embed the marker under a
+  reserved key; `needs-me`/`inbox` carry it as a list element; `briefing` uses a bundle key). `threads`
+  emits a single JSON **array** — the dropped list plus a trailing `threads-degraded` element — NOT
+  JSON-Lines (the leak this closed: streaming one object per line made `json.loads(stdout)` raise on the
+  trailing data whenever 2+ threads dropped). **Ship-gate: a new `--json` path is one `json.dumps`, with a
+  red-first test that `json.loads(stdout)` yields exactly one value on every degraded path.**
+- **Head-of-line: a budget cut may only ever truncate the TAIL — never the head.** The work-discovery
+  folds do live per-op transport at query time over an unbounded population; under budget pressure the cut
+  must land on the *lowest-priority* tail, so an agent's OWN assigned work and any decision parked on a
+  human can never be the thing that goes invisible. Two structural heads enforce this:
+  - **Blocked-on-human is the reserved FIRST section, and it is FREE.** `briefing` and `needs-me` render
+    open rows blocked on a human before presence/board/inbox, computed by `query.blocked_on_human` PURELY
+    from the aggregate rows already in memory — **zero extra transport ops** (the classifier takes no
+    `transport`; assert it against a counting fake). Free is what makes it un-starvable: a section that
+    spends no budget cannot be cut by one. `--on-user` **TYPES** the block as `blocked_on: user:<name>`
+    (additive — legacy plain values still parse) so the human case classifies at zero cost; a legacy plain
+    `blocked_on` resolves human-vs-agent against the caller's already-loaded identity set (row
+    assignees/owners + held roles), and **ambiguity resolves toward SURFACING** — a value that is not a
+    known agent/role is shown (with a degraded note when the identity set itself is UNKNOWN), because a
+    hidden human-blocked item is the incident and a false positive is only noise.
+  - **The caller's own reviews are the review-fold head, on a budget earlier legs cannot have spent.**
+    `_pending_reviews_for` derives the caller-assigned review slugs for free from the review-request
+    directive rows (`REVIEW REQUEST: <slug>`, assignee = the reviewer) and scans them FIRST under a
+    DEDICATED `deadline_seconds`, NOT the shared briefing budget's drained remainder. This is the fix for
+    the live `scanned 0/207`: the review leg used to inherit only what presence + role-fold + inbox left of
+    the shared budget, so on a busy board it started already expired and never scanned even a three-day-old
+    review the caller owed. The tail keeps the shared (clamped) budget; truncating it is expected and
+    reports `review-fold-degraded`. A head that STILL cannot complete is UNKNOWN and gets its OWN loud,
+    DISTINCT marker `review-head-degraded` — never conflated with the expected tail truncation, never a
+    silent skip. **Ship-gate: a new bounded work-discovery fold puts blocked-on-human and caller-assigned
+    work at the head (free where the data is already loaded; a dedicated budget where it is not), proves
+    the head completes under a spent shared budget on a live-shaped fixture, and gives "head could not
+    complete" a marker distinct from "tail truncated."**
 - **Role routing is the same contract, one layer in — a role you hold is an address.** A directive
   assigned to a ROLE is directed at whoever holds a fresh lease on it, so `briefing`, `inbox`,
   `needs-me`, and `listen` all fold role-routed work into the holder's queue (that is what makes
@@ -445,10 +481,11 @@ it (not on PyPI).
     NEVER a dropped thread** in any mode — the fold refuses it and the adapter reads
     the authoritative status from the task doc, not the summaries index (a same-minute
     close can leave the index stale-`proposed`). The fold's aggregate read deadline is
-    `COORD_THREADS_FOLD_BUDGET` (default 30s). A **`threads-degraded` row** (a JSON
-    object under `--json`; a stderr notice in text mode) means the fold saw only PART
-    of the store (budget breach or an unreadable shard) — sweep or wait, **never trust
-    it as complete**. coord-boss runs
+    `COORD_THREADS_FOLD_BUDGET` (default 30s). A **`threads-degraded` row** (a trailing
+    element of the single `--json` array; a stderr notice in text mode) means the fold
+    saw only PART of the store (budget breach or an unreadable shard) — sweep or wait,
+    **never trust it as complete**. `--json` is ONE array (dropped items + the optional
+    degraded element), not JSON-Lines — see the `--json` purity doctrine above. coord-boss runs
     `threads fulcra --for ash --json` in its loop and owns the curation/push call.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
   `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
