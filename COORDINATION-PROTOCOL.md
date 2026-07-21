@@ -7,15 +7,15 @@
 > [`packages/coord-engine`](packages/coord-engine/README.md) (the `coord-engine`
 > CLI) + the [`skills/fulcra-agent-*`](skills) skills. Where the text names
 > `fulcra-coord`, that is the **first-generation, now-deprecated** realization
-> (see [`packages/fulcra-coord/DEPRECATED.md`](packages/fulcra-coord/DEPRECATED.md));
-> the requirements it derives are unchanged, but new work targets coord-engine.
+> (retained in git history); the requirements it derives are unchanged, but new
+> work targets coord-engine.
 
 This document specifies what *any* coordination layer must provide for a fleet of
 autonomous agents and humans to do durable work together — across different
 runtimes, with no shared memory, no direct connectivity, ephemeral and crash-prone
 sessions, and an unreliable transport. It is **needs-driven**: it states the
 requirements and the failure each one prevents, not the design of any particular
-implementation. The systems in this repository (`fulcra-coord`, `fulcra-continuity`,
+implementation. The systems in this repository (coord, `fulcra-continuity`,
 `fulcra-prefs`) are one concrete realization; this doc is the protocol they imply,
 abstracted so others can adopt it.
 

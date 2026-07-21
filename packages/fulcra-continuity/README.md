@@ -19,11 +19,9 @@ task and import the latest same-agent continuity snapshot. For cross-agent
 handoff, include the producer's checkpoint path or JSON as a portable artifact
 so the receiver can load it directly before writing its own pickup checkpoint.
 
-**Legacy note:** the original pairing target, `fulcra-coord`, is the sunset
-first-generation layer (see [`../fulcra-coord/README.md`](../fulcra-coord/README.md));
-its handoff model is preserved at
-[`../fulcra-coord/docs/continuity-handoff.md`](../fulcra-coord/docs/continuity-handoff.md)
-for provenance — don't build new work against it.
+**Legacy note:** the original pairing target, `fulcra-coord`, was the retired
+first-generation layer. Its implementation and handoff model remain available
+in git history; don't build new work against it.
 
 ## Install in the workspace
 
@@ -37,13 +35,13 @@ uv run --package fulcra-continuity fulcra-continuity --help
 uv run --package fulcra-continuity fulcra-continuity checkpoint \
   --task-id TASK-123 \
   --title "Migrate daily check-ins" \
-  --objective "Move spreadsheet parsing onto fulcra-coord without noise" \
+  --objective "Move spreadsheet parsing onto coord without noise" \
   --workstream-id openclaw:discord:main-comms \
   --agent-id arc \
   --coord-task-id TASK-123 \
   --coord-owner-agent openclaw:discord:main-comms \
   --decision "Use lifecycle updates instead of channel broadcasts" \
-  --artifact packages/fulcra-coord/README.md \
+  --artifact packages/coord-engine/README.md \
   --next "Audit current parser inputs" \
   --out /tmp/checkpoint.json
 ```
@@ -54,7 +52,7 @@ Use the same identity values in both systems:
 
 - `workstream_id`: the channel, team, or durable workstream that owns the work
 - `agent_id`: the logical agent persona or runtime doing the work
-- `coord_task_id`: the `fulcra-coord` task this checkpoint resumes
+- `coord_task_id`: the coord task this checkpoint resumes
 - `coord_owner_agent`: the coord owner that should see or resume the task
 
 Do not write a continuity checkpoint for every coord event. Coord should stay

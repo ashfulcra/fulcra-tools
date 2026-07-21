@@ -20,10 +20,10 @@ portable enough for the receiver to access.
 - Use Fulcra Continuity at durable pause points: pre-compaction, handoff,
   teardown, idle/archive, overnight stop, or explicit "pause/done for now".
   Do not write a checkpoint for every chat message or every coord update.
-- When a `fulcra-coord` task exists, carry its identity in the checkpoint:
+- When a coord task exists, carry its identity in the checkpoint:
   `identity.coord_task_id`, `identity.coord_owner_agent`, `identity.workstream_id`,
   and `identity.agent_id`.
-- When no `fulcra-coord` task exists, still write continuity using a stable
+- When no coord task exists, still write continuity using a stable
   task/workstream/session identity. Do not fabricate a GitHub issue or PR just to
   make continuity work.
 - Cross-agent transfer is a first-class use case. The producing agent must not

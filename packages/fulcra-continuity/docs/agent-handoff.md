@@ -2,9 +2,9 @@
 
 Fulcra Continuity stores the "how to resume this work" snapshot that survives
 agent restarts, context compaction, sandbox teardown, and cross-agent transfer.
-It is intentionally separate from `fulcra-coord`: coord is the task/event ledger;
+It is intentionally separate from coord: coord is the task/event ledger;
 continuity is the cold-start handoff packet. The broader project is building
-`fulcra-coord` as a shared coordination bus; Continuity is the resume layer that
+coord as a shared coordination bus; Continuity is the resume layer that
 lets work on that bus move between agents without shared transcript or local
 filesystem access.
 
@@ -12,7 +12,7 @@ Continuity must work even when there is no GitHub issue, no pull request, and no
 repo-backed task. GitHub links are artifacts only, not identity.
 
 For the coord-side view of this relationship, read
-`packages/fulcra-coord/docs/continuity-handoff.md`.
+`skills/fulcra-agent-continuity/SKILL.md`.
 
 Assume the receiving agent may not know what Fulcra Continuity is. The
 checkpoint and any handoff message must be self-describing: it should say that it
@@ -28,11 +28,11 @@ Every agent that participates in continuity follows the same loop:
 1. Establish identity.
    - `workstream_id`: durable workstream, channel, project, sandbox, or task lane.
    - `agent_id`: logical agent identity, not just a transient process ID.
-   - `coord_task_id`: optional `fulcra-coord` task ID.
+   - `coord_task_id`: optional coord task ID.
    - `coord_owner_agent`: optional owner on the coord bus.
 2. On start or resume, look for a relevant checkpoint.
    - If a coord task is known, load the latest checkpoint for that task identity.
-     In current `fulcra-coord`, the automatic latest lookup is same-agent; for a
+     The automatic latest lookup is same-agent; for a
      cross-agent pickup, use the producer-provided checkpoint path or JSON first.
    - If no coord task is known, load by workstream/session identity when available.
    - Render the resume brief and inspect listed artifacts before acting.
@@ -125,7 +125,7 @@ identities, or explicit reproduction steps.
 
 ## Coord-Backed Work
 
-When a `fulcra-coord` task exists:
+When a coord task exists:
 
 1. Claim or update the task with the agent's identity.
 2. Ensure the session-to-task pointer is written by making the task
@@ -213,8 +213,11 @@ Claude Code resumes:
 
 ## Claude Code
 
-Claude Code should use `fulcra-coord install-claude-code --global` for the
-coord-backed lifecycle hooks when available:
+Claude Code should install the coord-backed lifecycle hooks with:
+
+```bash
+skills/fulcra-agent-automation/scripts/claude-code/install-claude-code.sh <team> <agent>
+```
 
 - `SessionStart`: connect presence and surface work.
 - `PreCompact`: checkpoint the active task before context loss.
@@ -234,8 +237,15 @@ Claude-specific instructions:
 
 ## Codex
 
-Codex should use `fulcra-coord ensure-codex-watch` for coord-backed hooks and
-the durable listener self-heal. At minimum, `fulcra-coord install-codex` wires:
+Codex should install coord-backed hooks and the adaptive durable listener with
+the automation skill's Codex installer and listener installer:
+
+```bash
+python skills/fulcra-agent-automation/scripts/codex/install_codex_watch.py <team> <agent>
+skills/fulcra-agent-automation/scripts/install-listener.sh <team> <agent>
+```
+
+The Codex installer wires:
 
 - `SessionStart`: connect presence and keep review capability fresh.
 - `PreCompact`: checkpoint the active task before context loss.
@@ -262,36 +272,28 @@ Codex-specific instructions:
 
 ## OpenClaw / Arc
 
-OpenClaw should use `fulcra-coord install-openclaw` for Track A file hooks:
+OpenClaw should install the automation skill's managed BOOT/HEARTBEAT block,
+then pair its per-agent listener with the bundled OpenClaw wake adapter. Exact
+setup is documented in `skills/fulcra-agent-automation/SKILL.md`:
 
-- `session:compact:before`: checkpoint before summarization.
-- `gateway:shutdown`: park active work and checkpoint.
-- `agent:bootstrap`: surface in-flight work during boot.
+```bash
+python3 skills/fulcra-agent-automation/scripts/openclaw/install_openclaw.py <team> <agent>
+```
 
 To make a fresh OpenClaw agent actually hear directed bus work while idle, bundle
 the durable pickup path at install time:
 
 ```bash
-fulcra-coord install-openclaw \
-  --with-heartbeat \
-  --with-listener \
-  --agent openclaw:<surface>:<workstream>
+skills/fulcra-agent-automation/scripts/install-listener.sh <team> \
+  openclaw:<surface>:<workstream> 1 \
+  --wake-cmd "skills/fulcra-agent-automation/scripts/wake/openclaw.sh"
 ```
 
-The heartbeat is machine-global; the listener is per-agent, so the `--agent`
-value must be the identity whose inbox should be polled. This composes the
-standard `install-heartbeat` and `install-listener` installers rather than
-open-coding scheduler state.
-
-For deterministic per-session start/end, materialize and install Track B:
-
-```bash
-fulcra-coord install-openclaw --with-plugin
-cd ~/.openclaw/plugins/fulcra-coord
-npm install
-npm run build
-openclaw plugins install .
-```
+The heartbeat is machine-global; the listener is per-agent, so the agent value
+must be the identity whose inbox should be polled. Install the team heartbeat
+separately with
+`skills/fulcra-agent-automation/scripts/install-heartbeat.sh <team>` when the
+host does not already have one.
 
 OpenClaw-specific instructions:
 

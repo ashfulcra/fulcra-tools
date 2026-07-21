@@ -72,10 +72,11 @@ as you:
 | **Fulcra Vault** *(alpha)* | A shared markdown knowledge vault in Fulcra Files — one durable place for humans and agents to keep prose memory: projects, people, decisions, corrections, and domain notes, linked with Obsidian-style `[[wikilinks]]`. Flat Dataview-friendly frontmatter, owned sections agents can edit safely, append-only logs, backlink indexes, and deterministic `MAP.md`/`HOT.md` rendering. | [`README.md`](packages/fulcra-vault/README.md) |
 | **Fulcra FDE** | A forward-deployed engineer as a skill: bring a business plan, deck, or idea; it interviews you to surface goals and assumptions, maps the product onto Fulcra primitives (with an honest gap register), builds a verification prototype — including a deployment rehearsal — and only then the real thing. Engagement state lives in your own Fulcra file store; judgment is prose ([`skills/fulcra-fde`](skills/fulcra-fde/SKILL.md)), bookkeeping is a stdlib-only engine ([`packages/fde-engine`](packages/fde-engine)). | [`SKILL.md`](skills/fulcra-fde/SKILL.md) · [`README.md`](packages/fde-engine/README.md) |
 
-**Legacy:** [`packages/fulcra-coord`](packages/fulcra-coord/README.md) and
-[`packages/fulcra-coord-files`](packages/fulcra-coord-files/README.md) are the
-first-generation coordination layer, superseded by coord. They're kept for
-the annotations helper and provenance; don't build anything new on them.
+The first-generation `fulcra-coord` and `fulcra-coord-files` packages were
+retired after their last live annotations surface moved to
+[`fulcra-common`](packages/fulcra-common/README.md). Their implementation and
+provenance remain available in git history; all new coordination work uses
+coord.
 
 ## Getting started
 
@@ -154,9 +155,5 @@ holder's name);
 `coord-engine review status <team> <slug>` gates the merge (a GitHub-only
 comment doesn't count, and neither does an ack). The artifact ref is opaque —
 PR#, branch, commit, URL — so the handshake works with any forge or none.
-Full rule: [`AGENTS.md`](AGENTS.md). One per-clone setup step:
-`git config core.hooksPath .githooks` enables the shared pre-push hook that
-runs the legacy fulcra-coord suite when that package changes (the macOS CI
-job is path-filtered and bills at 10×, so the local gate is the real one);
-`coord-engine` changes are gated by its own pytest suite — run it before
-pushing.
+Full rule: [`AGENTS.md`](AGENTS.md). `coord-engine` changes are gated by its
+pytest suite — run it before pushing.

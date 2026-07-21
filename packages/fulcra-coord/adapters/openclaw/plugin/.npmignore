@@ -1,8 +1,0 @@
-# Belt-and-suspenders: never let node_modules be staged when packing/installing.
-#
-# `openclaw plugins install .` may copy/pack the plugin directory; a stray
-# node_modules (especially a bundled `openclaw` peer) must never ride along
-# (arc's live finding TASK-...-install-f0e6511a). The `files` whitelist in
-# package.json is the primary control for `npm pack`/publish; this .npmignore is
-# the backstop for any path that ignores `files`.
-node_modules

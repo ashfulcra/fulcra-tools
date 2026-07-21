@@ -197,10 +197,10 @@ The listener (§2) delivers inbox notifications, but the **lifecycle contract** 
 snapshot-on-change, park-before-context-loss — is owned by a per-harness adapter that hooks the
 platform's own session events. The contract itself (rules 1–4) lives in
 [`fulcra-agent-continuity` §The lifecycle contract](../fulcra-agent-continuity/SKILL.md); the adapters
-below automate it. Each keys everything on a distinct `coord` marker and coexists with the legacy
-`fulcra-coord` adapters until the phase-3 freeze retires them — installing one never touches a legacy
-entry. All installers are idempotent (reinstall replaces, never duplicates) and ship an `--uninstall`
-inverse.
+below automate it. Each keys everything on a distinct `coord` marker. Retired
+first-generation entries are left inert unless an installer's documented
+migration path explicitly recognizes them. All installers are idempotent
+(reinstall replaces, never duplicates) and ship an `--uninstall` inverse.
 
 **Tick doctrine (shared by every adapter).** Every adapter keys off the same canonical, briefing-led
 tick — though claude-code's hook renders only steps 1–2 (`continuity resume` + `briefing`) as session
@@ -253,8 +253,9 @@ same discipline for the inbox side** — the installer-generated watcher (§2) a
 Writes three scripts to `~/.claude/fulcra-agent-hooks/` and merges their command paths into
 `~/.claude/settings.json`: **SessionStart** → bounded `continuity resume` + inbox brief injected as
 context; **PreCompact** and **SessionEnd** → backgrounded `continuity park`. It touches only its own
-command paths, so legacy `fulcra-coord-hooks` keep firing until the freeze; a coord2-era
-`fulcra-coord2-hooks` install is migrated to the new dir in place. Cowork uses the same core
+command paths; a coord2-era `fulcra-coord2-hooks` install is migrated to the new
+dir in place. Pre-coord first-generation hooks are not managed by this installer
+and should be removed separately. Cowork uses the same core
 and the same settings.json, so the same installer covers it.
 
 **Codex** — `hooks.json` merge + app-thread automation.

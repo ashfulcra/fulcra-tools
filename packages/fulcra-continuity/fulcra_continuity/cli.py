@@ -46,12 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument(
         "--coord-task-id",
         default="",
-        help="Optional fulcra-coord task ID this checkpoint resumes",
+        help="Optional coord task ID this checkpoint resumes",
     )
     checkpoint.add_argument(
         "--coord-owner-agent",
         default="",
-        help="Optional fulcra-coord owner agent for the referenced task",
+        help="Optional coord owner agent for the referenced task",
     )
     checkpoint.add_argument("--source", default="manual")
     checkpoint.add_argument("--transcript-path", default="")
