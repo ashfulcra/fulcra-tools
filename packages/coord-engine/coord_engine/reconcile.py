@@ -804,7 +804,10 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
         notes.append("retention: presence listing UNKNOWN; no presence pruned")
 
     # Canonicalize the historical singular namespace without dropping data.
-    _move_tree(transport, f"team/{team}/artifact/", f"team/{team}/artifacts/")
+    if not _move_tree(
+            transport, f"team/{team}/artifact/", f"team/{team}/artifacts/"):
+        notes.append(
+            "retention: artifact namespace move UNKNOWN or FAILED; sources kept")
     if marker is None or today not in marker:
         transport.write(_retention_marker_path(team),
                         json.dumps({"last_run": today, "archived": archived}))

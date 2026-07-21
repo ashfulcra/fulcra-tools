@@ -98,12 +98,15 @@ under `skills/`, each package with its own README, build, and tests.
   degraded marker path/reason in its diagnostics, and gives the intentionally
   slow fleet-health fold a separate six-minute bound while keeping other folds
   at three minutes.
-- Coord retention remains opt-in via `COORD_RETENTION_DAYS` or
-  `reconcile --retention-days`: it cold-archives old terminal **and proposed**
-  tasks, plus only doc-less review dirs positively proven to contain exactly one
-  old `codex-reviewer` verdict. Empty tombstones, multi-verdict/non-codex dirs,
-  and UNKNOWN listings stay hot. Moves are copy-verified, never destructive-only,
-  and reverse through `task restore` or `review restore`.
+- Coord retention is on by default: terminal and quiet proposed tasks archive
+  after 14 days, settled review families after 7 days, and dead presence shards
+  are pruned after 7 days. `COORD_RETENTION_DAYS=0` or
+  `reconcile --retention-days 0` is the explicit kill switch; invalid values
+  fail safe to the enabled default. Hot review folds consult a compact settled
+  index instead of repeatedly classifying historical tombstones, and the legacy
+  `artifact/` namespace is consolidated into `artifacts/`. UNKNOWN listings stay
+  hot, moves are copy-verified rather than destructive-only, and archived work
+  reverses through `task restore` or `review restore`.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 

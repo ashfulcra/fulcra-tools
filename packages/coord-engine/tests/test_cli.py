@@ -1078,6 +1078,20 @@ def test_retention_prunes_dead_presence_and_consolidates_artifacts(capsys):
     assert t.store["team/r/artifacts/job/result.json"] == "{\"ok\":true}"
 
 
+def test_retention_artifact_listing_failure_is_visible_and_non_destructive(capsys):
+    class ArtifactListingFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/artifact/":
+                from coord_engine.transport import TransportError
+                raise TransportError("artifact listing unavailable")
+            return super().list_dir(prefix)
+
+    t = ArtifactListingFails()
+    t.put("team/r/task/fresh.md", "---\ntype: Task\ntitle: F\nstatus: active\n---\n")
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+    assert "artifact namespace move UNKNOWN or FAILED" in capsys.readouterr().err
+
+
 def test_retention_orphan_verdict_listing_raise_is_loud_and_non_destructive(capsys):
     class FailVerdictListingTransport(FakeTransport):
         def list_dir(self, prefix):
