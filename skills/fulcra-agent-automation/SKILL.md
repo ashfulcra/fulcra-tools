@@ -99,7 +99,8 @@ the send verbs now print the exact `listen` line to run for replies. `listen` is
 leg — one implementation of the diff/notify logic that the launchd tick, live sessions, Codex, and
 headless all delegate to. Each tick id-diffs three sources against a per-agent state file: **new inbox
 directives** for the agent — including directives routed to a **role you hold a fresh lease on** (the
-same fold `inbox`/`briefing` show); **responses to directives you own** (the return of
+same fold `inbox`/`briefing` show), excluding self-authored rows (self-tells and the sender's own
+broadcast are consumed without waking that sender); **responses to directives you own** (the return of
 `respond`); and **new verdicts on reviews you requested** (the await leg of `review request`, including
 the terminal `SETTLED <slug>` line when a review closes). It also surfaces **orphan review dirs** (a
 `<slug>/` verdicts dir with no `<slug>.md` doc) as a one-time `ORPHAN` event — visibility only, repair

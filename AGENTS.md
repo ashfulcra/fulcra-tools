@@ -368,7 +368,9 @@ it (not on PyPI).
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
   against a per-agent state file — new **inbox directives, role-routed ones included** (the SAME fold
-  `inbox`/`briefing` now show — a lease handoff re-routes the very next tick),
+  `inbox`/`briefing` now show — a lease handoff re-routes the very next tick), except self-authored
+  rows: self-tells and the sender's own broadcast are consumed into listener state without waking the
+  sender,
   new **responses to directives you own** (the reply leg of `respond`), and new **verdicts on reviews you
   requested** (the await leg of `review request`, including the terminal `SETTLED <slug>` line). One event
   line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`; `--json` = one object per line);

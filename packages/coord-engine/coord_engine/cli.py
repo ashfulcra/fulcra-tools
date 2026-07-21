@@ -2750,8 +2750,18 @@ def _listen_tick(transport: Any, team: str, agent: str,
         slug = str(r.get("name") or "")
         if not slug or slug in inbox_ids:
             continue
+        owner = str(r.get("owner") or "?")
+        # A sender may be in its own audience: explicitly via a self-tell, or
+        # implicitly because every broadcast is addressed to ``*``.  Those rows
+        # are real inbox members (and must be consumed into the id-diff state),
+        # but waking the author for its own send is pure self-echo.  Suppress only
+        # the directive event; response/verdict sources below remain the reply
+        # legs for work the agent owns or requested.
+        if owner == agent:
+            inbox_ids.add(slug)
+            continue
         events.append({"type": "directive", "slug": slug,
-                       "owner": str(r.get("owner") or "?"),
+                       "owner": owner,
                        "title": str(r.get("title") or slug)})
         inbox_ids.add(slug)
 
