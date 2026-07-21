@@ -32,7 +32,7 @@ uv sync --all-packages --all-extras
 
 echo "=== 3/5  upgrade the fulcra CLI ==="
 # Newer CLI command groups (file, data-updates, data-type, tag) are load-
-# bearing for collect + fulcra-coord; a checkout that stays current via this
+# bearing for Collect + coord integrations; a checkout that stays current via this
 # script previously never upgraded the CLI it installed on day one.
 if uv tool list 2>/dev/null | grep -q '^fulcra-api '; then
   if uv tool install --upgrade fulcra-api >/dev/null 2>&1; then

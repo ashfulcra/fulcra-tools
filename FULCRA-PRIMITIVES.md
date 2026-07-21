@@ -231,8 +231,8 @@ the OpenAPI (spec-confirmed, not re-round-tripped):
   one record per line. **Caveat: NOT in the published OpenAPI (53 paths,
   re-checked 2026-07-16)** — but it is **live** (401 unauth on probe 2026-07-16,
   i.e. present and requiring auth; a 404 would mean gone). It works in
-  production (the Attention extension and the legacy coord writer POST to it
-  daily); it is unpublished, like `/data/v1/updates` once was. **Spec-absence is
+  production (the Attention extension posts to it); it is unpublished, like
+  `/data/v1/updates` once was. **Spec-absence is
   not removal** — a drift check has already misread it that way once. Treat it
   as retirement-eligible and prefer the typed
   endpoint's jsonlines mode for new code. Mind the
@@ -242,15 +242,14 @@ the OpenAPI (spec-confirmed, not re-round-tripped):
 - **Still no replace/update at any tier** — a record is appended, then
   tombstoned by a `DeletedRecord`. Corrections are a delete plus a re-record, or
   a superseding record; nothing edits in place.
-- The **fulcra-coord** Agent-Tasks annotation writer resolves its **tags** and
+- The Agent-Tasks annotation writer in **fulcra-common** resolves its **tags** and
   annotation-**definitions** through the public `fulcra` CLI (`fulcra tag
   get/create`, `fulcra catalog`, `fulcra data-type create`) — coord is a
   dependency-light bus that shells out to the CLI rather than importing a client.
   Its **records** still go out over stdlib `urllib` to
-  `POST /ingest/v1/record/batch` (the legacy path) — the one remaining raw-REST
-  path in the writer, and a holdover: it predates 0.1.37. **The verb it was
-  waiting on now exists**, so that POST can migrate to `fulcra record` on the
-  same shell-out pattern as its tags and definitions. Unblocked, not yet done.
+  the typed `POST /ingest/v1/record/MomentAnnotation` path over stdlib `urllib`.
+  Coord's projection fold is the sole supported caller; the first-generation
+  writer was retired.
 - **Reads:** tier 1 `fulcra get-records <DataType> "<range>"` — the same
   `Base/<definition-uuid>` shorthand `record` and `delete` take, so a
   write/read-back round trip is three commands with one identifier. `<range>`

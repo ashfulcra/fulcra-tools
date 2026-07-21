@@ -11,11 +11,10 @@ name: macOS CI
 # WHOLE workspace (incl. PyObjC, which can't even install on Linux), so it
 # cannot simply move to ubuntu. To stop draining the Actions free tier on
 # changes with no macOS-specific content, the triggers are PATH-FILTERED to
-# the files that actually carry macOS behaviour: the menubar package and the
-# fulcra-coord launchd / notification / CLI-resolution modules, plus this
+# the files that actually carry macOS behaviour: the menubar package, coord
+# engine and automation adapters, plus this
 # workflow and the dependency manifests (a dep bump can break the macOS
-# build). A change outside this set (e.g. a pure fulcra-coord refactor) skips
-# this job and is gated by the local test suite + review; `workflow_dispatch`
+# build). A change outside this set skips this job; `workflow_dispatch`
 # reruns it on demand. If you add a new macOS-specific path, list it in BOTH
 # the push and pull_request blocks below.
 
@@ -26,13 +25,6 @@ on:
       - 'packages/fulcra-menubar/**'
       - 'packages/coord-engine/**'
       - 'skills/fulcra-agent-automation/**'
-      - 'packages/fulcra-coord/fulcra_coord/remote.py'
-      - 'packages/fulcra-coord/fulcra_coord/installers.py'
-      - 'packages/fulcra-coord/fulcra_coord/listener.py'
-      - 'packages/fulcra-coord/fulcra_coord/heartbeat.py'
-      - 'packages/fulcra-coord/fulcra_coord/claude_code.py'
-      - 'packages/fulcra-coord/fulcra_coord/openclaw.py'
-      - 'packages/fulcra-coord/fulcra_coord/codex.py'
       - '.github/workflows/macos.yml'
       - 'pyproject.toml'
       - 'uv.lock'
@@ -42,13 +34,6 @@ on:
       - 'packages/fulcra-menubar/**'
       - 'packages/coord-engine/**'
       - 'skills/fulcra-agent-automation/**'
-      - 'packages/fulcra-coord/fulcra_coord/remote.py'
-      - 'packages/fulcra-coord/fulcra_coord/installers.py'
-      - 'packages/fulcra-coord/fulcra_coord/listener.py'
-      - 'packages/fulcra-coord/fulcra_coord/heartbeat.py'
-      - 'packages/fulcra-coord/fulcra_coord/claude_code.py'
-      - 'packages/fulcra-coord/fulcra_coord/openclaw.py'
-      - 'packages/fulcra-coord/fulcra_coord/codex.py'
       - '.github/workflows/macos.yml'
       - 'pyproject.toml'
       - 'uv.lock'

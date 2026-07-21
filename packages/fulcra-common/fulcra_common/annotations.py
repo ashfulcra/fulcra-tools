@@ -3,8 +3,7 @@
 PORT NOTE (2026-07-08)
 ----------------------
 This is the fulcra-common home of the Agent-Tasks annotation writer, ported off
-the deprecated ``fulcra_coord.annotations`` module (which stays in place with a
-tombstone during the deprecation window). Three things changed from the legacy
+the retired ``fulcra_coord.annotations`` module. Three things changed from the legacy
 writer; everything else is behavior-preserving:
 
   (a) RECORD POST → the typed ingest endpoint. The legacy writer wrapped every

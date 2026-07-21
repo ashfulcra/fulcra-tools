@@ -2,7 +2,7 @@
 """coord OpenClaw HEARTBEAT/BOOT managed-block installer (fulcra-agent-automation).
 
 Standalone (Python 3.10+ stdlib only). Ports ONLY the prose-file marker layer
-from the legacy adapter ``packages/fulcra-coord/fulcra_coord/openclaw.py``: the
+from the retired first-generation adapter (available in git history): the
 fence/replace-in-place helpers that merge a managed block into an OpenClaw
 workspace's ``BOOT.md`` / ``HEARTBEAT.md`` (agent-driven prompt files OpenClaw
 reads at boot and on each heartbeat).

@@ -61,7 +61,7 @@ bold "=== 3/5  Fulcra CLI ==="
 # Install-or-upgrade unconditionally: the old "skip if present" check
 # stranded machines on whatever CLI version they first installed, silently
 # missing newer command groups (file, data-updates, data-type, tag) that
-# collect and fulcra-coord depend on. `uv tool install --upgrade` is
+# Collect and coord integrations depend on. `uv tool install --upgrade` is
 # idempotent and a no-op when already current.
 echo "  installing/upgrading fulcra-api uv tool…"
 uv tool install --upgrade fulcra-api

@@ -11,8 +11,6 @@ members = [
     "fulcra-collect",
     "fulcra-common",
     "fulcra-continuity",
-    "fulcra-coord",
-    "fulcra-coord-files",
     "fulcra-csv-importer",
     "fulcra-dayone",
     "fulcra-gmail",
@@ -424,41 +422,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" }]
-provides-extras = ["dev"]
-
-[[package]]
-name = "fulcra-coord"
-source = { editable = "packages/fulcra-coord" }
-dependencies = [
-    { name = "fulcra-coord-files" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fulcra-coord-files", editable = "packages/fulcra-coord-files" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
-]
-provides-extras = ["dev"]
-
-[[package]]
-name = "fulcra-coord-files"
-version = "0.1.0"
-source = { editable = "packages/fulcra-coord-files" }
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" }]
 provides-extras = ["dev"]
 
 [[package]]

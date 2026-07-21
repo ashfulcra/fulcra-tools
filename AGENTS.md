@@ -72,9 +72,9 @@ under `skills/`, each package with its own README, build, and tests.
   actually drives it. (The `coord2` codename is fully retired — code,
   identifiers, and prose all say coord; installers migrate coord2-era
   on-host artifacts automatically when re-run.)
-  `packages/fulcra-coord` and `packages/fulcra-coord-files`
-  are the **first-generation, LEGACY** layer — kept for provenance and the
-  annotations helper only. **Don't build anything new on them.**
+  The first-generation `fulcra-coord` and `fulcra-coord-files` packages were
+  retired after their last live annotations surface moved to `fulcra-common`.
+  Their provenance remains in git history; all coordination work uses coord.
 - **`packages/coord-tracker-bridge`** — the alpha, provider-neutral projection
   core for reflecting coord work into external trackers. It ships normalized
   snapshots, a full source-identity ledger, versioned policy, a pure diff plan,
@@ -454,11 +454,11 @@ it (not on PyPI).
   transitions` (default `off`) makes the heartbeat project task transitions onto
   your Fulcra timeline model-free, right after each reconcile; `annotate status
   <team>` shows the level + cursor. It is the successor to the legacy
-  `fulcra-coord annotations` writer — enabling it requires that writer stay off
-  (see [Fulcra platform surface](#fulcra-platform-surface--records)). Projection
+  first-generation annotations writer, which is now retired (see
+  [Fulcra platform surface](#fulcra-platform-surface--records)). Projection
   needs the typed-record writer (`fulcra-common`) installed *beside* coord-engine
-  (`uv tool install … --with fulcra-common`); without it the step is a silent
-  exit-0 no-op. Setup + install recipe:
+  (`uv tool install … --with fulcra-common`); without it the step is an
+  explicit exit-0 no-op. Setup + install recipe:
   [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md#enable-timeline-projection-recommended)
   and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 
@@ -543,22 +543,16 @@ Upstream engineers read none of this repo (operator-relayed feedback, 2026-07-14
   evidence must reproduce from their code alone.
 - Everything else — discovery story, fleet impact, workarounds — stays here.
 
-## CI, the pre-push hook, and workspace membership
+## CI and workspace membership
 
 - **macOS CI is path-filtered and bills at 10×**, so it only runs on
   macOS-relevant changes (`packages/fulcra-menubar/**`, `packages/coord-engine/**`,
-  `skills/fulcra-agent-automation/**`, and the macOS-touching `fulcra-coord`
-  modules). Everything on Linux (`uv-workspace.yml`) runs on every push/PR to
+  and `skills/fulcra-agent-automation/**`). Everything on Linux
+  (`uv-workspace.yml`) runs on every push/PR to
   `main`. The upshot: for anything the macOS job skips, the **local gate is the
   real one** — run the relevant suite before you push.
-- **Pre-push hook.** A shared `pre-push` hook in `.githooks/` runs the LEGACY
-  `fulcra-coord` suite before any push that touches
-  `packages/fulcra-coord/(fulcra_coord/|tests/|pyproject.toml)` — that package
-  is the one with no full server-side gate. It's version-controlled but
-  `core.hooksPath` is per-clone, so **enable it once in every clone you push
-  from:** `git config core.hooksPath .githooks`. Bypass a single push with
-  `git push --no-verify`; needs `uv` on PATH. (`coord-engine` is CI-gated on
-  both runners, but still run its pytest suite locally before pushing.)
+- **Local verification.** `coord-engine` is CI-gated on both runners, but still
+  run its pytest suite locally before pushing.
 - **Workspace exclude.** Any directory under `packages/*` that is NOT a uv
   member (no `pyproject.toml`) must be added to `[tool.uv.workspace] exclude`
   in the root `pyproject.toml`, or it breaks `uv sync`/`uv run`/`uv tool
@@ -594,16 +588,11 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   update/replace verb, so corrections are modeled as new records, not edits:
   write a superseding record, or delete-then-re-record. What 0.1.37 changed is
   availability, not semantics.
-- **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
-  It defaults to off (inert); leave it there — an accidental `on` has caused
-  duplicate-record proliferation. Its successor is the heartbeat **projection
-  fold** (`coord-engine annotate resolution <team> transitions`). Note the
-  duplicate risk is TWO WRITERS minting *different* ids for the same logical
-  moment: the typed ingest endpoint **upserts records with matching explicit
-  ids** (live-verified 2026-07-14), so the projection fleet's deterministic
-  ids converge — but the legacy writer generates its own ids and would still
-  duplicate alongside it. Use projection for timeline annotations, never this
-  writer.
+- **Projection is the sole timeline-annotation writer.** Use the heartbeat
+  projection fold (`coord-engine annotate resolution <team> transitions`). Its
+  deterministic ids converge because typed ingest upserts matching explicit
+  ids (live-verified 2026-07-14). The retired first-generation writer minted
+  different ids and was removed after causing duplicate-record proliferation.
 
 ## The daemon (Collect)
 
