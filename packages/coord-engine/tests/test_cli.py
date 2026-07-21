@@ -928,12 +928,10 @@ def test_retention_keeps_malformed_timestamp_hot(capsys):
     assert not any("task/archive/not-a-d" in p for p in t.store)
 
 
-def test_retention_off_by_default_and_daily_throttle(capsys):
+def test_retention_on_by_default_and_daily_throttle(capsys):
     t = FakeTransport()
     t.put("team/r/task/olddone.md", _old_done_task("Olddone"))
-    cli.main(["reconcile", "r"], transport=t)                      # no flag/env -> no archival
-    assert "team/r/task/olddone.md" in t.store
-    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
     assert "team/r/task/olddone.md" not in t.store
     # marker written; a same-day second pass is a no-op (throttle)
     t.put("team/r/task/olddone2.md", _old_done_task("Olddone2"))
@@ -1042,6 +1040,44 @@ def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
     assert "team/r/review/live/verdicts/codex-reviewer.md" in t.store
 
 
+def test_retention_archives_settled_review_wholesale_and_indexes_slug(capsys):
+    t = FakeTransport()
+    t.put("team/r/review/settled.md",
+          "---\ntype: Review\ntitle: Settled\nrequired: alice\n---\n")
+    t.put("team/r/review/settled/verdicts/alice.md",
+          _old_verdict("alice"), mtime="2020-01-16 12:00PM UTC")
+    t.put("team/r/review/settled/verdicts/.settled",
+          "---\nschema: review-settled/v1\ntimestamp: 2020-01-16T00:00:00Z\n---\n",
+          mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+
+    assert "team/r/review/settled.md" not in t.store
+    assert any(p.endswith("/settled.md") and "_coord/archive/reviews/" in p
+               for p in t.store)
+    assert any(p.endswith("/settled/verdicts/alice.md")
+               and "_coord/archive/reviews/" in p for p in t.store)
+    index = json.loads(t.store["team/r/_coord/retention/settled-reviews.json"])
+    assert index["reviews"] == ["settled"]
+
+
+def test_retention_prunes_dead_presence_and_consolidates_artifacts(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/fresh.md", "---\ntype: Task\ntitle: F\nstatus: active\n---\n")
+    t.put("team/r/presence/dead.md",
+          "---\ntype: Presence\nagent: dead\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    t.put("team/r/presence/unknown.md",
+          "---\ntype: Presence\nagent: unknown\ntimestamp: not-a-date\n---\n")
+    t.put("team/r/artifact/job/result.json", "{\"ok\":true}")
+
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+
+    assert "team/r/presence/dead.md" not in t.store
+    assert "team/r/presence/unknown.md" in t.store
+    assert "team/r/artifact/job/result.json" not in t.store
+    assert t.store["team/r/artifacts/job/result.json"] == "{\"ok\":true}"
+
+
 def test_retention_orphan_verdict_listing_raise_is_loud_and_non_destructive(capsys):
     class FailVerdictListingTransport(FakeTransport):
         def list_dir(self, prefix):
@@ -1072,6 +1108,26 @@ def test_review_restore_moves_archived_orphan_verdict_back(capsys):
 
     assert cli.main(["review", "restore", "r", "settled"], transport=t) == 0
     assert hot in t.store and cold not in t.store
+    assert "restored review settled" in capsys.readouterr().out
+
+
+def test_review_restore_moves_wholesale_review_and_rearms_hot_folds(capsys):
+    t = FakeTransport()
+    hot_doc = "team/r/review/settled.md"
+    hot_verdict = "team/r/review/settled/verdicts/alice.md"
+    hot_marker = "team/r/review/settled/verdicts/.settled"
+    t.put(hot_doc, "---\ntype: Review\ntitle: Settled\nrequired: alice\n---\n")
+    t.put(hot_verdict, _old_verdict("alice"), mtime="2020-01-16 12:00PM UTC")
+    t.put(hot_marker,
+          "---\nschema: review-settled/v1\ntimestamp: 2020-01-16T00:00:00Z\n---\n",
+          mtime="2020-01-16 12:00PM UTC")
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+    assert hot_doc not in t.store and hot_verdict not in t.store
+
+    assert cli.main(["review", "restore", "r", "settled"], transport=t) == 0
+    assert hot_doc in t.store and hot_verdict in t.store and hot_marker in t.store
+    index = json.loads(t.store["team/r/_coord/retention/settled-reviews.json"])
+    assert index["reviews"] == []
     assert "restored review settled" in capsys.readouterr().out
 
 

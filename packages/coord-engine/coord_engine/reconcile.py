@@ -196,8 +196,11 @@ def _write_health_shard(transport: Any, team: str, *, host: str, now: str,
 
 #: Retention: terminal tasks older than this many days are archived during
 #: reconcile when retention is enabled (env COORD_RETENTION_DAYS or --retention-days).
-#: OPTIONAL — off unless configured. Bounded per pass; throttled to once/day.
+#: Enabled by default. Bounded per pass; throttled to once/day.
 RETENTION_CAP_PER_PASS = 20
+DEFAULT_RETENTION_DAYS = 14.0
+REVIEW_RETENTION_DAYS = 7.0
+PRESENCE_RETENTION_DAYS = 7.0
 
 GC_GRACE_HOURS = 24.0  #: never GC a shard younger than this (or undatable)
 
@@ -508,6 +511,66 @@ def _retention_marker_path(team: str) -> str:
     return f"team/{team}/_coord/retention/last-run.json"
 
 
+def settled_index_path(team: str) -> str:
+    return f"team/{team}/_coord/retention/settled-reviews.json"
+
+
+def _load_settled_index(transport: Any, team: str) -> set[str]:
+    raw = transport.read(settled_index_path(team))
+    try:
+        doc = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return set()
+    return {str(x) for x in doc.get("reviews", []) if x}
+
+
+def _move_tree(transport: Any, src_prefix: str, dst_prefix: str) -> bool:
+    """Crash-safe recursive prefix move; UNKNOWN listings keep the source hot."""
+    try:
+        entries = transport.list_dir(src_prefix)
+    except TransportError:
+        return False
+    ok = True
+    for entry in entries:
+        name = str(entry.get("name") or "").rstrip("/")
+        if not name:
+            continue
+        if entry.get("is_dir"):
+            ok = _move_tree(transport, src_prefix + name + "/",
+                            dst_prefix + name + "/") and ok
+        else:
+            ok = _crash_safe_move(transport, src_prefix + name,
+                                  dst_prefix + name) and ok
+    return ok
+
+
+def _copy_tree_verified(transport: Any, src_prefix: str,
+                        dst_prefix: str) -> tuple[bool, list[tuple[str, str]]]:
+    """Copy a tree without deleting sources; return every verified copy."""
+    try:
+        entries = transport.list_dir(src_prefix)
+    except TransportError:
+        return False, []
+    copied: list[tuple[str, str]] = []
+    for entry in entries:
+        name = str(entry.get("name") or "").rstrip("/")
+        if not name:
+            continue
+        if entry.get("is_dir"):
+            ok, nested = _copy_tree_verified(
+                transport, src_prefix + name + "/", dst_prefix + name + "/"
+            )
+            copied.extend(nested)
+            if not ok:
+                return False, copied
+        else:
+            src, dst = src_prefix + name, dst_prefix + name
+            if not _ensure_verified_copy(transport, src, dst):
+                return False, copied
+            copied.append((src, dst))
+    return True, copied
+
+
 def _verified_copy(transport: Any, src: str, dst: str) -> bool:
     if transport.read(dst) is not None:
         return False
@@ -519,10 +582,21 @@ def _verified_copy(transport: Any, src: str, dst: str) -> bool:
     return True
 
 
+def _ensure_verified_copy(transport: Any, src: str, dst: str) -> bool:
+    """Idempotent archival copy: an identical verified destination is success."""
+    source = transport.read(src)
+    if source is None:
+        return False
+    existing = transport.read(dst)
+    if existing is not None:
+        return existing == source
+    return bool(transport.write(dst, source) and transport.read(dst) == source)
+
+
 def _crash_safe_move(transport: Any, src: str, dst: str) -> bool:
     """Copy -> verify -> delete (the incumbent's archival discipline: never a
     window where the doc exists nowhere)."""
-    if not _verified_copy(transport, src, dst):
+    if not _ensure_verified_copy(transport, src, dst):
         return False
     return transport.delete(src) if hasattr(transport, "delete") else False
 
@@ -602,7 +676,9 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             notes.append(f"retention: move FAILED for {slug}; kept")
         keep.append(r)
 
-    # Verdict-only review dirs are a separate cold population. The review-root
+    # Settled reviews are immutable. Archive the whole family after seven quiet
+    # days and record the slug in a compact index so hot folds never have to
+    # classify the store's soft-deleted directory tombstone again.
     # listing positively proves which slugs have no live review doc; a raised
     # listing is UNKNOWN, never an empty set. Per-slug verdict listings obey the
     # same rule. Empty tombstones, multi-verdict dirs, and non-codex singletons are
@@ -624,6 +700,45 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             str(e.get("name") or "").rstrip("/")
             for e in review_entries if e.get("is_dir")
         } - doc_slugs)
+        settled_index = _load_settled_index(transport, team)
+        for slug in sorted(doc_slugs):
+            if archived >= RETENTION_CAP_PER_PASS:
+                break
+            verdict_prefix = f"{review_prefix}{slug}/verdicts/"
+            try:
+                ventries = transport.list_dir(verdict_prefix)
+            except TransportError:
+                continue
+            marker = next((e for e in ventries
+                           if (e.get("name") or "") == ".settled"), None)
+            if marker is None or not _quiet_mtime_old_enough(
+                    marker.get("mtime"), now=now, days=REVIEW_RETENTION_DAYS):
+                continue
+            month = str(now)[:7]
+            doc_src = f"{review_prefix}{slug}.md"
+            doc_dst = f"{review_archive_prefix(team)}{month}/{slug}.md"
+            family_dst = f"{review_archive_prefix(team)}{month}/{slug}/verdicts/"
+            doc_copied = _ensure_verified_copy(transport, doc_src, doc_dst)
+            family_ok, family_copies = _copy_tree_verified(
+                transport, verdict_prefix, family_dst) if doc_copied else (False, [])
+            deleted = False
+            if doc_copied and family_ok and hasattr(transport, "delete"):
+                delete_results = [transport.delete(src) for src, _ in family_copies]
+                if all(delete_results):
+                    deleted = transport.delete(doc_src)
+            if deleted:
+                archived += 1
+                review_archived += 1
+                settled_index.add(slug)
+                notes.append(f"retention: archived settled review {slug} wholesale")
+            elif hasattr(transport, "delete") and not family_ok:
+                # Copy failed before any source delete: clean partial cold copies.
+                transport.delete(doc_dst)
+                for _, dst in family_copies:
+                    transport.delete(dst)
+        transport.write(settled_index_path(team), json.dumps({
+            "schema": "coord.settled-reviews.v1", "reviews": sorted(settled_index)
+        }, separators=(",", ":")))
         for slug in dir_slugs:
             if archived >= RETENTION_CAP_PER_PASS:
                 break
@@ -669,6 +784,27 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 notes.append(f"retention: archived review {slug} -> reviews/{month}/")
             else:
                 notes.append(f"retention: review move FAILED for {slug}; kept")
+
+    # Presence is ephemeral liveness state, not history. Prune agents that have
+    # been dead for seven days; undatable/unreadable shards fail closed.
+    presence_prefix = f"team/{team}/presence/"
+    try:
+        for entry in transport.list_dir(presence_prefix):
+            name = str(entry.get("name") or "")
+            if entry.get("is_dir") or not name.endswith(".md"):
+                continue
+            raw = transport.read(presence_prefix + name)
+            fm = okf.parse_frontmatter(raw) or {}
+            ts = fm.get("timestamp")
+            age = age_hours(ts, now) if ts else float("inf")
+            if (age != float("inf") and age > PRESENCE_RETENTION_DAYS * 24
+                    and hasattr(transport, "delete")):
+                transport.delete(presence_prefix + name)
+    except TransportError:
+        notes.append("retention: presence listing UNKNOWN; no presence pruned")
+
+    # Canonicalize the historical singular namespace without dropping data.
+    _move_tree(transport, f"team/{team}/artifact/", f"team/{team}/artifacts/")
     if marker is None or today not in marker:
         transport.write(_retention_marker_path(team),
                         json.dumps({"last_run": today, "archived": archived}))
@@ -806,20 +942,15 @@ def reconcile(
         rows.append(row)
         parsed += 1
 
-    # --- retention sub-pass (OPTIONAL: only when configured) ---
-    # Off unless configured (default 0.0 -> disabled): NO positive fallback, unlike
+    # --- retention sub-pass (enabled by default) ---
     # the fold budgets. Precedence: --retention-days flag > COORD_RETENTION_DAYS >
     # legacy FULCRA_COORD_RETENTION_DAYS. The legacy prefix is alias-ACCEPTED (an
-    # operator copying old fulcra-coord docs still gets retention) but the legacy
-    # default of 30 is NOT adopted — coord-engine stays opt-in. Routing through the
-    # shared parser also gives retention the NaN/inf guard the fold budgets have
-    # (ENG-1-8: an inf/NaN value now disables cleanly instead of running unbounded).
+    # operator copying old fulcra-coord docs still gets retention), but its old
+    # 30-day default is not adopted. The dedicated parser accepts explicit zero
+    # as a kill switch; invalid,
+    # negative, or non-finite values fall back to the enabled safe default.
     archived_map: dict = {}
-    days = config.env_float(
-        "COORD_RETENTION_DAYS", 0.0,
-        override=retention_days,
-        aliases=("FULCRA_COORD_RETENTION_DAYS",),
-    )
+    days = config.retention_days(DEFAULT_RETENTION_DAYS, override=retention_days)
     if days > 0:
         rows, notes, archived_map = _run_retention(
             transport, team, rows, now=now, today=today, days=days, log=log)

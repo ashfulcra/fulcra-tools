@@ -879,6 +879,30 @@ def test_empty_review_dir_is_tombstone_no_listen_orphan_or_degrade(capsys):
     assert state["orphan_slugs"] == [], "a tombstone must never be cached as an orphan"
 
 
+def test_settled_index_skips_archived_review_tombstone_without_listing(capsys):
+    class CountVerdictListings(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.settled_listings = 0
+
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-archived/verdicts/":
+                self.settled_listings += 1
+            return super().list_dir(prefix)
+
+    t = CountVerdictListings()
+    # Object stores retain this directory prefix after wholesale source deletes.
+    t.put("team/r/review/pr-archived/verdicts/.settled", "settled\n")
+    t.put("team/r/_coord/retention/settled-reviews.json",
+          '{"schema":"coord.settled-reviews.v1","reviews":["pr-archived"]}')
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    assert failures == {}
+    assert not [e for e in events if e.get("slug") == "pr-archived"]
+    assert t.settled_listings == 0
+
+
 def test_orphan_dir_listing_raise_degrades_listen_not_tombstone(capsys):
     # Fail-closed outranks tombstone-skip: a verdicts LISTING that RAISES is
     # UNKNOWN — surface a degraded `verdicts` source, never a silent tombstone.
