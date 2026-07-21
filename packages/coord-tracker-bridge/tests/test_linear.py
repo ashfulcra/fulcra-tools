@@ -352,19 +352,32 @@ def test_legacy_marker_adoption_uses_footer_and_checks_arbitrary_slug_suffix():
     assert metadata["capability"] == "tasks"
 
 
+@pytest.mark.parametrize("derived_capability,derived_lane", [
+    ("threads", "threads-missed"),
+    ("asks", "asks"),
+])
 @pytest.mark.parametrize("canonical_first", [True, False])
-def test_legacy_marker_adoption_prefers_task_over_derived_thread(canonical_first):
+def test_legacy_marker_adoption_prefers_task_over_derived_row(
+    canonical_first, derived_capability, derived_lane
+):
+    # An unanswered directive surfaces in the asks lane with the SAME slug as
+    # its canonical task shard (live-hit on the first fulcra cutover,
+    # 2026-07-21) — like threads, asks is a derived observation of the task,
+    # not a second identity.
     slug = "website-v2-queue-complete-759208b7"
     task_source = SourceIdentity("coord-engine", "fulcra/tasks", slug)
-    thread_source = SourceIdentity("coord-engine", "fulcra/threads", slug)
-    task = WorkRecord(task_source, "tasks", "Canonical", "done", origin="fleet")
-    thread = WorkRecord(
-        thread_source, "threads", "Dropped", "threads-missed", origin="fleet"
+    derived_source = SourceIdentity(
+        "coord-engine", f"fulcra/{derived_capability}", slug
     )
-    items = (task, thread) if canonical_first else (thread, task)
+    task = WorkRecord(task_source, "tasks", "Canonical", "done", origin="fleet")
+    derived = WorkRecord(
+        derived_source, derived_capability, "Derived", derived_lane, origin="fleet"
+    )
+    items = (task, derived) if canonical_first else (derived, task)
     snapshot = Snapshot(
         items, True, (),
-        {"tasks": CapabilityState.COMPLETE, "threads": CapabilityState.COMPLETE},
+        {"tasks": CapabilityState.COMPLETE,
+         derived_capability: CapabilityState.COMPLETE},
         datetime(2026, 7, 17, tzinfo=timezone.utc),
     )
     issue = {
@@ -386,21 +399,64 @@ def test_legacy_marker_adoption_prefers_task_over_derived_thread(canonical_first
     assert adoptions[0].capability == "tasks"
 
 
-def test_legacy_marker_adoption_rejects_non_derived_slug_collision():
+def test_legacy_marker_adoption_three_way_collision_any_order():
+    # tasks + threads + asks all carrying one slug resolve to the canonical
+    # task row regardless of arrival order (grouping happens before resolution).
+    slug = "three-way-cafef00d"
+    task = WorkRecord(
+        SourceIdentity("coord-engine", "fulcra/tasks", slug),
+        "tasks", "Canonical", "active", origin="fleet",
+    )
+    thread = WorkRecord(
+        SourceIdentity("coord-engine", "fulcra/threads", slug),
+        "threads", "Derived", "threads-missed", origin="fleet",
+    )
+    ask = WorkRecord(
+        SourceIdentity("coord-engine", "fulcra/asks", slug),
+        "asks", "Derived", "asks", origin="fleet",
+    )
+    issue = {
+        "id": "LIN-1",
+        "title": "Legacy [bus:cafef00d]",
+        "description": f"bus slug: `{slug}`",
+    }
+    for items in ((thread, ask, task), (task, thread, ask), (ask, task, thread)):
+        snapshot = Snapshot(
+            items, True, (),
+            {"tasks": CapabilityState.COMPLETE,
+             "threads": CapabilityState.COMPLETE,
+             "asks": CapabilityState.COMPLETE},
+            datetime(2026, 7, 17, tzinfo=timezone.utc),
+        )
+        transport = FakeTransport([
+            response({
+                "issues": {"nodes": [dict(issue)], "pageInfo": {"hasNextPage": False}}
+            }),
+        ])
+        adoptions = LinearTrackerAdapter(
+            LinearClient(transport), "team"
+        ).plan_marker_adoptions(snapshot, BridgeLedger(), load_policy())
+        assert adoptions[0].capability == "tasks"
+
+
+@pytest.mark.parametrize("rows", [
+    # derived-only collision with NO canonical task row: nothing to adopt onto.
+    # (Duplicate canonical task rows need no case here — Snapshot construction
+    # already rejects identical source identities at model.py's invariant.)
+    ("threads", "asks"),
+])
+def test_legacy_marker_adoption_rejects_unresolvable_slug_collision(rows):
     slug = "duplicate-task-deadbeef"
     snapshot = Snapshot(
-        (
+        tuple(
             WorkRecord(
-                SourceIdentity("coord-engine", "fulcra/tasks", slug),
-                "tasks", "Canonical", "active", origin="fleet",
-            ),
-            WorkRecord(
-                SourceIdentity("coord-engine", "fulcra/asks", slug),
-                "asks", "Ask", "asks", origin="fleet",
-            ),
+                SourceIdentity("coord-engine", f"fulcra/{cap}", slug),
+                cap, "Row", "active" if cap == "tasks" else cap, origin="fleet",
+            )
+            for cap in rows
         ),
         True, (),
-        {"tasks": CapabilityState.COMPLETE, "asks": CapabilityState.COMPLETE},
+        {cap: CapabilityState.COMPLETE for cap in rows},
         datetime(2026, 7, 17, tzinfo=timezone.utc),
     )
     adapter = LinearTrackerAdapter(LinearClient(FakeTransport([])), "team")

@@ -82,7 +82,9 @@ under `skills/`, each package with its own README, build, and tests.
   `plan` first, one-time `adopt-markers` when migrating v0.25 issues,
   `apply-resources` explicitly, then `sync`; ordinary sync never creates
   labels/projects or infers identity from titles, and a singleton lease rejects
-  overlapping source/tracker/policy runs. Policy v2 has an explicit lane
+  overlapping source/tracker/policy runs. Adoption resolves a footer slug
+  colliding across `tasks` + derived lanes (`threads`, `asks`) to the canonical
+  task row, order-independently; derived-only collisions stay fail-closed. Policy v2 has an explicit lane
   allowlist (omission means exclusion), derives `@backlog` proposed/waiting
   rows to `backlog`, and names asks/threads lanes `asks`/`threads-missed`.
   An incomplete capability suppresses destructive closes only for that scope.
