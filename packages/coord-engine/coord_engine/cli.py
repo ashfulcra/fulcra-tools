@@ -1495,11 +1495,20 @@ def _pending_reviews_for(
 
     def _scan_one(e: dict[str, Any], phase_dl: Deadline) -> str:
         """Scan ONE slug under ``phase_dl``; mutate ``out`` + the ``scanned`` /
-        ``skipped`` counters + the shared role state. Returns ``"budget"`` when the
-        slug's own blocking op breached ``phase_dl`` (this slug is counted skipped
-        and the phase must STOP), else ``"ok"`` (settled-skip, unreadable-skip, and
-        a clean tally all continue). Same UNKNOWN discipline the loop always had: an
-        unreadable doc/tally is skipped-and-visible, never silently pending."""
+        ``skipped`` counters + the shared role state. Return values:
+
+        - ``"budget"`` — the slug's own blocking op breached ``phase_dl`` (this slug
+          is counted skipped and the phase must STOP).
+        - ``"unknown"`` — the slug is UNKNOWN for a non-budget reason: an unreadable
+          doc (``read`` returned None) or a per-slug ``TransportError``. Counted
+          skipped and surfaced, but scanning CONTINUES. A HEAD caller distinguishes
+          this from a clean scan (an UNKNOWN head slug owes ``review-head-degraded``);
+          the tail treats it like ``"ok"`` (it continues, and the terminal skipped
+          marker already reports it).
+        - ``"ok"`` — settled-skip or a clean tally; continue.
+
+        Same UNKNOWN discipline the loop always had: an unreadable doc/tally is
+        skipped-and-visible, never silently pending."""
         nonlocal scanned, skipped
         slug = (e.get("name") or "")[:-3]
         scanned += 1
@@ -1512,7 +1521,7 @@ def _pending_reviews_for(
                 # Slug came from the listing, so its doc exists — a None read is a
                 # transport failure (read() never raises). UNKNOWN: count + keep going.
                 skipped += 1
-                return "ok"
+                return "unknown"
             if phase_dl.expired():
                 # The doc read itself pushed us over budget (P1-B): after-op check.
                 # This slug is UNKNOWN; count it skipped and stop the phase.
@@ -1526,9 +1535,10 @@ def _pending_reviews_for(
                 skipped += 1
                 return "budget"
         except TransportError:
-            # A single slug's tally timed out: skip it, keep scanning the rest.
+            # A single slug's tally timed out: UNKNOWN. Skip it, keep scanning the
+            # rest — but a HEAD slug that ends here still owes its loud marker.
             skipped += 1
-            return "ok"
+            return "unknown"
         state = tally.get("state")
         pending = tally.get("pending_required") or []
         if state == review.APPROVED and not pending:
@@ -1557,22 +1567,40 @@ def _pending_reviews_for(
     head_slugs = _caller_review_head_slugs(rows, agent)
     head_entries = [e for e in slug_entries
                     if (e.get("name") or "")[:-3] in head_slugs]
-    if head_entries:
+    # Fail closed on negative-membership inference: a caller directive whose slug has
+    # NO .md in the listing must NOT silently vanish (a listing is not proof the
+    # obligation is gone, and the caller's OWN obligation least of all). Every such
+    # slug is UNKNOWN and named in the marker so the caller can act.
+    listed_head = {(e.get("name") or "")[:-3] for e in head_entries}
+    missing_head = sorted(head_slugs - listed_head)
+    if head_entries or missing_head:
         head_dl = Deadline.open(deadline_seconds)  # fresh — NOT the drained remainder
         head_total = len(head_entries)
         head_cut = False
+        head_unknown = bool(missing_head)  # a missing slug is already UNKNOWN
         for i, e in enumerate(head_entries):
             if i and head_dl.expired():  # between-slug (measurable progress)
                 head_cut = True
                 break
-            if _scan_one(e, head_dl) == "budget":
+            outcome = _scan_one(e, head_dl)
+            if outcome == "budget":
                 head_cut = True
                 break
-        if head_cut:
-            # The caller's OWN head could not complete: UNKNOWN, and DISTINCT from an
-            # expected tail truncation — this is the incident, loud on its own type.
-            out.append(budget_mod.degraded_row(
-                "review-head-degraded", scanned, head_total, skipped))
+            if outcome == "unknown":
+                # An unreadable doc / per-slug TransportError: this head slug is
+                # UNKNOWN. Keep scanning the rest of the head (a sibling may still be
+                # a live pending we can surface), but the head owes its loud marker.
+                head_unknown = True
+        if head_cut or head_unknown:
+            # The caller's OWN head could not fully resolve: UNKNOWN, and DISTINCT
+            # from an expected tail truncation — this is the incident, loud on its
+            # own type. Any unknown outcome (budget cut, unreadable doc, transport
+            # error, or a slug missing from the listing) qualifies.
+            head_row = budget_mod.degraded_row(
+                "review-head-degraded", scanned, head_total, skipped)
+            if missing_head:
+                head_row["missing"] = missing_head
+            out.append(head_row)
 
     # --- classify dir-only review slugs (visibility) under a TAIL sub-budget ----
     # Dir-only slugs (a `<slug>/` dir with no `<slug>.md`) are invisible to the
@@ -1649,6 +1677,10 @@ def _review_head_degraded_line(r: dict[str, Any]) -> str:
             f"{r.get('scanned')}/{r.get('total')} before budget — UNKNOWN, retry")
     if r.get("skipped"):
         line += f" ({r['skipped']} slug(s) skipped on transport error)"
+    if r.get("missing"):
+        # Slugs a caller directive named but that had no doc in the listing: fail
+        # closed and name them so the reader knows WHICH obligation went UNKNOWN.
+        line += f" (missing from listing: {', '.join(r['missing'])})"
     return line
 
 

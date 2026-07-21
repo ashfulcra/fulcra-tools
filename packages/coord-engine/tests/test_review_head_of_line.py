@@ -28,6 +28,7 @@ cut" is an exact fact, never a runtime threshold that flakes under runner load.
 import time
 
 from coord_engine import budget, cli
+from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
 
@@ -162,3 +163,85 @@ def test_no_rows_preserves_legacy_behavior(capsys):
     out = cli._pending_reviews_for(t, "r", "alice")
     assert any(r.get("type") == "review-pending" and r["name"] == "pr-x"
                for r in out)
+
+
+class _ReadNone(FakeTransport):
+    """Lists a slug's doc normally but returns None on read — a transport failure
+    (read() never raises; None on a listed doc means the read failed)."""
+
+    def __init__(self, *none_paths):
+        super().__init__()
+        self._none = set(none_paths)
+
+    def read(self, path):
+        if path in self._none:
+            return None
+        return super().read(path)
+
+
+class _ListRaises(FakeTransport):
+    """Raises TransportError on an EXACT listing prefix (a per-slug verdicts
+    listing timing out), while every other listing succeeds."""
+
+    def __init__(self, *raise_prefixes):
+        super().__init__()
+        self._raise = set(raise_prefixes)
+
+    def list_dir(self, prefix):
+        if prefix in self._raise:
+            raise TransportError("verdicts listing timed out")
+        return super().list_dir(prefix)
+
+
+def test_head_slug_unreadable_doc_is_head_degraded(capsys):
+    # P1 part 1: a caller-OWNED head slug whose review doc read returns None is
+    # UNKNOWN. It must surface the DISTINCT `review-head-degraded` marker, not vanish
+    # into ordinary tail fold degradation (or nothing). No budget pressure here — the
+    # failure is the unreadable doc alone.
+    doc = cli._review_doc_path("r", "pr-mine")
+    t = _ReadNone(doc)
+    _put_pending_review(t, "pr-mine", "alice")
+    rows = [_directive_row("pr-mine", "alice")]
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows, deadline_seconds=45.0)
+    assert any(r.get("type") == "review-head-degraded" for r in out), \
+        f"an unreadable caller-owned head slug must be loud UNKNOWN: {out}"
+
+
+def test_head_slug_transport_error_is_head_degraded(capsys):
+    # P1 part 1: a caller-OWNED head slug whose tally raises TransportError (a Task-1
+    # per-slug timeout) is UNKNOWN and must surface `review-head-degraded`.
+    vp = cli._verdicts_prefix("r", "pr-mine")
+    t = _ListRaises(vp)
+    _put_pending_review(t, "pr-mine", "alice")
+    rows = [_directive_row("pr-mine", "alice")]
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows, deadline_seconds=45.0)
+    assert any(r.get("type") == "review-head-degraded" for r in out), \
+        f"a head slug whose tally raised must be loud UNKNOWN: {out}"
+
+
+def test_head_slug_absent_from_listing_is_head_degraded(capsys):
+    # P1 part 2: an OPEN caller review directive whose slug has no `.md` in the
+    # listing must NOT silently vanish (negative-membership inference from a listing
+    # is not proof the obligation is gone). It fails closed: UNKNOWN, surfaced via
+    # `review-head-degraded`, and the marker names the missing slug so the caller
+    # can act.
+    t = FakeTransport()
+    # A directive names pr-ghost for alice, but no pr-ghost.md exists in the store.
+    rows = [_directive_row("pr-ghost", "alice")]
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows, deadline_seconds=45.0)
+    head = [r for r in out if r.get("type") == "review-head-degraded"]
+    assert head, f"a caller directive slug absent from the listing must fail closed: {out}"
+    assert "pr-ghost" in (head[0].get("missing") or []), \
+        f"the head-degraded marker must name the missing slug: {head[0]}"
+
+
+def test_head_degraded_line_renders_missing(capsys):
+    # The renderer surfaces the missing-slug detail so a briefing / needs-me reader
+    # (shared dispatch -> identical line) sees WHICH obligation went UNKNOWN.
+    line = cli._review_head_degraded_line(
+        {"type": "review-head-degraded", "scanned": 0, "total": 0,
+         "missing": ["pr-ghost"]})
+    assert "pr-ghost" in line and "missing" in line.lower()

@@ -308,7 +308,12 @@ it (not on PyPI).
     review the caller owed. The tail keeps the shared (clamped) budget; truncating it is expected and
     reports `review-fold-degraded`. A head that STILL cannot complete is UNKNOWN and gets its OWN loud,
     DISTINCT marker `review-head-degraded` — never conflated with the expected tail truncation, never a
-    silent skip. **Ship-gate: a new bounded work-discovery fold puts blocked-on-human and caller-assigned
+    silent skip. **A head slug is UNKNOWN on ANY non-complete outcome — a budget cut, an unreadable review
+    doc, a per-slug `TransportError`, OR a caller-directive slug absent from the listing (fail closed;
+    negative membership in a listing is not proof the obligation is gone) — and every one produces
+    `review-head-degraded` (the missing-from-listing slugs named in a `missing` field so the caller can
+    act). Only the caller's OWN head owes this; a clean head with a merely truncated tail must NOT raise a
+    false head alarm.** **Ship-gate: a new bounded work-discovery fold puts blocked-on-human and caller-assigned
     work at the head (free where the data is already loaded; a dedicated budget where it is not), proves
     the head completes under a spent shared budget on a live-shaped fixture, and gives "head could not
     complete" a marker distinct from "tail truncated."**
