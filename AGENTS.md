@@ -93,9 +93,15 @@ under `skills/`, each package with its own README, build, and tests.
   The engine source accepts both JSON documents and JSONL folds (including
   `threads --json`), retains valid JSONL rows around an interleaved prose
   degraded line while keeping that capability degraded, identifies the exact
-  degraded evidence in diagnostics, and gives the intentionally slow
-  fleet-health fold a separate six-minute bound while keeping other folds at
-  three minutes.
+  degraded marker path/reason in its diagnostics, and gives the intentionally
+  slow fleet-health fold a separate six-minute bound while keeping other folds
+  at three minutes.
+- Coord retention remains opt-in via `COORD_RETENTION_DAYS` or
+  `reconcile --retention-days`: it cold-archives old terminal **and proposed**
+  tasks, plus only doc-less review dirs positively proven to contain exactly one
+  old `codex-reviewer` verdict. Empty tombstones, multi-verdict/non-codex dirs,
+  and UNKNOWN listings stay hot. Moves are copy-verified, never destructive-only,
+  and reverse through `task restore` or `review restore`.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 
@@ -146,6 +152,18 @@ it (not on PyPI).
   needs you including reviews you owe. Start there — never watch a narrower
   surface (a bare inbox or a single view file misses role-addressed work and
   pending reviews).
+- **Quiet listeners must stay model-free.** Use one `coord-engine listen` owner
+  per agent identity and wake a model-backed harness only for a new event or a
+  newly reported degradation. The bundled scheduled tick emits nothing on a
+  healthy quiet pass; `COORD_LISTENER_VERBOSE=1` is diagnostics only. Never
+  suppress `LISTEN DEGRADED`: degradation is actionable, does not clear the
+  queue, and the awakened session must apply the targeted fallback before it
+  reports quiet. Host listeners should use the bundled adaptive cadence: poll
+  frequently while events are arriving and through a configurable hot tail,
+  then back off locally to a longer idle interval. A skipped tick must not call
+  the bus or a model; without source-side push, idle cadence is maximum pickup
+  latency. Model-backed harness automations that cannot reschedule themselves
+  retain a coarse safety net instead of emulating adaptation in prompt text.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
@@ -207,6 +225,10 @@ it (not on PyPI).
   group and is SIGKILLed whole on timeout (a hung child can't leak a pipe-holding tree past the bound).
   The per-op bound is `COORD_TRANSPORT_TIMEOUT` (float seconds, default 30; unparseable/≤0/NaN/inf →
   default) — **run it TIGHT on a watcher (e.g. 8s)** so the fold budgets above buy real responsiveness.
+  The direct `forge feedback` fallback also has one cumulative
+  `COORD_FORGE_SWEEP_BUDGET` (default 60s) spanning review/watch discovery and
+  the per-PR three-surface sweep; a cut returns non-zero with a
+  `forge-sweep-degraded` marker rather than hanging or reporting a clean partial.
   Every `COORD_*` tuning knob (default, unit, what it bounds), the shared positive-finite parse policy,
   and the `FULCRA_COORD_*` legacy-prefix rule are catalogued in one place:
   [`packages/coord-engine/README.md` → Environment / tuning](packages/coord-engine/README.md#environment--tuning).
@@ -264,7 +286,15 @@ it (not on PyPI).
   that distinction ONCE, in `roles.py`, and let the callers fail closed on `None`.
   Grep any new fold for a `parse`/`read` failure **or an unusable explicit value** that returns
   something comparing equal to a legitimate state; that is the whole bug class, and it has now hidden
-  in this fold three times.
+  in this fold four times — the fourth being the WRITE path (`continuity park` via `_held_roles`),
+  which the read-fold sweep left behind. There it is worse: `park` runs as a session EXITS, so a
+  swallowed listing that read as "you hold no roles" printed *"nothing to park"* and exited 0, silently
+  discarding the checkpoint the next session resumes from, with nobody watching. `_held_roles` now
+  returns `(held, ok)` and delegates per-role state to `_role_fresh_holders`; on `ok is False` park
+  fails **non-zero** and says the checkpoint was NOT written, so the operator can retry while the
+  context is still alive. **Ship-gate extends to write paths: a command that ACTS on the roles you hold
+  (not just reports them) resolves through the one helper and refuses to act on UNKNOWN rather than
+  treating it as "nothing to do".**
   Cost per pass is **`1 + Σ(2 + L_r)` ops** over the roles the open work references (`L_r` = that
   role's lease shards — one per agent that claimed it and never `roles release`-d, so it tracks
   lifetime churn and is unbounded in principle: a role with ten shards is 13 ops, measured). ONE
@@ -314,7 +344,7 @@ it (not on PyPI).
     still inside the next pass's window instead of consumed by this one; a failed listing preserves the
     prior `acked_by` rather than un-acking the task; and the whole-pass fast path declines while that
     anchor is behind `generated_at`, so a quiet beat can't skip the fold that still owes a read. A forced full fold every `COORD_ACKS_FULL_EVERY`
-    passes (default 12, ~4h at a 20-min heartbeat) bounds anything the query could miss, and carries the
+    passes (default 72, ~daily on a 20-min heartbeat) bounds anything the query could miss, and carries the
     orphan-shard GC.
   - **summaries.json is one shared doc written by many hosts at many versions — a top-level key added
     in version N is wiped by any host older than N.** The whole fleet reconciles ONE index, and an older
@@ -340,14 +370,25 @@ it (not on PyPI).
   a quiet tick prints NOTHING. It never advances state over an unread tick (a failed read re-surfaces the
   pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** across
   five independent sources (`inbox`, `responses`, `orphans`, `verdicts`, `roles`) — so a permanent orphan
-  can't pin the flag and silence a fresh outage. `--once` **always exits 0** (no output = nothing new, not
-  an error) — run it on a scheduler, or bare for a poll loop (`--interval`, SIGINT-clean). Every send verb
+  can't pin the flag and silence a fresh outage. `--once` exits **3** when its tick captured degraded
+  sources; exit 0 means clean/nothing-new — run it on a scheduler, or bare for a poll loop (`--interval`,
+  SIGINT-clean). Every send verb
   arms you with the exact `listen` line to run for replies. The deeper mechanics — the
   orphan/tombstone/unknown
   classification of dir-only review slugs, and the classify budgets (`COORD_LISTEN_CLASSIFY_BUDGET`) —
   live in [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md), the one skill the
   launchd/cron listener, live sessions, Codex, and headless all delegate to. (`review status` on a
   tombstone slug is terminal rc 1 — see [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md).)
+- **Idle-listener reaping (standing, operator-set 2026-07-20).** An agent whose
+  listener has run **2 days (48h) with no work** — no events, directives,
+  reviews, or responses surfaced or handled in that window — **parks a
+  continuity checkpoint to the bus and stands down its listener**:
+  `coord-engine continuity park <team> --agent <self> --objective "<what you
+  watch>" --next "resume on directed wake or new assignment"`, then stop the
+  poll loop. A directed wake or a new assignment resumes it
+  (`continuity resume`). Dormant watchers must not burn compute indefinitely;
+  the parked checkpoint loses nothing. Applies to every agent, coord-boss
+  included.
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

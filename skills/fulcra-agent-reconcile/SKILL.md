@@ -81,10 +81,11 @@ Both probes pass → the engine is healthy and the aggregate exists, so `status`
 read the fresh view; reconcile again on your cadence (or heartbeat) to keep it healed as tasks change.
 
 ## Usage
-This skill drives the shared **`coord-engine`** tool — invoked the same way this ecosystem already
-invokes `fulcra-api` (`uv tool run …`), so the skill itself stays pure prose + references (no bundled
-code). Needs `fulcra-api` authenticated and `coord-engine` installed (`uv tool install coord-engine`, or
-from source: `uv tool install <fulcra-tools>/packages/coord-engine`). See [`references/reconcile-cli.md`](references/reconcile-cli.md).
+This skill drives the shared **`coord-engine`** tool — invoked as the bare installed binary (never
+`uv tool run`, which resolves an ephemeral version; coord-engine is not on PyPI), so the skill itself
+stays pure prose + references (no bundled code). Needs `fulcra-api` authenticated and `coord-engine`
+installed (`uv tool install <fulcra-tools>/packages/coord-engine` — from the git tag or a checkout).
+See [`references/reconcile-cli.md`](references/reconcile-cli.md).
 ```bash
 coord-engine reconcile <team>            # scan + heal index/log + write the aggregate
 coord-engine board    <team>

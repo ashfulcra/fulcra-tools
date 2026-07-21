@@ -982,6 +982,99 @@ def test_retention_keeps_hot_task_when_shard_move_fails(capsys):
     assert "team/r/_coord/acks/olddone/amy-abc123.md" in t.store
 
 
+def _old_task(title, status):
+    return (f"---\ntype: Task\ntitle: {title}\nid: {title.lower()}\nstatus: {status}\n"
+            "timestamp: 2020-01-15T00:00:00Z\n---\nold body")
+
+
+def _old_verdict(reviewer, verdict="approve"):
+    return ("---\ntype: Verdict\n"
+            f"reviewer: {reviewer}\nverdict: {verdict}\n"
+            "timestamp: 2020-01-16T00:00:00Z\n---\n")
+
+
+def test_retention_archives_old_proposed_but_never_active_or_waiting(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/old-proposed.md", _old_task("Old-proposed", "proposed"),
+          mtime="2020-01-15 12:00PM UTC")
+    t.put("team/r/task/recent-proposed.md", _old_task("Recent-proposed", "proposed"))
+    t.put("team/r/task/old-active.md", _old_task("Old-active", "active"))
+    t.put("team/r/task/old-waiting.md", _old_task("Old-waiting", "waiting"))
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    assert "team/r/task/old-proposed.md" not in t.store
+    assert "team/r/task/archive/2020-01/old-proposed.md" in t.store
+    assert "team/r/task/recent-proposed.md" in t.store
+    assert "team/r/task/old-active.md" in t.store
+    assert "team/r/task/old-waiting.md" in t.store
+
+
+def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
+    t = FakeTransport()
+    # Eligible: no review doc, exactly one old codex-reviewer verdict.
+    t.put("team/r/review/settled/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+    t.put("team/r/review/recent/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"))
+    # Multi-reviewer and non-codex singletons are never settled-single reviews.
+    t.put("team/r/review/multi/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"))
+    t.put("team/r/review/multi/verdicts/coord-maintainer.md",
+          _old_verdict("coord-maintainer"))
+    t.put("team/r/review/other/verdicts/coord-maintainer.md",
+          _old_verdict("coord-maintainer"))
+    # A live review doc excludes the directory even when its verdict shape matches.
+    t.put("team/r/review/live.md", "---\ntype: Review\nrequired: codex-reviewer\n---\n")
+    t.put("team/r/review/live/verdicts/codex-reviewer.md",
+          _old_verdict("codex-reviewer"))
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    src = "team/r/review/settled/verdicts/codex-reviewer.md"
+    dst = ("team/r/_coord/archive/reviews/2020-01/settled/verdicts/"
+           "codex-reviewer.md")
+    assert src not in t.store and dst in t.store
+    assert "team/r/review/recent/verdicts/codex-reviewer.md" in t.store
+    assert "team/r/review/multi/verdicts/codex-reviewer.md" in t.store
+    assert "team/r/review/multi/verdicts/coord-maintainer.md" in t.store
+    assert "team/r/review/other/verdicts/coord-maintainer.md" in t.store
+    assert "team/r/review/live/verdicts/codex-reviewer.md" in t.store
+
+
+def test_retention_orphan_verdict_listing_raise_is_loud_and_non_destructive(capsys):
+    class FailVerdictListingTransport(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/unknown/verdicts/":
+                from coord_engine.transport import TransportError
+                raise TransportError("verdict listing unavailable")
+            return super().list_dir(prefix)
+
+    t = FailVerdictListingTransport()
+    src = "team/r/review/unknown/verdicts/codex-reviewer.md"
+    t.put(src, _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+    cap = capsys.readouterr()
+    assert src in t.store
+    assert not any("_coord/archive/reviews/" in p for p in t.store)
+    assert "unknown" in cap.err and "listing" in cap.err
+
+
+def test_review_restore_moves_archived_orphan_verdict_back(capsys):
+    t = FakeTransport()
+    hot = "team/r/review/settled/verdicts/codex-reviewer.md"
+    cold = ("team/r/_coord/archive/reviews/2020-01/settled/verdicts/"
+            "codex-reviewer.md")
+    t.put(hot, _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    assert hot not in t.store and cold in t.store
+
+    assert cli.main(["review", "restore", "r", "settled"], transport=t) == 0
+    assert hot in t.store and cold not in t.store
+    assert "restored review settled" in capsys.readouterr().out
+
+
 def test_task_restore_and_search_archived(capsys):
     import json as _j
     t = FakeTransport()
@@ -1324,6 +1417,68 @@ def test_park_respects_per_role_sla(capsys):
     assert "nothing to park" in capsys.readouterr().out    # stale vs the role's OWN sla
 
 
+def test_park_refuses_to_claim_nothing_when_role_state_is_unknown(capsys):
+    """A blip at session exit must not read as "you hold no roles".
+
+    park runs as a session ENDS, so a silent no-op discards the checkpoint the next
+    session resumes from, and nobody is watching to catch it. Before 2026-07-17
+    `_held_roles` swallowed a raised roles/ listing into `[]` and park printed
+    "nothing to park" and exited 0 — the checkpoint was never written and the
+    operator was told it was clean. UNKNOWN is not empty.
+    """
+    from coord_engine.transport import TransportError
+
+    class ListingDown(FakeTransport):
+        def list_dir(self, path):
+            if path.endswith("/roles/"):
+                raise TransportError("boom")
+            return super().list_dir(path)
+
+    t = ListingDown()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\n---\n")
+    rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1, f"park must fail loud on unknown role state, got rc={rc}"
+    assert "nothing to park" not in cap.out, "must NOT claim nothing to park"
+    assert "CHECKPOINT NOT WRITTEN" in cap.err, cap.err
+    assert not [p for p in t.store if "/continuity/" in p], "nothing may be written"
+
+
+def test_park_unreadable_role_doc_is_unknown_not_no_roles(capsys):
+    """A role the listing PROVES exists, whose doc will not parse, is UNKNOWN.
+
+    Only a complete, successfully parsed listing is negative membership evidence —
+    the same rule the read folds got in #410. This surface (the write path) was the
+    fourth one and kept the hole after those three were fixed.
+    """
+    class DocUnreadable(FakeTransport):
+        def read(self, path):
+            if path.endswith("/roles/reviewer.md"):
+                return "not frontmatter\n"
+            return super().read(path)
+
+    t = DocUnreadable()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\n---\n")
+    rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1, f"a listed-but-unparseable role doc is UNKNOWN, got rc={rc}"
+    assert "nothing to park" not in cap.out
+
+
+def test_park_genuinely_no_roles_still_exits_zero(capsys):
+    """The over-correction guard: holding nothing is a real, knowable answer.
+
+    Passes with AND without the fix, by design — it exists to catch a fix that
+    turns every park into UNKNOWN, not to catch the regression.
+    """
+    t = FakeTransport()
+    rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 0, f"no roles is a knowable answer, not a failure: rc={rc}"
+    assert "nothing to park" in cap.out
+    assert "CHECKPOINT NOT WRITTEN" not in cap.err
+
+
 def test_park_failed_snapshot_write_leaves_ref_unchanged(capsys):
     from coord_engine import okf
     t = FakeTransport()
@@ -1589,6 +1744,54 @@ def test_briefing_text_includes_pending_reviews(capsys):
     out = capsys.readouterr().out
     assert "pending reviews: 1 item(s)" in out
     assert "pr-5" in out
+
+
+def test_briefing_shared_budget_bounds_pending_review_fold(capsys, monkeypatch):
+    """Reviews must not reset the aggregate briefing clock.
+
+    A large permanent review history used to open a fresh 45-second window after
+    the shared add-on budget was already spent, starving the current-work output
+    on heartbeat wakes.  A slow top-level review listing is enough to reproduce
+    the deadline reset without creating hundreds of fixtures.
+    """
+    class SlowReviewTransport(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/":
+                _time.sleep(0.03)
+            return super().list_dir(prefix)
+
+    monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
+    monkeypatch.setenv("COORD_REVIEW_FOLD_BUDGET", "60")
+    t = SlowReviewTransport()
+    _seed_review(t, "pr-5", "me")
+
+    start = _time.monotonic()
+    assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
+    elapsed = _time.monotonic() - start
+    out = json.loads(capsys.readouterr().out)
+
+    assert elapsed < 1.0, "pending reviews must not reset the shared briefing budget"
+    assert any(r.get("type") == "review-fold-degraded"
+               for r in out["pending_reviews"]), out["pending_reviews"]
+
+
+def test_bundled_review_deadline_retains_reservable_budget(monkeypatch):
+    """The bundled absolute clamp must not disable the classification reserve."""
+    seen = []
+    original = cli.Deadline.reserve
+
+    def spy_reserve(self, fraction):
+        seen.append(self._budget)
+        return original(self, fraction)
+
+    monkeypatch.setattr(cli.Deadline, "reserve", spy_reserve)
+    t = FakeTransport()
+    cli._pending_reviews_for(
+        t, "r", "me", deadline_seconds=5.0,
+        deadline=_time.monotonic() + 2.0)
+
+    assert seen and seen[0] is not None
+    assert 0 < seen[0] <= 2.0
 
 
 def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):

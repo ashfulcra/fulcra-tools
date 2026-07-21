@@ -1,5 +1,7 @@
 # Teams convergence — coord + continuity as optional layers on `fulcra-agent-teams`
 
+> **Historical (2026-06):** These proposals are the design record for the teams convergence that SHIPPED as coord-engine. They are not maintained; the live docs are AGENTS.md §"Coordinate on the bus" and the fulcra-agent-* skills. Kept for archaeology.
+
 > **📎 HISTORICAL — design provenance, not current instructions.** This whole
 > subtree is a **proposal/design set**, superseded by what actually shipped: the
 > convergence landed as [`packages/coord-engine`](../../../../packages/coord-engine/README.md)

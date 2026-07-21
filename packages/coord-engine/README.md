@@ -16,7 +16,7 @@ and the agent conventions ([`AGENTS.md`](../../AGENTS.md)).
 ## Install
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.9#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.10#subdirectory=packages/coord-engine"
 coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 ```
 
@@ -79,6 +79,7 @@ disable a bound or make an op hang.
 | `COORD_TRANSPORT_TIMEOUT` | `30` | seconds | Hard per-op bound on every `fulcra-api file` subprocess. Constructor arg wins; run it TIGHT on a watcher (e.g. `8`) so the fold budgets buy real responsiveness. |
 | `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`). |
 | `COORD_BRIEFING_BUDGET` | `60` | seconds | Aggregate deadline for the `briefing`/`needs-me` transport-heavy add-on stack (chiefly the forge-feedback fan-out); opened once, spent cumulatively across sections. |
+| `COORD_FORGE_SWEEP_BUDGET` | `60` | seconds | Aggregate deadline for the direct `forge feedback` fallback: review/watch discovery plus its per-PR three-surface sweep. Breach is fail-visible and returns non-zero with a `forge-sweep-degraded` marker. |
 | `COORD_LISTEN_CLASSIFY_BUDGET` | `10` | seconds | Per-tick bound on the `listen` daemon's dir-only review-slug classification pass. |
 | `COORD_ROLE_FOLD_BUDGET` | `20` | seconds | Cumulative deadline for one role-resolution pass (`_held_roles_for_rows`), which `briefing`/`inbox`/`needs-me`/`listen` all run. Spent across the `roles/` listing, each role's doc + lease listing, and each lease shard read; a cut marks every unfinished candidate `unresolved` and emits `role-degraded`. |
 | `COORD_OVERLAY_BUDGET` | `10` | seconds | Time bound on the freshness overlay's fresh-doc reads (the cap bounds read COUNT; this bounds TIME). |
@@ -88,7 +89,7 @@ disable a bound or make an op hang.
 | `COORD_THREADS_SILENCE_DAYS` | `3` | days | `threads` started-then-silent window (flag `--silence-days` wins). |
 | `COORD_THREADS_INTENT_GRACE_HOURS` | `48` | hours | `threads` intent grace when an intent declares no window (flag `--intent-grace-hours` wins). |
 | `COORD_ACKS_FULL_EVERY` | `72` | count | Passes between FORCED full ack folds in `reconcile`. The fold is change-driven (it asks the store what changed and re-folds only those slugs); this bounds how long a change the query never reported can persist, and carries the orphan-shard GC, which only rides the full fold. `1` disables the incremental path (every pass lists every ack dir). Default 72 is ~daily on a 20-min heartbeat: a forced full fold measured 1091s (~18min) on a 1.2s/op remote transport, so the old `12` (~4h) taxed every remote host 18min every four hours to re-check a query already verified complete against an independent listing. 72 makes that forced fold 6x less frequent (~daily on the same heartbeat) — a sixth of the recurring cost. Any doubt — no change query, a query error, no anchor, a changed slug that wouldn't list — full-folds regardless of this knob, and does not advance the fold's anchor (`acks_folded_through`), so the unread change stays in the next pass's window. |
-| `COORD_RETENTION_DAYS` | *unset → off* | days | When set `> 0` (or `--retention-days N`), `reconcile` archives terminal (`done`/`abandoned`) tasks older than N days to the cold archive. **OFF unless configured.** Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins; the legacy default of `30` is *not* adopted — coord-engine stays opt-in). |
+| `COORD_RETENTION_DAYS` | *unset → off* | days | When set `> 0` (or `--retention-days N`), `reconcile` cold-archives quiet terminal (`done`/`abandoned`) **and `proposed`** tasks older than N days. It also archives doc-less review dirs only when a known listing proves exactly one old `codex-reviewer` verdict; empty tombstones, multi-verdict dirs, non-codex singletons, and UNKNOWN reads stay hot. Moves are copy-verified and reversible with `task restore` / `review restore`. **OFF unless configured.** Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins; the legacy default of `30` is *not* adopted — coord-engine stays opt-in). |
 
 ### Identity, state & logging
 

@@ -391,7 +391,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # fan-out is bounded cumulatively, not per-section. pending-reviews keeps its
     # own independent, already-shipped budget.
     add_on = Deadline.open(_briefing_budget())
-    got += _pending_reviews_for(transport, args.team, args.agent)
+    got += _pending_reviews_for(
+        transport, args.team, args.agent, deadline=add_on.instant)
     got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
     if args.json:
         print(json.dumps(got, indent=2))
@@ -714,6 +715,60 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
         print(f"restore failed: verified move from archive/{month}/ failed", file=sys.stderr)
         return 1
     print(f"restore failed: {args.name} not found in the archive", file=sys.stderr)
+    return 1
+
+
+def _review_archive_months(transport: Any, team: str) -> Optional[list[str]]:
+    try:
+        return [
+            str(e.get("name") or "").rstrip("/")
+            for e in transport.list_dir(rec.review_archive_prefix(team))
+            if e.get("is_dir") and e.get("name")
+        ]
+    except TransportError:
+        return None
+
+
+def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
+    """Restore a cold-archived settled-single verdict to the hot review path."""
+    months = _review_archive_months(transport, args.team)
+    if months is None:
+        print("review restore failed: archive root listing unknown", file=sys.stderr)
+        return 1
+    for month in sorted(months, reverse=True):
+        cold_prefix = (
+            f"{rec.review_archive_prefix(args.team)}{month}/{args.slug}/verdicts/"
+        )
+        try:
+            entries = transport.list_dir(cold_prefix)
+        except TransportError:
+            print(f"review restore failed: archive listing unknown for {args.slug}",
+                  file=sys.stderr)
+            return 1
+        files = [
+            str(e.get("name") or "") for e in entries
+            if not e.get("is_dir") and str(e.get("name") or "").endswith(".md")
+        ]
+        if not files:
+            continue
+        if files != ["codex-reviewer.md"]:
+            print(f"review restore failed: unexpected archived verdict shape for {args.slug}",
+                  file=sys.stderr)
+            return 1
+        filename = files[0]
+        src = cold_prefix + filename
+        dst = f"team/{args.team}/review/{args.slug}/verdicts/{filename}"
+        if transport.read(dst) is not None:
+            print(f"review restore failed: {args.slug} already exists in the hot path",
+                  file=sys.stderr)
+            return 1
+        if rec._crash_safe_move(transport, src, dst):
+            print(f"restored review {args.slug} from reviews/{month}/")
+            return 0
+        print(f"review restore failed: verified move from reviews/{month}/ failed",
+              file=sys.stderr)
+        return 1
+    print(f"review restore failed: {args.slug} not found in the archive", file=sys.stderr)
     return 1
 
 
@@ -1242,7 +1297,8 @@ def _held_roles_for_rows(
 
 
 def _pending_reviews_for(
-    transport: Any, team: str, agent: str, *, deadline_seconds: Optional[float] = None
+    transport: Any, team: str, agent: str, *, deadline_seconds: Optional[float] = None,
+    deadline: Optional[float] = None,
 ) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: the top listing failing yields []
@@ -1272,6 +1328,24 @@ def _pending_reviews_for(
     pre-fold (like task rows) — tracked on the bus."""
     if deadline_seconds is None:
         deadline_seconds = _review_fold_budget()
+    # The review fold owns a standalone budget, but bundled callers also have a
+    # shared aggregate deadline.  Spend whichever expires first.  Before this
+    # clamp, ``briefing`` claimed one cumulative add-on budget while reviews
+    # silently opened a fresh 45-second window; on a team with 193 historical
+    # review directories the session wake could expire here before current tasks
+    # were rendered.  Accept the absolute instant so time already spent by an
+    # earlier bundled section is preserved rather than reset.
+    # Preserve the standalone fold's historical measurable-progress contract:
+    # its own budget opens after the top-level listing.  A bundled caller passes
+    # an already-open absolute deadline, which *must* include that listing time.
+    dl: Optional[Deadline] = None
+    if deadline is not None:
+        # Re-open from the smaller REMAINING budget rather than constructing from
+        # the absolute instant.  ``Deadline.reserve`` needs the retained budget
+        # value to protect the doc scan from orphan-classification starvation;
+        # the bare constructor deliberately has no reservable budget.
+        remaining = max(0.0, deadline - time.monotonic())
+        dl = Deadline.open(min(deadline_seconds, remaining))
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
@@ -1295,7 +1369,10 @@ def _pending_reviews_for(
     total = len(slug_entries)
     scanned = 0
     skipped = 0
-    dl = Deadline.open(deadline_seconds)  # absolute monotonic instant (F2)
+    if dl is None:
+        dl = Deadline.open(deadline_seconds)
+    if dl.expired():
+        return [budget_mod.degraded_row("review-fold-degraded", 0, total)]
     # Dir-only review slugs (a `<slug>/` dir with no `<slug>.md` doc) are invisible
     # to the doc-keyed scan below. Classify each via the tombstone three-way (one
     # verdicts listing apiece): a dir with real verdict shards is an ORPHAN (surface
@@ -2884,14 +2961,20 @@ def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
     json_mode = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", False))
 
-    def tick() -> None:
-        _run_listen_tick(transport, args.team, agent, state,
-                         json_mode=json_mode, verbose=verbose)
+    def tick() -> dict[str, list[str]]:
+        _events, failures = _run_listen_tick(
+            transport, args.team, agent, state,
+            json_mode=json_mode, verbose=verbose)
         _save_listen_state(state_path, state)
+        return failures
 
     if args.once:
-        tick()
-        return 0
+        failures = tick()
+        # A captured transport failure is data, not an exception.  Keep the
+        # pulse-once stderr contract in _run_listen_tick, but return a stable
+        # machine-readable status on *every* one-shot tick so schedulers do not
+        # mistake a suppressed second pulse for recovery.
+        return 3 if failures else 0
     interval = args.interval if args.interval and args.interval > 0 else 60
     try:
         while True:
@@ -2958,29 +3041,51 @@ def cmd_continuity_checkpoint(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
-def _held_roles(transport: Any, team: str, agent: str) -> list[str]:
-    """Roles where ``agent`` holds a FRESH lease (same freshness fold as roles status)."""
-    held: list[str] = []
+def _held_roles(transport: Any, team: str, agent: str) -> tuple[list[str], bool]:
+    """Roles where ``agent`` holds a FRESH lease. Returns ``(held, ok)``.
+
+    ``ok`` is False whenever the answer is UNKNOWN — the roles/ listing raised, or
+    any single role's state could not be resolved. FAIL CLOSED: an empty ``held``
+    with ``ok=True`` means "holds nothing"; with ``ok=False`` it means "we could not
+    find out", and those are different facts that callers must not conflate.
+
+    This is the WRITE path's fold (``continuity park``), and until 2026-07-17 it was
+    the FOURTH role surface — the one #410 missed. ``parse_sla_hours``'s docstring
+    still says "all three role surfaces" because this one was deferred as
+    out-of-scope while the read folds were fixed. It carried every hole they did:
+    a raised listing returned a partial list as if complete; ``or {}`` on the role
+    doc turned an unparseable body into the default SLA; ``float(...) or DEFAULT``
+    under a bare except mapped an explicitly-invalid ``sla_hours`` onto 24h; and
+    ``or {}`` on the lease read folded an unreadable shard out as "not a holder".
+
+    On a write path those are worse than on a read one: ``park`` printed
+    "nothing to park" and exited 0, so a transport blip at session exit silently
+    discarded the checkpoint and told the operator it was a clean no-op — at
+    exactly the moment nobody is watching, because the session is ending.
+
+    Now it delegates per-role state to ``_role_fresh_holders``, which is the
+    canonical fold and already draws every one of those distinctions, so park and
+    ``roles status`` can never disagree about a lease.
+    """
     now = _iso(_now())
-    try:
-        entries = transport.list_dir(f"team/{team}/roles/")
-    except TransportError:
-        return held
-    for e in entries:
-        n = e.get("name") or ""
-        if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
+    names = _roles_listing_names(transport, team)
+    if names is None:
+        return [], False  # membership UNKNOWN — only a complete listing is evidence
+    held: list[str] = []
+    ok_all = True
+    cache: dict[str, Any] = {}
+    for n in sorted(names):
+        if not n.endswith(".md") or n == "index.md":
             continue
         role = n[:-3]
-        reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, role))) or {}
-        try:
-            sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
-        except (TypeError, ValueError):
-            sla = roles.DEFAULT_SLA_HOURS
-        lease = okf.parse_frontmatter(
-            transport.read(f"{_leases_prefix(team, role)}{tasks.agent_key(agent)}.md")) or {}
-        if lease and roles.age_hours(lease.get("timestamp"), now) <= sla:
+        holders, ok = _role_fresh_holders(
+            transport, team, role, now=now, listing_cache=cache)
+        if not ok:
+            ok_all = False  # this role's state is unknown; do not read it as "not held"
+            continue
+        if agent in holders:
             held.append(role)
-    return held
+    return held, ok_all
 
 
 def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
@@ -2988,7 +3093,18 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
     each role's checkpoint_ref at it. The incumbent's `park`."""
     agent = args.agent or _host()
     now = _iso(_now())
-    held = _held_roles(transport, args.team, agent)
+    held, ok = _held_roles(transport, args.team, agent)
+    if not ok:
+        # UNKNOWN is not "nothing to park". Refusing here is the whole point: a
+        # session runs park as it exits, so a silent no-op discards the checkpoint
+        # the NEXT session resumes from, and nobody is watching to notice. Say the
+        # checkpoint was not written, loudly and non-zero, while the operator can
+        # still retry with the context still alive.
+        print(f"park: could not determine which roles {agent} holds in "
+              f"team/{args.team} (role state unreadable, not empty) — "
+              f"CHECKPOINT NOT WRITTEN. Nothing was parked; retry before ending "
+              f"the session.", file=sys.stderr)
+        return 1
     if not held:
         print(f"park: {agent} holds no fresh roles in team/{args.team} — nothing to park")
         return 0
@@ -3083,7 +3199,8 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # the whole add-on stack is bounded cumulatively. pending-reviews keeps its own
     # tighter, already-shipped budget (whichever bound is sooner).
     try:
-        out["pending_reviews"] = _pending_reviews_for(transport, args.team, agent)
+        out["pending_reviews"] = _pending_reviews_for(
+            transport, args.team, agent, deadline=add_on.instant)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
@@ -3731,6 +3848,11 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
         print(f"  skipped {line}", file=sys.stderr)
     for line in fb.get("notes", []):
         print(f"  note {line}", file=sys.stderr)
+    if fb.get("degraded"):
+        print(budget_mod.fold_degraded_line(
+            fb["degraded"], label="forge sweep",
+            remedy="feedback state is partial, retry", noun="PR"), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -3750,6 +3872,11 @@ def cmd_forge_feedback(args: argparse.Namespace, transport: Any) -> int:
         print(f"  skipped {line}", file=sys.stderr)
     for line in fb.get("notes", []):
         print(f"  note {line}", file=sys.stderr)
+    if fb.get("degraded"):
+        print(budget_mod.fold_degraded_line(
+            fb["degraded"], label="forge sweep",
+            remedy="feedback state is partial, retry", noun="PR"), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -3863,7 +3990,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("reconcile", help="scan + heal a team's task views")
     r.add_argument("team")
     r.add_argument("--retention-days", dest="retention_days",
-                   help="archive terminal tasks older than N days (or env COORD_RETENTION_DAYS)")
+                   help="archive quiet terminal/proposed tasks and settled-single orphan reviews older than N days (or env COORD_RETENTION_DAYS)")
     r.set_defaults(func=cmd_reconcile)
 
     s = sub.add_parser("status", help="counts by status")
@@ -4144,6 +4271,9 @@ def build_parser() -> argparse.ArgumentParser:
     rvs = rvsub.add_parser("status", help="APPROVED/CHANGES/PENDING from reviewers' verdicts")
     rvs.add_argument("team"); rvs.add_argument("slug"); add_json(rvs)
     rvs.set_defaults(func=cmd_review_status)
+    rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
+    rvr.add_argument("team"); rvr.add_argument("slug")
+    rvr.set_defaults(func=cmd_review_restore)
 
     ct = sub.add_parser("continuity", help="structured resumable snapshots (fulcra-agent-continuity)")
     ctsub = ct.add_subparsers(dest="continuity_command", required=True)
