@@ -11,8 +11,20 @@ set -euo pipefail
 
 YES=0; UNINSTALL=0; WAKE_CMD=""; ADAPTIVE=1; TAIL_MINUTES=30; IDLE_MINUTES=30
 POS=()
+usage() {
+  cat <<'EOF'
+usage:
+  install-listener.sh [--yes] <team> <agent> [interval-minutes] [--wake-cmd "cmd..."]
+  install-listener.sh --uninstall <team> <agent>
+
+Schedules listener-tick.sh (inbox check + notification + optional consent-gated
+wake) for an agent. --yes skips the consent prompt; --wake-cmd must be one line
+with no single quotes or angle brackets.
+EOF
+}
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
+    -h|--help) usage; exit 0;;
     --yes) YES=1;;
     --uninstall) UNINSTALL=1;;
     --fixed) ADAPTIVE=0;;

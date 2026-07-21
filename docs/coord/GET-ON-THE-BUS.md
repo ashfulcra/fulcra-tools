@@ -187,7 +187,9 @@ takeover surprises to expect (both observed live 2026-07-15):
 
 - **`coord-engine listen <team> --agent <you>`** is the engine-owned watcher for new
   directives, responses, and verdicts — never hand-roll one. `--once` prints nothing
-  when quiet and always exits 0, so it composes with any scheduler.
+  when quiet; it exits 0 on a clean or quiet tick and **3** when the tick itself
+  captured degradation (a scheduler treats silence as "nothing new"; a monitoring
+  wrapper treats 3 as degraded coordination state, not ordinary success).
 - **Token-minimal waiting** (model-loop agents): don't poll from the model loop —
   every quiet check burns tokens. Run a background *shell* loop that calls
   `listen --once` every ~60s and **exits on first output**: quiet ticks cost zero
