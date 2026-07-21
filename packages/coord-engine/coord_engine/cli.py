@@ -433,10 +433,14 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_search(args: argparse.Namespace, transport: Any) -> int:
     rows, ok, reason = _load_rows_status(transport, args.team)
+    degraded_reasons = [] if ok else [reason]
     if getattr(args, "archived", False):
         # cold path: read archived task docs directly (archives are small + rare)
         from . import model as _model
-        for month in _archive_months(transport, args.team):
+        months, archive_reason = _archive_months_status(transport, args.team)
+        if archive_reason:
+            degraded_reasons.append(archive_reason)
+        for month in months:
             pfx = f"{rec.archive_prefix(args.team)}{month}/"
             try:
                 for e in transport.list_dir(pfx):
@@ -450,17 +454,20 @@ def cmd_search(args: argparse.Namespace, transport: Any) -> int:
                         row["archived"] = month
                         rows.append(row)
             except TransportError:
-                pass
+                degraded_reasons.append(f"task archive/{month} unreadable")
     got = query.search(rows, args.query)
-    # Public-read failure contract: an UNKNOWN index must not return a clean-empty
-    # "no matches" — surface the shared marker (json row / stderr notice).
-    if not ok:
-        got = [_read_degraded_row(reason)] + got
+    # Public-read failure contract: an UNKNOWN hot index or partial cold archive
+    # must not return a confident match (or clean-empty result). Preserve readable
+    # rows as evidence, but prefix the shared degraded marker so consumers fail
+    # closed before acting on an incomplete identity view.
+    degraded_reason = "; ".join(dict.fromkeys(filter(None, degraded_reasons)))
+    if degraded_reason:
+        got = [_read_degraded_row(degraded_reason)] + got
     if args.json:
         print(json.dumps(got, indent=2))
     else:
-        if not ok:
-            _surface_read_degraded(reason, json_mode=False)
+        if degraded_reason:
+            _surface_read_degraded(degraded_reason, json_mode=False)
         real = [r for r in got if r.get("type") != _READ_DEGRADED]
         print(f"{len(real)} match(es) for {args.query!r}:")
         for r in real:
@@ -674,12 +681,22 @@ def cmd_task_assign(args: argparse.Namespace, transport: Any) -> int:
     return _task_apply(args, transport, **kw)
 
 
-def _archive_months(transport: Any, team: str) -> list[str]:
+def _archive_months_status(transport: Any, team: str) -> tuple[list[str], str]:
     try:
-        return [e["name"].rstrip("/") for e in transport.list_dir(rec.archive_prefix(team))
-                if e.get("is_dir")]
+        return (
+            [
+                e["name"].rstrip("/")
+                for e in transport.list_dir(rec.archive_prefix(team))
+                if e.get("is_dir")
+            ],
+            "",
+        )
     except TransportError:
-        return []
+        return [], "task archive months unreadable"
+
+
+def _archive_months(transport: Any, team: str) -> list[str]:
+    return _archive_months_status(transport, team)[0]
 
 
 def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:

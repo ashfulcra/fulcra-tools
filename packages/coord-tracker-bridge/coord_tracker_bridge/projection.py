@@ -38,7 +38,7 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
     return {
         "title": item.title,
         "description": item.description,
-        "semantic_state": policy.lane_states.get(item.lane, item.lane),
+        "semantic_state": policy.lane_states[item.lane],
         "priority": policy.priority.get(item.priority, policy.priority.get("P2", 3)),
         "labels": labels,
         "project": policy.workstream_projects.get(item.workstream or ""),
@@ -49,6 +49,7 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
         "workstream": item.workstream,
         "source_identity": item.source.to_dict(),
         "source_capability": item.capability,
+        "source_lane": item.lane,
         "policy_version": policy.version,
         "policy_hash": policy.hash,
     }
@@ -85,6 +86,17 @@ def build_plan(
 
     for item in sorted(snapshot.items, key=lambda value: value.source):
         key = item.source.key
+        if item.lane not in policy.included_lanes:
+            diagnostics.append(Diagnostic(item.capability, "lane-excluded", item.lane))
+            existing = managed_by_source.get(key)
+            if existing and not existing.closed:
+                changes.append(Change(
+                    ChangeKind.CLOSE,
+                    item.source,
+                    existing.provider_id,
+                    MappingProxyType({}),
+                ))
+            continue
         if policy.included_origins and item.origin not in policy.included_origins:
             diagnostics.append(Diagnostic(item.capability, "origin-excluded", item.source.key))
             continue
@@ -120,4 +132,28 @@ def build_plan(
                 Diagnostic(entry.capability, "close-suppressed", f"absence not authoritative for {key}")
             )
 
-    return Plan(tuple(changes), tuple(diagnostics))
+    close_item_ids = {
+        change.source.item_id for change in changes if change.kind is ChangeKind.CLOSE
+    }
+    safe_changes: list[Change] = []
+    for change in changes:
+        if change.kind is ChangeKind.CREATE:
+            capability = str(change.fields.get("source_capability") or "").strip()
+            lane = str(change.fields.get("source_lane") or "").strip()
+            if not capability or not lane:
+                diagnostics.append(Diagnostic(
+                    capability or "projection",
+                    "create-suppressed-unresolved-source",
+                    change.source.item_id,
+                ))
+                continue
+            if change.source.item_id in close_item_ids:
+                diagnostics.append(Diagnostic(
+                    capability,
+                    "create-suppressed-conflicting-close",
+                    change.source.item_id,
+                ))
+                continue
+        safe_changes.append(change)
+
+    return Plan(tuple(safe_changes), tuple(diagnostics))

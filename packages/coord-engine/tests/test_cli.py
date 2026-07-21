@@ -1095,6 +1095,29 @@ def test_task_restore_and_search_archived(capsys):
     assert cli.main(["task", "restore", "r", "nope"], transport=t) == 1
 
 
+def test_search_archived_surfaces_partial_cold_archive_as_degraded(capsys):
+    from coord_engine.transport import TransportError
+
+    class PartialArchiveTransport(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/task/archive/2020-02/":
+                raise TransportError("cold month unreadable")
+            return super().list_dir(prefix)
+
+    t = PartialArchiveTransport()
+    t.put("team/r/task/archive/2020-01/target.md", _old_done_task("Target"))
+    t.put("team/r/task/archive/2020-02/other.md", _old_done_task("Other"))
+
+    assert cli.main(["search", "r", "target", "--archived", "--json"], transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+
+    assert got[0] == {
+        "type": "read-degraded",
+        "reason": "task archive/2020-02 unreadable",
+    }
+    assert got[1]["name"] == "target"
+
+
 def test_reconcile_writes_health_shard_and_health_folds(capsys):
     import json as _j
     t = FakeTransport()

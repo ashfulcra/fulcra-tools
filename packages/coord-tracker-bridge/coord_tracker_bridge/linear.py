@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Protocol
@@ -11,13 +12,16 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 import httpx
 
 from .ledger import BridgeLedger
-from .model import ManagedRecord, SourceIdentity
+from .model import ManagedRecord, Snapshot, SourceIdentity, WorkRecord
+from .policy import Policy
 from .projection import Change, ChangeKind
 
 
 LINEAR_API = "https://api.linear.app/graphql"
 METADATA_PREFIX = "<!-- coord-tracker-bridge:source="
 METADATA_SUFFIX = " -->"
+LEGACY_TITLE_MARKER = re.compile(r"(?<!\w)\[bus:([^\]\r\n]{8})\](?!\w)")
+LEGACY_SLUG_FOOTER = re.compile(r"(?m)^bus slug: `([^`\r\n]+)`\s*$")
 
 
 class LinearError(RuntimeError):
@@ -26,6 +30,16 @@ class LinearError(RuntimeError):
 
 class ResourceMissing(LinearError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class MarkerAdoption:
+    provider_id: str
+    source: SourceIdentity
+    capability: str
+    title: str
+    description: str
+    fields: Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +65,11 @@ class HttpxGraphQLTransport:
         response = self._client.post("", json=payload)
         try:
             body = response.json()
-        except ValueError as exc:
-            raise LinearError(f"non-JSON Linear response ({response.status_code})") from exc
+        except ValueError:
+            # Preserve the HTTP status so the client can apply its normal
+            # retry policy. Never include the response body: an upstream
+            # proxy can echo request content, including source text.
+            body = {"errors": [{"extensions": {"code": "NON_JSON_RESPONSE"}}]}
         return GraphQLResponse(response.status_code, body, response.headers)
 
 
@@ -76,14 +93,57 @@ class LinearClient:
 
     @staticmethod
     def _retryable(response: GraphQLResponse) -> bool:
-        if response.status_code in {408, 429, 500, 502, 503, 504}:
+        if response.status_code in {408, 429} or response.status_code >= 500:
             return True
         errors = response.body.get("errors") if isinstance(response.body, Mapping) else None
-        return bool(errors and any(
-            str(error.get("extensions", {}).get("code", "")).upper()
-            in {"RATELIMITED", "RATE_LIMITED", "INTERNAL_SERVER_ERROR"}
-            for error in errors if isinstance(error, Mapping)
-        ))
+        transient_codes = {
+            "GATEWAY_TIMEOUT",
+            "INTERNAL_ERROR",
+            "INTERNAL_SERVER_ERROR",
+            "RATE_LIMITED",
+            "RATELIMITED",
+            "SERVER_ERROR",
+            "SERVICE_UNAVAILABLE",
+            "TIMEOUT",
+            "TOO_MANY_REQUESTS",
+        }
+        for error in errors or ():
+            if not isinstance(error, Mapping):
+                continue
+            extensions = error.get("extensions")
+            extensions = extensions if isinstance(extensions, Mapping) else {}
+            code = str(extensions.get("code", "")).upper()
+            try:
+                status = int(extensions.get("status", 0))
+            except (TypeError, ValueError):
+                status = 0
+            if code in transient_codes or status in {408, 429} or status >= 500:
+                return True
+        return False
+
+    @staticmethod
+    def _failure_detail(response: GraphQLResponse) -> str:
+        """Return useful provider diagnostics without request/variable data."""
+
+        codes: list[str] = []
+        errors = response.body.get("errors") if isinstance(response.body, Mapping) else None
+        for error in errors or ():
+            if not isinstance(error, Mapping):
+                continue
+            extensions = error.get("extensions")
+            extensions = extensions if isinstance(extensions, Mapping) else {}
+            code = str(extensions.get("code", "")).strip()
+            if code and code not in codes:
+                codes.append(code)
+        suffix = f", graphql_codes={','.join(codes)}" if codes else ""
+        return f"http_status={response.status_code}{suffix}"
+
+    def _sleep_before_retry(self, attempt: int, retry_after: str | None = None) -> None:
+        try:
+            delay = float(retry_after) if retry_after else self.base_backoff * (2**attempt)
+        except (TypeError, ValueError):
+            delay = self.base_backoff * (2**attempt)
+        self.sleeper(min(max(delay, 0.0), 30.0))
 
     def execute(
         self, operation: str, query: str, variables: Mapping[str, Any] | None = None
@@ -92,7 +152,16 @@ class LinearClient:
         # never included in exception strings or logs.
         payload = {"operationName": operation, "query": query, "variables": dict(variables or {})}
         for attempt in range(self.max_attempts):
-            response = self.transport.post(payload)
+            try:
+                response = self.transport.post(payload)
+            except (httpx.TransportError, TimeoutError, ConnectionError) as exc:
+                if attempt + 1 >= self.max_attempts:
+                    raise LinearError(
+                        f"{operation}: Linear transport failed after {attempt + 1} attempt(s) "
+                        f"(transport={type(exc).__name__})"
+                    ) from exc
+                self._sleep_before_retry(attempt)
+                continue
             errors = response.body.get("errors") if isinstance(response.body, Mapping) else None
             if response.status_code < 400 and not errors:
                 data = response.body.get("data")
@@ -100,10 +169,12 @@ class LinearClient:
                     raise LinearError(f"{operation}: missing data")
                 return data
             if not self._retryable(response) or attempt + 1 >= self.max_attempts:
-                raise LinearError(f"{operation}: Linear request failed after {attempt + 1} attempt(s)")
+                raise LinearError(
+                    f"{operation}: Linear request failed after {attempt + 1} attempt(s) "
+                    f"({self._failure_detail(response)})"
+                )
             retry_after = response.headers.get("retry-after")
-            delay = float(retry_after) if retry_after else self.base_backoff * (2**attempt)
-            self.sleeper(min(delay, 30.0))
+            self._sleep_before_retry(attempt, retry_after)
         raise AssertionError("unreachable")
 
     def paginate(
@@ -151,7 +222,7 @@ ISSUES_QUERY = """query Issues($team:ID!,$after:String){issues(filter:{team:{id:
 LABELS_QUERY = """query Labels($team:ID!,$after:String){issueLabels(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 PROJECTS_QUERY = """query Projects($team:ID!,$after:String){projects(filter:{accessibleTeams:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 COMMENTS_QUERY = """query Comments($issue:ID!,$after:String){comments(filter:{issue:{id:{eq:$issue}}},first:100,after:$after){nodes{id body createdAt user{id}} pageInfo{hasNextPage endCursor}}}"""
-ISSUE_LABELS_QUERY = """query IssueLabels($issue:ID!,$after:String){issue(id:$issue){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}"""
+ISSUE_LABELS_QUERY = """query IssueLabels($issue:String!,$after:String){issue(id:$issue){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}"""
 EVENTS_QUERY = """query InboundEvents($team:ID!,$after:String){auditEntries(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id type createdAt actor{id} metadata} pageInfo{hasNextPage endCursor}}}"""
 SCHEMA_QUERY = """query Schema($team:ID!){team(id:$team){id key states{nodes{id name type}}}}"""
 
@@ -281,6 +352,150 @@ class LinearTrackerAdapter:
     def list_inbound_events(self) -> list[Mapping[str, Any]]:
         return self.client.paginate("InboundEvents", EVENTS_QUERY, "auditEntries", {"team": self.team_id})
 
+    def plan_marker_adoptions(
+        self,
+        snapshot: Snapshot,
+        ledger: BridgeLedger,
+        policy: Policy,
+        resolve_slug: Callable[[str], WorkRecord | None] | None = None,
+        resolve_slugs: Callable[
+            [tuple[str, ...]], Mapping[str, WorkRecord | None]
+        ] | None = None,
+    ) -> tuple[MarkerAdoption, ...]:
+        """Match legacy ``[bus:xxxxxxxx]`` titles to full source identities.
+
+        The bridge-owned description footer carries the authoritative full
+        slug. The title marker is only a consistency check against the slug's
+        final eight characters; those characters are not necessarily hex.
+        Unknowns and collisions fail the entire migration before mutation.
+        """
+
+        candidates: dict[str, Any] = {}
+        for item in snapshot.items:
+            slug = item.source.item_id
+            prior = candidates.get(slug)
+            if prior is None:
+                candidates[slug] = item
+                continue
+            capabilities = {prior.capability, item.capability}
+            if capabilities == {"tasks", "threads"}:
+                # ``threads`` is a derived observation of a task, not a second
+                # source identity.  Adoption must use the canonical task row so
+                # its durable namespace/capability is written to the ledger.
+                # Keep every other collision fail-closed.
+                if item.capability == "tasks":
+                    candidates[slug] = item
+                continue
+            raise LinearError(f"legacy footer slug {slug!r} matches multiple source rows")
+
+        issues = self.list_issues()
+        resolved: Mapping[str, WorkRecord | None] = {}
+        if resolve_slugs is not None:
+            missing: list[str] = []
+            for issue in issues:
+                if not LEGACY_TITLE_MARKER.search(str(issue.get("title") or "")):
+                    continue
+                footer_matches = list(
+                    LEGACY_SLUG_FOOTER.finditer(str(issue.get("description") or ""))
+                )
+                if len(footer_matches) == 1:
+                    slug = footer_matches[0].group(1)
+                    if slug not in candidates:
+                        missing.append(slug)
+            resolved = resolve_slugs(tuple(dict.fromkeys(missing)))
+
+        ledger_by_provider = {entry.tracker_record_id: entry for entry in ledger}
+        seen_slugs: set[str] = set()
+        planned: list[MarkerAdoption] = []
+        for issue in issues:
+            title = str(issue.get("title") or "")
+            matches = list(LEGACY_TITLE_MARKER.finditer(title))
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise LinearError(f"legacy issue {issue.get('id')!r} has multiple bus markers")
+            provider_id = str(issue.get("id") or "").strip()
+            if not provider_id:
+                raise LinearError("legacy marked issue has no provider id")
+            description = str(issue.get("description") or "")
+            footer_matches = list(LEGACY_SLUG_FOOTER.finditer(description))
+            if len(footer_matches) != 1:
+                raise LinearError(
+                    f"legacy issue {provider_id!r} must have exactly one bus slug footer"
+                )
+            slug = footer_matches[0].group(1)
+            item = candidates.get(slug)
+            if item is None:
+                item = resolved.get(slug)
+            if item is None and resolve_slug is not None:
+                item = resolve_slug(slug)
+            if item is None:
+                raise LinearError(f"legacy footer slug {slug!r} has no source row")
+            if item.source.item_id != slug:
+                raise LinearError(f"legacy slug resolver returned the wrong source row for {slug!r}")
+            marker = matches[0].group(1)
+            expected_marker = slug[-8:]
+            if marker != expected_marker:
+                raise LinearError(
+                    f"legacy issue {provider_id!r} marker does not match footer slug suffix"
+                )
+            if slug in seen_slugs:
+                raise LinearError(f"legacy footer slug {slug!r} appears on multiple issues")
+            seen_slugs.add(slug)
+
+            source_entry = ledger.get(item.source)
+            if (
+                source_entry is not None
+                and source_entry.tracker_record_id != provider_id
+            ):
+                raise LinearError(
+                    f"legacy footer slug {slug!r} is already mapped to another issue"
+                )
+            metadata = parse_bridge_metadata(description)
+            if metadata is not None:
+                existing_source = SourceIdentity.from_dict(metadata["source"])
+                if existing_source != item.source:
+                    raise LinearError(
+                        f"legacy issue {provider_id!r} metadata conflicts with marker source"
+                    )
+            entry = ledger_by_provider.get(provider_id)
+            if entry is not None and entry.source != item.source:
+                raise LinearError(
+                    f"legacy issue {provider_id!r} ledger identity conflicts with marker source"
+                )
+            clean_title = LEGACY_TITLE_MARKER.sub("", title)
+            clean_title = re.sub(r"\s{2,}", " ", clean_title).strip()
+            if not clean_title:
+                clean_title = item.title
+            fields = dict((metadata or {}).get("fields") or {})
+            fields.update({"policy_version": policy.version, "policy_hash": policy.hash})
+            planned.append(MarkerAdoption(
+                provider_id=provider_id,
+                source=item.source,
+                capability=item.capability,
+                title=clean_title,
+                description=strip_source_metadata(description),
+                fields=fields,
+            ))
+        return tuple(sorted(planned, key=lambda adoption: adoption.provider_id))
+
+    def apply_marker_adoption(self, adoption: MarkerAdoption) -> None:
+        description = append_source_metadata(
+            adoption.description,
+            adoption.source,
+            adoption.fields,
+            capability=adoption.capability,
+        )
+        self.client.execute_mutation(
+            "AdoptIssue",
+            "mutation AdoptIssue($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}",
+            "issueUpdate",
+            {"id": adoption.provider_id, "input": {
+                "title": adoption.title,
+                "description": description,
+            }},
+        )
+
     def list_managed_records(self, ledger: BridgeLedger) -> list[ManagedRecord]:
         ledger_by_provider = {entry.tracker_record_id: entry for entry in ledger}
         records: list[ManagedRecord] = []
@@ -397,7 +612,8 @@ class LinearTrackerAdapter:
             output["stateId"] = self._state_id(str(fields["semantic_state"]))
 
         internal_names = {
-            "owner", "assignee", "origin", "workstream", "policy_version", "policy_hash"
+            "owner", "assignee", "origin", "workstream", "source_lane",
+            "policy_version", "policy_hash"
         }
         internal = dict(self._metadata_by_source.get(source.key, {}))
         internal.update({key: fields[key] for key in internal_names if key in fields})

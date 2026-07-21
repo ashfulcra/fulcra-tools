@@ -157,7 +157,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "coord-tracker-bridge"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "packages/coord-tracker-bridge" }
 dependencies = [
     { name = "httpx" },

@@ -17,6 +17,7 @@ from coord_tracker_bridge import (
     WorkRecord,
     load_policy,
 )
+from coord_tracker_bridge.linear import MarkerAdoption
 
 
 NOW = datetime(2026, 7, 17, tzinfo=timezone.utc)
@@ -40,6 +41,8 @@ class Tracker:
         self.records = list(records)
         self.applied_resources = []
         self.changes = []
+        self.adoptions = []
+        self.applied_adoptions = []
 
     def list_managed_records(self, _ledger):
         return list(self.records)
@@ -62,6 +65,19 @@ class Tracker:
                 False,
             ))
         return provider_id
+
+    def plan_marker_adoptions(
+        self,
+        _snapshot,
+        _ledger,
+        _policy,
+        _resolve_slug=None,
+        _resolve_slugs=None,
+    ):
+        return tuple(self.adoptions)
+
+    def apply_marker_adoption(self, adoption):
+        self.applied_adoptions.append(adoption)
 
 
 def snapshot(capability="tasks"):
@@ -145,6 +161,58 @@ def test_sync_does_not_persist_ledger_when_provider_rejects_mutation(tmp_path):
     with pytest.raises(LinearError, match="semantic mutation failure"):
         service(tmp_path, RejectingTracker()).sync()
 
+    assert not (tmp_path / "ledger.json").exists()
+
+
+def test_adopt_markers_persists_full_identity_after_provider_mutation(tmp_path):
+    tracker = Tracker()
+    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    tracker.adoptions = [MarkerAdoption(
+        "LIN-legacy", source, "tasks", "Task", "body", {}
+    )]
+    bridge = service(tmp_path, tracker)
+
+    assert bridge.adopt_markers() == 1
+
+    assert tracker.applied_adoptions == tracker.adoptions
+    entry = BridgeLedger.load(tmp_path / "ledger.json").get(source)
+    assert entry.tracker_record_id == "LIN-legacy"
+    assert entry.capability == "tasks"
+
+
+def test_preview_marker_adoptions_never_mutates_provider_or_ledger(tmp_path):
+    tracker = Tracker(records=[ManagedRecord(
+        "LIN-managed",
+        SourceIdentity("coord-engine", "fulcra", "already-managed"),
+        "tasks",
+        {},
+        False,
+    )])
+    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    tracker.adoptions = [MarkerAdoption(
+        "LIN-legacy", source, "tasks", "Task", "body", {}
+    )]
+    bridge = service(tmp_path, tracker)
+
+    assert bridge.preview_marker_adoptions() == tuple(tracker.adoptions)
+
+    assert tracker.applied_adoptions == []
+    assert not (tmp_path / "ledger.json").exists()
+
+
+def test_adopt_markers_rejects_duplicate_provider_metadata_before_writes(tmp_path):
+    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    records = [
+        ManagedRecord("LIN-A", source, "tasks", {}, False),
+        ManagedRecord("LIN-B", source, "tasks", {}, False),
+    ]
+    tracker = Tracker(records=records)
+    bridge = service(tmp_path, tracker)
+
+    with pytest.raises(LinearError, match="appears on multiple provider records"):
+        bridge.adopt_markers()
+
+    assert tracker.applied_adoptions == []
     assert not (tmp_path / "ledger.json").exists()
 
 

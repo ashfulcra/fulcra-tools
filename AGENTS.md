@@ -79,18 +79,23 @@ under `skills/`, each package with its own README, build, and tests.
   core for reflecting coord work into external trackers. It ships normalized
   snapshots, a full source-identity ledger, versioned policy, a pure diff plan,
   a `coord-engine --json` source, and a paginated/retrying Linear adapter. Run
-  `plan` first, `apply-resources` explicitly, then `sync`; ordinary sync never
-  creates labels/projects, and a singleton lease rejects overlapping
-  source/tracker/policy runs. It never infers identity from titles, and an
-  incomplete capability suppresses destructive closes only for that scope.
+  `plan` first, one-time `adopt-markers` when migrating v0.25 issues,
+  `apply-resources` explicitly, then `sync`; ordinary sync never creates
+  labels/projects or infers identity from titles, and a singleton lease rejects
+  overlapping source/tracker/policy runs. Policy v2 has an explicit lane
+  allowlist (omission means exclusion), derives `@backlog` proposed/waiting
+  rows to `backlog`, and names asks/threads lanes `asks`/`threads-missed`.
+  An incomplete capability suppresses destructive closes only for that scope.
   The optional `--source teams` adapter is strict and read-only over typed
   `team/<team>/task/*.md` documents; ambiguous list/read/parse results degrade
   tasks, while unsupported capabilities remain explicitly unsupported. Command
   intake and expectation evaluation remain explicitly out of scope.
   The engine source accepts both JSON documents and JSONL folds (including
-  `threads --json`), identifies the exact degraded marker path/reason in its
-  diagnostics, and gives the intentionally slow fleet-health fold a separate
-  six-minute bound while keeping other folds at three minutes.
+  `threads --json`), retains valid JSONL rows around an interleaved prose
+  degraded line while keeping that capability degraded, identifies the exact
+  degraded marker path/reason in its diagnostics, and gives the intentionally
+  slow fleet-health fold a separate six-minute bound while keeping other folds
+  at three minutes.
 - Coord retention remains opt-in via `COORD_RETENTION_DAYS` or
   `reconcile --retention-days`: it cold-archives old terminal **and proposed**
   tasks, plus only doc-less review dirs positively proven to contain exactly one

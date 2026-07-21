@@ -18,7 +18,12 @@ from .source import EngineSourceAdapter, TeamsSourceAdapter
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coord-tracker-bridge")
-    parser.add_argument("phase", choices=("plan", "apply-resources", "sync"))
+    parser.add_argument("phase", choices=("plan", "adopt-markers", "apply-resources", "sync"))
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview adopt-markers mappings without provider or ledger writes",
+    )
     parser.add_argument("--coord-team", default=os.environ.get("COORD_TEAM", "fulcra"))
     parser.add_argument("--source", choices=("engine", "teams"), default="engine")
     parser.add_argument("--principal", default="ash")
@@ -76,9 +81,28 @@ def _plan_json(plan: BridgePlan) -> dict:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.dry_run and args.phase != "adopt-markers":
+            raise ValueError("--dry-run is only valid with adopt-markers")
         service = _service(args)
         if args.phase == "plan":
             print(json.dumps(_plan_json(service.plan()), sort_keys=True, default=str))
+        elif args.phase == "adopt-markers":
+            if args.dry_run:
+                adoptions = service.preview_marker_adoptions()
+                print(json.dumps({
+                    "dry_run": True,
+                    "count": len(adoptions),
+                    "adoptions": [
+                        {
+                            "provider_id": adoption.provider_id,
+                            "source": adoption.source.to_dict(),
+                            "capability": adoption.capability,
+                        }
+                        for adoption in adoptions
+                    ],
+                }, sort_keys=True))
+            else:
+                print(json.dumps({"adopted": service.adopt_markers()}))
         elif args.phase == "apply-resources":
             resources = service.apply_resources()
             print(json.dumps({"created_labels": list(resources.labels), "created_projects": list(resources.projects)}))

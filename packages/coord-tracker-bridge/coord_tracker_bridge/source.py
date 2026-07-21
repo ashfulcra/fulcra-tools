@@ -225,6 +225,48 @@ class EngineSourceAdapter:
     def source_id(self) -> str:
         return f"{self.provider}:{self.team}"
 
+    def resolve_legacy_slug(self, slug: str) -> WorkRecord | None:
+        """Resolve one hot or archived task slug for one-time tracker adoption."""
+
+        payload, error = self._read(
+            EngineCapability("tasks", ("search", self.team, slug, "--archived"))
+        )
+        if (
+            error is not None
+            or not isinstance(payload, list)
+            or self._degraded_evidence(payload) is not None
+        ):
+            raise ValueError(f"legacy slug lookup failed for {slug!r}")
+        matches = [
+            row
+            for row in payload
+            if isinstance(row, dict)
+            and str(row.get("id") or row.get("name") or "") == slug
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ValueError(f"legacy slug lookup is ambiguous for {slug!r}")
+        row = matches[0]
+        record = self._work_record(row, "tasks", str(row.get("status") or "unknown"))
+        if record is None:
+            raise ValueError(f"legacy slug lookup returned an invalid row for {slug!r}")
+        return record
+
+    def resolve_legacy_slugs(
+        self, slugs: Sequence[str]
+    ) -> dict[str, WorkRecord | None]:
+        """Resolve legacy slugs concurrently for the one-time adoption gate."""
+
+        ordered = tuple(dict.fromkeys(slugs))
+        if not ordered:
+            return {}
+        with ThreadPoolExecutor(max_workers=min(8, len(ordered))) as pool:
+            futures = {
+                slug: pool.submit(self.resolve_legacy_slug, slug) for slug in ordered
+            }
+            return {slug: futures[slug].result() for slug in ordered}
+
     def _capabilities(self) -> tuple[EngineCapability, ...]:
         return (
             EngineCapability("tasks", ("board", self.team)),
@@ -245,12 +287,32 @@ class EngineSourceAdapter:
                 return json.loads(stdout), None
             except json.JSONDecodeError:
                 # Some engine folds (notably `threads --json`) are JSONL, not
-                # one JSON document. Preserve ordered rows while still failing
-                # closed if any non-empty line is invalid JSON.
+                # one JSON document. Preserve every valid ordered row. Engine
+                # budget markers can also arrive as prose lines interleaved in
+                # stdout; retain the rows but degrade the capability loudly.
                 lines = [line for line in stdout.splitlines() if line.strip()]
                 if not lines:
                     raise
-                return [json.loads(line) for line in lines], None
+                values: list[Any] = []
+                degraded: list[str] = []
+                for line_number, line in enumerate(lines, 1):
+                    try:
+                        values.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        degraded.append(
+                            f"line {line_number}: {sanitize_text(line, limit=300)}"
+                        )
+                if not values:
+                    raise
+                payload: Any = values[0] if len(values) == 1 else values
+                diagnostic = None
+                if degraded:
+                    diagnostic = Diagnostic(
+                        capability.name,
+                        "source-line-degraded",
+                        sanitize_text("; ".join(degraded), limit=500),
+                    )
+                return payload, diagnostic
         except Exception as exc:
             # Source stderr can contain task text. Diagnostics stay useful but
             # redact payload-bearing exception strings by default.
@@ -317,7 +379,7 @@ class EngineSourceAdapter:
         for capability in self._capabilities():
             payload, error = self._read(capability)
             degraded_evidence = self._degraded_evidence(payload)
-            if error is not None or degraded_evidence:
+            if payload is None or degraded_evidence:
                 states[capability.name] = CapabilityState.DEGRADED
                 diagnostics.append(error or Diagnostic(
                     capability.name, "source-degraded",
@@ -337,7 +399,13 @@ class EngineSourceAdapter:
                             normalization_error = f"{path}: expected object, got {type(row).__name__}"
                             break
                         try:
-                            record = self._work_record(row, "tasks", str(lane))
+                            derived_lane = str(lane)
+                            if (
+                                derived_lane in {"proposed", "waiting"}
+                                and sanitize_text(row.get("assignee"), limit=200) == "@backlog"
+                            ):
+                                derived_lane = "backlog"
+                            record = self._work_record(row, "tasks", derived_lane)
                         except (TypeError, ValueError) as exc:
                             normalization_error = f"{path}: {type(exc).__name__}"
                             break
@@ -378,7 +446,10 @@ class EngineSourceAdapter:
             elif capability.name == "health":
                 normalization_error = f"$: expected object, got {type(payload).__name__}"
             elif isinstance(payload, list):
-                lane = "ask" if capability.name == "asks" else capability.name
+                lane = {
+                    "asks": "asks",
+                    "threads": "threads-missed",
+                }.get(capability.name, capability.name)
                 for index, row in enumerate(payload):
                     path = f"$[{index}]"
                     if not isinstance(row, dict):
@@ -396,13 +467,16 @@ class EngineSourceAdapter:
             else:
                 normalization_error = f"$: expected list, got {type(payload).__name__}"
             items.extend(normalized)
-            if normalization_error:
+            if normalization_error or error is not None:
                 states[capability.name] = CapabilityState.DEGRADED
-                diagnostics.append(Diagnostic(
-                    capability.name,
-                    "source-schema-degraded",
-                    sanitize_text(normalization_error, limit=500),
-                ))
+                if error is not None:
+                    diagnostics.append(error)
+                if normalization_error:
+                    diagnostics.append(Diagnostic(
+                        capability.name,
+                        "source-schema-degraded",
+                        sanitize_text(normalization_error, limit=500),
+                    ))
             else:
                 states[capability.name] = CapabilityState.COMPLETE
         complete = all(state is CapabilityState.COMPLETE for name, state in states.items()
