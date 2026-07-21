@@ -127,6 +127,109 @@ def test_directive_json_mode_one_object_per_line(capsys):
                    "owner": "alice", "title": "Title B"}
 
 
+@pytest.mark.parametrize("assignee", ["bob", "*"])
+def test_self_authored_directive_is_consumed_without_firing(assignee, capsys):
+    """A self-tell and the sender's own broadcast are inbox rows, but neither may
+    wake that sender.  Consuming the id keeps every later tick quiet."""
+    t = FakeTransport()
+    _put_directive(t, "self-echo", "My own send", owner="bob", assignee=assignee)
+    _reconcile(t)
+    state = _fresh_state()
+
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert events == []
+    assert capsys.readouterr().out == ""
+    assert state["inbox_ids"] == ["self-echo"]
+
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                              json_mode=False, verbose=False)
+    assert failures2 == {}
+    assert events2 == []
+    assert capsys.readouterr().out == ""
+
+
+def test_other_authored_broadcast_still_fires(capsys):
+    t = FakeTransport()
+    _put_directive(t, "broadcast-1", "All hands", owner="alice", assignee="*")
+    _reconcile(t)
+
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
+                                            json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert [e["slug"] for e in events] == ["broadcast-1"]
+    assert "DIRECTIVE broadcast-1 (from alice): All hands" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("send_argv", [
+    ["tell", TEAM, "bob", "Own tell", "--from", "bob"],
+    ["broadcast", TEAM, "Own broadcast", "--from", "bob"],
+])
+def test_cli_tell_and_broadcast_paths_do_not_echo_author_before_reconcile(send_argv, capsys):
+    t = FakeTransport()
+    assert cli.main(send_argv, transport=t) == 0
+    capsys.readouterr()  # delivery + reply breadcrumb are send-side output
+
+    # Exercise the live task-dir overlay: this is the send-to-listen window that
+    # used to wake the author before a reconcile could rebuild summaries.
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
+                                            json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert events == []
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("reconciled", [False, True])
+def test_visible_self_reminder_fires_once_in_overlay_and_summaries_windows(
+        reconciled, capsys):
+    t = FakeTransport()
+    _reconcile(t)  # establish the summaries anchor used by the freshness overlay
+    assert cli.main([
+        "remind", TEAM, "bob", "2026-07-10T00:15:00Z", "Self pickup",
+        "--from", "bob",
+    ], transport=t) == 0
+    capsys.readouterr()
+    if reconciled:
+        _reconcile(t)
+    state = _fresh_state()
+
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert [e["type"] for e in events] == ["directive"]
+    assert events[0]["owner"] == "bob"
+    assert "Self pickup" in capsys.readouterr().out
+
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
+                                              json_mode=False, verbose=False)
+    assert failures2 == {}
+    assert events2 == []
+    assert capsys.readouterr().out == ""
+
+
+def test_other_authored_visible_reminder_still_fires(capsys):
+    t = FakeTransport()
+    _reconcile(t)
+    assert cli.main([
+        "remind", TEAM, "bob", "2026-07-10T00:15:00Z", "Alice pickup",
+        "--from", "alice",
+    ], transport=t) == 0
+    capsys.readouterr()
+
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", _fresh_state(),
+                                            json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert [e["type"] for e in events] == ["directive"]
+    assert events[0]["owner"] == "alice"
+    assert "Alice pickup" in capsys.readouterr().out
+
+
 def test_id_diff_not_count_ack_plus_new_still_fires(capsys):
     """An ack removes A and a new B arrives — open count stays 1, but B is a NEW
     id and must fire (the id-diff-not-count lesson)."""
