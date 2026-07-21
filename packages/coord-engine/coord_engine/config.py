@@ -83,3 +83,21 @@ def env_int(
     except (TypeError, ValueError):
         return default
     return v if v > minimum else default
+
+
+def retention_days(default: float, *, override: Optional[object] = None) -> float:
+    """Retention is on by default, with an explicit ``0`` as the kill switch.
+
+    Unlike budgets, zero is meaningful here. Invalid/non-finite/negative values
+    fail safe to the enabled default rather than silently disabling cleanup.
+    """
+    raw = _resolve_raw(
+        "COORD_RETENTION_DAYS", override, ("FULCRA_COORD_RETENTION_DAYS",)
+    )
+    if raw is None:
+        return default
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value >= 0 else default

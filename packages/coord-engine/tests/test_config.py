@@ -154,13 +154,13 @@ def _archived(t) -> bool:
     return any("/task/archive/" in k for k in t.store)
 
 
-def test_retention_off_by_default(monkeypatch):
+def test_retention_on_by_default(monkeypatch):
     monkeypatch.delenv("COORD_RETENTION_DAYS", raising=False)
     monkeypatch.delenv("FULCRA_COORD_RETENTION_DAYS", raising=False)
     t = FakeTransport()
     t.put("team/r/task/olddone.md", _old_done_task())
     assert cli.main(["reconcile", "r"], transport=t) == 0
-    assert "team/r/task/olddone.md" in t.store and not _archived(t)
+    assert _archived(t)
 
 
 def test_retention_reads_canonical_env(monkeypatch):
@@ -202,12 +202,18 @@ def test_retention_flag_overrides_env(monkeypatch):
     assert _archived(t)
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf", "junk", "-5", "0"])
-def test_retention_bad_value_disables_cleanly(monkeypatch, bad):
-    """ENG-1-8: inf/NaN/unparseable now disable retention cleanly (default 0.0)
-    instead of running the sub-pass unbounded."""
+@pytest.mark.parametrize("bad", ["nan", "inf", "junk", "-5"])
+def test_retention_bad_value_falls_back_to_enabled_default(monkeypatch, bad):
     monkeypatch.setenv("COORD_RETENTION_DAYS", bad)
     monkeypatch.delenv("FULCRA_COORD_RETENTION_DAYS", raising=False)
+    t = FakeTransport()
+    t.put("team/r/task/olddone.md", _old_done_task())
+    cli.main(["reconcile", "r"], transport=t)
+    assert _archived(t)
+
+
+def test_retention_explicit_zero_disables(monkeypatch):
+    monkeypatch.setenv("COORD_RETENTION_DAYS", "0")
     t = FakeTransport()
     t.put("team/r/task/olddone.md", _old_done_task())
     cli.main(["reconcile", "r"], transport=t)

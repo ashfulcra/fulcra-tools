@@ -730,12 +730,13 @@ def _review_archive_months(transport: Any, team: str) -> Optional[list[str]]:
 
 
 def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
-    """Restore a cold-archived settled-single verdict to the hot review path."""
+    """Restore a cold-archived review family to the hot review path."""
     months = _review_archive_months(transport, args.team)
     if months is None:
         print("review restore failed: archive root listing unknown", file=sys.stderr)
         return 1
     for month in sorted(months, reverse=True):
+        cold_doc = f"{rec.review_archive_prefix(args.team)}{month}/{args.slug}.md"
         cold_prefix = (
             f"{rec.review_archive_prefix(args.team)}{month}/{args.slug}/verdicts/"
         )
@@ -749,8 +750,39 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
             str(e.get("name") or "") for e in entries
             if not e.get("is_dir") and str(e.get("name") or "").endswith(".md")
         ]
-        if not files:
+        archived_doc = transport.read(cold_doc)
+        if archived_doc is None and not files:
             continue
+        if archived_doc is not None:
+            hot_doc = _review_doc_path(args.team, args.slug)
+            if not rec._ensure_verified_copy(transport, cold_doc, hot_doc):
+                print(f"review restore failed: {args.slug} conflicts with the hot path",
+                      file=sys.stderr)
+                return 1
+            hot_prefix = _verdicts_prefix(args.team, args.slug)
+            copied, pairs = rec._copy_tree_verified(
+                transport, cold_prefix, hot_prefix)
+            if not copied:
+                print(f"review restore failed: verified family copy from reviews/{month}/ failed",
+                      file=sys.stderr)
+                return 1
+            if not hasattr(transport, "delete"):
+                print("review restore failed: transport cannot delete archived sources",
+                      file=sys.stderr)
+                return 1
+            deleted = [transport.delete(src) for src, _ in pairs]
+            deleted.append(transport.delete(cold_doc))
+            if not all(deleted):
+                print(f"review restore failed: archive cleanup from reviews/{month}/ failed",
+                      file=sys.stderr)
+                return 1
+            settled = rec._load_settled_index(transport, args.team)
+            settled.discard(args.slug)
+            transport.write(rec.settled_index_path(args.team), json.dumps({
+                "schema": "coord.settled-reviews.v1", "reviews": sorted(settled)
+            }, separators=(",", ":")))
+            print(f"restored review {args.slug} from reviews/{month}/")
+            return 0
         if files != ["codex-reviewer.md"]:
             print(f"review restore failed: unexpected archived verdict shape for {args.slug}",
                   file=sys.stderr)
@@ -1397,13 +1429,14 @@ def _pending_reviews_for(
     # budget that remains (its existing between-slug/mid-slug checks, against the
     # full fold deadline, then govern).
     classify_dl = dl.reserve(0.5)
+    settled_index = rec._load_settled_index(transport, team)
     doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
     dir_slugs = []
     for e in entries:
         if not e.get("is_dir"):
             continue
         oslug = (e.get("name") or "").rstrip("/")
-        if oslug and oslug not in doc_slugs:
+        if oslug and oslug not in doc_slugs and oslug not in settled_index:
             dir_slugs.append(oslug)
     for i, oslug in enumerate(dir_slugs):
         if classify_dl.expired():
@@ -2761,6 +2794,7 @@ def _listen_tick(transport: Any, team: str, agent: str,
     review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
     verdict_keys = set(state.get("verdict_keys") or [])
     settled_reviews = set(state.get("settled_reviews") or [])
+    settled_reviews.update(rec._load_settled_index(transport, team))
     review_prefix = f"team/{team}/review/"
     try:
         rentries = transport.list_dir(review_prefix)
@@ -2878,7 +2912,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
             if not e.get("is_dir"):
                 continue
             oslug = (e.get("name") or "").rstrip("/")
-            if not oslug or oslug in doc_names or oslug in orphan_slugs:
+            if (not oslug or oslug in doc_names or oslug in orphan_slugs
+                    or oslug in settled_reviews):
                 continue
             if classify_dl.expired():
                 _fail("verdicts", "dir classification budget spent — "
