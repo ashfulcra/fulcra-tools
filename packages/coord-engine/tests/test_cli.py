@@ -488,19 +488,6 @@ def test_cli_later_backlog_only_with_all(capsys):
         _dslug("Someday idea", assignee="@backlog")]
 
 
-def test_cli_handoff_atomic_single_write(capsys):
-    from coord_engine import okf
-    t = FakeTransport()
-    cli.main(["task", "start", "r", "H", "--status", "active"], transport=t)
-    writes = []
-    orig = t.write
-    t.write = lambda p, c: (writes.append(p), orig(p, c))[1]
-    assert cli.main(["handoff", "r", "h", "--to", "bob", "--checkpoint", "CHK-1", "-n", "resume"], transport=t) == 0
-    assert writes == ["team/r/task/h.md"]                    # ONE write: atomic
-    fm = okf.parse_frontmatter(t.store["team/r/task/h.md"])
-    assert fm["assignee"] == "bob" and fm["checkpoint_ref"] == "CHK-1"
-
-
 def test_cli_respond_closes_and_records(capsys):
     from coord_engine import okf
     t = FakeTransport()

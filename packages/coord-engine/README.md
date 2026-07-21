@@ -33,13 +33,13 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 |---|---|
 | Wake up / what needs me | `briefing` (THE entry fold) · `needs-me` · `inbox` · `digest` |
 | Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` |
-| Directives & messaging | `tell` · `broadcast` · `remind` · `respond` · `later` (backlog) · `intent` (spoken commitment) · `handoff` · `listen` (the engine-owned watcher) |
+| Directives & messaging | `tell` · `broadcast` · `remind` · `respond` · `later` (backlog) · `intent` (spoken commitment) · `listen` (the engine-owned watcher) |
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
 | Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
-| Fleet ops | `health` · `doctor` · `forge` · `migrate` · `annotate` |
+| Fleet ops | `health` · `doctor` · `forge` · `annotate` |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. The

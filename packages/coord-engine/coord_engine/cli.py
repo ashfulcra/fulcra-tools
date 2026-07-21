@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, okf, presence, query, review, roles, tasks
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -2398,23 +2398,6 @@ def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
                             payload=payload, assignee=principal, not_before=None)
 
 
-def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
-    """Atomic handoff: checkpoint ref + assignee land in ONE task write."""
-    path = _task_path(args.team, args.name)
-    try:
-        out = tasks.apply_update(
-            transport.read(path), now=_iso(_now()), assignee=args.to,
-            checkpoint_ref=args.checkpoint, next_action=args.next,
-        )
-    except tasks.TaskError as e:
-        print(f"handoff failed: {e}", file=sys.stderr)
-        return 1
-    transport.write(path, out)
-    print(f"handed off {args.name} -> {args.to}"
-          + (f" (checkpoint {args.checkpoint})" if args.checkpoint else ""))
-    return 0
-
-
 def _directed_inbox(transport: Any, team: str, agent: str,
                     rows: list[dict[str, Any]], *,
                     held_roles: "Optional[set[str]]" = None,
@@ -4001,30 +3984,6 @@ def cmd_forge_unwatch(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
-# --- migrate (incumbent fulcra-coord -> coord, docs 06 approach C) ---
-
-def cmd_migrate(args: argparse.Namespace, transport: Any) -> int:
-    res = migrate_mod.migrate(
-        transport, args.team, now=_iso(_now()), source=args.source,
-        dry_run=args.dry_run, mark=not args.no_mark,
-        include_terminal=args.include_terminal, limit=args.limit,
-    )
-    if args.dry_run:
-        print(f"DRY RUN — {len(res['planned'])} task(s) would migrate "
-              f"({res['skipped']} already migrated/skipped):")
-        for line in res["planned"]:
-            print(f"  {line}")
-    else:
-        print(f"migrated {res['migrated']} task(s) to team/{args.team} "
-              f"({res['skipped']} skipped as already-migrated, {res['marked']} marked on the incumbent)")
-    for err in res["errors"]:
-        print(f"  ERROR: {err}", file=sys.stderr)
-    if res["errors"]:
-        return 1
-    print("(run `coord-engine reconcile` on the team to index the migrated tasks)")
-    return 0
-
-
 # --- operator loop (fulcra-agent-operator): asks + answer ---
 
 def cmd_asks(args: argparse.Namespace, transport: Any) -> int:
@@ -4147,10 +4106,6 @@ def build_parser() -> argparse.ArgumentParser:
     it.add_argument("--from", dest="sender", help="capturing agent (records ownership)")
     it.add_argument("--priority", "-p", default="P2")
     it.set_defaults(func=cmd_intent)
-    ho = sub.add_parser("handoff", help="atomic handoff: assignee + checkpoint ref in one write")
-    ho.add_argument("team"); ho.add_argument("name"); ho.add_argument("--to", required=True)
-    ho.add_argument("--checkpoint"); ho.add_argument("--next", "-n")
-    ho.set_defaults(func=cmd_handoff)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
     ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
     ib.add_argument("--all", action="store_true",
@@ -4300,16 +4255,6 @@ def build_parser() -> argparse.ArgumentParser:
     fgu = fgsub.add_parser("unwatch", help="remove a PR watch registration")
     fgu.add_argument("team"); fgu.add_argument("pr_url")
     fgu.set_defaults(func=cmd_forge_unwatch)
-
-    mg = sub.add_parser("migrate", help="one-shot exporter: incumbent fulcra-coord tasks -> this team (docs 06)")
-    mg.add_argument("team")
-    mg.add_argument("--source", default="/coordination")
-    mg.add_argument("--dry-run", action="store_true")
-    mg.add_argument("--no-mark", dest="no_mark", action="store_true",
-                    help="rehearsal: don't tag incumbent tasks migrated:coord")
-    mg.add_argument("--include-terminal", action="store_true")
-    mg.add_argument("--limit", type=int)
-    mg.set_defaults(func=cmd_migrate)
 
     rp = sub.add_parser("respond", help="answer + close a directive with an outcome")
     rp.add_argument("team"); rp.add_argument("name"); rp.add_argument("--outcome", "-o", required=True)

@@ -42,7 +42,6 @@ broadcast <team> <title> …                        # assignee '*' — reaches e
 remind    <team> <assignee> <when> <title> …      # hidden until WHEN (ISO or 5d/36h/10m)
 later     <team> <title> …                        # backlog (@backlog; inbox --all surfaces it)
 intent    <team> "<text>" --for ash [--by <when>]  # capture a spoken commitment (intent:ash item)
-handoff   <team> <task> --to <agent> [--checkpoint REF] [-n next]   # ATOMIC: one write
 inbox     <team> [--agent X] [--json]             # actionable directives for X
 inbox     <team> --agent X --all [--json]          # full directed history
 inbox     <team> --agent X --ack <slug>           # ack: hides it for X, stops re-notify
