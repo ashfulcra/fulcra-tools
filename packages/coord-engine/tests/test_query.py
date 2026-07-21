@@ -2,12 +2,12 @@ from coord_engine import query
 
 
 def _r(id, status="active", assignee=None, blocked_on=None, not_before=None,
-       title=None, desc="", tags=None, priority="P2", ts=None):
+       title=None, desc="", tags=None, priority="P2", ts=None, acked_by=None):
     return {
         "id": id, "name": id, "title": title or id, "description": desc,
         "status": status, "assignee": assignee, "blocked_on": blocked_on,
         "not_before": not_before, "tags": tags or [], "priority": priority,
-        "timestamp": ts,
+        "timestamp": ts, "acked_by": acked_by or [],
     }
 
 
@@ -43,6 +43,23 @@ def test_needs_me_by_blocked_on():
 def test_needs_me_excludes_terminal():
     rows = [_r("a", status="done", assignee="me")]
     assert query.needs_me(rows, "me") == []
+
+
+def test_needs_me_hides_satisfied_directive_but_all_restores_history():
+    row = _r("done-for-me", assignee="me", tags=["kind:directive"],
+             acked_by=["me"])
+    assert query.needs_me([row], "me") == []
+    assert query.needs_me([row], "me", include_history=True) == [row]
+
+
+def test_needs_me_all_includes_closed_and_future_history():
+    rows = [
+        _r("closed", status="done", assignee="me"),
+        _r("future", assignee="me", not_before="2026-08-01T00:00:00Z"),
+    ]
+    got = query.needs_me(rows, "me", now="2026-07-01T00:00:00Z",
+                         include_history=True)
+    assert {r["id"] for r in got} == {"closed", "future"}
 
 
 def test_needs_me_not_before_gate():

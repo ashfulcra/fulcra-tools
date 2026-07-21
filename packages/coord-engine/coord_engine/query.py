@@ -31,10 +31,13 @@ def board(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
 def needs_me(
     rows: list[dict[str, Any]], agent: str, *, now: Optional[str] = None,
     held_roles: "Optional[set[str] | list[str]]" = None,
+    include_history: bool = False,
 ) -> list[dict[str, Any]]:
     """Open rows assigned to ``agent``, assigned to a ROLE ``agent`` holds
     (``held_roles``), or naming it in ``blocked_on``, gated on ``not_before`` (an
-    item scheduled for the future is hidden until ``now``).
+    item scheduled for the future is hidden until ``now``). A directive already
+    acknowledged by ``agent`` is satisfied and absent from the default view.
+    ``include_history`` bypasses lifecycle, acknowledgement, and schedule gates.
 
     ``now`` is an ISO-8601 string; ISO sorts lexically so string compare is a
     valid time compare. If ``now`` is None the gate is skipped.
@@ -47,15 +50,19 @@ def needs_me(
     roles = set(held_roles or ())
     out: list[dict[str, Any]] = []
     for r in rows:
-        if r.get("status") not in OPEN_STATUSES:
+        if not include_history and r.get("status") not in OPEN_STATUSES:
             continue
         assignee = r.get("assignee")
         blocked_on = r.get("blocked_on") or ""
         if (assignee != agent and assignee not in roles
                 and agent not in str(blocked_on)):
             continue
+        tags = set(str(t) for t in (r.get("tags") or []))
+        if (not include_history and "kind:directive" in tags
+                and agent in (r.get("acked_by") or [])):
+            continue
         nb = r.get("not_before")
-        if nb and now is not None and str(nb) > now:
+        if not include_history and nb and now is not None and str(nb) > now:
             continue  # scheduled for the future
         out.append(r)
     return sort_rows(out)

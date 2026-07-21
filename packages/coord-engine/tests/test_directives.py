@@ -59,6 +59,17 @@ def test_inbox_wildcard_ack_hides_per_agent():
     assert [r["name"] for r in directives.inbox(rows, {"all": ["amy"]}, "bob", now=NOW)] == ["all"]
 
 
+def test_inbox_all_includes_acknowledged_closed_and_future_history():
+    rows = [
+        _r("acked", assignee="amy"),
+        _r("closed", status="done", assignee="amy"),
+        _r("future", assignee="amy", not_before="2026-08-01T00:00:00Z"),
+    ]
+    got = directives.inbox(rows, {"acked": ["amy"]}, "amy", now=NOW,
+                           include_history=True)
+    assert {r["name"] for r in got} == {"acked", "closed", "future"}
+
+
 def test_inbox_not_before_gate_and_backlog():
     rows = [
         _r("later", assignee="amy", not_before="2026-08-01T00:00:00Z"),

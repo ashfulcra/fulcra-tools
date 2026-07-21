@@ -29,7 +29,8 @@ safe:
 | Inbox clear for me? | `coord-engine inbox <team> -a <id>` | the header line ends `0 item(s)` (the fold found nothing open + unacked for you) — NON-mutating read | **Work your inbox** — the header names a non-zero count and each following line is an open directive; act on / ack it (`inbox <team> --agent <id> --ack <slug>`) via [Verbs](#verbs) before directing new work |
 
 Inbox clear → nothing is assigned to you and unacked; proceed to `tell` / `broadcast` / `remind` others,
-or capture backlog with `later`. (Add `--all` to also surface `@backlog` items in the count.)
+or capture backlog with `later`. Add `--all` only for audit/debugging: it restores
+acknowledged, closed, future, and `@backlog` history.
 
 ## Verbs
 
@@ -42,7 +43,8 @@ remind    <team> <assignee> <when> <title> …      # hidden until WHEN (ISO or 
 later     <team> <title> …                        # backlog (@backlog; inbox --all surfaces it)
 intent    <team> "<text>" --for ash [--by <when>]  # capture a spoken commitment (intent:ash item)
 handoff   <team> <task> --to <agent> [--checkpoint REF] [-n next]   # ATOMIC: one write
-inbox     <team> [--agent X] [--json]             # open directives for X, minus X's acks
+inbox     <team> [--agent X] [--json]             # actionable directives for X
+inbox     <team> --agent X --all [--json]          # full directed history
 inbox     <team> --agent X --ack <slug>           # ack: hides it for X, stops re-notify
 respond   <team> <slug> --outcome TEXT [-e evidence]   # record a response + close the loop
 threads   <team> --for <principal> [--json]       # FOLD: dropped work-in-progress for a principal
@@ -55,7 +57,9 @@ Flags, modes, windows, and the `threads-degraded` row: see the [CLI reference](r
 ## How the deterministic parts work
 - **Inbox fold** (engine): open tasks assigned to you or `*`, minus your acks
   (`_coord/acks/<slug>/<agent-key>.md`, one file per agent — collision-safe key), gated on `not_before`,
-  priority-sorted. Served O(1) from the reconcile aggregate (`acked_by` is folded in at reconcile time;
+  priority-sorted. `needs-me` and `briefing` apply the same satisfaction rule,
+  so an acknowledged directive cannot linger in one queue after leaving another.
+  Served O(1) from the reconcile aggregate (`acked_by` is folded in at reconcile time;
   freshness is bounded by the reconcile cadence).
 - **Broadcast completion**: with `fulcra-agent-presence` installed, a `*` directive is complete when every
   non-stale roster agent has acked. Without presence, acking still hides per-agent (documented degradation).
