@@ -616,6 +616,11 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
 - Config dir `~/.config/fulcra-collect/`: `control.sock` (the UDS the menu-bar
   + CLI use), `web-url` (default `http://127.0.0.1:9292`), `web-token` (Bearer
   for the web API).
+- Plugin authors needing independent durable cursors/state use RunContext's
+  `kv_get` / `kv_set` / `kv_update` / `kv_delete` API. It is isolated by
+  plugin ID and backed by `state.db`; values must be JSON (64 KiB maximum,
+  256 UTF-8-byte keys). Use `kv_update` only for quick, side-effect-free atomic
+  transforms because it holds SQLite's writer lock while the callback runs.
 
 ### launchd PATH gotcha
 

@@ -173,6 +173,12 @@ every invocation and passes it in; the plugin reaches for its config,
 credentials, state, and the Fulcra def-resolver through the context
 rather than touching the filesystem or keychain directly.
 
+Long-lived plugins store independent cursors and per-entity state through
+`ctx.kv_get`, `ctx.kv_set`, `ctx.kv_update`, and `ctx.kv_delete`. Values are
+plugin-isolated JSON (64 KiB per value; 256 UTF-8 bytes per key) in `state.db`.
+Use `kv_update` for a quick, side-effect-free atomic read/modify/write when
+multiple worker processes may touch the same key.
+
 `packages/dayone/` is the smallest reference plugin —
 `fulcra_dayone/collect_plugin.py` defines its `PLUGIN` object in
 about 150 lines and exercises every part of the contract worth
@@ -229,7 +235,7 @@ Everything lives under `~/.config/fulcra-collect/` (override via
 | Path | Purpose |
 |---|---|
 | `config.toml`                  | Per-plugin enabled flag + interval overrides + `[daemon] web_port`. |
-| `state.db`                     | SQLite (WAL mode) — single source of truth for per-plugin run state. Schema migrations live in `db.py`; current version is 2. |
+| `state.db`                     | SQLite (WAL mode) — single source of truth for per-plugin run state and plugin-scoped JSON/KV. Schema migrations live in `db.py`; current version is 6. |
 | `control.sock`                 | Unix-domain socket the CLI talks to. |
 | `web-token`                    | Random bearer token (0600) seeded on first boot, mounted into the web UI as a cookie. |
 | `web-url`                      | The currently-bound web URL — read by the menubar and ad-hoc tools. |

@@ -59,6 +59,46 @@ def test_worker_carries_definition_id_on_error_path(collect_home: Path):
     assert events[-1]["definition_id"] == "def-partial"
 
 
+def test_worker_wires_persistent_plugin_kv_with_plugin_isolation(
+    collect_home: Path,
+):
+    seen: list[object] = []
+
+    def first_run(ctx: RunContext) -> None:
+        assert ctx.kv_get("counter", 0) == 0
+        assert ctx.kv_update(
+            "counter", lambda current: current + 1, default=0,
+        ) == 1
+        ctx.kv_set("checkpoint", {"page": 4})
+
+    first = Plugin(
+        id="service-a", name="Service A", kind="service",
+        collect_mode="live_continuous", run=first_run,
+    )
+    assert _run_capturing(first, collect_home)[-1]["outcome"] == "done"
+
+    def restarted(ctx: RunContext) -> None:
+        seen.append(ctx.kv_get("counter"))
+        seen.append(ctx.kv_get("checkpoint"))
+        seen.append(ctx.kv_delete("checkpoint"))
+
+    second = Plugin(
+        id="service-a", name="Service A", kind="service",
+        collect_mode="live_continuous", run=restarted,
+    )
+    assert _run_capturing(second, collect_home)[-1]["outcome"] == "done"
+    assert seen == [1, {"page": 4}, True]
+
+    isolated: list[object] = []
+    other = Plugin(
+        id="service-b", name="Service B", kind="service",
+        collect_mode="live_continuous",
+        run=lambda ctx: isolated.append(ctx.kv_get("counter", "missing")),
+    )
+    assert _run_capturing(other, collect_home)[-1]["outcome"] == "done"
+    assert isolated == ["missing"]
+
+
 def test_worker_forwards_progress_events(collect_home: Path):
     def run(ctx):
         ctx.progress(done=1, total=3)

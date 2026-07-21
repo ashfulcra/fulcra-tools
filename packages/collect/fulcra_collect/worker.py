@@ -61,6 +61,24 @@ def _unclaim_dedup_keys(keys: set[str]) -> None:
         )
 
 
+def _plugin_kv_get(plugin_id: str, key: str, default: object) -> object:
+    return db.get_plugin_kv(db.open(), plugin_id, key, default)
+
+
+def _plugin_kv_set(plugin_id: str, key: str, value: object) -> None:
+    db.set_plugin_kv(db.open(), plugin_id, key, value)
+
+
+def _plugin_kv_update(plugin_id: str, key: str, update, default: object) -> object:
+    return db.update_plugin_kv(
+        db.open(), plugin_id, key, update, default=default,
+    )
+
+
+def _plugin_kv_delete(plugin_id: str, key: str) -> bool:
+    return db.delete_plugin_kv(db.open(), plugin_id, key)
+
+
 class _FulcraDefinitionAdapter:
     """Thin adapter over BaseFulcraClient exposing the interface expected by
     ``fulcra_common.definitions.resolve_definition_id``:
@@ -197,6 +215,19 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         _fulcra_client_factory=_make_fulcra_definition_client,
         _claim_dedup_keys=_claim_dedup_keys,
         _unclaim_dedup_keys=_unclaim_dedup_keys,
+        # Generic plugin-scoped persistent state.  Binding plugin.id here is
+        # the isolation boundary: plugin code supplies only a key and can
+        # never address another plugin's namespace.
+        _plugin_kv_get=lambda key, default: _plugin_kv_get(
+            plugin.id, key, default,
+        ),
+        _plugin_kv_set=lambda key, value: _plugin_kv_set(
+            plugin.id, key, value,
+        ),
+        _plugin_kv_update=lambda key, update, default: _plugin_kv_update(
+            plugin.id, key, update, default,
+        ),
+        _plugin_kv_delete=lambda key: _plugin_kv_delete(plugin.id, key),
         # Keychain write-back: lets a plugin persist rotated secrets (e.g.
         # Trakt's single-use OAuth refresh tokens) without importing
         # fulcra_collect.credentials itself. Routes by the credential's

@@ -344,6 +344,23 @@ class RunContext:
     of importing fulcra_collect.credentials directly (same inversion as
     ``_claim_dedup_keys``). ``None`` in contexts that never write secrets
     (health checks, permission checks, standalone CLI)."""
+    _plugin_kv_get: Callable[[str, object], object] | None = field(
+        default=None, repr=False,
+    )
+    _plugin_kv_set: Callable[[str, object], None] | None = field(
+        default=None, repr=False,
+    )
+    _plugin_kv_update: Callable[
+        [str, Callable[[object], object], object], object
+    ] | None = field(default=None, repr=False)
+    _plugin_kv_delete: Callable[[str], bool] | None = field(
+        default=None, repr=False,
+    )
+    """Persistent JSON/KV state seams.  The worker binds these callables to
+    this context's ``plugin_id``; plugin code can never select another
+    plugin's namespace.  They are intentionally absent on lightweight
+    health/permission contexts, where attempting durable state access fails
+    loudly rather than pretending a write persisted."""
 
     def claim_dedup_keys(self, keys: set[str]) -> bool:
         """Atomically claim a set of dedup keys for one event, returning
@@ -395,6 +412,47 @@ class RunContext:
         if self._unclaim_dedup_keys is None:
             return
         self._unclaim_dedup_keys(set(keys))
+
+    def kv_get(self, key: str, default: object = None) -> object:
+        """Read a JSON value from this plugin's durable namespace.
+
+        Keys are limited to 256 UTF-8 bytes and values to 64 KiB of compact
+        JSON.  Only JSON-native types are accepted.  See ``kv_update`` for an
+        atomic read-modify-write operation.
+        """
+        if self._plugin_kv_get is None:
+            raise RuntimeError("plugin KV backend unavailable on this RunContext")
+        return self._plugin_kv_get(key, default)
+
+    def kv_set(self, key: str, value: object) -> None:
+        """Atomically create or replace one durable JSON value."""
+        if self._plugin_kv_set is None:
+            raise RuntimeError("plugin KV backend unavailable on this RunContext")
+        self._plugin_kv_set(key, value)
+
+    def kv_update(
+        self,
+        key: str,
+        update: Callable[[object], object],
+        *,
+        default: object = None,
+    ) -> object:
+        """Atomically transform one durable JSON value and return the result.
+
+        Concurrent worker processes are serialised before the read, preventing
+        lost updates.  ``update`` runs while the database write lock is held,
+        so it must be quick and side-effect free.  Exceptions and invalid or
+        oversized results leave the previous value unchanged.
+        """
+        if self._plugin_kv_update is None:
+            raise RuntimeError("plugin KV backend unavailable on this RunContext")
+        return self._plugin_kv_update(key, update, default)
+
+    def kv_delete(self, key: str) -> bool:
+        """Atomically delete one durable key; return whether it existed."""
+        if self._plugin_kv_delete is None:
+            raise RuntimeError("plugin KV backend unavailable on this RunContext")
+        return self._plugin_kv_delete(key)
 
     def progress(self, **fields: object) -> None:
         """Report structured progress back to the hub core."""
