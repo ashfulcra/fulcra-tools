@@ -312,6 +312,15 @@ it (not on PyPI).
     work at the head (free where the data is already loaded; a dedicated budget where it is not), proves
     the head completes under a spent shared budget on a live-shaped fixture, and gives "head could not
     complete" a marker distinct from "tail truncated."**
+  - **Every marker must RENDER, not just exist: `briefing` and `needs-me` type-dispatch every review row
+    type they can receive (`review-pending`, `review-orphan(-degraded)`, `review-role-degraded`,
+    `review-fold-degraded`, `review-head-degraded`) through ONE shared helper (`_review_row_line`), so an
+    identical row type can never diverge between the two verbs.** An unknown/typeless row must NEVER reach
+    the generic task line (`_line`), whose `priority`/`status`/`title` lookups print `[ ?] ? None` on a
+    marker shape; a degraded/UNKNOWN marker (head or tail) is always shown and NEVER counted as a pending
+    item. **Ship-gate: a new review row type is added to the shared dispatch with a red-first test that the
+    text output shows its real line (never `[ ?]`/`None`) in BOTH verbs, and that a UNKNOWN marker is not
+    tallied as a pending item.**
 - **Role routing is the same contract, one layer in — a role you hold is an address.** A directive
   assigned to a ROLE is directed at whoever holds a fresh lease on it, so `briefing`, `inbox`,
   `needs-me`, and `listen` all fold role-routed work into the holder's queue (that is what makes

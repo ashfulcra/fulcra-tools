@@ -466,24 +466,11 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                       f"(not empty), retry")
             elif r.get("type") == _ROLE_DEGRADED:
                 print(_role_degraded_line(r))
-            elif r.get("type") == "review-pending":
-                print(f"  [REVIEW] pending verdict: {r['name']} "
-                      f"(required: {', '.join(r['pending_required'])})")
-            elif r.get("type") == "review-fold-degraded":
-                print(_review_degraded_line(r))
-            elif r.get("type") == "review-orphan":
-                print(f"  [REVIEW] orphan review dir (verdicts, no doc): "
-                      f"{r['name']} — needs maintainer repair")
-            elif r.get("type") == "review-orphan-degraded":
-                if r.get("unclassified"):
-                    print(f"  [REVIEW] dir classification degraded: "
-                          f"{r['unclassified']} dir(s) unclassified before budget — retry")
-                else:
-                    print(f"  [REVIEW] orphan dir classification degraded: "
-                          f"{r['name']} — verdicts listing unreadable, retry")
-            elif r.get("type") == "review-role-degraded":
-                print(f"  review role resolution degraded: "
-                      f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
+            elif (review_line := _review_row_line(r)) is not None:
+                # Every review row type (pending / orphan / the degraded + head
+                # UNKNOWN markers) dispatches here — a review row must NEVER reach
+                # the generic task line below, which would print `[ ?] ? None`.
+                print(review_line)
             elif r.get("type") == "forge-feedback":
                 print(_forge_feedback_line(r))
             elif r.get("type") == "forge-degraded":
@@ -1652,6 +1639,47 @@ def _review_degraded_line(r: dict[str, Any]) -> str:
     return budget_mod.fold_degraded_line(
         r, label="review", remedy="run per-slug review status for the rest",
         noun="slug")
+
+
+def _review_head_degraded_line(r: dict[str, Any]) -> str:
+    """The caller's OWN review queue could not complete before budget — incident-
+    grade UNKNOWN, deliberately DISTINCT from ``_review_degraded_line`` (an expected
+    TAIL truncation). Never silent, never counted as a pending item."""
+    line = (f"  review HEAD degraded: caller's own reviews scanned "
+            f"{r.get('scanned')}/{r.get('total')} before budget — UNKNOWN, retry")
+    if r.get("skipped"):
+        line += f" ({r['skipped']} slug(s) skipped on transport error)"
+    return line
+
+
+def _review_row_line(r: dict[str, Any]) -> Optional[str]:
+    """The ONE text-dispatch for every review row type ``briefing`` / ``needs-me``
+    can receive. Both verbs render review rows through this, so an identical row
+    type can never diverge between them, and — critically — a review row can never
+    fall through to the generic task line (``_line``), whose ``priority`` /
+    ``status`` / ``title`` lookups print ``[ ?] ? None`` on these shapes. Returns
+    ``None`` for a non-review row so the caller falls back to its own default."""
+    t = r.get("type")
+    if t == "review-pending":
+        return (f"  [REVIEW] pending verdict: {r['name']} "
+                f"(required: {', '.join(r['pending_required'])})")
+    if t == "review-fold-degraded":
+        return _review_degraded_line(r)
+    if t == "review-head-degraded":
+        return _review_head_degraded_line(r)
+    if t == "review-orphan":
+        return (f"  [REVIEW] orphan review dir (verdicts, no doc): "
+                f"{r['name']} — needs maintainer repair")
+    if t == "review-orphan-degraded":
+        if r.get("unclassified"):
+            return (f"  [REVIEW] dir classification degraded: "
+                    f"{r['unclassified']} dir(s) unclassified before budget — retry")
+        return (f"  [REVIEW] orphan dir classification degraded: "
+                f"{r['name']} — verdicts listing unreadable, retry")
+    if t == "review-role-degraded":
+        return (f"  review role resolution degraded: "
+                f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
+    return None
 
 
 def _forge_responsible(
@@ -3449,15 +3477,21 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         # qualifies. Without it, an unresolved role renders as a clean queue that
         # reads "no role work", which is the bug this whole change closes.
         print(_role_degraded_line(out["role_degraded"]))
+    # The degraded / UNKNOWN markers are ALWAYS shown and NEVER counted as pending
+    # items: `review-fold-degraded` (expected tail truncation) and, incident-grade,
+    # `review-head-degraded` (the caller's OWN review queue could not complete). A
+    # head marker counted as a pending item — or rendered through `_line` — would be
+    # the very defect this closes, so it is split out and dispatched, not tallied.
+    _review_degraded_markers = ("review-fold-degraded", "review-head-degraded")
     pend_rows = [r for r in out["pending_reviews"]
-                 if r.get("type") != "review-fold-degraded"]
+                 if r.get("type") not in _review_degraded_markers]
     degraded_rows = [r for r in out["pending_reviews"]
-                     if r.get("type") == "review-fold-degraded"]
+                     if r.get("type") in _review_degraded_markers]
     print(f"  pending reviews: {len(pend_rows)} item(s)")
     for r in pend_rows[:5]:
-        print(_line(r))
-    for r in degraded_rows:  # always shown — a degraded fold must never hide
-        print(_review_degraded_line(r))
+        print(_review_row_line(r) or _line(r))
+    for r in degraded_rows:  # always shown — a degraded/UNKNOWN fold must never hide
+        print(_review_row_line(r) or _line(r))
     forge_rows = out.get("forge_feedback") or []
     forge_fb = [r for r in forge_rows if r.get("type") != "forge-degraded"]
     forge_deg = [r for r in forge_rows if r.get("type") == "forge-degraded"]
