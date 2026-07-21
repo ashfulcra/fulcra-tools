@@ -370,21 +370,27 @@ class LinearTrackerAdapter:
         Unknowns and collisions fail the entire migration before mutation.
         """
 
-        candidates: dict[str, Any] = {}
+        grouped: dict[str, list[Any]] = {}
         for item in snapshot.items:
-            slug = item.source.item_id
-            prior = candidates.get(slug)
-            if prior is None:
-                candidates[slug] = item
+            grouped.setdefault(item.source.item_id, []).append(item)
+        candidates: dict[str, Any] = {}
+        for slug, rows in grouped.items():
+            if len(rows) == 1:
+                candidates[slug] = rows[0]
                 continue
-            capabilities = {prior.capability, item.capability}
-            if capabilities == {"tasks", "threads"}:
-                # ``threads`` is a derived observation of a task, not a second
-                # source identity.  Adoption must use the canonical task row so
-                # its durable namespace/capability is written to the ledger.
-                # Keep every other collision fail-closed.
-                if item.capability == "tasks":
-                    candidates[slug] = item
+            # ``threads`` and ``asks`` are derived observations of a task, not
+            # second source identities (a directive surfaces in the asks lane
+            # while its canonical row lives in tasks — live-hit on the first
+            # fulcra cutover, 2026-07-21). Adoption must use the canonical task
+            # row so its durable namespace/capability is written to the ledger.
+            # Grouping before resolution keeps this order-independent for
+            # three-way collisions. Fail-closed stays for: derived-only
+            # collisions (no canonical task row), duplicate task rows, and any
+            # unknown capability.
+            capabilities = {row.capability for row in rows}
+            canonical = [row for row in rows if row.capability == "tasks"]
+            if len(canonical) == 1 and capabilities <= {"tasks", "threads", "asks"}:
+                candidates[slug] = canonical[0]
                 continue
             raise LinearError(f"legacy footer slug {slug!r} matches multiple source rows")
 
