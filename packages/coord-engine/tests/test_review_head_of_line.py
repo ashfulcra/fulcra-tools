@@ -339,3 +339,27 @@ def test_head_degraded_line_no_before_budget_for_nonbudget_cause(capsys):
          "missing": ["pr-ghost"]})
     assert "before budget" not in line, line
     assert "UNKNOWN" in line and "pr-ghost" in line, line
+
+
+def test_head_budget_cut_line_is_not_labeled_transport_error(capsys, monkeypatch):
+    # ROUND-4 DEFECT: a budget-ONLY head stop must not be rendered as a transport
+    # error. The slug that HIT the budget was counted in `skipped`, so the line read
+    # "(budget cut; 1 slug(s) skipped on transport error)" — blaming a transport
+    # failure that never happened. A pure budget cut carries budget_cut only,
+    # skipped == 0, and the line names exactly one cause.
+    t = ReviewClock()
+    _put_pending_review(t, "pr-mine-a", "alice")
+    _put_pending_review(t, "pr-mine-b", "alice")
+    rows = [_directive_row("pr-mine-a", "alice"), _directive_row("pr-mine-b", "alice")]
+    capsys.readouterr()
+    t.reads.clear()
+    t.cost = 1.0
+    _pin(monkeypatch, t)
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows, deadline_seconds=1.5)
+    head = [r for r in out if r.get("type") == "review-head-degraded"]
+    assert len(head) == 1, out
+    assert head[0].get("budget_cut") is True, head[0]
+    assert head[0].get("skipped", 0) == 0, f"budget stop is not a transport skip: {head[0]}"
+    line = cli._review_head_degraded_line(head[0])
+    assert "budget cut" in line, line
+    assert "transport error" not in line, line

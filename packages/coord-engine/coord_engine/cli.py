@@ -1590,15 +1590,19 @@ def _pending_reviews_for(
                 break
             outcome = _scan_one(e, head_dl)
             head_scanned += 1
-            if outcome != "ok":
-                head_skipped += 1
             if outcome == "budget":
+                # The slug that HIT the budget is a budget cut, NOT a transport
+                # skip — it must not be counted in head_skipped, or the line
+                # would blame the budget stop on a transport error that did not
+                # happen. The budget_cut flag alone carries this cause.
                 head_cut = True
                 break
             if outcome == "unknown":
                 # An unreadable doc / per-slug TransportError: this head slug is
-                # UNKNOWN. Keep scanning the rest of the head (a sibling may still be
-                # a live pending we can surface), but the head owes its loud marker.
+                # UNKNOWN. It IS a transport skip. Keep scanning the rest of the
+                # head (a sibling may still be a live pending we can surface), but
+                # the head owes its loud marker.
+                head_skipped += 1
                 head_unknown = True
         if head_cut or head_unknown:
             # The caller's OWN head could not fully resolve: UNKNOWN, and DISTINCT
