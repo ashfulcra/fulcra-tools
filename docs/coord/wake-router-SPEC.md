@@ -121,8 +121,10 @@ No decision remains open on this leg.
   Any adapter that would need to violate this surfaces to Ash instead.
 - **Zero model tokens in the router:** watcher, policy evaluation, TTL parking, and wake fan-out
   are pure host-side code. Model tokens are spent only by the *woken* agent on real work.
-- **Fail-closed secrets:** adapter credentials and the (future) installation token live in host
-  keychain / environment config — never in team paths (durable-state doctrine).
+- **Fail-closed secrets:** adapter credentials and the external-identity credential — in this
+  build, the FulcraBot fine-grained PAT (Part C) — live in host keychain / environment config,
+  never in team paths (durable-state doctrine). (An upstream-adopted App would manage its own
+  installation token on the upstream side; that credential never enters this build.)
 - **ATC fence:** no changes to usage/headroom/route/atc/dash or `fulcra-agent-atc`.
 - **Store remains the bus; the router owns exactly one namespace.** The router *reads* the shards
   agents write, and *writes only* under `team/<team>/_coord/router/` — durable state it exclusively
