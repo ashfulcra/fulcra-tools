@@ -248,7 +248,7 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
 
 - [`AGENTS.md`](../../AGENTS.md) — the working conventions: review handshake, delivery
   rule, backlog, ATC routing.
-- [`skills/`](../../skills) — the twelve `fulcra-agent-*` skills, each with re-entrancy
+- [`skills/`](../../skills) — the thirteen `fulcra-agent-*` skills, each with re-entrancy
   probes telling a waking agent exactly where to enter.
 - [`docs/coord/pitch/`](pitch) — the one-pager and demo script, if you're evaluating
   whether to adopt this at all.

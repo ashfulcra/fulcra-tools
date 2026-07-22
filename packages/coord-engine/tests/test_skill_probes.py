@@ -26,7 +26,7 @@ PROBE_SKILLS = ("fulcra-agent-presence", "fulcra-agent-roles", "fulcra-agent-tas
                 "fulcra-agent-automation", "fulcra-agent-continuity",
                 "fulcra-agent-review", "fulcra-agent-directives",
                 "fulcra-agent-reconcile", "fulcra-agent-forge", "fulcra-agent-operator",
-                "fulcra-agent-atc")
+                "fulcra-agent-atc", "fulcra-agent-durable-state")
 
 PROBE_HEADING = "## Where to start — the re-entrancy probes"
 
@@ -115,3 +115,21 @@ def test_every_probe_verb_is_a_real_cli_verb():
             f"{name}/SKILL.md probe section invokes coord-engine verb(s) that do "
             f"not exist in cli.py: {sorted(unknown)}"
         )
+
+
+def test_durable_state_probes_are_fulcra_api_based():
+    """durable-state is the one probe table with no engine dependency: its
+    probes run on ``fulcra-api`` directly. Pin the tool name and the two
+    load-bearing subcommand spellings, so a rename to a coord-engine stash
+    verb (planned) forces this test — and the SKILL prose — to move together."""
+    section = _probe_section(_skill_text("fulcra-agent-durable-state"))
+    assert "fulcra-api auth print-access-token" in section, (
+        "durable-state auth probe must use `fulcra-api auth print-access-token`"
+    )
+    assert "fulcra-api file list" in section, (
+        "durable-state stash probe must use `fulcra-api file list`"
+    )
+    assert "coord-engine" not in section, (
+        "durable-state probes gained a coord-engine dependency — if the stash "
+        "verb landed, update the SKILL probe table and this pin together"
+    )
