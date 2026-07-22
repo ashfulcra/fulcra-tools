@@ -94,10 +94,15 @@ Four walls, in the order you'll hit them:
    in play. Fallback that worked live (2026-07-22, a cloud join): vendor by
    download + `PYTHONPATH`, no install step required.
    ```bash
-   # fulcra-api: download wheels, unpack to a target dir, run via PYTHONPATH
-   python3 -m pip download fulcra-api -d /tmp/wheels          # download-only usually passes
-   python3 -m pip install --no-index --find-links /tmp/wheels --target "$HOME/.vendor" fulcra-api
-   export PYTHONPATH="$HOME/.vendor:$PYTHONPATH"              # `python3 -m fulcra_api …`
+   # fulcra-api: download wheels (deps included), unpack with stdlib zipfile —
+   # a wheel IS a zip — and run via PYTHONPATH. No install verb anywhere.
+   python3 -m pip download fulcra-api -d /tmp/wheels --only-binary :all:
+   mkdir -p "$HOME/.vendor"
+   for w in /tmp/wheels/*.whl; do python3 -m zipfile -e "$w" "$HOME/.vendor/"; done
+   export PYTHONPATH="$HOME/.vendor:$PYTHONPATH"
+   alias fulcra-api='python3 -c "from fulcra_api.cli import cli; cli()"'
+   # (NOT `python3 -m fulcra_api` — the package ships no __main__; its console
+   #  entry points target fulcra_api.cli:cli. Whole recipe validated 2026-07-22.)
 
    # coord-engine is stdlib-only: a checkout on PYTHONPATH is a complete install
    git clone --depth 1 --branch coord-engine-v1.6.11 https://github.com/ashfulcra/fulcra-tools /tmp/ft
@@ -106,8 +111,9 @@ Four walls, in the order you'll hit them:
    # (NOT `python3 -m coord_engine.cli` — running cli as __main__ re-imports it
    #  under its canonical name and trips a circular import; verified 2026-07-22)
    ```
-   If even `pip download` is blocked, that is an operator unlock, not something
-   to work around — say so and stop.
+   `--only-binary :all:` keeps the download pure wheels (an sdist would need a
+   build step — an install by another name). If even `pip download` is blocked,
+   that is an operator unlock, not something to work around — say so and stop.
 
 1. **Egress.** The bus needs `fulcra.us.auth0.com` (auth) and
    `api.fulcradynamics.com` (the File Store). In Claude Code on the web:

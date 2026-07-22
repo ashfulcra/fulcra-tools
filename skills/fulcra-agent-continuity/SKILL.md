@@ -117,12 +117,16 @@ repo homes because the parked snapshot asserted state that was never pushed.
 Rules, each earned there:
 
 - **Never park asserting repo/artifact state you have not pushed AND verified.**
-  "Verified" means an independent read-back — `git ls-remote` on the exact ref, a
-  push `--dry-run` probe, a store download — not the memory of having pushed. If
-  the migration/import is still pending when you must park, the snapshot says so
-  explicitly: **`IMPORT NOT DONE`**, followed by the exact recipe the successor
-  runs (the literal mirror-push/clone commands) and the **access prerequisites**
-  (who must grant what, before those commands can succeed).
+  "Verified" means an independent read-back of what the remote actually holds:
+  `git ls-remote` on the exact ref **compared against the exact hash** you
+  claim is there, or an equivalent remote fetch/download. Not the memory of
+  having pushed — and not a `git push --dry-run`, which only tests a
+  *prospective* push (it is the write-permission preflight in the checklist
+  below, never proof the remote has your state). If the migration/import is
+  still pending when you must park, the snapshot says so explicitly:
+  **`IMPORT NOT DONE`**, followed by the exact recipe the successor runs (the
+  literal mirror-push/clone commands) and the **access prerequisites** (who
+  must grant what, before those commands can succeed).
 - **One canonical home per artifact.** Name exactly one target repo/path for
   each piece of parked work. A checkpoint that names two candidate homes hands
   the successor a research task, not a resume.
@@ -145,8 +149,11 @@ Rules, each earned there:
         (cloud sessions are repo-scoped: account-level GitHub access does
         NOT reach them, cross-owner add_repo is unsupported — plan
         initial-source / mirror-push / same-owner fork; HARNESS-MAP wall 11).
-  - [ ] Write permission: GitHub App (or deploy key) has PUSH on the target
-        repo — verify with a `git push --dry-run` probe, not by assumption.
+  - [ ] Write permission: the successor's credential can PUSH the target
+        repo — whichever access path applies (GitHub App grant, deploy key,
+        or the accepted internal path: the FulcraBot fine-grained PAT for
+        `ashfulcra/*`, with upstream contributor handoff where applicable) —
+        verified with a `git push --dry-run` probe, not by assumption.
   ```
 
 ## When to use

@@ -227,8 +227,10 @@ it (not on PyPI).
   and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 - **Park for a successor only on pushed-and-verified state.** A continuity
   checkpoint is a promise: never park asserting repo/artifact state you have
-  not pushed AND independently verified (`git ls-remote` the exact ref, a push
-  `--dry-run` probe — not the memory of having pushed). If a migration/import
+  not pushed AND independently verified — `git ls-remote` the exact ref and
+  compare the exact hash (a push `--dry-run` only proves write permission,
+  not that the remote has your state; the memory of having pushed proves
+  nothing). If a migration/import
   is still pending at park time, the snapshot says **`IMPORT NOT DONE`** plus
   the exact recipe and the access prerequisites; it names ONE canonical home
   per artifact, never candidates. The parking agent also writes the role doc
