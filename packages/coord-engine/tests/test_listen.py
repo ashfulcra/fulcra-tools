@@ -125,6 +125,7 @@ def test_directive_json_mode_one_object_per_line(capsys):
     obj = json.loads(out)
     assert obj == {"type": "directive", "slug": "slug-b2",
                    "owner": "alice", "title": "Title B"}
+    assert out == json.dumps(obj, separators=(",", ":"))
 
 
 @pytest.mark.parametrize("assignee", ["bob", "*"])
