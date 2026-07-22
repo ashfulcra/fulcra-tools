@@ -313,7 +313,15 @@ it (not on PyPI).
     negative membership in a listing is not proof the obligation is gone) — and every one produces
     `review-head-degraded` (the missing-from-listing slugs named in a `missing` field so the caller can
     act). Only the caller's OWN head owes this; a clean head with a merely truncated tail must NOT raise a
-    false head alarm.** **Ship-gate: a new bounded work-discovery fold puts blocked-on-human and caller-assigned
+    false head alarm.** **The two markers carry PHASE-LOCAL counts and never borrow each other's numbers:
+    `review-head-degraded`'s `scanned`/`total`/`skipped` summarise HEAD work alone — and `total` counts
+    EVERY caller head obligation including the missing-from-listing slugs (so an UNKNOWN reads `0/1`, never
+    `0/0` or `1/1`, which would imply nothing-to-scan or fully-scanned) — while `review-fold-degraded`
+    counts TAIL work alone and is emitted ONLY on real tail degradation (a budget cut mid-tail or an
+    unreadable TAIL slug). A HEAD-only incident emits `review-head-degraded` and NOTHING else — never a
+    phantom tail marker with no tail behind it. The head-degraded LINE is cause-neutral (it does NOT say
+    "before budget" for an unreadable/missing/transport cause) and appends the specific causes the marker
+    carries.** **Ship-gate: a new bounded work-discovery fold puts blocked-on-human and caller-assigned
     work at the head (free where the data is already loaded; a dedicated budget where it is not), proves
     the head completes under a spent shared budget on a live-shaped fixture, and gives "head could not
     complete" a marker distinct from "tail truncated."**

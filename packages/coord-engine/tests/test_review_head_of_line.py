@@ -245,3 +245,97 @@ def test_head_degraded_line_renders_missing(capsys):
         {"type": "review-head-degraded", "scanned": 0, "total": 0,
          "missing": ["pr-ghost"]})
     assert "pr-ghost" in line and "missing" in line.lower()
+
+
+# --- Round-3 (codex): PHASE-LOCAL marker accounting ------------------------------
+# Three defects in how head/tail markers accounted for scanned/total/skipped:
+#   1. head_total excluded missing slugs -> UNKNOWN rendered as completion (0/0, 1/1).
+#   2. the head-degraded LINE always blamed "before budget" for non-budget causes.
+#   3. the terminal global `skipped` re-emitted a TAIL (review-fold-degraded) marker
+#      for a HEAD-only incident with no tail at all -> the same incident twice.
+# The fix is phase-local accounting: head markers count only head work (incl. missing
+# slugs); the tail marker counts only tail work and fires only on real tail
+# degradation. These tests assert the FULL marker payloads, not mere presence.
+
+
+def test_missing_only_head_total_counts_missing(capsys):
+    # DEFECT 1: a caller obligation whose slug has NO doc in the listing is the ONLY
+    # head work. head_total must COUNT it (1, not 0) so the marker reads 0/1 (nothing
+    # scanned of one owed) — never 0/0, which implies there was nothing to scan. And
+    # a head-only incident emits NOTHING else — no phantom review-fold-degraded.
+    t = FakeTransport()
+    rows = [_directive_row("ghost", "alice")]
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows, deadline_seconds=45.0)
+    assert out == [{"type": "review-head-degraded", "scanned": 0, "total": 1,
+                    "missing": ["ghost"]}], out
+
+
+def test_unreadable_head_no_tail_emits_only_head_marker(capsys):
+    # DEFECT 3: a listed-but-unreadable head slug, a readable pending head sibling,
+    # and NO tail. The only rows are the sibling's review-pending and ONE
+    # review-head-degraded whose counts reflect the HEAD alone (scanned 2/2, one
+    # skipped). The terminal global-`skipped` path must NOT also emit a
+    # review-fold-degraded — that marker describes expected TAIL truncation, and
+    # there is no tail here.
+    doc_a = cli._review_doc_path("r", "pr-mine-a")
+    t = _ReadNone(doc_a)
+    _put_pending_review(t, "pr-mine-a", "alice")  # unreadable doc -> UNKNOWN head slug
+    _put_pending_review(t, "pr-mine-b", "alice")  # readable -> pending head sibling
+    rows = [_directive_row("pr-mine-a", "alice"), _directive_row("pr-mine-b", "alice")]
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows, deadline_seconds=45.0)
+    assert not any(r.get("type") == "review-fold-degraded" for r in out), \
+        f"a head-only incident must NOT emit a tail-truncation marker: {out}"
+    pend = [r for r in out if r.get("type") == "review-pending"]
+    assert pend == [{"type": "review-pending", "name": "pr-mine-b",
+                     "state": "PENDING", "pending_required": ["alice"]}], out
+    head = [r for r in out if r.get("type") == "review-head-degraded"]
+    assert head == [{"type": "review-head-degraded", "scanned": 2, "total": 2,
+                     "skipped": 1}], out
+    assert len(out) == 2, f"exactly the pending sibling + head marker: {out}"
+
+
+def test_one_listed_one_missing_head(capsys):
+    # DEFECT 1 (mixed): one head slug listed + one missing. total==2 (both owed),
+    # scanned reflects the one listed slug attempted, and the missing slug is named.
+    _put_pending_review(t := FakeTransport(), "pr-mine", "alice")
+    rows = [_directive_row("pr-mine", "alice"), _directive_row("pr-ghost", "alice")]
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows, deadline_seconds=45.0)
+    head = [r for r in out if r.get("type") == "review-head-degraded"]
+    assert len(head) == 1, out
+    assert head[0]["total"] == 2, head[0]
+    assert head[0]["scanned"] == 1, head[0]
+    assert head[0]["missing"] == ["pr-ghost"], head[0]
+    assert not any(r.get("type") == "review-fold-degraded" for r in out), out
+
+
+def test_tail_budget_cut_uses_tail_only_numbers(capsys, monkeypatch):
+    # DEFECT 3 (numbers): head fine + tail genuinely budget-cut. The fold marker's
+    # scanned/total describe ONLY the tail (0 tail slugs scanned of 199), never the
+    # head+tail cumulative counts it used to borrow. And NO review-head-degraded.
+    t = ReviewClock()
+    rows = _live_shaped(t)  # 1 head (pr-mine) + 199 tail, n_reviews=200
+    capsys.readouterr()
+    t.reads.clear(); t.lists.clear()
+    t.cost = 1.0
+    _pin(monkeypatch, t)
+    out = cli._pending_reviews_for(t, "r", "alice", rows=rows,
+                                   deadline_seconds=45.0, deadline=t.clock)
+    assert not any(r.get("type") == "review-head-degraded" for r in out), \
+        "the head completed on its fresh budget -> no head marker"
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1, out
+    assert deg[0]["total"] == 199, f"tail-only total, not head+tail: {deg[0]}"
+    assert deg[0]["scanned"] == 0, f"no tail slug scanned -> 0, not the head count: {deg[0]}"
+
+
+def test_head_degraded_line_no_before_budget_for_nonbudget_cause(capsys):
+    # DEFECT 2: an unreadable / missing head slug is NOT a budget cut. The rendered
+    # line must NOT attribute it to "before budget".
+    line = cli._review_head_degraded_line(
+        {"type": "review-head-degraded", "scanned": 0, "total": 1,
+         "missing": ["pr-ghost"]})
+    assert "before budget" not in line, line
+    assert "UNKNOWN" in line and "pr-ghost" in line, line

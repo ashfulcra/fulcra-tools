@@ -1487,31 +1487,31 @@ def _pending_reviews_for(
         e for e in entries
         if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
     ]
-    total = len(slug_entries)
-    scanned = 0
-    skipped = 0
     if tail_dl is None:
         tail_dl = Deadline.open(deadline_seconds)
 
     def _scan_one(e: dict[str, Any], phase_dl: Deadline) -> str:
-        """Scan ONE slug under ``phase_dl``; mutate ``out`` + the ``scanned`` /
-        ``skipped`` counters + the shared role state. Return values:
+        """Scan ONE slug under ``phase_dl``; mutate ``out`` + the shared role state.
+        PHASE-LOCAL accounting: this helper NO LONGER touches any scanned/skipped
+        counter — it only reports its OUTCOME, and each phase (head/tail) tallies its
+        OWN counts from that. A ``"budget"``/``"unknown"`` outcome is exactly the
+        "count this slug skipped" signal; ``"ok"`` is "scanned clean". This is what
+        keeps the head marker's numbers from bleeding into the tail marker's (and
+        vice-versa). Return values:
 
-        - ``"budget"`` — the slug's own blocking op breached ``phase_dl`` (this slug
-          is counted skipped and the phase must STOP).
+        - ``"budget"`` — the slug's own blocking op breached ``phase_dl`` (skip this
+          slug and STOP the phase).
         - ``"unknown"`` — the slug is UNKNOWN for a non-budget reason: an unreadable
-          doc (``read`` returned None) or a per-slug ``TransportError``. Counted
-          skipped and surfaced, but scanning CONTINUES. A HEAD caller distinguishes
-          this from a clean scan (an UNKNOWN head slug owes ``review-head-degraded``);
-          the tail treats it like ``"ok"`` (it continues, and the terminal skipped
-          marker already reports it).
+          doc (``read`` returned None) or a per-slug ``TransportError``. Skip it and
+          surface it, but scanning CONTINUES. A HEAD caller distinguishes this from a
+          clean scan (an UNKNOWN head slug owes ``review-head-degraded``); the tail
+          treats it like ``"ok"`` for control flow (it continues) but still counts it
+          skipped, so the terminal tail marker reports it.
         - ``"ok"`` — settled-skip or a clean tally; continue.
 
         Same UNKNOWN discipline the loop always had: an unreadable doc/tally is
         skipped-and-visible, never silently pending."""
-        nonlocal scanned, skipped
         slug = (e.get("name") or "")[:-3]
-        scanned += 1
         try:
             ventries = transport.list_dir(_verdicts_prefix(team, slug))
             if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
@@ -1519,25 +1519,21 @@ def _pending_reviews_for(
             doc_raw = transport.read(_review_doc_path(team, slug))
             if doc_raw is None:
                 # Slug came from the listing, so its doc exists — a None read is a
-                # transport failure (read() never raises). UNKNOWN: count + keep going.
-                skipped += 1
+                # transport failure (read() never raises). UNKNOWN: keep going.
                 return "unknown"
             if phase_dl.expired():
                 # The doc read itself pushed us over budget (P1-B): after-op check.
-                # This slug is UNKNOWN; count it skipped and stop the phase.
-                skipped += 1
+                # This slug is UNKNOWN; stop the phase.
                 return "budget"
             tally, vreads_ok, fully = _tally_from_verdict_entries(
                 transport, team, slug, ventries, doc_raw, deadline=phase_dl.instant)
             if not fully:
                 # Budget expired MID-SLUG (F2): the partial tally is untrusted; this
-                # reached slug joins ``skipped`` and the phase stops.
-                skipped += 1
+                # reached slug is skipped and the phase stops.
                 return "budget"
         except TransportError:
             # A single slug's tally timed out: UNKNOWN. Skip it, keep scanning the
             # rest — but a HEAD slug that ends here still owes its loud marker.
-            skipped += 1
             return "unknown"
         state = tally.get("state")
         pending = tally.get("pending_required") or []
@@ -1573,9 +1569,19 @@ def _pending_reviews_for(
     # slug is UNKNOWN and named in the marker so the caller can act.
     listed_head = {(e.get("name") or "")[:-3] for e in head_entries}
     missing_head = sorted(head_slugs - listed_head)
+    # PHASE-LOCAL head counters — the head marker summarises HEAD work only and never
+    # borrows the tail's numbers. ``head_scanned`` also survives the block so the tail
+    # guard below can reproduce the old cumulative measurable-progress semantics.
+    head_scanned = 0
     if head_entries or missing_head:
         head_dl = Deadline.open(deadline_seconds)  # fresh — NOT the drained remainder
-        head_total = len(head_entries)
+        # head_total counts EVERY caller head obligation the marker summarises — the
+        # listed slugs AND the missing ones. A missing slug is UNKNOWN, not absent
+        # from the scan: excluding it renders 0/0 (implies nothing to scan) or 1/1
+        # (implies fully scanned) while a slug is still unresolved. Count it so the
+        # scanned/total makes the UNKNOWN VISIBLE.
+        head_total = len(head_entries) + len(missing_head)
+        head_skipped = 0
         head_cut = False
         head_unknown = bool(missing_head)  # a missing slug is already UNKNOWN
         for i, e in enumerate(head_entries):
@@ -1583,6 +1589,9 @@ def _pending_reviews_for(
                 head_cut = True
                 break
             outcome = _scan_one(e, head_dl)
+            head_scanned += 1
+            if outcome != "ok":
+                head_skipped += 1
             if outcome == "budget":
                 head_cut = True
                 break
@@ -1597,7 +1606,13 @@ def _pending_reviews_for(
             # own type. Any unknown outcome (budget cut, unreadable doc, transport
             # error, or a slug missing from the listing) qualifies.
             head_row = budget_mod.degraded_row(
-                "review-head-degraded", scanned, head_total, skipped)
+                "review-head-degraded", head_scanned, head_total, head_skipped)
+            if head_cut:
+                # A genuine budget cut — the ONE cause the head-degraded LINE may
+                # attribute to the budget. Unreadable/missing/transport causes must
+                # NOT be blamed on the budget, so the base line stays cause-neutral
+                # and only this flag adds the budget clause.
+                head_row["budget_cut"] = True
             if missing_head:
                 head_row["missing"] = missing_head
             out.append(head_row)
@@ -1634,20 +1649,33 @@ def _pending_reviews_for(
         # tombstone -> silently skipped
 
     # --- TAIL: the remaining reviews, under the (possibly drained) shared budget --
+    # PHASE-LOCAL tail counters. ``review-fold-degraded`` describes TAIL truncation
+    # ONLY — it must never borrow the head's scanned/skipped (a head-only incident is
+    # the head marker's business alone). ``tail_total`` is the tail count, not the
+    # whole listing; in the legacy no-head path tail_entries == slug_entries so this
+    # is byte-identical to the old ``total``.
     tail_entries = [e for e in slug_entries
                     if (e.get("name") or "")[:-3] not in head_slugs]
+    tail_total = len(tail_entries)
+    tail_scanned = 0
+    tail_skipped = 0
     for e in tail_entries:
-        # Between-slug check. ``scanned`` is cumulative: with a head already scanned
-        # it fires BEFORE the first tail slug (a spent shared budget truncates the
-        # tail to zero — expected); with no head it lets the first tail slug run
-        # (the standalone fold's measurable-progress contract, unchanged).
-        if scanned and tail_dl.expired():
+        # Between-slug check. Measurable-progress uses ``head_scanned or tail_scanned``
+        # — the same truthiness the old cumulative ``scanned`` gave: with a head
+        # already scanned it fires BEFORE the first tail slug (a spent shared budget
+        # truncates the tail to zero — expected); with no head it lets the first tail
+        # slug run (the standalone fold's contract, unchanged).
+        if (head_scanned or tail_scanned) and tail_dl.expired():
             out.append(budget_mod.degraded_row(
-                "review-fold-degraded", scanned, total, skipped))
+                "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
             return out
-        if _scan_one(e, tail_dl) == "budget":
+        outcome = _scan_one(e, tail_dl)
+        tail_scanned += 1
+        if outcome != "ok":
+            tail_skipped += 1
+        if outcome == "budget":
             out.append(budget_mod.degraded_row(
-                "review-fold-degraded", scanned, total, skipped))
+                "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
             return out
 
     if degraded_roles:
@@ -1655,11 +1683,14 @@ def _pending_reviews_for(
         # resolve, so a role-routed obligation may be missing. Make it VISIBLE.
         out.append({"type": "review-role-degraded",
                     "roles": sorted(degraded_roles)})
-    if skipped:
-        # Completed inside budget but some slugs were unreadable: partial
-        # knowledge must be visible, so emit the degraded marker anyway.
+    if tail_skipped:
+        # The TAIL completed inside budget but some tail slugs were unreadable:
+        # partial knowledge must be visible, so emit the tail marker anyway. Gated on
+        # ``tail_skipped`` (not a shared counter) so a head-only incident — already
+        # loud on ``review-head-degraded`` — never ALSO emits a phantom tail marker
+        # with no tail behind it.
         out.append(budget_mod.degraded_row(
-            "review-fold-degraded", scanned, total, skipped))
+            "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
     return out
 
 
@@ -1670,17 +1701,28 @@ def _review_degraded_line(r: dict[str, Any]) -> str:
 
 
 def _review_head_degraded_line(r: dict[str, Any]) -> str:
-    """The caller's OWN review queue could not complete before budget — incident-
-    grade UNKNOWN, deliberately DISTINCT from ``_review_degraded_line`` (an expected
-    TAIL truncation). Never silent, never counted as a pending item."""
-    line = (f"  review HEAD degraded: caller's own reviews scanned "
-            f"{r.get('scanned')}/{r.get('total')} before budget — UNKNOWN, retry")
+    """The caller's OWN review queue could not complete — incident-grade UNKNOWN,
+    deliberately DISTINCT from ``_review_degraded_line`` (an expected TAIL
+    truncation). Never silent, never counted as a pending item.
+
+    CAUSE-NEUTRAL base. A head incident may be a budget cut OR an unreadable doc OR a
+    per-slug transport error OR a slug missing from the listing — and several at once.
+    The base line therefore does NOT attribute a cause ("before budget" was wrong for
+    every non-budget case); it states the UNKNOWN and appends the specific causes the
+    marker actually carries (a budget cut, transport-skipped slugs, missing slugs)."""
+    line = (f"  review HEAD degraded: caller's own reviews incomplete — scanned "
+            f"{r.get('scanned')}/{r.get('total')} — UNKNOWN, retry")
+    causes: list[str] = []
+    if r.get("budget_cut"):
+        causes.append("budget cut")
     if r.get("skipped"):
-        line += f" ({r['skipped']} slug(s) skipped on transport error)"
+        causes.append(f"{r['skipped']} slug(s) skipped on transport error")
     if r.get("missing"):
         # Slugs a caller directive named but that had no doc in the listing: fail
         # closed and name them so the reader knows WHICH obligation went UNKNOWN.
-        line += f" (missing from listing: {', '.join(r['missing'])})"
+        causes.append(f"missing from listing: {', '.join(r['missing'])}")
+    if causes:
+        line += " (" + "; ".join(causes) + ")"
     return line
 
 
