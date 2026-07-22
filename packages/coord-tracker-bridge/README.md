@@ -104,8 +104,11 @@ or ambiguous archived lookups, collisions, or identity conflicts abort before
 mutations. Each successful issue update strips the title marker, writes full
 source identity and capability metadata, then atomically persists the ledger
 entry. A crash between the provider update and ledger write converges on retry
-from provider metadata. Re-run `plan` afterward and keep cutover held unless its
-create set matches the approved projection surface.
+from provider metadata. Re-run `plan` afterward; for a workspace not yet cut
+over, hold cutover until the plan's create set matches the approved projection
+surface. (The `fulcra` team's cutover completed 2026-07-21 — first live sync
+applied 59 changes — so this hold applies only to onboarding a NEW
+workspace/team, not to routine syncs.)
 
 Use `--source teams` to read the strict base-teams convention directly. The
 teams source requires `type: Task`, an explicit stable `id`, a title, a valid
