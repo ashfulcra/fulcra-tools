@@ -164,6 +164,17 @@ it (not on PyPI).
 - **Named identities** (Tycho = `coord-boss`, …): the registry is
   [`MAINTAINERS.md`](MAINTAINERS.md) — names are personas for human legibility;
   bus routing always uses the functional id.
+- **Durable tooling stash.** An agent's operational bundle (scripts, loops,
+  config templates) survives ephemeral machines via
+  `coord-engine stash push/pull/list` against
+  `team/<team>/_coord/agents/<agent>/stash/`: push refreshes a `manifest.json`
+  (per-file sha256 + exec bit), pull restores from it and **fails loud on
+  checksum drift** rather than handing back a silently-diverged file. Push runs
+  a **fail-closed secrets guard** — secret-shaped names (`.env`, `*.key`,
+  `*token*`, …) and credential-shaped content (`lin_oauth_…`, `sk-…`, PEM
+  headers) are refused with the tripped rule named; `--unsafe-allow-secrets`
+  is for false positives only, because `team/<team>/**` is readable by every
+  agent on the bus. Procedures: [`fulcra-agent-durable-state`](skills/fulcra-agent-durable-state/SKILL.md).
 - **On wake, `coord-engine briefing <team> --agent <you>` is THE entry fold.**
   One call surfaces your identity, your roles' inboxes, and everything that
   needs you including reviews you owe. Start there — never watch a narrower

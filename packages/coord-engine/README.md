@@ -39,6 +39,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
 | Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
+| Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
 | Fleet ops | `health` · `doctor` · `forge` · `annotate` |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 

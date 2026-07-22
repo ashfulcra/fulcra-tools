@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, tasks
+from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, stash, tasks
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -3826,6 +3826,160 @@ def cmd_roles_release(args: argparse.Namespace, transport: Any) -> int:
     return 0 if ok else 1
 
 
+# --- stash (fulcra-agent-durable-state) ---
+
+def _stash_prefix(team: str, agent: str) -> str:
+    # Raw agent id, not agent_key: the stash path is a documented convention
+    # (SKILL + pre-existing stashes) that agents also address with plain
+    # `fulcra-api file` commands, so the engine must not remap it.
+    return f"team/{team}/_coord/agents/{agent}/stash/"
+
+
+def cmd_stash_push(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    prefix = _stash_prefix(args.team, agent)
+    now = _iso(_now())
+    # Stage + guard EVERYTHING before the first upload: a batch with one
+    # refused file uploads nothing, so a retry can't silently diverge from
+    # what the failed run half-pushed.
+    staged: list[tuple[str, str, bool]] = []
+    for f in args.files:
+        p = pathlib.Path(f)
+        try:
+            content = p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            print(f"stash: no such file: {f}", file=sys.stderr)
+            return 1
+        except UnicodeDecodeError:
+            print(f"stash: {f} is not UTF-8 text — binary files don't survive "
+                  f"the text transport, refusing rather than corrupt", file=sys.stderr)
+            return 1
+        except OSError as e:
+            print(f"stash: cannot read {f}: {e}", file=sys.stderr)
+            return 1
+        name = p.name
+        if not stash.safe_name(name):
+            print(f"stash: refused {name!r}: not a plain stash filename", file=sys.stderr)
+            return 1
+        reason = stash.secret_reason(name, content)
+        if reason is not None:
+            if getattr(args, "unsafe_allow_secrets", False):
+                print(f"WARNING: secrets guard overridden — {reason}. "
+                      f"team/{args.team}/** is readable by every agent on the bus.",
+                      file=sys.stderr)
+            else:
+                print(f"stash: refused (fail-closed secrets guard): {reason}\n"
+                      f"  nothing was uploaded. Secrets belong in env config or the "
+                      f"keychain, never the stash (fulcra-agent-durable-state); for a "
+                      f"false positive re-run with --unsafe-allow-secrets",
+                      file=sys.stderr)
+                return 1
+        staged.append((name, content, bool(p.stat().st_mode & 0o111)))
+    manifest = stash.parse_manifest(transport.read(prefix + stash.MANIFEST_NAME))
+    for name, content, executable in staged:
+        if not transport.write(prefix + name, content):
+            print(f"stash: upload failed for {name} — manifest not advanced, re-run",
+                  file=sys.stderr)
+            return 1
+        manifest["files"][name] = stash.file_entry(content, executable=executable, now=now)
+        print(f"pushed {name} -> {prefix}{name}")
+    if not transport.write(prefix + stash.MANIFEST_NAME,
+                           stash.render_manifest(manifest, agent=agent, now=now)):
+        print("stash: manifest write failed — files landed but are unmanifested, re-run",
+              file=sys.stderr)
+        return 1
+    print(f"manifest: {len(manifest['files'])} file(s)")
+    return 0
+
+
+def cmd_stash_pull(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    prefix = _stash_prefix(args.team, agent)
+    manifest = stash.parse_manifest(transport.read(prefix + stash.MANIFEST_NAME))
+    files = manifest.get("files", {})
+    names = list(args.names or [])
+    for name in names:
+        # listing/manifest names are remote data — never let one path-traverse
+        # out of dest.
+        if not stash.safe_name(name):
+            print(f"stash: refused {name!r}: not a plain stash filename", file=sys.stderr)
+            return 1
+    if not names:
+        try:
+            entries = transport.list_dir(prefix)
+        except TransportError as e:
+            print(f"stash pull degraded: {e}, retry", file=sys.stderr)
+            return 1
+        names = sorted({e["name"] for e in entries
+                        if not e.get("is_dir") and stash.safe_name(e.get("name") or "")}
+                       | set(n for n in files if stash.safe_name(n)))
+        if not names:
+            print("stash: empty — nothing to pull", file=sys.stderr)
+            return 1
+    dest = pathlib.Path(getattr(args, "dest", None) or ".")
+    dest.mkdir(parents=True, exist_ok=True)
+    rc = 0
+    for name in names:
+        content = transport.read(prefix + name)
+        if content is None:
+            print(f"stash: {name} not in the stash", file=sys.stderr)
+            rc = 1
+            continue
+        target = dest / name
+        target.write_text(content, encoding="utf-8")
+        entry = files.get(name) or {}
+        if entry.get("exec"):
+            target.chmod(target.stat().st_mode | 0o755)
+        if entry.get("sha256") and entry["sha256"] != stash.sha256_hex(content):
+            # The bytes still land (an operator wants to inspect what drifted),
+            # but the exit is loud: a silently-diverged restore is the exact
+            # failure mode the manifest exists to catch.
+            print(f"stash: checksum drift on {name} — store copy does not match "
+                  f"the manifest; inspect before trusting it", file=sys.stderr)
+            rc = 1
+            continue
+        state = "verified" if entry.get("sha256") else "no manifest entry"
+        print(f"pulled {name} -> {target} ({state})")
+    return rc
+
+
+def cmd_stash_list(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    prefix = _stash_prefix(args.team, agent)
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError as e:
+        print(f"stash list degraded: {e}, retry", file=sys.stderr)
+        return 1
+    files = stash.parse_manifest(transport.read(prefix + stash.MANIFEST_NAME)).get("files", {})
+    rows, seen = [], set()
+    for e in entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or name == stash.MANIFEST_NAME:
+            continue
+        seen.add(name)
+        entry = files.get(name)
+        rows.append({"name": name, "size": e.get("size"), "mtime": e.get("mtime"),
+                     "manifest": "ok" if entry else "unmanifested",
+                     "sha256": (entry or {}).get("sha256"),
+                     "exec": (entry or {}).get("exec")})
+    for name in sorted(set(files) - seen):
+        # manifested but gone from the store: surfaced, not silently dropped
+        rows.append({"name": name, "size": None, "mtime": None, "manifest": "missing",
+                     "sha256": files[name].get("sha256"), "exec": files[name].get("exec")})
+    if args.json:
+        jsonutil.print_json(rows)
+        return 0
+    if not rows:
+        print(f"stash — {agent} in team/{args.team}: empty")
+        return 0
+    print(f"stash — {agent} in team/{args.team}: {len(rows)} file(s)")
+    for r in rows:
+        marks = r["manifest"] + (", exec" if r.get("exec") else "")
+        print(f"  {r['name']}  [{marks}]")
+    return 0
+
+
 # --- health / doctor (fulcra-agent-health) ---
 
 def cmd_health(args: argparse.Namespace, transport: Any) -> int:
@@ -4551,6 +4705,23 @@ def build_parser() -> argparse.ArgumentParser:
     rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)
+
+    sh = sub.add_parser("stash", help="durable per-agent tooling stash + manifest (fulcra-agent-durable-state)")
+    shsub = sh.add_subparsers(dest="stash_command", required=True)
+    shp = shsub.add_parser("push", help="upload local files into your stash (fail-closed secrets guard) + refresh the manifest")
+    shp.add_argument("team"); shp.add_argument("files", nargs="+")
+    shp.add_argument("--agent", "-a")
+    shp.add_argument("--unsafe-allow-secrets", action="store_true",
+                     help="override the secrets guard for a FALSE POSITIVE only — the stash is bus-readable, a real credential never goes here")
+    shp.set_defaults(func=cmd_stash_push)
+    shu = shsub.add_parser("pull", help="restore stash files to local disk, verifying manifest checksums")
+    shu.add_argument("team"); shu.add_argument("names", nargs="*")
+    shu.add_argument("--agent", "-a")
+    shu.add_argument("--dest", default=".", help="directory to restore into (default .)")
+    shu.set_defaults(func=cmd_stash_pull)
+    shl = shsub.add_parser("list", help="stash contents with manifest status (ok/unmanifested/missing)")
+    shl.add_argument("team"); shl.add_argument("--agent", "-a"); add_json(shl)
+    shl.set_defaults(func=cmd_stash_list)
 
     ct = sub.add_parser("continuity", help="structured resumable snapshots (fulcra-agent-continuity)")
     ctsub = ct.add_subparsers(dest="continuity_command", required=True)
