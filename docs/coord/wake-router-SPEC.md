@@ -36,10 +36,23 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
      idle boundary.
   2. *Priority gating* — only P1 / directed-to-you items interrupt; reviews and FYIs batch.
   3. *Debounce* — coalesce to at most one wake per N minutes per agent.
-- **Fan-out via the EXISTING wake adapters** — the router adds no new wake mechanism, it schedules
-  the ones the fleet already uses: `codex exec resume` (works with the app closed), OpenClaw POST,
-  cloud `send_later`/Routine fire, macOS notification (consent-gated harnesses), queued wake file
-  consumed by the SessionStart briefing hook on next human open.
+- **Fan-out via wake adapters, split by deployment status** (the harness matrix in
+  [`EVENT-DRIVEN-WAKE.md`](EVENT-DRIVEN-WAKE.md) is canonical; this spec adds no claim it
+  contradicts):
+  - *Deployed today:* `codex exec resume <thread-id>` (exact persisted thread, works with the app
+    closed — `scripts/wake/codex.sh`), OpenClaw authenticated `POST /hooks/wake`
+    (`scripts/wake/openclaw.sh`), Claude Managed Agents `user.message` to an idle persisted
+    session, macOS notification to the human for consent-gated harnesses.
+  - *Proposed in this build (new code, stage-2 tasks):* a **queued wake file** consumed by the
+    SessionStart briefing hook on next human open (local/desktop fallback lane), and a **platform
+    scheduled-routine leg** for Claude Code web/cloud — which has **no documented exact-session
+    inbound wake**; the router must NOT substitute a different Managed Agents session. For cloud
+    agents the router only aligns work to the agent's own self-armed Routine cadence (as
+    coord-boss and coord-fable-worker run today) or queues for it; it never creates sessions.
+  - *Fail-visible unroutable lane:* an agent whose harness offers no supported adapter is marked
+    `wake: unroutable` in router output and its pending items batch to the digest + surface in the
+    blocked-on-human-style fold — never silently dropped. The mixed-fleet gate (§3.4) counts an
+    unroutable agent as NOT covered; listener drawdown for it is forbidden.
 - **Webhook-swappable by construction:** when Fulcra webhooks ship, the poll leg is replaced by a
   webhook receiver feeding *the same router*; policy and adapters do not change. The interim build
   is therefore not throwaway — this is the pseudo-webhook infrastructure Ash asked to brainstorm,
@@ -104,8 +117,17 @@ tokens) so Parts A/B do not block on it.
 - **Fail-closed secrets:** adapter credentials and the (future) installation token live in host
   keychain / environment config — never in team paths (durable-state doctrine).
 - **ATC fence:** no changes to usage/headroom/route/atc/dash or `fulcra-agent-atc`.
-- **Store remains the bus:** the router is a *reader* of the same shards agents already write; no
-  new coordination channel.
+- **Store remains the bus; the router owns exactly one namespace.** The router *reads* the shards
+  agents write, and *writes only* under `team/<team>/_coord/router/` — durable state it exclusively
+  owns: `cursor.json` (monotonic cursor / idempotency keys; at-least-once delivery, replays are
+  no-ops), `queue/` (deferred and debounced wakes awaiting an idle boundary), `dead-letter/`
+  (wakes that exhausted bounded retry, with cause — the audit trail), and `delivered.json`
+  (observable last-delivered time per agent). This adopts the relay contract in
+  [`EVENT-DRIVEN-WAKE.md`](EVENT-DRIVEN-WAKE.md) (authenticated ends, allowlisted identifiers,
+  monotonic cursor, bounded retry + dead-letter, no untrusted command/session fields, fail-visible
+  degradation). Restart/failover: state is in the store, not host memory — a replacement router
+  process resumes from `cursor.json`; while no router runs, the safety-net listener cadence is the
+  backstop. No agent-owned shard is ever router-written.
 
 ## 5. Deliverables & stage plan
 
