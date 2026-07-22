@@ -3500,9 +3500,9 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
         out["forge_feedback"] = []
+    resume_cut = False
     try:
         snaps = []
-        resume_cut = False
         for e in transport.list_dir(_continuity_prefix(args.team, agent)):
             if add_on.expired():
                 # Shared budget spent by the earlier add-on sections: stop reading
@@ -3582,7 +3582,10 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(_forge_feedback_line(r))
     for r in forge_deg:  # always shown — a degraded fold must never hide
         print(_forge_degraded_line(r))
-    print(continuity.render_resume(out["resume"]))
+    # A budget cut means UNKNOWN/stale, not ABSENT. The stderr line above already
+    # gives the remedy; do not contradict it with continuity's absence rendering.
+    if not resume_cut:
+        print(continuity.render_resume(out["resume"]))
     return 0
 
 
@@ -3791,7 +3794,8 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
               f"session (no local nonce state to compare)", file=sys.stderr)
     nonce = secrets.token_hex(8)
     fm = {"type": "Lease", "title": f"{args.role} lease — {agent}", "agent": agent,
-          "timestamp": _iso(_now()), "nonce": nonce}
+          "timestamp": _iso(_now()), "nonce": nonce,
+          "summary": args.summary or ""}
     transport.write(shard_path, okf.render_frontmatter(fm) + f"\nHolding {args.role}.\n")
     try:
         state.parent.mkdir(parents=True, exist_ok=True)
@@ -4459,6 +4463,7 @@ def build_parser() -> argparse.ArgumentParser:
     rst.set_defaults(func=cmd_roles_status)
     rcl = rlsub.add_parser("claim", help="claim/refresh a lease on a role")
     rcl.add_argument("team"); rcl.add_argument("role"); rcl.add_argument("--agent", "-a")
+    rcl.add_argument("--summary", "-s")
     rcl.set_defaults(func=cmd_roles_claim)
     rre = rlsub.add_parser("release", help="release your lease on a role")
     rre.add_argument("team"); rre.add_argument("role"); rre.add_argument("--agent", "-a")

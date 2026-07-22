@@ -348,7 +348,9 @@ it (not on PyPI).
 - **Role routing is the same contract, one layer in — a role you hold is an address.** A directive
   assigned to a ROLE is directed at whoever holds a fresh lease on it, so `briefing`, `inbox`,
   `needs-me`, and `listen` all fold role-routed work into the holder's queue (that is what makes
-  role-based identity outlive a session). ONE resolver: `cli._held_roles_for_rows` — never resolve
+  role-based identity outlive a session). `roles claim <team> <role> -s/--summary <text>` records the
+  holder's current role-work summary on the lease, parallel to `presence beat --summary`. ONE resolver:
+  `cli._held_roles_for_rows` — never resolve
   roles a second way, or the folds silently disagree about a lease. It returns `(held, unresolved)`,
   and **`unresolved` is the load-bearing half**: a role whose lease state is UNKNOWN (transport
   failure, unreadable lease shard, a role doc that is listed but missing/truncated/**unparseable**, an

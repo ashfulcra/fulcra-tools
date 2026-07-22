@@ -407,6 +407,23 @@ def test_cli_roles_claim_release_roundtrip(capsys):
     assert _j.loads(capsys.readouterr().out)["status"] == "VACANT"
 
 
+def test_cli_roles_claim_accepts_summary(capsys):
+    from coord_engine import okf
+    from coord_engine.tasks import agent_key
+
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md",
+          "---\ntype: Role\npolicy: shared\nsla_hours: 24\n---\n")
+
+    assert cli.main([
+        "roles", "claim", "r", "reviewer", "--agent", "amy",
+        "--summary", "reviewing the release queue",
+    ], transport=t) == 0
+
+    raw = t.read(f"team/r/roles/reviewer/leases/{agent_key('amy')}.md")
+    assert okf.parse_frontmatter(raw)["summary"] == "reviewing the release queue"
+
+
 def test_cli_roles_release_without_lease_errors(capsys):
     t = FakeTransport()
     assert cli.main(["roles", "release", "r", "reviewer", "-a", "ghost"], transport=t) == 1
@@ -1454,6 +1471,22 @@ def test_cli_briefing_full_and_empty_store(capsys):
     assert any(p["agent"] == "amy" for p in b["presence"])
     # empty store: every section degrades gracefully
     assert cli.main(["briefing", "empty-team", "-a", "ghost"], transport=FakeTransport()) == 0
+
+
+def test_briefing_truncated_resume_does_not_claim_snapshot_absent(capsys, monkeypatch):
+    t = FakeTransport()
+    cli.main([
+        "continuity", "snapshot", "r", "amy", "work",
+        "--objective", "finish",
+    ], transport=t)
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "_briefing_budget", lambda: 0.0)
+
+    assert cli.main(["briefing", "r", "--agent", "amy"], transport=t) == 0
+    captured = capsys.readouterr()
+
+    assert "resume section truncated" in captured.err
+    assert "No continuity snapshot found" not in captured.out
 
 
 def test_cli_briefing_respects_live_ack_shards(capsys):
