@@ -14,11 +14,10 @@ name here (incl. the ``DEFAULT_THREADS_*`` knobs) is re-exported from ``cli``.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from typing import Any, Optional
 
-from . import config, directives, okf, threads as threads_mod
+from . import config, directives, jsonutil, okf, threads as threads_mod
 from . import cli
 from .budget import Deadline
 
@@ -292,10 +291,10 @@ def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
 
     if args.json:
         for o in dropped:
-            print(json.dumps(o))
+            print(jsonutil.dumps(o))
         if not ok:
-            print(json.dumps({"type": "threads-degraded",
-                              "reason": reason or "threads source degraded"}))
+            print(jsonutil.dumps({"type": "threads-degraded",
+                                  "reason": reason or "threads source degraded"}))
         return 0
 
     if not ok:
@@ -320,5 +319,3 @@ def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
         for o in group:  # classify already sorts oldest-first within a mode
             print(f"  {o['id']}: {o['title']} — {o['evidence']}")
     return 0
-
-

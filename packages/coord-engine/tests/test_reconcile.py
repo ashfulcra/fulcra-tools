@@ -73,9 +73,11 @@ def test_reconcile_builds_index_and_aggregate():
     assert res["tasks"] == 2
     idx = t.store["team/r/task/index.md"]
     assert "## Active" in idx and "[Alpha](a.md)" in idx
-    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    raw = t.store["team/r/_coord/summaries.json"]
+    agg = json.loads(raw)
     assert agg["team"] == "r"
     assert {r["name"] for r in agg["rows"]} == {"a", "b"}
+    assert raw == json.dumps(agg, separators=(",", ":"))
 
 
 def test_reconcile_skips_index_and_non_task_docs():

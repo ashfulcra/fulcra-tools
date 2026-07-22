@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import aggregate, config, health as health_mod, model, okf
+from . import aggregate, config, health as health_mod, jsonutil, model, okf
 from .log import get_logger
 from .roles import age_hours
 from .tasks import agent_key
@@ -1043,7 +1043,7 @@ def reconcile(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
     )
-    if not transport.write(summaries_path(team), json.dumps(agg, indent=2)):
+    if not transport.write(summaries_path(team), jsonutil.dumps(agg)):
         warnings.append("summaries.json write failed")
 
     # --- fleet health shard (best-effort; never fails the pass) ---

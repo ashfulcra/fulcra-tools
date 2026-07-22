@@ -111,6 +111,11 @@ under `skills/`, each package with its own README, build, and tests.
   are retired. Reassign live work with `task update --assignee <agent> --next
   "..."`; when another session needs resumable context, write the continuity
   snapshot first and then reassign the task.
+- Machine JSON is compact by contract: public non-ATC `--json` documents,
+  line-oriented `listen`/`threads` events, and `_coord/summaries.json` omit
+  insignificant whitespace while preserving parsed values and degradation
+  markers. Tests and consumers compare parsed JSON unless byte layout is the
+  explicit contract.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 

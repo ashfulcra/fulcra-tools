@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, tasks
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -337,7 +337,7 @@ def cmd_status(args: argparse.Namespace, transport: Any) -> int:
             # object; a consumer summing status counts already knows its status
             # vocabulary and skips the namespaced marker.
             counts = {**counts, _READ_DEGRADED: _read_degraded_row(reason)}
-        print(json.dumps(counts, indent=2))
+        jsonutil.print_json(counts)
     else:
         if not ok:
             _surface_read_degraded(reason, json_mode=False)
@@ -358,7 +358,7 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
             # section) so stdout stays one parseable object and the text loop's
             # fixed section set ignores it.
             groups[_READ_DEGRADED] = [_read_degraded_row(reason)]
-        print(json.dumps(groups, indent=2))
+        jsonutil.print_json(groups)
         return 0
     if not ok:
         _surface_read_degraded(reason, json_mode=False)
@@ -396,7 +396,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         transport, args.team, args.agent, deadline=add_on.instant)
     got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
     if args.json:
-        print(json.dumps(got, indent=2))
+        jsonutil.print_json(got)
     else:
         print(f"{len(got)} item(s) need {args.agent}:")
         for r in got:
@@ -465,7 +465,7 @@ def cmd_search(args: argparse.Namespace, transport: Any) -> int:
     if degraded_reason:
         got = [_read_degraded_row(degraded_reason)] + got
     if args.json:
-        print(json.dumps(got, indent=2))
+        jsonutil.print_json(got)
     else:
         if degraded_reason:
             _surface_read_degraded(degraded_reason, json_mode=False)
@@ -578,7 +578,7 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     if status == roles.DORMANT:
         result["dormant_until"] = reg.get("dormant_until")
     if args.json:
-        print(json.dumps(result, indent=2))
+        jsonutil.print_json(result)
     else:
         label = (f"DORMANT (until {reg.get('dormant_until')})"
                  if status == roles.DORMANT else status)
@@ -1983,7 +1983,7 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         transport.delete(_settled_marker_path(team, slug))
     result.update({"team": team, "slug": slug})
     if args.json:
-        print(json.dumps(result, indent=2))
+        jsonutil.print_json(result)
     else:
         print(f"review {slug} in team/{team}: {result['state']}")
         if result["approvals"]:
@@ -2052,7 +2052,7 @@ def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
     else:
         snap = continuity.latest(_agent_snapshots(transport, args.team, args.agent))
     if args.json:
-        print(json.dumps(snap, indent=2))
+        jsonutil.print_json(snap)
     else:
         print(continuity.render_resume(snap))
     return 0
@@ -2504,7 +2504,7 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
                     if not ok else got)
         if unresolved_roles:
             rows_out = [_role_degraded_row(unresolved_roles)] + rows_out
-        print(json.dumps(rows_out, indent=2))
+        jsonutil.print_json(rows_out)
         return 0
     if not ok:
         _surface_read_degraded(reason, json_mode=False, marker="inbox-degraded")
@@ -2985,7 +2985,7 @@ def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any
                      *, json_mode: bool, verbose: bool) -> tuple[list, dict[str, list[str]]]:
     events, failures = _listen_tick(transport, team, agent, state)
     for ev in events:
-        print(json.dumps(ev) if json_mode else _format_listen_event(ev))
+        print(jsonutil.dumps(ev) if json_mode else _format_listen_event(ev))
     sys.stdout.flush()
 
     # Per-source streaks: each source alarms ONCE per its own consecutive-failure
@@ -3305,7 +3305,7 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(f"briefing: resume section unavailable ({type(e).__name__})", file=sys.stderr)
         out["resume"] = None
     if args.json:
-        print(json.dumps(out, indent=2))
+        jsonutil.print_json(out)
         return 0
     print(f"briefing — {agent} in team/{args.team}")
     if not rows_ok:
@@ -3497,7 +3497,7 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
 def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
     ros = presence.roster(_presence_shards(transport, args.team), now=_iso(_now()))
     if args.json:
-        print(json.dumps(ros, indent=2))
+        jsonutil.print_json(ros)
         return 0
     print(f"presence — team/{args.team}: {len(ros)} agent(s)")
     for r in ros:
@@ -3514,7 +3514,7 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
     digest = presence.agents_digest(rows, _presence_shards(transport, args.team), now=_iso(_now()))
     if args.json:
         out = digest + [_read_degraded_row(reason)] if not ok else digest
-        print(json.dumps(out, indent=2))
+        jsonutil.print_json(out)
         return 0
     if not ok:
         _surface_read_degraded(reason, json_mode=False)
@@ -3622,7 +3622,7 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     # Same row fields stale_agents returns: agent/presence_age_h/snapshot_age_h.
     view["continuity_stale"] = flagged_agents
     if args.json:
-        print(json.dumps(view, indent=2))
+        jsonutil.print_json(view)
         return code
     print(f"health — team/{args.team}: {view['fresh']}/{view['total']} host(s) fresh"
           + ("" if view["healthy"] else "  [NO FRESH RECONCILER]"))
@@ -3718,7 +3718,7 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     if args.json:
         if not ok:
             d = {**d, _READ_DEGRADED: _read_degraded_row(reason)}
-        print(json.dumps(d, indent=2))
+        jsonutil.print_json(d)
     else:
         if not ok:
             _surface_read_degraded(reason, json_mode=False)
@@ -3993,7 +3993,7 @@ def cmd_asks(args: argparse.Namespace, transport: Any) -> int:
     got = query.asks(rows, now=_iso(_now()), human=args.human or _human())
     if args.json:
         out = [_read_degraded_row(reason)] + got if not ok else got
-        print(json.dumps(out, indent=2))
+        jsonutil.print_json(out)
         return 0
     if not ok:
         _surface_read_degraded(reason, json_mode=False)

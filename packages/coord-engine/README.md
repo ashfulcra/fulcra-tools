@@ -45,6 +45,9 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. The
 [skills](../../skills) carry the procedures (when to run what, and why);
 per-verb command references live in each skill's `references/` directory.
+Machine JSON is emitted compactly (including line-oriented `listen` and
+`threads` events), and the hot `_coord/summaries.json` aggregate uses the same
+zero-whitespace serializer; parsed values and degradation markers are unchanged.
 
 ## Properties worth knowing
 

@@ -11,11 +11,10 @@ re-exports the name). Dispatch stays wired in ``cli.build_parser``.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from typing import Any
 
-from . import annotate as annotate_mod
+from . import annotate as annotate_mod, jsonutil
 from . import cli
 
 
@@ -64,9 +63,9 @@ def cmd_annotate_status(args: argparse.Namespace, transport: Any) -> int:
     last_ts = cursor.get("last_ts")
     seen = cursor.get("seen_ids") or []
     if args.json:
-        print(json.dumps({"team": team, "resolution": res,
-                          "projecting": res in annotate_mod.LIVE_PROJECTING,
-                          "last_ts": last_ts, "seen_ids": len(seen)}, indent=2))
+        jsonutil.print_json({"team": team, "resolution": res,
+                             "projecting": res in annotate_mod.LIVE_PROJECTING,
+                             "last_ts": last_ts, "seen_ids": len(seen)})
     else:
         proj = "" if res in annotate_mod.LIVE_PROJECTING else "  (no projection)"
         print(f"annotate — team/{team}: resolution={res}{proj}")
@@ -125,5 +124,3 @@ def cmd_annotate_project(args: argparse.Namespace, transport: Any) -> int:
     # cursor untouched so every spec retries next run (over-capture beats loss).
     print(f"projected {emitted}/{len(specs)} transition(s) for team/{team}")
     return 0
-
-

@@ -21,8 +21,10 @@ def test_cli_reconcile_then_status_and_board(capsys):
     assert "2 tasks" in capsys.readouterr().out
 
     assert cli.main(["status", "r", "--json"], transport=t) == 0
-    counts = json.loads(capsys.readouterr().out)
+    raw = capsys.readouterr().out
+    counts = json.loads(raw)
     assert counts == {"active": 1, "waiting": 1}
+    assert raw == json.dumps(counts, separators=(",", ":")) + "\n"
 
     assert cli.main(["board", "r"], transport=t) == 0
     out = capsys.readouterr().out
