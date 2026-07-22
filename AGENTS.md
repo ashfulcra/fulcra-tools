@@ -161,6 +161,9 @@ doctrine (survival invariant + heartbeat duty for long-lived remote sessions). T
 `coord-engine` binary after `uv tool install` — `uvx`/`uv tool run` cannot resolve
 it (not on PyPI).
 
+- **Named identities** (Tycho = `coord-boss`, …): the registry is
+  [`MAINTAINERS.md`](MAINTAINERS.md) — names are personas for human legibility;
+  bus routing always uses the functional id.
 - **On wake, `coord-engine briefing <team> --agent <you>` is THE entry fold.**
   One call surfaces your identity, your roles' inboxes, and everything that
   needs you including reviews you owe. Start there — never watch a narrower
