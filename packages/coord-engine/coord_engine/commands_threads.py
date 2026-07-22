@@ -274,9 +274,10 @@ def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
     Windows: ``--silence-days`` (default 3, env ``COORD_THREADS_SILENCE_DAYS``),
     ``--intent-grace-hours`` (default 48, env ``COORD_THREADS_INTENT_GRACE_HOURS``);
     flag > env > default. Text is grouped by mode, oldest-first; ``--json`` emits
-    ONE object per line (``{mode, id, title, age, window, evidence}``), plus a
-    ``{"type": "threads-degraded", ...}`` object when a source was not fully
-    readable. Never crashes, never silently empties on failure."""
+    ONE JSON value — an array of ``{mode, id, title, age, window, evidence}``
+    objects, with a trailing ``{"type": "threads-degraded", ...}`` element when a
+    source was not fully readable. Never crashes, never silently empties on
+    failure, and (--json purity) never lets a notice reach stdout as prose."""
     principal = args.principal
     silence_days = _threads_window(getattr(args, "silence_days", None),
                                    "COORD_THREADS_SILENCE_DAYS",
@@ -290,11 +291,15 @@ def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
                                    intent_grace_hours=grace_hours)
 
     if args.json:
-        for o in dropped:
-            print(jsonutil.dumps(o))
+        # ONE parseable value: the dropped list, plus the degraded marker as a
+        # trailing element (a JSON ROW in the SAME array), never a second document.
+        # This was the known leak — the fold streamed one object PER LINE, so
+        # `json.loads(stdout)` on 2+ threads raised on the trailing data.
+        result = list(dropped)
         if not ok:
-            print(jsonutil.dumps({"type": "threads-degraded",
-                                  "reason": reason or "threads source degraded"}))
+            result.append({"type": "threads-degraded",
+                           "reason": reason or "threads source degraded"})
+        print(jsonutil.dumps(result))
         return 0
 
     if not ok:

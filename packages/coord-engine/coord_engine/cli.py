@@ -306,6 +306,56 @@ def _line(row: dict[str, Any]) -> str:
     )
 
 
+# --- blocked-on-human: the reserved, un-starvable FIRST section ---------------
+#
+# A decision parked on a human is the incident this section keeps visible. It is
+# derived PURELY from the aggregate rows already in memory (see
+# ``query.blocked_on_human``), so it adds ZERO transport ops — that free-ness is
+# exactly what makes it un-starvable: no budget cut can hide it, because it spends
+# no budget. The classifier needs one input to tell an agent-blocked legacy row
+# from a human-blocked one — the caller's known-identity set — which we assemble
+# from data the fold already holds (row assignees/owners + the held roles it
+# already resolved), never a fresh read.
+
+def _known_identities(
+    rows: list[dict[str, Any]], held_roles: "Optional[set[str]]" = None
+) -> set[str]:
+    """The caller's already-loaded agent/role identity set — the free input the
+    blocked-on-human classifier uses to distinguish an agent block from a human
+    block. Assembled from in-memory data only (row assignees/owners + held roles)."""
+    ids: set[str] = set()
+    for r in rows or []:
+        for k in ("assignee", "owner"):
+            v = r.get(k)
+            if v:
+                ids.add(str(v))
+    ids |= set(held_roles or ())
+    return ids
+
+
+def _blocked_on_human_section(
+    rows: list[dict[str, Any]], *, held_roles: "Optional[set[str]]" = None,
+    roles_unknown: bool = False,
+) -> list[dict[str, Any]]:
+    """The FIRST section of `briefing` / `needs-me`: open rows blocked on a human.
+    Pure over ``rows`` — no transport. ``roles_unknown`` (the caller's role
+    resolution degraded) makes an unresolvable legacy value SURFACE with a degraded
+    note rather than hide."""
+    return query.blocked_on_human(
+        rows, human=_human(),
+        known_agents=_known_identities(rows, held_roles),
+        roles_unknown=roles_unknown)
+
+
+def _blocked_on_human_line(r: dict[str, Any]) -> str:
+    user = r.get("blocked_on_user") or _human()
+    note = " — degraded: agent/role listing unknown" if r.get("blocked_on_degraded") else ""
+    return (
+        f"  [{r.get('priority', '?'):>2}] {str(r.get('status', '?')):8} "
+        f"{r.get('title') or r.get('name')}  (blocked on {user}){note}"
+    )
+
+
 def cmd_reconcile(args: argparse.Namespace, transport: Any) -> int:
     dt = _now()
     res = rec.reconcile(
@@ -393,36 +443,34 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # own independent, already-shipped budget.
     add_on = Deadline.open(_briefing_budget())
     got += _pending_reviews_for(
-        transport, args.team, args.agent, deadline=add_on.instant)
+        transport, args.team, args.agent, rows=rows, deadline=add_on.instant)
     got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
+    # Blocked-on-human is the reserved FIRST section — prepended AFTER every other
+    # section is built so it lands at index 0, and derived PURELY from ``rows``
+    # (zero transport, un-starvable). It surfaces decisions parked on a human that
+    # are assigned to the human (never to this agent), so they are not otherwise in
+    # ``got``; de-dup by id guards the rare overlap.
+    blocked = _blocked_on_human_section(
+        rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
+    seen = {r.get("id") for r in blocked}
+    got = blocked + [r for r in got if r.get("id") not in seen]
     if args.json:
         jsonutil.print_json(got)
     else:
         print(f"{len(got)} item(s) need {args.agent}:")
         for r in got:
-            if r.get("type") == _READ_DEGRADED:
+            if r.get("type") == "blocked-on-human":
+                print(_blocked_on_human_line(r))
+            elif r.get("type") == _READ_DEGRADED:
                 print(f"  read degraded: {r.get('reason')} — task fold unknown "
                       f"(not empty), retry")
             elif r.get("type") == _ROLE_DEGRADED:
                 print(_role_degraded_line(r))
-            elif r.get("type") == "review-pending":
-                print(f"  [REVIEW] pending verdict: {r['name']} "
-                      f"(required: {', '.join(r['pending_required'])})")
-            elif r.get("type") == "review-fold-degraded":
-                print(_review_degraded_line(r))
-            elif r.get("type") == "review-orphan":
-                print(f"  [REVIEW] orphan review dir (verdicts, no doc): "
-                      f"{r['name']} — needs maintainer repair")
-            elif r.get("type") == "review-orphan-degraded":
-                if r.get("unclassified"):
-                    print(f"  [REVIEW] dir classification degraded: "
-                          f"{r['unclassified']} dir(s) unclassified before budget — retry")
-                else:
-                    print(f"  [REVIEW] orphan dir classification degraded: "
-                          f"{r['name']} — verdicts listing unreadable, retry")
-            elif r.get("type") == "review-role-degraded":
-                print(f"  review role resolution degraded: "
-                      f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
+            elif (review_line := _review_row_line(r)) is not None:
+                # Every review row type (pending / orphan / the degraded + head
+                # UNKNOWN markers) dispatches here — a review row must NEVER reach
+                # the generic task line below, which would print `[ ?] ? None`.
+                print(review_line)
             elif r.get("type") == "forge-feedback":
                 print(_forge_feedback_line(r))
             elif r.get("type") == "forge-degraded":
@@ -660,7 +708,13 @@ def cmd_task_block(args: argparse.Namespace, transport: Any) -> int:
     if args.blocked_on and args.on_user:
         print("task block failed: pass --blocked-on OR --on-user, not both", file=sys.stderr)
         return 1
-    kw = {"status": "blocked", "blocked_on": args.on_user or args.blocked_on}
+    # TYPE the human block: `--on-user <name>` writes `blocked_on: user:<name>` so
+    # the blocked-on-human fold can classify it at ZERO transport cost (a plain
+    # value would need an agent/role lookup to tell human from agent). Additive:
+    # `--blocked-on <agent>` stays an untyped agent value, and legacy `user:`-less
+    # rows still parse (the fold's legacy branch handles them).
+    blocked_val = f"{query._USER_PREFIX}{args.on_user}" if args.on_user else args.blocked_on
+    kw = {"status": "blocked", "blocked_on": blocked_val}
     if args.on_user:
         kw["assignee"] = _human()
         kw["add_tags"] = ["needs:human"]
@@ -1329,13 +1383,62 @@ def _held_roles_for_rows(
     return held, unresolved
 
 
+#: The title a review-request directive carries (``_deliver_review_directive``):
+#: ``REVIEW REQUEST: <slug>``, assignee = the reviewer. reconcile indexes that
+#: directive as an ordinary aggregate row, so the caller's OWN pending reviews are
+#: derivable from the rows already in memory — ZERO transport — which is what makes
+#: the head-of-line priority free. One constant, used by the writer AND the reader,
+#: so the two can never drift on the exact prefix.
+_REVIEW_REQUEST_TITLE_PREFIX = "REVIEW REQUEST: "
+
+
+def _caller_review_head_slugs(
+    rows: "Optional[list[dict[str, Any]]]", agent: str
+) -> set[str]:
+    """Review slugs the CALLING agent is assigned to review — the head-of-line
+    priority — derived for FREE from the review-request directive rows already in
+    the aggregate (title ``REVIEW REQUEST: <slug>``, assignee = the reviewer).
+    Only OPEN directives count: a done/abandoned one means the caller already
+    filed. Pure over ``rows``; no transport."""
+    from . import model
+    slugs: set[str] = set()
+    for r in rows or []:
+        if r.get("assignee") != agent:
+            continue
+        if r.get("status") not in model.OPEN_STATUSES:
+            continue
+        title = str(r.get("title") or "")
+        if title.startswith(_REVIEW_REQUEST_TITLE_PREFIX):
+            s = title[len(_REVIEW_REQUEST_TITLE_PREFIX):].strip()
+            if s:
+                slugs.add(s)
+    return slugs
+
+
 def _pending_reviews_for(
-    transport: Any, team: str, agent: str, *, deadline_seconds: Optional[float] = None,
-    deadline: Optional[float] = None,
+    transport: Any, team: str, agent: str, *,
+    rows: "Optional[list[dict[str, Any]]]" = None,
+    deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
 ) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: the top listing failing yields []
     (needs-me/briefing must not fail because the review add-on is absent).
+
+    HEAD-OF-LINE (2026-07-20 starvation fix). The review slugs the CALLING agent is
+    assigned to review — its OWN obligations, derived for free from the
+    review-request directive ``rows`` — are the HEAD: scanned FIRST, under a
+    DEDICATED budget (``deadline_seconds``, un-clamped) that the earlier briefing
+    legs cannot have already spent. This is the fix for the live ``scanned 0/207``:
+    the review leg used to inherit only the shared briefing budget's (already
+    drained) remainder, so on a busy board it started already expired and never
+    scanned even the caller's own three-day-old review. The head is small (an
+    agent's own review queue), so a fresh budget bounds total wake by
+    head_count x transport-timeout while GUARANTEEING it completes. **A budget cut
+    may then only ever truncate the TAIL** (the other reviews), which is expected;
+    a head that STILL cannot complete is UNKNOWN and gets its OWN loud marker
+    (``review-head-degraded``), DISTINCT from the expected tail truncation
+    (``review-fold-degraded``). Called without ``rows`` (the historical signature),
+    there is no head and the fold behaves exactly as before.
 
     BOUNDED (2026-07-09 incident fix). Two guards keep a degraded transport from
     turning this into a multi-minute hang read as "bus down":
@@ -1361,24 +1464,16 @@ def _pending_reviews_for(
     pre-fold (like task rows) — tracked on the bus."""
     if deadline_seconds is None:
         deadline_seconds = _review_fold_budget()
-    # The review fold owns a standalone budget, but bundled callers also have a
-    # shared aggregate deadline.  Spend whichever expires first.  Before this
-    # clamp, ``briefing`` claimed one cumulative add-on budget while reviews
-    # silently opened a fresh 45-second window; on a team with 193 historical
-    # review directories the session wake could expire here before current tasks
-    # were rendered.  Accept the absolute instant so time already spent by an
-    # earlier bundled section is preserved rather than reset.
-    # Preserve the standalone fold's historical measurable-progress contract:
-    # its own budget opens after the top-level listing.  A bundled caller passes
-    # an already-open absolute deadline, which *must* include that listing time.
-    dl: Optional[Deadline] = None
+    # TAIL budget: the shared aggregate deadline a bundled caller passes (spend
+    # whichever of it / the standalone budget expires first), or the fold's own when
+    # standalone. Re-opened from the smaller REMAINING budget rather than the
+    # absolute instant so ``Deadline.reserve`` can carve the classify sub-budget.
+    # NOTE: the tail deliberately inherits the drained shared budget — truncating
+    # the tail is expected; it is the HEAD (below) that must NOT be starved by it.
+    tail_dl: Optional[Deadline] = None
     if deadline is not None:
-        # Re-open from the smaller REMAINING budget rather than constructing from
-        # the absolute instant.  ``Deadline.reserve`` needs the retained budget
-        # value to protect the doc scan from orphan-classification starvation;
-        # the bare constructor deliberately has no reservable budget.
         remaining = max(0.0, deadline - time.monotonic())
-        dl = Deadline.open(min(deadline_seconds, remaining))
+        tail_dl = Deadline.open(min(deadline_seconds, remaining))
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
@@ -1392,44 +1487,150 @@ def _pending_reviews_for(
         e for e in entries
         if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
     ]
-    # The fold's ONE deadline opens HERE — before the dir-classification loop, not
-    # after it (coordinator P1, the recurring pre-budget class): classification does
-    # one verdicts listing per dir-only slug, and the store's soft deletes make
-    # those dirs permanent (15 tombstones today, forever) — under a degraded
-    # transport an unbudgeted loop is up to N x timeout of listings AHEAD of the
-    # budget, the exact presence-P1 shape. Everything below — classification and
-    # the doc scan — spends this same budget cumulatively.
-    total = len(slug_entries)
-    scanned = 0
-    skipped = 0
-    if dl is None:
-        dl = Deadline.open(deadline_seconds)
-    if dl.expired():
-        return [budget_mod.degraded_row("review-fold-degraded", 0, total)]
-    # Dir-only review slugs (a `<slug>/` dir with no `<slug>.md` doc) are invisible
-    # to the doc-keyed scan below. Classify each via the tombstone three-way (one
-    # verdicts listing apiece): a dir with real verdict shards is an ORPHAN (surface
-    # a `review-orphan` row EVERY pass — repair stays a human/maintainer action); an
-    # EMPTY dir (no shards, or only a stale `.settled` marker) is a soft-delete
-    # TOMBSTONE carrying zero information — skip it silently (no orphan, no [?] row);
-    # a verdicts listing that RAISES is UNKNOWN — fail closed, surface a per-dir
-    # `review-orphan-degraded` row (never assume tombstone on transport failure).
-    # BUDGETED (the recurring pre-budget class): soft deletes make these dirs
-    # permanent, so under a degraded transport an unbudgeted loop is up to
-    # N x timeout of listings AHEAD of the fold's budget. Classification runs
-    # under a RESERVED sub-deadline — half the fold budget — so the doc scan (the
-    # load-bearing output) always keeps the other half and its measurable-progress
-    # guarantee (the reserved-budget pattern from the reconcile starve fix; a
-    # visibility-only pass must never starve the critical one). The sub-deadline
-    # is checked before each listing (equivalently after the previous — adjacent
-    # iterations — so an overrun is detected immediately; overshoot is bounded by
-    # ONE listing, whose completed result is definitive knowledge and is kept).
-    # On breach the REMAINING unclassified dirs fold into ONE aggregate
-    # `review-orphan-degraded` row ({unclassified: k}) — their state is UNKNOWN,
-    # never assumed tombstone — and the fold proceeds to the doc scan with the
-    # budget that remains (its existing between-slug/mid-slug checks, against the
-    # full fold deadline, then govern).
-    classify_dl = dl.reserve(0.5)
+    if tail_dl is None:
+        tail_dl = Deadline.open(deadline_seconds)
+
+    def _scan_one(e: dict[str, Any], phase_dl: Deadline) -> str:
+        """Scan ONE slug under ``phase_dl``; mutate ``out`` + the shared role state.
+        PHASE-LOCAL accounting: this helper NO LONGER touches any scanned/skipped
+        counter — it only reports its OUTCOME, and each phase (head/tail) tallies its
+        OWN counts from that. A ``"budget"``/``"unknown"`` outcome is exactly the
+        "count this slug skipped" signal; ``"ok"`` is "scanned clean". This is what
+        keeps the head marker's numbers from bleeding into the tail marker's (and
+        vice-versa). Return values:
+
+        - ``"budget"`` — the slug's own blocking op breached ``phase_dl`` (skip this
+          slug and STOP the phase).
+        - ``"unknown"`` — the slug is UNKNOWN for a non-budget reason: an unreadable
+          doc (``read`` returned None) or a per-slug ``TransportError``. Skip it and
+          surface it, but scanning CONTINUES. A HEAD caller distinguishes this from a
+          clean scan (an UNKNOWN head slug owes ``review-head-degraded``); the tail
+          treats it like ``"ok"`` for control flow (it continues) but still counts it
+          skipped, so the terminal tail marker reports it.
+        - ``"ok"`` — settled-skip or a clean tally; continue.
+
+        Same UNKNOWN discipline the loop always had: an unreadable doc/tally is
+        skipped-and-visible, never silently pending."""
+        slug = (e.get("name") or "")[:-3]
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+            if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
+                return "ok"  # settled -> skip entirely, zero reads beyond this listing
+            doc_raw = transport.read(_review_doc_path(team, slug))
+            if doc_raw is None:
+                # Slug came from the listing, so its doc exists — a None read is a
+                # transport failure (read() never raises). UNKNOWN: keep going.
+                return "unknown"
+            if phase_dl.expired():
+                # The doc read itself pushed us over budget (P1-B): after-op check.
+                # This slug is UNKNOWN; stop the phase.
+                return "budget"
+            tally, vreads_ok, fully = _tally_from_verdict_entries(
+                transport, team, slug, ventries, doc_raw, deadline=phase_dl.instant)
+            if not fully:
+                # Budget expired MID-SLUG (F2): the partial tally is untrusted; this
+                # reached slug is skipped and the phase stops.
+                return "budget"
+        except TransportError:
+            # A single slug's tally timed out: UNKNOWN. Skip it, keep scanning the
+            # rest — but a HEAD slug that ends here still owes its loud marker.
+            return "unknown"
+        state = tally.get("state")
+        pending = tally.get("pending_required") or []
+        if state == review.APPROVED and not pending:
+            # Cache only a PROVEN settle (non-empty required + every verdict read).
+            if _is_settleable(tally) and vreads_ok:
+                _write_settled_marker(transport, team, slug, now=now)
+            return "ok"
+        if state != "PENDING" or not pending:
+            return "ok"
+        if agent not in pending:  # direct hit needs no role folding at all
+            for r in pending:
+                if r not in role_holders:
+                    holders, ok = _role_fresh_holders(
+                        transport, team, r, now=now,
+                        listing_cache=roles_listing_cache)
+                    role_holders[r] = holders
+                    if not ok:
+                        # Fail-closed: the role's lease read is UNKNOWN — surface it.
+                        degraded_roles.add(r)
+        if review.is_pending_for(pending, agent, role_holders):
+            out.append({"type": "review-pending", "name": slug,
+                        "state": "PENDING", "pending_required": pending})
+        return "ok"
+
+    # --- HEAD: the caller's OWN reviews, on a dedicated (un-starvable) budget ----
+    head_slugs = _caller_review_head_slugs(rows, agent)
+    head_entries = [e for e in slug_entries
+                    if (e.get("name") or "")[:-3] in head_slugs]
+    # Fail closed on negative-membership inference: a caller directive whose slug has
+    # NO .md in the listing must NOT silently vanish (a listing is not proof the
+    # obligation is gone, and the caller's OWN obligation least of all). Every such
+    # slug is UNKNOWN and named in the marker so the caller can act.
+    listed_head = {(e.get("name") or "")[:-3] for e in head_entries}
+    missing_head = sorted(head_slugs - listed_head)
+    # PHASE-LOCAL head counters — the head marker summarises HEAD work only and never
+    # borrows the tail's numbers. ``head_scanned`` also survives the block so the tail
+    # guard below can reproduce the old cumulative measurable-progress semantics.
+    head_scanned = 0
+    if head_entries or missing_head:
+        head_dl = Deadline.open(deadline_seconds)  # fresh — NOT the drained remainder
+        # head_total counts EVERY caller head obligation the marker summarises — the
+        # listed slugs AND the missing ones. A missing slug is UNKNOWN, not absent
+        # from the scan: excluding it renders 0/0 (implies nothing to scan) or 1/1
+        # (implies fully scanned) while a slug is still unresolved. Count it so the
+        # scanned/total makes the UNKNOWN VISIBLE.
+        head_total = len(head_entries) + len(missing_head)
+        head_skipped = 0
+        head_cut = False
+        head_unknown = bool(missing_head)  # a missing slug is already UNKNOWN
+        for i, e in enumerate(head_entries):
+            if i and head_dl.expired():  # between-slug (measurable progress)
+                head_cut = True
+                break
+            outcome = _scan_one(e, head_dl)
+            head_scanned += 1
+            if outcome == "budget":
+                # The slug that HIT the budget is a budget cut, NOT a transport
+                # skip — it must not be counted in head_skipped, or the line
+                # would blame the budget stop on a transport error that did not
+                # happen. The budget_cut flag alone carries this cause.
+                head_cut = True
+                break
+            if outcome == "unknown":
+                # An unreadable doc / per-slug TransportError: this head slug is
+                # UNKNOWN. It IS a transport skip. Keep scanning the rest of the
+                # head (a sibling may still be a live pending we can surface), but
+                # the head owes its loud marker.
+                head_skipped += 1
+                head_unknown = True
+        if head_cut or head_unknown:
+            # The caller's OWN head could not fully resolve: UNKNOWN, and DISTINCT
+            # from an expected tail truncation — this is the incident, loud on its
+            # own type. Any unknown outcome (budget cut, unreadable doc, transport
+            # error, or a slug missing from the listing) qualifies.
+            head_row = budget_mod.degraded_row(
+                "review-head-degraded", head_scanned, head_total, head_skipped)
+            if head_cut:
+                # A genuine budget cut — the ONE cause the head-degraded LINE may
+                # attribute to the budget. Unreadable/missing/transport causes must
+                # NOT be blamed on the budget, so the base line stays cause-neutral
+                # and only this flag adds the budget clause.
+                head_row["budget_cut"] = True
+            if missing_head:
+                head_row["missing"] = missing_head
+            out.append(head_row)
+
+    # --- classify dir-only review slugs (visibility) under a TAIL sub-budget ----
+    # Dir-only slugs (a `<slug>/` dir with no `<slug>.md`) are invisible to the
+    # doc-keyed scan. Classify each via the tombstone three-way: real verdict shards
+    # -> ORPHAN (surface every pass); an empty dir / stale `.settled` -> TOMBSTONE
+    # (silently skipped); a listing that RAISES -> UNKNOWN (fail closed, per-dir
+    # `review-orphan-degraded`). Runs under HALF the tail budget (reserved) so the
+    # load-bearing tail doc scan keeps the other half — a visibility-only pass must
+    # never starve the critical one. It runs AFTER the head so the caller's own
+    # reviews are never behind orphan classification.
+    classify_dl = tail_dl.reserve(0.5)
     settled_index = rec._load_settled_index(transport, team)
     doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
     dir_slugs = []
@@ -1450,90 +1651,50 @@ def _pending_reviews_for(
         elif kind == "unknown":
             out.append({"type": "review-orphan-degraded", "name": oslug})
         # tombstone -> silently skipped
-    for e in slug_entries:
-        # Budget is checked BETWEEN slugs (after at least one is scanned, so a
-        # slow transport still makes measurable progress before degrading).
-        if scanned and dl.expired():
+
+    # --- TAIL: the remaining reviews, under the (possibly drained) shared budget --
+    # PHASE-LOCAL tail counters. ``review-fold-degraded`` describes TAIL truncation
+    # ONLY — it must never borrow the head's scanned/skipped (a head-only incident is
+    # the head marker's business alone). ``tail_total`` is the tail count, not the
+    # whole listing; in the legacy no-head path tail_entries == slug_entries so this
+    # is byte-identical to the old ``total``.
+    tail_entries = [e for e in slug_entries
+                    if (e.get("name") or "")[:-3] not in head_slugs]
+    tail_total = len(tail_entries)
+    tail_scanned = 0
+    tail_skipped = 0
+    for e in tail_entries:
+        # Between-slug check. Measurable-progress uses ``head_scanned or tail_scanned``
+        # — the same truthiness the old cumulative ``scanned`` gave: with a head
+        # already scanned it fires BEFORE the first tail slug (a spent shared budget
+        # truncates the tail to zero — expected); with no head it lets the first tail
+        # slug run (the standalone fold's contract, unchanged).
+        if (head_scanned or tail_scanned) and tail_dl.expired():
             out.append(budget_mod.degraded_row(
-                "review-fold-degraded", scanned, total, skipped))
+                "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
             return out
-        slug = (e.get("name") or "")[:-3]
-        scanned += 1
-        try:
-            ventries = transport.list_dir(_verdicts_prefix(team, slug))
-            if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
-                continue  # settled -> skip entirely, zero reads beyond this listing
-            doc_raw = transport.read(_review_doc_path(team, slug))
-            if doc_raw is None:
-                # The slug came from the review/ listing, so its doc exists —
-                # a None read is a transport failure (read() returns None on
-                # timeout, it never raises). The slug's state is UNKNOWN: not
-                # settled, not silently pending. Count it, keep scanning.
-                skipped += 1
-                continue
-            if dl.expired():
-                # The doc read itself pushed us over budget (P1-B): check AFTER the
-                # blocking op, not only between slugs. Don't start the verdict
-                # reads — this slug is UNKNOWN. Count it skipped and surface the
-                # degraded marker; the budget is spent.
-                skipped += 1
-                out.append(budget_mod.degraded_row(
-                    "review-fold-degraded", scanned, total, skipped))
-                return out
-            tally, vreads_ok, fully = _tally_from_verdict_entries(
-                transport, team, slug, ventries, doc_raw, deadline=dl.instant)
-            if not fully:
-                # Budget expired MID-SLUG (F2): a single review with many verdict
-                # shards would otherwise read them all unbounded. The partial
-                # tally is untrusted. This slug was reached (scanned already
-                # counts it), so it joins `skipped` — same accounting as a
-                # doc-read failure (scanned includes skipped; unscanned=total-scanned).
-                # The budget is spent: stop and surface the degraded marker.
-                skipped += 1
-                out.append(budget_mod.degraded_row(
-                    "review-fold-degraded", scanned, total, skipped))
-                return out
-        except TransportError:
-            # A single slug's tally timed out (Task-1 contract): skip it, keep
-            # scanning the rest, and make the gap visible via `skipped` below.
-            skipped += 1
-            continue
-        state = tally.get("state")
-        pending = tally.get("pending_required") or []
-        if state == review.APPROVED and not pending:
-            # Cache only a PROVEN settle: non-empty required (false-settle
-            # guard, see _is_settleable) AND every listed verdict actually read
-            # (an unreadable verdict could be a hidden CHANGES).
-            if _is_settleable(tally) and vreads_ok:
-                _write_settled_marker(transport, team, slug, now=now)
-            continue
-        if state != "PENDING" or not pending:
-            continue
-        if agent not in pending:  # direct hit needs no role folding at all
-            for r in pending:
-                if r not in role_holders:
-                    holders, ok = _role_fresh_holders(
-                        transport, team, r, now=now,
-                        listing_cache=roles_listing_cache)
-                    role_holders[r] = holders
-                    if not ok:
-                        # Fail-closed: the role's lease read is UNKNOWN. Do NOT let
-                        # it read as "no holders" (a silently dropped obligation) —
-                        # record it so a degraded marker surfaces below.
-                        degraded_roles.add(r)
-        if review.is_pending_for(pending, agent, role_holders):
-            out.append({"type": "review-pending", "name": slug,
-                        "state": "PENDING", "pending_required": pending})
+        outcome = _scan_one(e, tail_dl)
+        tail_scanned += 1
+        if outcome != "ok":
+            tail_skipped += 1
+        if outcome == "budget":
+            out.append(budget_mod.degraded_row(
+                "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
+            return out
+
     if degraded_roles:
         # A role's lease read degraded: the agent might be a holder we couldn't
         # resolve, so a role-routed obligation may be missing. Make it VISIBLE.
         out.append({"type": "review-role-degraded",
                     "roles": sorted(degraded_roles)})
-    if skipped:
-        # Completed inside budget but some slugs were unreadable: partial
-        # knowledge must be visible, so emit the degraded marker anyway.
+    if tail_skipped:
+        # The TAIL completed inside budget but some tail slugs were unreadable:
+        # partial knowledge must be visible, so emit the tail marker anyway. Gated on
+        # ``tail_skipped`` (not a shared counter) so a head-only incident — already
+        # loud on ``review-head-degraded`` — never ALSO emits a phantom tail marker
+        # with no tail behind it.
         out.append(budget_mod.degraded_row(
-            "review-fold-degraded", scanned, total, skipped))
+            "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
     return out
 
 
@@ -1541,6 +1702,62 @@ def _review_degraded_line(r: dict[str, Any]) -> str:
     return budget_mod.fold_degraded_line(
         r, label="review", remedy="run per-slug review status for the rest",
         noun="slug")
+
+
+def _review_head_degraded_line(r: dict[str, Any]) -> str:
+    """The caller's OWN review queue could not complete — incident-grade UNKNOWN,
+    deliberately DISTINCT from ``_review_degraded_line`` (an expected TAIL
+    truncation). Never silent, never counted as a pending item.
+
+    CAUSE-NEUTRAL base. A head incident may be a budget cut OR an unreadable doc OR a
+    per-slug transport error OR a slug missing from the listing — and several at once.
+    The base line therefore does NOT attribute a cause ("before budget" was wrong for
+    every non-budget case); it states the UNKNOWN and appends the specific causes the
+    marker actually carries (a budget cut, transport-skipped slugs, missing slugs)."""
+    line = (f"  review HEAD degraded: caller's own reviews incomplete — scanned "
+            f"{r.get('scanned')}/{r.get('total')} — UNKNOWN, retry")
+    causes: list[str] = []
+    if r.get("budget_cut"):
+        causes.append("budget cut")
+    if r.get("skipped"):
+        causes.append(f"{r['skipped']} slug(s) skipped on transport error")
+    if r.get("missing"):
+        # Slugs a caller directive named but that had no doc in the listing: fail
+        # closed and name them so the reader knows WHICH obligation went UNKNOWN.
+        causes.append(f"missing from listing: {', '.join(r['missing'])}")
+    if causes:
+        line += " (" + "; ".join(causes) + ")"
+    return line
+
+
+def _review_row_line(r: dict[str, Any]) -> Optional[str]:
+    """The ONE text-dispatch for every review row type ``briefing`` / ``needs-me``
+    can receive. Both verbs render review rows through this, so an identical row
+    type can never diverge between them, and — critically — a review row can never
+    fall through to the generic task line (``_line``), whose ``priority`` /
+    ``status`` / ``title`` lookups print ``[ ?] ? None`` on these shapes. Returns
+    ``None`` for a non-review row so the caller falls back to its own default."""
+    t = r.get("type")
+    if t == "review-pending":
+        return (f"  [REVIEW] pending verdict: {r['name']} "
+                f"(required: {', '.join(r['pending_required'])})")
+    if t == "review-fold-degraded":
+        return _review_degraded_line(r)
+    if t == "review-head-degraded":
+        return _review_head_degraded_line(r)
+    if t == "review-orphan":
+        return (f"  [REVIEW] orphan review dir (verdicts, no doc): "
+                f"{r['name']} — needs maintainer repair")
+    if t == "review-orphan-degraded":
+        if r.get("unclassified"):
+            return (f"  [REVIEW] dir classification degraded: "
+                    f"{r['unclassified']} dir(s) unclassified before budget — retry")
+        return (f"  [REVIEW] orphan dir classification degraded: "
+                f"{r['name']} — verdicts listing unreadable, retry")
+    if t == "review-role-degraded":
+        return (f"  review role resolution degraded: "
+                f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
+    return None
 
 
 def _forge_responsible(
@@ -2232,7 +2449,7 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
     Distinct (slug, reviewer) pairs produce distinct payloads -> distinct paths,
     so reviewers never collide and a re-request idempotently dedupes."""
     verdict_file = f"{_verdicts_prefix(team, slug)}{reviewer}.md"
-    title = f"REVIEW REQUEST: {slug}"
+    title = f"{_REVIEW_REQUEST_TITLE_PREFIX}{slug}"
     summary = f"Verdict owed on {of} — file it at {verdict_file}"
     next_action = f"file your verdict at {verdict_file}"
     payload = _directive_payload(title, summary, next_action, reviewer)
@@ -3246,6 +3463,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         held_roles, unresolved_roles = set(), {"(all)"}
     if unresolved_roles:
         out["role_degraded"] = _role_degraded_row(unresolved_roles)
+    # Blocked-on-human: the reserved FIRST section, on its own dedicated bundle key.
+    # Derived PURELY from ``rows`` + the role set already resolved above — ZERO
+    # extra transport, so a budget cut can never hide a decision parked on a human.
+    out["blocked_on_human"] = _blocked_on_human_section(
+        rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
     try:
         out["inbox"] = _directed_inbox(
             transport, args.team, agent, rows,
@@ -3268,7 +3490,7 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # tighter, already-shipped budget (whichever bound is sooner).
     try:
         out["pending_reviews"] = _pending_reviews_for(
-            transport, args.team, agent, deadline=add_on.instant)
+            transport, args.team, agent, rows=rows, deadline=add_on.instant)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
@@ -3310,6 +3532,13 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     print(f"briefing — {agent} in team/{args.team}")
     if not rows_ok:
         _surface_read_degraded(rows_reason, json_mode=False)
+    # FIRST — before presence/board/inbox: decisions parked on a human. Free and
+    # un-starvable, so this is the one section a budget cut can never hide.
+    boh = out.get("blocked_on_human") or []
+    if boh:
+        print(f"  blocked on human: {len(boh)} item(s)")
+        for r in boh:
+            print(_blocked_on_human_line(r))
     live = [p["agent"] for p in out["presence"] if p.get("liveness") == "live"]
     print(f"  live now: {', '.join(live) if live else '(nobody)'}")
     for r in out["presence"]:  # always shown — a degraded roster must never hide
@@ -3326,15 +3555,25 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         # qualifies. Without it, an unresolved role renders as a clean queue that
         # reads "no role work", which is the bug this whole change closes.
         print(_role_degraded_line(out["role_degraded"]))
+    # The degraded / UNKNOWN markers are ALWAYS shown and NEVER counted as pending
+    # items: `review-fold-degraded` (expected tail truncation) and, incident-grade,
+    # `review-head-degraded` (the caller's OWN review queue could not complete). A
+    # degraded/UNKNOWN marker counted as a pending item — or rendered through
+    # `_line` — misstates the queue (live: an orphan-classification marker read as
+    # "pending reviews: 1 item(s)" with zero actual reviews), so ALL markers are
+    # split out and dispatched, never tallied; only real review rows count.
+    _review_degraded_markers = (
+        "review-fold-degraded", "review-head-degraded",
+        "review-orphan-degraded", "review-role-degraded")
     pend_rows = [r for r in out["pending_reviews"]
-                 if r.get("type") != "review-fold-degraded"]
+                 if r.get("type") not in _review_degraded_markers]
     degraded_rows = [r for r in out["pending_reviews"]
-                     if r.get("type") == "review-fold-degraded"]
+                     if r.get("type") in _review_degraded_markers]
     print(f"  pending reviews: {len(pend_rows)} item(s)")
     for r in pend_rows[:5]:
-        print(_line(r))
-    for r in degraded_rows:  # always shown — a degraded fold must never hide
-        print(_review_degraded_line(r))
+        print(_review_row_line(r) or _line(r))
+    for r in degraded_rows:  # always shown — a degraded/UNKNOWN fold must never hide
+        print(_review_row_line(r) or _line(r))
     forge_rows = out.get("forge_feedback") or []
     forge_fb = [r for r in forge_rows if r.get("type") != "forge-degraded"]
     forge_deg = [r for r in forge_rows if r.get("type") == "forge-degraded"]

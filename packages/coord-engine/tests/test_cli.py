@@ -277,7 +277,9 @@ def test_cli_task_block_pause_abandon_assign(capsys):
     cli.main(["task", "start", "r", "T", "--status", "active"], transport=t)
     assert cli.main(["task", "block", "r", "t", "--on-user", "review"], transport=t) == 0
     fm = okf.parse_frontmatter(t.store["team/r/task/t.md"])
-    assert fm["status"] == "blocked" and fm["blocked_on"] == "review"
+    # --on-user TYPES the block as `user:<name>` (the blocked-on-human fold reads it
+    # at zero transport cost); --blocked-on stays an untyped agent value.
+    assert fm["status"] == "blocked" and fm["blocked_on"] == "user:review"
     assert fm["assignee"] == "human" and "needs:human" in fm["tags"]
     # blocked -> waiting is a legal transition
     assert cli.main(["task", "pause", "r", "t", "-n", "resume after review"], transport=t) == 0
@@ -291,7 +293,7 @@ def test_cli_task_block_on_user_honors_env_human(monkeypatch):
     cli.main(["task", "start", "r", "Human", "--status", "active"], transport=t)
     assert cli.main(["task", "block", "r", "human", "--on-user", "approve"], transport=t) == 0
     fm = okf.parse_frontmatter(t.store["team/r/task/human.md"])
-    assert fm["blocked_on"] == "approve"
+    assert fm["blocked_on"] == "user:approve"  # typed (was the untyped ask text)
     assert fm["assignee"] == "ash"
     assert "needs:human" in fm["tags"]
 
