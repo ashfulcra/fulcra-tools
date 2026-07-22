@@ -66,15 +66,18 @@ def sha256_hex(content: str) -> str:
 def parse_manifest(raw: Optional[str]) -> dict[str, Any]:
     """The manifest, or a fresh empty one when absent/corrupt.
 
-    Corrupt JSON degrades to empty rather than raising: the store copy is
-    last-writer-wins and the next push rewrites it whole, so an unreadable
-    manifest must not brick push/list — pull still verifies per-file checksums
-    against whatever survives here.
+    Corrupt JSON degrades to empty rather than raising, and a structurally
+    corrupt per-file entry (non-dict value) is dropped the same way: the store
+    copy is remote, last-writer-wins data — the next push rewrites it whole —
+    so no shape of it may brick push/list/pull. A dropped entry reads as
+    unmanifested downstream, never as a traceback.
     """
     if raw:
         try:
             data = json.loads(raw)
             if isinstance(data, dict) and isinstance(data.get("files"), dict):
+                data["files"] = {k: v for k, v in data["files"].items()
+                                 if isinstance(v, dict)}
                 return data
         except ValueError:
             pass

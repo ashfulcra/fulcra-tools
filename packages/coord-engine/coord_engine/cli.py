@@ -3928,8 +3928,12 @@ def cmd_stash_pull(args: argparse.Namespace, transport: Any) -> int:
         target = dest / name
         target.write_text(content, encoding="utf-8")
         entry = files.get(name) or {}
-        if entry.get("exec"):
-            target.chmod(target.stat().st_mode | 0o755)
+        if "exec" in entry:
+            # Re-apply the manifest's exec bit in BOTH directions: a restore
+            # over a stale executable must clear it, and only the x bits move
+            # (never widen read/write for group/other).
+            mode = target.stat().st_mode
+            target.chmod(mode | 0o111 if entry["exec"] else mode & ~0o111)
         if entry.get("sha256") and entry["sha256"] != stash.sha256_hex(content):
             # The bytes still land (an operator wants to inspect what drifted),
             # but the exit is loud: a silently-diverged restore is the exact

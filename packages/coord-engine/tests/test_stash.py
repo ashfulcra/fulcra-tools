@@ -197,6 +197,51 @@ def test_pull_restores_executable_bit(tmp_path):
     assert (dest / "loop.sh").stat().st_mode & 0o100
 
 
+def test_pull_clears_stale_executable_bit(tmp_path):
+    # Manifest says exec=False: restoring over a pre-existing EXECUTABLE dest
+    # must clear the bit, not preserve it — "re-apply the manifest exec bit"
+    # goes both directions (codex finding, PR #450 r1).
+    t = FakeTransport()
+    _push(tmp_path, t, "loop.sh", "plain\n")
+    dest = tmp_path / "restore"
+    dest.mkdir()
+    stale = dest / "loop.sh"
+    stale.write_text("old\n", encoding="utf-8")
+    stale.chmod(0o755)
+    assert cli.cmd_stash_pull(_args(dest=str(dest)), t) == 0
+    assert not (stale.stat().st_mode & 0o111)
+
+
+def test_parse_manifest_drops_malformed_entries():
+    raw = json.dumps({"schema": stash.MANIFEST_SCHEMA,
+                      "files": {"ok.sh": {"sha256": "x"}, "bad.sh": "bad-entry"}})
+    files = stash.parse_manifest(raw)["files"]
+    assert "ok.sh" in files and "bad.sh" not in files
+
+
+def test_list_survives_malformed_manifest_entry(capsys):
+    # A structurally corrupt entry is remote data — it degrades to
+    # "unmanifested", it must never traceback list (codex finding, PR #450 r1).
+    t = FakeTransport()
+    t.put(PREFIX + "tool.sh", "x\n")
+    t.put(PREFIX + "manifest.json",
+          json.dumps({"schema": stash.MANIFEST_SCHEMA,
+                      "files": {"tool.sh": "bad-entry"}}))
+    assert cli.cmd_stash_list(_args(), t) == 0
+    assert "unmanifested" in capsys.readouterr().out
+
+
+def test_pull_survives_malformed_manifest_entry(tmp_path):
+    t = FakeTransport()
+    t.put(PREFIX + "tool.sh", "x\n")
+    t.put(PREFIX + "manifest.json",
+          json.dumps({"schema": stash.MANIFEST_SCHEMA,
+                      "files": {"tool.sh": "bad-entry"}}))
+    dest = tmp_path / "restore"
+    assert cli.cmd_stash_pull(_args(dest=str(dest)), t) == 0
+    assert (dest / "tool.sh").read_text(encoding="utf-8") == "x\n"
+
+
 def test_pull_selected_names_only(tmp_path):
     t = FakeTransport()
     _push(tmp_path, t, "a.sh", "a\n")
