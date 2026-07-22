@@ -79,20 +79,27 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
   succeeding write fail. The engagement fold treats recent *activity* as liveness proof — a busy
   agent needs no separate beat.
 
-### Part C — Agent external identity (coord-maintainer's addendum, folded in)
+### Part C — Agent external identity (RESOLVED by operator rule, 2026-07-22)
 
-Agents currently act on GitHub as `ashfulcra` with pull-only reach on upstream orgs — which is why
-an approved upstream PR (community-skills#1) cannot be merged by any agent. Two candidate fixes:
+Ash's standing rule decides this leg: **the operator sits outside core engineering spaces and
+lobs contributions in** — he will not install an App or place a machine user in `fulcradynamics`
+org repos. The identity design follows from that boundary:
 
-- **GitHub App on `fulcradynamics`** with fine-grained per-repo permissions (contents +
-  pull_requests write on maintained repos); the router is the natural holder of the installation
-  token (it is the one resident, secretable process). **(Recommended — revocable, per-repo scoped,
-  auditable as itself.)**
-- **Machine-user account** — simpler to stand up, coarser to scope, one more seat to secure.
+- **Inside the operator's boundary (`ashfulcra/*` repos): the existing machine user (`FulcraBot`)
+  is the fleet identity.** It is already a collaborator and already shipping merged PRs. The
+  remaining work is hygiene, not creation: fine-grained per-repo PAT, rotation cadence, router as
+  token custodian (the slot this spec reserved for an installation token), and attribution
+  conventions so audit reads unambiguously as fleet activity.
+- **Upstream (`fulcradynamics` and any org the operator doesn't own): the contributor pattern IS
+  the design, permanently.** Agents fork, prepare, and lob the PR over the wall; the merge click
+  belongs to an upstream maintainer. The blocked-on-human fold models "awaiting upstream
+  maintainer" as a first-class visible state — it is the intended terminal hand-off, not a gap.
+- **The GitHub App proposal is a shelf artifact, not a dependency.** A per-repo-scoped,
+  short-lived-token App design (contents + pull_requests write only) stays documented here so the
+  `fulcradynamics` core team can *choose to install it themselves* if they ever want agent-driven
+  merges on their side. Nothing in this build waits on it, and no one on our side will install it.
 
-**DECISION REQUIRED (Ash, org-owner access):** App vs machine user, and who creates it. Until then
-this leg designs to an interface (`external identity provider` handing the router short-lived
-tokens) so Parts A/B do not block on it.
+No decision remains open on this leg.
 
 ## 3. Restated CONCUR conditions (from the vacancy-consults-presence concurrence; they bind here)
 
@@ -151,8 +158,9 @@ plug).
 
 ## 7. Open decisions (blocked-on-Ash ledger, led per standing rule)
 
-1. **External identity: GitHub App vs machine user** — and who creates it (org-owner access).
-   Recommendation: App, created by Ash, installed on `fulcradynamics` maintained repos only.
+1. ~~External identity: App vs machine user~~ — **RESOLVED 2026-07-22 by operator rule** (see
+   Part C): FulcraBot inside the operator's boundary, contributor pattern upstream, App proposal
+   shelved for the upstream org to adopt or not.
 2. **Router host designation** — which resident box is the router's home (MBP assumed; confirm),
    acknowledging today's evidence that desktop hosts are "unstable" by Ash's own assessment — the
    router must tolerate its own host dying (safety-net listener cadence is the fallback).
