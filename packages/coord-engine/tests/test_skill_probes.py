@@ -117,19 +117,20 @@ def test_every_probe_verb_is_a_real_cli_verb():
         )
 
 
-def test_durable_state_probes_are_fulcra_api_based():
-    """durable-state is the one probe table with no engine dependency: its
-    probes run on ``fulcra-api`` directly. Pin the tool name and the two
-    load-bearing subcommand spellings, so a rename to a coord-engine stash
-    verb (planned) forces this test — and the SKILL prose — to move together."""
+def test_durable_state_probes_use_the_stash_verb():
+    """durable-state's stash probes run on the engine's ``stash`` verb (BUS-75);
+    only auth still probes on ``fulcra-api`` (the engine inherits its
+    credentials). Pin both spellings — and pin the raw-file probe OUT — so the
+    SKILL prose and the CLI move together, the same contract the pre-stash
+    version of this test enforced in the other direction."""
     section = _probe_section(_skill_text("fulcra-agent-durable-state"))
     assert "fulcra-api auth print-access-token" in section, (
         "durable-state auth probe must use `fulcra-api auth print-access-token`"
     )
-    assert "fulcra-api file list" in section, (
-        "durable-state stash probe must use `fulcra-api file list`"
+    assert "coord-engine stash list" in section, (
+        "durable-state stash probe must use `coord-engine stash list`"
     )
-    assert "coord-engine" not in section, (
-        "durable-state probes gained a coord-engine dependency — if the stash "
-        "verb landed, update the SKILL probe table and this pin together"
+    assert "fulcra-api file list" not in section, (
+        "the raw-file stash probe was replaced by the stash verb — if it came "
+        "back, update the SKILL probe table and this pin together"
     )

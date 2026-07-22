@@ -28,14 +28,15 @@ last-writer-wins, survives every container the fleet has lost so far), and
 
 Before touching the stash, probe how far this session already got. Enter at the **first probe
 that fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`); every step
-is safely re-runnable (uploads/downloads are whole-file overwrites, last-writer-wins). These
-probes run on `fulcra-api` directly — this skill has no engine dependency today:
+is safely re-runnable (uploads/downloads are whole-file overwrites, last-writer-wins). Auth
+probes on `fulcra-api` (the engine inherits its credentials); the stash probes run on the
+engine's `stash` verb:
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Auth usable? | `fulcra-api auth print-access-token >/dev/null && echo AUTH-OK` | prints `AUTH-OK` (exit 0) | `fulcra-api auth login` — browser sign-in; a headless agent that can't complete it should surface to its operator, not improvise |
-| Stash exists? | `fulcra-api file list team/<team>/_coord/agents/<agent>/stash/` | lists at least one file | **First adoption** — nothing durable yet: push your bundle now (see *On change* below) |
-| Local cache complete? | `test -x <local-path>` for each tool the stash lists | every tool you depend on exists locally and is executable | **Restore** — download the missing files (see *On wake* below) |
+| Stash exists? | `coord-engine stash list <team> --agent <agent>` | lists at least one file (not `empty`) | **First adoption** — nothing durable yet: push your bundle now (see *On change* below) |
+| Local cache complete? | `test -x <local-path>` for each tool the stash lists | every tool you depend on exists locally and is executable | **Restore** — `coord-engine stash pull <team> --agent <agent> --dest <dir>` (see *On wake* below) |
 
 All probes pass → your tooling is durable and current; work normally and push on change. A
 freshly rolled-back container typically fails the third probe and enters at Restore.
@@ -46,6 +47,7 @@ Each agent keeps its durable bundle under a per-agent path in the team namespace
 
 ```
 team/<team>/_coord/agents/<agent>/stash/
+    manifest.json         # written by `stash push`: per-file sha256 + size + exec bit
     linear-sync.sh        # scripts, loops, config templates
     listener-loop.sh
     restore-tooling.sh    # the self-heal entrypoint (see below)
@@ -56,14 +58,19 @@ Three behaviors, mirroring the continuity lifecycle contract:
 1. **On wake** (fresh session, cron fire, post-rollback): if a tool you expect is
    missing from local disk, restore before improvising:
    ```bash
-   fulcra-api file download team/<team>/_coord/agents/<agent>/stash/<file> <local-path>
-   chmod +x <local-path>
+   coord-engine stash pull <team> --agent <agent> --dest <dir>
    ```
+   Pull re-applies each file's executable bit from the manifest and verifies its
+   sha256 — **checksum drift exits loud (rc 1)** instead of handing you a
+   silently-diverged restore. (No engine on the host yet? The plain
+   `fulcra-api file download` path still works; the stash is ordinary files.)
 2. **On change** (you edit a script, fix a bug in a loop): push the canonical copy
    back immediately — an unstashed fix is a fix a rollback will undo:
    ```bash
-   fulcra-api file upload <local-path> team/<team>/_coord/agents/<agent>/stash/<file>
+   coord-engine stash push <team> <local-path> --agent <agent>
    ```
+   One step uploads the file and refreshes `manifest.json`; the push runs the
+   fail-closed secrets guard below.
 3. **Self-heal first.** Keep a `restore-tooling.sh` in the stash that downloads the
    rest of the bundle, and make it the first line of any scheduled job's
    missing-file branch. A scheduled task's prompt should say "restore from the
@@ -80,7 +87,10 @@ agent (and every prompt-injection that lands on any agent) can read. Fail closed
   `*.env` files in the stash, no matter how convenient the restore would be.
 - Treat filenames as a first filter: if it's called `.env`, `*.key`, `*token*`,
   or holds a known credential prefix (`lin_oauth_…`, `sk-…`, PEM headers), it
-  does not get uploaded. When in doubt, it's a secret.
+  does not get uploaded. When in doubt, it's a secret. `stash push` enforces
+  exactly this, fail-closed: secret-shaped names and credential-shaped content
+  are refused with the tripped rule named; `--unsafe-allow-secrets` exists for
+  a false positive only, never for a real credential.
 - Config *templates* with the secret redacted are fine — the restore path then
   needs only the secret from env config, not the whole file from memory.
 
@@ -107,6 +117,7 @@ paths entirely — it rides in environment configuration instead.
   for what it was doing, a stash restore for what it works with.
 - **fulcra-agent-automation** installs the scheduled jobs; this skill is where
   those jobs' self-heal branches point.
-- Deterministic bookkeeping for this pattern (a `stash push/pull` verb with a
-  manifest and a fail-closed secrets guard) is planned for `coord-engine`; until
-  it lands, the plain `fulcra-api file` commands above are the whole mechanism.
+- The deterministic bookkeeping for this pattern is the engine's
+  `stash push/pull/list` verb (manifest + sha256 checksums + the fail-closed
+  secrets guard); the plain `fulcra-api file` commands remain the no-engine
+  fallback — the stash is ordinary files either way.
