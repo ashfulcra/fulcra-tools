@@ -65,9 +65,13 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
 
 - **Presence schema addition:** `engagement: {mode: resident|session|occasional, until: <ts>}`.
   - `resident` — always-on host; expected to beat; staleness is meaningful.
-  - `session` — bounded life; declares a TTL (`until`) at join. At expiry, the **host tick (zero
-    model tokens)** parks continuity and releases roles per the idle-reaping rule. A session past
-    TTL reads **PARKED — never gone-dark.** This is the structural fix for the false-liveness
+  - `session` — bounded life; declares a TTL (`until`, default `join + 8h` — operator-confirmed
+    2026-07-22). **At expiry the agent LAPSES, it does not park** (operator decision, same date):
+    a lapsed session drops to a reduced check-in cadence (default every 6h) **indefinitely**,
+    retains its roles, and reads **LAPSED — an explained state, never gone-dark. PARK happens
+    only when told** — an explicit operator/park directive (or the agent's own park before
+    context loss). The host tick (zero model tokens) marks the lapse and aligns future wakes to
+    the reduced cadence; it never parks anyone. This is the structural fix for the false-liveness
     incident and the direct answer to coord-maintainer's DECIDE-WITH-ME liveness-substrate
     question: liveness = engagement-aware fold over (beats + activity), not beats alone.
   - `occasional` — **occasional model, resident host:** a desktop agent holds a role with *no loop
@@ -88,11 +92,14 @@ Ash's standing rule decides this leg: **the operator sits outside core engineeri
 lobs contributions in** — he will not install an App or place a machine user in `fulcradynamics`
 org repos. The identity design follows from that boundary:
 
-- **Inside the operator's boundary (`ashfulcra/*` repos): the existing machine user (`FulcraBot`)
-  is the fleet identity.** It is already a collaborator and already shipping merged PRs. The
-  remaining work is hygiene, not creation: fine-grained per-repo PAT, rotation cadence, router as
-  token custodian (the slot this spec reserved for an installation token), and attribution
-  conventions so audit reads unambiguously as fleet activity.
+- **Inside the operator's boundary (`ashfulcra/*` repos): a DEDICATED fleet machine account,
+  to be created (operator decision 2026-07-22: `FulcraBot` is reserved for Fulcra-side repos —
+  e.g. the `fulcrabot`-owned website work — and is NOT the identity for the operator's
+  fulcra-tools fleet).** Until the new account exists, the interim is the status quo (operator
+  credentials inside the operator's own boundary). Once created: fine-grained per-repo PAT,
+  rotation cadence, router as token custodian, and attribution conventions so audit reads
+  unambiguously as fleet activity — the W9 custody design is unchanged, only the account it
+  guards.
 - **Upstream (`fulcradynamics` and any org the operator doesn't own): the contributor pattern IS
   the design, permanently.** Agents fork, prepare, and lob the PR over the wall; the merge click
   belongs to an upstream maintainer. The blocked-on-human fold models "awaiting upstream
