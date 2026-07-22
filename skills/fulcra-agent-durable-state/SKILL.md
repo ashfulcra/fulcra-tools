@@ -24,6 +24,22 @@ last-writer-wins, survives every container the fleet has lost so far), and
 
 > **Local disk is a cache. The store is the truth.**
 
+## Where to start — the re-entrancy probes
+
+Before touching the stash, probe how far this session already got. Enter at the **first probe
+that fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`); every step
+is safely re-runnable (uploads/downloads are whole-file overwrites, last-writer-wins). These
+probes run on `fulcra-api` directly — this skill has no engine dependency today:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Auth usable? | `fulcra-api auth print-access-token >/dev/null && echo AUTH-OK` | prints `AUTH-OK` (exit 0) | `fulcra-api auth login` — browser sign-in; a headless agent that can't complete it should surface to its operator, not improvise |
+| Stash exists? | `fulcra-api file list team/<team>/_coord/agents/<agent>/stash/` | lists at least one file | **First adoption** — nothing durable yet: push your bundle now (see *On change* below) |
+| Local cache complete? | `test -x <local-path>` for each tool the stash lists | every tool you depend on exists locally and is executable | **Restore** — download the missing files (see *On wake* below) |
+
+All probes pass → your tooling is durable and current; work normally and push on change. A
+freshly rolled-back container typically fails the third probe and enters at Restore.
+
 ## The stash convention
 
 Each agent keeps its durable bundle under a per-agent path in the team namespace:

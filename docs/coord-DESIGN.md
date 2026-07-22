@@ -1,6 +1,6 @@
 # coord — deterministic coordination add-ons for fulcra-agent-teams
 
-Twelve `fulcra-agent-*` skills that layer durable multi-agent coordination onto the official
+Thirteen `fulcra-agent-*` skills that layer durable multi-agent coordination onto the official
 `fulcra-agent-teams` OKF-markdown convention, backed by one shared stdlib-only CLI (`coord-engine`),
 invoked as the installed binary (`coord-engine …` — it is not on PyPI, so `uv tool run` will not
 resolve it; see the [quickstart](coord/GET-ON-THE-BUS.md) for the install).
