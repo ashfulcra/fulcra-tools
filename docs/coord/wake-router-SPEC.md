@@ -28,8 +28,11 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
 
 ### Part A — Wake Router
 
-- **One watcher, whole fleet:** a single process on a resident host (MBP-class) polls the store
-  once/min and evaluates every agent's wake policy. Per-agent listeners drop to a 30–60 min
+- **One watcher, whole fleet:** a single model-free process — **cloud-hosted per operator
+  decision (Ash, 2026-07-22): the decision plane runs in a cloud session environment (designated:
+  `coord-fable-worker`), never mandatorily on resident hardware** — polls the store at a fixed
+  60s interval while its container lives (setup-script re-arm at creation; hourly Routine floor
+  after reclaim; duty-cycle gated at acceptance) and evaluates every agent's wake policy. Per-agent listeners drop to a 30–60 min
   safety-net cadence (defense in depth, not the primary path).
 - **Policy, per agent:**
   1. *Busy-aware deferral* — an agent presence-marked busy gets non-urgent wakes queued to its next
@@ -127,8 +130,14 @@ No decision remains open on this leg.
   installation token on the upstream side; that credential never enters this build.)
 - **ATC fence:** no changes to usage/headroom/route/atc/dash or `fulcra-agent-atc`.
 - **Store remains the bus; the router owns exactly one namespace.** The router *reads* the shards
-  agents write, and *writes only* under `team/<team>/_coord/router/` — durable state it exclusively
-  owns: `cursor.json` (monotonic cursor / idempotency keys; at-least-once delivery, replays are
+  agents write, and *writes only* under `team/<team>/_coord/router/` — durable state owned by the
+  router SYSTEM, with per-subpath writers (stage-2 normative): `cursor.json`, `config.json`, and
+  the folded `delivered.json` view — decision plane only; `queue/` — created by the decision
+  plane, claim-stamped by the matching executor; `delivered/` + `dead-letter/` —
+  idempotency-keyed records written by the executing claim-holder; `shadow-evidence/` — the W7
+  delivery-probe writers, shadow window only, removable after acceptance. No agent-owned shard is
+  ever router-written; no router subpath is written outside its declared writer. Layout:
+  `cursor.json` (monotonic cursor / idempotency keys; at-least-once delivery, replays are
   no-ops), `queue/` (deferred and debounced wakes awaiting an idle boundary), `dead-letter/`
   (wakes that exhausted bounded retry, with cause — the audit trail), and `delivered.json`
   (observable last-delivered time per agent). This adopts the relay contract in
@@ -163,8 +172,9 @@ plug).
 1. ~~External identity: App vs machine user~~ — **RESOLVED 2026-07-22 by operator rule** (see
    Part C): FulcraBot inside the operator's boundary, contributor pattern upstream, App proposal
    shelved for the upstream org to adopt or not.
-2. **Router host designation** — which resident box is the router's home (MBP assumed; confirm),
-   acknowledging today's evidence that desktop hosts are "unstable" by Ash's own assessment — the
-   router must tolerate its own host dying (safety-net listener cadence is the fallback).
+2. ~~Router host designation~~ — **RESOLVED 2026-07-22 (Ash): cloud-first.** Decision plane in
+   the `coord-fable-worker` cloud environment; host-local adapters execute via a thin, policy-free
+   host executor whose failure mode is visibly-queued wakes (plan §2.5 / W5.5). No mandatory
+   component may require resident hardware.
 3. **TTL defaults** — proposed: session agents default `until = join + 8h` unless declared;
    confirm or adjust.

@@ -61,9 +61,18 @@ PR — same surface, one review.
   "decision-plane" or a host id from the config's executor allowlist>}` (all timestamps iso8601
   UTC) — idempotency key as in cursor. **The decision plane resolves `adapter`/`executor` from
   config at enqueue time** — that is the trusted routing source; executors never choose. An
-  executor claims exactly the entries whose `executor` matches its own id, stamps `claimed_at`,
-  and execution is idempotent under retry because the delivery record is keyed by the idempotency
-  key (a re-executed claim overwrites its own record, never another's).
+  executor claims exactly the entries whose `executor` matches its own id and stamps `claimed_at`.
+  **Delivery guarantee, stated honestly: the store has no atomic claim/CAS, so side effects are
+  AT-LEAST-ONCE** — a crash after the adapter fires but before the delivery record lands, or two
+  processes under one executor id, can re-execute. The system is safe under that guarantee by
+  ADAPTER CONTENT DESIGN, which W5 must enforce and test: every wake payload is a
+  "check your queue/bus" nudge carrying the idempotency key and NO per-event command or payload —
+  so N deliveries of the same wake converge to one bus check (semantically idempotent effect;
+  duplicate notifications are accepted noise). Discipline, not proof, bounds duplicates: exactly
+  one executor process per executor id (local pidfile), and executors skip entries with a foreign
+  fresh `claimed_at` (< 10 min) — a stale claim is retryable, which is at-least-once again, which
+  is safe by the content rule. Delivery records are bookkeeping (idempotency-keyed,
+  self-overwriting), never the safety mechanism.
 - **Dead-letter** (`_coord/router/dead-letter/<idempotency-key>.json`): queue entry +
   `{attempts, last_error, gave_up_at}`. **Owned by whichever executor holds the claim** when
   bounded retries exhaust; keyed by the idempotency key, so a duplicate transition under
@@ -85,9 +94,9 @@ cloud sessions; env-config secrets; setup-script process re-arm; self-armed Rout
 
 - **Decision plane (W4)** runs in a cloud session environment — designated: the
   `coord-fable-worker` environment (already carrying the setup-script + Routine + env-config
-  stack). **This supersedes the parent spec's "one model-free watcher on a resident host (MBP)"
-  sentence by operator decision (Ash, 2026-07-22)** — recorded here rather than re-gating the
-  spec; every other spec contract stands. **Cadence, defined:** the router's poll interval is a
+  stack). **The parent spec's hosting sentence and namespace-writer model are updated in this same PR**
+  (operator decision, Ash 2026-07-22) so exactly one authoritative contract exists — spec and plan
+  gate together on this head; every other spec contract stands. **Cadence, defined:** the router's poll interval is a
   FIXED constant `60s` while the process is alive (the acceptance latency bounds reference this
   constant — it is not tunable per report); the process runs continuously while the container
   lives, the setup script re-arms it at container creation, and the hourly Routine is the re-arm
