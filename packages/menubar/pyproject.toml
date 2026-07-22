@@ -75,6 +75,7 @@ requires = [
     "fulcra-attention",
     "fulcra-csv-importer",
     "fulcra-gmail",
+    "fulcra-purpleair",
     "tomlkit>=0.12",
     # macOS GUI stack.
     "rumps>=0.4",

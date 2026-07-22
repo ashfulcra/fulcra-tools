@@ -79,9 +79,10 @@ under `skills/`, each package with its own README, build, and tests.
   presetting that slot from its own plugin-KV cache (`definition_ids`).
   Idempotency is **per-reading** via the daemon `claim_dedup_keys` on the
   sensor's own observation timestamp (the typed-ingest endpoint does no
-  server-side dedup); a failed POST unclaims so the reading retries. Because
-  `api_key` is a required credential, `mode=local` shows a cosmetic
-  "credential missing" in the wizard — harmless, the run path doesn't need it.
+  server-side dedup); a failed POST unclaims so the reading retries. `api_key`
+  is an **optional** credential (`Credential(required=False)`) so `mode=local`
+  runs without it — the worker only hard-blocks a run on a *required* missing
+  credential (`required=True`, the default).
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the thirteen `fulcra-agent-*` skills under `skills/` are how an agent

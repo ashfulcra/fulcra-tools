@@ -80,19 +80,19 @@ def _resolve_definition_ids(ctx: RunContext) -> dict[str, str]:
     """Resolve (find-or-create) the six per-measure NumericAnnotation defs,
     caching each id in plugin KV keyed by measure.
 
-    ``resolved_definition_id`` caches a SINGLE id in ``state.definition_id``
-    and returns it for any name, so it cannot be called six times as-is.
-    Drive it per-measure by presetting the slot to this measure's cached id
-    (or ``None`` for a fresh resolve) — the same mechanism ``ensure_definition``
-    uses internally. It then validates-or-recreates that id against the live
-    account (self-healing an account switch) and we read the result back into
-    our own per-measure cache.
+    Each measure keeps its own cached id in plugin KV and is resolved through
+    ``ensure_definition``, which validates that cached id against the live
+    account every run (``resolved_definition_id``'s single ``state.definition_id``
+    slot + shared validation watermark can't be trusted across six distinct
+    definitions — a fresh watermark set by one measure would falsely pass a
+    stale sibling id after an account switch). On a stale/absent id it
+    re-resolves, landing this measure's description on first create.
     """
     cache = dict(ctx.kv_get(_DEFS_KV_KEY, {}) or {})
     for metric in METRICS:
-        ctx.state.definition_id = cache.get(metric.key)
-        cache[metric.key] = ctx.resolved_definition_id(
-            NUMERIC_EXPECTED_SPEC,
+        cache[metric.key] = ctx.ensure_definition(
+            cached=cache.get(metric.key),
+            expected_spec=NUMERIC_EXPECTED_SPEC,
             canonical_name=metric.canonical_name,
             create_extra=metric.create_extra(),
         )
@@ -195,6 +195,9 @@ PLUGIN = Plugin(
                 "A read key from https://develop.purpleair.com/ — needed for the "
                 "cloud 'api' source only; leave unset when reading a sensor on your LAN."
             ),
+            # Optional: the LAN ('local') source needs no key, so its absence
+            # must not block the run. run() requires it only in 'api' mode.
+            required=False,
         ),
     ),
     required_settings=(

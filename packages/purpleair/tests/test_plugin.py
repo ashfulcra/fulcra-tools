@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from fulcra_collect.plugin import RunContext
 from fulcra_purpleair import collect_plugin
+from fulcra_purpleair.definitions import METRICS
 from fulcra_purpleair.models import Reading
 
 
@@ -34,7 +35,7 @@ class _FakeAdapter:
         return True
 
 
-def _make_ctx(*, config: dict, credentials: dict | None = None) -> RunContext:
+def _make_ctx(*, config: dict, credentials: dict | None = None, factory=_FakeAdapter) -> RunContext:
     kv: dict = {}
     claimed: set[str] = set()
 
@@ -51,7 +52,7 @@ def _make_ctx(*, config: dict, credentials: dict | None = None) -> RunContext:
         state=types.SimpleNamespace(definition_id=None),
         log=logging.getLogger("test.purpleair"),
         _emit=lambda event: kv.setdefault("_events", []).append(event),
-        _fulcra_client_factory=_FakeAdapter,
+        _fulcra_client_factory=factory,
         _claim_dedup_keys=claim,
         _unclaim_dedup_keys=lambda keys: claimed.difference_update(keys),
         _plugin_kv_get=lambda key, default: kv.get(key, default),
@@ -84,6 +85,38 @@ def test_resolve_definition_ids_yields_six_distinct_and_caches():
     # A second call reuses the cache (validated live) — no new creates.
     ids2 = collect_plugin._resolve_definition_ids(ctx)
     assert ids2 == ids
+
+
+class _SwitchedAccountAdapter:
+    """Every cached id is absent on this account (an account switch), and each
+    name resolves to a brand-new id — so a stale cache MUST be re-resolved,
+    never trusted."""
+
+    def __init__(self) -> None:
+        self.created: list[str] = []
+
+    def list_definitions(self, *, name: str) -> list[dict]:
+        return []
+
+    def create_definition(self, *, name: str, **spec) -> dict:
+        self.created.append(name)
+        return {"id": f"new::{name}"}
+
+    def definition_exists(self, def_id: str) -> bool:
+        return False
+
+
+def test_resolve_definition_ids_reresolves_stale_ids_after_account_switch():
+    ctx = _make_ctx(config={}, factory=_SwitchedAccountAdapter)
+    # Seed a warm cache of ids from the *previous* account.
+    ctx._kv["definition_ids"] = {m.key: f"old::{m.key}" for m in METRICS}
+
+    ids = collect_plugin._resolve_definition_ids(ctx)
+    # None of the stale ids survive; every measure re-resolved on the new account.
+    assert all(not v.startswith("old::") for v in ids.values())
+    assert all(v.startswith("new::") for v in ids.values())
+    assert len(set(ids.values())) == 6
+    assert ctx._kv["definition_ids"] == ids
 
 
 def test_run_writes_all_measures_and_advances_cursor(monkeypatch):
