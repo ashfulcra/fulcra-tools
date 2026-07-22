@@ -225,6 +225,19 @@ it (not on PyPI).
   (`review-request-<review-slug>-<hash>`), never the bare review slug. Full rules
   and per-harness wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
   and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
+- **Park for a successor only on pushed-and-verified state.** A continuity
+  checkpoint is a promise: never park asserting repo/artifact state you have
+  not pushed AND independently verified (`git ls-remote` the exact ref, a push
+  `--dry-run` probe — not the memory of having pushed). If a migration/import
+  is still pending at park time, the snapshot says **`IMPORT NOT DONE`** plus
+  the exact recipe and the access prerequisites; it names ONE canonical home
+  per artifact, never candidates. The parking agent also writes the role doc
+  if it's missing and carries an operator pre-flight checklist (egress, auth
+  tap, repo scoping, write perm) so the successor's setup is one pass, not a
+  serial discovery-by-failure. Full doctrine + checklist template:
+  [`fulcra-agent-continuity`](skills/fulcra-agent-continuity/SKILL.md)
+  "Parking for a successor"; cloud repo-scoping wall:
+  [`HARNESS-MAP`](docs/coord/HARNESS-MAP.md) wall 11.
 - **Park a role, don't mute the sweep by hand.** Deliberately leaving a role unattended (a reviewer on leave, seasonal on-call) is an ENGINE fact, not an agent-side convention: set `dormant_until: <ISO>` in `team/<team>/roles/<role>.md`, and while that date is future the mechanical `escalate` sweep suppresses the role's vacancy escalation on every heartbeat host and `roles status` reports `DORMANT (until <ts>)`; escalation resumes automatically past the date, a live lease still shows HELD, and a garbage `dormant_until` fails OPEN (noted on stderr, escalation still fires) so a typo can't silently mute a role — see [`fulcra-agent-roles`](skills/fulcra-agent-roles/SKILL.md).
 - **Fold text is capped; the task doc is the payload's home.** Summaries rows bound
   `title`/`description` to `COORD_SUMMARY_TEXT_CAP` (default 280 chars, ellipsis-marked),
