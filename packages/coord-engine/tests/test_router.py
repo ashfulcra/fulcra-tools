@@ -579,3 +579,118 @@ def test_record_filename_deterministic_and_safe_for_colon_agent_ids():
     assert a == b                                   # single-writer-per-key
     assert ":" not in a and a.endswith(".json")     # store-safe
     assert router.record_filename(key) != router.record_filename(key + "x")
+
+
+# --- W5: cloud-execution loop (claim → invoke → delivered/dead-letter) -------
+
+def _seed_queue(t, entry):
+    key = router.idempotency_key(entry["source_shard"], entry["agent"])
+    name = router.queue_filename(entry["agent"], key)
+    t.put(RP + "queue/" + name, json.dumps(entry))
+    return RP + "queue/" + name
+
+
+def _shards_under(t, sub):
+    return {p: json.loads(c) for p, c in t.store.items()
+            if p.startswith(RP + sub)}
+
+
+def _invoke(status, detail=""):
+    return lambda inv: (status, detail)
+
+
+def test_execute_delivers_cloud_entry_writes_record_and_clears_queue():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-1"))
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 1
+    assert qpath not in t.store                          # queue entry cleared
+    recs = list(_shards_under(t, "delivered/").values())
+    assert len(recs) == 1 and recs[0]["agent"] == AGENT
+    assert router.fold_delivered(recs)[AGENT]["last_delivered_at"] == NOW_ISO
+
+
+def test_execute_leaves_host_local_entries_for_w55():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(adapter="codex-exec-resume",
+                                    executor="mac-mini-1", source="s-2"))
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 0
+    assert qpath in t.store                              # untouched — W5.5's
+    assert _shards_under(t, "delivered/") == {}
+
+
+def test_execute_defers_entry_until_not_before():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-3",
+                                    not_before="2026-07-23T13:00:00Z"))  # future
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["deferred"] == 1 and counts["delivered"] == 0
+    assert qpath in t.store and _shards_under(t, "delivered/") == {}
+
+
+def test_execute_bounded_retry_then_dead_letter():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-4"))
+    fail = _invoke("failed", "adapter boom")
+    # attempts 1,2 retry (entry stays); attempt 3 == MAX → dead-letter + clear
+    for expect_attempts in (1, 2):
+        counts = cli._router_execute_cloud(_args(), t, invoke=fail)
+        assert counts["retried"] == 1
+        assert json.loads(t.store[qpath])["attempts"] == expect_attempts
+    counts = cli._router_execute_cloud(_args(), t, invoke=fail)
+    assert counts["dead_lettered"] == 1
+    assert qpath not in t.store
+    dl = list(_shards_under(t, "dead-letter/").values())
+    assert len(dl) == 1
+    assert dl[0]["attempts"] == router.MAX_DELIVERY_ATTEMPTS
+    assert dl[0]["last_error"] == "adapter boom"
+
+
+def test_execute_respects_a_fresh_foreign_claim():
+    t = FakeTransport()
+    _base(t)
+    _seed_queue(t, _q_entry(source="s-5", claimed_by="other-plane",
+                            claimed_at="2026-07-23T11:55:00Z"))  # 5 min, fresh
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["skipped"] == 1 and counts["delivered"] == 0
+
+
+def test_execute_default_invoker_leaves_wake_visibly_queued():
+    """No host-side client wired ⇒ `unconfigured`: the wake stays queued (never
+    dropped, never a burned retry) — the plan's fail-visible degradation."""
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-6"))
+    counts = cli._router_execute_cloud(_args(), t)      # default invoker
+    assert counts["unconfigured"] == 1
+    assert qpath in t.store and json.loads(t.store[qpath]).get("attempts") is None
+    assert _shards_under(t, "delivered/") == {} and _shards_under(t, "dead-letter/") == {}
+
+
+def test_execute_delivery_record_is_single_writer_per_key():
+    t = FakeTransport()
+    _base(t)
+    _seed_queue(t, _q_entry(source="s-7"))
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    _seed_queue(t, _q_entry(source="s-7"))              # same key, re-delivered
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert len(_shards_under(t, "delivered/")) == 1     # self-overwrite, one shard
+
+
+def test_execute_failed_record_write_keeps_entry_queued(capsys):
+    """Same class as the W4 P1: a failed delivered-record write must NOT be
+    followed by the queue delete — the wake stays queued to retry, never lost."""
+    t = FlakyTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-9"))
+    t.fail_write_containing.add("delivered/")
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 0
+    assert qpath in t.store                              # NOT lost
+    assert _shards_under(t, "delivered/") == {}
+    assert "record write failed" in capsys.readouterr().err
