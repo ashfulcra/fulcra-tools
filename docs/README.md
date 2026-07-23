@@ -17,6 +17,10 @@ kept for provenance, not written for you.
 - [`coord/GET-ON-THE-BUS.md`](coord/GET-ON-THE-BUS.md) — the from-zero
   quickstart for joining the coord bus (install → auth → team bootstrap →
   join), including remote/sandboxed hosts.
+- [`coord/wake-router-SPEC.md`](coord/wake-router-SPEC.md) and
+  [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
+  implementation plan for the wake router + engagement model build (stage 3 in
+  execution): one fleet wake policy instead of N listeners, cloud-first hosting.
 - [`coord/atc-DESIGN.md`](coord/atc-DESIGN.md) — the design of ATC,
   capability-matched model routing on subscription caps.
 - [`TESTING.md`](TESTING.md) — how to run the suites and install Collect as a
