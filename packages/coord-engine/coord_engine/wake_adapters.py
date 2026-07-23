@@ -120,20 +120,20 @@ def consume_wake_files(
             try:
                 doc = json.loads(claim.read_text())
             except (OSError, ValueError):
-                _restore_invalid_claim(claim, path)
+                _quarantine_invalid_claim(claim, path)
                 errors.append(f"{path.name}: invalid JSON")
                 continue
             if not isinstance(doc, dict) or doc.get("type") != "coord-queued-wake":
-                _restore_invalid_claim(claim, path)
+                _quarantine_invalid_claim(claim, path)
                 errors.append(f"{path.name}: invalid wake shape")
                 continue
             if doc.get("team") != team or doc.get("agent") != agent:
-                _restore_invalid_claim(claim, path)
+                _quarantine_invalid_claim(claim, path)
                 errors.append(f"{path.name}: identity mismatch")
                 continue
             key = doc.get("key")
             if not isinstance(key, str) or not _KEY.fullmatch(key):
-                _restore_invalid_claim(claim, path)
+                _quarantine_invalid_claim(claim, path)
                 errors.append(f"{path.name}: invalid key")
                 continue
             keys.append(key)
@@ -156,13 +156,14 @@ def consume_wake_files(
             "keys": keys}
 
 
-def _restore_invalid_claim(claim: Path, canonical: Path) -> None:
-    """Keep malformed input visible without overwriting a new valid delivery."""
-    if not canonical.exists():
-        os.replace(claim, canonical)
-        return
-    claim.rename(canonical.with_name(
-        f"{canonical.name}.invalid-{secrets.token_hex(4)}"))
+def _quarantine_invalid_claim(claim: Path, canonical: Path) -> None:
+    """Keep malformed input visible and never touch the producer's pathname."""
+    quarantine = canonical.parent / ".quarantine"
+    quarantine.mkdir(exist_ok=True)
+    os.replace(
+        claim,
+        quarantine / f"{canonical.name}.invalid-{secrets.token_hex(8)}",
+    )
 
 
 def alignment_filename(key: str) -> str:

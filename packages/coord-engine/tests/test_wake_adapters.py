@@ -90,7 +90,37 @@ def test_malformed_wake_is_left_fail_visible(tmp_path):
         "fulcra", "codex:box:repo", root=tmp_path)
     assert result["count"] == 0
     assert result["errors"] == ["bad.json: invalid JSON"]
-    assert bad.exists()
+    assert not bad.exists()
+    quarantined = list((agent_dir / ".quarantine").glob("bad.json.invalid-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text() == "{not-json"
+
+
+def test_invalid_claim_quarantine_never_clobbers_valid_replacement(
+    tmp_path, monkeypatch
+):
+    bad = wake_adapters.queue_wake_file(
+        "fulcra", INV, root=tmp_path, now=PINNED_NOW)
+    bad.write_text("{not-json")
+    original_quarantine = wake_adapters._quarantine_invalid_claim
+    replaced = False
+
+    def replace_then_quarantine(claim, canonical):
+        nonlocal replaced
+        replaced = True
+        wake_adapters.queue_wake_file(
+            "fulcra", INV, root=tmp_path, now=PINNED_NOW)
+        original_quarantine(claim, canonical)
+
+    monkeypatch.setattr(
+        wake_adapters, "_quarantine_invalid_claim", replace_then_quarantine)
+    first = wake_adapters.consume_wake_files(
+        "fulcra", "codex:box:repo", root=tmp_path)
+    second = wake_adapters.consume_wake_files(
+        "fulcra", "codex:box:repo", root=tmp_path)
+    assert replaced is True
+    assert first["errors"] == [f"{bad.name}: invalid JSON"]
+    assert second["keys"] == ["task/w6:codex:box:repo"]
 
 
 def test_wake_key_cannot_inject_session_context(tmp_path):
