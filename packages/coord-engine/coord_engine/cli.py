@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, stash, tasks
+from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, router, stash, tasks
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -4083,6 +4083,226 @@ def cmd_roles_release(args: argparse.Namespace, transport: Any) -> int:
     return 0 if ok else 1
 
 
+# --- router (wake-router W4 — decision plane, enqueue-only) ---
+
+def _router_presence(transport: Any, team: str, agent: str,
+                     memo: dict) -> "tuple[Optional[datetime], bool]":
+    """(presence timestamp, lapsed?) for one agent, memoized per pass. Exact-id
+    shard read only (CONCUR: no substring/prefix matching). Missing/unreadable
+    shard reads as (None, False) — no presence signal, never a guess."""
+    if agent in memo:
+        return memo[agent]
+    fm = okf.parse_frontmatter(
+        transport.read(f"{_presence_prefix(team)}{tasks.agent_key(agent)}.md"))
+    if not fm:
+        memo[agent] = (None, False)
+        return memo[agent]
+    ts = router.parse_iso(fm.get("timestamp"))
+    lapsed = presence.parse_engagement(fm).get("state") == "lapsed"
+    memo[agent] = (ts, lapsed)
+    return memo[agent]
+
+
+def _router_pass(args: argparse.Namespace, transport: Any) -> int:
+    team = args.team
+    prefix = router.router_prefix(team)
+    task_prefix = f"team/{team}/task/"
+    now = _now()
+
+    cursor, cursor_reason = router.parse_cursor(transport.read(prefix + "cursor.json"))
+    observe = cursor is None
+    if observe:
+        print(f"router: OBSERVE-ONLY pass — {cursor_reason}; decisions are "
+              f"logged, nothing is enqueued, and a fresh cursor is written at "
+              f"the end of this pass to arm the next one", file=sys.stderr)
+
+    agents_cfg, _executors, cfg_errors = router.validate_config(
+        transport.read(prefix + "config.json"))
+    if "_config" in cfg_errors:
+        print(f"router: {cfg_errors['_config']} — every agent reads "
+              f"unconfigured (observe-only) until config.json is fixed",
+              file=sys.stderr)
+    agent_errors = {k: v for k, v in cfg_errors.items() if k != "_config"}
+    for agent, problem in sorted(agent_errors.items()):
+        print(f"router: config invalid for {agent}: {problem}", file=sys.stderr)
+
+    # delivered view — decision-plane-owned fold over the delivery records
+    delivered_shards: list[dict] = []
+    try:
+        dl_entries = transport.list_dir(prefix + "delivered/")
+    except TransportError:
+        dl_entries = []  # empty on first runs; a listing error just skips refold
+    for e in dl_entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or not name.endswith(".json"):
+            continue
+        raw = transport.read(prefix + "delivered/" + name)
+        if raw:
+            try:
+                delivered_shards.append(json.loads(raw))
+            except ValueError:
+                pass  # a corrupt record shard is bookkeeping loss, not a stop
+    delivered_view = router.fold_delivered(delivered_shards)
+
+    # prior queue entries — per-agent last queued_at, for cross-pass debounce
+    queue_last: dict[str, Any] = {}
+    try:
+        q_entries = transport.list_dir(prefix + "queue/")
+    except TransportError as e:
+        q_entries = []
+        print(f"router: queue listing degraded ({e}) — cross-pass debounce may "
+              f"under-coalesce this pass", file=sys.stderr)
+    for e in q_entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or not name.endswith(".json"):
+            continue
+        raw = transport.read(prefix + "queue/" + name)
+        try:
+            entry = json.loads(raw) if raw else None
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        qa = router.parse_iso(entry.get("queued_at"))
+        agent = entry.get("agent")
+        if isinstance(agent, str) and qa is not None:
+            if agent not in queue_last or qa > queue_last[agent]:
+                queue_last[agent] = qa
+
+    # the cursor scan — the store listing IS the event source (never `listen`)
+    try:
+        entries = transport.list_dir(task_prefix)
+    except TransportError as e:
+        print(f"router: scan degraded: {e}, retry next pass", file=sys.stderr)
+        return 1
+    watermark_dt = router.parse_iso(cursor["watermark"]) if not observe else None
+    processed = dict(cursor["processed"]) if not observe else {}
+    max_seen = watermark_dt
+    candidates = []
+    for e in entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
+            continue
+        mt = router.parse_store_mtime(e.get("mtime"))
+        if mt is None:
+            continue
+        # INCLUSIVE >= — equal-mtime shards are the common case (minute
+        # granularity); the processed ledger suppresses replays.
+        if watermark_dt is not None and mt < watermark_dt:
+            continue
+        candidates.append((mt, name))
+    candidates.sort()
+
+    counts = {d: 0 for d in router.DECISIONS}
+    presence_memo: dict = {}
+    enqueued = 0
+    pass_failed = False
+    for mt, name in candidates:
+        if max_seen is None or mt > max_seen:
+            max_seen = mt
+        shard_id = name[:-3]
+        fm = okf.parse_frontmatter(transport.read(task_prefix + name))
+        if not fm:
+            continue
+        assignee = str(fm.get("assignee") or "").strip()
+        # population = DIRECTED items only: concrete assignee, not settled
+        if not assignee or assignee == "*":
+            continue
+        if str(fm.get("status") or "").strip().lower() in router.TERMINAL_STATUSES:
+            continue
+        key = router.idempotency_key(shard_id, assignee)
+        if key in processed:
+            continue
+        presence_ts, lapsed = _router_presence(transport, team, assignee, presence_memo)
+        d_row = delivered_view.get(assignee) or {}
+        priority = str(fm.get("priority") or "P2").strip().upper()
+        decision, not_before, reason = router.decide(
+            item_priority=priority,
+            agent_cfg=agents_cfg.get(assignee),
+            config_error=agent_errors.get(assignee),
+            presence_ts=presence_ts,
+            lapsed=lapsed,
+            last_wake_at=queue_last.get(assignee),
+            last_delivered_at=router.parse_iso(d_row.get("last_delivered_at")),
+            now=now,
+        )
+        counts[decision] += 1
+        suffix = " [observe-only: not enqueued]" if observe and decision in (
+            "interrupt", "defer", "checkin") else ""
+        print(f"decision {assignee} {shard_id} -> {decision} ({reason}){suffix}")
+        if decision == "unroutable":
+            # fail-visible lane: never a silent drop
+            print(f"router: wake unroutable for {assignee} — {reason}; item "
+                  f"{shard_id} batches to the digest until config is fixed")
+        if not observe and decision in ("interrupt", "defer", "checkin"):
+            cfg = agents_cfg[assignee]
+            entry = {
+                "agent": assignee,
+                "reason": f"{decision}: directed item {shard_id} ({priority}) — "
+                          f"check your bus (idempotency {key})",
+                "source_shard": shard_id,
+                "priority": priority,
+                "queued_at": router.iso(now),
+                "not_before": router.iso(not_before or now),
+                "adapter": cfg["adapter"],
+                "executor": cfg["executor"],
+            }
+            if not transport.write(
+                    prefix + "queue/" + router.queue_filename(assignee, key),
+                    json.dumps(entry, sort_keys=True) + "\n"):
+                # A checkpointed-but-unwritten wake would be lost FOREVER (the
+                # ledger suppresses it on every future scan). Fail the pass:
+                # this key is not ledgered, later candidates are left for the
+                # retry, and the watermark stops at this item's minute — the
+                # inclusive rescan re-surfaces it next pass.
+                print(f"router: queue write failed for {key} — pass fails, "
+                      f"item is NOT ledgered and retries next pass",
+                      file=sys.stderr)
+                pass_failed = True
+                break
+            queue_last[assignee] = now
+            enqueued += 1
+        processed[key] = router.iso(now)
+
+    if not observe:
+        if not transport.write(prefix + "delivered.json",
+                               json.dumps(delivered_view, sort_keys=True) + "\n"):
+            # observability bookkeeping only — dedup authority is the ledger
+            print("router: delivered.json refold write failed (non-fatal, "
+                  "view regenerates next pass)", file=sys.stderr)
+    new_watermark = router.iso(max_seen) if max_seen is not None else (
+        cursor["watermark"] if not observe else None)
+    # checkpoint AFTER the batch — whole-file overwrite is the store's
+    # atomicity unit; a crash before this line replays safely (ledger no-ops)
+    if not transport.write(prefix + "cursor.json",
+                           router.render_cursor(new_watermark, processed)):
+        print("router: checkpoint write failed — pass fails; the next pass "
+              "rescans from the prior cursor (ledger no-ops make the replay "
+              "safe)", file=sys.stderr)
+        return 1
+
+    if args.json:
+        jsonutil.print_json({"observe_only": observe, "scanned": len(candidates),
+                             "enqueued": enqueued, "decisions": counts,
+                             "pass_failed": pass_failed})
+        return 1 if pass_failed else 0
+    summary = ", ".join(f"{d}={counts[d]}" for d in router.DECISIONS if counts[d])
+    print(f"router pass: {len(candidates)} candidate(s), {enqueued} enqueued"
+          + (f" — {summary}" if summary else "")
+          + (" [observe-only]" if observe else "")
+          + (" [PASS FAILED — retrying next pass]" if pass_failed else ""))
+    return 1 if pass_failed else 0
+
+
+def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
+    rc = _router_pass(args, transport)
+    if getattr(args, "once", False):
+        return rc
+    while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
+        time.sleep(router.ROUTER_POLL_SECONDS)
+        _router_pass(args, transport)
+
+
 # --- stash (fulcra-agent-durable-state) ---
 
 def _stash_prefix(team: str, agent: str) -> str:
@@ -4972,6 +5192,14 @@ def build_parser() -> argparse.ArgumentParser:
     rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)
+
+    ro = sub.add_parser("router", help="wake-router decision plane (wake-router-PLAN.md W4 — cursor scan + policy, enqueue-only)")
+    rosub = ro.add_subparsers(dest="router_command", required=True)
+    ror = rosub.add_parser("run", help="scan the store by cursor and enqueue wake decisions (fixed 60s cadence; --once for one pass)")
+    ror.add_argument("team")
+    ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
+    add_json(ror)
+    ror.set_defaults(func=cmd_router_run)
 
     sh = sub.add_parser("stash", help="durable per-agent tooling stash + manifest (fulcra-agent-durable-state)")
     shsub = sh.add_subparsers(dest="stash_command", required=True)

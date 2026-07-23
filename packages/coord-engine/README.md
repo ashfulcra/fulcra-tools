@@ -40,6 +40,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
+| Wake routing | `router` (run — cursor-scan decision plane, policy evaluation, enqueue-only; [plan](../../docs/coord/wake-router-PLAN.md)) |
 | Fleet ops | `health` · `doctor` · `forge` · `annotate` |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 
