@@ -212,6 +212,20 @@ it (not on PyPI).
   non-head tail truncated and will retry. Shared tail work may never drain the head
   budget. **A listener loop must never die on degradation:** degraded folds back
   off and keep beating; only affirmative delivery or the configured horizon exits.
+  **The healthy read path is feed-first.** Listener state carries an inclusive
+  `data-updates` cursor; one team-filtered feed call identifies changed task,
+  response, and verdict shards, and the fold reads those shards directly instead
+  of relisting their roots. `briefing`/`needs-me` likewise combine the last
+  aggregate with changed task docs. A missing, corrupt, or over-age cursor, an
+  unavailable/malformed feed, or any doubtful direct read falls through to the
+  unchanged W8-budgeted listing path. The cursor advances only after a conclusive
+  tick, never after degradation. Listener cursor/seen state writes through to
+  `team/<team>/_coord/agents/<agent>/listen-state.json`; the local state file is a
+  cache, so a container restart does not replay already-seen work. A missing,
+  corrupt, or unreadable store copy falls back to the local cache, then the legacy
+  fresh start. Presence is deliberately **time-dirty** rather than feed-cached:
+  each briefing evaluates the bounded roster against the current clock, so an
+  unchanged session shard still becomes `LAPSED` when `now >= until`.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
@@ -596,13 +610,14 @@ it (not on PyPI).
     `sv` != current `ROW_SCHEMA_VERSION` — e.g. a pre-text-cap row) is likewise reparsed once, so a
     projection change (like the summaries text cap) self-heals the whole index within one full pass
     rather than waiting for each task to organically change.
-  - **A freshness overlay surfaces new docs THIS read.** Every summaries-index fold (`inbox`, `listen`,
-    `briefing`, `needs-me`, `board`, `status`) lists the task dir once and unions in any doc written
-    since the last reconcile, so a directive delivered between heartbeats surfaces now, not a
-    reconcile-period later. It is bounded (`COORD_OVERLAY_CAP` reads, default 16; `COORD_OVERLAY_BUDGET`
-    time, default 10s) and **degrades the `inbox` source visibly** when capped, budget-breached, or a
-    listed doc is unreadable — capped-but-visible, never silent truncation. A fresh team (no index yet)
-    is unchanged.
+  - **A feed delta surfaces new docs THIS read.** On the healthy path, summaries-index folds combine
+    the aggregate with team-filtered `data-updates` changes and read only the changed task docs, so a
+    directive delivered between heartbeats surfaces now without relisting the task root. If the feed
+    or any changed-doc read is doubtful, the legacy freshness overlay lists the task dir once and
+    unions in docs written since the last reconcile. That fallback remains bounded
+    (`COORD_OVERLAY_CAP` reads, default 16; `COORD_OVERLAY_BUDGET` time, default 10s) and **degrades the
+    `inbox` source visibly** when capped, budget-breached, or a listed doc is unreadable —
+    capped-but-visible, never silent truncation. A fresh team (no index yet) is unchanged.
   - **Acks are folded change-driven, and reuse needs positive evidence.** Listing every ack dir every
     pass costs one op per dir (~280 on the live bus), so reconcile asks the store what changed
     (`/input/v1/file/recent_changes`) since the instant it last provably folded acks through — the ack

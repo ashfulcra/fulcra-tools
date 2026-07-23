@@ -18,6 +18,7 @@ not exist yet.
 """
 
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -289,6 +290,41 @@ def _put_presence(t, agent, *, age_min=5, engagement=None):
 
 def _defaults_path():
     return "team/r/_coord/router/engagement-defaults.json"
+
+
+def test_briefing_feed_delta_keeps_session_presence_time_dirty(monkeypatch, capsys):
+    """E2 chooses ratification option (a): presence stays time-dirty.
+
+    Even when the data-updates feed reports no byte changes, briefing re-reads the
+    session shard and evaluates ``now >= until`` at the current clock.  Therefore
+    its full-roster self-check cannot drift behind ``presence show`` on LAPSED.
+    """
+    t = FakeTransport()
+    _put_presence(
+        t,
+        "amy",
+        engagement=_session(NOW + timedelta(minutes=30)),
+    )
+    # Seed a readable aggregate so E2's feed-delta row path is active.
+    from coord_engine import reconcile
+    reconcile.reconcile(t, "r", now=NOW_ISO, today=NOW_ISO[:10], host="h")
+    calls = []
+
+    def updates(since, *, team=None):
+        calls.append((since, team))
+        return []
+
+    t.updates = updates
+    monkeypatch.setattr(cli, "_now", lambda: NOW + timedelta(hours=1))
+
+    assert cli.main(["briefing", "r", "--agent", "amy", "--json"],
+                    transport=t) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    amy = next(row for row in out["presence"] if row.get("agent") == "amy")
+    assert amy["state"] == "lapsed"
+    assert "LAPSED" in amy["annotation"]
+    assert calls and calls[0][1] == "r"
 
 
 def test_cli_gate_pass_rc0(monkeypatch, capsys):

@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from coord_engine import cli, okf, reconcile, tasks
+from coord_engine import aggregate, cli, okf, reconcile, tasks
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
@@ -91,6 +91,43 @@ def _fresh_state():
                          "verdicts": False, "roles": False, "tail": False}}
 
 
+class FeedTransport(FakeTransport):
+    def __init__(self, changes):
+        super().__init__()
+        self.changes = changes
+        self.update_calls = []
+
+    def updates(self, since, *, team=None):
+        self.update_calls.append((since, team))
+        return self.changes
+
+
+class StaleTaskListingFeedTransport(FeedTransport):
+    """The feed/direct read sees a task that the eventual listing omits."""
+
+    def __init__(self, changes, hidden):
+        super().__init__(changes)
+        self.hidden = hidden
+
+    def list_dir(self, prefix):
+        rows = super().list_dir(prefix)
+        if prefix == reconcile.task_prefix(TEAM):
+            return [r for r in rows if r.get("name") != self.hidden]
+        return rows
+
+
+class NoHistoryListingFeedTransport(FeedTransport):
+    block_history = False
+
+    def list_dir(self, prefix):
+        if self.block_history and prefix in (
+            cli._responses_prefix(TEAM),
+            f"team/{TEAM}/review/",
+        ):
+            raise AssertionError(f"feed-first tick listed history root: {prefix}")
+        return super().list_dir(prefix)
+
+
 # --- Source 1: inbox directives -------------------------------------------
 
 def test_new_directive_fires_then_quiet_and_state_round_trips(capsys):
@@ -113,6 +150,199 @@ def test_new_directive_fires_then_quiet_and_state_round_trips(capsys):
     out2 = capsys.readouterr().out
     assert events2 == []
     assert out2 == ""
+
+
+def test_feed_wins_when_task_listing_lags(capsys):
+    t = StaleTaskListingFeedTransport(
+        [{"path": "team/r/task/feed-only.md", "state": "uploaded",
+          "uploaded_at": "2026-07-10T00:20:00Z",
+          "archived_at": None, "deleted_at": None}],
+        hidden="feed-only.md",
+    )
+    _reconcile(t)
+    _put_directive(
+        t, "feed-only", "Feed is authoritative", owner="alice", assignee="bob")
+    state = _fresh_state()
+    state["feed_cursor"] = NOW
+
+    events, failures = cli._run_listen_tick(
+        t, TEAM, "bob", state, json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert [e["slug"] for e in events] == ["feed-only"]
+    assert "Feed is authoritative" in capsys.readouterr().out
+    assert t.update_calls and t.update_calls[0][1] == TEAM
+
+
+def test_malformed_uploaded_task_degrades_feed_and_cannot_be_consumed(
+        monkeypatch, capsys):
+    t = FeedTransport(
+        [{"path": "team/r/task/malformed-upload.md", "state": "uploaded",
+          "uploaded_at": "2026-07-10T00:20:00Z",
+          "archived_at": None, "deleted_at": None}])
+    _put_directive(
+        t, "malformed-upload", "Still assigned", owner="alice", assignee="bob")
+    _reconcile(t)
+    aggregate_doc = json.loads(t.read(reconcile.summaries_path(TEAM)))
+    index_rows = aggregate.aggregate_rows(aggregate_doc)
+    t.put(cli._task_path(TEAM, "malformed-upload"), "not frontmatter")
+
+    rows, ok, reason = cli._feed_task_rows(
+        t, TEAM, index_rows, t.changes)
+
+    assert rows == []
+    assert ok is False
+    assert "malformed-upload.md" in reason
+
+    original_list_dir = t.list_dir
+
+    def degraded_task_listing(prefix):
+        if prefix == reconcile.task_prefix(TEAM):
+            raise TransportError("listing unavailable")
+        return original_list_dir(prefix)
+
+    monkeypatch.setattr(t, "list_dir", degraded_task_listing)
+    state = _fresh_state()
+    state["feed_cursor"] = NOW
+
+    events, failures = cli._run_listen_tick(
+        t, TEAM, "bob", state, json_mode=False, verbose=False)
+
+    assert [event["slug"] for event in events
+            if event["type"] == "directive"] == ["malformed-upload"]
+    assert "inbox" in failures
+    assert state["feed_cursor"] == NOW
+    assert "Still assigned" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("states", [
+    ("archived", "uploaded"),
+    ("uploaded", "archived"),
+])
+def test_equal_instant_rewrite_keeps_uploaded_task_in_both_feed_orders(states):
+    t = FeedTransport([])
+    _put_directive(t, "rewritten", "Before", owner="alice", assignee="bob")
+    _reconcile(t)
+    _put_directive(t, "rewritten", "After", owner="alice", assignee="bob")
+    timestamp = "2026-07-10T00:20:00Z"
+    changes = [{
+        "path": "team/r/task/rewritten.md",
+        "state": state,
+        "uploaded_at": timestamp,
+        "archived_at": timestamp if state == "archived" else None,
+        "deleted_at": None,
+    } for state in states]
+
+    rows, ok, reason = cli._load_rows_status(
+        t, TEAM, feed_changes=changes, feed_attempted=True)
+
+    assert ok is True, reason
+    assert [(row["name"], row["title"]) for row in rows] == [
+        ("rewritten", "After")]
+
+
+def test_strictly_later_terminal_delete_still_drops_feed_task():
+    t = FeedTransport([])
+    _put_directive(t, "gone", "Before", owner="alice", assignee="bob")
+    _reconcile(t)
+    changes = [
+        {"path": "team/r/task/gone.md", "state": "uploaded",
+         "uploaded_at": "2026-07-10T00:20:00Z",
+         "archived_at": None, "deleted_at": None},
+        {"path": "team/r/task/gone.md", "state": "deleted",
+         "uploaded_at": "2026-07-10T00:20:00Z",
+         "archived_at": None, "deleted_at": "2026-07-10T00:21:00Z"},
+    ]
+
+    rows, ok, reason = cli._load_rows_status(
+        t, TEAM, feed_changes=changes, feed_attempted=True)
+
+    assert ok is True, reason
+    assert not [row for row in rows if row["name"] == "gone"]
+
+
+def test_feed_unavailable_uses_listing_fallback_unchanged(capsys):
+    baseline = FakeTransport()
+    _put_directive(
+        baseline, "fallback", "Listing fallback", owner="alice", assignee="bob")
+    _reconcile(baseline)
+    baseline_state = _fresh_state()
+    baseline_events, baseline_failures = cli._run_listen_tick(
+        baseline, TEAM, "bob", baseline_state, json_mode=False, verbose=False)
+    baseline_out = capsys.readouterr().out
+
+    fallback = FeedTransport(None)
+    fallback.store = dict(baseline.store)
+    fallback.mtimes = dict(baseline.mtimes)
+    fallback.sizes = dict(baseline.sizes)
+    fallback_state = _fresh_state()
+    fallback_state["feed_cursor"] = NOW
+    events, failures = cli._run_listen_tick(
+        fallback, TEAM, "bob", fallback_state, json_mode=False, verbose=False)
+
+    assert events == baseline_events
+    assert failures == baseline_failures
+    assert capsys.readouterr().out == baseline_out
+
+
+def test_failed_tick_does_not_advance_feed_cursor(capsys):
+    t = FeedTransport(None)
+    t.fail_list = True
+    state = _fresh_state()
+    state["feed_cursor"] = NOW
+
+    _events, failures = cli._run_listen_tick(
+        t, TEAM, "bob", state, json_mode=False, verbose=False)
+
+    assert failures
+    assert state["feed_cursor"] == NOW
+    capsys.readouterr()
+
+
+def test_feed_tick_reads_only_changed_response_shard(capsys):
+    slug = "owned"
+    change_path = cli._response_path(TEAM, slug, "stamp")
+    t = NoHistoryListingFeedTransport(
+        [{"path": change_path, "state": "uploaded",
+          "uploaded_at": "2026-07-10T00:20:00Z",
+          "archived_at": None, "deleted_at": None}])
+    _put_directive(t, slug, "Owned", owner="bob", assignee="amy")
+    _reconcile(t)
+    _put_response(t, slug, "stamp", agent="amy", outcome="done")
+    t.block_history = True
+    state = _fresh_state()
+    state["feed_cursor"] = NOW
+
+    events, failures = cli._run_listen_tick(
+        t, TEAM, "bob", state, json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert events == [{"type": "response", "slug": slug,
+                       "agent": "amy", "outcome": "done"}]
+    assert "RESPONSE owned by amy: done" in capsys.readouterr().out
+
+
+def test_feed_tick_reads_only_changed_verdict_shard(capsys):
+    slug = "mine"
+    verdict_path = cli._verdicts_prefix(TEAM, slug) + "rev.md"
+    t = NoHistoryListingFeedTransport(
+        [{"path": verdict_path, "state": "uploaded",
+          "uploaded_at": "2026-07-10T00:20:00Z",
+          "archived_at": None, "deleted_at": None}])
+    _put_review(t, slug, requested_by="bob")
+    _reconcile(t)
+    _put_verdict(t, slug, "rev")
+    t.block_history = True
+    state = _fresh_state()
+    state["feed_cursor"] = NOW
+
+    events, failures = cli._run_listen_tick(
+        t, TEAM, "bob", state, json_mode=False, verbose=False)
+
+    assert failures == {}
+    assert events == [{"type": "verdict", "slug": slug,
+                       "reviewer": "rev", "verdict": "approve"}]
+    assert "VERDICT mine by rev: approve" in capsys.readouterr().out
 
 
 def test_directive_json_mode_one_object_per_line(capsys):
@@ -740,6 +970,70 @@ def test_state_round_trips_through_disk(tmp_path):
     assert reloaded["inbox_ids"] == ["persist-1"]
 
 
+def test_store_state_wins_and_refreshes_local_cache(tmp_path):
+    t = FakeTransport()
+    path = tmp_path / "listen-r-bob.json"
+    path.write_text(json.dumps({"inbox_ids": ["local"]}), encoding="utf-8")
+    remote = _fresh_state()
+    remote["inbox_ids"] = ["store"]
+    remote["feed_cursor"] = "2026-07-10T00:20:00Z"
+    t.put(cli._listen_store_state_path(TEAM, "bob"), json.dumps(remote))
+
+    loaded = cli._load_listen_state(
+        path, transport=t, team=TEAM, agent="bob")
+
+    assert loaded["inbox_ids"] == ["store"]
+    assert loaded["feed_cursor"] == "2026-07-10T00:20:00Z"
+    assert json.loads(path.read_text(encoding="utf-8"))["inbox_ids"] == ["store"]
+
+
+@pytest.mark.parametrize("remote", [None, "{not json"])
+def test_missing_or_corrupt_store_state_falls_back_to_local(tmp_path, remote):
+    t = FakeTransport()
+    path = tmp_path / "listen-r-bob.json"
+    local = _fresh_state()
+    local["inbox_ids"] = ["local"]
+    path.write_text(json.dumps(local), encoding="utf-8")
+    if remote is not None:
+        t.put(cli._listen_store_state_path(TEAM, "bob"), remote)
+
+    loaded = cli._load_listen_state(
+        path, transport=t, team=TEAM, agent="bob")
+
+    assert loaded["inbox_ids"] == ["local"]
+
+
+def test_save_listen_state_writes_local_cache_and_store(tmp_path):
+    t = FakeTransport()
+    path = tmp_path / "listen-r-bob.json"
+    state = _fresh_state()
+    state["inbox_ids"] = ["persisted"]
+    state["feed_cursor"] = "2026-07-10T00:20:00Z"
+
+    cli._save_listen_state(
+        path, state, transport=t, team=TEAM, agent="bob")
+
+    assert json.loads(path.read_text(encoding="utf-8")) == state
+    assert json.loads(t.read(cli._listen_store_state_path(TEAM, "bob"))) == state
+
+
+def test_store_state_prevents_redelivery_after_local_cache_loss(
+        tmp_path, monkeypatch, capsys):
+    t = FakeTransport()
+    _put_directive(t, "restart-safe", "Once", owner="alice", assignee="bob")
+    _reconcile(t)
+    args = argparse.Namespace(team=TEAM, agent="bob", interval=60,
+                              once=True, verbose=False, json=False)
+
+    monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path / "before"))
+    assert cli.cmd_listen(args, t) == 0
+    assert "DIRECTIVE restart-safe" in capsys.readouterr().out
+    monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path / "after"))
+
+    assert cli.cmd_listen(args, t) == 0
+    assert capsys.readouterr().out == ""
+
+
 def test_load_state_tolerates_corrupt_file(tmp_path):
     path = tmp_path / "corrupt.json"
     path.write_text("{not json", encoding="utf-8")
@@ -748,9 +1042,10 @@ def test_load_state_tolerates_corrupt_file(tmp_path):
                      "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
                      "orphan_slugs": [],
                      "flagged_orphan_responses": [], "flagged_orphan_verdicts": [],
-                         "degraded": {"inbox": False, "responses": False,
-                                      "orphans": False, "verdicts": False,
-                                      "roles": False, "tail": False}}
+                     "feed_cursor": None,
+                     "degraded": {"inbox": False, "responses": False,
+                                  "orphans": False, "verdicts": False,
+                                  "roles": False, "tail": False}}
 
 
 def test_cmd_listen_once_exits_zero(tmp_path, monkeypatch, capsys):

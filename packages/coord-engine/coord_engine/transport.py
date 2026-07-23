@@ -193,21 +193,51 @@ class FulcraFileTransport:
         # constructor arg wins (tests pin it); else the env-hardened default.
         self.timeout = timeout if timeout is not None else _transport_timeout()
 
-    def updates(self, period: str) -> Optional[list]:
-        """File-change feed via ``fulcra-api data-updates`` — the reconcile fast
-        path's evidence source. Never raises: any failure returns None, which
-        callers treat as "no evidence, do the full pass". The run is hard-bounded
-        (``run_bounded``): a hung child tree returns None within the timeout, it
-        cannot stall the fast path."""
+    def updates(self, since: str, *, team: Optional[str] = None) -> Optional[list]:
+        """Parsed file-change feed for the explicit ``since`` window.
+
+        ``fulcra-api data-updates`` returns account-wide ``file_changes`` carrying
+        ``full_name`` and lifecycle timestamps.  Normalize those entries to the
+        transport-independent shape ``{path, state, uploaded_at, archived_at,
+        deleted_at}`` and, when ``team`` is supplied, retain only
+        ``team/<team>/`` paths.  Any malformed entry makes the whole result
+        UNKNOWN (``None``): consumers must take their full-scan fallback rather
+        than trust a partial ledger.
+
+        Never raises.  The subprocess is hard-bounded by ``run_bounded`` so a
+        hung child tree cannot stall a listener/reconcile pass."""
         try:
             rc, out, _err = run_bounded(
-                [*self.command, "data-updates", period], self.timeout
+                [*self.command, "data-updates", since], self.timeout
             )
             if rc != 0:
                 return None
             data = json.loads(out)
             changes = data.get("file_changes")
-            return changes if isinstance(changes, list) else None
+            if not isinstance(changes, list):
+                return None
+            prefix = f"team/{team}/" if team else None
+            parsed: list[dict[str, Any]] = []
+            for change in changes:
+                if not isinstance(change, dict):
+                    return None
+                full_name = change.get("full_name")
+                if not isinstance(full_name, str) or not full_name.strip():
+                    return None
+                path = full_name.strip().lstrip("/")
+                if prefix is not None and not path.startswith(prefix):
+                    continue
+                state = change.get("state")
+                if state not in ("uploaded", "archived", "deleted"):
+                    return None
+                parsed.append({
+                    "path": path,
+                    "state": state,
+                    "uploaded_at": change.get("uploaded_at"),
+                    "archived_at": change.get("archived_at"),
+                    "deleted_at": change.get("deleted_at"),
+                })
+            return parsed
         except Exception:
             return None
 
