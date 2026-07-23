@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from coord_engine import cli, okf, reconcile, tasks
+from coord_engine import aggregate, cli, okf, reconcile, tasks
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
@@ -172,6 +172,47 @@ def test_feed_wins_when_task_listing_lags(capsys):
     assert [e["slug"] for e in events] == ["feed-only"]
     assert "Feed is authoritative" in capsys.readouterr().out
     assert t.update_calls and t.update_calls[0][1] == TEAM
+
+
+def test_malformed_uploaded_task_degrades_feed_and_cannot_be_consumed(
+        monkeypatch, capsys):
+    t = FeedTransport(
+        [{"path": "team/r/task/malformed-upload.md", "state": "uploaded",
+          "uploaded_at": "2026-07-10T00:20:00Z",
+          "archived_at": None, "deleted_at": None}])
+    _put_directive(
+        t, "malformed-upload", "Still assigned", owner="alice", assignee="bob")
+    _reconcile(t)
+    aggregate_doc = json.loads(t.read(reconcile.summaries_path(TEAM)))
+    index_rows = aggregate.aggregate_rows(aggregate_doc)
+    t.put(cli._task_path(TEAM, "malformed-upload"), "not frontmatter")
+
+    rows, ok, reason = cli._feed_task_rows(
+        t, TEAM, index_rows, t.changes)
+
+    assert rows == []
+    assert ok is False
+    assert "malformed-upload.md" in reason
+
+    original_list_dir = t.list_dir
+
+    def degraded_task_listing(prefix):
+        if prefix == reconcile.task_prefix(TEAM):
+            raise TransportError("listing unavailable")
+        return original_list_dir(prefix)
+
+    monkeypatch.setattr(t, "list_dir", degraded_task_listing)
+    state = _fresh_state()
+    state["feed_cursor"] = NOW
+
+    events, failures = cli._run_listen_tick(
+        t, TEAM, "bob", state, json_mode=False, verbose=False)
+
+    assert [event["slug"] for event in events
+            if event["type"] == "directive"] == ["malformed-upload"]
+    assert "inbox" in failures
+    assert state["feed_cursor"] == NOW
+    assert "Still assigned" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("states", [

@@ -234,11 +234,11 @@ def _feed_task_rows(
                     fm, name=slug, path=f"task/{name}",
                     mtime=instant.strftime("%Y-%m-%d %I:%M%p UTC"))
             else:
-                by_name.pop(slug, None)
-        except Exception:
-            # Parse garbage is the same sanctioned skip as the listing overlay,
-            # but a formerly-valid task must disappear from the live view.
-            by_name.pop(slug, None)
+                return [], False, (
+                    f"data-updates task shard {name} is malformed or not a Task")
+        except Exception as exc:
+            return [], False, (
+                f"data-updates task shard {name} is malformed ({exc})")
     return [by_name[k] for k in sorted(by_name)], True, ""
 
 
