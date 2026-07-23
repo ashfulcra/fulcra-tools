@@ -384,6 +384,50 @@ def test_delivered_view_regenerated_from_shards():
     assert view[AGENT]["last_source_shard"] == "s1"
 
 
+class FlakyTransport(FakeTransport):
+    """FakeTransport whose writes can be made to fail by path substring."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_write_containing: set = set()
+
+    def write(self, path, content):
+        if any(s in path for s in self.fail_write_containing):
+            return False
+        return super().write(path, content)
+
+
+def test_failed_queue_write_is_not_ledgered_and_retries(capsys):
+    """codex P1 (r1): a queue upload that returns False must fail the pass —
+    the key stays un-ledgered and the cursor does not advance past the item,
+    so the wake is retried and eventually enqueued, never silently lost."""
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.fail_write_containing.add("queue/")
+    assert cli.cmd_router_run(_args(), t) == 1          # fail-visible
+    assert _queue_entries(t) == {}
+    cur = json.loads(t.store[RP + "cursor.json"])
+    assert f"urgent-1:{AGENT}" not in cur["processed"]  # NOT consumed
+    assert "queue write failed" in capsys.readouterr().err
+    t.fail_write_containing.clear()
+    assert cli.cmd_router_run(_args(), t) == 0          # retried next pass
+    assert len(_queue_entries(t)) == 1
+    cur = json.loads(t.store[RP + "cursor.json"])
+    assert f"urgent-1:{AGENT}" in cur["processed"]
+
+
+def test_failed_cursor_write_fails_the_pass(capsys):
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.fail_write_containing.add("cursor.json")
+    assert cli.cmd_router_run(_args(), t) == 1
+    assert "checkpoint write failed" in capsys.readouterr().err
+
+
 def test_corrupt_config_is_loud_and_enqueues_nothing(capsys):
     t = FakeTransport()
     t.put(TASKP + "item-1.md", _task("item-1", AGENT, "P1"),

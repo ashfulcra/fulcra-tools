@@ -4196,6 +4196,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     counts = {d: 0 for d in router.DECISIONS}
     presence_memo: dict = {}
     enqueued = 0
+    pass_failed = False
     for mt, name in candidates:
         if max_seen is None or mt > max_seen:
             max_seen = mt
@@ -4246,31 +4247,51 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                 "adapter": cfg["adapter"],
                 "executor": cfg["executor"],
             }
-            transport.write(prefix + "queue/" + router.queue_filename(assignee, key),
-                            json.dumps(entry, sort_keys=True) + "\n")
+            if not transport.write(
+                    prefix + "queue/" + router.queue_filename(assignee, key),
+                    json.dumps(entry, sort_keys=True) + "\n"):
+                # A checkpointed-but-unwritten wake would be lost FOREVER (the
+                # ledger suppresses it on every future scan). Fail the pass:
+                # this key is not ledgered, later candidates are left for the
+                # retry, and the watermark stops at this item's minute — the
+                # inclusive rescan re-surfaces it next pass.
+                print(f"router: queue write failed for {key} — pass fails, "
+                      f"item is NOT ledgered and retries next pass",
+                      file=sys.stderr)
+                pass_failed = True
+                break
             queue_last[assignee] = now
             enqueued += 1
         processed[key] = router.iso(now)
 
     if not observe:
-        transport.write(prefix + "delivered.json",
-                        json.dumps(delivered_view, sort_keys=True) + "\n")
+        if not transport.write(prefix + "delivered.json",
+                               json.dumps(delivered_view, sort_keys=True) + "\n"):
+            # observability bookkeeping only — dedup authority is the ledger
+            print("router: delivered.json refold write failed (non-fatal, "
+                  "view regenerates next pass)", file=sys.stderr)
     new_watermark = router.iso(max_seen) if max_seen is not None else (
         cursor["watermark"] if not observe else None)
     # checkpoint AFTER the batch — whole-file overwrite is the store's
     # atomicity unit; a crash before this line replays safely (ledger no-ops)
-    transport.write(prefix + "cursor.json",
-                    router.render_cursor(new_watermark, processed))
+    if not transport.write(prefix + "cursor.json",
+                           router.render_cursor(new_watermark, processed)):
+        print("router: checkpoint write failed — pass fails; the next pass "
+              "rescans from the prior cursor (ledger no-ops make the replay "
+              "safe)", file=sys.stderr)
+        return 1
 
     if args.json:
         jsonutil.print_json({"observe_only": observe, "scanned": len(candidates),
-                             "enqueued": enqueued, "decisions": counts})
-        return 0
+                             "enqueued": enqueued, "decisions": counts,
+                             "pass_failed": pass_failed})
+        return 1 if pass_failed else 0
     summary = ", ".join(f"{d}={counts[d]}" for d in router.DECISIONS if counts[d])
     print(f"router pass: {len(candidates)} candidate(s), {enqueued} enqueued"
           + (f" — {summary}" if summary else "")
-          + (" [observe-only]" if observe else ""))
-    return 0
+          + (" [observe-only]" if observe else "")
+          + (" [PASS FAILED — retrying next pass]" if pass_failed else ""))
+    return 1 if pass_failed else 0
 
 
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
