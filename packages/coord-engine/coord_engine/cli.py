@@ -3997,9 +3997,100 @@ def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
     print(f"presence — team/{args.team}: {len(ros)} agent(s)")
     for r in ros:
         ws = ", ".join(r["workstreams"])
-        print(f"  [{r['liveness']:5}] {r['agent']}" + (f"  ({ws})" if ws else "")
-              + (f" — {r['summary']}" if r["summary"] else ""))
+        # Render the engagement-aware STATE (may be `lapsed`) and append the
+        # annotation — the orthogonal second-axis fact (freshness for a lapsed
+        # row, a stale-beat nudge otherwise). dormancy ⊥ staleness: never merged.
+        line = (f"  [{r['state']:6}] {r['agent']}" + (f"  ({ws})" if ws else "")
+                + (f" — {r['summary']}" if r["summary"] else ""))
+        if r.get("annotation"):
+            line += f"  · {r['annotation']}"
+        print(line)
     return 0
+
+
+# --- engagement gate (wake-router W2 mixed-fleet gate, plan §3) --------------
+
+def _router_prefix(team: str) -> str:
+    return f"team/{team}/_coord/router/"
+
+
+def _engagement_defaults_path(team: str) -> str:
+    return f"{_router_prefix(team)}engagement-defaults.json"
+
+
+def _load_engagement_defaults(
+    transport: Any, team: str
+) -> tuple[dict[str, Any], bool]:
+    """Read the operator defaults map (agent -> mode), returning
+    ``(defaults, ok)``. ``ok`` is False when coverage is UNKNOWN and the gate must
+    fail closed.
+
+    READ-CONTRACT LENS (this class of bug hit W1 and W1.5): ``transport.read``
+    returns ``None`` on BOTH a missing file AND a transient failure, so a falsy
+    read alone can NEVER be read as "confirmed absent". A ``None`` read is
+    disambiguated against the RAISING ``list_dir`` contract:
+      - the router dir lists and does NOT contain the file  -> genuinely absent
+        -> an empty defaults map, ``ok=True`` (the file is optional; a missing one
+        must not fail an otherwise-covered fleet);
+      - the router dir lists and DOES contain the file, yet the read returned None
+        -> present-but-unreadable -> UNKNOWN, ``ok=False`` (fail closed);
+      - the listing itself raises -> UNKNOWN, ``ok=False`` (fail closed).
+    A present-but-unparseable body is likewise UNKNOWN (``ok=False``)."""
+    path = _engagement_defaults_path(team)
+    raw = transport.read(path)
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return {}, False              # present but unparseable -> UNKNOWN
+        return (data, True) if isinstance(data, dict) else ({}, False)
+    # raw is None: missing OR transient failure. Confirm which via the raising list.
+    try:
+        entries = transport.list_dir(_router_prefix(team))
+    except TransportError:
+        return {}, False                  # listing failed -> UNKNOWN -> fail closed
+    present = any((e.get("name") or "") == "engagement-defaults.json"
+                  for e in entries)
+    if present:
+        return {}, False                  # listed but unreadable -> UNKNOWN
+    return {}, True                       # confirmed absent -> legitimately empty
+
+
+def _engagement_gate_passes(transport: Any, team: str, *, now: str) -> bool:
+    """Predicate the gated vacancy/escalation semantic change branches on. True
+    ONLY when the gate is PASS; any degradation/failure returns False, so the
+    caller falls back to today's behavior verbatim (fail closed)."""
+    try:
+        shards = _presence_shards(transport, team)
+        defaults, ok = _load_engagement_defaults(transport, team)
+        res = presence.engagement_gate(shards, defaults, now=now, defaults_ok=ok)
+        return res["status"] == "PASS"
+    except Exception:
+        return False
+
+
+def cmd_engagement_gate(args: argparse.Namespace, transport: Any) -> int:
+    now = _iso(_now())
+    shards = _presence_shards(transport, args.team)
+    defaults, defaults_ok = _load_engagement_defaults(transport, args.team)
+    result = presence.engagement_gate(shards, defaults, now=now,
+                                      defaults_ok=defaults_ok)
+    if args.json:
+        out = dict(result)
+        out["team"] = args.team
+        jsonutil.print_json(out)
+        return 0 if result["status"] == "PASS" else 1
+    print(f"engagement gate — team/{args.team}: {result['status']}")
+    if not defaults_ok:
+        print("  ! engagement-defaults.json is UNKNOWN (present-but-unreadable or "
+              "unparseable — cannot be confirmed absent); failing closed, coverage "
+              "cannot be certified", file=sys.stderr)
+    for a in result["agents"]:
+        via = f" (via {a['via']})" if a.get("via") else ""
+        print(f"  [{a['coverage']:9}] {a['agent']}{via}")
+    if not result["agents"]:
+        print("  (no live agents to gate)")
+    return 0 if result["status"] == "PASS" else 1
 
 
 def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
@@ -4015,8 +4106,12 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
         _surface_read_degraded(reason, json_mode=False)
     for a in digest:
         counts = ", ".join(f"{k}={v}" for k, v in sorted(a["open"].items())) or "no open work"
-        print(f"  [{a['liveness']:7}] {a['agent']} — {counts}"
-              + (f" — {a['summary']}" if a["summary"] else ""))
+        state = a.get("state", a["liveness"])
+        line = (f"  [{state:7}] {a['agent']} — {counts}"
+                + (f" — {a['summary']}" if a["summary"] else ""))
+        if a.get("annotation"):
+            line += f"  · {a['annotation']}"
+        print(line)
     return 0
 
 
@@ -4445,6 +4540,16 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     except TransportError:
         print("escalate: roles dir unreadable", file=sys.stderr)
         return 1
+    # W2 gated (dormant today): a VACANT role whose holder's SESSION has LAPSED is
+    # EXPLAINED absence — role-retaining, not gone-dark — so the vacancy escalation
+    # is suppressed WITH a note. This mirrors the dormant_until suppress discipline
+    # (roles.escalation_due) and activates ONLY when the mixed-fleet gate PASSES
+    # (plan §3). While the gate is BLOCKED/DEGRADED (the fleet is not fully
+    # covered) the branch is dormant and every role escalates by today's rules
+    # verbatim. The gate + presence roster are team-global — read them ONCE, and
+    # only when the gate passes (a BLOCKED fleet pays nothing new).
+    gate_passes = _engagement_gate_passes(transport, args.team, now=now)
+    pres_shards = _presence_shards(transport, args.team) if gate_passes else []
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
@@ -4522,6 +4627,18 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if not roles.escalation_due(leases, now=now, sla_hours=sla,
                                     marker_exists_today=marker_exists):
             continue
+        # W2 gated semantic change (dormant while the gate is BLOCKED): a lapsed
+        # session holder is explained absence — suppress, and SAY so (never
+        # silently). When gate_passes is False this block is skipped entirely and
+        # control falls through to today's escalation behavior verbatim.
+        if gate_passes:
+            holder = presence.lapsed_holder(
+                [str(l.get("agent")) for l in (leases or [])], pres_shards, now=now)
+            if holder is not None:
+                print(f"escalate: {role} vacancy explained — holder {holder}'s "
+                      f"session has lapsed (declared window ended; role retained, "
+                      f"not gone-dark); escalation suppressed", file=sys.stderr)
+                continue
         maintainer = str(reg.get("maintainer") or _human())
         transport.write(marker_path, okf.render_frontmatter(
             {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
@@ -4734,9 +4851,15 @@ def build_parser() -> argparse.ArgumentParser:
     prb.add_argument("--until", help="session expiry (ISO-8601); only valid with "
                      "--engagement session, defaults to beat time + 8h")
     prb.set_defaults(func=cmd_presence_beat)
-    prs = prsub.add_parser("show", help="roster with live/idle/stale liveness")
+    prs = prsub.add_parser("show", help="roster with live/idle/stale/lapsed liveness")
     prs.add_argument("team"); add_json(prs)
     prs.set_defaults(func=cmd_presence_show)
+
+    en = sub.add_parser("engagement", help="engagement coverage gate (wake-router mixed-fleet gate)")
+    ensub = en.add_subparsers(dest="engagement_command", required=True)
+    eng = ensub.add_parser("gate", help="mixed-fleet gate: is every LIVE agent's engagement covered? (PASS/BLOCKED)")
+    eng.add_argument("team"); add_json(eng)
+    eng.set_defaults(func=cmd_engagement_gate)
 
     ag = sub.add_parser("agents", help="cross-agent digest (open work by agent + liveness)")
     ag.add_argument("team"); add_json(ag)

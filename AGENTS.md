@@ -480,6 +480,43 @@ it (not on PyPI).
   throttle memo is process-global module state — reset it between
   tests; any new write verb added to the engine must join `_ACTIVITY_WRITE_FUNCS` (or the omission is
   justified), and the preserve-everything-but-timestamp rule stays red-first pinned.**
+- **Engagement-aware liveness is a combiner over two ORTHOGONAL axes (wake-router W2).** `classify(ts,
+  now)` stays PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone — and is
+  NOT changed (it is called widely under that contract). The truth table is layered on top by
+  `presence.liveness(shard, now=…)`, which returns `{state, freshness, annotation, engagement}`: it reads
+  freshness from `classify` and mode/until/state from `parse_engagement`, then applies the authored table.
+  **STALENESS** (timestamp freshness — post-W1.5 a working agent's bus write already refreshes it, so a
+  fresh timestamp IS "recent activity"; no separate signal) and **DORMANCY** (a `session` past its `until`,
+  `now ≥ until` boundary-inclusive, OR a durable W3 `engagement.state: lapsed` marker) are INDEPENDENT and
+  rendered as two facts, NEVER a merged label. A dormant shard renders primary state **LAPSED** — distinct
+  from stale/dead, EXPLAINED ("declared session window ended"), ROLE-RETAINING — with the freshness axis in
+  the annotation: "still beating … — extend session or release" when fresh (a session overrunning its
+  window while beating is honestly **LAPSED+active**, a nudge to extend, NEVER silently live), "stale Nh"
+  when not. A degraded engagement reads as the legacy `resident`/`active` default and can therefore never
+  manufacture dormancy. **CONCUR conditions in output:** any stale row shows a beat nudge (`stale Nh —
+  nudge`); all agent lookups match by EXACT id (no substring/fuzzy — the corrupt-id lesson), incl.
+  `presence.lapsed_holder`; dormancy ⊥ staleness stays two facts. **The verdict rides ADDITIVELY:** roster
+  rows keep `liveness` = the pure freshness band (every existing caller — broadcast_roster, briefing,
+  agents_digest — reads it and its meaning must not shift) and gain `state`/`freshness`/`annotation`;
+  `presence show` and `agents` render `state` + annotation; `--json` carries all three. **`engagement gate
+  <team>`** is the deterministic mixed-fleet gate (plan §3): for every **LIVE** roster agent, COVERED iff
+  it beats with a well-formed `engagement` field OR appears in the operator map
+  `_coord/router/engagement-defaults.json`; else UNCOVERED. Stale/idle/dead shards never block; overall
+  **PASS** iff all live agents COVERED, else **BLOCKED**. **READ-CONTRACT LENS (mandatory — this bit W1
+  and W1.5):** `transport.read` returns `None` on BOTH a missing file AND a transient failure, so a falsy
+  read is NEVER "confirmed absent" on its own — the defaults read confirms absence against the RAISING
+  `list_dir` (`_load_engagement_defaults`): router-dir lists without the file ⇒ genuinely absent ⇒ empty
+  map + PASS-eligible; file listed but read `None`, body unparseable, or the listing itself raises ⇒
+  UNKNOWN ⇒ **DEGRADED** (fail closed — never PASS on unknown coverage). **The vacancy/escalation SEMANTIC
+  change is gated (§3, dormant today):** LAPSED RENDERING lands unconditionally (additive), but reading a
+  LAPSED session role-holder as EXPLAINED ABSENCE (role-retaining, suppress the vacancy escalation WITH a
+  note — mirroring `roles.escalation_due`'s dormant-suppress precedent) activates ONLY when
+  `_engagement_gate_passes(team)` — `if gate_passes: <lapsed-holder suppression> else: <today's behavior
+  verbatim>`. The gate is BLOCKED until the fleet is covered, so the new behavior ships DORMANT; BOTH
+  branches are red-first pinned (a gate-PASS fixture suppresses-explained, a gate-BLOCKED fixture escalates
+  as today). **Ship-gate: `classify` stays pure (no engagement read); any new dormancy/coverage input
+  class gets a red-first test; the gate fails closed on any UNKNOWN; the gated semantic change keeps both
+  branches pinned until the gate is satisfied fleet-wide (W10).**
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient

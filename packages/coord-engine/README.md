@@ -35,7 +35,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` |
 | Directives & messaging | `tell` · `broadcast` · `remind` · `respond` · `later` (backlog) · `intent` (spoken commitment) · `listen` (the engine-owned watcher) |
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
-| Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` |
+| Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
 | Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
