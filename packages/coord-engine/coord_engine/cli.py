@@ -3749,13 +3749,42 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
             # state/lapsed_at (W3 is their sole writer). Read the prior shard and
             # continue an existing session rather than minting a fresh one. A
             # read/parse failure is NOT fatal — treat it as "no prior engagement".
+            # (r3) Fail-closed on unknown prior: the transport read contract is
+            # None on ANY failure, so "no content" alone cannot distinguish a
+            # genuinely absent shard from an unreadable one — and overwriting an
+            # unreadable shard would let a transient read failure replace a
+            # sweep-marked lapsed session with fresh active engagement (false
+            # liveness through the error path). One parent listing disambiguates,
+            # the same idiom the role folds use: absent -> legitimately fresh;
+            # listed-but-unreadable or listing-failed -> UNKNOWN -> rc 1, write
+            # nothing (retryable). A READABLE prior whose engagement is malformed
+            # degrades inside parse_engagement and is treated as fresh — that is
+            # deliberate self-heal of a corrupt shard, not an unknown overwrite.
             prior: Optional[dict[str, Any]] = None
+            prior_raw: Optional[str] = None
+            read_raised = False
             try:
                 prior_raw = transport.read(shard_path)
-                if prior_raw:
-                    prior = presence.parse_engagement(okf.parse_frontmatter(prior_raw))
             except Exception:
-                prior = None
+                read_raised = True
+            if prior_raw:
+                try:
+                    prior = presence.parse_engagement(okf.parse_frontmatter(prior_raw))
+                except Exception:
+                    prior = None            # readable garbage -> self-heal as fresh
+            else:
+                exists: Optional[bool] = None
+                try:
+                    exists = any(e.get("name") == f"{slug}.md"
+                                 for e in transport.list_dir(_presence_prefix(args.team)))
+                except Exception:
+                    exists = None
+                if exists is not False:
+                    why = "read raised" if read_raised else "read returned no content"
+                    print(f"presence beat: prior shard {shard_path} is unreadable or of "
+                          f"unknown existence ({why}); refusing to write session "
+                          "engagement over an unknown prior — retry", file=sys.stderr)
+                    return 1
             # A prior SESSION (parse_engagement only reports mode session when it
             # has a resolved until) is continued; any other/malformed/legacy prior,
             # or a mode change into session, is a new session.

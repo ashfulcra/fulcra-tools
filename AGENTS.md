@@ -402,8 +402,13 @@ it (not on PyPI).
   ONLY for `session` (given with any other mode, or with no `--engagement` at all, or in a non-ISO form,
   it is a validation error at rc 2 and nothing is written). **A beat is REFRESH-SAFE and must never
   manufacture liveness.** `presence beat` is called repeatedly (the launchd heartbeat re-beats), so a
-  session beat reads its own prior shard first (a read/parse failure is non-fatal — treated as "no
-  prior") and: (a) **preserves a continuing session's resolved `until`**, recomputing `beat+8h` ONLY for
+  session beat reads its own prior shard first and: (r3 contract) an ABSENT shard (existence
+  disproven by one parent listing — the transport's read is None-on-any-failure, so a listing is
+  the disambiguator) is a legitimately fresh session; a LISTED-but-unreadable shard, or a failed
+  listing, is an UNKNOWN prior and the engagement-carrying beat FAILS CLOSED (rc 1, nothing
+  written, "…retry") — a transient read failure must never let fresh active engagement replace a
+  sweep-marked lapsed session; a READABLE prior with malformed engagement degrades in
+  `parse_engagement` and is treated as fresh (deliberate self-heal). Then: (a) **preserves a continuing session's resolved `until`**, recomputing `beat+8h` ONLY for
   a genuinely new session (no prior session, or a mode change *into* session) — an explicit `--until`
   always wins. Sliding `until` forward on every beat would make a session never lapse, recreating the
   dead-session-looks-alive bug this schema exists to prevent. (b) **never writes `engagement.state` /

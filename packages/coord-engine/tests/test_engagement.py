@@ -223,14 +223,49 @@ def test_mode_change_to_session_is_a_new_session():
     assert eng["state"] == "active" and eng["lapsed_at"] is None
 
 
-def test_session_beat_survives_read_failure():
-    """A read/parse failure while looking up the prior shard must NOT fail the
-    beat — it degrades to 'no prior engagement' (a fresh session)."""
+def test_session_beat_fails_closed_when_existing_shard_unreadable(capsys):
+    """(r3) A read failure over an EXISTING shard is an UNKNOWN prior: the
+    engagement-carrying beat must refuse (rc 1) and write NOTHING — a transient
+    read failure must never let a fresh active session replace a sweep-marked
+    lapsed one (false liveness through the error path)."""
     class _FailingRead(FakeTransport):
         def read(self, path):
             raise RuntimeError("transport down")
 
     t = _FailingRead()
+    _put_shard(t, "amy", {"mode": "session", "until": "2026-07-01T00:00:00Z",
+                          "state": "lapsed", "lapsed_at": "2026-07-01T00:00:00Z"})
+    before = t.store[_shard_path("amy")]
+    assert cli.main(["presence", "beat", "r", "-a", "amy",
+                     "--engagement", "session"], transport=t) == 1
+    assert "retry" in capsys.readouterr().err
+    assert t.store[_shard_path("amy")] == before      # untouched
+
+
+def test_session_beat_fails_closed_when_listing_fails(capsys):
+    """(r3) If the existence check itself fails, the prior is UNKNOWN — refuse."""
+    class _FailingBoth(FakeTransport):
+        def read(self, path):
+            raise RuntimeError("transport down")
+
+        def list_dir(self, prefix):
+            raise RuntimeError("transport down")
+
+    t = _FailingBoth()
+    assert cli.main(["presence", "beat", "r", "-a", "amy",
+                     "--engagement", "session"], transport=t) == 1
+    assert "retry" in capsys.readouterr().err
+    assert _no_presence_written(t)
+
+
+def test_session_beat_genuinely_absent_shard_is_fresh_session():
+    """(r3) Read failing but the LISTING proving absence is a legitimately fresh
+    session — bootstrap must not fail closed."""
+    class _FailingRead(FakeTransport):
+        def read(self, path):
+            raise RuntimeError("transport down")
+
+    t = _FailingRead()                                 # store empty: listing shows absent
     assert cli.main(["presence", "beat", "r", "-a", "amy",
                      "--engagement", "session"], transport=t) == 0
     eng = presence.parse_engagement(_read_shard_fm(t, "amy"))
