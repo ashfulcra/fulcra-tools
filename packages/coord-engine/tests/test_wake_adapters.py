@@ -35,6 +35,33 @@ def test_queued_wake_duplicate_converges_and_consumes_once(tmp_path):
         "fulcra", "codex:box:repo", root=tmp_path)["count"] == 0
 
 
+def test_concurrent_replacement_after_claim_remains_for_next_consume(
+    tmp_path, monkeypatch
+):
+    wake_adapters.queue_wake_file(
+        "fulcra", INV, root=tmp_path, now=PINNED_NOW)
+    original_read = wake_adapters.Path.read_text
+    replaced = False
+
+    def replace_then_read(path, *args, **kwargs):
+        nonlocal replaced
+        if ".claim-" in path.name and not replaced:
+            replaced = True
+            wake_adapters.queue_wake_file(
+                "fulcra", INV, root=tmp_path,
+                now=datetime(2026, 7, 23, 20, 1, tzinfo=timezone.utc))
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(wake_adapters.Path, "read_text", replace_then_read)
+    first = wake_adapters.consume_wake_files(
+        "fulcra", "codex:box:repo", root=tmp_path)
+    second = wake_adapters.consume_wake_files(
+        "fulcra", "codex:box:repo", root=tmp_path)
+    assert first["count"] == 1
+    assert second["count"] == 1
+    assert replaced is True
+
+
 def test_consumer_is_exact_identity_scoped_and_never_replays_message(tmp_path):
     wake_adapters.queue_wake_file(
         "fulcra", INV, root=tmp_path, now=PINNED_NOW)

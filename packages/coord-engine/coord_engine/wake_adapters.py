@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,23 +106,38 @@ def consume_wake_files(
     errors: list[str] = []
     if directory.exists():
         for path in sorted(directory.glob("*.json"))[:limit]:
+            # Claim the exact inode before reading it. A producer may publish a
+            # duplicate for the same key with os.replace() while SessionStart is
+            # consuming; renaming first means that later canonical pathname is
+            # never unlinked by this consumer.
+            claim = directory / (
+                f".{path.name}.claim-{os.getpid()}-{secrets.token_hex(4)}")
             try:
-                doc = json.loads(path.read_text())
+                os.replace(path, claim)
+            except FileNotFoundError:
+                # Another SessionStart claimed it first.
+                continue
+            try:
+                doc = json.loads(claim.read_text())
             except (OSError, ValueError):
+                _restore_invalid_claim(claim, path)
                 errors.append(f"{path.name}: invalid JSON")
                 continue
             if not isinstance(doc, dict) or doc.get("type") != "coord-queued-wake":
+                _restore_invalid_claim(claim, path)
                 errors.append(f"{path.name}: invalid wake shape")
                 continue
             if doc.get("team") != team or doc.get("agent") != agent:
+                _restore_invalid_claim(claim, path)
                 errors.append(f"{path.name}: identity mismatch")
                 continue
             key = doc.get("key")
             if not isinstance(key, str) or not _KEY.fullmatch(key):
+                _restore_invalid_claim(claim, path)
                 errors.append(f"{path.name}: invalid key")
                 continue
             keys.append(key)
-            path.unlink()
+            claim.unlink()
     context = ""
     if keys:
         context = (
@@ -138,6 +154,15 @@ def consume_wake_files(
         context = f"{context}\n{degraded}".strip()
     return {"context": context[:2000], "count": len(keys), "errors": errors,
             "keys": keys}
+
+
+def _restore_invalid_claim(claim: Path, canonical: Path) -> None:
+    """Keep malformed input visible without overwriting a new valid delivery."""
+    if not canonical.exists():
+        os.replace(claim, canonical)
+        return
+    claim.rename(canonical.with_name(
+        f"{canonical.name}.invalid-{secrets.token_hex(4)}"))
 
 
 def alignment_filename(key: str) -> str:
