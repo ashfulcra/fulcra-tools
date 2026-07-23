@@ -226,18 +226,23 @@ def fold_delivered(shards: list[dict[str, Any]]) -> dict[str, Any]:
     decision-plane-owned `delivered.json` view. Dedup authority stays with the
     cursor ledger; this is observability bookkeeping only."""
     view: dict[str, Any] = {}
+    latest: dict[str, datetime] = {}
     for shard in shards:
         if not isinstance(shard, dict):
             continue
         agent = shard.get("agent")
-        at = shard.get("delivered_at")
-        if not isinstance(agent, str) or parse_iso(at) is None:
+        at_dt = parse_iso(shard.get("delivered_at"))
+        if not isinstance(agent, str) or at_dt is None:
             continue
         row = view.setdefault(agent, {"last_delivered_at": None, "count": 0,
                                       "last_source_shard": None})
         row["count"] += 1
-        if row["last_delivered_at"] is None or at > row["last_delivered_at"]:
-            row["last_delivered_at"] = at
+        # codex #460 fix: compare PARSED datetimes, not ISO strings — a lexical
+        # string compare mis-orders non-UTC offsets (e.g. "…T14:00+02:00" sorts
+        # after "…T12:30Z" but is earlier). Store the normalized Z form.
+        if agent not in latest or at_dt > latest[agent]:
+            latest[agent] = at_dt
+            row["last_delivered_at"] = iso(at_dt)
             row["last_source_shard"] = shard.get("source_shard")
     return view
 

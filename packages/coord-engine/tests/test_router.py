@@ -385,16 +385,23 @@ def test_delivered_view_regenerated_from_shards():
 
 
 class FlakyTransport(FakeTransport):
-    """FakeTransport whose writes can be made to fail by path substring."""
+    """FakeTransport whose writes/listings can be made to fail by path substring."""
 
     def __init__(self):
         super().__init__()
         self.fail_write_containing: set = set()
+        self.fail_list_containing: set = set()
 
     def write(self, path, content):
         if any(s in path for s in self.fail_write_containing):
             return False
         return super().write(path, content)
+
+    def list_dir(self, prefix):
+        if any(s in prefix for s in self.fail_list_containing):
+            from coord_engine.transport import TransportError
+            raise TransportError("boom")
+        return super().list_dir(prefix)
 
 
 def test_failed_queue_write_is_not_ledgered_and_retries(capsys):
@@ -436,6 +443,42 @@ def test_corrupt_config_is_loud_and_enqueues_nothing(capsys):
     assert cli.cmd_router_run(_args(), t) == 0
     assert _queue_entries(t) == {}
     assert "config" in capsys.readouterr().err.lower()
+
+
+# --- W5 opening commit: two codex #460 verdict fixes ------------------------
+
+def test_delivered_listing_failure_preserves_the_populated_view(capsys):
+    """codex #460 Fix 1: a delivered/ LISTING error must NOT overwrite the
+    populated delivered.json with {} (which would also feed empty
+    last_delivered_at into decide() for the whole pass). Skip the refold, stay
+    fail-visible, and let the pass otherwise proceed."""
+    t = FlakyTransport()
+    t.put(TASKP + "item-1.md", _task("item-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    prior = {"other": {"last_delivered_at": "2026-07-23T09:00:00Z",
+                       "count": 5, "last_source_shard": "old"}}
+    t.put(RP + "delivered.json", json.dumps(prior))
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 0              # pass proceeds
+    assert json.loads(t.store[RP + "delivered.json"]) == prior   # NOT clobbered
+    assert "delivered/ listing degraded" in capsys.readouterr().err
+    assert len(_queue_entries(t)) == 1                      # P1 still enqueued
+
+
+def test_delivered_fold_orders_by_parsed_time_not_lexical_string():
+    """codex #460 Fix 2: a later UTC delivery must win over an earlier one whose
+    +offset string sorts later lexically ('…T14:00+02:00' = 12:00Z is earlier
+    than '…T12:30Z' but sorts after it as a string)."""
+    shards = [
+        {"agent": "a", "delivered_at": "2026-07-23T14:00:00+02:00",  # 12:00Z
+         "source_shard": "early"},
+        {"agent": "a", "delivered_at": "2026-07-23T12:30:00Z",       # later
+         "source_shard": "late"},
+    ]
+    view = router.fold_delivered(shards)
+    assert view["a"]["last_source_shard"] == "late"
+    assert view["a"]["last_delivered_at"] == "2026-07-23T12:30:00Z"  # normalized Z
 
 
 # --- W5: adapter integration + execution (pure core) ------------------------

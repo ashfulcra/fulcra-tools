@@ -4128,10 +4128,19 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
 
     # delivered view — decision-plane-owned fold over the delivery records
     delivered_shards: list[dict] = []
+    delivered_listing_ok = True
     try:
         dl_entries = transport.list_dir(prefix + "delivered/")
-    except TransportError:
-        dl_entries = []  # empty on first runs; a listing error just skips refold
+    except TransportError as e:
+        # codex #460 fix: a listing ERROR is NOT "genuinely empty". Fold no
+        # shards this pass, but do NOT refold delivered.json (that would
+        # overwrite the populated view with {} and feed empty last_delivered_at
+        # into decide() for the whole pass). Skip the refold, stay fail-visible.
+        dl_entries = []
+        delivered_listing_ok = False
+        print(f"router: delivered/ listing degraded ({e}) — skipping "
+              f"delivered.json refold this pass (the populated view is "
+              f"preserved; it regenerates next pass)", file=sys.stderr)
     for e in dl_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
@@ -4264,7 +4273,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             enqueued += 1
         processed[key] = router.iso(now)
 
-    if not observe:
+    if not observe and delivered_listing_ok:
         if not transport.write(prefix + "delivered.json",
                                json.dumps(delivered_view, sort_keys=True) + "\n"):
             # observability bookkeeping only — dedup authority is the ledger
