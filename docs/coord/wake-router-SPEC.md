@@ -160,6 +160,13 @@ No decision remains open on this leg.
   degradation). Restart/failover: state is in the store, not host memory — a replacement router
   process resumes from `cursor.json`; while no router runs, the safety-net listener cadence is the
   backstop. No agent-owned shard is ever written by a router component (the engine sweep's two-field exception above is the only agent-shard writer outside the agent itself).
+- **Read-path amendment (Addendum 1, Ash-authorized 2026-07-23).** Directory listings are
+  eventually-consistent caches; the store's `data-updates` feed is the authoritative change
+  ledger. The router's candidate scan and the engine's hot folds move to feed/event-driven
+  sources with the full listing scan retained as the fail-closed fallback, and a typed
+  `CoordEvent` record substrate indexes bus writes (shards remain canonical). Normative detail
+  and task DAG (E1–E3):
+  [`wake-router-ADDENDUM-1-event-substrate.md`](wake-router-ADDENDUM-1-event-substrate.md).
 
 ## 5. Deliverables & stage plan
 

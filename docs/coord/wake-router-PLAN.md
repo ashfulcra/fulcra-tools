@@ -27,6 +27,13 @@ Tasks are sized for one PR each, red-first tests throughout, ATC untouched. Assi
 Automation-skill doctrine update ("a listener loop must never die on degradation") rides with W8's
 PR — same surface, one review.
 
+**Addendum 1** (event substrate & delta-driven folds, Ash-authorized 2026-07-23) extends this DAG
+with tasks **E1–E3** and amends the read-path assumptions above — see
+[`wake-router-ADDENDUM-1-event-substrate.md`](wake-router-ADDENDUM-1-event-substrate.md); where the
+addendum speaks, it is normative over this plan (listing surfaces are eventually-consistent caches;
+the `data-updates` feed is the authoritative change ledger; W4's cursor listing-scan becomes E3's
+fail-closed fallback).
+
 ## 2. Schema diffs (normative for W1–W4)
 
 - **Presence shard:** `engagement: {mode: resident|session|occasional, until: <iso8601Z|null>,
