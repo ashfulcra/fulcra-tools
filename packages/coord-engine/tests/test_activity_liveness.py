@@ -142,6 +142,37 @@ def test_refresh_preserves_everything_but_the_timestamp():
             == presence.parse_engagement(okf.parse_frontmatter(original)))
 
 
+def test_refresh_does_not_clobber_a_present_shard_lacking_a_timestamp(capsys):
+    # A PRESENT-but-malformed shard (engagement + workstreams intact, but the
+    # top-level ``timestamp:`` line missing) must NOT be overwritten with a
+    # minimal beat — that would erase live engagement/workstreams, exactly the
+    # clobber this build exists to prevent. The refresh skips; the next real
+    # ``presence beat`` repairs it.
+    actor, team = "worker-3c", "r"
+    fm = {
+        "type": "Presence", "title": f"presence — {actor}", "agent": actor,
+        "workstreams": ["w1.5"], "summary": "wiring the hook",
+        "engagement": {"mode": "session", "until": "2026-07-02T09:00:00Z",
+                       "state": "lapsed", "lapsed_at": "2026-07-02T08:00:00Z"},
+    }
+    # Render, then strip the top-level timestamp line to simulate a malformed
+    # present shard.
+    rendered = okf.render_frontmatter(fm) + f"\n# Presence: {actor}\n"
+    original = "\n".join(ln for ln in rendered.split("\n")
+                         if not ln.startswith("timestamp:"))
+    t = FakeTransport()
+    path = _presence_path(team, actor)
+    t.put(path, original)
+
+    cli._refresh_activity_presence(
+        t, team, actor, now_monotonic=1.0, now_iso="2026-07-02T12:00:00Z")
+
+    # Byte-identical: no minimal-beat clobber, engagement + workstreams intact.
+    assert t.store[path] == original
+    assert "state: lapsed" in t.store[path]
+    assert "w1.5" in t.store[path]
+
+
 def test_refresh_writes_minimal_beat_when_no_shard_exists():
     actor, team = "worker-3b", "r"
     t = FakeTransport()

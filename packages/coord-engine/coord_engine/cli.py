@@ -4932,8 +4932,17 @@ def _refresh_activity_presence(
                     lines[i] = f"timestamp: {now_iso}"
                     transport.write(shard_path, "\n".join(lines))
                     return
-        # Absent shard (or one with no top-level timestamp): write a minimal
-        # beat. No engagement object — an activity bump must not manufacture one.
+            # PRESENT but malformed (no top-level timestamp line). Do NOT write a
+            # minimal beat over it — that would erase the shard's engagement
+            # (incl. state/lapsed_at/until) and workstreams, the clobber this path
+            # exists to prevent. Skip non-destructively; the agent's next real
+            # ``presence beat`` repairs the shard.
+            print(f"presence activity-refresh skipped: {shard_path} has no "
+                  "top-level timestamp; left intact for the next beat to repair",
+                  file=sys.stderr)
+            return
+        # ABSENT shard only: write a minimal beat. No engagement object — an
+        # activity bump must not manufacture one.
         fm = {"type": "Presence", "title": f"presence — {actor}",
               "agent": actor, "timestamp": now_iso}
         transport.write(shard_path, okf.render_frontmatter(fm) + f"\n# Presence: {actor}\n")
