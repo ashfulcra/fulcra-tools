@@ -188,6 +188,11 @@ def _feed_task_rows(
     """Apply changed task shards to aggregate rows without a task-dir listing."""
     from . import model
     prefix = rec.task_prefix(team)
+    # A store rewrite emits same-second archived(old)+uploaded(new) entries and
+    # does not promise feed order.  Total state priority makes that lifecycle
+    # collapse deterministic: the live upload wins an equal-instant rewrite,
+    # while a strictly-later terminal event still removes the row.
+    state_priority = {"archived": 0, "deleted": 1, "uploaded": 2}
     latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
     for change in changes:
         path = str(change.get("path") or "")
@@ -200,7 +205,11 @@ def _feed_task_rows(
         if instant is None:
             return [], False, f"data-updates change for {name} lacks a usable timestamp"
         prior = latest.get(path)
-        if prior is None or instant >= prior[0]:
+        if prior is None or (
+            instant, state_priority[str(change.get("state"))]
+        ) >= (
+            prior[0], state_priority[str(prior[1].get("state"))]
+        ):
             latest[path] = (instant, change)
 
     by_name = {str(r.get("name")): r for r in index_rows

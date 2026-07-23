@@ -174,6 +174,52 @@ def test_feed_wins_when_task_listing_lags(capsys):
     assert t.update_calls and t.update_calls[0][1] == TEAM
 
 
+@pytest.mark.parametrize("states", [
+    ("archived", "uploaded"),
+    ("uploaded", "archived"),
+])
+def test_equal_instant_rewrite_keeps_uploaded_task_in_both_feed_orders(states):
+    t = FeedTransport([])
+    _put_directive(t, "rewritten", "Before", owner="alice", assignee="bob")
+    _reconcile(t)
+    _put_directive(t, "rewritten", "After", owner="alice", assignee="bob")
+    timestamp = "2026-07-10T00:20:00Z"
+    changes = [{
+        "path": "team/r/task/rewritten.md",
+        "state": state,
+        "uploaded_at": timestamp,
+        "archived_at": timestamp if state == "archived" else None,
+        "deleted_at": None,
+    } for state in states]
+
+    rows, ok, reason = cli._load_rows_status(
+        t, TEAM, feed_changes=changes, feed_attempted=True)
+
+    assert ok is True, reason
+    assert [(row["name"], row["title"]) for row in rows] == [
+        ("rewritten", "After")]
+
+
+def test_strictly_later_terminal_delete_still_drops_feed_task():
+    t = FeedTransport([])
+    _put_directive(t, "gone", "Before", owner="alice", assignee="bob")
+    _reconcile(t)
+    changes = [
+        {"path": "team/r/task/gone.md", "state": "uploaded",
+         "uploaded_at": "2026-07-10T00:20:00Z",
+         "archived_at": None, "deleted_at": None},
+        {"path": "team/r/task/gone.md", "state": "deleted",
+         "uploaded_at": "2026-07-10T00:20:00Z",
+         "archived_at": None, "deleted_at": "2026-07-10T00:21:00Z"},
+    ]
+
+    rows, ok, reason = cli._load_rows_status(
+        t, TEAM, feed_changes=changes, feed_attempted=True)
+
+    assert ok is True, reason
+    assert not [row for row in rows if row["name"] == "gone"]
+
+
 def test_feed_unavailable_uses_listing_fallback_unchanged(capsys):
     baseline = FakeTransport()
     _put_directive(
