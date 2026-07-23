@@ -4883,28 +4883,59 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             if agent not in queue_last or qa > queue_last[agent]:
                 queue_last[agent] = qa
 
-    # the cursor scan — the store listing IS the event source (never `listen`)
-    try:
-        entries = transport.list_dir(task_prefix)
-    except TransportError as e:
-        print(f"router: scan degraded: {e}, retry next pass", file=sys.stderr)
-        return 1
     watermark_dt = router.parse_iso(cursor["watermark"]) if not observe else None
     processed = dict(cursor["processed"]) if not observe else {}
     max_seen = watermark_dt
-    candidates = []
-    for e in entries:
-        name = e.get("name") or ""
-        if e.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
-            continue
-        mt = router.parse_store_mtime(e.get("mtime"))
-        if mt is None:
-            continue
-        # INCLUSIVE >= — equal-mtime shards are the common case (minute
-        # granularity); the processed ledger suppresses replays.
-        if watermark_dt is not None and mt < watermark_dt:
-            continue
-        candidates.append((mt, name))
+    candidates: list = []
+
+    # E3 (addendum §3.3): FEED-FIRST candidate source. The router's candidates
+    # are `uploaded` events under task/ from the data-updates feed (server-
+    # written, second-granular — subsumes the minute-granularity tie). The task-
+    # directory LISTING stays as the fail-closed fallback, taken on ANY feed
+    # doubt (feed unsupported/error, or cursor missing/corrupt so no window).
+    # The cursor/ledger/decide seams are UNCHANGED: both sources yield (ts, name)
+    # candidates into the same loop below; the inclusive `>= watermark` rescan +
+    # processed ledger stay as defense in depth. When Fulcra webhooks ship, the
+    # receiver replaces this feed poll and nothing downstream moves.
+    feed = None if observe else _team_updates(
+        transport, team, since=cursor["watermark"], now=router.iso(now))
+    if feed is not None:
+        for change in feed:
+            if change.get("state") != "uploaded":
+                continue
+            path = change.get("path") or ""
+            if not path.startswith(task_prefix):
+                continue
+            name = path[len(task_prefix):]
+            if ("/" in name or not name.endswith(".md")
+                    or name in ("index.md", "log.md")):
+                continue
+            ts = router.parse_iso(change.get("uploaded_at"))
+            if ts is None:
+                continue
+            if watermark_dt is not None and ts < watermark_dt:
+                continue
+            candidates.append((ts, name))
+    else:
+        # fail-closed fallback: the full task-directory listing (the W4 source).
+        try:
+            entries = transport.list_dir(task_prefix)
+        except TransportError as e:
+            print(f"router: scan degraded (feed unavailable, task listing "
+                  f"failed): {e}, retry next pass", file=sys.stderr)
+            return 1
+        for e in entries:
+            name = e.get("name") or ""
+            if e.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
+                continue
+            mt = router.parse_store_mtime(e.get("mtime"))
+            if mt is None:
+                continue
+            # INCLUSIVE >= — equal-mtime shards are the common case (minute
+            # granularity); the processed ledger suppresses replays.
+            if watermark_dt is not None and mt < watermark_dt:
+                continue
+            candidates.append((mt, name))
     candidates.sort()
 
     counts = {d: 0 for d in router.DECISIONS}
