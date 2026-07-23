@@ -106,8 +106,12 @@ def _parse_yaml_subset(fm_text: str) -> dict[str, Any]:
             i = j
             continue
         if val_raw == "":
-            # possible block list: indented "- item" lines follow
+            # An empty scalar may introduce an indented block: either a block list
+            # ("- item" lines) or a one-level nested map ("subkey: value" lines).
+            # The first meaningful indented line decides which; the two never mix.
             items: list[str] = []
+            pairs: dict[str, Any] = {}
+            kind: Optional[str] = None
             j = i + 1
             while j < n:
                 lj = lines[j]
@@ -115,13 +119,31 @@ def _parse_yaml_subset(fm_text: str) -> dict[str, Any]:
                 if sj == "" or sj.startswith("#"):
                     j += 1
                     continue
-                if lj[:1].isspace() and sj.startswith("- "):
+                if not lj[:1].isspace():
+                    break
+                if sj.startswith("- "):
+                    if kind == "map":
+                        break
+                    kind = "list"
                     items.append(_unquote(sj[2:]))
                     j += 1
-                else:
-                    break
-            out[key] = items if items else None
-            i = j if items else i + 1
+                    continue
+                if ":" in lj:
+                    if kind == "list":
+                        break
+                    kind = "map"
+                    sub_key, _, sub_rest = lj.partition(":")
+                    pairs[sub_key.strip()] = _parse_scalar(sub_rest.strip())
+                    j += 1
+                    continue
+                break
+            if kind == "map":
+                out[key] = pairs
+            elif kind == "list":
+                out[key] = items
+            else:
+                out[key] = None
+            i = j if kind else i + 1
             continue
         out[key] = _parse_scalar(val_raw)
         i += 1
@@ -149,6 +171,19 @@ def render_frontmatter(fields: dict[str, Any]) -> str:
             continue
         if isinstance(val, bool):
             lines.append(f"{key}: {'true' if val else 'false'}")
+        elif isinstance(val, dict):
+            # One-level nested map (e.g. the presence ``engagement`` object). Nulls
+            # are rendered EXPLICITLY as ``null`` here (unlike the top level, which
+            # omits them) so the object round-trips with every key present — the
+            # schema depicts ``until``/``lapsed_at`` as literal ``null``.
+            lines.append(f"{key}:")
+            for sub_key, sub_val in val.items():
+                if sub_val is None:
+                    lines.append(f"  {sub_key}: null")
+                elif isinstance(sub_val, bool):
+                    lines.append(f"  {sub_key}: {'true' if sub_val else 'false'}")
+                else:
+                    lines.append(f"  {sub_key}: {_render_scalar(str(sub_val))}")
         elif isinstance(val, list):
             if not val:
                 lines.append(f"{key}: []")

@@ -23,7 +23,7 @@ import socket
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, stash, tasks
@@ -3724,14 +3724,104 @@ def cmd_dash(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
+    now = _now()
+    engagement = getattr(args, "engagement", None)
+    until = getattr(args, "until", None)
+    slug = tasks.agent_key(agent)
+    shard_path = f"{_presence_prefix(args.team)}{slug}.md"
+
+    # Build the engagement object (W1). When --engagement is NOT passed we write NO
+    # engagement field at all, so the shard stays byte-identical to the legacy
+    # shard — that is what keeps this step inert.
+    engagement_obj: Optional[dict[str, Any]] = None
+    if engagement is None:
+        if until is not None:
+            print("presence beat: --until requires --engagement session "
+                  "(there is no mode to attach the expiry to)", file=sys.stderr)
+            return 2
+    else:
+        resolved_until: Optional[str] = None
+        state = "active"
+        lapsed_at: Optional[str] = None
+        if engagement == "session":
+            # Refresh-safe: a repeated session beat (e.g. the launchd heartbeat)
+            # must NOT slide the TTL, and W1 must NEVER touch the sweep-owned
+            # state/lapsed_at (W3 is their sole writer). Read the prior shard and
+            # continue an existing session rather than minting a fresh one. A
+            # read/parse failure is NOT fatal — treat it as "no prior engagement".
+            # (r3) Fail-closed on unknown prior: the transport read contract is
+            # None on ANY failure, so "no content" alone cannot distinguish a
+            # genuinely absent shard from an unreadable one — and overwriting an
+            # unreadable shard would let a transient read failure replace a
+            # sweep-marked lapsed session with fresh active engagement (false
+            # liveness through the error path). One parent listing disambiguates,
+            # the same idiom the role folds use: absent -> legitimately fresh;
+            # listed-but-unreadable or listing-failed -> UNKNOWN -> rc 1, write
+            # nothing (retryable). A READABLE prior whose engagement is malformed
+            # degrades inside parse_engagement and is treated as fresh — that is
+            # deliberate self-heal of a corrupt shard, not an unknown overwrite.
+            prior: Optional[dict[str, Any]] = None
+            prior_raw: Optional[str] = None
+            read_raised = False
+            try:
+                prior_raw = transport.read(shard_path)
+            except Exception:
+                read_raised = True
+            if prior_raw:
+                try:
+                    prior = presence.parse_engagement(okf.parse_frontmatter(prior_raw))
+                except Exception:
+                    prior = None            # readable garbage -> self-heal as fresh
+            else:
+                exists: Optional[bool] = None
+                try:
+                    exists = any(e.get("name") == f"{slug}.md"
+                                 for e in transport.list_dir(_presence_prefix(args.team)))
+                except Exception:
+                    exists = None
+                if exists is not False:
+                    why = "read raised" if read_raised else "read returned no content"
+                    print(f"presence beat: prior shard {shard_path} is unreadable or of "
+                          f"unknown existence ({why}); refusing to write session "
+                          "engagement over an unknown prior — retry", file=sys.stderr)
+                    return 1
+            # A prior SESSION (parse_engagement only reports mode session when it
+            # has a resolved until) is continued; any other/malformed/legacy prior,
+            # or a mode change into session, is a new session.
+            continuing = bool(prior) and prior.get("mode") == "session"
+            if until is not None:
+                dt = presence.parse_iso_z(until)
+                if dt is None:
+                    print(f"presence beat: --until must be ISO-8601 "
+                          f"(e.g. 2026-07-23T09:00:00Z); got {until!r}", file=sys.stderr)
+                    return 2
+                resolved_until = presence.to_iso_z(dt)     # explicit always wins
+            elif continuing:
+                resolved_until = prior["until"]            # preserve — do not slide
+            else:
+                resolved_until = presence.to_iso_z(
+                    now + timedelta(hours=presence.SESSION_DEFAULT_TTL_HOURS))
+            if continuing:
+                # Carry forward whatever the sweep last wrote; W1 never resets it
+                # (no lapsed->active recovery here — that is W2/W3).
+                state = prior["state"]
+                lapsed_at = prior["lapsed_at"]
+        elif until is not None:
+            print(f"presence beat: --until is only valid with --engagement session; "
+                  f"mode {engagement!r} carries no expiry", file=sys.stderr)
+            return 2
+        engagement_obj = {"mode": engagement, "until": resolved_until,
+                          "state": state, "lapsed_at": lapsed_at}
+
     fm = {
         "type": "Presence", "title": f"presence — {agent}", "agent": agent,
         "workstreams": args.workstream or [], "summary": args.summary or "",
-        "timestamp": _iso(_now()),
+        "timestamp": _iso(now),
     }
+    if engagement_obj is not None:
+        fm["engagement"] = engagement_obj
     body = f"\n# Presence: {agent}\n"
-    slug = tasks.agent_key(agent)
-    transport.write(f"{_presence_prefix(args.team)}{slug}.md", okf.render_frontmatter(fm) + body)
+    transport.write(shard_path, okf.render_frontmatter(fm) + body)
     print(f"beat {agent} ({slug}.md)")
     return 0
 
@@ -4475,6 +4565,11 @@ def build_parser() -> argparse.ArgumentParser:
     prb.add_argument("team"); prb.add_argument("--agent", "-a")
     prb.add_argument("--workstream", "-w", action="append")
     prb.add_argument("--summary", "-s")
+    prb.add_argument("--engagement", choices=list(presence.ENGAGEMENT_MODES),
+                     help="occupancy mode written to the shard's engagement object "
+                          "(default: no engagement field — reads as resident)")
+    prb.add_argument("--until", help="session expiry (ISO-8601); only valid with "
+                     "--engagement session, defaults to beat time + 8h")
     prb.set_defaults(func=cmd_presence_beat)
     prs = prsub.add_parser("show", help="roster with live/idle/stale liveness")
     prs.add_argument("team"); add_json(prs)
