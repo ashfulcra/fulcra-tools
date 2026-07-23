@@ -26,7 +26,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, router, stash, tasks
+from . import (
+    aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
+    continuity_audit, digest as digest_mod, directives, forge as forge_mod,
+    health as health_mod, jsonutil, okf, presence, query, review, roles, router,
+    stash, tasks, wake_adapters,
+)
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -54,6 +59,25 @@ def _iso(dt: datetime) -> str:
 
 def _host() -> str:
     return os.environ.get("FULCRA_COORD_AGENT") or f"coord-reconcile:{socket.gethostname()}"
+
+
+def cmd_wake_queue_file(args: argparse.Namespace, transport: Any) -> int:
+    inv = {
+        "adapter": "queued-wake-file",
+        "agent": args.agent,
+        "idempotency_key": args.key,
+    }
+    print(wake_adapters.queue_wake_file(args.team, inv))
+    return 0
+
+
+def cmd_wake_consume(args: argparse.Namespace, transport: Any) -> int:
+    result = wake_adapters.consume_wake_files(args.team, args.agent)
+    if result["context"]:
+        print(result["context"])
+    for error in result["errors"]:
+        print(f"queued-wake degraded: {error}", file=sys.stderr)
+    return 0
 
 
 def _human() -> str:
@@ -5889,6 +5913,19 @@ def build_parser() -> argparse.ArgumentParser:
     ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)
+
+    wk = sub.add_parser(
+        "wake", help="zero-model wake adapter utilities (queued file / SessionStart)")
+    wksub = wk.add_subparsers(dest="wake_command", required=True)
+    wkq = wksub.add_parser(
+        "queue-file", help="write an idempotency-keyed local SessionStart nudge")
+    wkq.add_argument("team"); wkq.add_argument("--agent", required=True)
+    wkq.add_argument("--key", required=True)
+    wkq.set_defaults(func=cmd_wake_queue_file)
+    wkc = wksub.add_parser(
+        "consume", help="consume this identity's queued SessionStart nudges")
+    wkc.add_argument("team"); wkc.add_argument("--agent", required=True)
+    wkc.set_defaults(func=cmd_wake_consume)
 
     sh = sub.add_parser("stash", help="durable per-agent tooling stash + manifest (fulcra-agent-durable-state)")
     shsub = sh.add_subparsers(dest="stash_command", required=True)

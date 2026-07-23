@@ -121,6 +121,11 @@ class TestCodex:
         assert "degraded section is not clear" in prompt
         assert "write and verify the exact required verdict before acking" in prompt
 
+    def test_session_start_consumes_queued_wakes_before_briefing(self):
+        assert "coord-engine wake consume" in cx.SESSION_START_SH
+        assert 'WAKE_CONTEXT="$(' in cx.SESSION_START_SH
+        assert "wake nudge" in cx.SESSION_START_SH
+
     def test_migrates_coord2_era_host_in_place(self, tmp_path):
         d = tmp_path / "codex"
         slug = "codex-h-r"
@@ -264,6 +269,10 @@ class TestClaudeCode:
         # NB: check the OLD dirname, not bare "coord2" (the fixture path can
         # contain the test-fn name, which contains "coord2").
         assert not any(OLD_HOOKS in c for c in cmds)
+        session_start = (
+            home / ".claude" / NEW_HOOKS / "session-start.sh").read_text()
+        assert "coord-engine wake consume" in session_start
+        assert "WAKE_CONTEXT=" in session_start
 
     def test_migrates_coord2_era_host(self, tmp_path):
         home = tmp_path / "home"
