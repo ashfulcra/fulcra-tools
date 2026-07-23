@@ -117,7 +117,7 @@ No decision remains open on this leg.
    in output; staleness is never silently swallowed into a default.
 2. **Exact identity matching** — presence↔role↔wake matching on exact agent ids only; no
    substring/prefix heuristics (the `role@host` variant lesson).
-3. **Dormancy independent** — declared dormancy (`occasional`, parked TTL) is a separate axis from
+3. **Dormancy independent** — declared dormancy (`occasional`, lapsed TTL) is a separate axis from
    staleness; a dormant identity must never read as abandoned, and vice versa.
 4. **Mixed-fleet gate** — nothing that changes vacancy/escalation semantics ships until every
    harness in the live fleet (claude-code cloud + desktop, codex, OpenClaw, cron hosts) either
@@ -129,10 +129,11 @@ No decision remains open on this leg.
 - **Never spawn working sessions:** the router wakes *existing* sessions via their own adapters or
   queues for human-opened ones; it never creates a new working session unilaterally (Ash's rule).
   Any adapter that would need to violate this surfaces to Ash instead.
-- **Zero model tokens in the router:** watcher, policy evaluation, TTL parking, and wake fan-out
+- **Zero model tokens in the router:** watcher, policy evaluation, TTL lapse-marking, and wake fan-out
   are pure host-side code. Model tokens are spent only by the *woken* agent on real work.
 - **Fail-closed secrets:** adapter credentials and the external-identity credential — in this
-  build, the FulcraBot fine-grained PAT (Part C) — live in host keychain / environment config,
+  build, the dedicated fleet machine-account fine-grained PAT (Part C; interim: operator
+  credentials, no new secret) — live in host keychain / environment config,
   never in team paths (durable-state doctrine). (An upstream-adopted App would manage its own
   installation token on the upstream side; that credential never enters this build.)
 - **ATC fence:** no changes to usage/headroom/route/atc/dash or `fulcra-agent-atc`.
@@ -177,11 +178,12 @@ plug).
 ## 7. Open decisions (blocked-on-Ash ledger, led per standing rule)
 
 1. ~~External identity: App vs machine user~~ — **RESOLVED 2026-07-22 by operator rule** (see
-   Part C): FulcraBot inside the operator's boundary, contributor pattern upstream, App proposal
+   Part C): a dedicated fleet machine account inside the operator's boundary (FulcraBot is
+   reserved for Fulcra-side repos), contributor pattern upstream, App proposal
    shelved for the upstream org to adopt or not.
 2. ~~Router host designation~~ — **RESOLVED 2026-07-22 (Ash): cloud-first.** Decision plane in
    the `coord-fable-worker` cloud environment; host-local adapters execute via a thin, policy-free
    host executor whose failure mode is visibly-queued wakes (plan §2.5 / W5.5). No mandatory
    component may require resident hardware.
-3. **TTL defaults** — proposed: session agents default `until = join + 8h` unless declared;
-   confirm or adjust.
+3. ~~TTL defaults~~ — **RESOLVED 2026-07-22 (Ash): `join + 8h` default; expiry ⇒ LAPSED
+   indefinite reduced-cadence check-in (default 6h); park explicit-only** (see Part B).
