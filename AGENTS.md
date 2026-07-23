@@ -512,9 +512,12 @@ it (not on PyPI).
   presence ROSTER** (`_presence_shards_status`, a sibling of `_presence_shards` that PRESERVES degradation
   rather than swallowing a listing `TransportError` to `[]`) — the gate CERTIFIES the roster population, so
   an UNKNOWN roster read must never look like a confirmed-empty one (an empty gate PASSes vacuously —
-  fail-OPEN, the P1 codex caught): presence-dir listing raises, or a listed shard reads `None`, ⇒
-  `roster_ok=False` ⇒ DEGRADED; only a CONFIRMED enumeration (listing succeeded and every live shard read)
-  may PASS, and a confirmed-EMPTY roster still PASSes vacuously. `_engagement_gate_passes` routes through
+  fail-OPEN, the P1 codex caught): presence-dir listing raises, a listed shard reads `None`, OR a listed
+  shard reads non-empty but its frontmatter will not parse / carries no usable `timestamp` (a parse failure
+  is UNKNOWN coverage exactly like an unreadable shard — never synthesize a `{}`/timestampless phantom row,
+  which `classify` would fold to stale and SILENTLY EXCLUDE while `ok` stayed True), ⇒ `roster_ok=False` ⇒
+  DEGRADED; only a CONFIRMED enumeration (listing succeeded and every live shard parsed with a classifiable
+  timestamp) may PASS, and a confirmed-EMPTY roster still PASSes vacuously. `_engagement_gate_passes` routes through
   the same `(shards, ok)` helper, so a degraded roster returns False and the escalation falls back to
   today's behavior, never the suppression branch. **The vacancy/escalation SEMANTIC
   change is gated (§3, dormant today):** LAPSED RENDERING lands unconditionally (additive), but reading a

@@ -4023,8 +4023,16 @@ def _presence_shards_status(
       - the presence-dir ``list_dir`` raises   -> roster UNKNOWN, ``ok=False``;
       - a listed shard reads ``None``           -> that agent present-but-unreadable,
         coverage unknowable, ``ok=False`` (the rest are still collected);
-      - listing succeeds and every shard read   -> CONFIRMED, ``ok=True`` (an empty
-        result here is a confirmed-empty roster, distinct from UNKNOWN)."""
+      - a listed shard reads non-empty but its frontmatter will not parse, or
+        carries no usable ``timestamp`` -> its freshness (hence coverage) is
+        UNKNOWN, ``ok=False``. Emitting a synthesized ``{}``/timestampless row
+        (the ``parse_frontmatter(raw) or {}`` idiom) would classify it stale and
+        SILENTLY EXCLUDE it from the live population while ``ok`` stayed True —
+        the same certification-boundary fail-OPEN as an unreadable shard, so we
+        drop the phantom row and degrade instead;
+      - listing succeeds and every shard parses with a classifiable timestamp
+        -> CONFIRMED, ``ok=True`` (an empty result here is a confirmed-empty
+        roster, distinct from UNKNOWN)."""
     pfx = _presence_prefix(team)
     try:
         entries = transport.list_dir(pfx)
@@ -4040,7 +4048,13 @@ def _presence_shards_status(
         if raw is None:
             ok = False                    # listed but unreadable -> UNKNOWN coverage
             continue
-        fm = okf.parse_frontmatter(raw) or {}
+        fm = okf.parse_frontmatter(raw)
+        if not fm or presence.parse_iso_z(fm.get("timestamp")) is None:
+            # non-empty read but unparseable frontmatter, or no usable timestamp
+            # to classify freshness -> UNKNOWN coverage. Do NOT synthesize a
+            # phantom row that gets silently excluded — fail closed.
+            ok = False
+            continue
         fm.setdefault("agent", n[:-3])
         shards.append(fm)
     return shards, ok

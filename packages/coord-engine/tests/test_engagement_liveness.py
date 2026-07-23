@@ -440,6 +440,31 @@ def test_engagement_gate_passes_false_on_failing_presence_listing(monkeypatch):
     assert cli._engagement_gate_passes(t, "r", now=NOW_ISO) is False
 
 
+def test_cli_gate_listed_but_unparseable_shard_is_DEGRADED(monkeypatch, capsys):
+    # r2 variant: a listed shard that READS fine but has unparseable frontmatter
+    # must NOT synthesize a timestampless phantom row (classified stale, silently
+    # excluded from the live population while roster_ok stays True -> PASS). Its
+    # freshness/coverage is UNKNOWN -> the roster read is degraded, same as an
+    # unreadable shard. Covered live agent present to prove the fail-OPEN: without
+    # the fix the malformed shard is excluded and amy alone PASSes.
+    _pin(monkeypatch)
+    t = FakeTransport()
+    _put_presence(t, "amy", engagement={"mode": "resident", "until": None})
+    t.store["team/r/presence/bogus.md"] = "not frontmatter at all\njust prose\n"
+    shards, ok = cli._presence_shards_status(t, "r")
+    assert ok is False                          # parse failure -> UNKNOWN coverage
+    assert [s.get("agent") for s in shards] == ["amy"]   # no phantom row emitted
+    assert cli.main(["engagement", "gate", "r"], transport=t) == 1
+    assert "DEGRADED" in capsys.readouterr().out
+
+
+def test_engagement_gate_passes_false_on_unparseable_shard(monkeypatch):
+    _pin(monkeypatch)
+    t = FakeTransport()
+    t.store["team/r/presence/bogus.md"] = "not frontmatter at all\njust prose\n"
+    assert cli._engagement_gate_passes(t, "r", now=NOW_ISO) is False
+
+
 # --- the gated vacancy/escalation semantic change (both branches) -----------
 
 def _role_and_stale_session_lease(t, *, role="reviewer", holder="amy"):
