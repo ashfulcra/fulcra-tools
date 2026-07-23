@@ -149,6 +149,182 @@ def classify(ts: Optional[str], *, now: str, live_hours: float = LIVE_HOURS,
     return "stale"
 
 
+# --- engagement-aware liveness combiner (wake-router W2) --------------------
+#
+# ``classify`` above is the PURE freshness axis (a function of the timestamp
+# alone) and stays that way — it is called widely under that contract. W2 layers
+# the DORMANCY axis on top without touching it: ``liveness`` reads freshness from
+# ``classify`` and engagement from ``parse_engagement``, then applies the authored
+# truth table. The two axes are ORTHOGONAL and are rendered as two independent
+# facts, never a single merged label:
+#   STALENESS  — timestamp freshness (live/idle/stale). Post-W1.5 a working
+#                agent's timestamp is refreshed by the bus write-path, so a fresh
+#                timestamp already IS "recent activity" — no separate signal.
+#   DORMANCY   — a ``session`` past its ``until`` (or a durable W3 ``state:
+#                lapsed`` marker) is LAPSED: distinct from stale/dead, EXPLAINED
+#                ("declared session window ended"), and ROLE-RETAINING. It is
+#                shown REGARDLESS of freshness — a session overrunning its window
+#                while still beating is honestly LAPSED+active (nudge to extend),
+#                never silently live.
+
+LAPSED = "lapsed"
+
+
+def _ago_label(ts: Optional[str], now: str) -> str:
+    """A compact human age (``12m`` / ``5h`` / ``3d``) for annotations, or
+    ``unknown`` when unparseable."""
+    age = age_hours(ts, now)
+    if age == float("inf"):
+        return "unknown"
+    minutes = age * 60.0
+    if minutes < 60:
+        return f"{int(round(minutes))}m"
+    if age < 48:
+        return f"{int(round(age))}h"
+    return f"{int(round(age / 24.0))}d"
+
+
+def _is_lapsed(engagement: dict[str, Any], *, now: str) -> bool:
+    """Dormancy predicate. True iff the durable W3 marker says lapsed, OR a
+    session's ``until`` has passed in real time (``now >= until``, boundary
+    inclusive per the truth table). A degraded engagement reads as the legacy
+    ``resident``/``active`` default and is therefore never lapsed — a malformed
+    shard can never manufacture dormancy."""
+    if engagement.get("state") == LAPSED:
+        return True
+    if engagement.get("mode") == "session" and engagement.get("until"):
+        n = parse_iso_z(now)
+        until = parse_iso_z(engagement["until"])
+        if n is not None and until is not None and n >= until:
+            return True
+    return False
+
+
+def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
+             stale_hours: float = STALE_HOURS) -> dict[str, Any]:
+    """Engagement-aware liveness verdict for one presence shard.
+
+    Returns ``{state, freshness, annotation, engagement}`` where:
+      - ``freshness`` is the PURE ``classify`` band (live/idle/stale) — the
+        timestamp axis, unchanged.
+      - ``state`` is the rendered primary state: ``lapsed`` when dormant, else the
+        freshness band. LAPSED and stale are DISTINCT — ``state`` never collapses a
+        lapsed session onto ``stale`` nor hides the freshness axis.
+      - ``annotation`` renders the OTHER axis as a second fact: for a lapsed row,
+        the freshness ("still beating … — extend session" vs "stale Nh"); for a
+        live row, an occasional/within-window note and a stale-beat nudge.
+    """
+    fm = shard if isinstance(shard, dict) else {}
+    ts = fm.get("timestamp")
+    freshness = classify(ts, now=now, live_hours=live_hours, stale_hours=stale_hours)
+    engagement = parse_engagement(fm)
+    if _is_lapsed(engagement, now=now):
+        if freshness == "stale":
+            annotation = (f"LAPSED (declared session window ended; "
+                          f"stale {_ago_label(ts, now)})")
+        else:
+            annotation = (f"LAPSED (declared session window ended; still beating, "
+                          f"last beat {_ago_label(ts, now)} ago — extend session "
+                          f"or release)")
+        return {"state": LAPSED, "freshness": freshness,
+                "annotation": annotation, "engagement": engagement}
+    parts: list[str] = []
+    mode = engagement.get("mode")
+    if mode == "occasional":
+        parts.append("occasional")
+    elif mode == "session":
+        parts.append("within committed window")
+    if freshness == "stale":
+        parts.append(f"stale {_ago_label(ts, now)} — nudge")
+    return {"state": freshness, "freshness": freshness,
+            "annotation": "; ".join(parts), "engagement": engagement}
+
+
+def lapsed_holder(lease_agents: list[str], shards: list[dict[str, Any]], *,
+                  now: str) -> Optional[str]:
+    """The first lease agent whose presence reads LAPSED, or ``None``.
+
+    Backs the gated vacancy-suppression: a role whose holder's session has lapsed
+    is EXPLAINED absence (role-retaining), not gone-dark. Lookup is by EXACT id —
+    no substring/fuzzy match (the corrupt-id lesson) — so a near-miss id in a
+    lease never resolves to a live shard."""
+    by_agent: dict[str, dict[str, Any]] = {}
+    for s in shards:
+        if isinstance(s, dict) and s.get("agent"):
+            by_agent[str(s["agent"])] = s
+    for a in lease_agents:
+        s = by_agent.get(a)          # exact-id match only
+        if s is not None and liveness(s, now=now)["state"] == LAPSED:
+            return a
+    return None
+
+
+def _covered_via(shard: dict[str, Any], defaults: dict[str, Any], *,
+                 defaults_ok: bool) -> Optional[str]:
+    """How a live agent's engagement is covered for the mixed-fleet gate:
+    ``"engagement"`` (its own well-formed engagement field), ``"defaults"`` (an
+    operator-approved default mode), or ``None`` (uncovered). A malformed
+    engagement field is NOT coverage — it degrades in ``parse_engagement`` and
+    leaves coverage unknown."""
+    raw = shard.get("engagement")
+    if isinstance(raw, dict) and "_engagement_degraded" not in parse_engagement(shard):
+        return "engagement"
+    if defaults_ok and isinstance(defaults, dict):
+        mode = defaults.get(str(shard.get("agent")))
+        if mode in ENGAGEMENT_MODES:
+            return "defaults"
+    return None
+
+
+def engagement_gate(shards: list[dict[str, Any]], defaults: dict[str, Any], *,
+                    now: str, defaults_ok: bool = True, roster_ok: bool = True,
+                    live_hours: float = LIVE_HOURS,
+                    stale_hours: float = STALE_HOURS) -> dict[str, Any]:
+    """Deterministic mixed-fleet gate (plan §3). No vacancy/escalation semantic
+    change may activate until every LIVE roster agent is covered — either it beats
+    with a well-formed ``engagement`` field, or it appears in the operator-approved
+    defaults map. Returns ``{status, defaults_ok, roster_ok, agents}``.
+
+    Only agents whose freshness is ``live`` gate — stale/dead legacy shards (and
+    idle ones) never block. Fail-closed on unknown coverage — the gate reports
+    DEGRADED and NEVER PASS whenever certification is incomplete on EITHER read:
+      - ``defaults_ok=False`` — the operator defaults map is UNKNOWN
+        (present-but-unreadable or unparseable, which the None-on-any-failure read
+        contract cannot distinguish from absent);
+      - ``roster_ok=False`` — the presence roster enumeration is UNKNOWN (the
+        presence-dir listing failed, or a listed shard was present-but-unreadable,
+        so an agent's coverage is unknowable). Only a CONFIRMED roster (listing
+        succeeded and every live shard read) may PASS; a confirmed-EMPTY roster
+        still PASSes vacuously, but an UNKNOWN one must not.
+    Coverage is still reported for whatever shards were read, so a degraded gate
+    stays diagnosable."""
+    agents: list[dict[str, Any]] = []
+    for s in shards:
+        if not isinstance(s, dict) or not s.get("agent"):
+            continue
+        fresh = classify(s.get("timestamp"), now=now,
+                         live_hours=live_hours, stale_hours=stale_hours)
+        if fresh != "live":
+            continue
+        via = _covered_via(s, defaults, defaults_ok=defaults_ok)
+        if via is not None:
+            coverage = "COVERED"
+        elif not defaults_ok:
+            coverage = "UNKNOWN"      # could not certify via a degraded defaults map
+        else:
+            coverage = "UNCOVERED"
+        agents.append({"agent": str(s["agent"]), "coverage": coverage, "via": via})
+    agents.sort(key=lambda a: a["agent"])
+    if not defaults_ok or not roster_ok:
+        status = "DEGRADED"
+    elif all(a["coverage"] == "COVERED" for a in agents):
+        status = "PASS"
+    else:
+        status = "BLOCKED"
+    return {"status": status, "defaults_ok": defaults_ok,
+            "roster_ok": roster_ok, "agents": agents}
+
+
 def roster(
     shards: list[dict[str, Any]], *, now: str,
     live_hours: float = LIVE_HOURS, stale_hours: float = STALE_HOURS,
@@ -161,16 +337,21 @@ def roster(
         ws = s.get("workstreams")
         if not isinstance(ws, list):
             ws = [ws] if ws else []
+        lv = liveness(s, now=now, live_hours=live_hours, stale_hours=stale_hours)
         out.append({
             "agent": str(s["agent"]),
             "workstreams": [str(w) for w in ws],
             "summary": s.get("summary") or "",
             "last_seen": s.get("timestamp"),
-            "liveness": classify(s.get("timestamp"), now=now,
-                                 live_hours=live_hours, stale_hours=stale_hours),
-            # W1: PARSE and carry engagement additively — liveness above is
-            # computed from the timestamp ALONE and never consults this value.
-            "engagement": parse_engagement(s),
+            # ``liveness`` stays the PURE freshness band for back-compat — every
+            # existing caller (broadcast_roster, briefing, agents_digest) reads it
+            # and its meaning must not shift under them. The W2 engagement-aware
+            # verdict rides ADDITIVELY alongside it.
+            "liveness": lv["freshness"],
+            "state": lv["state"],            # W2: lapsed-aware primary state
+            "freshness": lv["freshness"],    # W2: the orthogonal freshness axis
+            "annotation": lv["annotation"],  # W2: the rendered second-axis fact
+            "engagement": lv["engagement"],
         })
     return sorted(out, key=lambda r: r["agent"])
 
@@ -208,9 +389,13 @@ def agents_digest(
         out.append({
             "agent": name,
             "liveness": pres["liveness"] if pres else "unknown",
+            # W2: the engagement-aware verdict, carried additively from the roster
+            # row. ``liveness`` above stays the pure freshness band for back-compat.
+            "state": pres["state"] if pres else "unknown",
+            "freshness": pres["freshness"] if pres else "unknown",
+            "annotation": pres["annotation"] if pres else "",
             "summary": pres["summary"] if pres else "",
             "workstreams": pres["workstreams"] if pres else [],
-            # W1: carried additively from the roster row (parse-only, no action).
             "engagement": pres["engagement"] if pres else dict(_ENGAGEMENT_DEFAULT),
             "open": counts,
         })

@@ -492,6 +492,55 @@ it (not on PyPI).
   throttle memo is process-global module state — reset it between
   tests; any new write verb added to the engine must join `_ACTIVITY_WRITE_FUNCS` (or the omission is
   justified), and the preserve-everything-but-timestamp rule stays red-first pinned.**
+- **Engagement-aware liveness is a combiner over two ORTHOGONAL axes (wake-router W2).** `classify(ts,
+  now)` stays PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone — and is
+  NOT changed (it is called widely under that contract). The truth table is layered on top by
+  `presence.liveness(shard, now=…)`, which returns `{state, freshness, annotation, engagement}`: it reads
+  freshness from `classify` and mode/until/state from `parse_engagement`, then applies the authored table.
+  **STALENESS** (timestamp freshness — post-W1.5 a working agent's bus write already refreshes it, so a
+  fresh timestamp IS "recent activity"; no separate signal) and **DORMANCY** (a `session` past its `until`,
+  `now ≥ until` boundary-inclusive, OR a durable W3 `engagement.state: lapsed` marker) are INDEPENDENT and
+  rendered as two facts, NEVER a merged label. A dormant shard renders primary state **LAPSED** — distinct
+  from stale/dead, EXPLAINED ("declared session window ended"), ROLE-RETAINING — with the freshness axis in
+  the annotation: "still beating … — extend session or release" when fresh (a session overrunning its
+  window while beating is honestly **LAPSED+active**, a nudge to extend, NEVER silently live), "stale Nh"
+  when not. A degraded engagement reads as the legacy `resident`/`active` default and can therefore never
+  manufacture dormancy. **CONCUR conditions in output:** any stale row shows a beat nudge (`stale Nh —
+  nudge`); all agent lookups match by EXACT id (no substring/fuzzy — the corrupt-id lesson), incl.
+  `presence.lapsed_holder`; dormancy ⊥ staleness stays two facts. **The verdict rides ADDITIVELY:** roster
+  rows keep `liveness` = the pure freshness band (every existing caller — broadcast_roster, briefing,
+  agents_digest — reads it and its meaning must not shift) and gain `state`/`freshness`/`annotation`;
+  `presence show` and `agents` render `state` + annotation; `--json` carries all three. **`engagement gate
+  <team>`** is the deterministic mixed-fleet gate (plan §3): for every **LIVE** roster agent, COVERED iff
+  it beats with a well-formed `engagement` field OR appears in the operator map
+  `_coord/router/engagement-defaults.json`; else UNCOVERED. Stale/idle/dead shards never block; overall
+  **PASS** iff all live agents COVERED, else **BLOCKED**. **READ-CONTRACT LENS (mandatory — this bit W1
+  and W1.5, and it bit the gate's ROSTER read too):** `transport.read` returns `None` on BOTH a missing
+  file AND a transient failure, and `list_dir` degradation must never fold to an empty result, so a falsy
+  read/listing is NEVER "confirmed absent/empty" on its own. This governs BOTH reads the gate makes, and
+  an UNKNOWN on either is **DEGRADED** (fail closed — never PASS on unknown coverage): **(a) defaults**
+  (`_load_engagement_defaults`) — router-dir lists without the file ⇒ genuinely absent ⇒ empty map +
+  PASS-eligible; file listed but read `None`, body unparseable, or the listing raises ⇒ UNKNOWN. **(b) the
+  presence ROSTER** (`_presence_shards_status`, a sibling of `_presence_shards` that PRESERVES degradation
+  rather than swallowing a listing `TransportError` to `[]`) — the gate CERTIFIES the roster population, so
+  an UNKNOWN roster read must never look like a confirmed-empty one (an empty gate PASSes vacuously —
+  fail-OPEN, the P1 codex caught): presence-dir listing raises, a listed shard reads `None`, OR a listed
+  shard reads non-empty but its frontmatter will not parse / carries no usable `timestamp` (a parse failure
+  is UNKNOWN coverage exactly like an unreadable shard — never synthesize a `{}`/timestampless phantom row,
+  which `classify` would fold to stale and SILENTLY EXCLUDE while `ok` stayed True), ⇒ `roster_ok=False` ⇒
+  DEGRADED; only a CONFIRMED enumeration (listing succeeded and every live shard parsed with a classifiable
+  timestamp) may PASS, and a confirmed-EMPTY roster still PASSes vacuously. `_engagement_gate_passes` routes through
+  the same `(shards, ok)` helper, so a degraded roster returns False and the escalation falls back to
+  today's behavior, never the suppression branch. **The vacancy/escalation SEMANTIC
+  change is gated (§3, dormant today):** LAPSED RENDERING lands unconditionally (additive), but reading a
+  LAPSED session role-holder as EXPLAINED ABSENCE (role-retaining, suppress the vacancy escalation WITH a
+  note — mirroring `roles.escalation_due`'s dormant-suppress precedent) activates ONLY when
+  `_engagement_gate_passes(team)` — `if gate_passes: <lapsed-holder suppression> else: <today's behavior
+  verbatim>`. The gate is BLOCKED until the fleet is covered, so the new behavior ships DORMANT; BOTH
+  branches are red-first pinned (a gate-PASS fixture suppresses-explained, a gate-BLOCKED fixture escalates
+  as today). **Ship-gate: `classify` stays pure (no engagement read); any new dormancy/coverage input
+  class gets a red-first test; the gate fails closed on any UNKNOWN; the gated semantic change keeps both
+  branches pinned until the gate is satisfied fleet-wide (W10).**
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
