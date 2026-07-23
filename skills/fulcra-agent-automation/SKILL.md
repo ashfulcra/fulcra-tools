@@ -268,6 +268,12 @@ dir in place. Pre-coord first-generation hooks are not managed by this installer
 and should be removed separately. Cowork uses the same core
 and the same settings.json, so the same installer covers it.
 
+The SessionStart hook also consumes exact-identity queued wake nudges from
+`${COORD_WAKE_DIR:-${XDG_STATE_HOME:-~/.local/state}/coord-engine/wakes}` before the briefing.
+These files are written atomically and keyed by the router idempotency key; duplicate delivery
+self-overwrites, consumption happens once, and no event body or encoded command enters model context.
+Malformed files remain in place and surface a degraded marker instead of being silently discarded.
+
 **Codex** — `hooks.json` merge + app-thread automation.
 ```bash
 python3 scripts/codex/install_codex_watch.py <team> <agent> [--codex-dir DIR] [--thread-id ID] [--interval-minutes N] [--uninstall] [--dry-run]
@@ -283,6 +289,10 @@ old 5-minute model-backed poll. For event-driven wake, pair its exact thread id 
 resumed agent fetches authoritative briefing state. Deployment precondition: on the first real host, verify the SessionStart hook actually fires
 before relying on hook-based automation seeding — pass `--thread-id` for the deterministic path if you
 already know the watch thread.
+
+Codex SessionStart consumes the same queued-wake directory and exact-identity format as Claude Code.
+The host executor invokes `coord-engine wake queue-file <team> --agent <id> --key <idempotency-key>`;
+the hook invokes `coord-engine wake consume <team> --agent <id>`. Both commands are model-free.
 
 **OpenClaw** — managed prose block.
 ```bash
@@ -307,6 +317,14 @@ filesystem or scheduler on your machine. Follow the lifecycle contract as prose
 open a periodic duty-cycle session that runs steps 1–2 of the contract. There is
 no durable background pickup on this tier; anything that must not wait for a
 routine belongs with an agent on a host tier.
+
+The router's `routine-align` adapter does not wake or create a cloud session. It writes one
+idempotency-keyed standard delivery record under `team/<team>/_coord/router/delivered/`, extended with
+`mode: self-armed-routine`, `eligible_at`, and `no_session_created: true`. For this lane, “delivered”
+means alignment-recorded: queued work has been aligned to the agent's already-existing Routine, and
+the Routine's normal
+SessionStart/briefing reads the authoritative bus. Treating this marker as an exact-session wake is a
+contract violation.
 
 ## 4. Resume on wake — structured, not a prose re-read
 When a cron/heartbeat wakes an agent to do team work, the wake payload should **resume continuity first**

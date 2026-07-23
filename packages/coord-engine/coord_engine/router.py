@@ -50,6 +50,9 @@ ADAPTERS_CLOUD = frozenset({"managed-agents-message", "routine-align"})
 ADAPTERS_HOST_LOCAL = frozenset(
     {"codex-exec-resume", "openclaw-post", "macos-notify", "queued-wake-file"})
 
+#: Logical executor id for adapters executed on the cloud decision plane.
+DECISION_PLANE = "decision-plane"
+
 #: Per-adapter allowlisted `adapter_args` keys — free-form keys are a config
 #: validation error (the relay contract: no commands, no session keys, no raw
 #: URLs ride the store).
@@ -240,6 +243,25 @@ def fold_delivered(shards: list[dict[str, Any]]) -> dict[str, Any]:
             row["last_delivered_at"] = at
             row["last_source_shard"] = shard.get("source_shard")
     return view
+
+
+def record_filename(key: str) -> str:
+    """Return the canonical idempotency-keyed delivery-record filename."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", key)
+    return f"{safe}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}.json"
+
+
+def delivery_record(entry: dict[str, Any], delivered_at: str) -> dict[str, Any]:
+    """Build the standard successful-execution record consumed by the fold."""
+    return {
+        "key": idempotency_key(str(entry.get("source_shard")),
+                               str(entry.get("agent"))),
+        "agent": entry.get("agent"),
+        "source_shard": entry.get("source_shard"),
+        "adapter": entry.get("adapter"),
+        "executor": entry.get("executor"),
+        "delivered_at": delivered_at,
+    }
 
 
 # --- policy -----------------------------------------------------------------
