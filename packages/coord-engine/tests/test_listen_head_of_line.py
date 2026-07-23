@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from coord_engine import cli, okf, reconcile
+from coord_engine import budget, cli, okf, reconcile
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
@@ -87,3 +87,40 @@ def test_direct_head_is_consumed_before_role_tail(monkeypatch):
 
     assert state["inbox_ids"] == ["mine"]
     assert "role-work" not in state["inbox_ids"]
+
+
+def test_row_load_head_budget_cut_is_loud_and_recovery_delivers(monkeypatch):
+    """A slow summaries read spends the protected clock before ack scanning.
+
+    The cut is head-degraded, advances no id, and the recovery tick delivers the
+    still-unseen directive. Fake monotonic time makes the boundary deterministic.
+    """
+    class SlowSummary(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.clock = 0.0
+            self.slow = True
+
+        def read(self, path):
+            if self.slow and path == reconcile.summaries_path(TEAM):
+                self.clock += 2.0
+            return super().read(path)
+
+    t = SlowSummary()
+    monkeypatch.setattr(budget.time, "monotonic", lambda: t.clock)
+    monkeypatch.setenv("COORD_LISTEN_HEAD_BUDGET", "1")
+    _put_direct(t)
+    reconcile.reconcile(t, TEAM, now=NOW, today="2026-07-22", host="h")
+    state = _state()
+
+    events, failures = cli._listen_tick(t, TEAM, "codex-coder", state)
+
+    assert events == []
+    assert state["inbox_ids"] == []
+    assert "listen-head-degraded" in " ".join(failures["inbox"])
+
+    t.slow = False
+    events2, failures2 = cli._listen_tick(t, TEAM, "codex-coder", state)
+    assert [e["slug"] for e in events2 if e["type"] == "directive"] == ["mine"]
+    assert "inbox" not in failures2
+    assert state["inbox_ids"] == ["mine"]

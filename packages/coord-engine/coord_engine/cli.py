@@ -107,7 +107,8 @@ def _overlay_budget() -> float:
 
 
 def _fresh_overlay_rows(
-    transport: Any, team: str, index_rows: list[dict[str, Any]]
+    transport: Any, team: str, index_rows: list[dict[str, Any]], *,
+    deadline: "Optional[Deadline]" = None,
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Freshness overlay (Task 2.5, the PR348 false-clear).
 
@@ -143,13 +144,24 @@ def _fresh_overlay_rows(
     reconcile's own tolerance). Cost: one extra ``list_dir`` per row load, plus one
     ``read`` per genuinely-new (unsummarized) slug, at most the cap, within the
     budget."""
-    dl = Deadline.open(_overlay_budget())
+    own_dl = Deadline.open(_overlay_budget())
+    # A caller may provide a stricter absolute phase deadline (listen's protected
+    # head). The overlay keeps its own cap/budget, but can never outlive that
+    # caller: whichever instant arrives first wins.
+    if deadline is not None and deadline.instant is not None:
+        instant = (deadline.instant if own_dl.instant is None else
+                   min(deadline.instant, own_dl.instant))
+        dl = Deadline(instant)
+    else:
+        dl = own_dl
     prefix = rec.task_prefix(team)
     try:
         listing = transport.list_dir(prefix)
     except Exception:
         # listing unknown -> degraded (caller surfaces it), never silent
         return [], False, "task-dir overlay unreadable"
+    if dl.expired():
+        return [], False, "task-dir overlay budget exhausted after listing"
     from . import model
     known = {str(r.get("name")) for r in index_rows if isinstance(r, dict)}
     absent: list[tuple[str, Any]] = []
@@ -206,7 +218,9 @@ def _fresh_overlay_rows(
     return overlay, ok, "; ".join(reasons)
 
 
-def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool, str]:
+def _load_rows_status(
+    transport: Any, team: str, *, deadline: "Optional[Deadline]" = None,
+) -> tuple[list[dict[str, Any]], bool, str]:
     """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
     was not, a short ``reason`` for the degraded surface to print (attribution: a
     summaries-index failure and a freshness-overlay failure are different outages
@@ -227,6 +241,11 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
         raw = transport.read(path)
     except Exception:
         return [], False, "summaries index unreadable"
+    if deadline is not None and deadline.expired():
+        # The protected caller phase did not complete inside its clock. Even if
+        # this read returned bytes, do not advance any directive id from a phase
+        # whose remaining freshness work is unknown; recovery re-reads/delivers.
+        return [], False, "caller row-load budget exhausted after summaries read"
     if raw:
         try:
             rows = aggregate.aggregate_rows(json.loads(raw))
@@ -236,7 +255,11 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
         # Live-freshness overlay: union in task docs written since the last
         # reconcile (absent from this index). Any overlay problem flips ``ok`` so
         # the inbox source degrades visibly; the index rows are still served.
-        overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(transport, team, rows)
+        overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(
+            transport, team, rows, deadline=deadline)
+        if deadline is not None and deadline.expired():
+            return [], False, (overlay_reason or
+                               "caller row-load budget exhausted during overlay")
         return rows + overlay, overlay_ok, overlay_reason
     parent, entry = path.rsplit("/", 1)
     try:
@@ -244,6 +267,8 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
     except TransportError:
         # transport down -> unknown, not a confirmed-empty index
         return [], False, "summaries index unreadable"
+    if deadline is not None and deadline.expired():
+        return [], False, "caller row-load budget exhausted after index listing"
     if entry in names:
         # index there yet unreadable (read returned None) -> degraded
         return [], False, "summaries index unreadable"
@@ -2994,7 +3019,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # summaries index is degraded, NOT a legitimately-empty inbox.
     now_iso = _iso(_now())
     head_dl = Deadline.open(_listen_head_budget())
-    rows, inbox_ok, inbox_reason = _load_rows_status(transport, team)
+    rows, inbox_ok, inbox_reason = _load_rows_status(
+        transport, team, deadline=head_dl)
     if not inbox_ok:
         # The reason attributes WHICH leg failed (summaries index vs the freshness
         # overlay — different outages, same inbox source/streak).
