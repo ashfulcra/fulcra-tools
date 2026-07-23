@@ -70,10 +70,27 @@ def test_updates_parses_file_changes(monkeypatch):
     from coord_engine import transport as tr
     t = tr.FulcraFileTransport(command=["uv", "tool", "run", "fulcra-api"])
     calls = []
-    monkeypatch.setattr(tr, "run_bounded",
-                        _fake_run(0, '{"file_changes": [{"full_name": "/team/r/task/a.md"}]}', calls))
-    got = t.updates("900 seconds")
-    assert got == [{"full_name": "/team/r/task/a.md"}]
+    monkeypatch.setattr(
+        tr,
+        "run_bounded",
+        _fake_run(
+            0,
+            '{"file_changes": ['
+            '{"full_name": "/team/r/task/a.md", "state": "uploaded",'
+            ' "uploaded_at": "2026-07-01T12:00:00Z"},'
+            '{"full_name": "/other/task/b.md", "state": "uploaded"}'
+            "]}",
+            calls,
+        ),
+    )
+    got = t.updates("900 seconds", team="r")
+    assert got == [{
+        "path": "team/r/task/a.md",
+        "state": "uploaded",
+        "uploaded_at": "2026-07-01T12:00:00Z",
+        "archived_at": None,
+        "deleted_at": None,
+    }]
     # exact command: the transport's own base verbatim — no binary rewriting
     assert calls == [["uv", "tool", "run", "fulcra-api", "data-updates", "900 seconds"]]
 
@@ -88,3 +105,14 @@ def test_updates_never_raises(monkeypatch):
         raise OSError("no binary")
     monkeypatch.setattr(tr, "run_bounded", boom)
     assert t.updates("60 seconds") is None
+
+
+def test_updates_fails_closed_on_malformed_change(monkeypatch):
+    from coord_engine import transport as tr
+    t = tr.FulcraFileTransport(command=["fulcra-api"])
+    monkeypatch.setattr(
+        tr,
+        "run_bounded",
+        _fake_run(0, '{"file_changes": [{"state": "uploaded"}]}', []),
+    )
+    assert t.updates("60 seconds", team="r") is None

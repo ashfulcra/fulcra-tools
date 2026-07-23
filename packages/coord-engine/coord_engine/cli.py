@@ -106,6 +106,133 @@ def _overlay_budget() -> float:
     return config.env_float("COORD_OVERLAY_BUDGET", DEFAULT_OVERLAY_BUDGET)
 
 
+DELTA_FEED_MAX_HOURS = 24.0
+
+
+def _delta_feed_window(since: Any, *, now: str) -> Optional[str]:
+    """Return the inclusive data-updates period for ``since`` → ``now``.
+
+    Missing/corrupt/future/too-old cursors are doubt and therefore return None;
+    callers take their existing full-listing fallback.  The same skew margin as
+    reconcile makes the rescan inclusive across host/store clock boundaries.
+    """
+    start = rec._parse_iso_utc(since)
+    end = rec._parse_iso_utc(now)
+    if start is None or end is None:
+        return None
+    seconds = (end - start).total_seconds()
+    if seconds < 0 or seconds > DELTA_FEED_MAX_HOURS * 3600:
+        return None
+    return f"{int(seconds) + rec.FAST_PATH_SKEW_MARGIN_SECONDS} seconds"
+
+
+def _team_updates(
+    transport: Any, team: str, *, since: Any, now: str,
+) -> Optional[list[dict[str, Any]]]:
+    """One parsed, team-filtered feed call, or None for UNKNOWN.
+
+    The TypeError retry preserves duck-typed/mixed-version transports while the
+    real transport owns the new ``team=`` filtering contract.
+    """
+    updates_fn = getattr(transport, "updates", None)
+    window = _delta_feed_window(since, now=now)
+    if updates_fn is None or window is None:
+        return None
+    try:
+        try:
+            changes = updates_fn(window, team=team)
+        except TypeError:
+            changes = updates_fn(window)
+    except Exception:
+        return None
+    if not isinstance(changes, list):
+        return None
+    prefix = f"team/{team}/"
+    parsed: list[dict[str, Any]] = []
+    for change in changes:
+        if not isinstance(change, dict):
+            return None
+        path = change.get("path", change.get("full_name"))
+        if not isinstance(path, str) or not path.strip():
+            return None
+        path = path.strip().lstrip("/")
+        if not path.startswith(prefix):
+            continue
+        state = change.get("state")
+        if state not in ("uploaded", "archived", "deleted"):
+            return None
+        parsed.append({
+            "path": path,
+            "state": state,
+            "uploaded_at": change.get("uploaded_at"),
+            "archived_at": change.get("archived_at"),
+            "deleted_at": change.get("deleted_at"),
+        })
+    return parsed
+
+
+def _change_instant(change: dict[str, Any]) -> Optional[datetime]:
+    state = change.get("state")
+    key = {"uploaded": "uploaded_at", "archived": "archived_at",
+           "deleted": "deleted_at"}.get(state)
+    value = change.get(key) if key else None
+    # Some archive/delete payloads retain only uploaded_at.  That timestamp is
+    # still usable for deterministic collapsing; total absence is feed doubt.
+    return rec._parse_iso_utc(value or change.get("uploaded_at"))
+
+
+def _feed_task_rows(
+    transport: Any, team: str, index_rows: list[dict[str, Any]],
+    changes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Apply changed task shards to aggregate rows without a task-dir listing."""
+    from . import model
+    prefix = rec.task_prefix(team)
+    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    for change in changes:
+        path = str(change.get("path") or "")
+        if not path.startswith(prefix) or not path.endswith(".md"):
+            continue
+        name = path[len(prefix):]
+        if "/" in name or name in ("index.md", "log.md"):
+            continue
+        instant = _change_instant(change)
+        if instant is None:
+            return [], False, f"data-updates change for {name} lacks a usable timestamp"
+        prior = latest.get(path)
+        if prior is None or instant >= prior[0]:
+            latest[path] = (instant, change)
+
+    by_name = {str(r.get("name")): r for r in index_rows
+               if isinstance(r, dict) and r.get("name")}
+    for path in sorted(latest):
+        instant, change = latest[path]
+        name = path[len(prefix):]
+        slug = name[:-3]
+        if change.get("state") in ("archived", "deleted"):
+            by_name.pop(slug, None)
+            continue
+        try:
+            raw = transport.read(path)
+        except Exception:
+            raw = None
+        if raw is None:
+            return [], False, f"data-updates task shard {name} unreadable"
+        try:
+            fm = okf.parse_frontmatter(raw)
+            if fm is not None and model.is_task(fm):
+                by_name[slug] = model.row_from_frontmatter(
+                    fm, name=slug, path=f"task/{name}",
+                    mtime=instant.strftime("%Y-%m-%d %I:%M%p UTC"))
+            else:
+                by_name.pop(slug, None)
+        except Exception:
+            # Parse garbage is the same sanctioned skip as the listing overlay,
+            # but a formerly-valid task must disappear from the live view.
+            by_name.pop(slug, None)
+    return [by_name[k] for k in sorted(by_name)], True, ""
+
+
 def _fresh_overlay_rows(
     transport: Any, team: str, index_rows: list[dict[str, Any]], *,
     deadline: "Optional[Deadline]" = None,
@@ -220,6 +347,8 @@ def _fresh_overlay_rows(
 
 def _load_rows_status(
     transport: Any, team: str, *, deadline: "Optional[Deadline]" = None,
+    feed_changes: "Optional[list[dict[str, Any]]]" = None,
+    feed_attempted: bool = False,
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
     was not, a short ``reason`` for the degraded surface to print (attribution: a
@@ -248,10 +377,30 @@ def _load_rows_status(
         return [], False, "caller row-load budget exhausted after summaries read"
     if raw:
         try:
-            rows = aggregate.aggregate_rows(json.loads(raw))
+            aggregate_doc = json.loads(raw)
+            rows = aggregate.aggregate_rows(aggregate_doc)
         except Exception:
             # index present but corrupt -> unreadable, surface it
             return [], False, "summaries index unreadable"
+        # E2 primary path: one authoritative feed call since the aggregate cursor,
+        # then direct reads of only changed task shards.  No task-dir listing is
+        # consulted, so listing lag cannot hide a verified feed entry.
+        aggregate_cursor = (
+            aggregate_doc.get("generated_at")
+            if isinstance(aggregate_doc, dict)
+            else None
+        )
+        feed = (feed_changes if feed_attempted else _team_updates(
+            transport, team, since=aggregate_cursor, now=_iso(_now())))
+        if feed is not None:
+            delta_rows, delta_ok, _delta_reason = _feed_task_rows(
+                transport, team, rows, feed)
+            if delta_ok:
+                if deadline is not None and deadline.expired():
+                    return [], False, "caller row-load budget exhausted during feed delta"
+                return delta_rows, True, ""
+            # Any feed/read doubt takes the byte-for-byte legacy listing overlay
+            # below.  A healthy fallback is not a degraded public read.
         # Live-freshness overlay: union in task docs written since the last
         # reconcile (absent from this index). Any overlay problem flips ``ok`` so
         # the inbox source degrades visibly; the index rows are still served.
@@ -2923,6 +3072,9 @@ def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
         # Legacy files lack the keys and default empty.
         "flagged_orphan_responses": list(data.get("flagged_orphan_responses") or []),
         "flagged_orphan_verdicts": list(data.get("flagged_orphan_verdicts") or []),
+        # E2 authoritative data-updates cursor. Missing/corrupt -> one legacy
+        # full-listing pass, which seeds it only after that tick is conclusive.
+        "feed_cursor": data.get("feed_cursor"),
         "degraded": _coerce_degraded(data.get("degraded")),
     }
 
@@ -2972,6 +3124,123 @@ def _listen_inbox_phase(
     return out, True, scanned, len(candidates)
 
 
+def _listen_feed_history(
+    transport: Any, team: str, agent: str, changes: list[dict[str, Any]], *,
+    response_keys: set[str], slug_owned: dict[str, Any],
+    verdict_keys: set[str], review_requested: dict[str, Any],
+    settled_reviews: set[str],
+) -> Optional[dict[str, Any]]:
+    """Classify changed response/verdict shards without history-root listings.
+
+    The result is copy-on-success. Any unreadable owner/requester/shard returns
+    None so the caller discards the partial work and takes the unchanged
+    listing-based tail fallback.
+    """
+    next_response_keys = set(response_keys)
+    next_slug_owned = dict(slug_owned)
+    next_verdict_keys = set(verdict_keys)
+    next_review_requested = dict(review_requested)
+    next_settled_reviews = set(settled_reviews)
+    events: list[dict[str, Any]] = []
+    responses_prefix = _responses_prefix(team)
+    review_prefix = f"team/{team}/review/"
+
+    # A settling change must be observed after its verdict shards in the same
+    # inclusive feed window, regardless of endpoint ordering.
+    ordered = sorted(
+        changes,
+        key=lambda c: (
+            str(c.get("path") or "").endswith("/.settled"),
+            str(c.get("path") or ""),
+        ),
+    )
+    for change in ordered:
+        if change.get("state") != "uploaded":
+            continue
+        path = str(change.get("path") or "")
+        if path.startswith(responses_prefix):
+            rest = path[len(responses_prefix):]
+            parts = rest.split("/")
+            if len(parts) != 2 or not parts[0] or not parts[1].endswith(".md"):
+                continue
+            slug, filename = parts
+            key = f"{slug}/{filename[:-3]}"
+            if key in next_response_keys:
+                continue
+            owned = next_slug_owned.get(slug)
+            if owned is None:
+                doc = transport.read(_task_path(team, slug))
+                if doc is None:
+                    return None
+                fm = okf.parse_frontmatter(doc) or {}
+                owned = str(fm.get("owner") or "").strip() == agent
+                next_slug_owned[slug] = owned
+            if not owned:
+                continue
+            shard = transport.read(path)
+            if shard is None:
+                return None
+            fm = okf.parse_frontmatter(shard) or {}
+            events.append({
+                "type": "response",
+                "slug": slug,
+                "agent": str(fm.get("agent") or "?"),
+                "outcome": str(fm.get("outcome") or "?"),
+            })
+            next_response_keys.add(key)
+            continue
+
+        if not path.startswith(review_prefix):
+            continue
+        rest = path[len(review_prefix):]
+        parts = rest.split("/")
+        if len(parts) != 3 or parts[1] != "verdicts":
+            continue
+        slug, _verdicts, filename = parts
+        if not slug or slug in next_settled_reviews:
+            continue
+        requested = next_review_requested.get(slug)
+        if requested is None:
+            doc = transport.read(_review_doc_path(team, slug))
+            if doc is None:
+                return None
+            fm = okf.parse_frontmatter(doc) or {}
+            requested = str(fm.get("requested_by") or "").strip() == agent
+            next_review_requested[slug] = requested
+        if not requested:
+            continue
+        if filename == SETTLED_MARKER:
+            events.append({"type": "settled", "slug": slug,
+                           "state": review.APPROVED})
+            next_settled_reviews.add(slug)
+            continue
+        if not filename.endswith(".md"):
+            continue
+        key = f"{slug}/{filename[:-3]}"
+        if key in next_verdict_keys:
+            continue
+        shard = transport.read(path)
+        if shard is None:
+            return None
+        fm = okf.parse_frontmatter(shard) or {}
+        events.append({
+            "type": "verdict",
+            "slug": slug,
+            "reviewer": filename[:-3],
+            "verdict": str(fm.get("verdict") or "?"),
+        })
+        next_verdict_keys.add(key)
+
+    return {
+        "events": events,
+        "response_keys": next_response_keys,
+        "slug_owned": next_slug_owned,
+        "verdict_keys": next_verdict_keys,
+        "review_requested": next_review_requested,
+        "settled_reviews": next_settled_reviews,
+    }
+
+
 def _listen_tick(transport: Any, team: str, agent: str,
                  state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
@@ -3006,6 +3275,9 @@ def _listen_tick(transport: Any, team: str, agent: str,
     inbox_ids = set(state["inbox_ids"])
     response_keys = set(state["response_keys"])
     slug_owned: dict[str, Any] = dict(state["slug_owned"])
+    verdict_keys = set(state.get("verdict_keys") or [])
+    review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
+    settled_reviews = set(state.get("settled_reviews") or [])
     # Emit-once caches: slugs whose owner/requester doc read None and have already
     # had their degrade emitted. Skipped SILENTLY thereafter so a fail-closed
     # watcher (persistent DEGRADED == fatal) survives a permanently-missing doc;
@@ -3018,9 +3290,14 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # directives routed to a fresh-lease ROLE this agent holds. An unreadable
     # summaries index is degraded, NOT a legitimately-empty inbox.
     now_iso = _iso(_now())
+    feed_attempted = bool(state.get("feed_cursor"))
+    feed_changes = (_team_updates(
+        transport, team, since=state.get("feed_cursor"), now=now_iso)
+        if feed_attempted else None)
     head_dl = Deadline.open(_listen_head_budget())
     rows, inbox_ok, inbox_reason = _load_rows_status(
-        transport, team, deadline=head_dl)
+        transport, team, deadline=head_dl, feed_changes=feed_changes,
+        feed_attempted=feed_attempted)
     if not inbox_ok:
         # The reason attributes WHICH leg failed (summaries index vs the freshness
         # overlay — different outages, same inbox source/streak).
@@ -3107,11 +3384,30 @@ def _listen_tick(transport: Any, team: str, agent: str,
                        "title": str(r.get("title") or slug)})
         inbox_ids.add(slug)
 
+    # Feed-first history tail.  This is copy-on-success: any changed shard whose
+    # ownership/requester/content cannot be read discards the partial result and
+    # falls through to the unchanged listing-based W8-budgeted tail.
+    history_feed = False
+    if feed_changes is not None and _tail_ready("feed history"):
+        targeted = _listen_feed_history(
+            transport, team, agent, feed_changes,
+            response_keys=response_keys, slug_owned=slug_owned,
+            verdict_keys=verdict_keys, review_requested=review_requested,
+            settled_reviews=settled_reviews)
+        if targeted is not None:
+            history_feed = True
+            events.extend(targeted["events"])
+            response_keys = targeted["response_keys"]
+            slug_owned = targeted["slug_owned"]
+            verdict_keys = targeted["verdict_keys"]
+            review_requested = targeted["review_requested"]
+            settled_reviews = targeted["settled_reviews"]
+
     # Source 2 — new responses to directives THIS agent owns. One list_dir of the
     # responses root; per-slug work only for owned slugs, ownership cached.
     prefix = _responses_prefix(team)
-    entries = None
-    if _tail_ready("responses"):
+    entries = [] if history_feed else None
+    if not history_feed and _tail_ready("responses"):
         try:
             entries = transport.list_dir(prefix)
         except TransportError as e:
@@ -3184,14 +3480,11 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # slugs. A `.settled` listing first EMITS every unseen shard + one terminal
     # SETTLED event, then drops the slug so it is never listed again (the review
     # is immutable once settled). Its OWN degraded source `verdicts`.
-    review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
-    verdict_keys = set(state.get("verdict_keys") or [])
-    settled_reviews = set(state.get("settled_reviews") or [])
     if _tail_ready("settled-review index"):
         settled_reviews.update(rec._load_settled_index(transport, team))
     review_prefix = f"team/{team}/review/"
-    rentries = None
-    if _tail_ready("verdicts"):
+    rentries = [] if history_feed else None
+    if not history_feed and _tail_ready("verdicts"):
         try:
             rentries = transport.list_dir(review_prefix)
         except TransportError as e:
@@ -3346,6 +3639,11 @@ def _listen_tick(transport: Any, team: str, agent: str,
     state["orphan_slugs"] = sorted(orphan_slugs)
     state["flagged_orphan_responses"] = sorted(flagged_orphan_responses)
     state["flagged_orphan_verdicts"] = sorted(flagged_orphan_verdicts)
+    # Never consume a window whose tick was incomplete.  A conclusive feed tick
+    # OR a conclusive full-listing fallback may advance; any degraded source
+    # leaves the old cursor intact so recovery inclusively replays the window.
+    if not failures:
+        state["feed_cursor"] = now_iso
     return events, failures
 
 
