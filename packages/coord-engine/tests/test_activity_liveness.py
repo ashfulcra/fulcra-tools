@@ -41,6 +41,47 @@ class _PresenceWriteRaises(FakeTransport):
         return super().write(path, content)
 
 
+class _FlakyTransport(FakeTransport):
+    """Independently controls ``read`` (real / None / raise) and ``list_dir``
+    (real / raise) so absence can be confirmed vs an UNKNOWN read failure.
+    ``read`` returning None models the FulcraFileTransport contract: None on
+    BOTH a missing file and a transient failure."""
+
+    def __init__(self, *, read_mode="real", list_mode="real"):
+        super().__init__()
+        self.read_mode = read_mode      # "real" | "none" | "raise"
+        self.list_mode = list_mode      # "real" | "raise"
+        self.presence_writes: list[str] = []
+
+    def read(self, path):
+        if self.read_mode == "raise":
+            raise RuntimeError("transient read failure")
+        if self.read_mode == "none":
+            return None
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        if self.list_mode == "raise":
+            raise RuntimeError("transient list failure")
+        return super().list_dir(prefix)
+
+    def write(self, path, content):
+        if "/presence/" in path:
+            self.presence_writes.append(path)
+        return super().write(path, content)
+
+
+def _engagement_shard(actor):
+    fm = {
+        "type": "Presence", "title": f"presence — {actor}", "agent": actor,
+        "workstreams": ["w1.5"], "summary": "wiring the hook",
+        "timestamp": "2026-07-02T04:00:00Z",
+        "engagement": {"mode": "session", "until": "2026-07-02T09:00:00Z",
+                       "state": "lapsed", "lapsed_at": "2026-07-02T08:00:00Z"},
+    }
+    return okf.render_frontmatter(fm) + f"\n# Presence: {actor}\n"
+
+
 # --- 1. THROTTLE -------------------------------------------------------------
 
 def test_throttle_collapses_writes_within_one_interval():
@@ -171,6 +212,59 @@ def test_refresh_does_not_clobber_a_present_shard_lacking_a_timestamp(capsys):
     assert t.store[path] == original
     assert "state: lapsed" in t.store[path]
     assert "w1.5" in t.store[path]
+
+
+def test_refresh_does_not_clobber_when_read_returns_none_on_present_shard():
+    # read() -> None on an EXISTING engagement shard (transient failure looks
+    # identical to absent). Absence must be confirmed via list_dir; the listing
+    # finds the shard -> UNKNOWN read -> skip, never a minimal-beat clobber.
+    actor, team = "worker-3d", "r"
+    original = _engagement_shard(actor)
+    t = _FlakyTransport(read_mode="none")     # list_dir stays real
+    path = _presence_path(team, actor)
+    t.put(path, original)                     # shard IS present in the store
+    cli._refresh_activity_presence(
+        t, team, actor, now_monotonic=1.0, now_iso="2026-07-02T12:00:00Z")
+    assert t.presence_writes == []            # nothing written
+    assert t.store[path] == original          # byte-identical
+
+
+def test_refresh_does_not_clobber_when_read_raises_on_present_shard():
+    actor, team = "worker-3e", "r"
+    original = _engagement_shard(actor)
+    t = _FlakyTransport(read_mode="raise")
+    path = _presence_path(team, actor)
+    t.put(path, original)
+    cli._refresh_activity_presence(
+        t, team, actor, now_monotonic=1.0, now_iso="2026-07-02T12:00:00Z")
+    assert t.presence_writes == []
+    assert t.store[path] == original
+
+
+def test_refresh_skips_when_listing_fails_unknown_existence():
+    # read() -> None AND list_dir raises -> existence UNKNOWN -> fail closed
+    # (skip, no write). A listing failure must never license a minimal beat.
+    actor, team = "worker-3f", "r"
+    t = _FlakyTransport(read_mode="none", list_mode="raise")
+    path = _presence_path(team, actor)
+    cli._refresh_activity_presence(
+        t, team, actor, now_monotonic=1.0, now_iso="2026-07-02T12:00:00Z")
+    assert t.presence_writes == []
+    assert path not in t.store
+
+
+def test_refresh_writes_minimal_beat_only_when_listing_confirms_absent():
+    # read() -> None and list_dir succeeds WITHOUT the shard -> confirmed absent
+    # -> the sole safe case for a minimal beat.
+    actor, team = "worker-3g", "r"
+    t = _FlakyTransport(read_mode="none")     # empty store -> listing has no shard
+    path = _presence_path(team, actor)
+    cli._refresh_activity_presence(
+        t, team, actor, now_monotonic=1.0, now_iso="2026-07-02T12:00:00Z")
+    assert t.presence_writes == [path]
+    assert "type: Presence" in t.store[path]
+    assert "timestamp: 2026-07-02T12:00:00Z" in t.store[path]
+    assert "engagement:" not in t.store[path]
 
 
 def test_refresh_writes_minimal_beat_when_no_shard_exists():

@@ -4941,8 +4941,26 @@ def _refresh_activity_presence(
                   "top-level timestamp; left intact for the next beat to repair",
                   file=sys.stderr)
             return
-        # ABSENT shard only: write a minimal beat. No engagement object — an
-        # activity bump must not manufacture one.
+        # ``read`` returned falsy — but the transport contract is None on BOTH a
+        # missing file AND a transient read failure, so this is NOT yet proof of
+        # absence. Confirm independently via the RAISING ``list_dir`` contract and
+        # FAIL CLOSED on any UNKNOWN (same idiom as the W1 session beat): a minimal
+        # beat over a shard that merely failed to read would erase live engagement.
+        present: Optional[bool]
+        try:
+            present = any(e.get("name") == f"{slug}.md"
+                          for e in transport.list_dir(_presence_prefix(team)))
+        except Exception:
+            present = None                         # listing failed -> UNKNOWN
+        if present is not False:
+            # UNKNOWN (listing failed) or shard-present-but-unreadable -> never
+            # clobber a possibly-live shard.
+            print(f"presence activity-refresh skipped: {shard_path} existence "
+                  "unconfirmed (read returned no content); not writing over a "
+                  "possibly-live shard", file=sys.stderr)
+            return
+        # list_dir-CONFIRMED absent — the sole safe case for a minimal beat. No
+        # engagement object: an activity bump must not manufacture one.
         fm = {"type": "Presence", "title": f"presence — {actor}",
               "agent": actor, "timestamp": now_iso}
         transport.write(shard_path, okf.render_frontmatter(fm) + f"\n# Presence: {actor}\n")

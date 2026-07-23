@@ -447,8 +447,14 @@ it (not on PyPI).
   TIMESTAMP BUMP, not a `presence beat` re-run** (it does NOT go through the W1 engagement-resolution
   path): it rewrites ONLY the top-level `timestamp` line and preserves every other byte — `engagement`
   (mode/until/**state/lapsed_at**), workstreams, summary, body — verbatim, so it never slides a session's
-  `until` and never writes `state`/`lapsed_at` (W3-owned). An absent shard gets a minimal beat carrying NO
-  engagement object. **Ship-gate: the throttle memo is process-global module state — reset it between
+  `until` and never writes `state`/`lapsed_at` (W3-owned). **The minimal-beat fallback fires ONLY on
+  `list_dir`-CONFIRMED absence** (carrying NO engagement object): because the transport's `read` returns
+  `None` on BOTH a missing file and a transient failure, a falsy read is confirmed against the RAISING
+  `list_dir` contract and FAILS CLOSED on any UNKNOWN — a listing failure, or a shard present-but-
+  unreadable, SKIPS (no write) rather than overwriting a possibly-live shard; only a listing that
+  succeeds and does not contain the shard licenses the minimal beat. A present shard with no top-level
+  `timestamp:` line likewise skips. Failure isolation never means destructive fallback. **Ship-gate: the
+  throttle memo is process-global module state — reset it between
   tests; any new write verb added to the engine must join `_ACTIVITY_WRITE_FUNCS` (or the omission is
   justified), and the preserve-everything-but-timestamp rule stays red-first pinned.**
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
