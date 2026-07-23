@@ -289,3 +289,129 @@ def decide(
         boundary = presence_ts + timedelta(minutes=BUSY_FRESH_MIN)
         return "defer", boundary, "agent busy — queued to idle boundary"
     return "batch", None, "below interrupt floor — rides digest/next check-in"
+
+
+# --- W5: adapter integration + execution (pure core) ------------------------
+#
+# The decision plane EXECUTES the cloud-reachable adapters (executor ==
+# DECISION_PLANE); host-local adapters are enqueued with executor: <host id>
+# and left for the W5.5 thin host executor — one component executes each adapter
+# class, by construction (plan §W5). Delivery is AT-LEAST-ONCE (the store has no
+# atomic claim/CAS); the system is safe by ADAPTER CONTENT DESIGN, enforced by
+# `adapter_invocation` below: every wake is a keyed check-your-bus nudge with NO
+# per-event command, so N deliveries converge to one bus check (plan §2).
+
+#: Logical executor id the decision plane claims. Cloud-reachable adapters
+#: resolve to this at enqueue time (see `validate_config`); host-local adapters
+#: resolve to a host id and are never executed here.
+DECISION_PLANE = "decision-plane"
+
+#: Bounded retry before an execution is dead-lettered (plan §2 relay contract:
+#: bounded retry → dead-letter, never an unbounded loop).
+MAX_DELIVERY_ATTEMPTS = 3
+
+#: A FOREIGN claim younger than this reads as "another executor is mid-flight" —
+#: skip it. Own claims and stale foreign claims are retryable, which is
+#: at-least-once again, which is safe by the content rule (plan §2).
+CLAIM_FRESH_MIN = 10
+
+
+def is_decision_plane_entry(entry: dict[str, Any]) -> bool:
+    """The decision plane executes exactly the entries it owns — cloud-reachable
+    adapters resolved to `executor: decision-plane`. Everything else (host-local
+    executor ids) is left in the queue for W5.5; the decision plane never fires
+    a host-local adapter."""
+    return entry.get("executor") == DECISION_PLANE
+
+
+def claim_is_skippable(entry: dict[str, Any], executor_id: str,
+                       now: datetime) -> bool:
+    """True when a FOREIGN executor holds a fresh (< CLAIM_FRESH_MIN) claim —
+    another process is mid-flight, so skip to avoid a redundant fire. Our own
+    claim or a STALE foreign claim is retryable (at-least-once, safe by the
+    content rule). No claim at all is claimable."""
+    claimed_at = parse_iso(entry.get("claimed_at"))
+    if claimed_at is None:
+        return False
+    if entry.get("claimed_by") == executor_id:
+        return False
+    return claimed_at > now - timedelta(minutes=CLAIM_FRESH_MIN)
+
+
+def claim_stamp(entry: dict[str, Any], executor_id: str,
+                now: datetime) -> dict[str, Any]:
+    """Entry re-stamped with this executor's claim. Claim is advisory, not a
+    lock (no CAS in the store) — it only suppresses a concurrent fresh foreign
+    fire; correctness rests on the content rule, not the claim."""
+    return {**entry, "claimed_by": executor_id, "claimed_at": iso(now)}
+
+
+def adapter_invocation(entry: dict[str, Any],
+                       adapter_args: Optional[dict[str, Any]] = None
+                       ) -> dict[str, Any]:
+    """The W5 adapter-invocation contract — a content-SAFE wake payload.
+
+    ENFORCES the relay content rule (plan §2, spec §4): the payload is a keyed
+    "check your bus" nudge carrying the idempotency key and NO per-event
+    command, session mutation, or raw content — so at-least-once delivery is
+    safe (N fires converge to one bus check). Routing targets come ONLY from
+    allowlisted `adapter_args` (host-resolved), never from the store shard.
+
+    Raises ValueError on an unknown adapter (fail-visible, never a silent
+    mis-fire)."""
+    adapter = entry.get("adapter")
+    if adapter not in ADAPTERS_CLOUD | ADAPTERS_HOST_LOCAL:
+        raise ValueError(f"adapter {adapter!r} not in the allowlist")
+    args = adapter_args or {}
+    key = idempotency_key(str(entry.get("source_shard")), str(entry.get("agent")))
+    inv: dict[str, Any] = {
+        "adapter": adapter,
+        "agent": entry.get("agent"),
+        "idempotency_key": key,
+        # the ONLY content — a fixed keyed nudge, never a per-event command
+        "message": (f"wake({entry.get('agent')}): a directed item is on your "
+                    f"bus [{key}]. Check your inbox / needs-me. No action is "
+                    f"encoded in this wake."),
+    }
+    # per-adapter routing target, drawn from allowlisted adapter_args only
+    if adapter == "managed-agents-message":
+        inv["session_ref"] = args.get("session_ref")
+    elif adapter == "codex-exec-resume":
+        inv["thread_id"] = args.get("thread_id")
+    elif adapter == "openclaw-post":
+        inv["endpoint_name"] = args.get("endpoint_name")
+    # macos-notify, queued-wake-file, routine-align carry no extra target
+    return inv
+
+
+def record_filename(key: str) -> str:
+    """Deterministic, single-writer-per-key shard name for delivered/ and
+    dead-letter/ records. Keyed by the idempotency key (so a duplicate write is
+    a self-overwrite, never a second shard), sanitized for the store with a key
+    hash appended for collision-resistance (agent ids carry ':' — a plain
+    substitution could collide)."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", key)
+    return f"{safe}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}.json"
+
+
+def delivery_record(entry: dict[str, Any], delivered_at: str) -> dict[str, Any]:
+    """A successful-execution record shard (plan §2). Idempotency-keyed;
+    carries exactly what `fold_delivered` reads plus provenance."""
+    return {
+        "key": idempotency_key(str(entry.get("source_shard")),
+                               str(entry.get("agent"))),
+        "agent": entry.get("agent"),
+        "source_shard": entry.get("source_shard"),
+        "adapter": entry.get("adapter"),
+        "executor": entry.get("executor"),
+        "delivered_at": delivered_at,
+    }
+
+
+def dead_letter_record(entry: dict[str, Any], *, attempts: int,
+                       last_error: str, gave_up_at: str) -> dict[str, Any]:
+    """A bounded-retry-exhausted record (plan §2): the full queue entry plus the
+    audit fields. Idempotency-keyed by the caller, so a concurrent duplicate
+    transition is a self-overwrite no-op."""
+    return {**entry, "attempts": attempts, "last_error": last_error,
+            "gave_up_at": gave_up_at}

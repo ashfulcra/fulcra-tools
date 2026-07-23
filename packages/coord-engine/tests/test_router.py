@@ -436,3 +436,103 @@ def test_corrupt_config_is_loud_and_enqueues_nothing(capsys):
     assert cli.cmd_router_run(_args(), t) == 0
     assert _queue_entries(t) == {}
     assert "config" in capsys.readouterr().err.lower()
+
+
+# --- W5: adapter integration + execution (pure core) ------------------------
+
+def _q_entry(agent=AGENT, adapter="managed-agents-message",
+             executor=router.DECISION_PLANE, source="item-1", **extra):
+    e = {"agent": agent, "reason": "check your bus", "source_shard": source,
+         "priority": "P1", "queued_at": NOW_ISO, "not_before": NOW_ISO,
+         "adapter": adapter, "executor": executor}
+    e.update(extra)
+    return e
+
+
+def test_decision_plane_owns_only_its_executor():
+    """The decision plane executes exactly `executor: decision-plane`; a
+    host-local executor id is W5.5's, never fired here (plan §W5)."""
+    assert router.is_decision_plane_entry(_q_entry()) is True
+    assert router.is_decision_plane_entry(
+        _q_entry(executor="mac-mini-1")) is False
+    assert router.is_decision_plane_entry({"executor": None}) is False
+
+
+def test_adapter_invocation_is_a_keyed_nudge_with_no_command():
+    """The relay content rule (plan §2): the wake payload carries the
+    idempotency key and NO per-event command/session-mutation/raw content, so
+    at-least-once delivery converges to one bus check."""
+    inv = router.adapter_invocation(
+        _q_entry(source="urgent-9"), {"session_ref": "sess-42"})
+    key = router.idempotency_key("urgent-9", AGENT)
+    assert inv["idempotency_key"] == key
+    assert key in inv["message"]
+    assert inv["session_ref"] == "sess-42"          # target from adapter_args
+    # NO command / session-mutation / raw-content field ever rides the payload
+    for banned in ("command", "cmd", "exec", "run", "payload", "session_patch",
+                   "permission_mode", "url"):
+        assert banned not in inv
+    # the message is a fixed nudge — it names no action to take
+    assert "no action is encoded" in inv["message"].lower()
+
+
+def test_adapter_invocation_targets_are_allowlisted_per_adapter():
+    assert router.adapter_invocation(
+        _q_entry(adapter="codex-exec-resume", executor="host-x"),
+        {"thread_id": "th-1"})["thread_id"] == "th-1"
+    assert router.adapter_invocation(
+        _q_entry(adapter="openclaw-post", executor="host-x"),
+        {"endpoint_name": "wake"})["endpoint_name"] == "wake"
+    # a no-target adapter carries only the safe nudge fields
+    inv = router.adapter_invocation(_q_entry(adapter="routine-align"))
+    assert set(inv) == {"adapter", "agent", "idempotency_key", "message"}
+
+
+def test_adapter_invocation_rejects_unknown_adapter():
+    with pytest.raises(ValueError):
+        router.adapter_invocation(_q_entry(adapter="curl-the-internet"))
+
+
+def test_claim_skippable_only_for_a_fresh_foreign_claim():
+    fresh = "2026-07-23T11:55:00Z"   # 5 min before PINNED_NOW (< 10)
+    stale = "2026-07-23T11:30:00Z"   # 30 min before PINNED_NOW (> 10)
+    me = router.DECISION_PLANE
+    # foreign + fresh → another executor is mid-flight → skip
+    assert router.claim_is_skippable(
+        _q_entry(claimed_by="other", claimed_at=fresh), me, PINNED_NOW) is True
+    # foreign + stale → retryable (at-least-once, safe by content rule)
+    assert router.claim_is_skippable(
+        _q_entry(claimed_by="other", claimed_at=stale), me, PINNED_NOW) is False
+    # our own claim → retryable
+    assert router.claim_is_skippable(
+        _q_entry(claimed_by=me, claimed_at=fresh), me, PINNED_NOW) is False
+    # unclaimed → claimable
+    assert router.claim_is_skippable(_q_entry(), me, PINNED_NOW) is False
+
+
+def test_delivery_record_is_readable_by_the_delivered_fold():
+    """A delivery-record shard must fold cleanly into `delivered.json` — the
+    single-writer-per-key contract feeds the decision-plane view."""
+    rec = router.delivery_record(_q_entry(source="s-7"), NOW_ISO)
+    assert rec["key"] == router.idempotency_key("s-7", AGENT)
+    view = router.fold_delivered([rec])
+    assert view[AGENT]["last_delivered_at"] == NOW_ISO
+    assert view[AGENT]["count"] == 1
+    assert view[AGENT]["last_source_shard"] == "s-7"
+
+
+def test_dead_letter_record_carries_entry_plus_audit():
+    e = _q_entry(source="s-3")
+    dl = router.dead_letter_record(
+        e, attempts=3, last_error="boom", gave_up_at=NOW_ISO)
+    assert dl["source_shard"] == "s-3" and dl["adapter"] == e["adapter"]
+    assert (dl["attempts"], dl["last_error"], dl["gave_up_at"]) == (
+        3, "boom", NOW_ISO)
+
+
+def test_record_filename_deterministic_and_safe_for_colon_agent_ids():
+    key = router.idempotency_key("s-1", "openclaw:discord:fulcra-skills")
+    a, b = router.record_filename(key), router.record_filename(key)
+    assert a == b                                   # single-writer-per-key
+    assert ":" not in a and a.endswith(".json")     # store-safe
+    assert router.record_filename(key) != router.record_filename(key + "x")
