@@ -28,8 +28,11 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
 
 ### Part A — Wake Router
 
-- **One watcher, whole fleet:** a single process on a resident host (MBP-class) polls the store
-  once/min and evaluates every agent's wake policy. Per-agent listeners drop to a 30–60 min
+- **One watcher, whole fleet:** a single model-free process — **cloud-hosted per operator
+  decision (Ash, 2026-07-22): the decision plane runs in a cloud session environment (designated:
+  `coord-fable-worker`), never mandatorily on resident hardware** — polls the store at a fixed
+  60s interval while its container lives (setup-script re-arm at creation; hourly Routine floor
+  after reclaim; duty-cycle gated at acceptance) and evaluates every agent's wake policy. Per-agent listeners drop to a 30–60 min
   safety-net cadence (defense in depth, not the primary path).
 - **Policy, per agent:**
   1. *Busy-aware deferral* — an agent presence-marked busy gets non-urgent wakes queued to its next
@@ -60,11 +63,18 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
 
 ### Part B — Engagement model
 
-- **Presence schema addition:** `engagement: {mode: resident|session|occasional, until: <ts>}`.
+- **Presence schema addition:** `engagement: {mode: resident|session|occasional,
+  until: <iso8601Z|null>, state: active|lapsed, lapsed_at: <iso8601Z|null>}` (absent field ⇒
+  `resident`/`active`; `state`+`lapsed_at` are written only by the engine's engagement sweep —
+  see the namespace writer note in the store contract).
   - `resident` — always-on host; expected to beat; staleness is meaningful.
-  - `session` — bounded life; declares a TTL (`until`) at join. At expiry, the **host tick (zero
-    model tokens)** parks continuity and releases roles per the idle-reaping rule. A session past
-    TTL reads **PARKED — never gone-dark.** This is the structural fix for the false-liveness
+  - `session` — bounded life; declares a TTL (`until`, default `join + 8h` — operator-confirmed
+    2026-07-22). **At expiry the agent LAPSES, it does not park** (operator decision, same date):
+    a lapsed session drops to a reduced check-in cadence (default every 6h) **indefinitely**,
+    retains its roles, and reads **LAPSED — an explained state, never gone-dark. PARK happens
+    only when told** — an explicit operator/park directive (or the agent's own park before
+    context loss). The host tick (zero model tokens) marks the lapse and aligns future wakes to
+    the reduced cadence; it never parks anyone. This is the structural fix for the false-liveness
     incident and the direct answer to coord-maintainer's DECIDE-WITH-ME liveness-substrate
     question: liveness = engagement-aware fold over (beats + activity), not beats alone.
   - `occasional` — **occasional model, resident host:** a desktop agent holds a role with *no loop
@@ -85,11 +95,14 @@ Ash's standing rule decides this leg: **the operator sits outside core engineeri
 lobs contributions in** — he will not install an App or place a machine user in `fulcradynamics`
 org repos. The identity design follows from that boundary:
 
-- **Inside the operator's boundary (`ashfulcra/*` repos): the existing machine user (`FulcraBot`)
-  is the fleet identity.** It is already a collaborator and already shipping merged PRs. The
-  remaining work is hygiene, not creation: fine-grained per-repo PAT, rotation cadence, router as
-  token custodian (the slot this spec reserved for an installation token), and attribution
-  conventions so audit reads unambiguously as fleet activity.
+- **Inside the operator's boundary (`ashfulcra/*` repos): a DEDICATED fleet machine account,
+  to be created (operator decision 2026-07-22: `FulcraBot` is reserved for Fulcra-side repos —
+  e.g. the `fulcrabot`-owned website work — and is NOT the identity for the operator's
+  fulcra-tools fleet).** Until the new account exists, the interim is the status quo (operator
+  credentials inside the operator's own boundary). Once created: fine-grained per-repo PAT,
+  rotation cadence, router as token custodian, and attribution conventions so audit reads
+  unambiguously as fleet activity — the W9 custody design is unchanged, only the account it
+  guards.
 - **Upstream (`fulcradynamics` and any org the operator doesn't own): the contributor pattern IS
   the design, permanently.** Agents fork, prepare, and lob the PR over the wall; the merge click
   belongs to an upstream maintainer. The blocked-on-human fold models "awaiting upstream
@@ -107,7 +120,7 @@ No decision remains open on this leg.
    in output; staleness is never silently swallowed into a default.
 2. **Exact identity matching** — presence↔role↔wake matching on exact agent ids only; no
    substring/prefix heuristics (the `role@host` variant lesson).
-3. **Dormancy independent** — declared dormancy (`occasional`, parked TTL) is a separate axis from
+3. **Dormancy independent** — declared dormancy (`occasional`, lapsed TTL) is a separate axis from
    staleness; a dormant identity must never read as abandoned, and vice versa.
 4. **Mixed-fleet gate** — nothing that changes vacancy/escalation semantics ships until every
    harness in the live fleet (claude-code cloud + desktop, codex, OpenClaw, cron hosts) either
@@ -119,16 +132,26 @@ No decision remains open on this leg.
 - **Never spawn working sessions:** the router wakes *existing* sessions via their own adapters or
   queues for human-opened ones; it never creates a new working session unilaterally (Ash's rule).
   Any adapter that would need to violate this surfaces to Ash instead.
-- **Zero model tokens in the router:** watcher, policy evaluation, TTL parking, and wake fan-out
+- **Zero model tokens in the router:** watcher, policy evaluation, TTL lapse-marking, and wake fan-out
   are pure host-side code. Model tokens are spent only by the *woken* agent on real work.
 - **Fail-closed secrets:** adapter credentials and the external-identity credential — in this
-  build, the FulcraBot fine-grained PAT (Part C) — live in host keychain / environment config,
+  build, the dedicated fleet machine-account fine-grained PAT (Part C; interim: operator
+  credentials, no new secret) — live in host keychain / environment config,
   never in team paths (durable-state doctrine). (An upstream-adopted App would manage its own
   installation token on the upstream side; that credential never enters this build.)
 - **ATC fence:** no changes to usage/headroom/route/atc/dash or `fulcra-agent-atc`.
 - **Store remains the bus; the router owns exactly one namespace.** The router *reads* the shards
-  agents write, and *writes only* under `team/<team>/_coord/router/` — durable state it exclusively
-  owns: `cursor.json` (monotonic cursor / idempotency keys; at-least-once delivery, replays are
+  agents write, and *writes only* under `team/<team>/_coord/router/` — durable state owned by the
+  router SYSTEM, with per-subpath writers (stage-2 normative): `cursor.json`, `config.json`, and
+  the folded `delivered.json` view — decision plane only; `queue/` — created by the decision
+  plane, claim-stamped by the matching executor; `delivered/` + `dead-letter/` —
+  idempotency-keyed records written by the executing claim-holder; `shadow-evidence/` — the W7
+  delivery-probe writers, shadow window only, removable after acceptance. No agent-owned shard is
+  ever written by any ROUTER component (decision plane or executor); the single, narrow exception
+  to agent-owned presence writes belongs to the ENGINE's engagement sweep (W3 — part of
+  coord-engine, not the router), whose writer authority covers exactly `engagement.state` and
+  `engagement.lapsed_at`, nothing else. No router subpath is written outside its declared writer. Layout:
+  `cursor.json` (monotonic cursor / idempotency keys; at-least-once delivery, replays are
   no-ops), `queue/` (deferred and debounced wakes awaiting an idle boundary), `dead-letter/`
   (wakes that exhausted bounded retry, with cause — the audit trail), and `delivered.json`
   (observable last-delivered time per agent). This adopts the relay contract in
@@ -136,7 +159,7 @@ No decision remains open on this leg.
   monotonic cursor, bounded retry + dead-letter, no untrusted command/session fields, fail-visible
   degradation). Restart/failover: state is in the store, not host memory — a replacement router
   process resumes from `cursor.json`; while no router runs, the safety-net listener cadence is the
-  backstop. No agent-owned shard is ever router-written.
+  backstop. No agent-owned shard is ever written by a router component (the engine sweep's two-field exception above is the only agent-shard writer outside the agent itself).
 
 ## 5. Deliverables & stage plan
 
@@ -161,10 +184,12 @@ plug).
 ## 7. Open decisions (blocked-on-Ash ledger, led per standing rule)
 
 1. ~~External identity: App vs machine user~~ — **RESOLVED 2026-07-22 by operator rule** (see
-   Part C): FulcraBot inside the operator's boundary, contributor pattern upstream, App proposal
+   Part C): a dedicated fleet machine account inside the operator's boundary (FulcraBot is
+   reserved for Fulcra-side repos), contributor pattern upstream, App proposal
    shelved for the upstream org to adopt or not.
-2. **Router host designation** — which resident box is the router's home (MBP assumed; confirm),
-   acknowledging today's evidence that desktop hosts are "unstable" by Ash's own assessment — the
-   router must tolerate its own host dying (safety-net listener cadence is the fallback).
-3. **TTL defaults** — proposed: session agents default `until = join + 8h` unless declared;
-   confirm or adjust.
+2. ~~Router host designation~~ — **RESOLVED 2026-07-22 (Ash): cloud-first.** Decision plane in
+   the `coord-fable-worker` cloud environment; host-local adapters execute via a thin, policy-free
+   host executor whose failure mode is visibly-queued wakes (plan §2.5 / W5.5). No mandatory
+   component may require resident hardware.
+3. ~~TTL defaults~~ — **RESOLVED 2026-07-22 (Ash): `join + 8h` default; expiry ⇒ LAPSED
+   indefinite reduced-cadence check-in (default 6h); park explicit-only** (see Part B).
