@@ -4148,6 +4148,149 @@ def cmd_engagement_gate(args: argparse.Namespace, transport: Any) -> int:
     return 0 if result["status"] == "PASS" else 1
 
 
+# --- engagement sweep (wake-router W3 zero-token lapse sweep) ----------------
+
+def _split_body_verbatim(raw: str) -> str:
+    """Return the shard body — everything after the closing frontmatter ``---``
+    delimiter line — BYTE-PRESERVED (unlike ``okf.split_frontmatter``, which
+    routes through ``splitlines`` and drops the exact tail). The sweep re-renders
+    only the frontmatter, so the body must survive verbatim. A shard with no
+    parseable frontmatter block returns ``""`` (the caller never marks such a
+    shard, so this is only reached on the mark path)."""
+    lines = raw.splitlines(keepends=True)
+    i = 0
+    if lines and lines[0].startswith("﻿"):
+        lines[0] = lines[0][1:]
+    while i < len(lines) and lines[i].strip() == "":
+        i += 1
+    if i >= len(lines) or lines[i].strip() != "---":
+        return ""
+    for j in range(i + 1, len(lines)):
+        if lines[j].strip() == "---":
+            return "".join(lines[j + 1:])
+    return ""
+
+
+def cmd_engagement_sweep(args: argparse.Namespace, transport: Any) -> int:
+    """Host-tick, model-free lapse sweep. For each presence shard, mark a session
+    past its ``until`` as LAPSED by writing EXACTLY ``engagement.state: lapsed`` +
+    ``engagement.lapsed_at`` (this sweep's evaluation time) — the ONE sanctioned
+    exception to agent-owned presence writes, scoped to those two fields. Never
+    parks, never releases roles, never touches any doc but the presence shard.
+
+    READ-CONTRACT LENS: enumeration is via the RAISING ``list_dir``; if it raises,
+    the roster is UNKNOWN and the sweep is DEGRADED — loud (stderr + degraded
+    line), rc nonzero, and it must NEVER read as a clean ``0 marked`` swept roster.
+    Per shard, the ``read``-None / unparseable / ``_engagement_degraded`` cases
+    fail CLOSED — SKIP, never mark (a failed read never causes a write)."""
+    now_iso = _iso(_now())
+    pfx = _presence_prefix(args.team)
+
+    marked: list[str] = []
+    already: list[str] = []
+    skipped: dict[str, list[str]] = {}
+    degraded: list[dict[str, str]] = []
+    write_failures: list[str] = []
+
+    try:
+        entries = transport.list_dir(pfx)
+    except TransportError as e:
+        # Enumeration UNKNOWN — the roster cannot be certified, so we cannot claim
+        # anything about lapses. Fail loud and closed; never a silent clean sweep.
+        result = {
+            "team": args.team, "now": now_iso, "dry_run": bool(args.dry_run),
+            "enumeration_ok": False, "marked": [], "already_lapsed": [],
+            "skipped": {}, "degraded": [], "write_failures": [],
+        }
+        if args.json:
+            jsonutil.print_json(result)
+        else:
+            print(f"engagement sweep — team/{args.team}: DEGRADED — roster "
+                  f"enumeration failed ({e}); NOT swept", file=sys.stderr)
+        return 1
+
+    def _agent_of(fm: dict[str, Any], name: str) -> str:
+        return str(fm.get("agent") or name[:-3])
+
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        raw = transport.read(pfx + n)
+        if raw is None:
+            # listed but unreadable — a failed read must never cause a write.
+            degraded.append({"shard": n, "reason": "unreadable"})
+            continue
+        fm = okf.parse_frontmatter(raw)
+        if not fm:
+            degraded.append({"shard": n, "reason": "unparseable"})
+            continue
+        decision = presence.sweep_decision(fm, now=now_iso)
+        action, reason = decision["action"], decision["reason"]
+        agent = _agent_of(fm, n)
+        if reason == "degraded":
+            # A malformed engagement is fail-visible degradation, not a clean skip.
+            degraded.append({"shard": n, "reason": "engagement-degraded"})
+            continue
+        if action == presence.NOOP:
+            already.append(agent)
+            continue
+        if action == presence.SKIP:
+            skipped.setdefault(reason, []).append(agent)
+            continue
+        # action == MARK: write EXACTLY the two engagement fields, preserving all
+        # else. Mutate the RAW parsed engagement map (not the normalized parse)
+        # so mode/until survive byte-for-byte; the top-level timestamp is NOT
+        # bumped — the sweep is not a beat.
+        marked.append(agent)
+        if args.dry_run:
+            continue
+        new_fm = dict(fm)
+        raw_eng = fm.get("engagement")
+        new_eng = dict(raw_eng) if isinstance(raw_eng, dict) else {}
+        new_eng["state"] = "lapsed"
+        new_eng["lapsed_at"] = now_iso
+        new_fm["engagement"] = new_eng
+        body = _split_body_verbatim(raw)
+        content = okf.render_frontmatter(new_fm) + "\n" + body
+        if not transport.write(pfx + n, content):
+            # per-shard write failure: report + continue, never abort the sweep.
+            marked.pop()
+            write_failures.append(agent)
+
+    marked.sort(); already.sort()
+    for v in skipped.values():
+        v.sort()
+    clean = not degraded and not write_failures
+    result = {
+        "team": args.team, "now": now_iso, "dry_run": bool(args.dry_run),
+        "enumeration_ok": True, "marked": marked, "already_lapsed": already,
+        "skipped": skipped, "degraded": degraded, "write_failures": write_failures,
+    }
+    if args.json:
+        jsonutil.print_json(result)
+        return 0 if clean else 1
+
+    skip_n = sum(len(v) for v in skipped.values())
+    tag = " [DRY-RUN]" if args.dry_run else ""
+    print(f"engagement sweep — team/{args.team}: {len(marked)} marked, "
+          f"{len(already)} already-lapsed, {skip_n} skipped, "
+          f"{len(degraded)} degraded{tag}")
+    if marked:
+        print(f"  marked: {', '.join(marked)}")
+    if skipped:
+        buckets = ", ".join(f"{k}={len(v)}" for k, v in sorted(skipped.items()))
+        print(f"  skipped: {buckets}")
+    if write_failures:
+        print(f"  ! write failed (mark did not land): {', '.join(write_failures)}",
+              file=sys.stderr)
+    if degraded:
+        for d in degraded:
+            print(f"  ! DEGRADED shard {d['shard']}: {d['reason']} (skipped, "
+                  "not marked)", file=sys.stderr)
+    return 0 if clean else 1
+
+
 def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
     # Public-read failure contract (see _read_degraded_row): an UNKNOWN task fold
     # must not read as every agent having "no open work".
@@ -5135,6 +5278,12 @@ def build_parser() -> argparse.ArgumentParser:
     eng = ensub.add_parser("gate", help="mixed-fleet gate: is every LIVE agent's engagement covered? (PASS/BLOCKED)")
     eng.add_argument("team"); add_json(eng)
     eng.set_defaults(func=cmd_engagement_gate)
+    esw = ensub.add_parser("sweep", help="host-tick: mark expired sessions LAPSED "
+                           "(zero-token; idempotent; never parks/releases roles)")
+    esw.add_argument("team"); add_json(esw)
+    esw.add_argument("--dry-run", action="store_true",
+                     help="preview what WOULD be marked without writing")
+    esw.set_defaults(func=cmd_engagement_sweep)
 
     ag = sub.add_parser("agents", help="cross-agent digest (open work by agent + liveness)")
     ag.add_argument("team"); add_json(ag)

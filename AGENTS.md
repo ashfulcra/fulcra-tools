@@ -541,6 +541,39 @@ it (not on PyPI).
   as today). **Ship-gate: `classify` stays pure (no engagement read); any new dormancy/coverage input
   class gets a red-first test; the gate fails closed on any UNKNOWN; the gated semantic change keeps both
   branches pinned until the gate is satisfied fleet-wide (W10).**
+- **The zero-token lapse sweep writes two fields and nothing else (wake-router W3).** `coord-engine
+  engagement sweep <team>` is a host-tick, model-free pass that marks a session past its `until` as
+  **LAPSED** by writing EXACTLY `engagement.state: lapsed` + `engagement.lapsed_at` (the sweep's
+  evaluation time, UTC `…Z`) into the presence shard — the **ONE sanctioned exception** to agent-owned
+  presence writes, scoped to those two qualified names. **MARK predicate** (`presence.sweep_decision`,
+  the pure read-only seam — reads through `parse_engagement`, never a raw dict-walk): mark iff
+  `mode == session` AND `until` present AND `now ≥ until` (boundary-inclusive) AND `state == active` AND
+  engagement WELL-FORMED. Otherwise: `resident`/`occasional`/legacy-absent → SKIP (no session, no lapse
+  concept); session `now < until` → SKIP `within-until`; `state == lapsed` already → **NOOP** (idempotent
+  — a second sweep with no time change writes nothing, pinned with a write-count fake transport);
+  degraded/unparseable engagement → SKIP (fail-closed — a malformed shard, e.g. a session missing its
+  required `until`, NEVER manufactures a lapse). **The write preserves everything but the two fields:**
+  the RAW parsed `engagement` map is mutated (so `mode`/`until` survive byte-for-byte) and re-rendered;
+  the top-level `timestamp` is **NOT bumped** (the sweep is not a beat) and `until` is **NOT slid**; the
+  body is preserved verbatim (`_split_body_verbatim` keeps the exact tail after the closing `---`, which
+  `okf.split_frontmatter`'s `splitlines` would drop). **NEVER parks, NEVER releases roles** (operator
+  decision 2026-07-22: park is explicit-only) — only the presence shard is ever written; role leases and
+  continuity docs are untouched (blast-radius pinned to the one shard path). **READ-CONTRACT LENS (this
+  class bit W1/W1.5/W2 — every read swept):** `transport.read` returns `None` on BOTH missing and
+  failure; `list_dir` RAISES on failure. Enumeration via `list_dir`: if it raises, the roster is UNKNOWN
+  and the sweep is **DEGRADED** — loud (stderr `DEGRADED` line / `enumeration_ok: false`), rc 1, and it
+  must NEVER read as a clean `0 marked` swept roster (that would read as swept-clean). Per shard: read
+  `None` / unparseable frontmatter / `_engagement_degraded` → SKIP into the `degraded` bucket (a failed
+  read must NEVER cause a write; marking is a WRITE derived only from a CONFIRMED session-past-until-
+  active shard). A per-shard write failure is reported and the sweep continues (never aborts). Output:
+  `N marked, N already-lapsed, N skipped (bucketed by reason), N degraded`; `--json` returns the
+  structured result; `--dry-run` previews would-be-marks and writes nothing. **rc 0 only on a clean
+  sweep** (enumeration OK, zero degraded shards, zero write failures); rc 1 on enumeration-degrade, any
+  degraded shard, or any write failure. **W4 consumes the marker** (reduced-cadence check-ins); the
+  `lapsed → active` clearing happens via an explicit W1 session re-declaration in the beat, never the
+  sweep. **Ship-gate: the sweep writes ONLY `state`/`lapsed_at`; the mark predicate stays fail-closed
+  (no mark on UNKNOWN/malformed); enumeration-degrade is loud + rc-nonzero, never a silent clean sweep;
+  idempotency and the two-field-only / never-park / never-release invariants stay red-first pinned.**
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient

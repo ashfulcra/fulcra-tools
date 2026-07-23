@@ -240,6 +240,58 @@ def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
             "annotation": "; ".join(parts), "engagement": engagement}
 
 
+# --- lapse-sweep predicate (wake-router W3) ---------------------------------
+#
+# The zero-token sweep marks a SESSION past its ``until`` as LAPSED. This is the
+# pure decision seam: a function of the parsed shard + ``now`` ALONE — it reads,
+# it never writes, and the CLI owns the read-contract (enumeration + per-shard
+# read) and the two-field write. It is FAIL-CLOSED toward NOT marking: a degraded
+# or malformed engagement can never manufacture a lapse (the dead-session-looks-
+# alive shape the schema exists to prevent), and a session already ``lapsed`` is
+# an idempotent no-op — a second sweep with no time change writes nothing.
+
+MARK = "mark"
+NOOP = "noop"
+SKIP = "skip"
+
+
+def sweep_decision(fm: Any, *, now: str) -> dict[str, str]:
+    """Decide the lapse-sweep action for one parsed presence shard.
+
+    Returns ``{"action", "reason"}`` where ``action`` is:
+      - ``"mark"`` — a ``session`` past its ``until`` (``now >= until``, boundary
+        inclusive), ``state: active``, engagement WELL-FORMED. Lapse it.
+      - ``"noop"`` — already ``state: lapsed``. Idempotent: no write.
+      - ``"skip"`` — everything else, ``reason`` bucketed: ``resident`` /
+        ``occasional`` (no session, no lapse concept), ``within-until`` (session
+        not yet expired), ``degraded`` (engagement malformed/unparseable — NEVER
+        marked; fail-closed).
+
+    Reads engagement through the single defensive ``parse_engagement`` seam
+    (never a raw ``fm["engagement"]`` dict-walk), so a malformed field degrades to
+    the legacy ``resident``/``active`` default with a marker rather than raising —
+    and a degraded read is a ``skip``, never a ``mark``."""
+    eng = parse_engagement(fm if isinstance(fm, dict) else {})
+    if "_engagement_degraded" in eng:
+        return {"action": SKIP, "reason": "degraded"}
+    mode = eng.get("mode")
+    if mode != "session":
+        # resident / occasional / legacy-absent (defaults to resident)
+        return {"action": SKIP, "reason": str(mode)}
+    if eng.get("state") == LAPSED:
+        return {"action": NOOP, "reason": "already-lapsed"}
+    # A well-formed session always carries a resolved, parseable ``until`` (a
+    # session without one degrades above). Re-parse defensively anyway: if either
+    # bound is unparseable, fail closed toward NOT marking.
+    n = parse_iso_z(now)
+    until = parse_iso_z(eng.get("until"))
+    if n is None or until is None:
+        return {"action": SKIP, "reason": "degraded"}
+    if n >= until:
+        return {"action": MARK, "reason": "expired"}
+    return {"action": SKIP, "reason": "within-until"}
+
+
 def lapsed_holder(lease_agents: list[str], shards: list[dict[str, Any]], *,
                   now: str) -> Optional[str]:
     """The first lease agent whose presence reads LAPSED, or ``None``.
