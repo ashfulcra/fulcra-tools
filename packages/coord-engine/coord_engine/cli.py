@@ -23,7 +23,7 @@ import socket
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, stash, tasks
@@ -3724,11 +3724,47 @@ def cmd_dash(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
+    now = _now()
+    engagement = getattr(args, "engagement", None)
+    until = getattr(args, "until", None)
+
+    # Build the engagement object (W1). When --engagement is NOT passed we write NO
+    # engagement field at all, so the shard stays byte-identical to the legacy
+    # shard — that is what keeps this step inert. state/lapsed_at are always the
+    # active/null defaults here; only the W3 sweep writes lapsed values.
+    engagement_obj: Optional[dict[str, Any]] = None
+    if engagement is None:
+        if until is not None:
+            print("presence beat: --until requires --engagement session "
+                  "(there is no mode to attach the expiry to)", file=sys.stderr)
+            return 2
+    else:
+        resolved_until: Optional[str] = None
+        if engagement == "session":
+            if until is not None:
+                dt = presence.parse_iso_z(until)
+                if dt is None:
+                    print(f"presence beat: --until must be ISO-8601 "
+                          f"(e.g. 2026-07-23T09:00:00Z); got {until!r}", file=sys.stderr)
+                    return 2
+                resolved_until = presence.to_iso_z(dt)
+            else:
+                resolved_until = presence.to_iso_z(
+                    now + timedelta(hours=presence.SESSION_DEFAULT_TTL_HOURS))
+        elif until is not None:
+            print(f"presence beat: --until is only valid with --engagement session; "
+                  f"mode {engagement!r} carries no expiry", file=sys.stderr)
+            return 2
+        engagement_obj = {"mode": engagement, "until": resolved_until,
+                          "state": "active", "lapsed_at": None}
+
     fm = {
         "type": "Presence", "title": f"presence — {agent}", "agent": agent,
         "workstreams": args.workstream or [], "summary": args.summary or "",
-        "timestamp": _iso(_now()),
+        "timestamp": _iso(now),
     }
+    if engagement_obj is not None:
+        fm["engagement"] = engagement_obj
     body = f"\n# Presence: {agent}\n"
     slug = tasks.agent_key(agent)
     transport.write(f"{_presence_prefix(args.team)}{slug}.md", okf.render_frontmatter(fm) + body)
@@ -4475,6 +4511,11 @@ def build_parser() -> argparse.ArgumentParser:
     prb.add_argument("team"); prb.add_argument("--agent", "-a")
     prb.add_argument("--workstream", "-w", action="append")
     prb.add_argument("--summary", "-s")
+    prb.add_argument("--engagement", choices=list(presence.ENGAGEMENT_MODES),
+                     help="occupancy mode written to the shard's engagement object "
+                          "(default: no engagement field — reads as resident)")
+    prb.add_argument("--until", help="session expiry (ISO-8601); only valid with "
+                     "--engagement session, defaults to beat time + 8h")
     prb.set_defaults(func=cmd_presence_beat)
     prs = prsub.add_parser("show", help="roster with live/idle/stale liveness")
     prs.add_argument("team"); add_json(prs)

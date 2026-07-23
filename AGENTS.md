@@ -392,6 +392,27 @@ it (not on PyPI).
   fold). Because no op count bounds LATENCY when each op can burn a transport timeout, the pass also
   runs under one cumulative `COORD_ROLE_FOLD_BUDGET` (default 20s) opened ahead of that listing — a
   cut marks every unfinished candidate `unresolved`, never "not held".
+- **Presence engagement is an inert, defensively-parsed schema (wake-router W1).** A presence shard MAY
+  carry an `engagement` object with exactly four qualified names:
+  `engagement.mode` (`resident|session|occasional`), `engagement.until` (`iso8601Z|null`),
+  `engagement.state` (`active|lapsed`), `engagement.lapsed_at` (`iso8601Z|null`). **Absent `engagement`
+  reads as `resident` + `active` — today's exact behavior**, so every legacy shard is unchanged and a
+  `presence beat` with no `--engagement` flag writes NO engagement field (byte-identical legacy shard —
+  pinned). `--engagement session` defaults `until` to beat time + 8h; `--until` is meaningful ONLY for
+  `session` (given with any other mode, or with no `--engagement` at all, or in a non-ISO form, it is a
+  validation error at rc 2 and nothing is written). **`engagement.state` and `engagement.lapsed_at` are
+  written ONLY by the W3 sweep** — a beat always writes `state: active`, `lapsed_at: null`; in W1 these
+  two names are PARSE-ONLY. **The whole schema is inert in W1: every fold PARSES engagement but NONE
+  acts on it** — no liveness/vacancy/roster/broadcast decision changes; a shard whose engagement says
+  `session` past its `until` yields the IDENTICAL liveness verdict as one with no engagement field (the
+  field is carried additively into fold rows, surfaced under `--json`, never consulted by `classify`).
+  There is ONE parse seam, `presence.parse_engagement(fm)`, and it is **DEFENSIVE by contract**: a
+  non-dict engagement, an unknown `mode`/`state`, or an unparseable `until`/`lapsed_at` degrades to the
+  legacy `resident`/`active` default AND sets a visible `_engagement_degraded` marker — it NEVER raises,
+  so one malformed shard cannot break the fold for every other agent. **Ship-gate: any code that reads
+  engagement goes through `parse_engagement` (never a raw `fm["engagement"]` dict-walk), and any new
+  bad-input class it must survive gets a red-first test proving it degrades-with-marker instead of
+  raising. Until the W3 sweep ships, no write path may set `state`/`lapsed_at` to a non-default value.**
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
