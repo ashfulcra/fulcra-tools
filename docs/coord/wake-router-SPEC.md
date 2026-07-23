@@ -63,7 +63,10 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
 
 ### Part B — Engagement model
 
-- **Presence schema addition:** `engagement: {mode: resident|session|occasional, until: <ts>}`.
+- **Presence schema addition:** `engagement: {mode: resident|session|occasional,
+  until: <iso8601Z|null>, state: active|lapsed, lapsed_at: <iso8601Z|null>}` (absent field ⇒
+  `resident`/`active`; `state`+`lapsed_at` are written only by the engine's engagement sweep —
+  see the namespace writer note in the store contract).
   - `resident` — always-on host; expected to beat; staleness is meaningful.
   - `session` — bounded life; declares a TTL (`until`, default `join + 8h` — operator-confirmed
     2026-07-22). **At expiry the agent LAPSES, it does not park** (operator decision, same date):
@@ -144,7 +147,10 @@ No decision remains open on this leg.
   plane, claim-stamped by the matching executor; `delivered/` + `dead-letter/` —
   idempotency-keyed records written by the executing claim-holder; `shadow-evidence/` — the W7
   delivery-probe writers, shadow window only, removable after acceptance. No agent-owned shard is
-  ever router-written; no router subpath is written outside its declared writer. Layout:
+  ever written by any ROUTER component (decision plane or executor); the single, narrow exception
+  to agent-owned presence writes belongs to the ENGINE's engagement sweep (W3 — part of
+  coord-engine, not the router), whose writer authority covers exactly `engagement.state` and
+  `engagement.lapsed_at`, nothing else. No router subpath is written outside its declared writer. Layout:
   `cursor.json` (monotonic cursor / idempotency keys; at-least-once delivery, replays are
   no-ops), `queue/` (deferred and debounced wakes awaiting an idle boundary), `dead-letter/`
   (wakes that exhausted bounded retry, with cause — the audit trail), and `delivered.json`
@@ -153,7 +159,7 @@ No decision remains open on this leg.
   monotonic cursor, bounded retry + dead-letter, no untrusted command/session fields, fail-visible
   degradation). Restart/failover: state is in the store, not host memory — a replacement router
   process resumes from `cursor.json`; while no router runs, the safety-net listener cadence is the
-  backstop. No agent-owned shard is ever router-written.
+  backstop. No agent-owned shard is ever written by a router component (the engine sweep's two-field exception above is the only agent-shard writer outside the agent itself).
 
 ## 5. Deliverables & stage plan
 
