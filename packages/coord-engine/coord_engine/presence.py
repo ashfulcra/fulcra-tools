@@ -277,20 +277,27 @@ def _covered_via(shard: dict[str, Any], defaults: dict[str, Any], *,
 
 
 def engagement_gate(shards: list[dict[str, Any]], defaults: dict[str, Any], *,
-                    now: str, defaults_ok: bool = True,
+                    now: str, defaults_ok: bool = True, roster_ok: bool = True,
                     live_hours: float = LIVE_HOURS,
                     stale_hours: float = STALE_HOURS) -> dict[str, Any]:
     """Deterministic mixed-fleet gate (plan §3). No vacancy/escalation semantic
     change may activate until every LIVE roster agent is covered — either it beats
     with a well-formed ``engagement`` field, or it appears in the operator-approved
-    defaults map. Returns ``{status, defaults_ok, agents}``.
+    defaults map. Returns ``{status, defaults_ok, roster_ok, agents}``.
 
     Only agents whose freshness is ``live`` gate — stale/dead legacy shards (and
-    idle ones) never block. Fail-closed on unknown coverage: an UNKNOWN defaults
-    map (``defaults_ok=False`` — present-but-unreadable or unparseable, which the
-    caller cannot distinguish from absent via the None-on-any-failure read
-    contract) never yields PASS; the gate reports DEGRADED regardless of how the
-    live agents' own fields look."""
+    idle ones) never block. Fail-closed on unknown coverage — the gate reports
+    DEGRADED and NEVER PASS whenever certification is incomplete on EITHER read:
+      - ``defaults_ok=False`` — the operator defaults map is UNKNOWN
+        (present-but-unreadable or unparseable, which the None-on-any-failure read
+        contract cannot distinguish from absent);
+      - ``roster_ok=False`` — the presence roster enumeration is UNKNOWN (the
+        presence-dir listing failed, or a listed shard was present-but-unreadable,
+        so an agent's coverage is unknowable). Only a CONFIRMED roster (listing
+        succeeded and every live shard read) may PASS; a confirmed-EMPTY roster
+        still PASSes vacuously, but an UNKNOWN one must not.
+    Coverage is still reported for whatever shards were read, so a degraded gate
+    stays diagnosable."""
     agents: list[dict[str, Any]] = []
     for s in shards:
         if not isinstance(s, dict) or not s.get("agent"):
@@ -308,13 +315,14 @@ def engagement_gate(shards: list[dict[str, Any]], defaults: dict[str, Any], *,
             coverage = "UNCOVERED"
         agents.append({"agent": str(s["agent"]), "coverage": coverage, "via": via})
     agents.sort(key=lambda a: a["agent"])
-    if not defaults_ok:
+    if not defaults_ok or not roster_ok:
         status = "DEGRADED"
     elif all(a["coverage"] == "COVERED" for a in agents):
         status = "PASS"
     else:
         status = "BLOCKED"
-    return {"status": status, "defaults_ok": defaults_ok, "agents": agents}
+    return {"status": status, "defaults_ok": defaults_ok,
+            "roster_ok": roster_ok, "agents": agents}
 
 
 def roster(

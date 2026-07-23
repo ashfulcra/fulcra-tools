@@ -261,6 +261,16 @@ def test_gate_malformed_engagement_is_not_coverage():
     assert res["agents"][0]["coverage"] == "UNCOVERED"
 
 
+def test_gate_degraded_when_roster_unknown_even_if_present_agents_covered():
+    # Fail-closed on the ROSTER read too: an UNKNOWN roster enumeration never
+    # PASSes, even when the shards we DID read are all covered — the agents we
+    # could not enumerate/read are unknowable coverage.
+    shards = [_shard("amy", age_min=5, engagement={"mode": "resident", "until": None})]
+    res = presence.engagement_gate(shards, {}, now=NOW_ISO, defaults_ok=True,
+                                   roster_ok=False)
+    assert res["status"] == "DEGRADED"
+
+
 # --- the engagement gate CLI + defaults read-contract -----------------------
 
 def _pin(monkeypatch):
@@ -366,6 +376,68 @@ def test_cli_gate_defaults_listing_failure_is_DEGRADED(monkeypatch):
     defaults, ok = cli._load_engagement_defaults(t, "r")
     assert ok is False
     assert cli.main(["engagement", "gate", "r"], transport=t) == 1
+
+
+# --- roster read-contract: an UNKNOWN presence roster is DEGRADED, never PASS -
+
+class _FailPresenceListing(FakeTransport):
+    """Presence-dir enumeration raises; every OTHER listing/read still works (so
+    the defaults read confirms absent normally). Isolates the roster-read hole."""
+    def list_dir(self, prefix):
+        if prefix == "team/r/presence/":
+            from coord_engine.transport import TransportError
+            raise TransportError("presence dir unreadable")
+        return super().list_dir(prefix)
+
+
+class _UnreadablePresenceShard(FakeTransport):
+    """A listed presence shard whose read returns None — present-but-unreadable,
+    that agent's coverage unknowable. Everything else reads normally."""
+    def read(self, path):
+        if path.startswith("team/r/presence/") and path.endswith(".md"):
+            return None
+        return super().read(path)
+
+
+def test_cli_gate_failing_presence_listing_is_DEGRADED(monkeypatch, capsys):
+    _pin(monkeypatch)
+    t = _FailPresenceListing()
+    _put_presence(t, "amy", engagement={"mode": "resident", "until": None})
+    shards, ok = cli._presence_shards_status(t, "r")
+    assert ok is False                          # roster enumeration UNKNOWN
+    assert cli.main(["engagement", "gate", "r"], transport=t) == 1   # not PASS
+    assert "DEGRADED" in capsys.readouterr().out
+
+
+def test_cli_gate_listed_but_unreadable_shard_is_DEGRADED(monkeypatch, capsys):
+    _pin(monkeypatch)
+    t = _UnreadablePresenceShard()
+    _put_presence(t, "amy", engagement={"mode": "resident", "until": None})
+    shards, ok = cli._presence_shards_status(t, "r")
+    assert ok is False                          # listed but unreadable -> UNKNOWN
+    assert cli.main(["engagement", "gate", "r"], transport=t) == 1
+    assert "DEGRADED" in capsys.readouterr().out
+
+
+def test_cli_gate_confirmed_empty_roster_passes_vacuously(monkeypatch, capsys):
+    # The distinguishing case: a CONFIRMED-empty roster (listing succeeded, nothing
+    # there) may still PASS — unlike an UNKNOWN roster, which must not.
+    _pin(monkeypatch)
+    t = FakeTransport()
+    shards, ok = cli._presence_shards_status(t, "r")
+    assert (shards, ok) == ([], True)
+    assert cli.main(["engagement", "gate", "r"], transport=t) == 0
+    assert "PASS" in capsys.readouterr().out
+
+
+def test_engagement_gate_passes_false_on_failing_presence_listing(monkeypatch):
+    # The escalation predicate must return False on an UNKNOWN roster (the bug:
+    # _presence_shards swallowed the TransportError to [], so no exception fired
+    # and the empty-list all(...) reported PASS -> True -> fail-open suppression).
+    _pin(monkeypatch)
+    t = _FailPresenceListing()
+    _put_presence(t, "amy", engagement={"mode": "resident", "until": None})
+    assert cli._engagement_gate_passes(t, "r", now=NOW_ISO) is False
 
 
 # --- the gated vacancy/escalation semantic change (both branches) -----------

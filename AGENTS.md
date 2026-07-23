@@ -503,11 +503,20 @@ it (not on PyPI).
   it beats with a well-formed `engagement` field OR appears in the operator map
   `_coord/router/engagement-defaults.json`; else UNCOVERED. Stale/idle/dead shards never block; overall
   **PASS** iff all live agents COVERED, else **BLOCKED**. **READ-CONTRACT LENS (mandatory — this bit W1
-  and W1.5):** `transport.read` returns `None` on BOTH a missing file AND a transient failure, so a falsy
-  read is NEVER "confirmed absent" on its own — the defaults read confirms absence against the RAISING
-  `list_dir` (`_load_engagement_defaults`): router-dir lists without the file ⇒ genuinely absent ⇒ empty
-  map + PASS-eligible; file listed but read `None`, body unparseable, or the listing itself raises ⇒
-  UNKNOWN ⇒ **DEGRADED** (fail closed — never PASS on unknown coverage). **The vacancy/escalation SEMANTIC
+  and W1.5, and it bit the gate's ROSTER read too):** `transport.read` returns `None` on BOTH a missing
+  file AND a transient failure, and `list_dir` degradation must never fold to an empty result, so a falsy
+  read/listing is NEVER "confirmed absent/empty" on its own. This governs BOTH reads the gate makes, and
+  an UNKNOWN on either is **DEGRADED** (fail closed — never PASS on unknown coverage): **(a) defaults**
+  (`_load_engagement_defaults`) — router-dir lists without the file ⇒ genuinely absent ⇒ empty map +
+  PASS-eligible; file listed but read `None`, body unparseable, or the listing raises ⇒ UNKNOWN. **(b) the
+  presence ROSTER** (`_presence_shards_status`, a sibling of `_presence_shards` that PRESERVES degradation
+  rather than swallowing a listing `TransportError` to `[]`) — the gate CERTIFIES the roster population, so
+  an UNKNOWN roster read must never look like a confirmed-empty one (an empty gate PASSes vacuously —
+  fail-OPEN, the P1 codex caught): presence-dir listing raises, or a listed shard reads `None`, ⇒
+  `roster_ok=False` ⇒ DEGRADED; only a CONFIRMED enumeration (listing succeeded and every live shard read)
+  may PASS, and a confirmed-EMPTY roster still PASSes vacuously. `_engagement_gate_passes` routes through
+  the same `(shards, ok)` helper, so a degraded roster returns False and the escalation falls back to
+  today's behavior, never the suppression branch. **The vacancy/escalation SEMANTIC
   change is gated (§3, dormant today):** LAPSED RENDERING lands unconditionally (additive), but reading a
   LAPSED session role-holder as EXPLAINED ABSENCE (role-retaining, suppress the vacancy escalation WITH a
   note — mirroring `roles.escalation_due`'s dormant-suppress precedent) activates ONLY when

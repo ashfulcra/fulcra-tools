@@ -4010,6 +4010,42 @@ def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
 
 # --- engagement gate (wake-router W2 mixed-fleet gate, plan §3) --------------
 
+def _presence_shards_status(
+    transport: Any, team: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read presence shards for the gate, PRESERVING read degradation. Returns
+    ``(shards, ok)``.
+
+    ``_presence_shards`` swallows a listing ``TransportError`` to ``[]`` — fine
+    for a best-effort roster, but the gate CERTIFIES that population, so an
+    UNKNOWN roster read must never look like a confirmed-empty one (an empty gate
+    passes vacuously — fail-OPEN). Same read-contract class as the defaults read:
+      - the presence-dir ``list_dir`` raises   -> roster UNKNOWN, ``ok=False``;
+      - a listed shard reads ``None``           -> that agent present-but-unreadable,
+        coverage unknowable, ``ok=False`` (the rest are still collected);
+      - listing succeeds and every shard read   -> CONFIRMED, ``ok=True`` (an empty
+        result here is a confirmed-empty roster, distinct from UNKNOWN)."""
+    pfx = _presence_prefix(team)
+    try:
+        entries = transport.list_dir(pfx)
+    except TransportError:
+        return [], False
+    shards: list[dict[str, Any]] = []
+    ok = True
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        raw = transport.read(pfx + n)
+        if raw is None:
+            ok = False                    # listed but unreadable -> UNKNOWN coverage
+            continue
+        fm = okf.parse_frontmatter(raw) or {}
+        fm.setdefault("agent", n[:-3])
+        shards.append(fm)
+    return shards, ok
+
+
 def _router_prefix(team: str) -> str:
     return f"team/{team}/_coord/router/"
 
@@ -4061,9 +4097,10 @@ def _engagement_gate_passes(transport: Any, team: str, *, now: str) -> bool:
     ONLY when the gate is PASS; any degradation/failure returns False, so the
     caller falls back to today's behavior verbatim (fail closed)."""
     try:
-        shards = _presence_shards(transport, team)
+        shards, roster_ok = _presence_shards_status(transport, team)
         defaults, ok = _load_engagement_defaults(transport, team)
-        res = presence.engagement_gate(shards, defaults, now=now, defaults_ok=ok)
+        res = presence.engagement_gate(shards, defaults, now=now,
+                                       defaults_ok=ok, roster_ok=roster_ok)
         return res["status"] == "PASS"
     except Exception:
         return False
@@ -4071,16 +4108,20 @@ def _engagement_gate_passes(transport: Any, team: str, *, now: str) -> bool:
 
 def cmd_engagement_gate(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
-    shards = _presence_shards(transport, args.team)
+    shards, roster_ok = _presence_shards_status(transport, args.team)
     defaults, defaults_ok = _load_engagement_defaults(transport, args.team)
     result = presence.engagement_gate(shards, defaults, now=now,
-                                      defaults_ok=defaults_ok)
+                                      defaults_ok=defaults_ok, roster_ok=roster_ok)
     if args.json:
         out = dict(result)
         out["team"] = args.team
         jsonutil.print_json(out)
         return 0 if result["status"] == "PASS" else 1
     print(f"engagement gate — team/{args.team}: {result['status']}")
+    if not roster_ok:
+        print("  ! presence roster is UNKNOWN (listing failed or a shard was "
+              "present-but-unreadable — coverage cannot be enumerated); failing "
+              "closed", file=sys.stderr)
     if not defaults_ok:
         print("  ! engagement-defaults.json is UNKNOWN (present-but-unreadable or "
               "unparseable — cannot be confirmed absent); failing closed, coverage "
