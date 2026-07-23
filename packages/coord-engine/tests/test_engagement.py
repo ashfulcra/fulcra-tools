@@ -164,6 +164,95 @@ def test_parse_engagement_bad_until_degrades_no_raise():
     assert "_engagement_degraded" in eng
 
 
+# --- refresh-preservation: a beat must not slide TTL or clobber sweep state --
+
+def _put_shard(t: FakeTransport, agent: str, engagement: dict) -> None:
+    fm = {
+        "type": "Presence", "title": f"presence — {agent}", "agent": agent,
+        "workstreams": [], "summary": "",
+        "timestamp": PINNED_NOW.isoformat().replace("+00:00", "Z"),
+        "engagement": engagement,
+    }
+    t.store[_shard_path(agent)] = okf.render_frontmatter(fm) + f"\n# Presence: {agent}\n"
+
+
+def test_repeated_session_beat_preserves_until(monkeypatch):
+    t = FakeTransport()
+    assert cli.main(["presence", "beat", "r", "-a", "amy",
+                     "--engagement", "session"], transport=t) == 0
+    first = presence.parse_engagement(_read_shard_fm(t, "amy"))["until"]
+    # Advance the clock two hours: a second session beat with no --until must NOT
+    # recompute (slide) the expiry off the new 'now' — that is the dead-session-
+    # looks-alive bug this schema exists to prevent.
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW + timedelta(hours=2))
+    assert cli.main(["presence", "beat", "r", "-a", "amy",
+                     "--engagement", "session"], transport=t) == 0
+    second = presence.parse_engagement(_read_shard_fm(t, "amy"))["until"]
+    assert second == first
+
+
+def test_session_beat_explicit_until_replaces_preserved():
+    t = FakeTransport()
+    cli.main(["presence", "beat", "r", "-a", "amy", "--engagement", "session"], transport=t)
+    assert cli.main(["presence", "beat", "r", "-a", "amy", "--engagement", "session",
+                     "--until", "2026-08-01T00:00:00Z"], transport=t) == 0
+    assert presence.parse_engagement(_read_shard_fm(t, "amy"))["until"] == "2026-08-01T00:00:00Z"
+
+
+def test_session_beat_preserves_sweep_owned_state():
+    t = FakeTransport()
+    _put_shard(t, "amy", {"mode": "session", "until": "2026-07-01T00:00:00Z",
+                          "state": "lapsed", "lapsed_at": "2026-07-01T00:00:00Z"})
+    assert cli.main(["presence", "beat", "r", "-a", "amy",
+                     "--engagement", "session"], transport=t) == 0
+    eng = presence.parse_engagement(_read_shard_fm(t, "amy"))
+    assert eng["state"] == "lapsed"
+    assert eng["lapsed_at"] == "2026-07-01T00:00:00Z"
+    assert eng["until"] == "2026-07-01T00:00:00Z"   # preserved, not slid
+
+
+def test_mode_change_to_session_is_a_new_session():
+    t = FakeTransport()
+    _put_shard(t, "amy", {"mode": "resident", "until": None,
+                          "state": "active", "lapsed_at": None})
+    assert cli.main(["presence", "beat", "r", "-a", "amy",
+                     "--engagement", "session"], transport=t) == 0
+    eng = presence.parse_engagement(_read_shard_fm(t, "amy"))
+    expected = (PINNED_NOW + timedelta(hours=8)).isoformat().replace("+00:00", "Z")
+    assert eng["until"] == expected           # new session -> join + 8h
+    assert eng["state"] == "active" and eng["lapsed_at"] is None
+
+
+def test_session_beat_survives_read_failure():
+    """A read/parse failure while looking up the prior shard must NOT fail the
+    beat — it degrades to 'no prior engagement' (a fresh session)."""
+    class _FailingRead(FakeTransport):
+        def read(self, path):
+            raise RuntimeError("transport down")
+
+    t = _FailingRead()
+    assert cli.main(["presence", "beat", "r", "-a", "amy",
+                     "--engagement", "session"], transport=t) == 0
+    eng = presence.parse_engagement(_read_shard_fm(t, "amy"))
+    expected = (PINNED_NOW + timedelta(hours=8)).isoformat().replace("+00:00", "Z")
+    assert eng["until"] == expected
+    assert eng["state"] == "active" and eng["lapsed_at"] is None
+
+
+# --- parser: a session with no expiry is malformed --------------------------
+
+def test_parse_engagement_session_missing_until_degrades():
+    eng = presence.parse_engagement({"engagement": {"mode": "session"}})
+    assert eng["mode"] == "resident"
+    assert "_engagement_degraded" in eng
+
+
+def test_parse_engagement_session_null_until_degrades():
+    eng = presence.parse_engagement({"engagement": {"mode": "session", "until": None}})
+    assert eng["mode"] == "resident"
+    assert "_engagement_degraded" in eng
+
+
 # --- the inert-fold guarantee (heart of W1) ---------------------------------
 
 def test_folds_do_not_act_on_engagement():

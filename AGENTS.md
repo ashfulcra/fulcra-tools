@@ -398,16 +398,26 @@ it (not on PyPI).
   `engagement.state` (`active|lapsed`), `engagement.lapsed_at` (`iso8601Z|null`). **Absent `engagement`
   reads as `resident` + `active` — today's exact behavior**, so every legacy shard is unchanged and a
   `presence beat` with no `--engagement` flag writes NO engagement field (byte-identical legacy shard —
-  pinned). `--engagement session` defaults `until` to beat time + 8h; `--until` is meaningful ONLY for
-  `session` (given with any other mode, or with no `--engagement` at all, or in a non-ISO form, it is a
-  validation error at rc 2 and nothing is written). **`engagement.state` and `engagement.lapsed_at` are
-  written ONLY by the W3 sweep** — a beat always writes `state: active`, `lapsed_at: null`; in W1 these
-  two names are PARSE-ONLY. **The whole schema is inert in W1: every fold PARSES engagement but NONE
-  acts on it** — no liveness/vacancy/roster/broadcast decision changes; a shard whose engagement says
-  `session` past its `until` yields the IDENTICAL liveness verdict as one with no engagement field (the
-  field is carried additively into fold rows, surfaced under `--json`, never consulted by `classify`).
-  There is ONE parse seam, `presence.parse_engagement(fm)`, and it is **DEFENSIVE by contract**: a
-  non-dict engagement, an unknown `mode`/`state`, or an unparseable `until`/`lapsed_at` degrades to the
+  pinned). A NEW `--engagement session` defaults `until` to beat time + 8h; `--until` is meaningful
+  ONLY for `session` (given with any other mode, or with no `--engagement` at all, or in a non-ISO form,
+  it is a validation error at rc 2 and nothing is written). **A beat is REFRESH-SAFE and must never
+  manufacture liveness.** `presence beat` is called repeatedly (the launchd heartbeat re-beats), so a
+  session beat reads its own prior shard first (a read/parse failure is non-fatal — treated as "no
+  prior") and: (a) **preserves a continuing session's resolved `until`**, recomputing `beat+8h` ONLY for
+  a genuinely new session (no prior session, or a mode change *into* session) — an explicit `--until`
+  always wins. Sliding `until` forward on every beat would make a session never lapse, recreating the
+  dead-session-looks-alive bug this schema exists to prevent. (b) **never writes `engagement.state` /
+  `engagement.lapsed_at` to a non-default value** — those two names are written ONLY by the W3 sweep; a
+  beat continuing an existing engagement object carries its prior `state`/`lapsed_at` forward untouched
+  (no `lapsed→active` recovery in W1 — that is W2/W3) and initializes them to `active`/`null` only for a
+  brand-new session. In W1 both names are otherwise PARSE-ONLY. **The whole schema is inert in W1: every
+  fold PARSES engagement but NONE acts on it** — no liveness/vacancy/roster/broadcast decision changes;
+  a shard whose engagement says `session` past its `until` yields the IDENTICAL liveness verdict as one
+  with no engagement field (the field is carried additively into fold rows, surfaced under `--json`,
+  never consulted by `classify`). There is ONE parse seam, `presence.parse_engagement(fm)`, and it is
+  **DEFENSIVE by contract**: a non-dict engagement, an unknown `mode`/`state`, an unparseable
+  `until`/`lapsed_at`, **or a `session` with no resolved `until`** (a session with no expiry is
+  malformed — the write path always resolves one — never a valid never-expiring session) degrades to the
   legacy `resident`/`active` default AND sets a visible `_engagement_degraded` marker — it NEVER raises,
   so one malformed shard cannot break the fold for every other agent. **Ship-gate: any code that reads
   engagement goes through `parse_engagement` (never a raw `fm["engagement"]` dict-walk), and any new

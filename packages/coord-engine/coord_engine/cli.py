@@ -3727,11 +3727,12 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     now = _now()
     engagement = getattr(args, "engagement", None)
     until = getattr(args, "until", None)
+    slug = tasks.agent_key(agent)
+    shard_path = f"{_presence_prefix(args.team)}{slug}.md"
 
     # Build the engagement object (W1). When --engagement is NOT passed we write NO
     # engagement field at all, so the shard stays byte-identical to the legacy
-    # shard — that is what keeps this step inert. state/lapsed_at are always the
-    # active/null defaults here; only the W3 sweep writes lapsed values.
+    # shard — that is what keeps this step inert.
     engagement_obj: Optional[dict[str, Any]] = None
     if engagement is None:
         if until is not None:
@@ -3740,23 +3741,48 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
             return 2
     else:
         resolved_until: Optional[str] = None
+        state = "active"
+        lapsed_at: Optional[str] = None
         if engagement == "session":
+            # Refresh-safe: a repeated session beat (e.g. the launchd heartbeat)
+            # must NOT slide the TTL, and W1 must NEVER touch the sweep-owned
+            # state/lapsed_at (W3 is their sole writer). Read the prior shard and
+            # continue an existing session rather than minting a fresh one. A
+            # read/parse failure is NOT fatal — treat it as "no prior engagement".
+            prior: Optional[dict[str, Any]] = None
+            try:
+                prior_raw = transport.read(shard_path)
+                if prior_raw:
+                    prior = presence.parse_engagement(okf.parse_frontmatter(prior_raw))
+            except Exception:
+                prior = None
+            # A prior SESSION (parse_engagement only reports mode session when it
+            # has a resolved until) is continued; any other/malformed/legacy prior,
+            # or a mode change into session, is a new session.
+            continuing = bool(prior) and prior.get("mode") == "session"
             if until is not None:
                 dt = presence.parse_iso_z(until)
                 if dt is None:
                     print(f"presence beat: --until must be ISO-8601 "
                           f"(e.g. 2026-07-23T09:00:00Z); got {until!r}", file=sys.stderr)
                     return 2
-                resolved_until = presence.to_iso_z(dt)
+                resolved_until = presence.to_iso_z(dt)     # explicit always wins
+            elif continuing:
+                resolved_until = prior["until"]            # preserve — do not slide
             else:
                 resolved_until = presence.to_iso_z(
                     now + timedelta(hours=presence.SESSION_DEFAULT_TTL_HOURS))
+            if continuing:
+                # Carry forward whatever the sweep last wrote; W1 never resets it
+                # (no lapsed->active recovery here — that is W2/W3).
+                state = prior["state"]
+                lapsed_at = prior["lapsed_at"]
         elif until is not None:
             print(f"presence beat: --until is only valid with --engagement session; "
                   f"mode {engagement!r} carries no expiry", file=sys.stderr)
             return 2
         engagement_obj = {"mode": engagement, "until": resolved_until,
-                          "state": "active", "lapsed_at": None}
+                          "state": state, "lapsed_at": lapsed_at}
 
     fm = {
         "type": "Presence", "title": f"presence — {agent}", "agent": agent,
@@ -3766,8 +3792,7 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     if engagement_obj is not None:
         fm["engagement"] = engagement_obj
     body = f"\n# Presence: {agent}\n"
-    slug = tasks.agent_key(agent)
-    transport.write(f"{_presence_prefix(args.team)}{slug}.md", okf.render_frontmatter(fm) + body)
+    transport.write(shard_path, okf.render_frontmatter(fm) + body)
     print(f"beat {agent} ({slug}.md)")
     return 0
 

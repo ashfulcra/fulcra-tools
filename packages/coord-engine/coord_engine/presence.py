@@ -105,6 +105,12 @@ def parse_engagement(fm: Any) -> dict[str, Any]:
     # ``until`` is only meaningful for a session; other modes never carry an expiry.
     if mode != "session":
         until = None
+    elif until is None:
+        # The write path ALWAYS resolves a session's until, so a persisted session
+        # with a missing/null until is malformed — never a valid never-expiring
+        # session (that would be the dead-session-looks-alive bug the schema exists
+        # to prevent). Degrade rather than hand a fold an immortal session.
+        return _engagement_degraded("session engagement missing required until")
 
     state = raw.get("state") or "active"
     if state not in ENGAGEMENT_STATES:
