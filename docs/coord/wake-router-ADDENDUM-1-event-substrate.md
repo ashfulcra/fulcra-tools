@@ -87,6 +87,19 @@ A user-defined data type, created once via `data-type create`, schema versioned:
   priority); **no secrets, no free-form content** — the relay contract's no-untrusted-fields
   rule applies.
 - **Unknown `schema_version` ⇒ fallback** (principle 2). Bumps are additive-only.
+- **Physical encoding (normative — from the 2026-07-23 live de-risk probe, bus shard
+  `546b2445`):** the record service persists ONLY the sanctioned annotation fields
+  `{id, tags, sources, recorded_at, note}` and **silently drops arbitrary top-level JSON
+  fields** (confirmed live, including with `--no-validate`). The logical schema above is
+  therefore an ENCODING CONTRACT, not a storage layout: the full logical event rides as
+  compact JSON in `note`; `recorded_at` carries `ts`; `tags` carry the indexable dimensions
+  (`coord-event`, `kind:<event>`, `actor:<agent>`, `team:<team>`) so range queries pre-filter
+  without decoding; the client-supplied record `id` is the `event_id` (retries become upserts
+  where the service honors client ids; reader-side `event_id` dedup remains the backstop where
+  it does not). Writes go via JSONL stdin (field-options-only invocation fails in non-TTY
+  sandboxes — probe finding 4). A record whose `note` fails to decode or lacks
+  `schema_version` is unknown-version ⇒ fallback (principle 2). E1 re-verifies this encoding
+  against the service before building on it (the probe is evidence, not a contract).
 
 ### 3.1 Completeness contract (normative — closes the missing-mirror hole)
 
