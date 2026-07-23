@@ -100,6 +100,9 @@ Four walls, in the order you'll hit them:
    mkdir -p "$HOME/.vendor"
    for w in /tmp/wheels/*.whl; do python3 -m zipfile -e "$w" "$HOME/.vendor/"; done
    export PYTHONPATH="$HOME/.vendor:$PYTHONPATH"
+   # both installed console-entry names, so every later `fulcra …` /
+   # `fulcra-api …` command in this guide works unchanged from the fallback:
+   alias fulcra='python3 -c "from fulcra_api.cli import cli; cli()"'
    alias fulcra-api='python3 -c "from fulcra_api.cli import cli; cli()"'
    # (NOT `python3 -m fulcra_api` — the package ships no __main__; its console
    #  entry points target fulcra_api.cli:cli. Whole recipe validated 2026-07-22.)
