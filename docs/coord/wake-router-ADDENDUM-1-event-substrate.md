@@ -39,6 +39,8 @@ feed only as reconcile's no-change fast path and discards its contents on any ch
 4. **Dual-write failure isolation.** A typed-record write failure must never fail the shard
    write it accompanies (mirror of W1.5's presence-refresh isolation: stderr note, rc
    unchanged). The inverse is forbidden: no record is written for a shard write that failed.
+   Isolation is safe ONLY because §3.1's completeness contract detects and repairs the
+   resulting gap — the two are one mechanism and ship together in E1.
 
 ## 3. `CoordEvent` typed substrate (task E1)
 
@@ -60,11 +62,45 @@ A user-defined data type, created once via `data-type create`, schema versioned:
 - **Writer:** the engine, at the same `main()` dispatch chokepoint W1.5 established — one
   seam, keyed on the same write-verb set (as extended by W2's opening commit). Actor is the
   writer, never a target.
+- **Event identity (normative dedup rule):** every record carries
+  `event_id = sha256("<subject_path>|<event>|<shard mtime or write ts>|<actor>")[:16]` —
+  deterministic from the canonical write, so a retry or back-fill (§3.1) re-produces the SAME
+  logical event. The record store is append-only, so duplicate physical records are possible
+  by design; **readers dedupe on `event_id`** and duplicate physical records are semantically
+  invisible. Red-first pin: a double write/back-fill of one logical event folds identically
+  to a single write.
 - **Reader:** folds query `get-records CoordEvent <range>` and reconstruct deltas without
-  listing or re-reading unchanged shards. `payload` carries only fold-relevant fields already
-  public in the shard (assignee, status, priority); **no secrets, no free-form content** —
-  the relay contract's no-untrusted-fields rule applies.
+  listing or re-reading unchanged shards — subject to the §3.1 completeness contract.
+  `payload` carries only fold-relevant fields already public in the shard (assignee, status,
+  priority); **no secrets, no free-form content** — the relay contract's no-untrusted-fields
+  rule applies.
 - **Unknown `schema_version` ⇒ fallback** (principle 2). Bumps are additive-only.
+
+### 3.1 Completeness contract (normative — closes the missing-mirror hole)
+
+Principle 4's isolation means a shard write can succeed while its event write fails; a healthy,
+queryable record store may therefore be silently missing a mutation. Events-first folds MUST
+be able to detect this, so:
+
+- **The completeness oracle is the `data-updates` feed, not the record store.** The feed is
+  written server-side by the store itself and cannot miss a shard write for a client-side
+  reason — it is, structurally, the outbox this contract needs (nothing new to build or keep
+  in sync).
+- **Reconcile owns back-fill.** Each reconcile pass compares the feed's `file_changes` for
+  coordination paths against `CoordEvent` records over the same window and back-fills any
+  missing event (idempotent via `event_id`), then durably advances an
+  `events_confirmed_through` watermark (stored with reconcile's other state, whole-file
+  overwrite).
+- **Reader rule:** an events-first fold may trust the record stream only up to
+  `events_confirmed_through`. For any window beyond the watermark — or when the watermark is
+  missing, stale beyond one reconcile interval, or unreadable — the fold consumes the FEED
+  directly for that window, or takes the full-scan fallback (principle 2). A missing single
+  event can therefore never produce a false-negative fold: unconfirmed windows are never
+  served from records alone.
+- **Red-first acceptance (E1):** (1) shard write succeeds, event write fails, record store
+  stays healthy ⇒ the fold does NOT false-negative (unconfirmed window read from feed), and
+  the next reconcile back-fills the event and advances the watermark; (2) retry/back-fill of
+  the same logical event produces no duplicate after the reader's `event_id` dedupe.
 
 ## 4. Delta-driven folds (task E2)
 
@@ -88,7 +124,7 @@ webhooks ship, the receiver replaces the feed poll and nothing downstream moves.
 
 | # | Task | Depends on | Assignee (planned) |
 |---|---|---|---|
-| E1 | **CoordEvent substrate.** `data-type create` (versioned schema above), engine dual-write at the W1.5 chokepoint (failure-isolated both directions per principle 4), events-first fold seam with fail-closed fallback. Red-first tests: schema-version drift ⇒ fallback; feed/records unavailable ⇒ fallback; dual-write failure isolation both directions. | this addendum | coord-opus-worker |
+| E1 | **CoordEvent substrate.** `data-type create` (versioned schema above), engine dual-write at the W1.5 chokepoint (failure-isolated both directions per principle 4), the §3.1 completeness contract (reconcile back-fill + `events_confirmed_through` watermark + reader rule), events-first fold seam with fail-closed fallback. Red-first tests: schema-version drift ⇒ fallback; feed/records unavailable ⇒ fallback; dual-write failure isolation both directions; **§3.1's two acceptance cases** (missing-mirror no-false-negative + back-fill; `event_id` dedupe under retry). | this addendum | coord-opus-worker |
 | E2 | **Delta-driven listen/briefing.** `transport.updates()` since-window + path filter; events-first listen tick; aggregate+delta briefing. Red-first tests: feed-vs-listing divergence (feed wins), feed-unavailable fallback byte-identical, cursor no-false-advance across a failed tick. | this addendum (parallel with E1 — consumes the FILE feed, not CoordEvent records) | codex-coder |
 | E3 | **Router feed swap.** Candidate source = feed `uploaded` events; listing fallback; cursor seams unchanged. | this addendum, W5 | Fabio |
 
