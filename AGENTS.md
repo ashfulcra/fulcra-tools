@@ -443,6 +443,35 @@ it (not on PyPI).
   engagement goes through `parse_engagement` (never a raw `fm["engagement"]` dict-walk), and any new
   bad-input class it must survive gets a red-first test proving it degrades-with-marker instead of
   raising. Until the W3 sweep ships, no write path may set `state`/`lapsed_at` to a non-default value.**
+- **Activity implies liveness (wake-router W1.5).** Every engine bus **WRITE** verb refreshes the
+  **actor's** presence timestamp, so a *working* agent is provably live — distinct from a dead session
+  whose launchd beat still ticks (W2 consumes this as liveness proof). The write-verb set is exactly
+  `tell`, `respond`, the `task` mutators (`start|update|block|pause|abandon|assign|restore|done`),
+  `review request`, `review restore`, and `reconcile`; read verbs (`status`/`board`/`search`/`needs-me`/
+  `briefing`, `presence show`, `review status`) and the W1 `presence beat` never refresh. The hook lives
+  at the **single dispatch chokepoint** (`main`, after `rc = args.func(...)`), keyed on a frozenset of the
+  command FUNCTIONS themselves so no verb can be missed, and fires only on `rc == 0`. The **actor is the
+  WRITER** — `--from` / `FULCRA_COORD_AGENT` via `_known_sender` (never a target assignee); the anonymous
+  `coord-reconcile:<host>` fallback is not a presence identity, so a missing actor or team skips silently.
+  Two hard constraints, each pinned red-first: **(1) THROTTLE** — at most ONE presence write per
+  `presence.ACTIVITY_REFRESH_INTERVAL` (60s) **per process**, via a module-level `_ACTIVITY_BEAT_MEMO`
+  (`actor -> last monotonic time`); N writes inside one interval collapse to exactly one shard write
+  (tests inject the monotonic clock, never wall time). **(2) FAILURE ISOLATION** — a refresh failure
+  NEVER fails the successful bus write: the read+write is wrapped, a single `presence activity-refresh
+  failed: <e>` stderr note is emitted, and no exception escapes and `rc` is untouched. **The refresh is a
+  TIMESTAMP BUMP, not a `presence beat` re-run** (it does NOT go through the W1 engagement-resolution
+  path): it rewrites ONLY the top-level `timestamp` line and preserves every other byte — `engagement`
+  (mode/until/**state/lapsed_at**), workstreams, summary, body — verbatim, so it never slides a session's
+  `until` and never writes `state`/`lapsed_at` (W3-owned). **The minimal-beat fallback fires ONLY on
+  `list_dir`-CONFIRMED absence** (carrying NO engagement object): because the transport's `read` returns
+  `None` on BOTH a missing file and a transient failure, a falsy read is confirmed against the RAISING
+  `list_dir` contract and FAILS CLOSED on any UNKNOWN — a listing failure, or a shard present-but-
+  unreadable, SKIPS (no write) rather than overwriting a possibly-live shard; only a listing that
+  succeeds and does not contain the shard licenses the minimal beat. A present shard with no top-level
+  `timestamp:` line likewise skips. Failure isolation never means destructive fallback. **Ship-gate: the
+  throttle memo is process-global module state — reset it between
+  tests; any new write verb added to the engine must join `_ACTIVITY_WRITE_FUNCS` (or the omission is
+  justified), and the preserve-everything-but-timestamp rule stays red-first pinned.**
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
