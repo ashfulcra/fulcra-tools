@@ -162,10 +162,10 @@ No decision remains open on this leg.
   backstop. No agent-owned shard is ever written by a router component (the engine sweep's two-field exception above is the only agent-shard writer outside the agent itself).
 - **Read-path amendment (Addendum 1, Ash-authorized 2026-07-23).** Directory listings are
   eventually-consistent caches; the store's `data-updates` feed is the authoritative change
-  ledger. The router's candidate scan and the engine's hot folds move to feed/event-driven
-  sources with the full listing scan retained as the fail-closed fallback, and a typed
-  `CoordEvent` record substrate indexes bus writes (shards remain canonical). Normative detail
-  and task DAG (E1–E3):
+  ledger. Reconcile, the engine's hot folds, and the router's candidate scan move to
+  feed-driven delta sources with the full listing scan retained as the fail-closed fallback
+  (shards remain canonical; a second coordination-owned ledger was considered and cut by
+  operator direction). Normative detail and task DAG (E1–E3):
   [`wake-router-ADDENDUM-1-event-substrate.md`](wake-router-ADDENDUM-1-event-substrate.md).
 
 ## 5. Deliverables & stage plan
