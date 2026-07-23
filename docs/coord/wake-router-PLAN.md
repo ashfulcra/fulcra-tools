@@ -29,8 +29,14 @@ PR — same surface, one review.
 
 ## 2. Schema diffs (normative for W1–W4)
 
-- **Presence shard:** `engagement: {mode: resident|session|occasional, until: <iso8601|null>}`;
-  absent field ⇒ `resident`. `until` required iff `mode: session`.
+- **Presence shard:** `engagement: {mode: resident|session|occasional, until: <iso8601Z|null>,
+  state: active|lapsed, lapsed_at: <iso8601Z|null>}`. Absent `engagement` ⇒ `resident` + `active`
+  (legacy). `until` defaults to `join + 8h` iff `mode: session` and omitted. `state` defaults to
+  `active`; absent `state` reads as `active` (legacy shards). **`engagement.state` and
+  `engagement.lapsed_at` are written ONLY by the engine's engagement sweep (W3)** — `lapsed_at`
+  is stamped once at the transition to `lapsed` (UTC, the sweep's evaluation time) and cleared
+  when a fresh beat/activity returns the agent to `active`. W3 writes and W4 consumes exactly
+  these qualified names.
 - **Cursor + durable dedup** (`_coord/router/cursor.json`): `{watermark: <iso8601Z>,
   processed: {<idempotency-key>: <first-seen iso8601Z>, …}}`. The watermark is the store-listing
   mtime high-water mark (monotonic: never written backwards); `processed` is the durable
@@ -53,7 +59,9 @@ PR — same surface, one review.
   ONLY — e.g. codex-exec-resume: {thread_id}; openclaw-post: {endpoint_name} (resolved from local
   adapter config, never a raw URL from the store); managed-agents-message: {session_ref};
   free-form keys are a config validation error>, active_hours?: {window: "HH:MM-HH:MM",
-  tz: <IANA name>}}`; absent agent ⇒ observe-only (shadow) — enablement is explicit per agent,
+  tz: <IANA name>}, lapsed_checkin_min: <int minutes, default 360, valid range 60–1440 —
+  validation error outside it; governs check-in cadence for agents whose presence reads
+  engagement.state: lapsed>}`; absent agent ⇒ observe-only (shadow) — enablement is explicit per agent,
   never default. Per the relay contract, no config field may carry commands, permission modes, or
   session keys; adapters resolve secrets host-side.
 - **Wake-queue entry** (`_coord/router/queue/<agent>-<hash>.json`): `{agent, reason, source_shard,
