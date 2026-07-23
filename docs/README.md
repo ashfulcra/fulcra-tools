@@ -21,6 +21,10 @@ kept for provenance, not written for you.
   [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
   implementation plan for the wake router + engagement model build (stage 3 in
   execution): one fleet wake policy instead of N listeners, cloud-first hosting.
+- [`coord/wake-router-ADDENDUM-1-event-substrate.md`](coord/wake-router-ADDENDUM-1-event-substrate.md)
+  — normative addendum (tasks E1–E3): the `data-updates` feed as the authoritative
+  change ledger and feed-driven delta folds (incremental reconcile, listen/briefing,
+  router scan) with fail-closed full-scan fallbacks.
 - [`coord/atc-DESIGN.md`](coord/atc-DESIGN.md) — the design of ATC,
   capability-matched model routing on subscription caps.
 - [`TESTING.md`](TESTING.md) — how to run the suites and install Collect as a
