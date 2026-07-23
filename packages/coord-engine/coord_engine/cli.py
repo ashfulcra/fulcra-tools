@@ -4869,11 +4869,83 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# --- W1.5 activity-implies-liveness -----------------------------------------
+#
+# Every engine bus WRITE verb refreshes the ACTOR's presence timestamp at the
+# single dispatch chokepoint below, so no verb can be missed and none has to
+# opt in. The set is keyed on the command FUNCTIONS themselves (not on parsed
+# subcommand strings) — read verbs (status/board/search/needs-me/briefing,
+# presence show, review status) and the W1 ``presence beat`` are deliberately
+# absent. See AGENTS.md, "Activity implies liveness".
+_ACTIVITY_WRITE_FUNCS = frozenset({
+    cmd_tell, cmd_respond,
+    cmd_task_start, cmd_task_update, cmd_task_block, cmd_task_pause,
+    cmd_task_abandon, cmd_task_assign, cmd_task_restore, cmd_task_done,
+    cmd_review_request, cmd_review_restore,
+    cmd_reconcile,
+})
+
+#: Process-global throttle memo: actor -> monotonic time of its last activity
+#: refresh. Module state by design (one process = one live agent); the test
+#: suite resets it between cases.
+_ACTIVITY_BEAT_MEMO: dict[str, float] = {}
+
+
+def _now_monotonic() -> float:
+    """Monotonic clock seam for the activity throttle — patchable in tests."""
+    return time.monotonic()
+
+
+def _refresh_activity_presence(
+    transport: Any, team: str, actor: str, *, now_monotonic: float, now_iso: str,
+) -> None:
+    """Bump ``actor``'s presence timestamp to mark write-path activity.
+
+    THROTTLE: at most one write per ``ACTIVITY_REFRESH_INTERVAL`` per process —
+    N writes in one interval collapse to ONE presence write via the module memo.
+
+    PRESERVE-ALL-BUT-TIMESTAMP: this is a timestamp BUMP, not a ``presence beat``
+    re-run. It reads the actor's existing shard and rewrites ONLY the top-level
+    ``timestamp`` line, leaving every other byte — engagement (mode/until/**state
+    /lapsed_at**), workstreams, summary, body — verbatim. It never slides a
+    session's ``until`` and never touches ``state``/``lapsed_at`` (W3-owned). If
+    no shard exists, it writes a minimal beat that carries NO engagement object.
+
+    FAILURE ISOLATION: any error is swallowed with a single stderr note; this
+    function never raises and never affects the bus write's rc.
+    """
+    last = _ACTIVITY_BEAT_MEMO.get(actor)
+    if last is not None and now_monotonic - last < presence.ACTIVITY_REFRESH_INTERVAL:
+        return  # throttled — already refreshed within this interval
+    _ACTIVITY_BEAT_MEMO[actor] = now_monotonic
+    try:
+        slug = tasks.agent_key(actor)
+        shard_path = f"{_presence_prefix(team)}{slug}.md"
+        raw = transport.read(shard_path)
+        if raw:
+            lines = raw.split("\n")
+            for i, line in enumerate(lines):
+                # Top-level ``timestamp:`` only (engagement's nested keys are
+                # indented, so they never match) — a pure value swap keeps every
+                # other byte, incl. engagement and body, untouched.
+                if line.startswith("timestamp:"):
+                    lines[i] = f"timestamp: {now_iso}"
+                    transport.write(shard_path, "\n".join(lines))
+                    return
+        # Absent shard (or one with no top-level timestamp): write a minimal
+        # beat. No engagement object — an activity bump must not manufacture one.
+        fm = {"type": "Presence", "title": f"presence — {actor}",
+              "agent": actor, "timestamp": now_iso}
+        transport.write(shard_path, okf.render_frontmatter(fm) + f"\n# Presence: {actor}\n")
+    except Exception as e:
+        print(f"presence activity-refresh failed: {e}", file=sys.stderr)
+
+
 def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
     args = build_parser().parse_args(argv)
     transport = transport if transport is not None else FulcraFileTransport()
     try:
-        return args.func(args, transport)
+        rc = args.func(args, transport)
     except Exception as e:  # never dump a traceback at the user
         # Registered error envelope. An UNEXPECTED exception is NOT a retryable
         # degrade: the `error:` register token (distinct from the "…, retry" /
@@ -4887,6 +4959,20 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
         print(f"coord-engine: error: command={cmd} type={type(e).__name__}: {e}",
               file=sys.stderr)
         return 1
+
+    # W1.5: a SUCCESSFUL bus write proves the actor is working -> refresh its
+    # presence beat. Actor is the WRITER (``--from``/``FULCRA_COORD_AGENT`` via
+    # ``_known_sender`` — never a target assignee); the anonymous host fallback
+    # is not a presence identity, so a missing actor/team skips silently. The
+    # whole step is best-effort and cannot change ``rc``.
+    if rc == 0 and args.func in _ACTIVITY_WRITE_FUNCS:
+        actor = _known_sender(args)
+        team = getattr(args, "team", None)
+        if actor and team:
+            _refresh_activity_presence(
+                transport, team, actor,
+                now_monotonic=_now_monotonic(), now_iso=_iso(_now()))
+    return rc
 
 
 # --- extracted command groups: import + re-export ---------------------------

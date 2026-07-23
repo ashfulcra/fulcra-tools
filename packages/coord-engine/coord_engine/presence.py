@@ -24,6 +24,18 @@ from .roles import age_hours
 LIVE_HOURS = 1.0
 STALE_HOURS = 24.0
 
+# --- activity-implies-liveness (wake-router W1.5) ---------------------------
+#
+# Every engine bus WRITE bumps the ACTOR's presence timestamp so a *working*
+# agent is provably live — distinct from a dead session whose launchd beat still
+# ticks. The bump is throttled to at most one presence write per this interval
+# per process (an in-memory memo in the CLI dispatch layer). 60s sits well under
+# the ``live``/``idle`` boundary (1h) so a steadily-working agent never drifts
+# out of ``live`` between beats, yet coarse enough that a burst of writes in one
+# command sequence collapses to a single shard write. Tests pin the throttle
+# with an INJECTED monotonic clock, never this wall value.
+ACTIVITY_REFRESH_INTERVAL = 60.0  # seconds
+
 # --- engagement (wake-router W1, inert schema) ------------------------------
 #
 # The presence shard MAY carry an ``engagement`` object describing how the agent
