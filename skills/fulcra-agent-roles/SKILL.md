@@ -79,6 +79,17 @@ examples (exclusive maintainer, shared reviewer, shared multi-host monitor) are 
 folds role status from the directory listing, and the reference deployment does not
 maintain one.
 
+**Parking a role for a successor? The role doc is YOUR job, not theirs.** A role
+can be claimed and worked without `roles/<name>.md` ever being written — `claim`
+only warns — but the successor then inherits a role with broken review
+role-routing and status folds falling back to fabricated defaults (observed live
+2026-07-22: a handed-off role was registered on the bus with no role doc, and
+the successor's claim landed on the warning). Before you park (see
+fulcra-agent-continuity, "Parking for a successor"), run the first re-entrancy
+probe above; if the doc is missing, write it — duties, policy, SLA, maintainer,
+and the `checkpoint_ref` your park will set — so the successor claims into a
+fully-routed role.
+
 ### Claim / hold
 `coord-engine roles claim <team> <name>` writes your lease shard (engine-named `<slug>-<hash6>.md`;
 the command echoes the filename). **Re-run it** whenever you do work in the role — the refreshed

@@ -70,6 +70,18 @@ the wall exists — not where it happened first.
     mistyped/display-title slug records a ghost response and leaves the real
     directive open forever (fixed in v1.6.5: fails loud). Same family as
     walls 4 and 5: *the absence of an error is not success.*
+11. **Cloud sessions are repo-scoped; account-level GitHub access does not
+    reach them** (2). A cloud session's GitHub credential covers exactly the
+    repos attached when the session started — granting the *account* access to
+    another repo changes nothing mid-session, and cross-owner `add_repo` is
+    unsupported (v1). Hit twice on 2026-07-22: a handed-off import stalled
+    against an empty target repo, and a worker's push returned 403 until its
+    session was restarted. Workarounds, in preference order: the operator
+    starts (or restarts) the session **with the repo as an initial source**;
+    mirror-push the content into a repo that IS in scope; or work a
+    **same-owner fork**. Plan this in the parking doc's operator pre-flight
+    (fulcra-agent-continuity, "Parking for a successor") — discovering it
+    serially costs a human round-trip per failed attempt.
 
 ## What "monitoring" should grow into
 
@@ -91,3 +103,5 @@ nobody was looking.** The monitoring vision, staged:
 ## Change log
 
 - 2026-07-14: initial map (coord-boss), from the 07-11..07-14 incident record.
+- 2026-07-22: wall 11 (cloud repo scoping), from Webster's handoff
+  retrospective + the Fabio session restart (BUS-79).

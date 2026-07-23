@@ -32,7 +32,9 @@ allows; where it doesn't, follow them as prose:
    `coord-engine continuity snapshot <team> <agent> <task> --objective … [--decision …] [--next …]`.
 3. **Before context loss** (compaction, model handoff, session end):
    `coord-engine continuity park <team> --agent <agent> --objective "<one line>"` —
-   parks every held role with a checkpoint.
+   parks every held role with a checkpoint. Handing off to a successor session?
+   The checkpoint's CONTENT has rules of its own — see
+   [Parking for a successor](#parking-for-a-successor-handoff-doctrine).
 4. **Inbox cadence:** while live, poll your inbox at least every 30 minutes. If your
    platform has a durable scheduler, install the listener instead of trusting yourself.
 
@@ -106,6 +108,53 @@ coord-engine briefing <team> [--agent X] [--json]                  # session sta
   `checkpoint --role`.
 - `briefing` is the session-start verb and **tolerates absent add-ons** — with no presence/directives
   installed the sections are simply empty; it never fails a cold start.
+
+### Parking for a successor (handoff doctrine)
+
+A checkpoint is a promise to whoever wakes on it. One handoff (2026-07-22, the
+Webster resume) cost the successor its first hour reconciling three candidate
+repo homes because the parked snapshot asserted state that was never pushed.
+Rules, each earned there:
+
+- **Never park asserting repo/artifact state you have not pushed AND verified.**
+  "Verified" means an independent read-back of what the remote actually holds:
+  `git ls-remote` on the exact ref **compared against the exact hash** you
+  claim is there, or an equivalent remote fetch/download. Not the memory of
+  having pushed — and not a `git push --dry-run`, which only tests a
+  *prospective* push (it is the write-permission preflight in the checklist
+  below, never proof the remote has your state). If the migration/import is
+  still pending when you must park, the snapshot says so explicitly:
+  **`IMPORT NOT DONE`**, followed by the exact recipe the successor runs (the
+  literal mirror-push/clone commands) and the **access prerequisites** (who
+  must grant what, before those commands can succeed).
+- **One canonical home per artifact.** Name exactly one target repo/path for
+  each piece of parked work. A checkpoint that names two candidate homes hands
+  the successor a research task, not a resume.
+- **The role doc exists before you park.** A parked role whose
+  `team/<team>/roles/<role>.md` is missing leaves the successor claiming into a
+  warning with review role-routing broken — creating it is the PARKING agent's
+  job, not the successor's (see fulcra-agent-roles, "Establish a role").
+- **Carry an operator pre-flight checklist.** Every human unlock your successor's
+  bootstrap will need, enumerated in the parking doc so the operator grants them
+  in ONE pass instead of the successor discovering them serially by failure
+  (that same handoff burned ~6 round-trips this way). Template:
+
+  ```markdown
+  ## Operator pre-flight (grant BEFORE waking the successor)
+  - [ ] Network egress: `fulcra.us.auth0.com` + `api.fulcradynamics.com`
+        allowlisted in the session's environment (GET-ON-THE-BUS §3).
+  - [ ] Auth tap: operator reachable for one device-flow approval
+        (token cache does not survive a fresh container).
+  - [ ] Source-repo access: repo(s) attached to the session AT START
+        (cloud sessions are repo-scoped: account-level GitHub access does
+        NOT reach them, cross-owner add_repo is unsupported — plan
+        initial-source / mirror-push / same-owner fork; HARNESS-MAP wall 11).
+  - [ ] Write permission: the successor's credential can PUSH the target
+        repo — whichever access path applies (GitHub App grant, deploy key,
+        or the accepted internal path: the FulcraBot fine-grained PAT for
+        `ashfulcra/*`, with upstream contributor handoff where applicable) —
+        verified with a `git push --dry-run` probe, not by assumption.
+  ```
 
 ## When to use
 - **Before context runs low** or at a natural stopping point — capture what you'd need to resume.
