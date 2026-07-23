@@ -106,10 +106,19 @@ the terminal `SETTLED <slug>` line when a review closes). It also surfaces **orp
 `<slug>/` verdicts dir with no `<slug>.md` doc) as a one-time `ORPHAN` event — visibility only, repair
 stays a maintainer action. One line per new item — `DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`,
 or one JSON object per line under `--json`. Quiet ticks print nothing. A transport failure prints
-`LISTEN DEGRADED: <what>` to stderr **once per source per streak** across five independent sources —
-`inbox`, `responses`, `orphans`, `verdicts`, and `roles` (an unreadable role-lease listing while
+`LISTEN DEGRADED: <what>` to stderr **once per source per streak** across six independent sources —
+`inbox`, `responses`, `orphans`, `verdicts`, `roles` (an unreadable role-lease listing while
 resolving role-routed directives; independent so a chronic role failure can't mask a fresh inbox
-outage). A degraded read never advances state, so the pending event re-surfaces on recovery.
+outage), and `tail` (the shared non-head budget). Literal-agent and wildcard directives form a
+protected head: they scan first under `COORD_LISTEN_HEAD_BUDGET`; role/response/review history shares
+`COORD_LISTEN_TAIL_BUDGET`. `listen-head-degraded` means the caller's own head is UNKNOWN;
+`listen-tail-degraded` means only the history/role tail truncated. A degraded read never advances
+state, so the pending event re-surfaces on recovery.
+
+**A listener loop must never die on degradation.** Degraded folds back off and keep beating; only
+affirmative delivery or the configured horizon exits the loop. One-shot adapters return degradation
+nonzero so their scheduler can apply that backoff, but degradation is never interpreted as a clean
+queue or as permission to retire the listener.
 
 `listen` is the reply-leg watcher; the load-bearing **wake** read is the composite `briefing` path.
 When a scheduled tick's `briefing`/`inbox` degrades, quiet is NOT clear — apply the raw-bus fallback
