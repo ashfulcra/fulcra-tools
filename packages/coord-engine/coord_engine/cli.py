@@ -4807,10 +4807,19 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
 
     # delivered view — decision-plane-owned fold over the delivery records
     delivered_shards: list[dict] = []
+    delivered_listing_ok = True
     try:
         dl_entries = transport.list_dir(prefix + "delivered/")
-    except TransportError:
-        dl_entries = []  # empty on first runs; a listing error just skips refold
+    except TransportError as e:
+        # codex #460 fix: a listing ERROR is NOT "genuinely empty". Fold no
+        # shards this pass, but do NOT refold delivered.json (that would
+        # overwrite the populated view with {} and feed empty last_delivered_at
+        # into decide() for the whole pass). Skip the refold, stay fail-visible.
+        dl_entries = []
+        delivered_listing_ok = False
+        print(f"router: delivered/ listing degraded ({e}) — skipping "
+              f"delivered.json refold this pass (the populated view is "
+              f"preserved; it regenerates next pass)", file=sys.stderr)
     for e in dl_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
@@ -4821,7 +4830,33 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                 delivered_shards.append(json.loads(raw))
             except ValueError:
                 pass  # a corrupt record shard is bookkeeping loss, not a stop
-    delivered_view = router.fold_delivered(delivered_shards)
+    if delivered_listing_ok:
+        delivered_view = router.fold_delivered(delivered_shards)
+    else:
+        # codex #466: the delivered/ shard listing failed. DECIDE from the
+        # last-known-good persisted delivered.json so last_delivered_at is
+        # honored per-agent (no early lapsed check-ins / weakened debounce).
+        # A valid mapping — INCLUDING {} — is KNOWN history and proceeds. But if
+        # delivered.json is ALSO unavailable (None), malformed, or not a
+        # mapping, delivery history is UNKNOWN (not empty): FAIL THE PASS CLOSED
+        # — do not enqueue or advance the cursor from unknown history (that
+        # recreates the premature-checkin/weakened-debounce bug). Retries next
+        # pass once either read recovers.
+        delivered_view = None
+        prior_raw = transport.read(prefix + "delivered.json")
+        if prior_raw is not None:
+            try:
+                loaded = json.loads(prior_raw)
+                if isinstance(loaded, dict):
+                    delivered_view = loaded
+            except ValueError:
+                pass
+        if delivered_view is None:
+            print("router: delivered/ listing degraded AND delivered.json "
+                  "unavailable/malformed — delivery history is UNKNOWN; failing "
+                  "the pass closed (nothing enqueued, cursor not advanced; "
+                  "retries next pass)", file=sys.stderr)
+            return 1
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}
@@ -4943,7 +4978,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             enqueued += 1
         processed[key] = router.iso(now)
 
-    if not observe:
+    if not observe and delivered_listing_ok:
         if not transport.write(prefix + "delivered.json",
                                json.dumps(delivered_view, sort_keys=True) + "\n"):
             # observability bookkeeping only — dedup authority is the ledger
@@ -4973,13 +5008,138 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     return 1 if pass_failed else 0
 
 
+def _default_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
+    """Default decision-plane adapter invoker → (status, detail), status one of
+    "delivered" | "failed" | "unconfigured".
+
+    This is the host-side integration SEAM. The real cloud-adapter clients plug
+    in here: `managed-agents-message` needs a Managed Agents client + creds
+    (fail-closed secrets — never in team paths); `routine-align`'s alignment
+    mechanism is W6. Until a client is wired on THIS host, the default reports
+    `unconfigured` — the wake stays VISIBLY QUEUED (never silently dropped, never
+    a burned retry), which is the plan's fail-visible degradation mode. Tests
+    inject a fake invoker to exercise the delivered/failed paths."""
+    return ("unconfigured",
+            f"no host-side client wired for adapter "
+            f"{inv.get('adapter')!r} on this decision plane yet")
+
+
+def _router_execute_cloud(args: argparse.Namespace, transport: Any,
+                          invoke: Any = None) -> "dict[str, int]":
+    """Drain the decision-plane-owned queue entries (cloud-reachable adapters):
+    claim → invoke → delivered/dead-letter with BOUNDED cross-pass retry. Only
+    `executor == decision-plane` entries are touched; host-local entries are
+    left for the W5.5 thin executor. Delivery is at-least-once — safe by the
+    adapter content rule (`router.adapter_invocation`)."""
+    invoke = invoke or _default_adapter_invoke
+    team = args.team
+    prefix = router.router_prefix(team)
+    now = _now()
+    counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
+              "unconfigured": 0, "skipped": 0, "deferred": 0}
+
+    try:
+        q_entries = transport.list_dir(prefix + "queue/")
+    except TransportError as e:
+        print(f"router: queue listing degraded ({e}) — no execution this pass, "
+              f"entries stay queued and retry next pass", file=sys.stderr)
+        return counts
+
+    agents_cfg, _executors, _errs = router.validate_config(
+        transport.read(prefix + "config.json"))
+
+    for e in q_entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or not name.endswith(".json"):
+            continue
+        raw = transport.read(prefix + "queue/" + name)
+        try:
+            entry = json.loads(raw) if raw else None
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or not router.is_decision_plane_entry(entry):
+            continue  # host-local (or malformed) — W5.5's, never fired here
+        # deferred wakes wait for their idle boundary
+        nb = router.parse_iso(entry.get("not_before"))
+        if nb is not None and nb > now:
+            counts["deferred"] += 1
+            continue
+        # respect a fresh FOREIGN claim (another decision-plane process mid-flight)
+        if router.claim_is_skippable(entry, router.DECISION_PLANE, now):
+            counts["skipped"] += 1
+            continue
+
+        key = router.idempotency_key(str(entry.get("source_shard")),
+                                     str(entry.get("agent")))
+        cfg = agents_cfg.get(entry.get("agent")) or {}
+        qpath = prefix + "queue/" + name
+
+        def _terminate(sub: str, record: dict, tally: str) -> None:
+            """Write a delivered/dead-letter record, then remove the queue entry
+            ONLY if that write landed. A failed record write must NOT be followed
+            by the delete — else the wake is lost (same class as the W4 P1). Left
+            queued, it retries next pass (at-least-once, safe by the content
+            rule)."""
+            if transport.write(prefix + sub + router.record_filename(key),
+                               json.dumps(record, sort_keys=True) + "\n"):
+                transport.delete(qpath)
+                counts[tally] += 1
+            else:
+                print(f"router execute: {sub.rstrip('/')} record write failed "
+                      f"for {key} — entry stays queued, retries next pass",
+                      file=sys.stderr)
+                counts["retried"] += 1
+
+        try:
+            inv = router.adapter_invocation(entry, cfg.get("adapter_args"))
+        except ValueError as ve:
+            # unroutable at execution — dead-letter immediately (never succeeds)
+            _terminate("dead-letter/", router.dead_letter_record(
+                entry, attempts=int(entry.get("attempts", 0)) + 1,
+                last_error=f"unroutable: {ve}", gave_up_at=router.iso(now)),
+                "dead_lettered")
+            continue
+
+        status, detail = invoke(inv)
+        if status == "delivered":
+            _terminate("delivered/",
+                       router.delivery_record(entry, router.iso(now)),
+                       "delivered")
+        elif status == "unconfigured":
+            # visibly queued, not a burned retry — awaits a wired host client
+            counts["unconfigured"] += 1
+        else:  # "failed" — bounded cross-pass retry, then dead-letter
+            attempts = int(entry.get("attempts", 0)) + 1
+            if attempts >= router.MAX_DELIVERY_ATTEMPTS:
+                _terminate("dead-letter/", router.dead_letter_record(
+                    entry, attempts=attempts, last_error=detail,
+                    gave_up_at=router.iso(now)), "dead_lettered")
+            else:
+                retried = router.claim_stamp(entry, router.DECISION_PLANE, now)
+                retried["attempts"] = attempts
+                retried["last_error"] = detail
+                if not transport.write(qpath,
+                                       json.dumps(retried, sort_keys=True) + "\n"):
+                    print(f"router execute: retry-state write failed for {key} "
+                          f"— entry unchanged, retries next pass", file=sys.stderr)
+                counts["retried"] += 1
+
+    active = {k: v for k, v in counts.items() if v}
+    if active:
+        print("router execute: "
+              + ", ".join(f"{k}={v}" for k, v in active.items()))
+    return counts
+
+
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
     rc = _router_pass(args, transport)
+    _router_execute_cloud(args, transport)
     if getattr(args, "once", False):
         return rc
     while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
         time.sleep(router.ROUTER_POLL_SECONDS)
         _router_pass(args, transport)
+        _router_execute_cloud(args, transport)
 
 
 # --- stash (fulcra-agent-durable-state) ---
