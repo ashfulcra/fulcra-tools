@@ -4151,7 +4151,25 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                 delivered_shards.append(json.loads(raw))
             except ValueError:
                 pass  # a corrupt record shard is bookkeeping loss, not a stop
-    delivered_view = router.fold_delivered(delivered_shards)
+    if delivered_listing_ok:
+        delivered_view = router.fold_delivered(delivered_shards)
+    else:
+        # codex #466: a degraded pass must DECIDE from the last-known-good
+        # persisted delivered.json, NOT the empty fold — otherwise
+        # last_delivered_at reads None for EVERY agent this pass (early lapsed
+        # check-ins, weakened debounce). Read the persisted view; fall back to
+        # {} only if it too is absent/unreadable (genuinely no history).
+        delivered_view = {}
+        prior_raw = transport.read(prefix + "delivered.json")
+        if prior_raw:
+            try:
+                loaded = json.loads(prior_raw)
+                if isinstance(loaded, dict):
+                    delivered_view = loaded
+            except ValueError:
+                print("router: persisted delivered.json unreadable during the "
+                      "degraded pass — decide() proceeds without delivery "
+                      "history this pass", file=sys.stderr)
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}

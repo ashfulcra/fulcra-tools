@@ -466,6 +466,24 @@ def test_delivered_listing_failure_preserves_the_populated_view(capsys):
     assert len(_queue_entries(t)) == 1                      # P1 still enqueued
 
 
+def test_degraded_delivered_listing_decides_from_persisted_view(capsys):
+    """codex #466: when the delivered/ listing fails, decide() must use the
+    last-known-good delivered.json — an agent delivered inside its debounce
+    window keeps that debounce instead of being re-woken from an empty fold."""
+    t = FlakyTransport()
+    t.put(TASKP + "item-1.md", _task("item-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    # persisted view: AGENT delivered 5 min ago (inside the 15-min debounce)
+    t.put(RP + "delivered.json", json.dumps(
+        {AGENT: {"last_delivered_at": "2026-07-23T11:55:00Z", "count": 1,
+                 "last_source_shard": "prior"}}))
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 0
+    assert _queue_entries(t) == {}          # debounced from the persisted view
+    assert "delivered/ listing degraded" in capsys.readouterr().err
+
+
 def test_delivered_fold_orders_by_parsed_time_not_lexical_string():
     """codex #460 Fix 2: a later UTC delivery must win over an earlier one whose
     +offset string sorts later lexically ('…T14:00+02:00' = 12:00Z is earlier
