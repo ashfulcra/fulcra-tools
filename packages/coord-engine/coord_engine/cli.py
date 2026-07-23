@@ -4154,22 +4154,30 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     if delivered_listing_ok:
         delivered_view = router.fold_delivered(delivered_shards)
     else:
-        # codex #466: a degraded pass must DECIDE from the last-known-good
-        # persisted delivered.json, NOT the empty fold — otherwise
-        # last_delivered_at reads None for EVERY agent this pass (early lapsed
-        # check-ins, weakened debounce). Read the persisted view; fall back to
-        # {} only if it too is absent/unreadable (genuinely no history).
-        delivered_view = {}
+        # codex #466: the delivered/ shard listing failed. DECIDE from the
+        # last-known-good persisted delivered.json so last_delivered_at is
+        # honored per-agent (no early lapsed check-ins / weakened debounce).
+        # A valid mapping — INCLUDING {} — is KNOWN history and proceeds. But if
+        # delivered.json is ALSO unavailable (None), malformed, or not a
+        # mapping, delivery history is UNKNOWN (not empty): FAIL THE PASS CLOSED
+        # — do not enqueue or advance the cursor from unknown history (that
+        # recreates the premature-checkin/weakened-debounce bug). Retries next
+        # pass once either read recovers.
+        delivered_view = None
         prior_raw = transport.read(prefix + "delivered.json")
-        if prior_raw:
+        if prior_raw is not None:
             try:
                 loaded = json.loads(prior_raw)
                 if isinstance(loaded, dict):
                     delivered_view = loaded
             except ValueError:
-                print("router: persisted delivered.json unreadable during the "
-                      "degraded pass — decide() proceeds without delivery "
-                      "history this pass", file=sys.stderr)
+                pass
+        if delivered_view is None:
+            print("router: delivered/ listing degraded AND delivered.json "
+                  "unavailable/malformed — delivery history is UNKNOWN; failing "
+                  "the pass closed (nothing enqueued, cursor not advanced; "
+                  "retries next pass)", file=sys.stderr)
+            return 1
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}

@@ -484,6 +484,51 @@ def test_degraded_delivered_listing_decides_from_persisted_view(capsys):
     assert "delivered/ listing degraded" in capsys.readouterr().err
 
 
+def test_double_degradation_fails_closed_when_history_unknown(capsys):
+    """codex #466 P1: delivered/ listing fails AND delivered.json is absent
+    (read None) ⇒ delivery history is UNKNOWN, not empty. Fail the pass CLOSED
+    — nonzero, no queue write, no cursor advancement."""
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)                                   # cursor watermark 11:00:00Z
+    # delivered.json intentionally absent → read returns None
+    t.fail_list_containing.add("delivered/")   # authoritative shard listing down
+    assert cli.cmd_router_run(_args(), t) == 1
+    assert _queue_entries(t) == {}             # nothing enqueued from unknown history
+    cur = json.loads(t.store[RP + "cursor.json"])
+    assert cur["watermark"] == "2026-07-23T11:00:00Z"   # cursor NOT advanced
+    assert f"urgent-1:{AGENT}" not in cur["processed"]  # NOT consumed
+    assert "UNKNOWN" in capsys.readouterr().err
+
+
+def test_double_degradation_fails_closed_on_malformed_persisted_view(capsys):
+    """codex #466 P1: listing fails AND delivered.json is malformed (not a valid
+    mapping) ⇒ still unknown history ⇒ fail closed."""
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.put(RP + "delivered.json", "{not valid json")
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 1
+    assert _queue_entries(t) == {}
+    assert json.loads(t.store[RP + "cursor.json"])["watermark"] == "2026-07-23T11:00:00Z"
+
+
+def test_degraded_listing_with_empty_persisted_view_is_known_history():
+    """A valid EMPTY mapping is KNOWN history (router ran, delivered nothing) —
+    it must proceed, not fail closed."""
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.put(RP + "delivered.json", json.dumps({}))   # known-empty
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 0      # proceeds
+    assert len(_queue_entries(t)) == 1              # P1 enqueued (no history ⇒ no debounce)
+
+
 def test_delivered_fold_orders_by_parsed_time_not_lexical_string():
     """codex #460 Fix 2: a later UTC delivery must win over an earlier one whose
     +offset string sorts later lexically ('…T14:00+02:00' = 12:00Z is earlier
