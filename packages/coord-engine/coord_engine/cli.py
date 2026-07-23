@@ -3052,50 +3052,103 @@ def _listen_state_path(team: str, agent: str) -> pathlib.Path:
     return _listen_state_dir() / f"listen-{tasks.slugify(team) or 'team'}-{tasks.agent_key(agent)}.json"
 
 
-def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
-    """Load the one-doc state, tolerating a missing/corrupt/foreign file (fresh
-    default). Never raises — a tick never fails on its own bookkeeping."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        data = {}
+def _listen_store_state_path(team: str, agent: str) -> str:
+    """Durable listener state in the agent's existing store namespace."""
+    return f"team/{team}/_coord/agents/{agent}/listen-state.json"
+
+
+def _coerce_listen_state_doc(data: Any) -> Optional[dict[str, Any]]:
+    """Normalize one decoded state document, or None when its shape is corrupt."""
     if not isinstance(data, dict):
-        data = {}
-    return {
-        "inbox_ids": list(data.get("inbox_ids") or []),
-        "response_keys": list(data.get("response_keys") or []),
-        "slug_owned": dict(data.get("slug_owned") or {}),
-        # Source 3 (verdicts) bookkeeping — legacy state files lack these keys;
-        # they default empty, so an upgrade re-surfaces nothing spuriously.
-        "verdict_keys": list(data.get("verdict_keys") or []),
-        "review_requested": dict(data.get("review_requested") or {}),
-        "settled_reviews": list(data.get("settled_reviews") or []),
-        # Orphan review dirs already reported (verdicts dir, no doc) — cached so
-        # each is surfaced ONCE; legacy files lack the key and default empty.
-        "orphan_slugs": list(data.get("orphan_slugs") or []),
-        # Emit-once caches for a PERMANENTLY-absent owner/requester doc at the
-        # responses / verdicts sources — a slug whose directive|review doc reads
-        # None has its degrade emitted ONCE, then is skipped silently (a fail-closed
-        # watcher treats persistent DEGRADED as fatal). Distinct from orphan_slugs,
-        # which caches emitted-orphan EVENTS; these cache emitted-DEGRADE slugs.
-        # Legacy files lack the keys and default empty.
-        "flagged_orphan_responses": list(data.get("flagged_orphan_responses") or []),
-        "flagged_orphan_verdicts": list(data.get("flagged_orphan_verdicts") or []),
-        # E2 authoritative data-updates cursor. Missing/corrupt -> one legacy
-        # full-listing pass, which seeds it only after that tick is conclusive.
-        "feed_cursor": data.get("feed_cursor"),
-        "degraded": _coerce_degraded(data.get("degraded")),
-    }
+        return None
+    try:
+        return {
+            "inbox_ids": list(data.get("inbox_ids") or []),
+            "response_keys": list(data.get("response_keys") or []),
+            "slug_owned": dict(data.get("slug_owned") or {}),
+            # Source 3 (verdicts) bookkeeping — legacy state files lack these keys;
+            # they default empty, so an upgrade re-surfaces nothing spuriously.
+            "verdict_keys": list(data.get("verdict_keys") or []),
+            "review_requested": dict(data.get("review_requested") or {}),
+            "settled_reviews": list(data.get("settled_reviews") or []),
+            # Orphan review dirs already reported (verdicts dir, no doc) — cached so
+            # each is surfaced ONCE; legacy files lack the key and default empty.
+            "orphan_slugs": list(data.get("orphan_slugs") or []),
+            # Emit-once caches for a PERMANENTLY-absent owner/requester doc at the
+            # responses / verdicts sources — a slug whose directive|review doc reads
+            # None has its degrade emitted ONCE, then is skipped silently (a
+            # fail-closed watcher treats persistent DEGRADED as fatal). Distinct
+            # from orphan_slugs, which caches emitted-orphan EVENTS; these cache
+            # emitted-DEGRADE slugs. Legacy files default empty.
+            "flagged_orphan_responses": list(
+                data.get("flagged_orphan_responses") or []),
+            "flagged_orphan_verdicts": list(
+                data.get("flagged_orphan_verdicts") or []),
+            # E2 authoritative data-updates cursor. Missing/corrupt -> one legacy
+            # full-listing pass, which seeds it only after that tick is conclusive.
+            "feed_cursor": data.get("feed_cursor"),
+            "degraded": _coerce_degraded(data.get("degraded")),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
-def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
-    # Best-effort: a state-write failure must never crash a tick. Worst case of a
-    # lost write is one re-notify on the next run, never a missed event.
+def _write_local_listen_cache(path: pathlib.Path, payload: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        path.write_text(payload, encoding="utf-8")
     except OSError as e:
         _log.warning("listen state write failed", path=str(path), error=str(e))
+
+
+def _load_listen_state(
+    path: pathlib.Path, *, transport: Any = None,
+    team: Optional[str] = None, agent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Load durable store state, using the local file as a restart cache.
+
+    A valid store copy is authoritative and refreshes the local cache. Missing,
+    corrupt, or unreadable store state falls back to the legacy local file, then
+    to a fresh state. Never raises — bookkeeping cannot kill the listener.
+    """
+    if transport is not None and team is not None and agent is not None:
+        try:
+            raw = transport.read(_listen_store_state_path(team, agent))
+            decoded = json.loads(raw) if raw else None
+        except Exception:
+            decoded = None
+        state = _coerce_listen_state_doc(decoded)
+        if state is not None:
+            _write_local_listen_cache(path, json.dumps(state, sort_keys=True))
+            return state
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        decoded = None
+    return (_coerce_listen_state_doc(decoded)
+            or _coerce_listen_state_doc({})
+            or {})  # the empty schema is statically valid
+
+
+def _save_listen_state(
+    path: pathlib.Path, state: dict[str, Any], *, transport: Any = None,
+    team: Optional[str] = None, agent: Optional[str] = None,
+) -> None:
+    """Write through to local cache and durable store, both best-effort.
+
+    A lost write may cause one re-notify after restart, never a missed event.
+    """
+    payload = json.dumps(state, sort_keys=True)
+    _write_local_listen_cache(path, payload)
+    if transport is None or team is None or agent is None:
+        return
+    store_path = _listen_store_state_path(team, agent)
+    try:
+        if not transport.write(store_path, payload):
+            _log.warning("listen store state write failed", path=store_path)
+    except Exception as e:
+        _log.warning("listen store state write failed", path=store_path,
+                     error=str(e))
 
 
 def _listen_inbox_phase(
@@ -3708,7 +3761,8 @@ def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
         # engine rather than reimplementing it. Print and exit; no tick, no writes.
         print(str(state_path))
         return 0
-    state = _load_listen_state(state_path)
+    state = _load_listen_state(
+        state_path, transport=transport, team=args.team, agent=agent)
     json_mode = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", False))
 
@@ -3716,7 +3770,8 @@ def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
         _events, failures = _run_listen_tick(
             transport, args.team, agent, state,
             json_mode=json_mode, verbose=verbose)
-        _save_listen_state(state_path, state)
+        _save_listen_state(
+            state_path, state, transport=transport, team=args.team, agent=agent)
         return failures
 
     if args.once:

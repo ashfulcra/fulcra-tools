@@ -929,6 +929,70 @@ def test_state_round_trips_through_disk(tmp_path):
     assert reloaded["inbox_ids"] == ["persist-1"]
 
 
+def test_store_state_wins_and_refreshes_local_cache(tmp_path):
+    t = FakeTransport()
+    path = tmp_path / "listen-r-bob.json"
+    path.write_text(json.dumps({"inbox_ids": ["local"]}), encoding="utf-8")
+    remote = _fresh_state()
+    remote["inbox_ids"] = ["store"]
+    remote["feed_cursor"] = "2026-07-10T00:20:00Z"
+    t.put(cli._listen_store_state_path(TEAM, "bob"), json.dumps(remote))
+
+    loaded = cli._load_listen_state(
+        path, transport=t, team=TEAM, agent="bob")
+
+    assert loaded["inbox_ids"] == ["store"]
+    assert loaded["feed_cursor"] == "2026-07-10T00:20:00Z"
+    assert json.loads(path.read_text(encoding="utf-8"))["inbox_ids"] == ["store"]
+
+
+@pytest.mark.parametrize("remote", [None, "{not json"])
+def test_missing_or_corrupt_store_state_falls_back_to_local(tmp_path, remote):
+    t = FakeTransport()
+    path = tmp_path / "listen-r-bob.json"
+    local = _fresh_state()
+    local["inbox_ids"] = ["local"]
+    path.write_text(json.dumps(local), encoding="utf-8")
+    if remote is not None:
+        t.put(cli._listen_store_state_path(TEAM, "bob"), remote)
+
+    loaded = cli._load_listen_state(
+        path, transport=t, team=TEAM, agent="bob")
+
+    assert loaded["inbox_ids"] == ["local"]
+
+
+def test_save_listen_state_writes_local_cache_and_store(tmp_path):
+    t = FakeTransport()
+    path = tmp_path / "listen-r-bob.json"
+    state = _fresh_state()
+    state["inbox_ids"] = ["persisted"]
+    state["feed_cursor"] = "2026-07-10T00:20:00Z"
+
+    cli._save_listen_state(
+        path, state, transport=t, team=TEAM, agent="bob")
+
+    assert json.loads(path.read_text(encoding="utf-8")) == state
+    assert json.loads(t.read(cli._listen_store_state_path(TEAM, "bob"))) == state
+
+
+def test_store_state_prevents_redelivery_after_local_cache_loss(
+        tmp_path, monkeypatch, capsys):
+    t = FakeTransport()
+    _put_directive(t, "restart-safe", "Once", owner="alice", assignee="bob")
+    _reconcile(t)
+    args = argparse.Namespace(team=TEAM, agent="bob", interval=60,
+                              once=True, verbose=False, json=False)
+
+    monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path / "before"))
+    assert cli.cmd_listen(args, t) == 0
+    assert "DIRECTIVE restart-safe" in capsys.readouterr().out
+    monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path / "after"))
+
+    assert cli.cmd_listen(args, t) == 0
+    assert capsys.readouterr().out == ""
+
+
 def test_load_state_tolerates_corrupt_file(tmp_path):
     path = tmp_path / "corrupt.json"
     path.write_text("{not json", encoding="utf-8")

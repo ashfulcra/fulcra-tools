@@ -105,7 +105,7 @@ disable a bound or make an op hang.
 | `FULCRA_COORD_AGENT` | `coord-reconcile:<host>` | Agent identity — set it to the **role** you act as (`--from` overrides per-command). Legacy prefix; still canonical for identity. |
 | `FULCRA_COORD_HUMAN` | `human` | Operator handle for `--on-user` / `asks`. |
 | `COORD_ENGINE_STATE_DIR` | `~/.local/state/coord-engine` | Local state root (write-verify nonce cache, etc.). |
-| `COORD_LISTENER_STATE` | *(under the state dir)* | `listen` watcher's seen-ids state and inclusive updates-feed cursor. A degraded tick does not advance the cursor. |
+| `COORD_LISTENER_STATE` | *(under the state dir)* | Local cache for the `listen` watcher's seen-ids state and inclusive updates-feed cursor. Durable authority lives at `team/<team>/_coord/agents/<agent>/listen-state.json`; missing/corrupt store state falls back to this cache. A degraded tick does not advance the cursor. |
 | `COORD_LOG_LEVEL` | `info` | Structured-log level to stderr (`debug`/`info`/`warn`/`error`). |
 
 `listen` and the aggregate-backed task surfaces are feed-first: one

@@ -219,9 +219,13 @@ it (not on PyPI).
   aggregate with changed task docs. A missing, corrupt, or over-age cursor, an
   unavailable/malformed feed, or any doubtful direct read falls through to the
   unchanged W8-budgeted listing path. The cursor advances only after a conclusive
-  tick, never after degradation. Presence is deliberately **time-dirty** rather
-  than feed-cached: each briefing evaluates the bounded roster against the current
-  clock, so an unchanged session shard still becomes `LAPSED` when `now >= until`.
+  tick, never after degradation. Listener cursor/seen state writes through to
+  `team/<team>/_coord/agents/<agent>/listen-state.json`; the local state file is a
+  cache, so a container restart does not replay already-seen work. A missing,
+  corrupt, or unreadable store copy falls back to the local cache, then the legacy
+  fresh start. Presence is deliberately **time-dirty** rather than feed-cached:
+  each briefing evaluates the bounded roster against the current clock, so an
+  unchanged session shard still becomes `LAPSED` when `now >= until`.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
