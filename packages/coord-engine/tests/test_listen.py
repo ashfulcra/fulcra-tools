@@ -88,7 +88,7 @@ def _fresh_state():
     return {"inbox_ids": [], "response_keys": [], "slug_owned": {},
             "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
             "degraded": {"inbox": False, "responses": False, "orphans": False,
-                         "verdicts": False, "roles": False}}
+                         "verdicts": False, "roles": False, "tail": False}}
 
 
 # --- Source 1: inbox directives -------------------------------------------
@@ -480,13 +480,14 @@ def test_legacy_single_bool_degraded_migrates_to_per_source(tmp_path):
                               "slug_owned": {}, "degraded": True}), encoding="utf-8")
     state = cli._load_listen_state(path)
     assert state["degraded"] == {"inbox": True, "responses": True,
-                                 "orphans": True, "verdicts": True, "roles": True}
+                                 "orphans": True, "verdicts": True, "roles": True,
+                                 "tail": True}
     assert state["inbox_ids"] == ["x"]
 
     path.write_text(_j.dumps({"degraded": False}), encoding="utf-8")
     assert cli._load_listen_state(path)["degraded"] == {
         "inbox": False, "responses": False, "orphans": False, "verdicts": False,
-        "roles": False}
+        "roles": False, "tail": False}
 
 
 def test_verbose_heartbeat_only_on_quiet_tick_and_only_stderr(capsys):
@@ -747,9 +748,9 @@ def test_load_state_tolerates_corrupt_file(tmp_path):
                      "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
                      "orphan_slugs": [],
                      "flagged_orphan_responses": [], "flagged_orphan_verdicts": [],
-                     "degraded": {"inbox": False, "responses": False,
-                                  "orphans": False, "verdicts": False,
-                                  "roles": False}}
+                         "degraded": {"inbox": False, "responses": False,
+                                      "orphans": False, "verdicts": False,
+                                      "roles": False, "tail": False}}
 
 
 def test_cmd_listen_once_exits_zero(tmp_path, monkeypatch, capsys):

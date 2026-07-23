@@ -76,13 +76,16 @@ def test_env_int_policy(monkeypatch):
 
 def test_budget_wrappers_default_when_env_absent(monkeypatch):
     for name in ("COORD_REVIEW_FOLD_BUDGET", "COORD_BRIEFING_BUDGET",
-                 "COORD_LISTEN_CLASSIFY_BUDGET", "COORD_OVERLAY_BUDGET",
+                 "COORD_LISTEN_CLASSIFY_BUDGET", "COORD_LISTEN_HEAD_BUDGET",
+                 "COORD_LISTEN_TAIL_BUDGET", "COORD_OVERLAY_BUDGET",
                  "COORD_THREADS_FOLD_BUDGET", "COORD_OVERLAY_CAP",
                  "COORD_TRANSPORT_TIMEOUT"):
         monkeypatch.delenv(name, raising=False)
     assert cli._review_fold_budget() == cli.DEFAULT_REVIEW_FOLD_BUDGET
     assert cli._briefing_budget() == cli.DEFAULT_BRIEFING_BUDGET
     assert cli._listen_classify_budget() == cli.DEFAULT_LISTEN_CLASSIFY_BUDGET
+    assert cli._listen_head_budget() == cli.DEFAULT_LISTEN_HEAD_BUDGET
+    assert cli._listen_tail_budget() == cli.DEFAULT_LISTEN_TAIL_BUDGET
     assert cli._overlay_budget() == cli.DEFAULT_OVERLAY_BUDGET
     assert cli._threads_fold_budget() == cli.DEFAULT_THREADS_FOLD_BUDGET
     assert cli._overlay_cap() == cli.DEFAULT_OVERLAY_CAP
@@ -93,6 +96,8 @@ def test_budget_wrappers_default_when_env_absent(monkeypatch):
     ("_review_fold_budget", "COORD_REVIEW_FOLD_BUDGET", "DEFAULT_REVIEW_FOLD_BUDGET"),
     ("_briefing_budget", "COORD_BRIEFING_BUDGET", "DEFAULT_BRIEFING_BUDGET"),
     ("_listen_classify_budget", "COORD_LISTEN_CLASSIFY_BUDGET", "DEFAULT_LISTEN_CLASSIFY_BUDGET"),
+    ("_listen_head_budget", "COORD_LISTEN_HEAD_BUDGET", "DEFAULT_LISTEN_HEAD_BUDGET"),
+    ("_listen_tail_budget", "COORD_LISTEN_TAIL_BUDGET", "DEFAULT_LISTEN_TAIL_BUDGET"),
     ("_overlay_budget", "COORD_OVERLAY_BUDGET", "DEFAULT_OVERLAY_BUDGET"),
     ("_threads_fold_budget", "COORD_THREADS_FOLD_BUDGET", "DEFAULT_THREADS_FOLD_BUDGET"),
 ])
@@ -249,7 +254,8 @@ def test_tuning_knobs_are_documented():
     (identity/state/log-level vars are covered by their own prose rows too)."""
     documented = _table_env_names()
     for knob in ("COORD_REVIEW_FOLD_BUDGET", "COORD_BRIEFING_BUDGET",
-                 "COORD_LISTEN_CLASSIFY_BUDGET", "COORD_OVERLAY_BUDGET",
+                 "COORD_LISTEN_CLASSIFY_BUDGET", "COORD_LISTEN_HEAD_BUDGET",
+                 "COORD_LISTEN_TAIL_BUDGET", "COORD_OVERLAY_BUDGET",
                  "COORD_OVERLAY_CAP", "COORD_THREADS_FOLD_BUDGET",
                  "COORD_THREADS_SILENCE_DAYS", "COORD_THREADS_INTENT_GRACE_HOURS",
                  "COORD_TRANSPORT_TIMEOUT", "COORD_RETENTION_DAYS"):

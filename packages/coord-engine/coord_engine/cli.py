@@ -107,7 +107,8 @@ def _overlay_budget() -> float:
 
 
 def _fresh_overlay_rows(
-    transport: Any, team: str, index_rows: list[dict[str, Any]]
+    transport: Any, team: str, index_rows: list[dict[str, Any]], *,
+    deadline: "Optional[Deadline]" = None,
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Freshness overlay (Task 2.5, the PR348 false-clear).
 
@@ -143,13 +144,24 @@ def _fresh_overlay_rows(
     reconcile's own tolerance). Cost: one extra ``list_dir`` per row load, plus one
     ``read`` per genuinely-new (unsummarized) slug, at most the cap, within the
     budget."""
-    dl = Deadline.open(_overlay_budget())
+    own_dl = Deadline.open(_overlay_budget())
+    # A caller may provide a stricter absolute phase deadline (listen's protected
+    # head). The overlay keeps its own cap/budget, but can never outlive that
+    # caller: whichever instant arrives first wins.
+    if deadline is not None and deadline.instant is not None:
+        instant = (deadline.instant if own_dl.instant is None else
+                   min(deadline.instant, own_dl.instant))
+        dl = Deadline(instant)
+    else:
+        dl = own_dl
     prefix = rec.task_prefix(team)
     try:
         listing = transport.list_dir(prefix)
     except Exception:
         # listing unknown -> degraded (caller surfaces it), never silent
         return [], False, "task-dir overlay unreadable"
+    if dl.expired():
+        return [], False, "task-dir overlay budget exhausted after listing"
     from . import model
     known = {str(r.get("name")) for r in index_rows if isinstance(r, dict)}
     absent: list[tuple[str, Any]] = []
@@ -206,7 +218,9 @@ def _fresh_overlay_rows(
     return overlay, ok, "; ".join(reasons)
 
 
-def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool, str]:
+def _load_rows_status(
+    transport: Any, team: str, *, deadline: "Optional[Deadline]" = None,
+) -> tuple[list[dict[str, Any]], bool, str]:
     """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
     was not, a short ``reason`` for the degraded surface to print (attribution: a
     summaries-index failure and a freshness-overlay failure are different outages
@@ -227,6 +241,11 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
         raw = transport.read(path)
     except Exception:
         return [], False, "summaries index unreadable"
+    if deadline is not None and deadline.expired():
+        # The protected caller phase did not complete inside its clock. Even if
+        # this read returned bytes, do not advance any directive id from a phase
+        # whose remaining freshness work is unknown; recovery re-reads/delivers.
+        return [], False, "caller row-load budget exhausted after summaries read"
     if raw:
         try:
             rows = aggregate.aggregate_rows(json.loads(raw))
@@ -236,7 +255,11 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
         # Live-freshness overlay: union in task docs written since the last
         # reconcile (absent from this index). Any overlay problem flips ``ok`` so
         # the inbox source degrades visibly; the index rows are still served.
-        overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(transport, team, rows)
+        overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(
+            transport, team, rows, deadline=deadline)
+        if deadline is not None and deadline.expired():
+            return [], False, (overlay_reason or
+                               "caller row-load budget exhausted during overlay")
         return rows + overlay, overlay_ok, overlay_reason
     parent, entry = path.rsplit("/", 1)
     try:
@@ -244,6 +267,8 @@ def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], 
     except TransportError:
         # transport down -> unknown, not a confirmed-empty index
         return [], False, "summaries index unreadable"
+    if deadline is not None and deadline.expired():
+        return [], False, "caller row-load budget exhausted after index listing"
     if entry in names:
         # index there yet unreadable (read returned None) -> degraded
         return [], False, "summaries index unreadable"
@@ -916,6 +941,16 @@ DEFAULT_ROLE_FOLD_BUDGET = 20.0
 #: tick, on the watcher whose tick latency is load-bearing. 10s is a bounded
 #: fraction of the default 60s poll interval.
 DEFAULT_LISTEN_CLASSIFY_BUDGET = 10.0
+#: Dedicated budget for the caller-directed inbox head.  It is deliberately
+#: independent of the listener tail budget: role expansion and the global
+#: responses/reviews history must never spend the clock before literal-agent and
+#: wildcard directives have been checked.
+DEFAULT_LISTEN_HEAD_BUDGET = 10.0
+#: Shared aggregate budget for every non-head listener leg (role routing,
+#: responses, verdicts, and orphan classification).  The deadline opens at tick
+#: start, so an expensive head can legitimately leave less history work; the head
+#: itself has the independent budget above and therefore cannot be starved by it.
+DEFAULT_LISTEN_TAIL_BUDGET = 20.0
 
 # The `threads` fold/window defaults (DEFAULT_THREADS_*) live with the threads
 # command in `commands_threads.py`; they are re-exported onto `cli` at module end.
@@ -955,6 +990,18 @@ def _listen_classify_budget() -> float:
     classification pass. Env ``COORD_LISTEN_CLASSIFY_BUDGET`` (see the
     DEFAULT_LISTEN_CLASSIFY_BUDGET rationale)."""
     return config.env_float("COORD_LISTEN_CLASSIFY_BUDGET", DEFAULT_LISTEN_CLASSIFY_BUDGET)
+
+
+def _listen_head_budget() -> float:
+    """Dedicated caller-directed head budget, seconds. Env
+    ``COORD_LISTEN_HEAD_BUDGET``."""
+    return config.env_float("COORD_LISTEN_HEAD_BUDGET", DEFAULT_LISTEN_HEAD_BUDGET)
+
+
+def _listen_tail_budget() -> float:
+    """Shared non-head listener budget, seconds. Env
+    ``COORD_LISTEN_TAIL_BUDGET``."""
+    return config.env_float("COORD_LISTEN_TAIL_BUDGET", DEFAULT_LISTEN_TAIL_BUDGET)
 
 
 def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
@@ -2782,11 +2829,13 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 #      the await leg of `review request`, now that a verb-opened review notifies
 #      its reviewers atomically (so the `await verdicts` breadcrumb is genuine).
 #
-# Five failure SOURCES are tracked independently — inbox (summaries index),
+# Six failure SOURCES are tracked independently — inbox (summaries index / the
+# protected caller head),
 # responses (the responses subtree transport), orphans (a response whose owning
 # directive doc won't resolve), verdicts (the review root / a review doc /
-# a verdict shard unreadable), and roles (a role-lease listing unreadable while
-# resolving role-routed directives). Each is its own degraded streak.
+# a verdict shard unreadable), roles (a role-lease listing unreadable while
+# resolving role-routed directives), and tail (the shared non-head budget).
+# Each is its own degraded streak.
 #
 # Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
 #   * No false advance — a failed/None read during a tick must NOT mark unknown
@@ -2815,11 +2864,12 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 
 
 # The independent degraded streaks. Each source alarms once per its own streak.
-# `roles` (role-lease resolution for role-routed directives) is its own source:
+# `roles` (role-lease resolution for role-routed directives) and `tail` (shared
+# non-head budget exhaustion) are their own sources:
 # folding it into `inbox` would let a chronic role degradation pin that streak
 # and mask a fresh summaries outage — the independent-streak invariant. Legacy
 # state files lack the key; _coerce_degraded defaults it False (free migration).
-_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles")
+_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles", "tail")
 
 
 def _coerce_degraded(value: Any) -> dict[str, bool]:
@@ -2887,6 +2937,41 @@ def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
         _log.warning("listen state write failed", path=str(path), error=str(e))
 
 
+def _listen_inbox_phase(
+    transport: Any, team: str, agent: str, rows: list[dict[str, Any]],
+    *, seen: set[str], deadline: Deadline,
+    held_roles: "Optional[set[str]]" = None,
+) -> tuple[list[dict[str, Any]], bool, int, int]:
+    """Fold one inbox phase under its supplied deadline.
+
+    The protected head calls this with no roles (literal-agent + wildcard); the
+    shared tail calls it with only held-role rows. The candidate set is pure over
+    the already-loaded rows. Only fresh ack-shard checks cost transport. Returns
+    ``(rows, complete, scanned, total)``; an incomplete head is UNKNOWN and the
+    caller emits the distinct ``listen-head-degraded`` marker.  Seen ids are
+    excluded before ack reads, which keeps quiet ticks cheap.
+    """
+    now = _iso(_now())
+    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
+    candidates = directives.inbox(rows, acks, agent, now=now,
+                                   held_roles=held_roles)
+    candidates = [r for r in candidates
+                  if str(r.get("name") or "") not in seen]
+    out: list[dict[str, Any]] = []
+    scanned = 0
+    for i, row in enumerate(candidates):
+        if i and deadline.expired():
+            return out, False, scanned, len(candidates)
+        slug = str(row.get("name") or "")
+        ack = transport.read(_ack_path(team, slug, agent))
+        scanned += 1
+        if ack is None:
+            out.append(row)
+        if deadline.expired() and scanned < len(candidates):
+            return out, False, scanned, len(candidates)
+    return out, True, scanned, len(candidates)
+
+
 def _listen_tick(transport: Any, team: str, agent: str,
                  state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
@@ -2899,6 +2984,24 @@ def _listen_tick(transport: Any, team: str, agent: str,
 
     def _fail(source: str, msg: str) -> None:
         failures.setdefault(source, []).append(msg)
+
+    # The tail clock opens at tick start and is shared by every history/role leg.
+    # The literal-agent/wildcard inbox head below gets a separate fresh clock, so
+    # a drained shared budget can truncate only the tail — never caller-directed
+    # work.  ``tail`` owns one distinct failure streak/marker.
+    tail_dl = Deadline.open(_listen_tail_budget())
+    tail_cut = False
+
+    def _tail_ready(phase: str) -> bool:
+        nonlocal tail_cut
+        if tail_cut:
+            return False
+        if tail_dl.expired():
+            tail_cut = True
+            _fail("tail", f"listen-tail-degraded: shared budget spent before {phase}; "
+                  "caller-directed head was still served")
+            return False
+        return True
 
     inbox_ids = set(state["inbox_ids"])
     response_keys = set(state["response_keys"])
@@ -2915,11 +3018,31 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # directives routed to a fresh-lease ROLE this agent holds. An unreadable
     # summaries index is degraded, NOT a legitimately-empty inbox.
     now_iso = _iso(_now())
-    rows, inbox_ok, inbox_reason = _load_rows_status(transport, team)
+    head_dl = Deadline.open(_listen_head_budget())
+    rows, inbox_ok, inbox_reason = _load_rows_status(
+        transport, team, deadline=head_dl)
     if not inbox_ok:
         # The reason attributes WHICH leg failed (summaries index vs the freshness
         # overlay — different outages, same inbox source/streak).
-        _fail("inbox", inbox_reason or "summaries index unreadable")
+        _fail("inbox", "listen-head-degraded: " +
+              (inbox_reason or "summaries index unreadable"))
+    direct_head, head_complete, head_scanned, head_total = _listen_inbox_phase(
+        transport, team, agent, rows, seen=inbox_ids, deadline=head_dl)
+    if not head_complete:
+        _fail("inbox", "listen-head-degraded: caller-directed inbox budget spent "
+              f"after {head_scanned}/{head_total} items")
+    for r in direct_head:
+        slug = str(r.get("name") or "")
+        if not slug:
+            continue
+        owner = str(r.get("owner") or "?")
+        if owner == agent and not r.get("not_before"):
+            inbox_ids.add(slug)
+            continue
+        events.append({"type": "directive", "slug": slug,
+                       "owner": owner,
+                       "title": str(r.get("title") or slug)})
+        inbox_ids.add(slug)
     # Role expansion — the shared resolver (`_held_roles_for_rows`, which owns the
     # candidate bound and the fail-closed contract), narrowed HERE to UNSEEN
     # directives: an already-fired id needs no route, so a steady-state tick pays
@@ -2935,8 +3058,17 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # the route), so a new role holder sees a directive iff its id is unseen in
     # THEIR OWN state file (state is per-agent) — the holder-change semantics fall
     # out.
-    held_roles, unresolved_roles = _held_roles_for_rows(
-        transport, team, agent, rows, now=now_iso, skip_slugs=inbox_ids)
+    held_roles: set[str] = set()
+    unresolved_roles: set[str] = set()
+    if _tail_ready("role routing"):
+        remaining = (None if tail_dl.instant is None else
+                     max(0.0, tail_dl.instant - time.monotonic()))
+        role_budget = _role_fold_budget()
+        if remaining is not None:
+            role_budget = min(role_budget, remaining)
+        held_roles, unresolved_roles = _held_roles_for_rows(
+            transport, team, agent, rows, now=now_iso, skip_slugs=inbox_ids,
+            deadline_seconds=role_budget)
     for role in sorted(unresolved_roles):
         # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent may
         # miss role-routed work) on the DEDICATED `roles` source — never crash,
@@ -2944,8 +3076,16 @@ def _listen_tick(transport: Any, team: str, agent: str,
         # load-bearing: a chronic role degradation must not pin the inbox streak
         # and mask a fresh summaries outage.
         _fail("roles", f"role lease unknown for {role}")
-    inbox = _directed_inbox(transport, team, agent, rows,
-                            held_roles=held_roles or None)
+    # Direct rows were consumed by the protected head.  Restrict this shared-tail
+    # pass to actual held-role rows so it cannot repeat their ack reads.
+    role_rows = [r for r in rows if str(r.get("assignee") or "") in held_roles]
+    inbox: list[dict[str, Any]] = []
+    if held_roles and _tail_ready("role inbox"):
+        inbox, role_complete, _role_scanned, _role_total = _listen_inbox_phase(
+            transport, team, agent, role_rows, seen=inbox_ids, deadline=tail_dl,
+            held_roles=held_roles)
+        if not role_complete:
+            _tail_ready("role inbox completion")
     for r in inbox:
         slug = str(r.get("name") or "")
         if not slug or slug in inbox_ids:
@@ -2970,12 +3110,15 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # Source 2 — new responses to directives THIS agent owns. One list_dir of the
     # responses root; per-slug work only for owned slugs, ownership cached.
     prefix = _responses_prefix(team)
-    try:
-        entries = transport.list_dir(prefix)
-    except TransportError as e:
-        _fail("responses", f"responses listing unreadable ({e})")
-        entries = None
+    entries = None
+    if _tail_ready("responses"):
+        try:
+            entries = transport.list_dir(prefix)
+        except TransportError as e:
+            _fail("responses", f"responses listing unreadable ({e})")
     for e in entries or []:
+        if not _tail_ready("response classification"):
+            break
         raw = e.get("name") or ""
         if not (e.get("is_dir") or raw.endswith("/")):
             continue  # only slug dirs live here
@@ -3006,6 +3149,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
             owned = owner == agent  # owner is the directive's SENDER; broadcast/absent -> not owned
             slug_owned[slug] = owned  # definitive classification: cache it
             flagged_orphan_responses.discard(slug)  # recovered -> re-arm fail-loud
+            if not _tail_ready("response ownership"):
+                break
         if not owned:
             continue  # responses to other-owner / broadcast directives are noise
         try:
@@ -3014,6 +3159,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
             _fail("responses", f"response dir {slug} unreadable ({ex})")
             continue
         for se in stamps:
+            if not _tail_ready("response shards"):
+                break
             sname = se.get("name") or ""
             if se.get("is_dir") or not sname.endswith(".md"):
                 continue
@@ -3040,14 +3187,18 @@ def _listen_tick(transport: Any, team: str, agent: str,
     review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
     verdict_keys = set(state.get("verdict_keys") or [])
     settled_reviews = set(state.get("settled_reviews") or [])
-    settled_reviews.update(rec._load_settled_index(transport, team))
+    if _tail_ready("settled-review index"):
+        settled_reviews.update(rec._load_settled_index(transport, team))
     review_prefix = f"team/{team}/review/"
-    try:
-        rentries = transport.list_dir(review_prefix)
-    except TransportError as e:
-        _fail("verdicts", f"review listing unreadable ({e})")
-        rentries = None
+    rentries = None
+    if _tail_ready("verdicts"):
+        try:
+            rentries = transport.list_dir(review_prefix)
+        except TransportError as e:
+            _fail("verdicts", f"review listing unreadable ({e})")
     for e in rentries or []:
+        if not _tail_ready("review classification"):
+            break
         name = e.get("name") or ""
         # The review DOCS are the `.md` entries; `{slug}/` dirs hold the verdicts.
         if e.get("is_dir") or not name.endswith(".md"):
@@ -3078,6 +3229,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
             requested = str(fm.get("requested_by") or "").strip() == agent
             review_requested[slug] = requested  # definitive classification: cache
             flagged_orphan_verdicts.discard(slug)  # recovered -> re-arm fail-loud
+            if not _tail_ready("review requester"):
+                break
         if not requested:
             continue  # someone else's review -> noise
         try:
@@ -3095,6 +3248,9 @@ def _listen_tick(transport: Any, team: str, agent: str,
         # Cost stays bounded: only unseen shards are read, once per slug lifetime.
         unread = False
         for ve in ventries:
+            if not _tail_ready("verdict shards"):
+                unread = True
+                break
             vname = ve.get("name") or ""
             if ve.get("is_dir") or not vname.endswith(".md"):
                 continue  # `.settled` and dirs are not verdict shards
@@ -3155,6 +3311,8 @@ def _listen_tick(transport: Any, team: str, agent: str,
                      if not e.get("is_dir") and (e.get("name") or "").endswith(".md")}
         classify_dl = Deadline.open(_listen_classify_budget())
         for e in rentries:
+            if not _tail_ready("orphan review classification"):
+                break
             if not e.get("is_dir"):
                 continue
             oslug = (e.get("name") or "").rstrip("/")
@@ -3173,6 +3331,11 @@ def _listen_tick(transport: Any, team: str, agent: str,
                 _fail("verdicts", f"orphan dir {oslug} unclassifiable "
                       f"(verdicts listing unreadable)")
             # tombstone -> silently skipped, never cached
+
+    # Final after-op check: a last blocking read/list that crossed the aggregate
+    # deadline must not return a falsely clean tick merely because there is no
+    # next iteration whose pre-op guard would observe it.
+    _tail_ready("tail completion")
 
     state["inbox_ids"] = sorted(inbox_ids)
     state["response_keys"] = sorted(response_keys)

@@ -192,6 +192,14 @@ it (not on PyPI).
   the bus or a model; without source-side push, idle cadence is maximum pickup
   latency. Model-backed harness automations that cannot reschedule themselves
   retain a coarse safety net instead of emulating adaptation in prompt text.
+  **The listen fold is head/tail budgeted:** literal-agent and wildcard directives
+  are the caller-directed head and run first under their dedicated
+  `COORD_LISTEN_HEAD_BUDGET`; role routing plus response/review history is the tail
+  under shared `COORD_LISTEN_TAIL_BUDGET`. `listen-head-degraded` means the caller's
+  own head is UNKNOWN and is incident-grade; `listen-tail-degraded` means the
+  non-head tail truncated and will retry. Shared tail work may never drain the head
+  budget. **A listener loop must never die on degradation:** degraded folds back
+  off and keep beating; only affirmative delivery or the configured horizon exits.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
@@ -538,7 +546,7 @@ it (not on PyPI).
   line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`; `--json` = one object per line);
   a quiet tick prints NOTHING. It never advances state over an unread tick (a failed read re-surfaces the
   pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** across
-  five independent sources (`inbox`, `responses`, `orphans`, `verdicts`, `roles`) — so a permanent orphan
+  six independent sources (`inbox`, `responses`, `orphans`, `verdicts`, `roles`, `tail`) — so a permanent orphan
   can't pin the flag and silence a fresh outage. `--once` exits **3** when its tick captured degraded
   sources; exit 0 means clean/nothing-new — run it on a scheduler, or bare for a poll loop (`--interval`,
   SIGINT-clean). Every send verb
