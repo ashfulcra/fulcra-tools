@@ -62,13 +62,25 @@ A user-defined data type, created once via `data-type create`, schema versioned:
 - **Writer:** the engine, at the same `main()` dispatch chokepoint W1.5 established — one
   seam, keyed on the same write-verb set (as extended by W2's opening commit). Actor is the
   writer, never a target.
-- **Event identity (normative dedup rule):** every record carries
-  `event_id = sha256("<subject_path>|<event>|<shard mtime or write ts>|<actor>")[:16]` —
-  deterministic from the canonical write, so a retry or back-fill (§3.1) re-produces the SAME
-  logical event. The record store is append-only, so duplicate physical records are possible
-  by design; **readers dedupe on `event_id`** and duplicate physical records are semantically
-  invisible. Red-first pin: a double write/back-fill of one logical event folds identically
-  to a single write.
+- **Event identity (normative dedup rule):** every record carries the FULL digest
+  `event_id = sha256("<subject_path>|<event>|<sha256 of the shard bytes>")` — no timestamp
+  and no writer-local input participates in identity. Both writers derive it identically by
+  construction: the immediate mirror hashes the exact bytes it just uploaded; back-fill
+  (§3.1) downloads the shard at `subject_path` and hashes the same bytes; `event` is derived
+  from the path class (`task/` ⇒ directive lifecycle, `_coord/responses/` ⇒ response,
+  `review/**/verdicts/` ⇒ verdict-filed, `presence/` ⇒ presence-beat, …), reproducible from
+  the path alone. The actor rides in the record body, derivable from the shard frontmatter —
+  never in the identity. **Convergence rule for superseded intermediates (explicit):** if the
+  shard was rewritten again before back-fill ran, back-fill necessarily produces the id of
+  the LATEST bytes, which collides with (and dedupes into) the newest mutation's own event —
+  the missed intermediate is subsumed by the state that replaced it, which is correct for
+  folds that reconstruct current state; per-mutation history is explicitly NOT a goal of the
+  mirror (the feed remains the complete change ledger). The record store is append-only, so
+  duplicate physical records are possible by design; **readers dedupe on `event_id`** and
+  duplicates are semantically invisible. Red-first pins: (a) double write/back-fill of one
+  logical event folds identically to a single write; (b) immediate-mirror and back-fill
+  writers given INTENTIONALLY different local clocks / feed timestamps still produce one
+  logical event after back-fill (timestamps cannot influence identity).
 - **Reader:** folds query `get-records CoordEvent <range>` and reconstruct deltas without
   listing or re-reading unchanged shards — subject to the §3.1 completeness contract.
   `payload` carries only fold-relevant fields already public in the shard (assignee, status,
