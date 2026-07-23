@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from . import router
+
 _KEY = re.compile(r"^[A-Za-z0-9_./:-]{1,512}$")
 
 
@@ -166,11 +168,6 @@ def _quarantine_invalid_claim(claim: Path, canonical: Path) -> None:
     )
 
 
-def alignment_filename(key: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", key).strip("-") or "alignment"
-    return f"{safe[:96]}-{hashlib.sha256(key.encode()).hexdigest()[:8]}.json"
-
-
 def align_routine(
     transport: Any,
     team: str,
@@ -181,23 +178,31 @@ def align_routine(
 ) -> str:
     """Record work for an agent's *existing, self-armed* cloud Routine.
 
-    This is alignment/bookkeeping, not an exact-session wake.  The marker lives
-    solely in the router-owned namespace and says so explicitly.
+    This is alignment/bookkeeping, not an exact-session wake. Its evidence is
+    the standard router delivery record, extended with Routine-specific fields.
     """
     agent, key = _invocation(inv, "routine-align")
     aligned_at = aligned_at or datetime.now(timezone.utc).isoformat(
         timespec="seconds").replace("+00:00", "Z")
-    record = {
+    suffix = f":{agent}"
+    if not key.endswith(suffix) or len(key) == len(suffix):
+        raise ValueError(
+            "routine-align idempotency_key is not <source_shard>:<agent>")
+    entry = {
+        "adapter": "routine-align",
         "agent": agent,
-        "aligned_at": aligned_at,
+        "executor": router.DECISION_PLANE,
+        "source_shard": key[:-len(suffix)],
+    }
+    record = {
+        **router.delivery_record(entry, delivered_at=aligned_at),
         "eligible_at": eligible_at,
-        "key": key,
         "mode": "self-armed-routine",
         "no_session_created": True,
     }
     path = (
-        f"team/{team}/_coord/router/routine-align/"
-        f"{alignment_filename(key)}"
+        f"{router.router_prefix(team)}delivered/"
+        f"{router.record_filename(key)}"
     )
     if transport.write(path, json.dumps(record, sort_keys=True) + "\n") is False:
         raise RuntimeError(f"routine alignment write failed: {path}")

@@ -136,21 +136,33 @@ def test_routine_alignment_is_router_owned_and_never_claims_a_wake(tmp_path):
     path = wake_adapters.align_routine(
         transport, "fulcra", inv, eligible_at="2026-07-23T20:30:00Z",
         aligned_at="2026-07-23T20:00:00Z")
-    assert path.startswith("team/fulcra/_coord/router/routine-align/")
+    assert path.startswith("team/fulcra/_coord/router/delivered/")
     record = json.loads(transport.store[path])
     assert record == {
+        "adapter": "routine-align",
         "agent": "codex:box:repo",
-        "aligned_at": "2026-07-23T20:00:00Z",
+        "delivered_at": "2026-07-23T20:00:00Z",
         "eligible_at": "2026-07-23T20:30:00Z",
+        "executor": "decision-plane",
         "key": "task/w6:codex:box:repo",
         "mode": "self-armed-routine",
         "no_session_created": True,
+        "source_shard": "task/w6",
     }
     # Same key self-overwrites: one durable alignment, no duplicate session.
     assert wake_adapters.align_routine(
         transport, "fulcra", inv, eligible_at="2026-07-23T20:30:00Z",
         aligned_at="2026-07-23T20:00:00Z") == path
     assert len(transport.store) == 1
+
+
+def test_routine_alignment_rejects_noncanonical_key():
+    with pytest.raises(ValueError, match="not <source_shard>:<agent>"):
+        wake_adapters.align_routine(
+            FakeTransport(), "fulcra",
+            {**INV, "adapter": "routine-align",
+             "idempotency_key": "unrelated-key"},
+            eligible_at="2026-07-23T20:30:00Z")
 
 
 def test_routine_alignment_write_failure_is_not_delivery():

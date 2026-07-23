@@ -319,9 +319,10 @@ no durable background pickup on this tier; anything that must not wait for a
 routine belongs with an agent on a host tier.
 
 The router's `routine-align` adapter does not wake or create a cloud session. It writes one
-idempotency-keyed marker under `team/<team>/_coord/router/routine-align/` with
-`mode: self-armed-routine`, `eligible_at`, and `no_session_created: true`. That marker records that
-queued work has been aligned to the agent's already-existing Routine; the Routine's normal
+idempotency-keyed standard delivery record under `team/<team>/_coord/router/delivered/`, extended with
+`mode: self-armed-routine`, `eligible_at`, and `no_session_created: true`. For this lane, “delivered”
+means alignment-recorded: queued work has been aligned to the agent's already-existing Routine, and
+the Routine's normal
 SessionStart/briefing reads the authoritative bus. Treating this marker as an exact-session wake is a
 contract violation.
 
