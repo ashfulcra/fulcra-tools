@@ -4938,6 +4938,21 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         print("router: SHADOW pass — W7 read-only acceptance measurement; a "
               "decision is logged + persisted per directed item, nothing "
               "enqueued or executed", file=sys.stderr)
+        mark_path = (prefix + router.SHADOW_MARKS_SUBPATH
+                     + router.shadow_mark_bucket(now))
+        try:
+            raw_mark = transport.read(mark_path)
+            existing_mark = json.loads(raw_mark) if raw_mark else None
+        except (TransportError, ValueError) as e:
+            print(f"router: shadow mark {mark_path} is unreadable ({e}) — pass "
+                  "measurement UNKNOWN; refusing to overwrite",
+                  file=sys.stderr)
+            return 1
+        mark = router.shadow_mark_record(existing_mark, at=router.iso(now))
+        if not transport.write(mark_path, json.dumps(mark, sort_keys=True) + "\n"):
+            print("router: shadow pass-mark write failed — pass measurement "
+                  "UNKNOWN", file=sys.stderr)
+            return 1
 
     agents_cfg, _executors, cfg_errors = router.validate_config(
         transport.read(prefix + "config.json"))
@@ -5463,7 +5478,8 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
     prefix = router.router_prefix(args.team)
     unknown: list[str] = []
 
-    def _rows(subpath: str) -> list[dict[str, Any]]:
+    def _rows(subpath: str, *, timestamp: str,
+              required: tuple[str, ...]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         try:
             entries = transport.list_dir(prefix + subpath)
@@ -5480,10 +5496,12 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
             except (TransportError, ValueError) as e:
                 unknown.append(f"{subpath}{name} unreadable: {e}")
                 continue
-            if isinstance(doc, dict):
+            if (isinstance(doc, dict)
+                    and all(doc.get(field) is not None for field in required)
+                    and router.parse_iso(doc.get(timestamp)) is not None):
                 rows.append(doc)
             else:
-                unknown.append(f"{subpath}{name} is not an object")
+                unknown.append(f"{subpath}{name} malformed required fields")
         return rows
 
     try:
@@ -5493,11 +5511,52 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
         window = None
         unknown.append(f"shadow-window unreadable: {e}")
     start = window.get("started_at") if isinstance(window, dict) else None
-    if router.parse_iso(start) is None:
+    started = router.parse_iso(start)
+    try:
+        min_hours = int(window.get("min_hours", 48))
+    except (AttributeError, TypeError, ValueError):
+        min_hours = 0
+    if started is None or min_hours < 48:
         unknown.append("shadow-window marker missing or invalid")
 
-    decisions = _rows(router.SHADOW_DECISIONS_SUBPATH)
-    evidence = _rows(router.SHADOW_EVIDENCE_SUBPATH)
+    decisions = _rows(
+        router.SHADOW_DECISIONS_SUBPATH, timestamp="decided_at",
+        required=("key", "agent", "decision", "decided_at"))
+    evidence = _rows(
+        router.SHADOW_EVIDENCE_SUBPATH, timestamp="delivered_at",
+        required=("key", "agent", "path", "delivered_at"))
+    for row in decisions:
+        if (not isinstance(row.get("key"), str)
+                or not isinstance(row.get("agent"), str)
+                or row.get("decision") not in router.DECISIONS):
+            unknown.append("shadow-decisions contains malformed record")
+    for row in evidence:
+        if (not isinstance(row.get("key"), str)
+                or not isinstance(row.get("agent"), str)
+                or row.get("path") not in router.SHADOW_EVIDENCE_PATHS):
+            unknown.append("shadow-evidence contains malformed record")
+    mark_rows = _rows(
+        router.SHADOW_MARKS_SUBPATH, timestamp="last",
+        required=("bucket", "first", "last", "count"))
+    pass_marks: list[str] = []
+    for mark in mark_rows:
+        first = router.parse_iso(mark.get("first"))
+        last = router.parse_iso(mark.get("last"))
+        count = mark.get("count")
+        if (first is None or last is None or first > last
+                or not isinstance(count, int) or count < 1 or count > 10000):
+            unknown.append(f"{router.SHADOW_MARKS_SUBPATH}"
+                           f"{mark.get('bucket')} has invalid bounds/count")
+            continue
+        if count == 1:
+            pass_marks.append(router.iso(last))
+        else:
+            step = (last - first) / (count - 1)
+            pass_marks.extend(router.iso(first + step * i)
+                              for i in range(count))
+    if not mark_rows:
+        unknown.append("shadow-marks population missing")
+
     store_keys: set[str] = set()
     try:
         task_entries = transport.list_dir(f"team/{args.team}/task/")
@@ -5515,11 +5574,57 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
             unknown.append(f"task/{name} unreadable: {e}")
             continue
         assignee = str((fm or {}).get("assignee") or "").strip()
-        status = str((fm or {}).get("status") or "").strip().lower()
-        if assignee and assignee != "*" and status not in router.TERMINAL_STATUSES:
+        if assignee and assignee != "*":
             store_keys.add(router.idempotency_key(name[:-3], assignee))
 
     end = router.iso(_now())
+    ended = router.parse_iso(end)
+    feed_slugs: set[str] = set()
+    updates_fn = getattr(transport, "updates", None)
+    if started is not None and ended is not None and updates_fn is not None:
+        seconds = max(0, int((ended - started).total_seconds()) + 120)
+        try:
+            try:
+                changes = updates_fn(f"{seconds} seconds", team=args.team)
+            except TypeError:
+                changes = updates_fn(f"{seconds} seconds")
+        except Exception:
+            changes = None
+        if not isinstance(changes, list):
+            unknown.append("data-updates task population unreadable")
+        else:
+            task_prefix = f"team/{args.team}/task/"
+            for change in changes:
+                if not isinstance(change, dict):
+                    unknown.append("data-updates contains malformed change")
+                    continue
+                path = change.get("path", change.get("full_name"))
+                if (isinstance(path, str) and path.startswith(task_prefix)
+                        and path.endswith(".md")):
+                    lifecycle = [
+                        router.parse_iso(change.get(field))
+                        for field in ("uploaded_at", "archived_at", "deleted_at")
+                    ]
+                    lifecycle = [ts for ts in lifecycle if ts is not None]
+                    if not lifecycle:
+                        unknown.append(
+                            f"data-updates task change for {path} has no "
+                            "valid lifecycle timestamp")
+                    elif any(started <= ts <= ended for ts in lifecycle):
+                        feed_slugs.add(path[len(task_prefix):-3])
+    else:
+        unknown.append("data-updates task population unavailable")
+
+    # A deleted shard cannot supply its assignee at report time. Decisions do:
+    # union keys whose source slug appeared in the append-only feed window.
+    for decision in decisions:
+        key, agent = decision.get("key"), decision.get("agent")
+        suffix = f":{agent}"
+        if isinstance(key, str) and key.endswith(suffix):
+            source = key[:-len(suffix)]
+            if source in feed_slugs:
+                store_keys.add(key)
+
     if unknown:
         report: dict[str, Any] = {
             "pass": False, "verdict": "UNKNOWN", "unknown": unknown,
@@ -5529,9 +5634,16 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
     else:
         report = router.shadow_report(
             decisions, evidence, store_keys=store_keys,
-            pass_marks=[d["decided_at"] for d in decisions
-                        if isinstance(d.get("decided_at"), str)],
+            pass_marks=pass_marks,
             window_start=start, window_end=end)
+        elapsed_hours = ((ended - started).total_seconds() / 3600.0
+                         if ended is not None and started is not None else 0.0)
+        report["duration"] = {
+            "elapsed_hours": round(elapsed_hours, 4),
+            "min_hours": min_hours,
+        }
+        report["gates"]["window_duration"] = elapsed_hours >= min_hours
+        report["pass"] = all(report["gates"].values())
         report["verdict"] = "PASS" if report["pass"] else "FAIL"
         rc = 0 if report["pass"] else 1
     if getattr(args, "json", False):

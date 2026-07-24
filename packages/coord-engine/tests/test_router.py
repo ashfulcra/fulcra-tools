@@ -727,6 +727,9 @@ def test_router_shadow_mode_persists_decisions_enqueues_nothing():
         AGENT, "interrupt", f"urgent-1:{AGENT}")
     cur = json.loads(t.store[RP + "cursor.json"])
     assert f"urgent-1:{AGENT}" in cur["processed"]       # cursor still advances
+    marks = [json.loads(c) for p, c in t.store.items()
+             if p.startswith(RP + router.SHADOW_MARKS_SUBPATH)]
+    assert len(marks) == 1 and marks[0]["count"] == 1
 
 
 def test_router_shadow_arm_writes_marker_and_is_idempotent(capsys):
@@ -755,6 +758,116 @@ def test_router_shadow_report_missing_population_is_unknown_json(capsys):
     assert report["verdict"] == "UNKNOWN"
     assert report["pass"] is False
     assert any("shadow-window" in reason for reason in report["unknown"])
+
+
+def _put_healthy_marks(t, start, hours):
+    from datetime import timedelta
+    for hour in range(hours):
+        first = start + timedelta(hours=hour)
+        last = first + timedelta(minutes=59)
+        record = {
+            "bucket": router.iso(first)[:13],
+            "first": router.iso(first),
+            "last": router.iso(last),
+            "count": 60,
+        }
+        t.put(RP + router.SHADOW_MARKS_SUBPATH
+              + router.shadow_mark_bucket(first), json.dumps(record))
+    end = start + timedelta(hours=hours)
+    t.put(RP + router.SHADOW_MARKS_SUBPATH
+          + router.shadow_mark_bucket(end), json.dumps({
+              "bucket": router.iso(end)[:13], "first": router.iso(end),
+              "last": router.iso(end), "count": 1}))
+
+
+def test_shadow_report_cli_happy_completed_task_passes(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    key = f"done-item:{AGENT}"
+    t.put(RP + router.SHADOW_DECISIONS_SUBPATH + "d.json",
+          json.dumps(_dec(key, decided_at="2026-07-23T12:01:00Z")))
+    t.put(RP + router.SHADOW_EVIDENCE_SUBPATH + "e.json",
+          json.dumps(_ev(key)))
+    t.put(TASKP + "done-item.md",
+          _task("done-item", AGENT, "P1", status="done"))
+    _put_healthy_marks(t, start, 48)
+
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "PASS"
+    assert report["classes"][key] == "matched"
+    assert report["gates"]["window_duration"] is True
+
+
+def test_shadow_report_cli_quiet_pass_marks_prove_uptime(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    _put_healthy_marks(t, start, 48)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
+    assert json.loads(capsys.readouterr().out)["duty_cycle"]["uptime"] >= .95
+
+
+def test_shadow_report_cli_feed_proves_deleted_task_existed(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([{"path": TASKP + "deleted-item.md", "state": "deleted",
+                 "deleted_at": "2026-07-23T18:00:00Z"}])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    key = f"deleted-item:{AGENT}"
+    t.put(RP + router.SHADOW_DECISIONS_SUBPATH + "d.json",
+          json.dumps(_dec(key, decided_at="2026-07-23T12:01:00Z")))
+    t.put(RP + router.SHADOW_EVIDENCE_SUBPATH + "e.json",
+          json.dumps(_ev(key)))
+    _put_healthy_marks(t, start, 48)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
+    assert json.loads(capsys.readouterr().out)["classes"][key] == "matched"
+
+
+def test_shadow_report_cli_rejects_short_window(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    monkeypatch.setattr(cli, "_now", lambda: start + timedelta(hours=1))
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    _put_healthy_marks(t, start, 1)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "FAIL"
+    assert report["gates"]["window_duration"] is False
+
+
+def test_shadow_report_cli_malformed_record_is_unknown(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    monkeypatch.setattr(cli, "_now", lambda: start + timedelta(hours=48))
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    t.put(RP + router.SHADOW_DECISIONS_SUBPATH + "bad.json",
+          json.dumps({"key": "bad", "agent": AGENT, "decision": "interrupt",
+                      "decided_at": "not-a-time"}))
+    _put_healthy_marks(t, start, 48)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    assert json.loads(capsys.readouterr().out)["verdict"] == "UNKNOWN"
 
 
 def test_router_run_json_is_one_document_and_details_are_stderr(capsys):
