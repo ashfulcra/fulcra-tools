@@ -184,6 +184,40 @@ it (not on PyPI).
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
+- **Thin host executor (W5.5).** `coord-engine router execute <team> [--host
+  <id>] [--once] [--dry-run]` is the SOLE executor for host-local adapters
+  (`codex-exec-resume`, `openclaw-post`, `macos-notify`, `queued-wake-file`). It
+  is **policy-free and has no config authority**: it makes no wake decisions (W4
+  did, stamping `executor`/`adapter` into the queue entry — the trusted routing
+  source) and re-runs no policy — an entry present in the queue executes
+  regardless of priority; it reads `config.json` only for the host-resolved
+  `adapter_args` routing target. Per pass it drains exactly the queue entries
+  whose `executor` matches this host's id (default `_host()`), skips any whose
+  delivery-record already exists (**idempotency-keyed skip — never re-invoke**),
+  skips a fresh claim held by another process, then **persists its own claim to
+  the entry BEFORE invoking** (claim-then-invoke: `claimed_by` names the claiming
+  process, `claimed_at` stamps the window) — a claim that does not persist blocks
+  the invoke and leaves the entry visibly queued (**no wake without a persisted
+  claim**), so the side-effect window is always claimed and the claim-holder owns
+  the delivered/dead-letter transition; the claim stays advisory (a stale claim
+  never wedges an entry — a resident process still retries its own). It fires the
+  sanctioned host-local adapter through one invoker seam, and records the outcome:
+  success ⇒ an idempotency-keyed `delivered/` shard
+  (the `fold_delivered` view reads it), failure ⇒ bounded retry (`attempts` ≤
+  `MAX_DELIVERY_ATTEMPTS`) then a **dead-letter transition** (`{attempts,
+  last_error, gave_up_at}` under `dead-letter/`, owned as claim-holder); a
+  non-host-local or unknown adapter dead-letters immediately. Delivery is
+  **at-least-once and safe by the keyed-nudge content rule** — the wake carries
+  no per-event command, so executing the same entry twice converges to one bus
+  check (the §2 acceptance test). **Read-contract, fail-visible:** a queue or
+  `delivered/` listing that RAISES is UNKNOWN-degraded — reported loudly, no
+  execution, wakes stay VISIBLY queued and the command exits non-zero (a dead
+  executor never reports a clean "0 delivered"); a per-entry read that is
+  None/unparseable is SKIPPED (never invoke on an UNKNOWN entry). The default
+  invoker wires no real adapter (reports `unconfigured`, wake stays queued), so
+  the command wakes nothing on its own — **DEPLOYMENT (wiring the real adapter
+  scripts and scheduling the poller on a host) is a separate Ash-gated step.**
+  Contract: [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) W5.5 + §2.
 - **Durable tooling stash.** An agent's operational bundle (scripts, loops,
   config templates) survives ephemeral machines via
   `coord-engine stash push/pull/list` against
@@ -727,6 +761,20 @@ it (not on PyPI).
     **never trust it as complete**. `--json` is ONE array (dropped items + the optional
     degraded element), not JSON-Lines — see the `--json` purity doctrine above. coord-boss runs
     `threads fulcra --for ash --json` in its loop and owns the curation/push call.
+- **Blocked-on-operator doctrine — a harness approval-gate is a bus event
+  (operator order, 2026-07-23, after the W5 stall).** When work waits on an
+  operator/harness approval that only a human can grant (a "nod before you build",
+  a deploy sign-off, an entered credential, any approval you cannot self-serve),
+  the blocked agent does THREE things the same turn, not one: (1) immediately post
+  a **P1 BLOCKED-ON-OPERATOR** shard to coord-boss naming the EXACT approval and
+  the EXACT artifact it gates (PR #, slug, host) — so the block is a visible,
+  routable bus item, not a private wait; (2) **continue all non-blocked work** —
+  the block scopes to the gated artifact, never to the agent; idle-while-blocked
+  on one item when other work is ready is itself a failure; (3) **keep beating** —
+  a blocked agent is still live and must stay so. **Silence-while-blocked is a
+  protocol violation:** never let an operator approval turn into an invisible stall
+  (the failure this codifies). The operator's absence is never approval — surface
+  the block loudly and persistently, and take the other ready work meanwhile.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
   `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
   model that covers the work, and log the outcome after:
