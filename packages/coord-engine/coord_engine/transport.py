@@ -383,6 +383,23 @@ class FulcraFileTransport:
         except TransportError:
             return False
 
+    def delete_idempotent(self, path: str) -> bool:
+        """Ensure ``path`` is absent with an authoritative delete operation.
+
+        Success means either the server deleted the file or explicitly reported
+        that the exact path was already absent. Timeouts, execution failures, and
+        every other remote error remain false; eventually-consistent listings and
+        ambiguous ``read() -> None`` results are never used as absence evidence.
+        """
+        try:
+            cp = self._run(["delete", path])
+        except TransportError:
+            return False
+        return (
+            cp.returncode == 0
+            or "File not found in Fulcra:" in (cp.stderr or "")
+        )
+
 
 class TransportError(RuntimeError):
     pass

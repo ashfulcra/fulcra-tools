@@ -37,7 +37,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
-| Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
+| Review handshake | `review` (request/status) — one `pr-N` slug advances through exact `--head` rounds; obligation persists until active-head verdict files exist |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
 | Wake routing | `router` (`run` — feed-first policy plane, direct cloud-adapter execution, host-local queue; `execute` — thin host-local executor; [plan](../../docs/coord/wake-router-PLAN.md)) |

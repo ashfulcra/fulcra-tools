@@ -309,22 +309,33 @@ it (not on PyPI).
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
   a direct push to `main`**. The handshake rides the bus, not the forge:
-  `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
+  `coord-engine review request <team> <slug> --of <artifact> [--head <exact-sha>]
+  --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
-  verdict file exists at `team/<team>/review/<slug>/verdicts/<role>.md` (the
-  filename stem is the `required` token — the role passed to `--reviewer` — not
-  the holder's own name; that stem is what the tally credits).
+  verdict file exists at the exact path the command echoes (the required token
+  is the role passed to `--reviewer`, not the holder's own name; that token is
+  what the tally credits).
+  **One PR has one review slug (`pr-N`), across every push.** Pass the PR URL as
+  `--of` and the full 40- or 64-hex commit id as `--head`. Re-requesting that
+  same slug/PR/requester/required-set with a NEW head advances the same review
+  doc to the next round; verdicts append at
+  `verdicts/<head>--<required-token>.md`, and the verdict frontmatter must repeat
+  that exact `head`. `review status` folds ONLY the active head, reports its
+  `head` + `round`, and ignores superseded-head verdicts without deleting them.
+  This keeps exact-head rigor without `pr-N-r2`/`r3` slug ceremony. Legacy or
+  non-code reviews may omit `--head` and retain `verdicts/<required-token>.md`.
   The request is **durable-first, not atomic**: the review doc lands FIRST (that
   doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened
   review fires each reviewer's inbox/`listen` — never hand-send a review tell),
   and a partial notification failure is reported loud (rc 1) naming exactly which
   reviewers were and were not notified — and is **idempotently recoverable**: re-running the SAME
-  request (same `of`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
+  request (same `of`/`--head`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
   only the reviewers a prior partial failure dropped (the doc is left byte-unchanged,
   already-delivered directives dedupe rc 0), so no reviewer is stranded by the
   exists-guard; a re-request with a *different* `of`/required-set/requester is a
-  loud rc 1 conflict (a changed required set re-opens only via a new slug), and a
+  loud rc 1 conflict (a changed required set re-opens only via a new slug), while
+  a different valid `--head` is the sanctioned next round, and a
   present-but-unreadable doc fails closed (rc 1, never overwritten);
   `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
   and gates the merge. The `<artifact>` is an opaque ref (PR#, branch, commit

@@ -1069,11 +1069,10 @@ def _verdicts_prefix(team: str, slug: str) -> str:
 # outstanding required reviewers, a tiny cache marker is dropped IN the verdicts
 # prefix (so the ONE listing the fold already does reveals it — zero extra
 # reads). It is not a `.md` file, so the verdict-reading loop already ignores it.
-# CONTRACT: a settled review is IMMUTABLE — a new verdict on it is a no-op by
-# definition (already APPROVED, required list frozen), and changing the required
-# set re-opens the review only via a NEW slug. The marker is a fold cache, never
-# a source of truth: `review status` recomputes the full tally every time and so
-# self-heals a wrong/stale marker on direct query.
+# CONTRACT: a settled ROUND is immutable. A new exact head advances the same PR
+# slug and clears this marker; changing artifact/requester/required set still
+# needs a NEW slug. The marker is a fold cache, never a source of truth:
+# `review status` recomputes the active-head tally every time.
 SETTLED_MARKER = ".settled"
 
 #: Aggregate deadline (seconds) for ``_pending_reviews_for`` — never let a degraded
@@ -1117,6 +1116,20 @@ DEFAULT_LISTEN_TAIL_BUDGET = 20.0
 
 def _settled_marker_path(team: str, slug: str) -> str:
     return _verdicts_prefix(team, slug) + SETTLED_MARKER
+
+
+def _clear_settled_marker(transport: Any, team: str, slug: str) -> bool:
+    """Authoritatively clear a prior round's fold cache, failing closed.
+
+    A head advance must become visible to ``needs-me`` before reviewers are
+    notified. The transport operation is idempotent: only a successful deletion
+    or the server's explicit exact-path-not-found response proves absence.
+    """
+    marker_path = _settled_marker_path(team, slug)
+    return bool(
+        hasattr(transport, "delete_idempotent")
+        and transport.delete_idempotent(marker_path)
+    )
 
 
 def _review_fold_budget() -> float:
@@ -1224,6 +1237,7 @@ def _tally_from_verdict_entries(
     trust (it counts the slug as skipped, surfaces the degraded marker). None
     (``review status``, no budget) never bounds and always scans fully."""
     req_doc = okf.parse_frontmatter(doc_raw) or {}
+    head = review.normalize_head(req_doc.get("head"))
     required = req_doc.get("required")
     if isinstance(required, str):
         required = [r.strip() for r in required.split(",") if r.strip()]
@@ -1236,6 +1250,11 @@ def _tally_from_verdict_entries(
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        reviewer = review.reviewer_from_filename(n, head=head)
+        if reviewer is None:
+            # A keyed review reads only the active head's append-only shards;
+            # legacy reviews ignore keyed files. Superseded heads cost zero reads.
             continue
         if dl.expired():
             # Budget expired mid-slug: stop reading shards. The tally built so far
@@ -1253,11 +1272,23 @@ def _tally_from_verdict_entries(
         if raw_v is None:
             reads_ok = False  # listed file unreadable -> tally is incomplete
         fm = okf.parse_frontmatter(raw_v) or {}
-        # Key by the FILENAME stem (ACL-controlled path), not the frontmatter
+        if head and review.normalize_head(fm.get("head")) != head:
+            # The path selects the round, and the verdict must independently
+            # attest the exact reviewed head. A mismatch cannot discharge it.
+            continue
+        # Key by the requirement token encoded in the ACL-controlled FILENAME,
+        # not the frontmatter
         # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
         # could shadow alice's real verdict. One verdict file per reviewer.
-        verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
-    return review.tally(verdicts, required=required), reads_ok, fully_scanned
+        verdicts.append({"reviewer": reviewer, "verdict": fm.get("verdict")})
+    tally = review.tally(verdicts, required=required)
+    if head:
+        tally["head"] = head
+        try:
+            tally["round"] = max(1, int(req_doc.get("round") or 1))
+        except (TypeError, ValueError):
+            tally["round"] = 1
+    return tally, reads_ok, fully_scanned
 
 
 def _review_tally(
@@ -2164,7 +2195,8 @@ def _review_request_diff(
     that differs. Request identity is ``requested_by`` + ``of`` + the required SET
     (order-normalized): a different requester re-opening someone else's review is a
     conflict (not a silent recovery), and a changed required set re-opens a review
-    only via a NEW slug (the settled-review immutability contract)."""
+    only via a NEW slug. The exact head is deliberately not an identity field:
+    changing it advances the same PR review to a new append-only round."""
     ex_rb = str(fm.get("requested_by") or "")
     if ex_rb != (requested_by or ""):
         return ("requested_by", ex_rb, requested_by or "")
@@ -2179,6 +2211,7 @@ def _review_request_diff(
 
 def _deliver_all_review_directives(
     transport: Any, team: str, slug: str, required: list[str], *, owner: str, of: str,
+    head: Optional[str] = None,
 ) -> tuple[list[str], list[str]]:
     """Deliver ONE directive per required reviewer through the canonical hash-slug
     path. Returns ``(delivered, failed)``. Payload-hash dedup makes this idempotent:
@@ -2188,7 +2221,7 @@ def _deliver_all_review_directives(
     failed: list[str] = []
     for r in required:
         if _deliver_review_directive(transport, team, slug, r,
-                                     sender=owner, of=of) == 0:
+                                     sender=owner, of=of, head=head) == 0:
             delivered.append(r)
         else:
             failed.append(r)
@@ -2208,15 +2241,23 @@ def _print_partial_review_failure(
 
 def _print_review_success(
     args: argparse.Namespace, team: str, slug: str, required: list[str], *,
-    recovered: bool,
+    recovered: bool, head: Optional[str] = None, round_no: Optional[int] = None,
+    advanced: bool = False,
 ) -> None:
     if recovered:
         print(f"review {slug} already exists (matching) — re-verified reviewer "
               f"delivery (required: {', '.join(required)})")
+    elif advanced:
+        print(f"review {slug} advanced to head {head} "
+              f"(round {round_no or 1}; required: {', '.join(required)})")
     else:
         print(f"review {slug} requested (required: {', '.join(required)})")
+    if head:
+        print(f"  active head {head} (round {round_no or 1})")
     for r in required:
-        print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
+        filename = review.verdict_filename(r, head=head)
+        print(f"  reviewer {r} -> file verdict at "
+              f"{_verdicts_prefix(team, slug)}{filename}")
     # Point the requester at the await primitive for the verdict wait (they poll
     # `review status`; `listen` is the same arm-a-listener discipline every ask uses).
     sender = _known_sender(args)
@@ -2245,6 +2286,13 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         print("review request needs at least one non-empty --reviewer",
               file=sys.stderr)
         return 2
+    requested_head: Optional[str] = None
+    if getattr(args, "head", None) is not None:
+        requested_head = review.normalize_head(args.head)
+        if requested_head is None:
+            print("review request --head must be an exact 40- or 64-hex commit SHA",
+                  file=sys.stderr)
+            return 2
     path = _review_doc_path(team, slug)
     owner = getattr(args, "sender", None) or _host()
     existing = transport.read(path)
@@ -2273,6 +2321,57 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
                   f"different {field} re-opens a review only via a new slug; "
                   f"refusing to overwrite", file=sys.stderr)
             return 1
+        existing_head_raw = existing_fm.get("head")
+        existing_head = review.normalize_head(existing_head_raw)
+        if existing_head_raw and existing_head is None:
+            print(f"review {slug} already exists with an invalid head "
+                  f"{existing_head_raw!r} — cannot verify, will not overwrite; retry",
+                  file=sys.stderr)
+            return 1
+        if existing_head and requested_head is None:
+            print(f"review {slug} is head-keyed at {existing_head}; an unkeyed "
+                  f"re-request would discard exact-head gating — pass --head",
+                  file=sys.stderr)
+            return 1
+        if requested_head and requested_head != existing_head:
+            # SAME PR slug + requester + required set, NEW exact head: advance the
+            # single durable review to an append-only head-keyed round. Prior
+            # verdict files remain in place and the tally ignores them.
+            if not _clear_settled_marker(transport, team, slug):
+                print("review request cannot clear the prior settled marker — "
+                      "active-head obligations may remain hidden; retry",
+                      file=sys.stderr)
+                return 1
+            try:
+                prior_round = max(1, int(existing_fm.get("round") or 1))
+            except (TypeError, ValueError):
+                prior_round = 1
+            round_no = prior_round + 1
+            advanced_fm = dict(existing_fm)
+            advanced_fm.update({
+                "schema": "review-request/v2",
+                "head": requested_head,
+                "round": round_no,
+                "ts": _iso(_now()),
+            })
+            body = (f"\nReview requested: {args.of}\n"
+                    f"Active head: {requested_head} (round {round_no})\n")
+            if not transport.write(path, okf.render_frontmatter(advanced_fm) + body):
+                print("review request head advance write failed (transport)",
+                      file=sys.stderr)
+                return 1
+            delivered, failed = _deliver_all_review_directives(
+                transport, team, slug, required, owner=owner, of=args.of,
+                head=requested_head)
+            if failed:
+                _print_partial_review_failure(
+                    slug, delivered, failed,
+                    doc_note=f"advanced to head {requested_head} (round {round_no})")
+                return 1
+            _print_review_success(args, team, slug, required, recovered=False,
+                                  head=requested_head, round_no=round_no,
+                                  advanced=True)
+            return 0
         # IDEMPOTENT RECOVERY: same requested_by + of + required set. Skip the doc
         # write (it already holds our request), keep the harmless stale-marker
         # delete (a prior fold may have settled it; its absence just makes the next
@@ -2280,14 +2379,23 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         # — hash-path dedup re-verifies the ones that landed (rc 0 "already
         # delivered") and delivers the ones a prior partial failure dropped. This
         # is what makes a partial-delivery retry CONVERGE instead of dying here.
-        transport.delete(_settled_marker_path(team, slug))
+        if not _clear_settled_marker(transport, team, slug):
+            print("review request cannot clear the settled marker — active-head "
+                  "obligations may remain hidden; retry", file=sys.stderr)
+            return 1
         delivered, failed = _deliver_all_review_directives(
-            transport, team, slug, required, owner=owner, of=args.of)
+            transport, team, slug, required, owner=owner, of=args.of,
+            head=existing_head)
         if failed:
             _print_partial_review_failure(slug, delivered, failed,
                                           doc_note="already exists (matching)")
             return 1
-        _print_review_success(args, team, slug, required, recovered=True)
+        try:
+            round_no = max(1, int(existing_fm.get("round") or 1))
+        except (TypeError, ValueError):
+            round_no = 1
+        _print_review_success(args, team, slug, required, recovered=True,
+                              head=existing_head, round_no=round_no)
         return 0
     # existing is None is AMBIGUOUS (T1: a read timeout and a genuinely-absent doc
     # both map to None). Treating it as an empty slot would let a degraded transport
@@ -2306,13 +2414,17 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # Genuinely absent -> write the fresh review doc.
     fm = {
         "type": "Review",
-        "schema": "review-request/v1",
+        "schema": "review-request/v2" if requested_head else "review-request/v1",
         "requested_by": owner,
         "of": args.of,
         "required": required,
         "ts": _iso(_now()),
     }
+    if requested_head:
+        fm.update({"head": requested_head, "round": 1})
     body = f"\nReview requested: {args.of}\n"
+    if requested_head:
+        body += f"Active head: {requested_head} (round 1)\n"
     if not transport.write(path, okf.render_frontmatter(fm) + body):
         # T1: a timed-out write returns False, not a raise. An rc-0 "review
         # requested" that never landed is the requester-side incident (mirror of
@@ -2333,12 +2445,14 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # landed and what did not (partial is never silent), and the requester's retry
     # re-enters the idempotent-recovery path above to fill the gaps.
     delivered, failed = _deliver_all_review_directives(
-        transport, team, slug, required, owner=owner, of=args.of)
+        transport, team, slug, required, owner=owner, of=args.of,
+        head=requested_head)
     if failed:
         _print_partial_review_failure(slug, delivered, failed,
                                       doc_note="requested (doc written)")
         return 1
-    _print_review_success(args, team, slug, required, recovered=False)
+    _print_review_success(args, team, slug, required, recovered=False,
+                          head=requested_head, round_no=1 if requested_head else None)
     return 0
 
 
@@ -2643,7 +2757,8 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
 
 
 def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
-                              *, sender: str, of: str) -> int:
+                              *, sender: str, of: str,
+                              head: Optional[str] = None) -> int:
     """Deliver ONE review-request directive to ``reviewer`` via the canonical
     hash-slug directive path — the SAME ``_write_directive`` delivery (payload-hash
     dedup + C1 write-verification) every ``tell`` gets, so a verb-opened review
@@ -2652,11 +2767,17 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
     text carries the exact slug AND the verdict-file path (the fail-closed watcher
     contract). Returns ``_write_directive``'s rc (0 delivered/deduped, 1 failed).
 
-    Distinct (slug, reviewer) pairs produce distinct payloads -> distinct paths,
-    so reviewers never collide and a re-request idempotently dedupes."""
-    verdict_file = f"{_verdicts_prefix(team, slug)}{reviewer}.md"
+    Distinct (slug, head, reviewer) tuples produce distinct payloads -> distinct
+    paths, so reviewers and rounds never collide while a same-head re-request
+    idempotently dedupes."""
+    verdict_file = (
+        f"{_verdicts_prefix(team, slug)}"
+        f"{review.verdict_filename(reviewer, head=head)}"
+    )
     title = f"{_REVIEW_REQUEST_TITLE_PREFIX}{slug}"
     summary = f"Verdict owed on {of} — file it at {verdict_file}"
+    if head:
+        summary += f" after reviewing exact head {head}"
     next_action = f"file your verdict at {verdict_file}"
     payload = _directive_payload(title, summary, next_action, reviewer)
     dslug = f"{tasks.slugify(title)}-{_payload_hash(payload)}"
@@ -6518,6 +6639,11 @@ def build_parser() -> argparse.ArgumentParser:
     rvq = rvsub.add_parser("request", help="open a review with required reviewers (durable obligation)")
     rvq.add_argument("team"); rvq.add_argument("name", help="slug or title")
     rvq.add_argument("--of", required=True, help="artifact under review (PR url or description)")
+    rvq.add_argument(
+        "--head",
+        help="exact 40- or 64-hex commit SHA; re-requesting the same PR slug "
+             "with a new head advances its append-only review round",
+    )
     rvq.add_argument("--reviewer", action="append", required=True,
                      help="required reviewer (role preferred); repeat for many")
     rvq.add_argument("--from", dest="sender", help="requesting agent (defaults to host)")

@@ -740,6 +740,212 @@ def test_request_write_timeout_fails_loud(capsys):
     assert "requested" not in cap.out, "must not claim a review that never landed"
 
 
+# --- BUS-86: one review slug per PR, head-keyed rounds -----------------------
+
+HEAD_A = "a" * 40
+HEAD_B = "b" * 40
+
+
+def _head_verdict_path(slug, head, reviewer="alice"):
+    return f"team/r/review/{slug}/verdicts/{head}--{reviewer}.md"
+
+
+def _head_verdict(head, reviewer="alice", verdict="approve"):
+    return (
+        "---\n"
+        "type: Verdict\n"
+        f"reviewer: {reviewer}\n"
+        f"head: {head}\n"
+        f"verdict: {verdict}\n"
+        "---\n"
+    )
+
+
+def test_head_request_writes_v2_round_and_head_specific_paths(capsys):
+    t = FakeTransport()
+    assert cli.main(
+        ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+         "--head", HEAD_A, "--reviewer", "alice", "--from", "requester"],
+        transport=t,
+    ) == 0
+    cap = capsys.readouterr()
+    fm = okf.parse_frontmatter(t.read("team/r/review/pr-86.md"))
+    assert fm["schema"] == "review-request/v2"
+    assert fm["head"] == HEAD_A
+    assert fm["round"] == "1"
+    verdict_path = _head_verdict_path("pr-86", HEAD_A)
+    assert verdict_path in cap.out
+    assert any(verdict_path in content for path, content in t.store.items()
+               if path.startswith("team/r/task/"))
+
+
+def test_new_head_advances_same_slug_and_ignores_prior_head_verdict(capsys):
+    t = FakeTransport()
+    base = ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+            "--reviewer", "alice", "--from", "requester"]
+    assert cli.main([*base, "--head", HEAD_A], transport=t) == 0
+    t.put(_head_verdict_path("pr-86", HEAD_A), _head_verdict(HEAD_A))
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-86", "--json"], transport=t) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["state"] == "APPROVED"
+    assert first["head"] == HEAD_A
+    assert first["round"] == 1
+
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 0
+    capsys.readouterr()
+    fm = okf.parse_frontmatter(t.read("team/r/review/pr-86.md"))
+    assert fm["head"] == HEAD_B
+    assert fm["round"] == "2"
+    assert _head_verdict_path("pr-86", HEAD_A) in t.store, \
+        "superseded head evidence is append-only, never overwritten"
+    assert cli.main(["review", "status", "r", "pr-86", "--json"], transport=t) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["state"] == "PENDING"
+    assert second["head"] == HEAD_B
+    assert second["round"] == 2
+    assert second["pending_required"] == ["alice"]
+
+
+def test_new_head_clears_settled_round_and_returns_to_pending_fold(capsys):
+    t = FakeTransport()
+    base = ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+            "--reviewer", "alice", "--from", "requester"]
+    assert cli.main([*base, "--head", HEAD_A], transport=t) == 0
+    t.put(_head_verdict_path("pr-86", HEAD_A), _head_verdict(HEAD_A))
+    capsys.readouterr()
+    assert not cli._pending_reviews_for(t, "r", "alice")
+    marker = "team/r/review/pr-86/verdicts/.settled"
+    assert marker in t.store
+
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 0
+    capsys.readouterr()
+    assert marker not in t.store
+    pending = cli._pending_reviews_for(t, "r", "alice")
+    assert any(
+        row.get("type") == "review-pending"
+        and row.get("name") == "pr-86"
+        and row.get("pending_required") == ["alice"]
+        for row in pending
+    )
+
+
+def test_new_head_fails_loud_until_settled_marker_delete_recovers(capsys):
+    class MarkerDeleteFailsOnce(FakeTransport):
+        fail_marker_delete = True
+
+        def delete(self, path):
+            if self.fail_marker_delete and path.endswith("/verdicts/.settled"):
+                return False
+            return super().delete(path)
+
+    t = MarkerDeleteFailsOnce()
+    base = ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+            "--reviewer", "alice", "--from", "requester"]
+    assert cli.main([*base, "--head", HEAD_A], transport=t) == 0
+    t.put(_head_verdict_path("pr-86", HEAD_A), _head_verdict(HEAD_A))
+    capsys.readouterr()
+    assert not cli._pending_reviews_for(t, "r", "alice")
+    marker = "team/r/review/pr-86/verdicts/.settled"
+    assert marker in t.store
+
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "settled marker" in cap.err and "retry" in cap.err
+    assert marker in t.store
+    assert okf.parse_frontmatter(t.read("team/r/review/pr-86.md"))["head"] == HEAD_A
+    assert not any(
+        HEAD_B in content
+        for path, content in t.store.items()
+        if path.startswith("team/r/task/")
+    ), "reviewers must not be notified while the pending fold still skips the round"
+
+    # The failed cache clear leaves the old round intact. Retrying the new head
+    # clears the marker first, then advances and delivers the missing directive.
+    t.fail_marker_delete = False
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 0
+    capsys.readouterr()
+    assert marker not in t.store
+    assert any(
+        HEAD_B in content
+        for path, content in t.store.items()
+        if path.startswith("team/r/task/")
+    )
+    pending = cli._pending_reviews_for(t, "r", "alice")
+    assert any(
+        row.get("type") == "review-pending" and row.get("name") == "pr-86"
+        for row in pending
+    )
+
+
+def test_new_head_unconditionally_clears_marker_hidden_by_stale_reads(capsys):
+    class MarkerHiddenByStaleReads(FakeTransport):
+        def list_dir(self, prefix):
+            entries = super().list_dir(prefix)
+            if prefix.endswith("/verdicts/"):
+                return [e for e in entries if e.get("name") != ".settled"]
+            return entries
+
+        def read(self, path):
+            if path.endswith("/verdicts/.settled"):
+                return None
+            return super().read(path)
+
+    t = MarkerHiddenByStaleReads()
+    base = ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+            "--reviewer", "alice", "--from", "requester"]
+    assert cli.main([*base, "--head", HEAD_A], transport=t) == 0
+    marker = "team/r/review/pr-86/verdicts/.settled"
+    t.put(marker, "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 0
+    capsys.readouterr()
+    assert marker not in t.store, (
+        "advancing a head must issue an idempotent authoritative delete; a stale "
+        "listing plus a failed marker read is not proof of absence"
+    )
+
+
+def test_current_head_requires_matching_head_in_verdict_frontmatter(capsys):
+    t = FakeTransport()
+    cli.main(
+        ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+         "--head", HEAD_B, "--reviewer", "alice"],
+        transport=t,
+    )
+    t.put(_head_verdict_path("pr-86", HEAD_B), _head_verdict(HEAD_A))
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-86", "--json"], transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert got["state"] == "PENDING"
+    assert got["pending_required"] == ["alice"]
+
+
+def test_same_head_rerequest_is_idempotent_recovery(capsys):
+    t = FakeTransport()
+    args = ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+            "--head", HEAD_A, "--reviewer", "alice", "--from", "requester"]
+    assert cli.main(args, transport=t) == 0
+    before = t.read("team/r/review/pr-86.md")
+    capsys.readouterr()
+    assert cli.main(args, transport=t) == 0
+    cap = capsys.readouterr()
+    assert "matching" in cap.out and "re-verified" in cap.out
+    assert t.read("team/r/review/pr-86.md") == before
+
+
+def test_head_request_rejects_non_exact_sha_without_writes(capsys):
+    t = FakeTransport()
+    assert cli.main(
+        ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+         "--head", "abc1234", "--reviewer", "alice"],
+        transport=t,
+    ) == 2
+    assert "exact 40- or 64-hex commit SHA" in capsys.readouterr().err
+    assert t.read("team/r/review/pr-86.md") is None
+
+
 # --- atomic notification: request also delivers a directive per reviewer -----
 
 def test_request_notifies_each_required_reviewer(capsys):
