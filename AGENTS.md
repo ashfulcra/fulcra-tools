@@ -221,10 +221,40 @@ it (not on PyPI).
   execution, wakes stay VISIBLY queued and the command exits non-zero (a dead
   executor never reports a clean "0 delivered"); a per-entry read that is
   None/unparseable is SKIPPED (never invoke on an UNKNOWN entry). The default
-  invoker wires no real adapter (reports `unconfigured`, wake stays queued), so
-  the command wakes nothing on its own — **DEPLOYMENT (wiring the real adapter
-  scripts and scheduling the poller on a host) is a separate Ash-gated step.**
+  invoker runs a host-provisioned adapter SCRIPT (below); on an un-provisioned
+  host it reports `unconfigured` and the command wakes nothing —
+  **DEPLOYMENT (provisioning the scripts and scheduling the poller on a host) is
+  a separate Ash-gated step.**
   Contract: [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) W5.5 + §2.
+- **Host-local wake adapters are provisioned SCRIPTS behind one invoker seam.**
+  `_default_host_adapter_invoke` → `wake_adapters.run_script_adapter` resolves
+  `$COORD_WAKE_ADAPTER_DIR/<adapter>.sh` and returns
+  **`delivered` (exit 0) | `failed` (non-zero, un-spawnable, or timeout) |
+  `unconfigured`**. Three rules are load-bearing:
+  - **Nudge-only content (plan §2).** The adapter receives EXACTLY
+    `--agent <id> --key <idempotency-key> --reason <wake_adapters.NUDGE_REASON>`
+    — the reason is a module constant, and no other field of the invocation is
+    read. No per-event command, shell, URL or payload can reach an adapter, so
+    at-least-once delivery converges to one bus check. An agent id or key
+    outside the accepted charset is refused **before** the script runs.
+  - **Bounded.** The script runs under `COORD_WAKE_ADAPTER_TIMEOUT` (default
+    10s) via `transport.run_bounded`, which SIGKILLs the whole process group at
+    the bound; a hung adapter is reported `failed` and can never wedge the
+    executor.
+  - **Absent script ⇒ `unconfigured`, never a silent drop.** Env unset, no
+    `<adapter>.sh`, or present-but-not-executable all leave the wake VISIBLY
+    QUEUED with no retry burned. `COORD_WAKE_ADAPTER_DIR` is unset by default,
+    which is why an installed engine fires nothing.
+  The first (and currently only) script is
+  [`skills/fulcra-agent-automation/scripts/wake/macos-notify.sh`](skills/fulcra-agent-automation/scripts/wake/macos-notify.sh):
+  it posts ONE desktop notification via `osascript`, handing the text to a fixed
+  `on run argv` AppleScript program as ARGUMENTS (nothing is interpolated into
+  source), exits 127 with a clear message where `osascript` is unavailable, and
+  **displays text and starts nothing** — no session spawn, no network, no
+  interpreter. Every other adapter in `router.ADAPTERS_HOST_LOCAL`
+  (`codex-exec-resume`, `openclaw-post`, `queued-wake-file`) still reports
+  `unconfigured` until its script lands (W6). Adding this adapter **enables no
+  agent, authors no `config.json`, installs nothing and schedules nothing.**
 - **Durable tooling stash.** An agent's operational bundle (scripts, loops,
   config templates) survives ephemeral machines via
   `coord-engine stash push/pull/list` against
