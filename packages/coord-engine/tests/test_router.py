@@ -878,6 +878,39 @@ def test_shadow_report_phantom_only_with_store_keys():
     assert rep["classes"][k] == "no-probe-evidence"
 
 
+def test_shadow_report_phantom_wins_over_evidence():
+    """codex #475: a WAKE decision whose item never existed is phantom EVEN
+    WHEN probe evidence exists — evidence must never launder a phantom wake."""
+    k = f"ghost:{AGENT}"
+    rep = router.shadow_report(
+        [_dec(k, "interrupt", "2026-07-23T12:01:00Z")], [_ev(k)],
+        store_keys=set(), window_start=WS, window_end=WE)
+    assert rep["classes"][k] == "phantom"
+    assert rep["gates"]["phantom_zero"] is False and rep["pass"] is False
+
+
+def test_shadow_report_window_bounds_the_population():
+    """codex #475: records outside [window_start, window_end] are dropped
+    before correlation — stale shards cannot alter the 48h verdict."""
+    stale, live = f"old:{AGENT}", f"new:{AGENT}"
+    rep = router.shadow_report(
+        [_dec(stale, "interrupt", "2026-07-01T12:00:00Z"),   # outside window
+         _dec(live, "interrupt", "2026-07-23T12:02:00Z")],
+        [_ev(stale, "2026-07-01T11:59:00Z"),                 # outside window
+         _ev(live)],
+        window_start=WS, window_end=WE)
+    assert stale not in rep["classes"]                       # fully excluded
+    assert rep["classes"][live] == "matched"
+    # stale decision + IN-window evidence => the in-window delivery reads
+    # missed (the router made no in-window decision for it) — conservative
+    rep = router.shadow_report(
+        [_dec(stale, "interrupt", "2026-07-01T12:00:00Z")],
+        [_ev(stale, "2026-07-23T12:00:00Z")],
+        window_start=WS, window_end=WE)
+    assert rep["classes"][stale] == "missed"
+    assert rep["gates"]["missed_zero"] is False
+
+
 def test_shadow_report_duty_cycle_unknown_fails_closed():
     k = f"s1:{AGENT}"
     rep = router.shadow_report(

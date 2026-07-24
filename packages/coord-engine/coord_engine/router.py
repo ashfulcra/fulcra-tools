@@ -532,13 +532,24 @@ def shadow_report(
         raise ValueError("invalid window bounds")
     window = timedelta(seconds=SHADOW_CORRELATION_WINDOW_S)
 
+    # codex #475: the window BOUNDS the record population — a record whose
+    # timestamp is outside [start, end] (inclusive), or unparseable, is dropped
+    # before correlation so stale shards cannot alter the 48h verdict. The
+    # consequences then flow conservatively: in-window evidence whose decision
+    # was stale reads as `missed`, never silently matched.
+    def _in_window(ts_value: Any) -> bool:
+        ts = parse_iso(ts_value)
+        return ts is not None and ws <= ts <= we
+
     dec_by_key: dict[str, dict] = {}
     for d in decisions:
-        if isinstance(d, dict) and isinstance(d.get("key"), str):
+        if (isinstance(d, dict) and isinstance(d.get("key"), str)
+                and _in_window(d.get("decided_at"))):
             dec_by_key[d["key"]] = d
     ev_by_key: dict[str, dict] = {}
     for e in evidence:
-        if isinstance(e, dict) and isinstance(e.get("key"), str):
+        if (isinstance(e, dict) and isinstance(e.get("key"), str)
+                and _in_window(e.get("delivered_at"))):
             prev = ev_by_key.get(e["key"])
             # earliest delivery wins — latency measures against first delivery
             if prev is None or (parse_iso(e.get("delivered_at")) or we) < (
@@ -552,12 +563,16 @@ def shadow_report(
         if d is None:
             classes[key] = "missed"
             continue
+        # codex #475: phantom is checked BEFORE the evidence branch — a WAKE
+        # decision whose item never existed in the store is phantom even when
+        # probe evidence exists (zero-tolerance; evidence of a nonexistent
+        # item's delivery must never launder the wake into `matched`).
+        if (store_keys is not None and d.get("decision") in WAKE_DECISIONS
+                and key not in store_keys):
+            classes[key] = "phantom"
+            continue
         if e is None:
-            if (store_keys is not None and d.get("decision") in WAKE_DECISIONS
-                    and key not in store_keys):
-                classes[key] = "phantom"
-            else:
-                classes[key] = "no-probe-evidence"
+            classes[key] = "no-probe-evidence"
             continue
         decided = parse_iso(d.get("decided_at"))
         delivered = parse_iso(e.get("delivered_at"))
