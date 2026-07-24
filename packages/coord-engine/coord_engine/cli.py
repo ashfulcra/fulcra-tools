@@ -4959,6 +4959,18 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     cursor, cursor_reason = router.parse_cursor(transport.read(prefix + "cursor.json"))
     observe = cursor is None
     shadow = bool(getattr(args, "shadow", False))
+    # Blocking (c): a SHADOW pass under a --state-prefix override reads the
+    # delivered view from the CANONICAL prefix. The shadow plane never delivers,
+    # so its own namespaced delivered/ is eternally empty; reading it would feed
+    # empty last_delivered_at into decide() and inflate policy-divergent forever
+    # (debounce/lapsed-checkin never see live delivery recency). The read is safe
+    # by construction — shadow writes nothing to the canonical plane — and the
+    # pass SKIPS the delivered.json refold (it maintains no view it will reuse).
+    # Predicate is exactly (shadow AND override active); default and the
+    # live-namespaced pair (run --state-prefix X, no shadow) keep today's
+    # namespaced delivered/ behavior, where it is correct.
+    shadow_override = shadow and state is not None
+    delivered_prefix = config_prefix if shadow_override else prefix
     if observe:
         print(f"router: OBSERVE-ONLY pass — {cursor_reason}; decisions are "
               f"logged, nothing is enqueued, and a fresh cursor is written at "
@@ -4986,7 +4998,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     delivered_shards: list[dict] = []
     delivered_listing_ok = True
     try:
-        dl_entries = transport.list_dir(prefix + "delivered/")
+        dl_entries = transport.list_dir(delivered_prefix + "delivered/")
     except TransportError as e:
         # codex #460 fix: a listing ERROR is NOT "genuinely empty". Fold no
         # shards this pass, but do NOT refold delivered.json (that would
@@ -5002,7 +5014,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
             continue
-        raw = transport.read(prefix + "delivered/" + name)
+        raw = transport.read(delivered_prefix + "delivered/" + name)
         if raw:
             try:
                 delivered_shards.append(json.loads(raw))
@@ -5021,7 +5033,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         # recreates the premature-checkin/weakened-debounce bug). Retries next
         # pass once either read recovers.
         delivered_view = None
-        prior_raw = transport.read(prefix + "delivered.json")
+        prior_raw = transport.read(delivered_prefix + "delivered.json")
         if prior_raw is not None:
             try:
                 loaded = json.loads(prior_raw)
@@ -5222,7 +5234,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             enqueued += 1
         processed[key] = router.iso(now)
 
-    if not observe and delivered_listing_ok:
+    if not observe and delivered_listing_ok and not shadow_override:
         if not transport.write(prefix + "delivered.json",
                                json.dumps(delivered_view, sort_keys=True) + "\n"):
             # observability bookkeeping only — dedup authority is the ledger
@@ -5970,8 +5982,13 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
                 # failure never affects execution.
                 try:
                     if _shadow_window_active(transport, args.team):
+                        # W7 evidence is CANONICAL by design (like the cloud
+                        # executor): only cursor/queue/delivered/dead-letter/marks
+                        # move under a --state-prefix override. Writing evidence to
+                        # the namespaced sibling would hide it from the canonical
+                        # shadow report → the delivery reads no-probe-evidence/missed.
                         transport.write(
-                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            canon_prefix + router.SHADOW_EVIDENCE_SUBPATH
                             + router.shadow_evidence_filename(
                                 str(entry.get("agent")), key),
                             json.dumps(router.shadow_evidence_record(

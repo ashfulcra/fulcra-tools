@@ -141,6 +141,40 @@ def test_config_is_shared_canonical_under_override():
     assert rec["agent"] == AGENT and rec["decision"] == "interrupt"
 
 
+def test_shadow_pass_reads_canonical_delivery_recency():
+    """Blocking (c): a namespaced SHADOW pass reads the delivered view from the
+    CANONICAL prefix. The live plane delivered to this agent recently (canonical
+    delivered/); the shadow plane never delivers, so its own namespaced delivered/
+    is empty by construction. A shadow `--state-prefix` pass over a fresh directed
+    item for the same agent must therefore DEBOUNCE — honoring canonical delivery
+    recency — not classify `interrupt` off an eternally-empty namespaced history
+    (which would inflate policy-divergent forever). It also writes NO delivered.json
+    refold (a shadow pass maintains no view it will ever reuse)."""
+    t = FakeTransport()
+    t.put(TASKP + "item-1.md", _task("item-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    t.put(RP + "config.json", _config())
+    t.put(RP_SHADOW + "cursor.json", _cursor("2026-07-23T11:00:00Z"))
+    # LIVE delivery recorded at the CANONICAL delivered/ prefix, 5 min before now
+    # — well inside the 15-min debounce window (CLOUD_CFG debounce_min=15).
+    prior = {"agent": AGENT, "source_shard": "item-0",
+             "adapter": CLOUD_CFG["adapter"], "executor": "decision-plane",
+             "delivered_at": "2026-07-23T11:55:00Z"}
+    t.put(RP + "delivered/" + router.record_filename(
+        router.idempotency_key("item-0", AGENT)), json.dumps(prior))
+
+    assert cli.cmd_router_run(
+        _args(shadow=True, state_prefix="shadow"), t) == 0
+
+    decisions = list(_paths(t, RP_SHADOW, "shadow-decisions/").values())
+    assert len(decisions) == 1
+    rec = json.loads(decisions[0])
+    assert rec["decision"] == "debounce", (
+        "shadow pass must honor canonical delivery recency, not interrupt")
+    # a shadow-under-override pass persists no delivered.json (skips the refold)
+    assert RP_SHADOW + "delivered.json" not in t.store
+
+
 # --- the no-collision property (the deliverable) ----------------------------
 
 def test_live_and_shadow_do_not_starve_each_other():
