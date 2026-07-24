@@ -5500,20 +5500,22 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
 
         cfg = agents_cfg.get(entry.get("agent")) or {}
 
-        def _terminate(sub: str, record: dict, tally: str) -> None:
+        def _terminate(sub: str, record: dict, tally: str) -> bool:
             """Write a delivered/dead-letter record, then remove the queue entry
             ONLY if that write landed. A failed record write must NOT be followed
             by the delete — else the wake is lost. Left queued, it retries next
-            pass (at-least-once, safe by the content rule)."""
+            pass (at-least-once, safe by the content rule). Returns True iff the
+            record landed and the entry was cleared."""
             if transport.write(prefix + sub + router.record_filename(key),
                                json.dumps(record, sort_keys=True) + "\n"):
                 transport.delete(qpath)
                 counts[tally] += 1
-            else:
-                print(f"router execute [{executor_id}]: {sub.rstrip('/')} "
-                      f"record write failed for {key} — entry stays queued, "
-                      f"retries next pass", file=sys.stderr)
-                counts["retried"] += 1
+                return True
+            print(f"router execute [{executor_id}]: {sub.rstrip('/')} "
+                  f"record write failed for {key} — entry stays queued, "
+                  f"retries next pass", file=sys.stderr)
+            counts["retried"] += 1
+            return False
 
         # only the four host-local adapters are executable on a host executor; a
         # cloud adapter mis-resolved here (or anything unknown) is a per-entry
@@ -5557,9 +5559,27 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
 
         status, detail = invoke(inv)
         if status == "delivered":
-            _terminate("delivered/",
-                       router.delivery_record(entry, router.iso(now)),
-                       "delivered")
+            if _terminate("delivered/",
+                          router.delivery_record(entry, router.iso(now)),
+                          "delivered"):
+                # W7 delivery probe (path=adapter): a GENUINE host-local adapter
+                # delivery (record landed). Host-local adapters are a real
+                # delivery plane — their deliveries must enter the W7 evidence
+                # population (codex #470 r2). Window-gated + guarded: a probe
+                # failure never affects execution.
+                try:
+                    if _shadow_window_active(transport, args.team):
+                        transport.write(
+                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            + router.shadow_evidence_filename(
+                                str(entry.get("agent")), key),
+                            json.dumps(router.shadow_evidence_record(
+                                key=key, agent=str(entry.get("agent")),
+                                delivered_at=router.iso(now), path="adapter"),
+                                sort_keys=True) + "\n")
+                except Exception as e:
+                    print(f"router execute [{executor_id}]: W7 adapter probe "
+                          f"skipped ({type(e).__name__}: {e})", file=sys.stderr)
         elif status == "unconfigured":
             # visibly queued, not a burned retry — awaits a wired host script
             counts["unconfigured"] += 1
