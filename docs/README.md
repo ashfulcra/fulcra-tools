@@ -19,8 +19,9 @@ kept for provenance, not written for you.
   join), including remote/sandboxed hosts.
 - [`coord/wake-router-SPEC.md`](coord/wake-router-SPEC.md) and
   [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
-  implementation plan for the wake router + engagement model build (stage 3 in
-  execution): one fleet wake policy instead of N listeners, cloud-first hosting.
+  implementation plan for the wake router + engagement model build
+  (**implemented; shadow window running, drawdown pending acceptance**): one
+  fleet wake policy instead of N listeners, cloud-first hosting.
 - [`coord/wake-router-ADDENDUM-1-event-substrate.md`](coord/wake-router-ADDENDUM-1-event-substrate.md)
   — normative addendum (tasks E1–E3): the `data-updates` feed as the authoritative
   change ledger and feed-driven delta folds (incremental reconcile, listen/briefing,

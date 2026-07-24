@@ -45,6 +45,12 @@ token, and this file won't pretend otherwise.
 - The coord engine is stdlib-only, so it installs with no Fulcra account (see
   [Getting started](#getting-started)); `coord-engine --help` then prints the
   full verb surface offline.
+- The **wake router** is the fleet's always-on wake plane: a model-free
+  decision loop (`coord-engine router run`) routes directed work to agents via
+  content-safe adapters — cloud sessions align to their own Routines, desktop
+  hosts get a notification or queued wake file via a thin host executor
+  (`router execute`) — so agents no longer need per-agent poll loops to hear
+  the bus. Design and status: [`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md).
 
 **Needs your Fulcra token — live data:** anything that reads or writes your
 actual data — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the

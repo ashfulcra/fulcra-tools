@@ -1,5 +1,10 @@
 # Wake Router + Engagement Model — stage-2 implementation plan
 
+> **STATUS (2026-07-24): EXECUTED through W8 + E-track + W5.5/W6/W7; W9 in progress; W10
+> pending.** Every task below except W9/W10 is merged and live; the shadow window
+> (W7 acceptance clock) opened 2026-07-24T12:11:11Z. This plan is the build's contract
+> record — per-task detail below is historical; do not re-dispatch from it.
+
 **Parent spec:** [`wake-router-SPEC.md`](wake-router-SPEC.md) (merged `8211776`, Part C resolution
 `5d44b68`). **Owner:** Tycho (`coord-boss`). **Gate:** dual-green (codex-reviewer + owner) on this
 plan before any task below is dispatched; then per-task dual-green during execution.

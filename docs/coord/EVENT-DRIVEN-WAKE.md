@@ -1,5 +1,11 @@
 # Event-driven coordination wake
 
+> **STATUS (2026-07-24):** this pre-build survey's relay contract and harness matrix were
+> adopted by the wake-router build and are now implemented (`router run`/`router execute`,
+> W4–W7). The per-harness adapter matrix here remains the canonical reference; the
+> listener-centric operational text below describes the pre-router era and is retained for
+> rationale.
+
 The fleet uses one model-free `coord-engine listen` owner per agent identity.
 Healthy quiet ticks emit no output and consume no model turn. A new event (or a
 newly reported degraded source) invokes one fixed, operator-approved harness

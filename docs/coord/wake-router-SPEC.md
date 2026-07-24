@@ -1,5 +1,15 @@
 # Wake Router + Engagement Model — build spec (stage 1: consolidated brainstorm → spec)
 
+> **STATUS (2026-07-24): IMPLEMENTED — awaiting shadow acceptance.** Everything this spec
+> proposes is built and merged: engagement model W1–W3, router core W4, cloud execution W5,
+> host executor W5.5, proposed-adapter legs W6, shadow instrumentation + report W7, listen
+> fix W8, and the feed-first read path (Addendum 1, E1–E3). The first live wake delivered
+> 2026-07-24 14:11Z (55 s dispatch-to-notification). The ≥48 h shadow window opened
+> 2026-07-24T12:11:11Z; W10 listener drawdown gates on its acceptance report. W9 (fleet
+> credential custody) is executing. This document remains the design rationale; current
+> operational truth lives in the engine (`coord-engine --help`) and the delivery/evidence
+> records under `_coord/router/`.
+
 **Owner:** Tycho (`coord-boss`). **Implementers:** `coord-maintainer`, Fabio (`coord-fable-worker`).
 **Review gate:** `codex-reviewer` + owner, dual-green at every stage (spec → plan → each SDD task).
 **Authorization:** Ash 2026-07-21 (proposal `4c8f6f02`), ownership directive relayed 2026-07-22
