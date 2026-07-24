@@ -180,7 +180,14 @@ it (not on PyPI).
   `routine-align`) directly — claim → invoke → delivered/dead-letter with bounded
   retry, at-least-once and safe by the keyed-nudge content rule; host-local
   adapters are enqueued with an `executor` id for the W5.5 thin executor. A
-  missing/corrupt cursor restarts observe-only. Contract:
+  missing/corrupt cursor restarts observe-only. **Shadow mode (W7):** `router
+  shadow arm <team>` writes the `shadow-window.json` marker (recording
+  `started_at`, activating the fleet-wide delivery probes); `router run --shadow`
+  is read-only — it logs AND persists a decision per directed item to
+  `shadow-decisions/` and enqueues/executes nothing, while the live delivery
+  paths (listener tick, adapter execution) write `shadow-evidence/` shards at
+  delivery success. The acceptance report correlates the two on the idempotency
+  key over a ≥48h window (duty-cycle gated). Contract:
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.

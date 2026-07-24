@@ -481,3 +481,21 @@ def shadow_evidence_record(*, key: str, agent: str, delivered_at: str,
             f"{sorted(SHADOW_EVIDENCE_PATHS)}")
     return {"key": key, "agent": agent, "delivered_at": delivered_at,
             "path": path}
+
+
+SHADOW_DECISIONS_SUBPATH = "shadow-decisions/"
+
+
+def shadow_decision_record(*, key: str, agent: str, decision: str, reason: str,
+                           priority: str, decided_at: str) -> dict[str, Any]:
+    """A read-only shadow-mode decision shard — the router's `decision` for a
+    directed item, persisted so the acceptance report can correlate it against
+    the delivery-probe evidence on the idempotency `key`. Persisted (not just
+    logged to stdout) because decisions depend on decision-time state
+    (presence/debounce/delivered-view) and cannot be recomputed at report time,
+    and because the decision plane is duty-cycled — an ephemeral host must not
+    lose the window's decisions. `decision` must be a known DECISIONS class."""
+    if decision not in DECISIONS:
+        raise ValueError(f"decision {decision!r} not in {DECISIONS}")
+    return {"key": key, "agent": agent, "decision": decision, "reason": reason,
+            "priority": priority, "decided_at": decided_at}

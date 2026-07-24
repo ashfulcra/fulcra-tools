@@ -3745,12 +3745,51 @@ def _format_listen_event(ev: dict[str, Any]) -> str:
     return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
 
 
+def _shadow_window_active(transport: Any, team: str) -> bool:
+    """True iff a W7 shadow window is armed — the `shadow-window.json` marker
+    exists and carries a `started_at`. One cheap read; absent/unreadable/malformed
+    ⇒ off, so the delivery probes stay silent outside the window (and default-off
+    on any doubt). Checked only when there is something to probe."""
+    raw = transport.read(router.router_prefix(team) + "shadow-window.json")
+    if not raw:
+        return False
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(doc, dict) and bool(doc.get("started_at"))
+
+
 def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any],
                      *, json_mode: bool, verbose: bool) -> tuple[list, dict[str, list[str]]]:
     events, failures = _listen_tick(transport, team, agent, state)
     for ev in events:
         print(jsonutil.dumps(ev) if json_mode else _format_listen_event(ev))
     sys.stdout.flush()
+
+    # W7 delivery probe (path=listener). Each DIRECTIVE surfaced this tick is a
+    # live delivery of a directed item to this agent; while a shadow window is
+    # armed, record an idempotency-keyed evidence shard the acceptance report
+    # correlates against router decisions. FULLY GUARDED: a probe failure never
+    # perturbs the load-bearing watcher tick. The marker read happens only when a
+    # directive was actually delivered (not every quiet tick). Removable after
+    # acceptance. (Writing shadow-evidence/ from the listener is sanctioned by
+    # the spec's namespace-writer rule.)
+    try:
+        directives = [ev for ev in events if ev.get("type") == "directive"]
+        if directives and _shadow_window_active(transport, team):
+            base = router.router_prefix(team) + router.SHADOW_EVIDENCE_SUBPATH
+            delivered_at = router.iso(_now())
+            for ev in directives:
+                key = router.idempotency_key(str(ev.get("slug")), agent)
+                transport.write(
+                    base + router.shadow_evidence_filename(agent, key),
+                    json.dumps(router.shadow_evidence_record(
+                        key=key, agent=agent, delivered_at=delivered_at,
+                        path="listener"), sort_keys=True) + "\n")
+    except Exception as e:  # never let the probe break the watcher
+        print(f"listen: W7 shadow probe skipped ({type(e).__name__}: {e})",
+              file=sys.stderr)
 
     # Per-source streaks: each source alarms ONCE per its own consecutive-failure
     # streak (the flags persist in state across `--once` runs) and resets on its
@@ -4790,10 +4829,18 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
 
     cursor, cursor_reason = router.parse_cursor(transport.read(prefix + "cursor.json"))
     observe = cursor is None
+    shadow = bool(getattr(args, "shadow", False))
     if observe:
         print(f"router: OBSERVE-ONLY pass — {cursor_reason}; decisions are "
               f"logged, nothing is enqueued, and a fresh cursor is written at "
               f"the end of this pass to arm the next one", file=sys.stderr)
+    elif shadow:
+        # W7 read-only shadow: cursor-tracked like a live pass (each directed
+        # item decided ONCE, watermark + ledger advance), but a decision is
+        # logged AND persisted per item and NOTHING is enqueued or executed.
+        print("router: SHADOW pass — W7 read-only acceptance measurement; a "
+              "decision is logged + persisted per directed item, nothing "
+              "enqueued or executed", file=sys.stderr)
 
     agents_cfg, _executors, cfg_errors = router.validate_config(
         transport.read(prefix + "config.json"))
@@ -4987,14 +5034,30 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             now=now,
         )
         counts[decision] += 1
-        suffix = " [observe-only: not enqueued]" if observe and decision in (
-            "interrupt", "defer", "checkin") else ""
+        suffix = ""
+        if (observe or shadow) and decision in ("interrupt", "defer", "checkin"):
+            suffix = (" [shadow: not enqueued]" if shadow
+                      else " [observe-only: not enqueued]")
         print(f"decision {assignee} {shard_id} -> {decision} ({reason}){suffix}")
         if decision == "unroutable":
             # fail-visible lane: never a silent drop
             print(f"router: wake unroutable for {assignee} — {reason}; item "
                   f"{shard_id} batches to the digest until config is fixed")
-        if not observe and decision in ("interrupt", "defer", "checkin"):
+        if shadow:
+            # W7: persist the decision for EVERY directed item (the report's
+            # comparison population) so it can be correlated with delivery-probe
+            # evidence on the idempotency key. Enqueue/execute nothing. A failed
+            # shard write is a measurement gap, logged, never fatal.
+            if not transport.write(
+                    prefix + router.SHADOW_DECISIONS_SUBPATH
+                    + router.shadow_evidence_filename(assignee, key),
+                    json.dumps(router.shadow_decision_record(
+                        key=key, agent=assignee, decision=decision,
+                        reason=reason, priority=priority,
+                        decided_at=router.iso(now)), sort_keys=True) + "\n"):
+                print(f"router: shadow decision write failed for {key} "
+                      f"(measurement gap, non-fatal)", file=sys.stderr)
+        elif not observe and decision in ("interrupt", "defer", "checkin"):
             cfg = agents_cfg[assignee]
             entry = {
                 "agent": assignee,
@@ -5178,14 +5241,76 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
 
 
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
+    # W7 shadow mode is READ-ONLY: log + persist decisions, never enqueue OR
+    # execute (the pass suppresses the enqueue; the executor is skipped here).
+    shadow = bool(getattr(args, "shadow", False))
     rc = _router_pass(args, transport)
-    _router_execute_cloud(args, transport)
+    if not shadow:
+        _router_execute_cloud(args, transport)
     if getattr(args, "once", False):
         return rc
     while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
         time.sleep(router.ROUTER_POLL_SECONDS)
         _router_pass(args, transport)
-        _router_execute_cloud(args, transport)
+        if not shadow:
+            _router_execute_cloud(args, transport)
+
+
+def cmd_router_shadow_arm(args: argparse.Namespace, transport: Any) -> int:
+    """Write the W7 shadow-window marker — records `started_at` and activates
+    the fleet-wide delivery probes. Idempotent: a re-arm reports the existing
+    start (never resets the clock) unless the marker is missing/malformed."""
+    prefix = router.router_prefix(args.team)
+    path = prefix + "shadow-window.json"
+    existing = transport.read(path)
+    if existing:
+        try:
+            doc = json.loads(existing)
+            if isinstance(doc, dict) and doc.get("started_at"):
+                print(f"shadow window already armed at {doc['started_at']} "
+                      f"(min_hours={doc.get('min_hours')}) — not resetting the "
+                      f"clock")
+                return 0
+        except ValueError:
+            pass  # malformed marker -> re-arm cleanly
+    started_at = router.iso(_now())
+    doc = {"started_at": started_at,
+           "min_hours": int(getattr(args, "min_hours", 48) or 48),
+           "poll_seconds": router.ROUTER_POLL_SECONDS}
+    if not transport.write(path, json.dumps(doc, sort_keys=True) + "\n"):
+        print("shadow arm: marker write failed — window NOT armed", file=sys.stderr)
+        return 1
+    print(f"shadow window ARMED at {started_at} (>= {doc['min_hours']}h, poll "
+          f"{doc['poll_seconds']}s). Delivery probes now record to "
+          f"{prefix}{router.SHADOW_EVIDENCE_SUBPATH}; run `router run --shadow "
+          f"{args.team}` for the read-only decision log.")
+    return 0
+
+
+def cmd_router_shadow_status(args: argparse.Namespace, transport: Any) -> int:
+    """Report the shadow-window marker: armed?, start, and elapsed vs min_hours."""
+    prefix = router.router_prefix(args.team)
+    raw = transport.read(prefix + "shadow-window.json")
+    if not raw:
+        print("shadow window: NOT armed")
+        return 0
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        print("shadow window: marker present but MALFORMED (re-arm to fix)",
+              file=sys.stderr)
+        return 1
+    started = router.parse_iso(doc.get("started_at")) if isinstance(doc, dict) else None
+    if started is None:
+        print("shadow window: marker present but has no valid started_at",
+              file=sys.stderr)
+        return 1
+    elapsed_h = (_now() - started).total_seconds() / 3600.0
+    min_h = doc.get("min_hours", 48)
+    done = "MET" if elapsed_h >= min_h else "not yet"
+    print(f"shadow window ARMED at {doc['started_at']}: {elapsed_h:.1f}h "
+          f"elapsed of >= {min_h}h ({done})")
+    return 0
 
 
 # --- W5.5: thin host executor -----------------------------------------------
@@ -6375,8 +6500,18 @@ def build_parser() -> argparse.ArgumentParser:
     ror = rosub.add_parser("run", help="scan the store by cursor and enqueue wake decisions (fixed 60s cadence; --once for one pass)")
     ror.add_argument("team")
     ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
+    ror.add_argument("--shadow", action="store_true", help="W7 read-only shadow mode: log + persist a decision per directed item, enqueue and execute NOTHING (the >=48h acceptance measurement)")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)
+    rosh = rosub.add_parser("shadow", help="W7 shadow-window control (arm/status the >=48h read-only acceptance window)")
+    roshsub = rosh.add_subparsers(dest="shadow_command", required=True)
+    rosha = roshsub.add_parser("arm", help="write the shadow-window marker (records started_at; activates the fleet-wide delivery probes)")
+    rosha.add_argument("team")
+    rosha.add_argument("--min-hours", type=int, default=48, help="minimum window length before acceptance (default 48)")
+    rosha.set_defaults(func=cmd_router_shadow_arm)
+    roshs = roshsub.add_parser("status", help="report the shadow-window marker (armed?, started_at, elapsed vs min_hours)")
+    roshs.add_argument("team")
+    roshs.set_defaults(func=cmd_router_shadow_status)
     roe = rosub.add_parser("execute", help="W5.5 thin host executor: fire host-local adapters for queue entries resolved to THIS host (policy-free; --once for one pass)")
     roe.add_argument("team")
     roe.add_argument("--host", default=None, help="executor id to drain (default: this host's own id)")
