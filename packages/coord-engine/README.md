@@ -16,7 +16,7 @@ and the agent conventions ([`AGENTS.md`](../../AGENTS.md)).
 ## Install
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.12#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.13#subdirectory=packages/coord-engine"
 coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 ```
 
@@ -55,9 +55,11 @@ zero-whitespace serializer; parsed values and degradation markers are unchanged.
 
 - **Stdlib-only runtime.** No dependencies; transport is a subprocess call. Installs
   anywhere Python ≥3.10 runs.
-- **Deterministic folds.** Views are rebuilt from the live listing each pass
-  (`reconcile`), so orphaned index entries cannot recur; role/review/presence status are
-  computed, never inferred by a model.
+- **Deterministic folds, feed-first.** Views are rebuilt each pass from the store's
+  `data-updates` change feed (the authoritative ledger — listings are eventually-consistent
+  caches), reading only changed shards, with the full listing scan retained as the
+  fail-closed fallback on any feed doubt; orphaned index entries cannot recur, and
+  role/review/presence status are computed, never inferred by a model.
 - **Fails loud, never silent.** Unverifiable writes are retried, cached locally, and
   announced; a degraded read fold says so (`review-fold-degraded`, `LISTEN DEGRADED`)
   instead of returning a clean-looking partial answer.

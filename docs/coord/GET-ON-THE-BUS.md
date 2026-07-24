@@ -25,7 +25,7 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ```bash
 uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.12#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.13#subdirectory=packages/coord-engine"
 ```
 
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
@@ -43,7 +43,7 @@ silent exit-0 no-op — the failure mode that left the timeline dark. Install bo
 
 ```bash
 uv tool install --force \
-  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.12#subdirectory=packages/coord-engine" \
+  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.13#subdirectory=packages/coord-engine" \
   --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common"
 ```
 
@@ -108,7 +108,7 @@ Four walls, in the order you'll hit them:
    #  entry points target fulcra_api.cli:cli. Whole recipe validated 2026-07-22.)
 
    # coord-engine is stdlib-only: a checkout on PYTHONPATH is a complete install
-   git clone --depth 1 --branch coord-engine-v1.6.11 https://github.com/ashfulcra/fulcra-tools /tmp/ft
+   git clone --depth 1 --branch coord-engine-v1.6.13 https://github.com/ashfulcra/fulcra-tools /tmp/ft
    export PYTHONPATH="/tmp/ft/packages/coord-engine:$PYTHONPATH"
    alias coord-engine='python3 -c "import sys; from coord_engine.cli import main; sys.exit(main(sys.argv[1:]))"'
    # (NOT `python3 -m coord_engine.cli` — running cli as __main__ re-imports it
