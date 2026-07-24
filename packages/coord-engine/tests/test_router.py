@@ -825,6 +825,117 @@ def test_malformed_started_at_does_not_activate_probes(monkeypatch):
     assert cli.cmd_router_shadow_status(_args(), t) == 1   # status agrees: invalid
 
 
+# --- W7: acceptance-report fold ---------------------------------------------
+
+WS, WE = "2026-07-23T00:00:00Z", "2026-07-25T00:00:00Z"
+
+
+def _dec(key, decision="interrupt", decided_at="2026-07-23T12:01:00Z"):
+    return {"key": key, "agent": key.split(":", 1)[1], "decision": decision,
+            "reason": "r", "priority": "P1", "decided_at": decided_at}
+
+
+def _ev(key, delivered_at="2026-07-23T12:00:00Z"):
+    return {"key": key, "agent": key.split(":", 1)[1],
+            "delivered_at": delivered_at, "path": "listener"}
+
+
+def _marks(step_s=60, hours=48):
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 7, 23, 0, 0, tzinfo=timezone.utc)
+    n = int(hours * 3600 / step_s)
+    return [router.iso(t0 + timedelta(seconds=i * step_s)) for i in range(n + 1)]
+
+
+def test_shadow_report_matched_lagged_policy_divergent_missed():
+    k1, k2, k3, k4 = (f"s{i}:{AGENT}" for i in range(1, 5))
+    rep = router.shadow_report(
+        [_dec(k1, "interrupt", "2026-07-23T12:02:00Z"),      # +2m  -> matched
+         _dec(k2, "interrupt", "2026-07-23T12:30:00Z"),      # +30m -> lagged
+         _dec(k3, "batch")],                                  # delivered -> divergent
+        [_ev(k1), _ev(k2), _ev(k3), _ev(k4)],                # k4: no decision -> missed
+        window_start=WS, window_end=WE)
+    assert rep["classes"] == {k1: "matched", k2: "lagged",
+                              k3: "policy-divergent", k4: "missed"}
+    assert rep["gates"]["missed_zero"] is False
+    assert rep["gates"]["lagged_zero"] is False
+    assert rep["pass"] is False
+
+
+def test_shadow_report_phantom_only_with_store_keys():
+    k = f"ghost:{AGENT}"
+    # without store_keys: unverifiable -> no-probe-evidence, not phantom
+    rep = router.shadow_report([_dec(k)], [], window_start=WS, window_end=WE)
+    assert rep["classes"][k] == "no-probe-evidence"
+    # with store_keys and the item absent -> phantom (zero-tolerance)
+    rep = router.shadow_report([_dec(k)], [], store_keys=set(),
+                               window_start=WS, window_end=WE)
+    assert rep["classes"][k] == "phantom"
+    assert rep["gates"]["phantom_zero"] is False and rep["pass"] is False
+    # present in the store -> not phantom
+    rep = router.shadow_report([_dec(k)], [], store_keys={k},
+                               window_start=WS, window_end=WE)
+    assert rep["classes"][k] == "no-probe-evidence"
+
+
+def test_shadow_report_duty_cycle_unknown_fails_closed():
+    k = f"s1:{AGENT}"
+    rep = router.shadow_report(
+        [_dec(k, "interrupt", "2026-07-23T12:02:00Z")], [_ev(k)],
+        window_start=WS, window_end=WE)          # no pass_marks
+    assert rep["classes"][k] == "matched"
+    assert rep["duty_cycle"]["known"] is False
+    assert rep["gates"]["duty_uptime"] is False   # unknown never passes
+    assert rep["pass"] is False
+
+
+def test_shadow_report_passes_with_healthy_window():
+    k = f"s1:{AGENT}"
+    rep = router.shadow_report(
+        [_dec(k, "interrupt", "2026-07-23T12:02:00Z")], [_ev(k)],
+        store_keys={k}, pass_marks=_marks(),
+        window_start=WS, window_end=WE)
+    assert rep["duty_cycle"]["known"] is True
+    assert rep["duty_cycle"]["uptime"] >= 0.95
+    assert rep["duty_cycle"]["max_gap_s"] <= 90 * 60
+    assert rep["gates"] == {g: True for g in rep["gates"]}
+    assert rep["pass"] is True
+
+
+def test_shadow_report_duty_gate_fails_on_a_two_hour_gap():
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 7, 23, 0, 0, tzinfo=timezone.utc)
+    marks = _marks(step_s=60, hours=24)          # healthy first day...
+    late_start = t0 + timedelta(hours=26)        # ...then a 2h outage
+    marks += [router.iso(late_start + timedelta(seconds=i * 60))
+              for i in range(22 * 60)]
+    k = f"s1:{AGENT}"
+    rep = router.shadow_report(
+        [_dec(k, "interrupt", "2026-07-23T12:02:00Z")], [_ev(k)],
+        store_keys={k}, pass_marks=marks, window_start=WS, window_end=WE)
+    assert rep["duty_cycle"]["max_gap_s"] >= 2 * 3600
+    assert rep["gates"]["duty_max_gap"] is False
+    assert rep["pass"] is False
+
+
+def test_shadow_report_p95_bound():
+    # 20 interrupts: 19 fast (30s), 1 slow-but-within-window (300s) -> p95 over bound(180s)? p95 index = int(.95*20)=19 -> the 300s one
+    decs, evs = [], []
+    for i in range(20):
+        k = f"m{i}:{AGENT}"
+        lat = 30 if i < 19 else 300
+        decs.append(_dec(k, "interrupt",
+                         router.iso(router.parse_iso("2026-07-23T12:00:00Z")
+                                    + __import__('datetime').timedelta(seconds=lat))))
+        evs.append(_ev(k))
+    rep = router.shadow_report(decs, evs, store_keys={d['key'] for d in decs},
+                               pass_marks=_marks(), window_start=WS, window_end=WE)
+    assert all(c == "matched" for c in rep["classes"].values())  # 300s < 360s window
+    assert rep["p95_interrupt_latency_s"] == 300
+    assert rep["gates"]["p95_within_bound"] is False              # 300 > 180
+    assert rep["pass"] is False
+
+
 # --- E3: router feed-first candidate source (addendum §3.3) -----------------
 
 def _uploaded(name, at):
