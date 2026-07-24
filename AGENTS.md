@@ -941,13 +941,40 @@ fails with a permissions error, the fix is granting the **bot account** access,
 not re-minting the token.
 
 **Rotation.** 90-day expiry; the current token expires **2026-10-22**, with a P1
-bus reminder armed for 2026-10-15 (7 days' lead) carrying the re-mint procedure.
-Verify a new token without exposing it:
+bus reminder armed for 2026-10-15 (7 days' lead). **The operator runs every step;
+agents cannot mint or revoke tokens.** Order matters — the new token is verified
+*before* the old one is revoked, so a failed rotation is always recoverable.
 
-```bash
-GH_TOKEN=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT -w) \
-  gh api user --jq .login            # expect: AnachronixBot
-```
+1. **Mint** (GitHub UI, signed in as `AnachronixBot`): Settings → Developer
+   settings → Personal access tokens → Fine-grained → *Generate new token*. Same
+   scopes as the incumbent — **Contents: RW, Pull requests: RW, Metadata: R**, no
+   administration, no workflows — scoped to the same repos, 90-day expiry. Leave
+   the page open until step 3 passes; the value is shown once.
+2. **Store**, replacing the incumbent. `-U` updates the existing item; passing
+   `-w` with **no value** makes it prompt, so the token never enters argv or
+   shell history:
+   ```bash
+   security add-generic-password -U -a "$USER" -s FLEET_GH_PAT -w
+   ```
+3. **Verify before cutover** — prints only derived facts, never the value:
+   ```bash
+   T=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT -w)
+   GH_TOKEN="$T" gh api user --jq .login                     # expect AnachronixBot
+   GH_TOKEN="$T" gh api repos/ashfulcra/fulcra-tools \
+     --jq '{push: .permissions.push, admin: .permissions.admin}'
+   unset T                                    # expect push true, admin false
+   ```
+   Both must pass. A wrong `login` means you minted on the wrong account; `push:
+   false` means the **bot account** lacks repo access — grant it, don't re-mint.
+4. **Rollback if step 3 fails:** re-run step 2 and re-enter the *old* (still
+   valid, not yet revoked) token. The fleet keeps working; retry the rotation.
+5. **Revoke the old token** — only after step 3 passes. GitHub UI → the previous
+   token → *Revoke*. Skipping this leaves a live credential in circulation.
+6. **Re-arm** the next rotation reminder (~7 days before the new expiry) and
+   update the expiry date recorded above.
+
+Never let the value reach argv, stdout, shell history, a repo file, a launchd
+plist, a log, or a chat transcript at any step.
 
 ## Documentation rules (standing, operator-set)
 
