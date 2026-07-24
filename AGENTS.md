@@ -915,13 +915,25 @@ Fulcra-side repos, operator decision 2026-07-22). Agent-driven GitHub actions ru
 as the bot so they are **attributable to the fleet, not to Ash personally**; when
 you see a push or merge by `AnachronixBot`, an agent did it.
 
-**Custody — keychain, read at runtime, never embedded.** The token lives in the
-macOS keychain as service `FLEET_GH_PAT` (account = the host user). Read it only
-at the moment of use:
+**Custody — TWO homes, read at runtime, never embedded.** The same credential
+lives in two places and **both must be rotated together**:
+
+| Home | Where | Holders |
+|---|---|---|
+| **PRIMARY** | `FLEET_GH_TOKEN` + `FLEET_BOT_NAME` in the **CCR env config** | the four cloud agents: `coord-boss`, `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer` |
+| Mac host | macOS keychain, service `FLEET_GH_PAT` (account = host user) | host-local jobs on the resident Mac |
+| VPS | per the deploy package | added at the VPS migration |
+
+Cloud agents read `FLEET_GH_TOKEN` from their environment; on the Mac host, read
+the keychain only at the moment of use:
 
 ```bash
 GH_TOKEN=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT -w)
 ```
+
+**Rotating one home only is the trap:** revoking the old PAT after refreshing just
+the keychain leaves every cloud agent holding a dead token. The rotation runbook
+below updates the CCR envs *before* revocation for exactly this reason.
 
 Hard rules, each one a real leak vector:
 - **NEVER put it in a launchd plist `EnvironmentVariables`.** Plists under
@@ -989,9 +1001,17 @@ and working until the candidate has passed verification.
    this is what catches the empty-value footgun. If it fails, the staging item
    still holds the verified-good token (readable via Keychain Access): redo
    step 5. Do not proceed until this passes.
-7. **Revoke the old token** — only now. GitHub UI → previous token → *Revoke*.
-   Skipping this leaves a live credential in circulation.
-8. **Clean up staging and re-arm:**
+7. **Propagate to the PRIMARY home — the cloud agents — BEFORE revoking.** Steps
+   2–6 rotate the Mac keychain only; the four cloud agents (`coord-boss`,
+   `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer`) still hold the
+   **old** token in `FLEET_GH_TOKEN`. Update `FLEET_GH_TOKEN` in each of their CCR
+   env configs (and the VPS deploy package once migrated), then **confirm one real
+   cloud push or PR operation succeeds** with the new value. Revoking before this
+   step strands the entire cloud fleet on a dead credential — the whole reason
+   custody is documented as two homes.
+8. **Revoke the old token** — only after step 7 confirms. GitHub UI → previous
+   token → *Revoke*. Skipping this leaves a live credential in circulation.
+9. **Clean up staging and re-arm:**
    ```bash
    security delete-generic-password -a "$USER" -s FLEET_GH_PAT_NEW
    ```
