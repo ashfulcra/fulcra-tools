@@ -748,6 +748,33 @@ def test_router_shadow_status_reports_elapsed(capsys):
     assert "ARMED" in capsys.readouterr().out
 
 
+def test_router_shadow_report_missing_population_is_unknown_json(capsys):
+    t = FakeTransport()
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "UNKNOWN"
+    assert report["pass"] is False
+    assert any("shadow-window" in reason for reason in report["unknown"])
+
+
+def test_router_run_json_is_one_document_and_details_are_stderr(capsys):
+    t = FakeTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    assert cli.cmd_router_run(_args(json=True), t) == 0
+    captured = capsys.readouterr()
+    doc = json.loads(captured.out)
+    assert doc["pass"]["scanned"] == 1
+    assert isinstance(doc["execute"], dict)
+    assert "decision " in captured.err
+
+
+def test_router_run_rejects_json_resident_mode(capsys):
+    assert cli.cmd_router_run(_args(json=True, once=False), FakeTransport()) == 2
+    assert capsys.readouterr().out == ""
+
+
 def _listen_state():
     return {"inbox_ids": set(), "response_keys": set(),
             "verdict_keys": set(), "degraded": {}}
