@@ -761,6 +761,20 @@ it (not on PyPI).
     **never trust it as complete**. `--json` is ONE array (dropped items + the optional
     degraded element), not JSON-Lines — see the `--json` purity doctrine above. coord-boss runs
     `threads fulcra --for ash --json` in its loop and owns the curation/push call.
+- **Blocked-on-operator doctrine — a harness approval-gate is a bus event
+  (operator order, 2026-07-23, after the W5 stall).** When work waits on an
+  operator/harness approval that only a human can grant (a "nod before you build",
+  a deploy sign-off, an entered credential, any approval you cannot self-serve),
+  the blocked agent does THREE things the same turn, not one: (1) immediately post
+  a **P1 BLOCKED-ON-OPERATOR** shard to coord-boss naming the EXACT approval and
+  the EXACT artifact it gates (PR #, slug, host) — so the block is a visible,
+  routable bus item, not a private wait; (2) **continue all non-blocked work** —
+  the block scopes to the gated artifact, never to the agent; idle-while-blocked
+  on one item when other work is ready is itself a failure; (3) **keep beating** —
+  a blocked agent is still live and must stay so. **Silence-while-blocked is a
+  protocol violation:** never let an operator approval turn into an invisible stall
+  (the failure this codifies). The operator's absence is never approval — surface
+  the block loudly and persistently, and take the other ready work meanwhile.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
   `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
   model that covers the work, and log the outcome after:
