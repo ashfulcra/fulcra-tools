@@ -5188,6 +5188,218 @@ def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
         _router_execute_cloud(args, transport)
 
 
+# --- W5.5: thin host executor -----------------------------------------------
+#
+# The SOLE executor for host-local adapters (plan §W5/W5.5). Policy-free and
+# config-authority-free: it makes NO wake decisions (W4's `router run` did that
+# and stamped `executor`/`adapter` into the queue entry — the trusted routing
+# source) and re-runs NO policy. It drains exactly the queue entries whose
+# `executor` matches its own host id, fires the sanctioned host-local adapter
+# through the one invoker seam, and records the outcome. A flaky desktop delays
+# only its own adapters' wakes — visibly, in the durable queue (plan §2.5).
+# Delivery is at-least-once and safe by `router.adapter_invocation`'s keyed-nudge
+# content rule; deployment (wiring the real adapter scripts, scheduling the
+# poller on a host) is a separate Ash-gated step — this command wakes nothing.
+
+def _default_host_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
+    """Default host-local adapter invoker → (status, detail), status one of
+    "delivered" | "failed" | "unconfigured".
+
+    The host-side integration SEAM. Real deployment wires the sanctioned
+    host-local adapter SCRIPT here (`codex-exec-resume` resumes a Codex thread,
+    `openclaw-post` posts to a local endpoint, `macos-notify` posts a
+    notification, `queued-wake-file` drops a SessionStart nudge) — each fires a
+    check-your-queue nudge and reports delivered/failed. Until a script is wired
+    on THIS host the default reports `unconfigured`: the wake stays VISIBLY
+    QUEUED (never dropped, never a burned retry), the plan's fail-visible
+    degradation. Tests inject a fake invoker to exercise the delivered/failed
+    paths — so nothing in this component ever wakes anything on its own."""
+    return ("unconfigured",
+            f"no host-local adapter script wired for "
+            f"{inv.get('adapter')!r} on this executor yet")
+
+
+def _router_execute_host(args: argparse.Namespace, transport: Any,
+                         invoke: Any = None) -> "dict[str, int]":
+    """Drain the queue entries resolved to THIS host's executor id: select →
+    idempotency-skip → claim → invoke → delivered/dead-letter with BOUNDED
+    cross-pass retry. Only `executor == <this host id>` entries are touched;
+    everything else (other hosts, the decision plane, malformed) is left
+    untouched. Policy-free: an entry present in the queue executes regardless of
+    priority — W4 already decided.
+
+    Read-contract (plan §2, and the bug that hit W1–W3): a queue OR delivered/
+    listing that RAISES is UNKNOWN-degraded — reported loudly, `degraded` set, no
+    execution this pass, wakes stay VISIBLY queued (a dead/blind executor never
+    reports a clean "0 delivered"). A per-entry read that is None/unparseable is
+    SKIPPED (never invoke an adapter on an UNKNOWN entry — a failed read must
+    cause no wake and no delivery-record). The delivered/ existence check that
+    drives idempotency confirms via the RAISING `list_dir`, never a falsy read."""
+    invoke = invoke or _default_host_adapter_invoke
+    executor_id = getattr(args, "host", None) or _host()
+    dry_run = getattr(args, "dry_run", False)
+    prefix = router.router_prefix(args.team)
+    now = _now()
+    counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
+              "unconfigured": 0, "skipped": 0, "deferred": 0,
+              "already_delivered": 0, "would_execute": 0, "degraded": 0}
+
+    try:
+        q_entries = transport.list_dir(prefix + "queue/")
+    except TransportError as e:
+        print(f"router execute [{executor_id}]: queue listing degraded ({e}) — "
+              f"UNKNOWN, no execution this pass; wakes stay visibly queued (a "
+              f"dead executor leaves wakes queued, never a silent 0 delivered)",
+              file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
+
+    # Idempotency source: the delivered/ record set. Existence is confirmed via
+    # the RAISING list_dir — a listing that raises is degraded (cannot rule out a
+    # re-fire we shouldn't make), never read as "nothing delivered yet".
+    try:
+        delivered_names = {e.get("name")
+                           for e in transport.list_dir(prefix + "delivered/")
+                           if not e.get("is_dir")}
+    except TransportError as e:
+        print(f"router execute [{executor_id}]: delivered/ listing degraded "
+              f"({e}) — cannot confirm idempotency, no execution this pass; "
+              f"wakes stay visibly queued", file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
+
+    # config.json is read ONLY for the host-resolved adapter_args routing target
+    # (thread_id/endpoint_name) — not for policy. No config authority here.
+    agents_cfg, _executors, _errs = router.validate_config(
+        transport.read(prefix + "config.json"))
+
+    for e in q_entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or not name.endswith(".json"):
+            continue
+        raw = transport.read(prefix + "queue/" + name)
+        try:
+            entry = json.loads(raw) if raw else None
+        except ValueError:
+            entry = None
+        if not isinstance(entry, dict):
+            # read None / unparseable → UNKNOWN entry: SKIP, never invoke on it
+            counts["skipped"] += 1
+            continue
+        if entry.get("executor") != executor_id:
+            continue  # another host's, the decision plane's, or malformed routing
+        # deferred wakes wait for their idle boundary (W4 stamped not_before)
+        nb = router.parse_iso(entry.get("not_before"))
+        if nb is not None and nb > now:
+            counts["deferred"] += 1
+            continue
+
+        key = router.idempotency_key(str(entry.get("source_shard")),
+                                     str(entry.get("agent")))
+        qpath = prefix + "queue/" + name
+
+        # step 2: a delivery-record already exists for this key → SKIP, never
+        # re-invoke (existence confirmed via the RAISING list_dir above).
+        if router.record_filename(key) in delivered_names:
+            counts["already_delivered"] += 1
+            continue
+
+        # respect a FRESH FOREIGN claim (another executor process mid-flight). Our
+        # own claim and a STALE foreign claim are retryable — at-least-once again,
+        # safe by the content rule; a stale claim never wedges an entry forever.
+        if router.claim_is_skippable(entry, executor_id, now):
+            counts["skipped"] += 1
+            continue
+
+        if dry_run:
+            counts["would_execute"] += 1        # select + report only
+            continue
+
+        cfg = agents_cfg.get(entry.get("agent")) or {}
+
+        def _terminate(sub: str, record: dict, tally: str) -> None:
+            """Write a delivered/dead-letter record, then remove the queue entry
+            ONLY if that write landed. A failed record write must NOT be followed
+            by the delete — else the wake is lost. Left queued, it retries next
+            pass (at-least-once, safe by the content rule)."""
+            if transport.write(prefix + sub + router.record_filename(key),
+                               json.dumps(record, sort_keys=True) + "\n"):
+                transport.delete(qpath)
+                counts[tally] += 1
+            else:
+                print(f"router execute [{executor_id}]: {sub.rstrip('/')} "
+                      f"record write failed for {key} — entry stays queued, "
+                      f"retries next pass", file=sys.stderr)
+                counts["retried"] += 1
+
+        # only the four host-local adapters are executable on a host executor; a
+        # cloud adapter mis-resolved here (or anything unknown) is a per-entry
+        # error → dead-letter, never a silent skip or mis-fire.
+        adapter = entry.get("adapter")
+        if adapter not in router.ADAPTERS_HOST_LOCAL:
+            _terminate("dead-letter/", router.dead_letter_record(
+                entry, attempts=int(entry.get("attempts", 0)) + 1,
+                last_error=(f"adapter {adapter!r} is not a host-local adapter "
+                            f"({sorted(router.ADAPTERS_HOST_LOCAL)}) — not "
+                            f"executable on this host executor"),
+                gave_up_at=router.iso(now)), "dead_lettered")
+            continue
+
+        try:
+            inv = router.adapter_invocation(entry, cfg.get("adapter_args"))
+        except ValueError as ve:
+            _terminate("dead-letter/", router.dead_letter_record(
+                entry, attempts=int(entry.get("attempts", 0)) + 1,
+                last_error=f"unroutable: {ve}", gave_up_at=router.iso(now)),
+                "dead_lettered")
+            continue
+
+        status, detail = invoke(inv)
+        if status == "delivered":
+            _terminate("delivered/",
+                       router.delivery_record(entry, router.iso(now)),
+                       "delivered")
+        elif status == "unconfigured":
+            # visibly queued, not a burned retry — awaits a wired host script
+            counts["unconfigured"] += 1
+        else:  # "failed" — bounded cross-pass retry, then dead-letter
+            attempts = int(entry.get("attempts", 0)) + 1
+            if attempts >= router.MAX_DELIVERY_ATTEMPTS:
+                _terminate("dead-letter/", router.dead_letter_record(
+                    entry, attempts=attempts, last_error=detail,
+                    gave_up_at=router.iso(now)), "dead_lettered")
+            else:
+                # id-match + claimed_at claim stamp on the retry (advisory: it
+                # only suppresses a concurrent fresh foreign fire; correctness
+                # rests on the content rule, not the claim).
+                retried = router.claim_stamp(entry, executor_id, now)
+                retried["attempts"] = attempts
+                retried["last_error"] = detail
+                if not transport.write(qpath,
+                                       json.dumps(retried, sort_keys=True) + "\n"):
+                    print(f"router execute [{executor_id}]: retry-state write "
+                          f"failed for {key} — entry unchanged, retries next "
+                          f"pass", file=sys.stderr)
+                counts["retried"] += 1
+
+    active = {k: v for k, v in counts.items() if v}
+    if active:
+        print(f"router execute [{executor_id}]: "
+              + ", ".join(f"{k}={v}" for k, v in active.items())
+              + (" [dry-run]" if dry_run else ""))
+    return counts
+
+
+def cmd_router_execute(args: argparse.Namespace, transport: Any) -> int:
+    counts = _router_execute_host(args, transport)
+    rc = 1 if counts.get("degraded") else 0
+    if getattr(args, "once", False) or getattr(args, "dry_run", False):
+        return rc
+    while True:  # resident thin executor: FIXED 60s cadence (plan §2.5)
+        time.sleep(router.ROUTER_POLL_SECONDS)
+        _router_execute_host(args, transport)
+
+
 # --- stash (fulcra-agent-durable-state) ---
 
 def _stash_prefix(team: str, agent: str) -> str:
@@ -6119,6 +6331,13 @@ def build_parser() -> argparse.ArgumentParser:
     ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)
+    roe = rosub.add_parser("execute", help="W5.5 thin host executor: fire host-local adapters for queue entries resolved to THIS host (policy-free; --once for one pass)")
+    roe.add_argument("team")
+    roe.add_argument("--host", default=None, help="executor id to drain (default: this host's own id)")
+    roe.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
+    roe.add_argument("--dry-run", action="store_true", help="select + report only; invoke nothing, write nothing")
+    add_json(roe)
+    roe.set_defaults(func=cmd_router_execute)
 
     wk = sub.add_parser(
         "wake", help="zero-model wake adapter utilities (queued file / SessionStart)")

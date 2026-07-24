@@ -184,6 +184,34 @@ it (not on PyPI).
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
+- **Thin host executor (W5.5).** `coord-engine router execute <team> [--host
+  <id>] [--once] [--dry-run]` is the SOLE executor for host-local adapters
+  (`codex-exec-resume`, `openclaw-post`, `macos-notify`, `queued-wake-file`). It
+  is **policy-free and has no config authority**: it makes no wake decisions (W4
+  did, stamping `executor`/`adapter` into the queue entry — the trusted routing
+  source) and re-runs no policy — an entry present in the queue executes
+  regardless of priority; it reads `config.json` only for the host-resolved
+  `adapter_args` routing target. Per pass it drains exactly the queue entries
+  whose `executor` matches this host's id (default `_host()`), skips any whose
+  delivery-record already exists (**idempotency-keyed skip — never re-invoke**),
+  claims by id-match + a `claimed_at` stamp (advisory; a stale claim never wedges
+  an entry), fires the sanctioned host-local adapter through one invoker seam,
+  and records the outcome: success ⇒ an idempotency-keyed `delivered/` shard
+  (the `fold_delivered` view reads it), failure ⇒ bounded retry (`attempts` ≤
+  `MAX_DELIVERY_ATTEMPTS`) then a **dead-letter transition** (`{attempts,
+  last_error, gave_up_at}` under `dead-letter/`, owned as claim-holder); a
+  non-host-local or unknown adapter dead-letters immediately. Delivery is
+  **at-least-once and safe by the keyed-nudge content rule** — the wake carries
+  no per-event command, so executing the same entry twice converges to one bus
+  check (the §2 acceptance test). **Read-contract, fail-visible:** a queue or
+  `delivered/` listing that RAISES is UNKNOWN-degraded — reported loudly, no
+  execution, wakes stay VISIBLY queued and the command exits non-zero (a dead
+  executor never reports a clean "0 delivered"); a per-entry read that is
+  None/unparseable is SKIPPED (never invoke on an UNKNOWN entry). The default
+  invoker wires no real adapter (reports `unconfigured`, wake stays queued), so
+  the command wakes nothing on its own — **DEPLOYMENT (wiring the real adapter
+  scripts and scheduling the poller on a host) is a separate Ash-gated step.**
+  Contract: [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) W5.5 + §2.
 - **Durable tooling stash.** An agent's operational bundle (scripts, loops,
   config templates) survives ephemeral machines via
   `coord-engine stash push/pull/list` against
