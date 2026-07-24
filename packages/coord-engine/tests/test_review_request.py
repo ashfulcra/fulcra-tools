@@ -878,6 +878,35 @@ def test_new_head_fails_loud_until_settled_marker_delete_recovers(capsys):
     )
 
 
+def test_new_head_unconditionally_clears_marker_hidden_by_stale_reads(capsys):
+    class MarkerHiddenByStaleReads(FakeTransport):
+        def list_dir(self, prefix):
+            entries = super().list_dir(prefix)
+            if prefix.endswith("/verdicts/"):
+                return [e for e in entries if e.get("name") != ".settled"]
+            return entries
+
+        def read(self, path):
+            if path.endswith("/verdicts/.settled"):
+                return None
+            return super().read(path)
+
+    t = MarkerHiddenByStaleReads()
+    base = ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+            "--reviewer", "alice", "--from", "requester"]
+    assert cli.main([*base, "--head", HEAD_A], transport=t) == 0
+    marker = "team/r/review/pr-86/verdicts/.settled"
+    t.put(marker, "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 0
+    capsys.readouterr()
+    assert marker not in t.store, (
+        "advancing a head must issue an idempotent authoritative delete; a stale "
+        "listing plus a failed marker read is not proof of absence"
+    )
+
+
 def test_current_head_requires_matching_head_in_verdict_frontmatter(capsys):
     t = FakeTransport()
     cli.main(

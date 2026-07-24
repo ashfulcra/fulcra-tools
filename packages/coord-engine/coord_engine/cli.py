@@ -1119,24 +1119,17 @@ def _settled_marker_path(team: str, slug: str) -> str:
 
 
 def _clear_settled_marker(transport: Any, team: str, slug: str) -> bool:
-    """Clear a prior round's fold cache, failing closed when that cannot be proven.
+    """Authoritatively clear a prior round's fold cache, failing closed.
 
     A head advance must become visible to ``needs-me`` before reviewers are
-    notified. Listings are only used to distinguish a confirmed empty prefix from
-    a marker that needs deletion; a positive direct read catches a marker omitted
-    by an eventually-consistent listing. A failed delete is never treated as
-    absence.
+    notified. The transport operation is idempotent: only a successful deletion
+    or the server's explicit exact-path-not-found response proves absence.
     """
-    prefix = _verdicts_prefix(team, slug)
     marker_path = _settled_marker_path(team, slug)
-    try:
-        entries = transport.list_dir(prefix)
-    except TransportError:
-        return False
-    listed = any((entry.get("name") or "") == SETTLED_MARKER for entry in entries)
-    if not listed and transport.read(marker_path) is None:
-        return True
-    return bool(hasattr(transport, "delete") and transport.delete(marker_path))
+    return bool(
+        hasattr(transport, "delete_idempotent")
+        and transport.delete_idempotent(marker_path)
+    )
 
 
 def _review_fold_budget() -> float:
