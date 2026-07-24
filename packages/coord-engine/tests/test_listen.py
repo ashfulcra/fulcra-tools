@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from coord_engine import aggregate, cli, okf, reconcile, tasks
+from coord_engine import aggregate, cli, okf, reconcile
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 

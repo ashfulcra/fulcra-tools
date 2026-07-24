@@ -77,7 +77,6 @@ def test_mirror_degrades_on_gh_failure_and_non_pr_artifacts():
 def test_cli_forge_mirror_command(capsys):
     t = FakeTransport()
     _team_with_review(t)
-    import argparse
     from coord_engine.cli import build_parser
     p = build_parser()
     args = p.parse_args(["forge", "mirror", "r"])

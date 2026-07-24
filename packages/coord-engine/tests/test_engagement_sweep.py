@@ -24,8 +24,6 @@ Non-negotiables pinned here (all red-first — the sweep does not exist yet):
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from coord_engine import cli, okf, presence, tasks
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport

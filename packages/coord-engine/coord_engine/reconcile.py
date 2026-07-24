@@ -1,12 +1,14 @@
-"""L1 reconcile orchestration (spec §3, §8).
+"""L1 reconcile orchestration (spec §3, §8; event addendum E1).
 
-Scan a team's ``task/`` namespace, parse changed OKF Task docs, and heal the
-engine-owned derived artifacts (``index.md``, ``log.md``, ``_coord/summaries.json``).
+Maintain a team's task rows incrementally from the authoritative data-updates
+feed, reading only changed OKF Task docs, and heal the engine-owned derived
+artifacts (``index.md``, ``log.md``, ``_coord/summaries.json``). Any feed,
+cursor, or changed-shard doubt takes the full listing scan. A scheduled full
+scan also detects drift and loudly rebuilds divergence, preserving the
+orphan-proof ground-truth check without taxing every pass.
+
 Transport is injected (duck-typed: ``list_dir``/``read``/``write``), so this is
 fully testable without the network.
-
-Orphan-proof by construction: rows are rebuilt from the live listing each pass,
-never unioned with stale state.
 """
 
 from __future__ import annotations
@@ -888,18 +890,6 @@ def _parse_reconcile_cursor(
     return {"watermark": wm,
             "processed": {str(k): str(v) for k, v in data["processed"].items()},
             "streak": streak}, None
-
-
-def _mtime_from_uploaded_at(uploaded_at: Any) -> Optional[str]:
-    """The feed's second-granular ISO ``uploaded_at`` -> the store's
-    minute-granular listing format (``"2026-07-01 12:15PM UTC"``), so a row folded
-    from the feed carries the SAME mtime a full scan's listing would stamp
-    (byte-parity between the two paths). None if unparseable — the caller then
-    treats the entry as doubt and full-scans."""
-    dt = _parse_iso_utc(uploaded_at)
-    if dt is None:
-        return None
-    return dt.strftime("%Y-%m-%d %I:%M%p UTC")
 
 
 _FEED_STATE_PRIORITY = {"archived": 0, "deleted": 1, "uploaded": 2}

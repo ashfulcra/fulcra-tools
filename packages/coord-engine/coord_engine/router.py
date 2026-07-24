@@ -2,18 +2,20 @@
 
 Normative contract: docs/coord/wake-router-PLAN.md §2/§2.5 and
 wake-router-SPEC.md §4 (relay contract). The router is the fleet's model-free
-wake policy: it scans the store by cursor (structurally immune to the
+wake policy: it scans the authoritative data-updates feed by cursor
+(structurally immune to the
 2026-07-22 listen-starvation class — it never touches the `listen` fold),
-evaluates per-agent policy, and ENQUEUES wake decisions under the one namespace
-it owns, `team/<team>/_coord/router/`. W4 executes nothing — execution is W5
-(cloud-reachable) and W5.5 (thin host executor).
+evaluates per-agent policy, executes cloud-reachable adapters, and enqueues
+host-local wake decisions under the one namespace it owns,
+`team/<team>/_coord/router/`. A full task-listing scan remains the fail-closed
+fallback on feed doubt.
 
 Two design facts everything else hangs off:
 
-- **Tie-safe scan.** Store mtimes are minute-granular, so equal-mtime shards
-  are the COMMON case. The scan is inclusive (`mtime >= watermark`) and the
+- **Tie-safe scan.** Feed timestamps are second-granular and the scan is
+  inclusive (`uploaded_at >= watermark`); the
   durable `processed` ledger — key ``<source-shard-id>:<agent>`` — suppresses
-  replays. A strict `>` scan would skip forever any same-minute shard that
+  replays. A strict `>` scan could skip an equal-timestamp shard that
   landed after checkpoint.
 - **Enablement is explicit.** An agent absent from `config.json` is
   observe-only: the router classifies and ledgers its items but never enqueues
@@ -250,25 +252,6 @@ def fold_delivered(shards: list[dict[str, Any]]) -> dict[str, Any]:
     return view
 
 
-def record_filename(key: str) -> str:
-    """Return the canonical idempotency-keyed delivery-record filename."""
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", key)
-    return f"{safe}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}.json"
-
-
-def delivery_record(entry: dict[str, Any], delivered_at: str) -> dict[str, Any]:
-    """Build the standard successful-execution record consumed by the fold."""
-    return {
-        "key": idempotency_key(str(entry.get("source_shard")),
-                               str(entry.get("agent"))),
-        "agent": entry.get("agent"),
-        "source_shard": entry.get("source_shard"),
-        "adapter": entry.get("adapter"),
-        "executor": entry.get("executor"),
-        "delivered_at": delivered_at,
-    }
-
-
 # --- policy -----------------------------------------------------------------
 
 def queue_filename(agent: str, key: str) -> str:
@@ -327,11 +310,6 @@ def decide(
 # atomic claim/CAS); the system is safe by ADAPTER CONTENT DESIGN, enforced by
 # `adapter_invocation` below: every wake is a keyed check-your-bus nudge with NO
 # per-event command, so N deliveries converge to one bus check (plan §2).
-
-#: Logical executor id the decision plane claims. Cloud-reachable adapters
-#: resolve to this at enqueue time (see `validate_config`); host-local adapters
-#: resolve to a host id and are never executed here.
-DECISION_PLANE = "decision-plane"
 
 #: Bounded retry before an execution is dead-lettered (plan §2 relay contract:
 #: bounded retry → dead-letter, never an unbounded loop).

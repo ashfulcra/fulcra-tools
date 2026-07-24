@@ -20,8 +20,6 @@ not exist yet.
 from datetime import datetime, timedelta, timezone
 import json
 
-import pytest
-
 from coord_engine import cli, okf, presence, tasks
 from coord_engine_test_helpers import FakeTransport
 

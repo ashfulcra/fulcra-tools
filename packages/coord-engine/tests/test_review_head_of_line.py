@@ -25,8 +25,6 @@ idiom), pinned into `budget.time.monotonic`, so "the head completed / the tail w
 cut" is an exact fact, never a runtime threshold that flakes under runner load.
 """
 
-import time
-
 from coord_engine import budget, cli
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
@@ -126,8 +124,8 @@ def test_head_scanned_before_tail(capsys, monkeypatch):
     rows = _live_shaped(t, n_reviews=50, n_proposed=10)
     capsys.readouterr()
     t.reads.clear()
-    out = cli._pending_reviews_for(t, "r", "alice", rows=rows,
-                                   deadline_seconds=45.0)
+    cli._pending_reviews_for(t, "r", "alice", rows=rows,
+                             deadline_seconds=45.0)
     head_doc_read = next(i for i, p in enumerate(t.reads)
                          if p == "team/r/review/pr-mine.md")
     first_other = next(i for i, p in enumerate(t.reads)

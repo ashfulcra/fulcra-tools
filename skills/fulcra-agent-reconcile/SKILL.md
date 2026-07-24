@@ -1,6 +1,6 @@
 ---
 name: fulcra-agent-reconcile
-description: "Give a fulcra-agent-teams space self-healing, queryable task views: scan the team's OKF task docs, regenerate task/index.md and log.md, and answer status/board/needs-me/search in one read."
+description: "Give a fulcra-agent-teams space self-healing, queryable task views: fold changed OKF task docs from the data-updates feed, retain a fail-closed full-scan fallback, regenerate task/index.md and log.md, and answer status/board/needs-me/search in one read."
 homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
@@ -15,16 +15,18 @@ At any real scale that index drifts. This skill makes the index **engine-owned a
 **structured queries** the convention otherwise lacks — without changing how tasks are written.
 
 ## What it does
-A bundled stdlib-only tool (`coord-reconcile`) that, for a given team:
-- **Scans** `team/<team>/task/*.md` (OKF `type: Task` concept docs).
+A bundled stdlib-only tool (`coord-engine`) that, for a given team:
+- **Folds** changed `team/<team>/task/*.md` docs from the authoritative
+  `data-updates` feed, reading only the changed shards.
 - **Heals** `task/index.md` (OKF §6, grouped by status) and appends `task/log.md` (OKF §7, status
-  transitions) — regenerated from the live listing each pass, so stale/orphaned entries cannot accrue.
+  transitions), with a periodic full-scan drift check that loudly rebuilds any divergence.
 - **Emits** `team/<team>/_coord/summaries.json` — a fast-path aggregate so reads are one download, not N.
 - **Answers** `status` / `board` / `needs-me` / `search` from that aggregate.
 
-Properties: **orphan-proof** (full rebuild from ground truth), **incremental** (skips unchanged files by
-the `fulcra-api file list` timestamp), **degraded-safe** (a listing failure aborts the pass and leaves the
-prior index intact — never publishes a truncated view).
+Properties: **orphan-proof** (scheduled full-scan drift checks rebuild from ground truth),
+**incremental** (a durable feed cursor reads only changed task shards), **degraded-safe** (any
+feed/cursor/shard doubt falls back to the full listing scan; if that scan fails, the pass aborts and
+leaves the prior index intact — never publishes a truncated view).
 
 ## The OKF Task contract (what a task doc looks like)
 ```yaml
@@ -63,7 +65,8 @@ With `--retention-days N` (or env `COORD_RETENTION_DAYS`), reconcile archives te
 days to `task/archive/<YYYY-MM>/` — a **verified move** (copy → read-back → delete), never a bare delete —
 and moves the task's ack/response shards with it. Once per day, capped per pass. `coord-engine task
 restore <team> <slug>` brings one back; `coord-engine search <team> <q> --archived` searches the cold
-archive. Off by default.
+archive. Retention defaults to 14 days; set `COORD_RETENTION_DAYS=0` or pass
+`--retention-days 0` to disable it explicitly.
 
 ## Where to start — the re-entrancy probes
 
@@ -74,8 +77,8 @@ and degraded-safe — so re-running it never corrupts state and re-entry is alwa
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first — a `✗` line names the broken leg (launcher not on PATH, or File Store unreachable → `fulcra-api auth login`); do NOT reconcile against a broken engine |
-| Aggregate present + fresh? | `coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint, printed only when no aggregate has been built) | **Reconcile** — run `coord-engine reconcile <team>` (see [Usage](#usage)) to scan the task docs and build/heal the aggregate, then re-probe |
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first — a `✗` line names the broken leg (launcher not on PATH, or File Store unreachable → `fulcra auth login`); do NOT reconcile against a broken engine |
+| Aggregate present + fresh? | `coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint, printed only when no aggregate has been built) | **Reconcile** — run `coord-engine reconcile <team>` (see [Usage](#usage)) to fold feed changes or take the fail-closed full scan and build/heal the aggregate, then re-probe |
 
 Both probes pass → the engine is healthy and the aggregate exists, so `status`/`board`/`needs-me`/`search`
 read the fresh view; reconcile again on your cadence (or heartbeat) to keep it healed as tasks change.
@@ -87,7 +90,7 @@ stays pure prose + references (no bundled code). Needs `fulcra-api` authenticate
 installed (`uv tool install <fulcra-tools>/packages/coord-engine` — from the git tag or a checkout).
 See [`references/reconcile-cli.md`](references/reconcile-cli.md).
 ```bash
-coord-engine reconcile <team>            # scan + heal index/log + write the aggregate
+coord-engine reconcile <team>            # feed delta (or full-scan fallback) + heal views
 coord-engine board    <team>
 coord-engine needs-me <team> --agent <id>
 ```
