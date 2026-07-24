@@ -250,25 +250,6 @@ def fold_delivered(shards: list[dict[str, Any]]) -> dict[str, Any]:
     return view
 
 
-def record_filename(key: str) -> str:
-    """Return the canonical idempotency-keyed delivery-record filename."""
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", key)
-    return f"{safe}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}.json"
-
-
-def delivery_record(entry: dict[str, Any], delivered_at: str) -> dict[str, Any]:
-    """Build the standard successful-execution record consumed by the fold."""
-    return {
-        "key": idempotency_key(str(entry.get("source_shard")),
-                               str(entry.get("agent"))),
-        "agent": entry.get("agent"),
-        "source_shard": entry.get("source_shard"),
-        "adapter": entry.get("adapter"),
-        "executor": entry.get("executor"),
-        "delivered_at": delivered_at,
-    }
-
-
 # --- policy -----------------------------------------------------------------
 
 def queue_filename(agent: str, key: str) -> str:
