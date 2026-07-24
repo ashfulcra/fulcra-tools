@@ -907,6 +907,48 @@ Author commits as `ashfulcra
 trailer `Co-Authored-By: <your model> <noreply@anthropic.com>` (e.g.
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
 
+## Fleet bot identity & PAT custody (W9)
+
+**The fleet's machine account is `AnachronixBot`** — a dedicated bot User, distinct
+from `ashfulcra` (Ash's personal account) and from `FulcraBot` (reserved for
+Fulcra-side repos, operator decision 2026-07-22). Agent-driven GitHub actions run
+as the bot so they are **attributable to the fleet, not to Ash personally**; when
+you see a push or merge by `AnachronixBot`, an agent did it.
+
+**Custody — keychain, read at runtime, never embedded.** The token lives in the
+macOS keychain as service `FLEET_GH_PAT` (account = the host user). Read it only
+at the moment of use:
+
+```bash
+GH_TOKEN=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT -w)
+```
+
+Hard rules, each one a real leak vector:
+- **NEVER put it in a launchd plist `EnvironmentVariables`.** Plists under
+  `~/Library/LaunchAgents` are readable; a token there is plaintext at rest. A
+  scheduled job that needs it shells out to the keychain *at runtime*.
+- **Never** commit it, echo it, paste it into a chat/transcript, or log it. Print
+  derived facts (identity, permissions), never the value.
+- Agents **cannot mint tokens** — only the operator can. An expired PAT is an
+  operator action, never an agent workaround.
+
+**Least privilege (verified 2026-07-24).** Fine-grained, per-repo:
+Contents RW + Pull requests RW + Metadata R. **No admin, no workflows** — the
+workflows scope would let a bot rewrite CI, which is far more blast radius than
+the fleet needs. Confirmed on `ashfulcra/fulcra-tools`: `push: true`,
+`admin: false`. A PAT can never exceed its account's own repo access — if a merge
+fails with a permissions error, the fix is granting the **bot account** access,
+not re-minting the token.
+
+**Rotation.** 90-day expiry; the current token expires **2026-10-22**, with a P1
+bus reminder armed for 2026-10-15 (7 days' lead) carrying the re-mint procedure.
+Verify a new token without exposing it:
+
+```bash
+GH_TOKEN=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT -w) \
+  gh api user --jq .login            # expect: AnachronixBot
+```
+
 ## Documentation rules (standing, operator-set)
 
 The docs' primary reader is an **agent**; the showcase test is the goal: a
