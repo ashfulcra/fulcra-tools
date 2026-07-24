@@ -260,6 +260,11 @@ class TestListenerTick:
             "exit \"${COORD_TEST_EXIT:-0}\" ;;\n"
             "esac\n")
         engine.chmod(0o755)
+        osascript = shims / "osascript"
+        osascript.write_text(
+            "#!/bin/sh\n"
+            'echo "osascript $*" >> "$COORD_TEST_NOTIFY_CALLS"\n')
+        osascript.chmod(0o755)
         env = {
             "HOME": str(tmp_path / "home"),
             "PATH": f"{shims}:/usr/bin:/bin",
@@ -269,6 +274,7 @@ class TestListenerTick:
             "COORD_TEST_STDERR": once_stderr,
             "COORD_TEST_EXIT": str(once_exit),
             "COORD_TEST_CALLS": str(tmp_path / "calls.log"),
+            "COORD_TEST_NOTIFY_CALLS": str(tmp_path / "notify-calls.log"),
             "COORD_LISTENER_VERBOSE": "1" if verbose else "0",
         }
         if now is not None:
@@ -349,6 +355,9 @@ class TestListenerTick:
             tmp_path, adaptive=True, now=1000, once_exit=3,
             once_stderr="LISTEN DEGRADED: transport\n")
         assert first.returncode == 0
+        assert "listener degraded" in first.stdout
+        assert "LISTEN DEGRADED: transport" in first.stderr
+        assert len((tmp_path / "notify-calls.log").read_text().splitlines()) == 1
         assert cadence.read_text() == \
             "active_until=1300\nnext_due=1060\nfailure_streak=1\n"
 
@@ -358,7 +367,8 @@ class TestListenerTick:
             tmp_path, adaptive=True, now=1060, once_exit=3,
             once_stderr="")
         assert second.returncode == 0
-        assert "engine exited 3" in second.stderr
+        assert second.stdout == "" and second.stderr == ""
+        assert len((tmp_path / "notify-calls.log").read_text().splitlines()) == 1
         assert cadence.read_text() == \
             "active_until=1300\nnext_due=1180\nfailure_streak=2\n"
 
