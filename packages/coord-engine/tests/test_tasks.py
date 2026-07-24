@@ -87,7 +87,6 @@ def test_apply_update_legal_transition_and_note():
 
 
 def test_apply_update_rejects_illegal_transition():
-    doc = tasks.new_task_doc("T", now=NOW, status="done")  # can't build done? proposed->done ok
     # build an active task then try done->active
     done_doc = tasks.apply_update(tasks.new_task_doc("T", now=NOW, status="active")[1],
                                   now=NOW, status="done", evidence="e")

@@ -63,11 +63,6 @@ def _age_days(ref: datetime, now: datetime) -> float:
     return (now - ref).total_seconds() / 86400.0
 
 
-def _tags(row: dict[str, Any]) -> list[str]:
-    tags = row.get("tags")
-    return [str(t) for t in tags] if isinstance(tags, list) else []
-
-
 def _followup(row: dict[str, Any]) -> dict[str, Any]:
     fu = row.get("followup")
     if not isinstance(fu, dict):

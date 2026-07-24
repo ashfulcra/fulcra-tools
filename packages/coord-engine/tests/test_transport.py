@@ -8,7 +8,6 @@ briefing/needs-me folds rely on: nothing but ``TransportError`` (or the method's
 soft return) ever escapes a transport method.
 """
 
-import os
 import subprocess
 import time
 import urllib.error

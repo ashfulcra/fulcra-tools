@@ -438,10 +438,6 @@ def _load_rows_status(
     return [], True, ""  # genuinely absent -> a real, readable empty
 
 
-def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
-    return _load_rows_status(transport, team)[0]
-
-
 # --- The public-read failure contract (defined ONCE) -----------------------
 #
 # Every aggregate-backed PUBLIC READ — `status`, `board`, `needs-me`, `search`,
@@ -4469,12 +4465,8 @@ def _presence_shards_status(
     return shards, ok
 
 
-def _router_prefix(team: str) -> str:
-    return f"team/{team}/_coord/router/"
-
-
 def _engagement_defaults_path(team: str) -> str:
-    return f"{_router_prefix(team)}engagement-defaults.json"
+    return f"{router.router_prefix(team)}engagement-defaults.json"
 
 
 def _load_engagement_defaults(
@@ -4505,7 +4497,7 @@ def _load_engagement_defaults(
         return (data, True) if isinstance(data, dict) else ({}, False)
     # raw is None: missing OR transient failure. Confirm which via the raising list.
     try:
-        entries = transport.list_dir(_router_prefix(team))
+        entries = transport.list_dir(router.router_prefix(team))
     except TransportError:
         return {}, False                  # listing failed -> UNKNOWN -> fail closed
     present = any((e.get("name") or "") == "engagement-defaults.json"
@@ -4785,7 +4777,7 @@ def cmd_roles_release(args: argparse.Namespace, transport: Any) -> int:
     return 0 if ok else 1
 
 
-# --- router (wake-router W4 — decision plane, enqueue-only) ---
+# --- router (feed-first decision plane + host-local executor) ---
 
 def _router_presence(transport: Any, team: str, agent: str,
                      memo: dict) -> "tuple[Optional[datetime], bool]":
@@ -6227,7 +6219,10 @@ def build_parser() -> argparse.ArgumentParser:
     def add_json(sp):
         sp.add_argument("--json", action="store_true", help="emit JSON")
 
-    r = sub.add_parser("reconcile", help="scan + heal a team's task views")
+    r = sub.add_parser(
+        "reconcile",
+        help="feed-fold + heal a team's task views (full-scan fallback)",
+    )
     r.add_argument("team")
     r.add_argument("--retention-days", dest="retention_days",
                    help="archive quiet terminal/proposed tasks and settled-single orphan reviews older than N days (or env COORD_RETENTION_DAYS)")
@@ -6527,9 +6522,16 @@ def build_parser() -> argparse.ArgumentParser:
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)
 
-    ro = sub.add_parser("router", help="wake-router decision plane (wake-router-PLAN.md W4 — cursor scan + policy, enqueue-only)")
+    ro = sub.add_parser(
+        "router",
+        help="wake-router feed-first decision plane + host-local executor",
+    )
     rosub = ro.add_subparsers(dest="router_command", required=True)
-    ror = rosub.add_parser("run", help="scan the store by cursor and enqueue wake decisions (fixed 60s cadence; --once for one pass)")
+    ror = rosub.add_parser(
+        "run",
+        help=("fold feed changes by cursor, execute cloud adapters, and enqueue "
+              "host-local wakes (fixed 60s cadence; --once for one pass)"),
+    )
     ror.add_argument("team")
     ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
     ror.add_argument("--shadow", action="store_true", help="W7 read-only shadow mode: log + persist a decision per directed item, enqueue and execute NOTHING (the >=48h acceptance measurement)")

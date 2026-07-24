@@ -110,10 +110,6 @@ SOURCE_MARKER = "com.fulcradynamics.fulcra-coord.projection"
 #: reopened. See ``reconcile.FAST_PATH_SKEW_MARGIN_SECONDS``.
 SKEW_MARGIN_SECONDS = FAST_PATH_SKEW_MARGIN_SECONDS
 
-#: Required keys on a structured transition row.
-_REQUIRED_KEYS = ("task_id", "kind", "ts")
-
-
 # ---------------------------------------------------------------------------
 # AnnotationSpec — what the fold emits per projected transition
 # ---------------------------------------------------------------------------
