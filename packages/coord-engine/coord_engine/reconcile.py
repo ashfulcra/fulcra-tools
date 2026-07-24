@@ -834,6 +834,338 @@ def _load_prior_aggregate(transport: Any, team: str) -> Optional[dict[str, Any]]
         return None
 
 
+# --- E1: incremental reconcile (feed-cursor fold) ---------------------------
+#
+# Reconcile's default pass is a FEED DELTA, not a directory scan: consume the
+# data-updates feed since a durable cursor, read ONLY the changed task shards,
+# and update the aggregate rows in place. The full directory scan stays as (a)
+# the fail-closed fallback on ANY cursor/feed doubt and (b) a periodic drift
+# self-check. Normative: docs/coord/wake-router-ADDENDUM-1-event-substrate §3.1;
+# the cursor reuses W4's proven watermark + processed-ledger pattern (router.py).
+
+#: The cursor lives in summaries.json (already read + written every pass, so it
+#: costs no transport op) under this key, shape ``{watermark, processed, streak}``.
+#: An older host that predates this key wipes it on its own pass — the same
+#: mixed-fleet hazard the ack anchor hit — but losing it is HARMLESS (no cursor
+#: -> full scan, fail-closed), and ``build_aggregate``'s passthrough preserves it
+#: for every host >= this version.
+RECONCILE_CURSOR_KEY = "reconcile_cursor"
+
+#: Force a full-scan drift self-check every Nth incremental pass, independent of
+#: the ``MAX_FAST_PATH_HOURS`` time backstop (env ``COORD_RECONCILE_FULL_EVERY``;
+#: positive int, bad value -> this default). The full scan is authoritative; a
+#: divergence from the incremental-maintained view is logged LOUD and rebuilt.
+DEFAULT_RECONCILE_FULL_EVERY = 72
+
+
+def _parse_reconcile_cursor(
+    raw: Any,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """(cursor, None) on a valid cursor; (None, reason) when reconcile must fall
+    back to a full scan (missing or corrupt). Fail-closed by construction: any
+    shape we cannot positively validate is UNKNOWN, never an empty cursor that
+    would be read as "nothing to fold".
+
+    Cursor shape: ``{"watermark": iso|None, "processed": {path: sig}, "streak": int}``.
+    Accepts either the stored dict (normal path) or a JSON string (defensive).
+    """
+    if raw is None:
+        return None, "cursor missing (first run or reclaimed state)"
+    data: Any = raw
+    if not isinstance(data, dict):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return None, "cursor corrupt (unparseable JSON)"
+    if not isinstance(data, dict) or not isinstance(data.get("processed"), dict):
+        return None, "cursor corrupt (wrong shape)"
+    wm = data.get("watermark")
+    if wm is not None and (not isinstance(wm, str) or _parse_iso_utc(wm) is None):
+        return None, "cursor corrupt (unparseable watermark)"
+    streak = data.get("streak", 0)
+    if not isinstance(streak, int) or isinstance(streak, bool) or streak < 0:
+        streak = 0
+    return {"watermark": wm,
+            "processed": {str(k): str(v) for k, v in data["processed"].items()},
+            "streak": streak}, None
+
+
+def _mtime_from_uploaded_at(uploaded_at: Any) -> Optional[str]:
+    """The feed's second-granular ISO ``uploaded_at`` -> the store's
+    minute-granular listing format (``"2026-07-01 12:15PM UTC"``), so a row folded
+    from the feed carries the SAME mtime a full scan's listing would stamp
+    (byte-parity between the two paths). None if unparseable — the caller then
+    treats the entry as doubt and full-scans."""
+    dt = _parse_iso_utc(uploaded_at)
+    if dt is None:
+        return None
+    return dt.strftime("%Y-%m-%d %I:%M%p UTC")
+
+
+_FEED_STATE_PRIORITY = {"archived": 0, "deleted": 1, "uploaded": 2}
+
+
+def _feed_change_instant(change: dict[str, Any]) -> Optional[datetime]:
+    """Return the lifecycle instant for one normalized data-updates row."""
+    state = change.get("state")
+    key = {"uploaded": "uploaded_at", "archived": "archived_at",
+           "deleted": "deleted_at"}.get(state)
+    value = change.get(key) if key else None
+    # Archive/delete payloads can retain only uploaded_at.  It is still a
+    # deterministic instant; total absence is feed doubt.
+    return _parse_iso_utc(value or change.get("uploaded_at"))
+
+
+def _collapse_feed_changes(
+    changes: list[dict[str, Any]],
+) -> Optional[dict[str, tuple[datetime, dict[str, Any]]]]:
+    """Collapse normalized feed rows to one authoritative lifecycle per path.
+
+    The feed does not promise order, and one window can contain both sides of a
+    delete/recreate.  Latest instant wins; equal instants use the E2 lifecycle
+    priority ``uploaded > deleted > archived`` so a same-second rewrite keeps
+    the live shard.  ``None`` means an entry lacked a usable instant.
+    """
+    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    for change in changes:
+        path = str(change.get("path") or "")
+        instant = _feed_change_instant(change)
+        if instant is None:
+            return None
+        prior = latest.get(path)
+        if prior is None or (
+            instant, _FEED_STATE_PRIORITY[str(change.get("state"))]
+        ) >= (
+            prior[0], _FEED_STATE_PRIORITY[str(prior[1].get("state"))]
+        ):
+            latest[path] = (instant, change)
+    return latest
+
+
+def _feed_task_delta(
+    transport: Any, team: str, *, cursor: dict[str, Any], now: str, log: Any
+) -> Optional[tuple[dict[str, str], set, dict[str, str]]]:
+    """What changed under ``task/`` since the cursor, via the data-updates feed.
+
+    Returns ``(changed, deleted, new_processed)`` or **None for UNKNOWN** (=> the
+    caller full-scans, fail-closed). ``changed`` maps slug -> the parity mtime for
+    each ``uploaded`` task shard; ``deleted`` is the set of removed slugs;
+    ``new_processed`` is the pruned processed-ledger to carry into the next pass.
+
+    W4 pattern: the window is INCLUSIVE (``watermark`` back one skew margin) and a
+    processed ledger keyed ``<path>:<state>:<uploaded_at>`` suppresses re-folding
+    an entry already folded in a prior overlapping window. Every doubt (no feed
+    support, feed error, an entry we cannot positively parse, an unparseable
+    upload time) returns None — never a false "nothing changed"."""
+    updates_fn = getattr(transport, "updates", None)
+    if updates_fn is None:
+        return None
+    start = _parse_iso_utc(cursor.get("watermark"))
+    end = _parse_iso_utc(now)
+    if start is None or end is None:
+        return None  # no usable watermark -> full scan seeds one
+    span = (end - start).total_seconds() + FAST_PATH_SKEW_MARGIN_SECONDS
+    # An anchor so old the query would 500 on an over-wide window is unusable —
+    # the same ceiling the ack change-query respects. Skip to the full scan.
+    if span <= 0 or span > ACKS_ANCHOR_MAX_HOURS * 3600 + FAST_PATH_SKEW_MARGIN_SECONDS:
+        return None
+    period = f"{int(span)} seconds"
+    try:
+        try:
+            changes = updates_fn(period, team=team)
+        except TypeError:
+            changes = updates_fn(period)   # pre-team-kwarg duck-typed transports
+    except Exception as e:
+        log.warn("reconcile: data-updates delta raised; full scan",
+                 team=team, error=str(e))
+        return None
+    if not isinstance(changes, list):
+        return None
+    task_pfx = task_prefix(team)
+    prior_processed = cursor.get("processed", {})
+    relevant: list[dict[str, Any]] = []
+    margin_floor = end - timedelta(seconds=2 * FAST_PATH_SKEW_MARGIN_SECONDS)
+    for c in changes:
+        # Shape guard, fail-CLOSED: any entry we cannot positively parse is doubt,
+        # and doubt is UNKNOWN — feed-shape drift degrades to a full scan, never to
+        # false no-change evidence (the fast path's rule, extended).
+        if not isinstance(c, dict):
+            return None
+        path = c.get("path", c.get("full_name"))
+        state = c.get("state")
+        if not isinstance(path, str) or not path.strip():
+            return None
+        norm = path.strip().lstrip("/")
+        if not norm.startswith(task_pfx):
+            continue  # not a task-namespace change
+        rest = norm[len(task_pfx):]
+        # Direct task shards only: index/log are derived OUTPUTS, and a nested path
+        # (task/archive/…) is not a live task row.
+        if "/" in rest or not rest.endswith(".md") or rest in ("index.md", "log.md"):
+            continue
+        # Only a direct task change can affect this fold.  Irrelevant feed rows
+        # may be the older path-only shape accepted by the global fast path.
+        if state not in ("uploaded", "archived", "deleted"):
+            return None
+        relevant.append({
+            "path": norm,
+            "state": state,
+            "uploaded_at": c.get("uploaded_at"),
+            "archived_at": c.get("archived_at"),
+            "deleted_at": c.get("deleted_at"),
+        })
+
+    collapsed = _collapse_feed_changes(relevant)
+    if collapsed is None:
+        return None
+
+    changed: dict[str, str] = {}
+    deleted: set = set()
+    new_processed: dict[str, str] = {}
+    for norm, (instant, event) in collapsed.items():
+        state = str(event.get("state"))
+        slug = norm[len(task_pfx):-3]
+        at = instant.isoformat().replace("+00:00", "Z")
+        sig = f"{state}:{at}"
+        already = prior_processed.get(norm) == sig
+        # Keep only recent entries in the next ledger — those are the only ones an
+        # overlapping next window can re-surface; older entries can't reappear.
+        if instant >= margin_floor:
+            new_processed[norm] = sig
+        if already:
+            continue
+        if state == "uploaded":
+            changed[slug] = instant.strftime("%Y-%m-%d %I:%M%p UTC")
+        else:  # archived | deleted -> the row goes away
+            deleted.add(slug)
+    return changed, deleted, new_processed
+
+
+def _project_task_row(
+    transport: Any, team: str, slug: str, *, mtime: Any, size: Any, log: Any
+) -> tuple[Optional[dict[str, Any]], Optional[str], bool]:
+    """Read + project ONE task shard into a row, the identical way the full scan
+    does (parity by construction). Returns ``(row_or_None, warning_or_None,
+    read_failed)``. ``read_failed`` True means the shard would not READ — distinct
+    from unparseable — so the incremental caller can fall back to a full scan
+    rather than advance on a row it could not confirm.
+
+    ``size`` may be None on the incremental path (the feed carries no byte size);
+    the row is then stamped from the read content's UTF-8 length, which equals the
+    store's listed byte size for the same bytes."""
+    name = f"{slug}.md"
+    content = transport.read(f"{task_prefix(team)}{name}")
+    if content is None:
+        return None, None, True
+    fm = okf.parse_frontmatter(content)
+    if fm is None:
+        return None, f"{name}: unparseable frontmatter", False
+    if not model.is_task(fm):
+        return None, None, False  # not a Task concept doc — holds no row
+    row = model.row_from_frontmatter(fm, name=slug, path=f"task/{name}", mtime=mtime)
+    row["size"] = size if size is not None else f"{len(content.encode('utf-8'))}B"
+    return row, None, False
+
+
+def _full_scan_task_rows(
+    transport: Any, team: str, listing: list, prior_by_name: dict[str, Any],
+    last_reconcile_iso: Any, log: Any,
+) -> tuple[list[dict[str, Any]], list[str], int, int]:
+    """Fold the full ``task/`` listing into rows, reusing unchanged prior rows.
+    The authoritative pass — the fail-closed fallback and the drift self-check's
+    reference. Returns ``(rows, warnings, reused, parsed)``."""
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    reused = parsed = 0
+    for entry in listing:
+        name = entry.get("name") or ""
+        if entry.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
+            continue
+        slug = name[:-3]
+        prior = prior_by_name.get(slug)
+        entry_mtime = entry.get("mtime")
+        entry_size = entry.get("size")
+        # Incremental reuse rests on THREE listing-only checks (see the long note
+        # this loop carried before extraction): mtime unchanged, byte size
+        # unchanged AND carried, the mtime-minute provably closed before our last
+        # read, and the row-schema stamp current.
+        minute_safe = _same_minute_reuse_safe(entry_mtime, last_reconcile_iso)
+        reusable = (
+            prior is not None
+            and entry_mtime
+            and prior.get("mtime") == entry_mtime
+            and prior.get("size") is not None
+            and prior.get("size") == entry_size
+            and minute_safe is not False
+            and prior.get("sv") == model.ROW_SCHEMA_VERSION
+        )
+        if reusable:
+            rows.append(prior)
+            reused += 1
+            continue
+        row, warning, _read_failed = _project_task_row(
+            transport, team, slug, mtime=entry_mtime, size=entry_size, log=log)
+        if row is None:
+            # unparseable / unreadable / non-task: never drop a task — keep prior.
+            if warning is not None:
+                if prior:
+                    warnings.append(f"{warning}, kept prior row")
+                    rows.append(prior)
+                else:
+                    warnings.append(f"{warning}, no prior row, skipped")
+            continue
+        rows.append(row)
+        parsed += 1
+    return rows, warnings, reused, parsed
+
+
+def _incremental_reconcile_rows(
+    transport: Any, team: str, prior_by_name: dict[str, Any], *,
+    changed: dict[str, str], deleted: set, log: Any,
+) -> Optional[tuple[list[dict[str, Any]], int, int, list[str]]]:
+    """Fold ONLY the changed/deleted task shards into the prior rows, in place.
+
+    Returns ``(rows, parsed, reused, warnings)`` or **None** if a changed shard
+    would not READ — doubt about a row we know changed, so the caller full-scans.
+    Rows come back name-sorted to match a full scan's (sorted) listing order, so
+    the two paths' summaries.json are byte-identical for the same end state."""
+    by_name = dict(prior_by_name)
+    warnings: list[str] = []
+    parsed = 0
+    for slug, mt in sorted(changed.items()):
+        row, warning, read_failed = _project_task_row(
+            transport, team, slug, mtime=mt, size=None, log=log)
+        if read_failed:
+            log.warn("reconcile: changed shard would not read; full scan",
+                     team=team, slug=slug)
+            return None
+        if row is None:
+            # unparseable or no-longer-a-Task: mirror the full scan exactly.
+            if warning is not None and slug in by_name:
+                warnings.append(f"{warning}, kept prior row")
+            elif warning is not None:
+                warnings.append(f"{warning}, no prior row, skipped")
+                by_name.pop(slug, None)
+            else:
+                by_name.pop(slug, None)  # no longer a Task doc -> drop its row
+            continue
+        by_name[slug] = row
+        parsed += 1
+    for slug in deleted:
+        by_name.pop(slug, None)
+    rows = [by_name[k] for k in sorted(by_name)]
+    return rows, parsed, len(rows) - parsed, warnings
+
+
+def _rows_diverged(incremental_rows: list, full_rows: list) -> list[str]:
+    """Slugs where the incremental-maintained view differs from the authoritative
+    full scan — the drift self-check. Compares the consumer-visible row dicts."""
+    inc = aggregate.rows_by_name(incremental_rows)
+    full = aggregate.rows_by_name(full_rows)
+    return sorted(name for name in set(inc) | set(full)
+                  if inc.get(name) != full.get(name))
+
+
 def reconcile(
     transport: Any,
     team: str,
@@ -864,93 +1196,114 @@ def reconcile(
     # back to mtime+size.
     last_reconcile_iso = (prior_agg or {}).get("generated_at")
 
-    if _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
-        # NOTE: warnings from the prior aggregate are not resurfaced here; they
-        # reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
-        result = {"tasks": len(prior_rows), "parsed": 0, "reused": len(prior_rows),
-                  "transitions": 0, "warnings": [], "fast_path": True}
-        _write_health_shard(transport, team, host=host, now=now, result=result, log=log)
-        log.info("reconciled (fast path)", team=team, tasks=len(prior_rows))
-        return result
-
     prefix = task_prefix(team)
-    try:
-        listing = transport.list_dir(prefix)
-    except TransportError as e:
-        log.error("list failed, pass aborted (prior artifacts intact)", team=team, error=str(e))
-        return {"degraded": True, "reason": str(e), "tasks": 0}
 
-    rows: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    reused = parsed = 0
+    # --- E1 row build: feed-delta incremental fold, full scan as fallback -----
+    # Cursor + backstops decide the pass shape. A cursor is the incremental path's
+    # licence; the two backstops force an authoritative full scan (which doubles as
+    # the drift self-check when an incremental view was available):
+    #   * streak backstop — every Nth incremental pass, so a change the feed never
+    #     reported cannot hide past a bounded number of passes;
+    #   * time backstop  — MAX_FAST_PATH_HOURS, the same net the fast path uses.
+    prior_cursor, cursor_reason = _parse_reconcile_cursor(
+        (prior_agg or {}).get(RECONCILE_CURSOR_KEY))
+    full_every = config.env_int(
+        "COORD_RECONCILE_FULL_EVERY", DEFAULT_RECONCILE_FULL_EVERY)
+    if not isinstance(full_every, int) or full_every < 1:
+        full_every = DEFAULT_RECONCILE_FULL_EVERY
+    rec_streak = prior_cursor["streak"] if prior_cursor else 0
+    agg_age = age_hours(last_reconcile_iso, now) if last_reconcile_iso else None
+    stale = agg_age is None or agg_age < 0 or agg_age > MAX_FAST_PATH_HOURS
+    due_for_full = prior_cursor is None or rec_streak + 1 >= full_every or stale
 
-    for entry in listing:
-        name = entry.get("name") or ""
-        if entry.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
-            continue
-        slug = name[:-3]
-        prior = prior_by_name.get(slug)
-        entry_mtime = entry.get("mtime")
-        entry_size = entry.get("size")
-        # Incremental reuse. The store listing carries only size + a MINUTE-granular
-        # mtime + name — NO per-file content fingerprint (the `Version:` UUID lives
-        # in per-file `file stat`, one read per doc, too expensive for a fold). So
-        # reuse rests on THREE listing-only checks, all of which must hold:
-        #   (a) mtime unchanged — a new write bumps it to a new minute;
-        #   (b) byte size unchanged AND the prior row actually CARRIES a size —
-        #       a legacy pre-`size` row (or any length-changing edit) is reparsed
-        #       ONCE and re-stamped, so no row lingers on mtime-only reuse;
-        #   (c) the mtime-minute provably CLOSED before our last reconcile read
-        #       (_same_minute_reuse_safe) — mtime+size alone cannot see a
-        #       SAME-length edit made in the SAME clock-minute (the fossil: the row
-        #       lies stale until an unrelated write). This is the honest narrow
-        #       guarantee: same-minute-TOUCHED docs are reparsed, not reused; it is
-        #       the index-side companion to PR #356's read-side doc-authoritative
-        #       status guard. When there is no anchor (legacy aggregate w/o
-        #       generated_at) (c) is skipped and reuse falls back to (a)+(b).
-        #   (d) the prior row carries the CURRENT row-schema stamp — a row projected
-        #       by an older `row_from_frontmatter` (e.g. pre-#388, uncapped title/
-        #       description, no `sv`) is NOT content-stale but PROJECTION-stale, so
-        #       mtime+size can't detect it (the doc never changed). Force one reparse
-        #       so the current projection (cap + stamp) applies; it then reuses
-        #       normally. This is what self-heals the legacy uncapped index, and
-        #       since v1.6.9 it is the ONLY place the `sv` check lives: the fast
-        #       path used to gate on it too, but a mixed fleet re-introduces
-        #       unstamped rows continuously, so gating there never settled (see
-        #       _fast_path_no_changes). Here it settles per-row, on contact.
-        minute_safe = _same_minute_reuse_safe(entry_mtime, last_reconcile_iso)
-        reusable = (
-            prior is not None
-            and entry_mtime
-            and prior.get("mtime") == entry_mtime
-            and prior.get("size") is not None
-            and prior.get("size") == entry_size
-            and minute_safe is not False
-            and prior.get("sv") == model.ROW_SCHEMA_VERSION
-        )
-        if reusable:
-            rows.append(prior)
-            reused += 1
-            continue
-        content = transport.read(f"{prefix}{name}")
-        fm = okf.parse_frontmatter(content)
-        if fm is None:
-            # unparseable / unreadable: never drop a task — keep the prior row.
-            if prior:
-                warnings.append(f"{name}: unparseable frontmatter, kept prior row")
-                rows.append(prior)
-            else:
-                warnings.append(f"{name}: unparseable frontmatter, no prior row, skipped")
-            continue
-        if not model.is_task(fm):
-            continue  # not a Task concept doc — silently ignore
-        row = model.row_from_frontmatter(
-            fm, name=slug, path=f"task/{name}", mtime=entry_mtime
-        )
-        # Stamp the listed size so the NEXT pass can sub-minute-compare (above).
-        row["size"] = entry_size
-        rows.append(row)
-        parsed += 1
+    # Fast path — nothing relevant changed — only when NOT owed a full/drift pass.
+    # It still advances the E1 cursor after independently confirming the feed
+    # delta: unrelated events must not leave an old watermark to grow forever.
+    if not due_for_full and _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
+        fast_delta = _feed_task_delta(
+            transport, team, cursor=prior_cursor, now=now, log=log)
+        if fast_delta is not None:
+            fast_changed, fast_deleted, fast_processed = fast_delta
+            if not fast_changed and not fast_deleted:
+                fast_agg = dict(prior_agg or {})
+                fast_agg[RECONCILE_CURSOR_KEY] = {
+                    "watermark": now,
+                    "processed": fast_processed,
+                    "streak": rec_streak + 1,
+                }
+                if not transport.write(
+                        summaries_path(team), jsonutil.dumps(fast_agg)):
+                    result = {
+                        "degraded": True,
+                        "reason": "reconcile cursor write failed",
+                        "tasks": len(prior_rows),
+                    }
+                    _write_health_shard(
+                        transport, team, host=host, now=now, result=result, log=log)
+                    return result
+                # NOTE: warnings from the prior aggregate are not resurfaced here;
+                # they reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
+                result = {
+                    "tasks": len(prior_rows),
+                    "parsed": 0,
+                    "reused": len(prior_rows),
+                    "transitions": 0,
+                    "warnings": [],
+                    "fast_path": True,
+                }
+                _write_health_shard(
+                    transport, team, host=host, now=now, result=result, log=log)
+                log.info(
+                    "reconciled (fast path)", team=team, tasks=len(prior_rows))
+                return result
+
+    # Try the feed-delta fold when a cursor is usable; None at any step is doubt.
+    inc: Optional[tuple] = None
+    if prior_cursor is not None:
+        delta = _feed_task_delta(transport, team, cursor=prior_cursor, now=now, log=log)
+        if delta is not None:
+            changed, deleted, new_processed = delta
+            folded = _incremental_reconcile_rows(
+                transport, team, prior_by_name,
+                changed=changed, deleted=deleted, log=log)
+            if folded is not None:
+                inc = (*folded, new_processed)  # (rows, parsed, reused, warnings, processed)
+
+    incremental = False
+    drift_detected = False
+    if inc is not None and not due_for_full:
+        rows, parsed, reused, warnings, inc_processed = inc
+        new_cursor = {"watermark": now, "processed": inc_processed,
+                      "streak": rec_streak + 1}
+        incremental = True
+        log.info("reconciled (incremental)", team=team, tasks=len(rows),
+                 parsed=parsed, reused=reused)
+    else:
+        # Full scan — authoritative. Reseeds the cursor (streak 0). When an
+        # incremental view was available this pass (a backstop is due, not a feed
+        # failure), compare the two: a divergence is the drift the self-check
+        # exists to catch — logged LOUD, and rebuilt from this full scan.
+        try:
+            listing = transport.list_dir(prefix)
+        except TransportError as e:
+            log.error("list failed, pass aborted (prior artifacts intact)",
+                      team=team, error=str(e))
+            return {"degraded": True, "reason": str(e), "tasks": 0}
+        rows, warnings, reused, parsed = _full_scan_task_rows(
+            transport, team, listing, prior_by_name, last_reconcile_iso, log)
+        new_cursor = {"watermark": now, "processed": {}, "streak": 0}
+        if inc is not None:
+            diverged = _rows_diverged(inc[0], rows)
+            if diverged:
+                drift_detected = True
+                warnings.append(
+                    "reconcile-drift: incremental view diverged from full scan on "
+                    f"{diverged}; rebuilt from full scan")
+                log.error("reconcile drift detected; rebuilt from full scan",
+                          team=team, slugs=diverged)
+        if cursor_reason:
+            log.info("reconcile: full scan (cursor unusable)", team=team,
+                     reason=cursor_reason)
 
     # --- retention sub-pass (enabled by default) ---
     # the fold budgets. Precedence: --retention-days flag > COORD_RETENTION_DAYS >
@@ -1037,6 +1390,11 @@ def reconcile(
         if prior_anchor:
             ack_state[ACKS_ANCHOR_KEY] = prior_anchor
         ack_state[ACKS_STREAK_KEY] = streak
+    # The E1 reconcile cursor rides here too (watermark + processed ledger + the
+    # incremental-streak backstop counter). THIS build owns it — it is cut from the
+    # passthrough below and rewritten in full every pass, so a stale value can never
+    # resurrect. The fast path advances it in its own verified write above.
+    ack_state[RECONCILE_CURSOR_KEY] = new_cursor
     # `prior` carries any top-level key a NEWER host wrote that this build does not
     # know about — see build_aggregate's invariant: rebuilding from a fixed key set
     # is what killed v1.6.8's anchor on the live mixed fleet. The ack keys are cut
@@ -1045,7 +1403,8 @@ def reconcile(
     # writes no anchor at all (inconclusive fold, no prior anchor). Passing them
     # through would resurrect a value this pass decided not to keep.
     prior_unknown = {k: v for k, v in (prior_agg or {}).items()
-                     if k not in (ACKS_ANCHOR_KEY, ACKS_STREAK_KEY)}
+                     if k not in (ACKS_ANCHOR_KEY, ACKS_STREAK_KEY,
+                                  RECONCILE_CURSOR_KEY)}
     agg = aggregate.build_aggregate(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
@@ -1070,4 +1429,6 @@ def reconcile(
         "transitions": len(transitions),
         "warnings": warnings,
         "rows": rows,
+        "incremental": incremental,
+        "drift_detected": drift_detected,
     }
