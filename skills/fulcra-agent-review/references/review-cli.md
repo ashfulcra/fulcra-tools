@@ -14,13 +14,12 @@ this file is the exact commands.
 ## Request review (author) — one command
 ```bash
 coord-engine review request <team> <slug-or-title> \
-    --of <artifact> --reviewer <role> [--reviewer <role> …] [--from <me>]
+    --of <artifact> [--head <exact-sha>] \
+    --reviewer <role> [--reviewer <role> …] [--from <me>]
 ```
-- `<slug-or-title>` slugs exactly as a `tell` title does (an already-slug-like arg
-  round-trips unchanged) — the result is the **`<review-slug>`** you use in
-  `review status` and the verdict path. `<artifact>` is an opaque ref —
-  PR#/branch/commit SHA/URL or a non-code deliverable — so the handshake works with
-  any forge or none.
+- A PR uses one stable slug (`pr-N`) across every push, its PR URL as `--of`,
+  and the full 40- or 64-hex commit id as `--head`. That exact head is the active
+  review round. Non-code/legacy reviews may omit `--head`.
 - Name **roles**, not identities (`--reviewer reviewer`, not a session id), so
   `needs-me`/`briefing` resolve the fresh lease holders (role-routing doctrine).
 
@@ -44,20 +43,26 @@ The command echoes, per required reviewer, the verdict path to fill (it prints t
 ack step below):
 ```
 review <review-slug> requested (required: reviewer, security)
-  reviewer reviewer -> file verdict at team/<team>/review/<review-slug>/verdicts/reviewer.md
+reviewer reviewer -> file verdict at team/<team>/review/<review-slug>/verdicts/<head>--reviewer.md
 await verdicts: coord-engine listen <team> --agent <me>
 ```
 
 ### Recovery semantics (idempotent, fail-closed)
+- **New PR head** — re-run the SAME PR slug/URL/requester/required set with a new
+  exact `--head`. The doc advances to the next round, the settled marker clears,
+  prior verdict shards remain append-only, and new head-specific reviewer
+  directives are delivered. `review status` ignores all superseded heads.
 - **Partial notify** — if the doc lands but a reviewer directive fails to deliver,
   the command reports **rc 1** naming exactly which reviewers were and were not
-  notified. **Re-run the SAME request** (same `--of` / `--reviewer` set / `--from`):
+  notified. **Re-run the SAME request** (same `--of` / `--head` /
+  `--reviewer` set / `--from`):
   it is idempotent recovery — the doc is left byte-unchanged, already-delivered
   directives dedupe (rc 0), and only the dropped reviewers are re-notified. No
   reviewer is stranded by the exists-guard.
 - **Conflicting re-request** — re-running with a *different* `--of`, required set,
   or requester is a loud **rc 1 conflict**; it never clobbers the existing doc. A
-  changed required set re-opens only via a **new slug**.
+  changed required set re-opens only via a **new slug**. Omitting `--head` from an
+  already head-keyed review is also refused; exact-head gating never downgrades.
 - **Unreadable doc** — a present-but-unreadable request doc fails closed (rc 1,
   never overwritten).
 
@@ -67,23 +72,27 @@ presence-of-file, so writing it (and only it) is what removes you from
 `pending_required`. Acking is separate: it just clears the directive from your
 `inbox`/re-notify, and it does **not** substitute for the verdict.
 
-1. **Write your verdict** at the **slug-exact** path the request echoed. The verdict
-   FILENAME STEM must equal the `required` token the request named — that stem is what
-   the tally matches, NOT the frontmatter `reviewer:` field — so name the file after
-   the requirement, not yourself:
-   - **role requirement** (`required: reviewer`) → `verdicts/reviewer.md`, whoever
-     holds the role (`verdicts/alice.md` records an approval the tally can't credit —
-     `reviewer` stays in `pending_required` forever).
-   - **direct requirement** (`required: alice`) → `verdicts/alice.md`.
+1. **Write your verdict** at the **slug-exact** path the request echoed. The
+   filename encodes the `required` token the request named (after `<head>--` for
+   keyed rounds); that path token is what the tally matches, NOT the
+   frontmatter `reviewer:` field:
+   - **role requirement** (`required: reviewer`) →
+     `verdicts/<head>--reviewer.md`, whoever holds the role.
+   - **direct requirement** (`required: alice`) →
+     `verdicts/<head>--alice.md`.
+   The verdict frontmatter must repeat the exact active `head`; a missing or
+   mismatched head does not discharge the round. Legacy unkeyed reviews retain
+   `verdicts/<required-token>.md`.
    ```bash
-   # filename = the required token, e.g. reviewer.md — type: Verdict, verdict: approve|changes
+   # keyed filename = <head>--<required-token>.md
    fulcra-api file upload /tmp/verdict.md \
-     "team/<team>/review/<review-slug>/verdicts/reviewer.md"
+     "team/<team>/review/<review-slug>/verdicts/<head>--reviewer.md"
    ```
    ```yaml
    ---
    type: Verdict
    reviewer: <you>             # who signed off (informational — the FILENAME drives the tally)
+   head: <exact-sha>            # required for a head-keyed PR review
    verdict: approve            # approve | changes
    ---
    Notes / requested changes.
@@ -112,7 +121,8 @@ your mind, re-upload your verdict file (last wins; the File Store keeps history)
 ## Check state (deterministic — do not tally by hand)
 ```bash
 coord-engine review status <team> <review-slug> --json
-# {state: APPROVED|CHANGES|PENDING, approvals:[...], changes:[...], required:[...], pending_required:[...]}
+# {state: APPROVED|CHANGES|PENDING, approvals:[...], changes:[...],
+#  required:[...], pending_required:[...], head:<sha>?, round:<n>?}
 ```
 - **CHANGES** — any reviewer requested changes (a single blocker dominates).
 - **APPROVED** — ≥1 approval, no outstanding changes, and every `required` reviewer approved.
@@ -120,11 +130,12 @@ coord-engine review status <team> <review-slug> --json
 
 Verdict synonyms accepted: `approve|approved|lgtm` and `changes|request-changes|reject`.
 
-A review that reaches APPROVED with every `required` verdict in is *settled* — the
+A review round that reaches APPROVED with every `required` verdict in is *settled* — the
 fold caches `verdicts/.settled` so the fan-out folds (`briefing`/`needs-me`) skip
-it. Settled reviews are immutable; re-opening under a changed `required` list is a
-**new slug**. `review status` never trusts the marker — it recomputes the full
-tally every call, so a stale marker self-heals on direct query.
+it. A new exact head advances the same PR slug and clears that cache; a changed
+artifact/requester/required set needs a **new slug**. `review status` never trusts
+the marker — it recomputes the active-head tally every call, so a stale marker
+self-heals on direct query.
 
 ### The rc-1 register a watcher parses
 `review status` **exits 1** rather than ever printing a partial state:

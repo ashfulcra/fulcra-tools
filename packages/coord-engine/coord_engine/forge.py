@@ -90,7 +90,10 @@ def default_runner(args: list[str]) -> Optional[str]:
 
 
 def pr_state(runner: Callable[[list[str]], Optional[str]], url: str) -> Optional[dict[str, Any]]:
-    raw = runner(["gh", "pr", "view", url, "--json", "state,mergedAt,reviewDecision"])
+    raw = runner([
+        "gh", "pr", "view", url, "--json",
+        "state,mergedAt,reviewDecision,headRefOid",
+    ])
     if not raw:
         return None
     try:
@@ -109,7 +112,7 @@ def mirror(
     repo: Optional[str] = None,
 ) -> dict[str, Any]:
     """One mirror pass. Returns {checked, mirrored, verdicts, skipped}."""
-    from . import okf
+    from . import okf, review
     from .transport import TransportError
 
     checked = mirrored = verdicts = 0
@@ -141,12 +144,23 @@ def mirror(
             }) + f"\nPR is {label} as of {now}.\n"):
                 mirrored += 1  # count only landed writes (failed ones retry next pass)
         if label == "MERGED":
-            vpath = f"team/{team}/review/{slug}/verdicts/forge.md"
+            expected_head = review.normalize_head(fm.get("head"))
+            merged_head = review.normalize_head(state.get("headRefOid"))
+            # A head-keyed review proves one exact commit. The forge may only
+            # auto-approve when the merged PR head is that reviewed commit.
+            if expected_head and merged_head != expected_head:
+                continue
+            filename = review.verdict_filename("forge", head=expected_head)
+            vpath = f"team/{team}/review/{slug}/verdicts/{filename}"
             if transport.read(vpath) is None:
-                if transport.write(vpath, okf.render_frontmatter({
+                verdict_fm = {
                     "type": "Verdict", "reviewer": "forge", "verdict": "approve",
                     "timestamp": now,
-                }) + f"\nAuto-approved: PR merged on the forge ({url}).\n"):
+                }
+                if expected_head:
+                    verdict_fm["head"] = expected_head
+                if transport.write(vpath, okf.render_frontmatter(verdict_fm)
+                                   + f"\nAuto-approved: PR merged on the forge ({url}).\n"):
                     verdicts += 1
     return {"checked": checked, "mirrored": mirrored, "verdicts": verdicts}
 
