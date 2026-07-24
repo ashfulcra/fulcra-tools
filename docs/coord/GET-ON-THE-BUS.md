@@ -203,11 +203,12 @@ predecessor's parked snapshot (objective, next actions, open questions, recent
 decisions) is the role's memory, and the role doc's `checkpoint_ref` names it. Two
 takeover surprises to expect (both observed live 2026-07-15):
 
-- **The first `listen --once` on a fresh host replays everything.** The listen cursor
-  is host-local, so your first tick emits every outstanding directive and historical
-  response as if new. Triage that first flood against the snapshot (the predecessor
-  likely already dispositioned most of it), don't work it item by item; the cursor is
-  primed after one tick and later ticks are quiet.
+- **A fresh host normally resumes the durable listen cursor.** Authority lives at
+  `team/<team>/_coord/agents/<agent>/listen-state.json`; the host-local state file is
+  only a cache. A replay flood occurs only on the legacy fresh-start path, when the
+  durable state is absent/corrupt/unreadable and no usable local cache exists. If that
+  happens, triage the first tick against the continuity snapshot rather than treating
+  every historical event as new work.
 - **A truncated `briefing` can print `No continuity snapshot found` when one exists** —
   if the resume section was cut by the shared budget (`resume section truncated`),
   treat the snapshot's existence as UNKNOWN and run `continuity resume` directly;

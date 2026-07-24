@@ -450,3 +450,53 @@ def test_command_once_returns_zero_on_clean_pass():
     _seed(t, _host_entry(source="s-16"))
     # default invoker → unconfigured (wakes nothing) but a clean pass = rc 0
     assert cli.cmd_router_execute(_args(), t) == 0
+
+
+# --- W7: host-executor delivery probe (codex #470 r2) ------------------------
+
+def test_host_delivery_probe_records_evidence_when_armed():
+    """codex #470 r2 P1: a GENUINE host-local adapter delivery, while a shadow
+    window is armed, writes path=adapter evidence — host-local adapters are a
+    real delivery plane and must enter the W7 evidence population."""
+    t = FlakyTransport()
+    _hbase(t)
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    _seed(t, _host_entry(source="s-20"))
+    counts = cli._router_execute_host(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 1
+    ev = _shards_under(t, "shadow-evidence/")
+    assert len(ev) == 1
+    (s,) = ev.values()
+    assert (s["path"], s["agent"], s["key"]) == (
+        "adapter", AGENT, f"s-20:{AGENT}")
+
+
+def test_host_delivery_probe_silent_when_window_not_armed():
+    t = FlakyTransport()
+    _hbase(t)                                            # no marker
+    _seed(t, _host_entry(source="s-21"))
+    counts = cli._router_execute_host(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 1
+    assert _shards_under(t, "shadow-evidence/") == {}
+
+
+def test_host_probe_not_written_on_failed_delivery():
+    """A failed invoke (or a delivered-record write that did not land) must not
+    produce evidence — probes are success-only."""
+    t = FlakyTransport()
+    _hbase(t)
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    _seed(t, _host_entry(source="s-22"))
+    cli._router_execute_host(_args(), t, invoke=_invoke("failed", "boom"))
+    assert _shards_under(t, "shadow-evidence/") == {}
+    # and a delivered invoke whose RECORD write fails also writes no evidence
+    t2 = FlakyTransport()
+    _hbase(t2)
+    t2.put(RP + "shadow-window.json",
+           json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    _seed(t2, _host_entry(source="s-23"))
+    t2.fail_write_containing.add("delivered/")
+    cli._router_execute_host(_args(), t2, invoke=_invoke("delivered"))
+    assert _shards_under(t2, "shadow-evidence/") == {}

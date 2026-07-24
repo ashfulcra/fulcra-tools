@@ -56,6 +56,11 @@ class FakeTransport:
     def delete(self, path):
         return self.store.pop(path, None) is not None
 
+    def delete_idempotent(self, path):
+        if path not in self.store:
+            return True
+        return self.delete(path)
+
 
 def _task(title, status, priority="P2"):
     return f"---\ntype: Task\ntitle: {title}\nstatus: {status}\npriority: {priority}\n---\nbody"

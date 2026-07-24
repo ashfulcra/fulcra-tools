@@ -8,7 +8,6 @@ briefing/needs-me folds rely on: nothing but ``TransportError`` (or the method's
 soft return) ever escapes a transport method.
 """
 
-import os
 import subprocess
 import time
 import urllib.error
@@ -61,6 +60,10 @@ def test_delete_returns_false_on_timeout():
     assert _slow().delete("/x.md") is False
 
 
+def test_delete_idempotent_returns_false_on_timeout():
+    assert _slow().delete_idempotent("/x.md") is False
+
+
 def test_updates_returns_none_on_timeout():
     # updates() already swallows everything; confirm a timeout is included.
     assert _slow().updates("60 seconds") is None
@@ -89,6 +92,29 @@ def test_stat_returns_none_on_missing_binary():
 
 def test_delete_returns_false_on_missing_binary():
     assert _missing().delete("/x.md") is False
+
+
+def test_delete_idempotent_returns_false_on_missing_binary():
+    assert _missing().delete_idempotent("/x.md") is False
+
+
+def test_delete_idempotent_accepts_server_confirmed_absence(monkeypatch):
+    t = tr.FulcraFileTransport(command=["unused"])
+    result = subprocess.CompletedProcess(
+        ["unused"], 1, "",
+        "Error: File not found in Fulcra: /x.md\n",
+    )
+    monkeypatch.setattr(t, "_run", lambda args: result)
+    assert t.delete_idempotent("/x.md") is True
+
+
+def test_delete_idempotent_rejects_other_remote_error(monkeypatch):
+    t = tr.FulcraFileTransport(command=["unused"])
+    result = subprocess.CompletedProcess(
+        ["unused"], 1, "", "Error: unauthorized\n",
+    )
+    monkeypatch.setattr(t, "_run", lambda args: result)
+    assert t.delete_idempotent("/x.md") is False
 
 
 def test_updates_returns_none_on_missing_binary():

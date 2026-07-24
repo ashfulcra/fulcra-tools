@@ -3,8 +3,8 @@
 The shared engine of **coord**, the agent-coordination layer — how agents on Fulcra work
 with their user's other agents: coordinate work, discover what's new on every loop. It is
 a **stdlib-only** Python CLI that gives a fleet of independent agents (Claude Code, Codex,
-OpenClaw, CI, humans) durable coordination over the Fulcra File Store as a bus. Judgment stays in prose — the twelve
-[`fulcra-agent-*` skills](../../skills) (of 14 total) — and every consistency-critical fold (who's live,
+OpenClaw, CI, humans) durable coordination over the Fulcra File Store as a bus. Judgment stays in prose — the thirteen
+[`fulcra-agent-*` skills](../../skills) (of 15 total) — and every consistency-critical fold (who's live,
 what's mine, is this review settled) is a deterministic engine verb, so two agents always
 agree on derived state instead of eyeballing timestamps.
 
@@ -37,29 +37,29 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
-| Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
+| Review handshake | `review` (request/status) — one `pr-N` slug advances through exact `--head` rounds; obligation persists until active-head verdict files exist |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
-| Wake routing | `router` (run — cursor-scan decision plane, policy evaluation, enqueue-only; [plan](../../docs/coord/wake-router-PLAN.md)) |
+| Wake routing | `router` (`run` — feed-first policy plane, direct cloud-adapter execution, host-local queue; `execute` — thin host-local executor; [plan](../../docs/coord/wake-router-PLAN.md)) |
 | Fleet ops | `health` · `doctor` · `forge` · `annotate` |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. The
 [skills](../../skills) carry the procedures (when to run what, and why);
 per-verb command references live in each skill's `references/` directory.
-Machine JSON is emitted compactly (including line-oriented `listen` and
-`threads` events), and the hot `_coord/summaries.json` aggregate uses the same
+Machine JSON is emitted compactly: `listen` is line-oriented, while `threads`
+emits one JSON array. The hot `_coord/summaries.json` aggregate uses the same
 zero-whitespace serializer; parsed values and degradation markers are unchanged.
 
 ## Properties worth knowing
 
 - **Stdlib-only runtime.** No dependencies; transport is a subprocess call. Installs
   anywhere Python ≥3.10 runs.
-- **Deterministic folds, feed-first.** Views are rebuilt each pass from the store's
-  `data-updates` change feed (the authoritative ledger — listings are eventually-consistent
-  caches), reading only changed shards, with the full listing scan retained as the
-  fail-closed fallback on any feed doubt; orphaned index entries cannot recur, and
-  role/review/presence status are computed, never inferred by a model.
+- **Deterministic folds, feed-first.** Views are maintained incrementally from the
+  store's `data-updates` change feed (the authoritative ledger — listings are
+  eventually-consistent caches), reading only changed shards. Feed doubt or a
+  scheduled drift check rebuilds from the full listing scan; orphaned index entries
+  cannot recur, and role/review/presence status are computed, never inferred by a model.
 - **Fails loud, never silent.** Unverifiable writes are retried, cached locally, and
   announced; a degraded read fold says so (`review-fold-degraded`, `LISTEN DEGRADED`)
   instead of returning a clean-looking partial answer.
@@ -97,6 +97,7 @@ disable a bound or make an op hang.
 | `COORD_THREADS_FOLD_BUDGET` | `30` | seconds | Aggregate deadline for the `threads` dropped-work fold's per-candidate reads; breach emits a `threads-degraded` row. |
 | `COORD_THREADS_SILENCE_DAYS` | `3` | days | `threads` started-then-silent window (flag `--silence-days` wins). |
 | `COORD_THREADS_INTENT_GRACE_HOURS` | `48` | hours | `threads` intent grace when an intent declares no window (flag `--intent-grace-hours` wins). |
+| `COORD_RECONCILE_FULL_EVERY` | `72` | count | Incremental reconcile passes between forced task-listing drift checks; `1` full-scans every pass. Missing/corrupt cursor state, feed doubt, an unreadable changed shard, or an aggregate older than `MAX_FAST_PATH_HOURS` full-scans regardless. |
 | `COORD_ACKS_FULL_EVERY` | `72` | count | Passes between FORCED full ack folds in `reconcile`. The fold is change-driven (it asks the store what changed and re-folds only those slugs); this bounds how long a change the query never reported can persist, and carries the orphan-shard GC, which only rides the full fold. `1` disables the incremental path (every pass lists every ack dir). Default 72 is ~daily on a 20-min heartbeat: a forced full fold measured 1091s (~18min) on a 1.2s/op remote transport, so the old `12` (~4h) taxed every remote host 18min every four hours to re-check a query already verified complete against an independent listing. 72 makes that forced fold 6x less frequent (~daily on the same heartbeat) — a sixth of the recurring cost. Any doubt — no change query, a query error, no anchor, a changed slug that wouldn't list — full-folds regardless of this knob, and does not advance the fold's anchor (`acks_folded_through`), so the unread change stays in the next pass's window. |
 | `COORD_RETENTION_DAYS` | `14` | days | `reconcile` cold-archives quiet terminal (`done`/`abandoned`) and stale `proposed` tasks after 14 days by default (flag/env overrides). Settled reviews are archived wholesale after 7 days and indexed so hot folds skip their soft-delete tombstones; presence dead over 7 days is pruned; legacy `artifact/` is consolidated into `artifacts/`. Moves are copy-verified and fail closed. Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins). |
 

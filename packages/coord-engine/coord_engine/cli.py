@@ -195,16 +195,6 @@ def _team_updates(
     return parsed
 
 
-def _change_instant(change: dict[str, Any]) -> Optional[datetime]:
-    state = change.get("state")
-    key = {"uploaded": "uploaded_at", "archived": "archived_at",
-           "deleted": "deleted_at"}.get(state)
-    value = change.get(key) if key else None
-    # Some archive/delete payloads retain only uploaded_at.  That timestamp is
-    # still usable for deterministic collapsing; total absence is feed doubt.
-    return rec._parse_iso_utc(value or change.get("uploaded_at"))
-
-
 def _feed_task_rows(
     transport: Any, team: str, index_rows: list[dict[str, Any]],
     changes: list[dict[str, Any]],
@@ -212,12 +202,7 @@ def _feed_task_rows(
     """Apply changed task shards to aggregate rows without a task-dir listing."""
     from . import model
     prefix = rec.task_prefix(team)
-    # A store rewrite emits same-second archived(old)+uploaded(new) entries and
-    # does not promise feed order.  Total state priority makes that lifecycle
-    # collapse deterministic: the live upload wins an equal-instant rewrite,
-    # while a strictly-later terminal event still removes the row.
-    state_priority = {"archived": 0, "deleted": 1, "uploaded": 2}
-    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    relevant: list[dict[str, Any]] = []
     for change in changes:
         path = str(change.get("path") or "")
         if not path.startswith(prefix) or not path.endswith(".md"):
@@ -225,16 +210,12 @@ def _feed_task_rows(
         name = path[len(prefix):]
         if "/" in name or name in ("index.md", "log.md"):
             continue
-        instant = _change_instant(change)
-        if instant is None:
-            return [], False, f"data-updates change for {name} lacks a usable timestamp"
-        prior = latest.get(path)
-        if prior is None or (
-            instant, state_priority[str(change.get("state"))]
-        ) >= (
-            prior[0], state_priority[str(prior[1].get("state"))]
-        ):
-            latest[path] = (instant, change)
+        relevant.append(change)
+
+    # Shared with E1 reconcile: one deterministic lifecycle winner per path.
+    latest = rec._collapse_feed_changes(relevant)
+    if latest is None:
+        return [], False, "data-updates task change lacks a usable timestamp"
 
     by_name = {str(r.get("name")): r for r in index_rows
                if isinstance(r, dict) and r.get("name")}
@@ -455,10 +436,6 @@ def _load_rows_status(
         # index there yet unreadable (read returned None) -> degraded
         return [], False, "summaries index unreadable"
     return [], True, ""  # genuinely absent -> a real, readable empty
-
-
-def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
-    return _load_rows_status(transport, team)[0]
 
 
 # --- The public-read failure contract (defined ONCE) -----------------------
@@ -1092,11 +1069,10 @@ def _verdicts_prefix(team: str, slug: str) -> str:
 # outstanding required reviewers, a tiny cache marker is dropped IN the verdicts
 # prefix (so the ONE listing the fold already does reveals it — zero extra
 # reads). It is not a `.md` file, so the verdict-reading loop already ignores it.
-# CONTRACT: a settled review is IMMUTABLE — a new verdict on it is a no-op by
-# definition (already APPROVED, required list frozen), and changing the required
-# set re-opens the review only via a NEW slug. The marker is a fold cache, never
-# a source of truth: `review status` recomputes the full tally every time and so
-# self-heals a wrong/stale marker on direct query.
+# CONTRACT: a settled ROUND is immutable. A new exact head advances the same PR
+# slug and clears this marker; changing artifact/requester/required set still
+# needs a NEW slug. The marker is a fold cache, never a source of truth:
+# `review status` recomputes the active-head tally every time.
 SETTLED_MARKER = ".settled"
 
 #: Aggregate deadline (seconds) for ``_pending_reviews_for`` — never let a degraded
@@ -1140,6 +1116,20 @@ DEFAULT_LISTEN_TAIL_BUDGET = 20.0
 
 def _settled_marker_path(team: str, slug: str) -> str:
     return _verdicts_prefix(team, slug) + SETTLED_MARKER
+
+
+def _clear_settled_marker(transport: Any, team: str, slug: str) -> bool:
+    """Authoritatively clear a prior round's fold cache, failing closed.
+
+    A head advance must become visible to ``needs-me`` before reviewers are
+    notified. The transport operation is idempotent: only a successful deletion
+    or the server's explicit exact-path-not-found response proves absence.
+    """
+    marker_path = _settled_marker_path(team, slug)
+    return bool(
+        hasattr(transport, "delete_idempotent")
+        and transport.delete_idempotent(marker_path)
+    )
 
 
 def _review_fold_budget() -> float:
@@ -1247,6 +1237,7 @@ def _tally_from_verdict_entries(
     trust (it counts the slug as skipped, surfaces the degraded marker). None
     (``review status``, no budget) never bounds and always scans fully."""
     req_doc = okf.parse_frontmatter(doc_raw) or {}
+    head = review.normalize_head(req_doc.get("head"))
     required = req_doc.get("required")
     if isinstance(required, str):
         required = [r.strip() for r in required.split(",") if r.strip()]
@@ -1259,6 +1250,11 @@ def _tally_from_verdict_entries(
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        reviewer = review.reviewer_from_filename(n, head=head)
+        if reviewer is None:
+            # A keyed review reads only the active head's append-only shards;
+            # legacy reviews ignore keyed files. Superseded heads cost zero reads.
             continue
         if dl.expired():
             # Budget expired mid-slug: stop reading shards. The tally built so far
@@ -1276,11 +1272,23 @@ def _tally_from_verdict_entries(
         if raw_v is None:
             reads_ok = False  # listed file unreadable -> tally is incomplete
         fm = okf.parse_frontmatter(raw_v) or {}
-        # Key by the FILENAME stem (ACL-controlled path), not the frontmatter
+        if head and review.normalize_head(fm.get("head")) != head:
+            # The path selects the round, and the verdict must independently
+            # attest the exact reviewed head. A mismatch cannot discharge it.
+            continue
+        # Key by the requirement token encoded in the ACL-controlled FILENAME,
+        # not the frontmatter
         # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
         # could shadow alice's real verdict. One verdict file per reviewer.
-        verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
-    return review.tally(verdicts, required=required), reads_ok, fully_scanned
+        verdicts.append({"reviewer": reviewer, "verdict": fm.get("verdict")})
+    tally = review.tally(verdicts, required=required)
+    if head:
+        tally["head"] = head
+        try:
+            tally["round"] = max(1, int(req_doc.get("round") or 1))
+        except (TypeError, ValueError):
+            tally["round"] = 1
+    return tally, reads_ok, fully_scanned
 
 
 def _review_tally(
@@ -2187,7 +2195,8 @@ def _review_request_diff(
     that differs. Request identity is ``requested_by`` + ``of`` + the required SET
     (order-normalized): a different requester re-opening someone else's review is a
     conflict (not a silent recovery), and a changed required set re-opens a review
-    only via a NEW slug (the settled-review immutability contract)."""
+    only via a NEW slug. The exact head is deliberately not an identity field:
+    changing it advances the same PR review to a new append-only round."""
     ex_rb = str(fm.get("requested_by") or "")
     if ex_rb != (requested_by or ""):
         return ("requested_by", ex_rb, requested_by or "")
@@ -2202,6 +2211,7 @@ def _review_request_diff(
 
 def _deliver_all_review_directives(
     transport: Any, team: str, slug: str, required: list[str], *, owner: str, of: str,
+    head: Optional[str] = None,
 ) -> tuple[list[str], list[str]]:
     """Deliver ONE directive per required reviewer through the canonical hash-slug
     path. Returns ``(delivered, failed)``. Payload-hash dedup makes this idempotent:
@@ -2211,7 +2221,7 @@ def _deliver_all_review_directives(
     failed: list[str] = []
     for r in required:
         if _deliver_review_directive(transport, team, slug, r,
-                                     sender=owner, of=of) == 0:
+                                     sender=owner, of=of, head=head) == 0:
             delivered.append(r)
         else:
             failed.append(r)
@@ -2231,15 +2241,23 @@ def _print_partial_review_failure(
 
 def _print_review_success(
     args: argparse.Namespace, team: str, slug: str, required: list[str], *,
-    recovered: bool,
+    recovered: bool, head: Optional[str] = None, round_no: Optional[int] = None,
+    advanced: bool = False,
 ) -> None:
     if recovered:
         print(f"review {slug} already exists (matching) — re-verified reviewer "
               f"delivery (required: {', '.join(required)})")
+    elif advanced:
+        print(f"review {slug} advanced to head {head} "
+              f"(round {round_no or 1}; required: {', '.join(required)})")
     else:
         print(f"review {slug} requested (required: {', '.join(required)})")
+    if head:
+        print(f"  active head {head} (round {round_no or 1})")
     for r in required:
-        print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
+        filename = review.verdict_filename(r, head=head)
+        print(f"  reviewer {r} -> file verdict at "
+              f"{_verdicts_prefix(team, slug)}{filename}")
     # Point the requester at the await primitive for the verdict wait (they poll
     # `review status`; `listen` is the same arm-a-listener discipline every ask uses).
     sender = _known_sender(args)
@@ -2268,6 +2286,13 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         print("review request needs at least one non-empty --reviewer",
               file=sys.stderr)
         return 2
+    requested_head: Optional[str] = None
+    if getattr(args, "head", None) is not None:
+        requested_head = review.normalize_head(args.head)
+        if requested_head is None:
+            print("review request --head must be an exact 40- or 64-hex commit SHA",
+                  file=sys.stderr)
+            return 2
     path = _review_doc_path(team, slug)
     owner = getattr(args, "sender", None) or _host()
     existing = transport.read(path)
@@ -2296,6 +2321,57 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
                   f"different {field} re-opens a review only via a new slug; "
                   f"refusing to overwrite", file=sys.stderr)
             return 1
+        existing_head_raw = existing_fm.get("head")
+        existing_head = review.normalize_head(existing_head_raw)
+        if existing_head_raw and existing_head is None:
+            print(f"review {slug} already exists with an invalid head "
+                  f"{existing_head_raw!r} — cannot verify, will not overwrite; retry",
+                  file=sys.stderr)
+            return 1
+        if existing_head and requested_head is None:
+            print(f"review {slug} is head-keyed at {existing_head}; an unkeyed "
+                  f"re-request would discard exact-head gating — pass --head",
+                  file=sys.stderr)
+            return 1
+        if requested_head and requested_head != existing_head:
+            # SAME PR slug + requester + required set, NEW exact head: advance the
+            # single durable review to an append-only head-keyed round. Prior
+            # verdict files remain in place and the tally ignores them.
+            if not _clear_settled_marker(transport, team, slug):
+                print("review request cannot clear the prior settled marker — "
+                      "active-head obligations may remain hidden; retry",
+                      file=sys.stderr)
+                return 1
+            try:
+                prior_round = max(1, int(existing_fm.get("round") or 1))
+            except (TypeError, ValueError):
+                prior_round = 1
+            round_no = prior_round + 1
+            advanced_fm = dict(existing_fm)
+            advanced_fm.update({
+                "schema": "review-request/v2",
+                "head": requested_head,
+                "round": round_no,
+                "ts": _iso(_now()),
+            })
+            body = (f"\nReview requested: {args.of}\n"
+                    f"Active head: {requested_head} (round {round_no})\n")
+            if not transport.write(path, okf.render_frontmatter(advanced_fm) + body):
+                print("review request head advance write failed (transport)",
+                      file=sys.stderr)
+                return 1
+            delivered, failed = _deliver_all_review_directives(
+                transport, team, slug, required, owner=owner, of=args.of,
+                head=requested_head)
+            if failed:
+                _print_partial_review_failure(
+                    slug, delivered, failed,
+                    doc_note=f"advanced to head {requested_head} (round {round_no})")
+                return 1
+            _print_review_success(args, team, slug, required, recovered=False,
+                                  head=requested_head, round_no=round_no,
+                                  advanced=True)
+            return 0
         # IDEMPOTENT RECOVERY: same requested_by + of + required set. Skip the doc
         # write (it already holds our request), keep the harmless stale-marker
         # delete (a prior fold may have settled it; its absence just makes the next
@@ -2303,14 +2379,23 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         # — hash-path dedup re-verifies the ones that landed (rc 0 "already
         # delivered") and delivers the ones a prior partial failure dropped. This
         # is what makes a partial-delivery retry CONVERGE instead of dying here.
-        transport.delete(_settled_marker_path(team, slug))
+        if not _clear_settled_marker(transport, team, slug):
+            print("review request cannot clear the settled marker — active-head "
+                  "obligations may remain hidden; retry", file=sys.stderr)
+            return 1
         delivered, failed = _deliver_all_review_directives(
-            transport, team, slug, required, owner=owner, of=args.of)
+            transport, team, slug, required, owner=owner, of=args.of,
+            head=existing_head)
         if failed:
             _print_partial_review_failure(slug, delivered, failed,
                                           doc_note="already exists (matching)")
             return 1
-        _print_review_success(args, team, slug, required, recovered=True)
+        try:
+            round_no = max(1, int(existing_fm.get("round") or 1))
+        except (TypeError, ValueError):
+            round_no = 1
+        _print_review_success(args, team, slug, required, recovered=True,
+                              head=existing_head, round_no=round_no)
         return 0
     # existing is None is AMBIGUOUS (T1: a read timeout and a genuinely-absent doc
     # both map to None). Treating it as an empty slot would let a degraded transport
@@ -2329,13 +2414,17 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # Genuinely absent -> write the fresh review doc.
     fm = {
         "type": "Review",
-        "schema": "review-request/v1",
+        "schema": "review-request/v2" if requested_head else "review-request/v1",
         "requested_by": owner,
         "of": args.of,
         "required": required,
         "ts": _iso(_now()),
     }
+    if requested_head:
+        fm.update({"head": requested_head, "round": 1})
     body = f"\nReview requested: {args.of}\n"
+    if requested_head:
+        body += f"Active head: {requested_head} (round 1)\n"
     if not transport.write(path, okf.render_frontmatter(fm) + body):
         # T1: a timed-out write returns False, not a raise. An rc-0 "review
         # requested" that never landed is the requester-side incident (mirror of
@@ -2356,12 +2445,14 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # landed and what did not (partial is never silent), and the requester's retry
     # re-enters the idempotent-recovery path above to fill the gaps.
     delivered, failed = _deliver_all_review_directives(
-        transport, team, slug, required, owner=owner, of=args.of)
+        transport, team, slug, required, owner=owner, of=args.of,
+        head=requested_head)
     if failed:
         _print_partial_review_failure(slug, delivered, failed,
                                       doc_note="requested (doc written)")
         return 1
-    _print_review_success(args, team, slug, required, recovered=False)
+    _print_review_success(args, team, slug, required, recovered=False,
+                          head=requested_head, round_no=1 if requested_head else None)
     return 0
 
 
@@ -2666,7 +2757,8 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
 
 
 def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
-                              *, sender: str, of: str) -> int:
+                              *, sender: str, of: str,
+                              head: Optional[str] = None) -> int:
     """Deliver ONE review-request directive to ``reviewer`` via the canonical
     hash-slug directive path — the SAME ``_write_directive`` delivery (payload-hash
     dedup + C1 write-verification) every ``tell`` gets, so a verb-opened review
@@ -2675,11 +2767,17 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
     text carries the exact slug AND the verdict-file path (the fail-closed watcher
     contract). Returns ``_write_directive``'s rc (0 delivered/deduped, 1 failed).
 
-    Distinct (slug, reviewer) pairs produce distinct payloads -> distinct paths,
-    so reviewers never collide and a re-request idempotently dedupes."""
-    verdict_file = f"{_verdicts_prefix(team, slug)}{reviewer}.md"
+    Distinct (slug, head, reviewer) tuples produce distinct payloads -> distinct
+    paths, so reviewers and rounds never collide while a same-head re-request
+    idempotently dedupes."""
+    verdict_file = (
+        f"{_verdicts_prefix(team, slug)}"
+        f"{review.verdict_filename(reviewer, head=head)}"
+    )
     title = f"{_REVIEW_REQUEST_TITLE_PREFIX}{slug}"
     summary = f"Verdict owed on {of} — file it at {verdict_file}"
+    if head:
+        summary += f" after reviewing exact head {head}"
     next_action = f"file your verdict at {verdict_file}"
     payload = _directive_payload(title, summary, next_action, reviewer)
     dslug = f"{tasks.slugify(title)}-{_payload_hash(payload)}"
@@ -3745,12 +3843,54 @@ def _format_listen_event(ev: dict[str, Any]) -> str:
     return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
 
 
+def _shadow_window_active(transport: Any, team: str) -> bool:
+    """True iff a W7 shadow window is armed — the `shadow-window.json` marker
+    exists and carries a `started_at`. One cheap read; absent/unreadable/malformed
+    ⇒ off, so the delivery probes stay silent outside the window (and default-off
+    on any doubt). Checked only when there is something to probe."""
+    raw = transport.read(router.router_prefix(team) + "shadow-window.json")
+    if not raw:
+        return False
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return False
+    # codex #470 P2: a PARSEABLE started_at, not mere truthiness — a malformed
+    # marker ({"started_at":"bogus"}) is doubt ⇒ off, matching this fn's own
+    # contract and `shadow status`.
+    return isinstance(doc, dict) and router.parse_iso(doc.get("started_at")) is not None
+
+
 def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any],
                      *, json_mode: bool, verbose: bool) -> tuple[list, dict[str, list[str]]]:
     events, failures = _listen_tick(transport, team, agent, state)
     for ev in events:
         print(jsonutil.dumps(ev) if json_mode else _format_listen_event(ev))
     sys.stdout.flush()
+
+    # W7 delivery probe (path=listener). Each DIRECTIVE surfaced this tick is a
+    # live delivery of a directed item to this agent; while a shadow window is
+    # armed, record an idempotency-keyed evidence shard the acceptance report
+    # correlates against router decisions. FULLY GUARDED: a probe failure never
+    # perturbs the load-bearing watcher tick. The marker read happens only when a
+    # directive was actually delivered (not every quiet tick). Removable after
+    # acceptance. (Writing shadow-evidence/ from the listener is sanctioned by
+    # the spec's namespace-writer rule.)
+    try:
+        directives = [ev for ev in events if ev.get("type") == "directive"]
+        if directives and _shadow_window_active(transport, team):
+            base = router.router_prefix(team) + router.SHADOW_EVIDENCE_SUBPATH
+            delivered_at = router.iso(_now())
+            for ev in directives:
+                key = router.idempotency_key(str(ev.get("slug")), agent)
+                transport.write(
+                    base + router.shadow_evidence_filename(agent, key),
+                    json.dumps(router.shadow_evidence_record(
+                        key=key, agent=agent, delivered_at=delivered_at,
+                        path="listener"), sort_keys=True) + "\n")
+    except Exception as e:  # never let the probe break the watcher
+        print(f"listen: W7 shadow probe skipped ({type(e).__name__}: {e})",
+              file=sys.stderr)
 
     # Per-source streaks: each source alarms ONCE per its own consecutive-failure
     # streak (the flags persist in state across `--once` runs) and resets on its
@@ -4446,12 +4586,8 @@ def _presence_shards_status(
     return shards, ok
 
 
-def _router_prefix(team: str) -> str:
-    return f"team/{team}/_coord/router/"
-
-
 def _engagement_defaults_path(team: str) -> str:
-    return f"{_router_prefix(team)}engagement-defaults.json"
+    return f"{router.router_prefix(team)}engagement-defaults.json"
 
 
 def _load_engagement_defaults(
@@ -4482,7 +4618,7 @@ def _load_engagement_defaults(
         return (data, True) if isinstance(data, dict) else ({}, False)
     # raw is None: missing OR transient failure. Confirm which via the raising list.
     try:
-        entries = transport.list_dir(_router_prefix(team))
+        entries = transport.list_dir(router.router_prefix(team))
     except TransportError:
         return {}, False                  # listing failed -> UNKNOWN -> fail closed
     present = any((e.get("name") or "") == "engagement-defaults.json"
@@ -4762,7 +4898,7 @@ def cmd_roles_release(args: argparse.Namespace, transport: Any) -> int:
     return 0 if ok else 1
 
 
-# --- router (wake-router W4 — decision plane, enqueue-only) ---
+# --- router (feed-first decision plane + host-local executor) ---
 
 def _router_presence(transport: Any, team: str, agent: str,
                      memo: dict) -> "tuple[Optional[datetime], bool]":
@@ -4790,10 +4926,18 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
 
     cursor, cursor_reason = router.parse_cursor(transport.read(prefix + "cursor.json"))
     observe = cursor is None
+    shadow = bool(getattr(args, "shadow", False))
     if observe:
         print(f"router: OBSERVE-ONLY pass — {cursor_reason}; decisions are "
               f"logged, nothing is enqueued, and a fresh cursor is written at "
               f"the end of this pass to arm the next one", file=sys.stderr)
+    elif shadow:
+        # W7 read-only shadow: cursor-tracked like a live pass (each directed
+        # item decided ONCE, watermark + ledger advance), but a decision is
+        # logged AND persisted per item and NOTHING is enqueued or executed.
+        print("router: SHADOW pass — W7 read-only acceptance measurement; a "
+              "decision is logged + persisted per directed item, nothing "
+              "enqueued or executed", file=sys.stderr)
 
     agents_cfg, _executors, cfg_errors = router.validate_config(
         transport.read(prefix + "config.json"))
@@ -4987,14 +5131,30 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             now=now,
         )
         counts[decision] += 1
-        suffix = " [observe-only: not enqueued]" if observe and decision in (
-            "interrupt", "defer", "checkin") else ""
+        suffix = ""
+        if (observe or shadow) and decision in ("interrupt", "defer", "checkin"):
+            suffix = (" [shadow: not enqueued]" if shadow
+                      else " [observe-only: not enqueued]")
         print(f"decision {assignee} {shard_id} -> {decision} ({reason}){suffix}")
         if decision == "unroutable":
             # fail-visible lane: never a silent drop
             print(f"router: wake unroutable for {assignee} — {reason}; item "
                   f"{shard_id} batches to the digest until config is fixed")
-        if not observe and decision in ("interrupt", "defer", "checkin"):
+        if shadow:
+            # W7: persist the decision for EVERY directed item (the report's
+            # comparison population) so it can be correlated with delivery-probe
+            # evidence on the idempotency key. Enqueue/execute nothing. A failed
+            # shard write is a measurement gap, logged, never fatal.
+            if not transport.write(
+                    prefix + router.SHADOW_DECISIONS_SUBPATH
+                    + router.shadow_evidence_filename(assignee, key),
+                    json.dumps(router.shadow_decision_record(
+                        key=key, agent=assignee, decision=decision,
+                        reason=reason, priority=priority,
+                        decided_at=router.iso(now)), sort_keys=True) + "\n"):
+                print(f"router: shadow decision write failed for {key} "
+                      f"(measurement gap, non-fatal)", file=sys.stderr)
+        elif not observe and decision in ("interrupt", "defer", "checkin"):
             cfg = agents_cfg[assignee]
             entry = {
                 "agent": assignee,
@@ -5120,21 +5280,22 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
         cfg = agents_cfg.get(entry.get("agent")) or {}
         qpath = prefix + "queue/" + name
 
-        def _terminate(sub: str, record: dict, tally: str) -> None:
+        def _terminate(sub: str, record: dict, tally: str) -> bool:
             """Write a delivered/dead-letter record, then remove the queue entry
             ONLY if that write landed. A failed record write must NOT be followed
             by the delete — else the wake is lost (same class as the W4 P1). Left
             queued, it retries next pass (at-least-once, safe by the content
-            rule)."""
+            rule). Returns True iff the record landed and the entry was cleared."""
             if transport.write(prefix + sub + router.record_filename(key),
                                json.dumps(record, sort_keys=True) + "\n"):
                 transport.delete(qpath)
                 counts[tally] += 1
-            else:
-                print(f"router execute: {sub.rstrip('/')} record write failed "
-                      f"for {key} — entry stays queued, retries next pass",
-                      file=sys.stderr)
-                counts["retried"] += 1
+                return True
+            print(f"router execute: {sub.rstrip('/')} record write failed "
+                  f"for {key} — entry stays queued, retries next pass",
+                  file=sys.stderr)
+            counts["retried"] += 1
+            return False
 
         try:
             inv = router.adapter_invocation(entry, cfg.get("adapter_args"))
@@ -5148,9 +5309,27 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
 
         status, detail = invoke(inv)
         if status == "delivered":
-            _terminate("delivered/",
-                       router.delivery_record(entry, router.iso(now)),
-                       "delivered")
+            if _terminate("delivered/",
+                          router.delivery_record(entry, router.iso(now)),
+                          "delivered"):
+                # W7 delivery probe (path=adapter): a GENUINE cloud-adapter
+                # delivery (record landed). While a window is armed, record
+                # evidence — guarded so a probe failure never affects execution.
+                # Quiet during a shadow window (the shadow runner executes
+                # nothing); meaningful when a live router runs during a window.
+                try:
+                    if _shadow_window_active(transport, team):
+                        transport.write(
+                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            + router.shadow_evidence_filename(
+                                str(entry.get("agent")), key),
+                            json.dumps(router.shadow_evidence_record(
+                                key=key, agent=str(entry.get("agent")),
+                                delivered_at=router.iso(now), path="adapter"),
+                                sort_keys=True) + "\n")
+                except Exception as e:
+                    print(f"router execute: W7 adapter probe skipped "
+                          f"({type(e).__name__}: {e})", file=sys.stderr)
         elif status == "unconfigured":
             # visibly queued, not a burned retry — awaits a wired host client
             counts["unconfigured"] += 1
@@ -5178,14 +5357,85 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
 
 
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
+    # W7 shadow mode is READ-ONLY: log + persist decisions, never enqueue OR
+    # execute (the pass suppresses the enqueue; the executor is skipped here).
+    shadow = bool(getattr(args, "shadow", False))
     rc = _router_pass(args, transport)
-    _router_execute_cloud(args, transport)
+    if not shadow:
+        _router_execute_cloud(args, transport)
     if getattr(args, "once", False):
         return rc
     while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
         time.sleep(router.ROUTER_POLL_SECONDS)
         _router_pass(args, transport)
-        _router_execute_cloud(args, transport)
+        if not shadow:
+            _router_execute_cloud(args, transport)
+
+
+def cmd_router_shadow_arm(args: argparse.Namespace, transport: Any) -> int:
+    """Write the W7 shadow-window marker — records `started_at` and activates
+    the fleet-wide delivery probes. Idempotent: a re-arm reports the existing
+    start (never resets the clock) unless the marker is missing/malformed."""
+    prefix = router.router_prefix(args.team)
+    path = prefix + "shadow-window.json"
+    existing = transport.read(path)
+    if existing:
+        try:
+            doc = json.loads(existing)
+            if isinstance(doc, dict) and doc.get("started_at"):
+                print(f"shadow window already armed at {doc['started_at']} "
+                      f"(min_hours={doc.get('min_hours')}) — not resetting the "
+                      f"clock")
+                return 0
+        except ValueError:
+            pass  # malformed marker -> re-arm cleanly
+    mh = getattr(args, "min_hours", 48)
+    min_hours = 48 if mh is None else int(mh)  # NOT `or 48` — that maps 0 -> 48
+    # codex #470 P1: the normative window is >=48h — refuse to arm a shorter (or
+    # negative) one that `shadow status` would then treat as the acceptance
+    # minimum, letting the gate pass early.
+    if min_hours < 48:
+        print(f"shadow arm: --min-hours {min_hours} is below the normative "
+              f"minimum of 48 — refusing to arm a window that could pass "
+              f"acceptance early", file=sys.stderr)
+        return 1
+    started_at = router.iso(_now())
+    doc = {"started_at": started_at, "min_hours": min_hours,
+           "poll_seconds": router.ROUTER_POLL_SECONDS}
+    if not transport.write(path, json.dumps(doc, sort_keys=True) + "\n"):
+        print("shadow arm: marker write failed — window NOT armed", file=sys.stderr)
+        return 1
+    print(f"shadow window ARMED at {started_at} (>= {doc['min_hours']}h, poll "
+          f"{doc['poll_seconds']}s). Delivery probes now record to "
+          f"{prefix}{router.SHADOW_EVIDENCE_SUBPATH}; run `router run --shadow "
+          f"{args.team}` for the read-only decision log.")
+    return 0
+
+
+def cmd_router_shadow_status(args: argparse.Namespace, transport: Any) -> int:
+    """Report the shadow-window marker: armed?, start, and elapsed vs min_hours."""
+    prefix = router.router_prefix(args.team)
+    raw = transport.read(prefix + "shadow-window.json")
+    if not raw:
+        print("shadow window: NOT armed")
+        return 0
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        print("shadow window: marker present but MALFORMED (re-arm to fix)",
+              file=sys.stderr)
+        return 1
+    started = router.parse_iso(doc.get("started_at")) if isinstance(doc, dict) else None
+    if started is None:
+        print("shadow window: marker present but has no valid started_at",
+              file=sys.stderr)
+        return 1
+    elapsed_h = (_now() - started).total_seconds() / 3600.0
+    min_h = doc.get("min_hours", 48)
+    done = "MET" if elapsed_h >= min_h else "not yet"
+    print(f"shadow window ARMED at {doc['started_at']}: {elapsed_h:.1f}h "
+          f"elapsed of >= {min_h}h ({done})")
+    return 0
 
 
 # --- W5.5: thin host executor -----------------------------------------------
@@ -5205,18 +5455,25 @@ def _default_host_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
     """Default host-local adapter invoker → (status, detail), status one of
     "delivered" | "failed" | "unconfigured".
 
-    The host-side integration SEAM. Real deployment wires the sanctioned
-    host-local adapter SCRIPT here (`codex-exec-resume` resumes a Codex thread,
-    `openclaw-post` posts to a local endpoint, `macos-notify` posts a
-    notification, `queued-wake-file` drops a SessionStart nudge) — each fires a
-    check-your-queue nudge and reports delivered/failed. Until a script is wired
-    on THIS host the default reports `unconfigured`: the wake stays VISIBLY
-    QUEUED (never dropped, never a burned retry), the plan's fail-visible
-    degradation. Tests inject a fake invoker to exercise the delivered/failed
-    paths — so nothing in this component ever wakes anything on its own."""
-    return ("unconfigured",
-            f"no host-local adapter script wired for "
-            f"{inv.get('adapter')!r} on this executor yet")
+    The host-side integration SEAM. A sanctioned host-local adapter is a small
+    host-provisioned SCRIPT at `$COORD_WAKE_ADAPTER_DIR/<adapter>.sh`; the first
+    one in-tree is `macos-notify` (posts a desktop notification and spawns
+    nothing). The rest of `router.ADAPTERS_HOST_LOCAL` still reports
+    `unconfigured` until its script lands (W6).
+
+    Three properties hold at this seam (see `wake_adapters.run_script_adapter`):
+    NUDGE-ONLY — the adapter receives the agent id, the idempotency key and a
+    STATIC reason constant, never a per-event command/URL/payload, so
+    at-least-once delivery converges to one bus check; BOUNDED — the script runs
+    under a hard timeout with its whole process group killed at the bound, so a
+    hung adapter cannot wedge the executor (reported `failed`); FAIL-VISIBLE —
+    an un-provisioned host (env unset, or no script) reports `unconfigured` and
+    the wake stays VISIBLY QUEUED, never dropped and never a burned retry.
+
+    `COORD_WAKE_ADAPTER_DIR` is unset by default, so an engine that has merely
+    been installed wakes nothing; tests inject a fake invoker or a stub script.
+    """
+    return wake_adapters.run_script_adapter(inv)
 
 
 def _claim_owner(executor_id: str) -> str:
@@ -5344,20 +5601,22 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
 
         cfg = agents_cfg.get(entry.get("agent")) or {}
 
-        def _terminate(sub: str, record: dict, tally: str) -> None:
+        def _terminate(sub: str, record: dict, tally: str) -> bool:
             """Write a delivered/dead-letter record, then remove the queue entry
             ONLY if that write landed. A failed record write must NOT be followed
             by the delete — else the wake is lost. Left queued, it retries next
-            pass (at-least-once, safe by the content rule)."""
+            pass (at-least-once, safe by the content rule). Returns True iff the
+            record landed and the entry was cleared."""
             if transport.write(prefix + sub + router.record_filename(key),
                                json.dumps(record, sort_keys=True) + "\n"):
                 transport.delete(qpath)
                 counts[tally] += 1
-            else:
-                print(f"router execute [{executor_id}]: {sub.rstrip('/')} "
-                      f"record write failed for {key} — entry stays queued, "
-                      f"retries next pass", file=sys.stderr)
-                counts["retried"] += 1
+                return True
+            print(f"router execute [{executor_id}]: {sub.rstrip('/')} "
+                  f"record write failed for {key} — entry stays queued, "
+                  f"retries next pass", file=sys.stderr)
+            counts["retried"] += 1
+            return False
 
         # only the four host-local adapters are executable on a host executor; a
         # cloud adapter mis-resolved here (or anything unknown) is a per-entry
@@ -5401,9 +5660,27 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
 
         status, detail = invoke(inv)
         if status == "delivered":
-            _terminate("delivered/",
-                       router.delivery_record(entry, router.iso(now)),
-                       "delivered")
+            if _terminate("delivered/",
+                          router.delivery_record(entry, router.iso(now)),
+                          "delivered"):
+                # W7 delivery probe (path=adapter): a GENUINE host-local adapter
+                # delivery (record landed). Host-local adapters are a real
+                # delivery plane — their deliveries must enter the W7 evidence
+                # population (codex #470 r2). Window-gated + guarded: a probe
+                # failure never affects execution.
+                try:
+                    if _shadow_window_active(transport, args.team):
+                        transport.write(
+                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            + router.shadow_evidence_filename(
+                                str(entry.get("agent")), key),
+                            json.dumps(router.shadow_evidence_record(
+                                key=key, agent=str(entry.get("agent")),
+                                delivered_at=router.iso(now), path="adapter"),
+                                sort_keys=True) + "\n")
+                except Exception as e:
+                    print(f"router execute [{executor_id}]: W7 adapter probe "
+                          f"skipped ({type(e).__name__}: {e})", file=sys.stderr)
         elif status == "unconfigured":
             # visibly queued, not a burned retry — awaits a wired host script
             counts["unconfigured"] += 1
@@ -6070,7 +6347,10 @@ def build_parser() -> argparse.ArgumentParser:
     def add_json(sp):
         sp.add_argument("--json", action="store_true", help="emit JSON")
 
-    r = sub.add_parser("reconcile", help="scan + heal a team's task views")
+    r = sub.add_parser(
+        "reconcile",
+        help="feed-fold + heal a team's task views (full-scan fallback)",
+    )
     r.add_argument("team")
     r.add_argument("--retention-days", dest="retention_days",
                    help="archive quiet terminal/proposed tasks and settled-single orphan reviews older than N days (or env COORD_RETENTION_DAYS)")
@@ -6359,6 +6639,11 @@ def build_parser() -> argparse.ArgumentParser:
     rvq = rvsub.add_parser("request", help="open a review with required reviewers (durable obligation)")
     rvq.add_argument("team"); rvq.add_argument("name", help="slug or title")
     rvq.add_argument("--of", required=True, help="artifact under review (PR url or description)")
+    rvq.add_argument(
+        "--head",
+        help="exact 40- or 64-hex commit SHA; re-requesting the same PR slug "
+             "with a new head advances its append-only review round",
+    )
     rvq.add_argument("--reviewer", action="append", required=True,
                      help="required reviewer (role preferred); repeat for many")
     rvq.add_argument("--from", dest="sender", help="requesting agent (defaults to host)")
@@ -6370,13 +6655,30 @@ def build_parser() -> argparse.ArgumentParser:
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)
 
-    ro = sub.add_parser("router", help="wake-router decision plane (wake-router-PLAN.md W4 — cursor scan + policy, enqueue-only)")
+    ro = sub.add_parser(
+        "router",
+        help="wake-router feed-first decision plane + host-local executor",
+    )
     rosub = ro.add_subparsers(dest="router_command", required=True)
-    ror = rosub.add_parser("run", help="scan the store by cursor and enqueue wake decisions (fixed 60s cadence; --once for one pass)")
+    ror = rosub.add_parser(
+        "run",
+        help=("fold feed changes by cursor, execute cloud adapters, and enqueue "
+              "host-local wakes (fixed 60s cadence; --once for one pass)"),
+    )
     ror.add_argument("team")
     ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
+    ror.add_argument("--shadow", action="store_true", help="W7 read-only shadow mode: log + persist a decision per directed item, enqueue and execute NOTHING (the >=48h acceptance measurement)")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)
+    rosh = rosub.add_parser("shadow", help="W7 shadow-window control (arm/status the >=48h read-only acceptance window)")
+    roshsub = rosh.add_subparsers(dest="shadow_command", required=True)
+    rosha = roshsub.add_parser("arm", help="write the shadow-window marker (records started_at; activates the fleet-wide delivery probes)")
+    rosha.add_argument("team")
+    rosha.add_argument("--min-hours", type=int, default=48, help="minimum window length before acceptance (default 48)")
+    rosha.set_defaults(func=cmd_router_shadow_arm)
+    roshs = roshsub.add_parser("status", help="report the shadow-window marker (armed?, started_at, elapsed vs min_hours)")
+    roshs.add_argument("team")
+    roshs.set_defaults(func=cmd_router_shadow_status)
     roe = rosub.add_parser("execute", help="W5.5 thin host executor: fire host-local adapters for queue entries resolved to THIS host (policy-free; --once for one pass)")
     roe.add_argument("team")
     roe.add_argument("--host", default=None, help="executor id to drain (default: this host's own id)")

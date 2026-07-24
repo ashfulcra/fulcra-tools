@@ -65,6 +65,45 @@ def test_mirror_merged_pr_auto_approves_and_review_status_reflects(capsys):
         {"checked": 1, "mirrored": 0, "verdicts": 0}
 
 
+def test_mirror_head_keyed_review_approves_only_matching_merged_head(capsys):
+    head = "a" * 40
+    t = FakeTransport()
+    t.put(
+        "team/r/review/pr-42.md",
+        "---\ntype: Review\nschema: review-request/v2\n"
+        "requested_by: requester\nof: https://github.com/o/r/pull/42\n"
+        f"required: [forge]\nhead: {head}\nround: 2\n---\n",
+    )
+    runner = lambda a: json.dumps({
+        "state": "MERGED", "mergedAt": "2026-07-02T14:00:00Z",
+        "reviewDecision": "APPROVED", "headRefOid": head,
+    })
+    assert forge.mirror(t, "r", now=NOW, runner=runner)["verdicts"] == 1
+    vpath = f"team/r/review/pr-42/verdicts/{head}--forge.md"
+    assert vpath in t.store
+    assert f"head: {head}" in t.store[vpath]
+    assert cli.main(["review", "status", "r", "pr-42", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
+
+
+def test_mirror_head_keyed_review_refuses_mismatched_merged_head():
+    reviewed = "a" * 40
+    merged = "b" * 40
+    t = FakeTransport()
+    t.put(
+        "team/r/review/pr-42.md",
+        "---\ntype: Review\nschema: review-request/v2\n"
+        "requested_by: requester\nof: https://github.com/o/r/pull/42\n"
+        f"required: [forge]\nhead: {reviewed}\nround: 1\n---\n",
+    )
+    runner = lambda a: json.dumps({
+        "state": "MERGED", "mergedAt": "2026-07-02T14:00:00Z",
+        "reviewDecision": "APPROVED", "headRefOid": merged,
+    })
+    assert forge.mirror(t, "r", now=NOW, runner=runner)["verdicts"] == 0
+    assert not [p for p in t.store if p.endswith("--forge.md")]
+
+
 def test_mirror_degrades_on_gh_failure_and_non_pr_artifacts():
     t = FakeTransport()
     _team_with_review(t, slug="doc-review", artifact="internal doc, no forge")
@@ -77,7 +116,6 @@ def test_mirror_degrades_on_gh_failure_and_non_pr_artifacts():
 def test_cli_forge_mirror_command(capsys):
     t = FakeTransport()
     _team_with_review(t)
-    import argparse
     from coord_engine.cli import build_parser
     p = build_parser()
     args = p.parse_args(["forge", "mirror", "r"])

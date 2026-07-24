@@ -910,7 +910,6 @@ def test_retention_archives_old_terminal_and_moves_shards(capsys):
     t.put("team/r/task/fresh.md", "---\ntype: Task\ntitle: F\nstatus: active\n---\n")
     t.put("team/r/_coord/acks/olddone/amy-abc123.md",
           "---\ntype: Ack\nagent: amy\ntimestamp: 2020-01-16T00:00:00Z\n---\n")
-    import os
     assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
     # task doc moved to archive/<YYYY-MM>/, original gone
     assert "team/r/task/olddone.md" not in t.store

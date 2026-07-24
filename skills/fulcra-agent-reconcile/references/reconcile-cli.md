@@ -1,12 +1,13 @@
 ---
 name: fulcra-agent-reconcile-cli
-description: "Exact commands to run the coord-reconcile tool over a fulcra-agent-teams namespace."
+description: "Exact commands to run coord-engine reconcile over a fulcra-agent-teams namespace."
 ---
 
 # Fulcra Agent Reconcile — CLI reference
 
-The logic lives in the shared **`coord-engine`** tool (repo `engine/`). It shells out to `fulcra-api file`
-for all storage I/O, so `fulcra-api` must be authenticated (`fulcra-api auth login`).
+The logic lives in the shared **`coord-engine`** tool
+([`packages/coord-engine`](../../../packages/coord-engine)). It shells out to `fulcra-api file`
+for all storage I/O, so the Fulcra CLI must be authenticated (`fulcra auth login`).
 
 ## Install / run
 
@@ -19,7 +20,7 @@ coord-engine reconcile <team>
 
 ## Commands
 ```bash
-# Scan team/<team>/task/*.md -> heal task/index.md + task/log.md -> write _coord/summaries.json
+# Fold data-updates changes (or full-scan fallback) -> heal index/log/summaries
 coord-engine reconcile <team>
 
 # Read views (one aggregate download each; run reconcile first):
@@ -35,15 +36,17 @@ coord-engine search   <team> <query> [--json]  # substring over id/title/descrip
 - `COORD_LOG_LEVEL` — `debug|info|warn|error` (structured JSON logs to stderr; default `info`).
 
 ## Behavior notes
-- **Incremental:** a task file is re-read only when its `fulcra-api file list` timestamp differs from the
-  last aggregate. That timestamp is minute-granular, so two edits within one minute of the prior pass are
-  re-scanned on the next run (conservative, never stale).
-- **Degraded:** if `file list` fails, the pass aborts and writes nothing (prior index/log/aggregate stay).
-- **Concurrency:** run reconcile from one scheduled host, or accept convergence — the output is
-  deterministic from the listing, so concurrent passes converge (Fulcra File Store is last-writer-wins
-  and versions every write).
+- **Incremental:** a durable cursor in `_coord/summaries.json` consumes the authoritative
+  `data-updates` feed and reads only changed task shards. Unrelated events still advance the cursor.
+- **Fail closed:** a missing/corrupt cursor, unavailable/malformed feed, doubtful lifecycle, or
+  unreadable changed shard takes the full listing scan. If that fallback listing fails, the pass
+  aborts and writes nothing (the prior index/log/aggregate stay intact).
+- **Drift check:** every `COORD_RECONCILE_FULL_EVERY` passes (default 72), or when the aggregate is too
+  old, a full scan compares against the incremental view and loudly rebuilds any divergence.
+- **Concurrency:** output remains deterministic from the feed lifecycle ordering and the same full-scan
+  ground truth; Fulcra File Store is last-writer-wins and versions every write.
 
 ## Tests
 ```bash
-cd engine && uv run --extra dev pytest -q
+uv run pytest packages/coord-engine -q
 ```

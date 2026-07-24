@@ -112,10 +112,10 @@ under `skills/`, each package with its own README, build, and tests.
   "..."`; when another session needs resumable context, write the continuity
   snapshot first and then reassign the task.
 - Machine JSON is compact by contract: public non-ATC `--json` documents,
-  line-oriented `listen`/`threads` events, and `_coord/summaries.json` omit
-  insignificant whitespace while preserving parsed values and degradation
-  markers. Tests and consumers compare parsed JSON unless byte layout is the
-  explicit contract.
+  line-oriented `listen` events, the single-array `threads` result, and
+  `_coord/summaries.json` omit insignificant whitespace while preserving parsed
+  values and degradation markers. Tests and consumers compare parsed JSON unless
+  byte layout is the explicit contract.
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
   in the README; their skills and READMEs carry the detail.
 
@@ -180,7 +180,14 @@ it (not on PyPI).
   `routine-align`) directly — claim → invoke → delivered/dead-letter with bounded
   retry, at-least-once and safe by the keyed-nudge content rule; host-local
   adapters are enqueued with an `executor` id for the W5.5 thin executor. A
-  missing/corrupt cursor restarts observe-only. Contract:
+  missing/corrupt cursor restarts observe-only. **Shadow mode (W7):** `router
+  shadow arm <team>` writes the `shadow-window.json` marker (recording
+  `started_at`, activating the fleet-wide delivery probes); `router run --shadow`
+  is read-only — it logs AND persists a decision per directed item to
+  `shadow-decisions/` and enqueues/executes nothing, while the live delivery
+  paths (listener tick, adapter execution) write `shadow-evidence/` shards at
+  delivery success. The acceptance report correlates the two on the idempotency
+  key over a ≥48h window (duty-cycle gated). Contract:
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
@@ -214,10 +221,40 @@ it (not on PyPI).
   execution, wakes stay VISIBLY queued and the command exits non-zero (a dead
   executor never reports a clean "0 delivered"); a per-entry read that is
   None/unparseable is SKIPPED (never invoke on an UNKNOWN entry). The default
-  invoker wires no real adapter (reports `unconfigured`, wake stays queued), so
-  the command wakes nothing on its own — **DEPLOYMENT (wiring the real adapter
-  scripts and scheduling the poller on a host) is a separate Ash-gated step.**
+  invoker runs a host-provisioned adapter SCRIPT (below); on an un-provisioned
+  host it reports `unconfigured` and the command wakes nothing —
+  **DEPLOYMENT (provisioning the scripts and scheduling the poller on a host) is
+  a separate Ash-gated step.**
   Contract: [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) W5.5 + §2.
+- **Host-local wake adapters are provisioned SCRIPTS behind one invoker seam.**
+  `_default_host_adapter_invoke` → `wake_adapters.run_script_adapter` resolves
+  `$COORD_WAKE_ADAPTER_DIR/<adapter>.sh` and returns
+  **`delivered` (exit 0) | `failed` (non-zero, un-spawnable, or timeout) |
+  `unconfigured`**. Three rules are load-bearing:
+  - **Nudge-only content (plan §2).** The adapter receives EXACTLY
+    `--agent <id> --key <idempotency-key> --reason <wake_adapters.NUDGE_REASON>`
+    — the reason is a module constant, and no other field of the invocation is
+    read. No per-event command, shell, URL or payload can reach an adapter, so
+    at-least-once delivery converges to one bus check. An agent id or key
+    outside the accepted charset is refused **before** the script runs.
+  - **Bounded.** The script runs under `COORD_WAKE_ADAPTER_TIMEOUT` (default
+    10s) via `transport.run_bounded`, which SIGKILLs the whole process group at
+    the bound; a hung adapter is reported `failed` and can never wedge the
+    executor.
+  - **Absent script ⇒ `unconfigured`, never a silent drop.** Env unset, no
+    `<adapter>.sh`, or present-but-not-executable all leave the wake VISIBLY
+    QUEUED with no retry burned. `COORD_WAKE_ADAPTER_DIR` is unset by default,
+    which is why an installed engine fires nothing.
+  The first (and currently only) script is
+  [`skills/fulcra-agent-automation/scripts/wake/macos-notify.sh`](skills/fulcra-agent-automation/scripts/wake/macos-notify.sh):
+  it posts ONE desktop notification via `osascript`, handing the text to a fixed
+  `on run argv` AppleScript program as ARGUMENTS (nothing is interpolated into
+  source), exits 127 with a clear message where `osascript` is unavailable, and
+  **displays text and starts nothing** — no session spawn, no network, no
+  interpreter. Every other adapter in `router.ADAPTERS_HOST_LOCAL`
+  (`codex-exec-resume`, `openclaw-post`, `queued-wake-file`) still reports
+  `unconfigured` until its script lands (W6). Adding this adapter **enables no
+  agent, authors no `config.json`, installs nothing and schedules nothing.**
 - **Durable tooling stash.** An agent's operational bundle (scripts, loops,
   config templates) survives ephemeral machines via
   `coord-engine stash push/pull/list` against
@@ -272,22 +309,33 @@ it (not on PyPI).
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
   a direct push to `main`**. The handshake rides the bus, not the forge:
-  `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
+  `coord-engine review request <team> <slug> --of <artifact> [--head <exact-sha>]
+  --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
-  verdict file exists at `team/<team>/review/<slug>/verdicts/<role>.md` (the
-  filename stem is the `required` token — the role passed to `--reviewer` — not
-  the holder's own name; that stem is what the tally credits).
+  verdict file exists at the exact path the command echoes (the required token
+  is the role passed to `--reviewer`, not the holder's own name; that token is
+  what the tally credits).
+  **One PR has one review slug (`pr-N`), across every push.** Pass the PR URL as
+  `--of` and the full 40- or 64-hex commit id as `--head`. Re-requesting that
+  same slug/PR/requester/required-set with a NEW head advances the same review
+  doc to the next round; verdicts append at
+  `verdicts/<head>--<required-token>.md`, and the verdict frontmatter must repeat
+  that exact `head`. `review status` folds ONLY the active head, reports its
+  `head` + `round`, and ignores superseded-head verdicts without deleting them.
+  This keeps exact-head rigor without `pr-N-r2`/`r3` slug ceremony. Legacy or
+  non-code reviews may omit `--head` and retain `verdicts/<required-token>.md`.
   The request is **durable-first, not atomic**: the review doc lands FIRST (that
   doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened
   review fires each reviewer's inbox/`listen` — never hand-send a review tell),
   and a partial notification failure is reported loud (rc 1) naming exactly which
   reviewers were and were not notified — and is **idempotently recoverable**: re-running the SAME
-  request (same `of`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
+  request (same `of`/`--head`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
   only the reviewers a prior partial failure dropped (the doc is left byte-unchanged,
   already-delivered directives dedupe rc 0), so no reviewer is stranded by the
   exists-guard; a re-request with a *different* `of`/required-set/requester is a
-  loud rc 1 conflict (a changed required set re-opens only via a new slug), and a
+  loud rc 1 conflict (a changed required set re-opens only via a new slug), while
+  a different valid `--head` is the sanctioned next round, and a
   present-but-unreadable doc fails closed (rc 1, never overwritten);
   `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
   and gates the merge. The `<artifact>` is an opaque ref (PR#, branch, commit
@@ -673,6 +721,22 @@ it (not on PyPI).
     anchor is behind `generated_at`, so a quiet beat can't skip the fold that still owes a read. A forced full fold every `COORD_ACKS_FULL_EVERY`
     passes (default 72, ~daily on a 20-min heartbeat) bounds anything the query could miss, and carries the
     orphan-shard GC.
+  - **Reconcile's own pass is a feed delta, not a directory scan (E1).** A reconcile pass consumes
+    `data-updates` since a durable cursor (`reconcile_cursor` in summaries.json — watermark +
+    processed ledger + an incremental-streak counter, the W4 pattern), reads ONLY the changed task
+    shards, and updates the rows in place — so "fresh" means "feed entries since the last pass"
+    (0–a handful), not "every doc the index hasn't met". The full `list_dir(task/)` scan stays as
+    (a) the fail-closed fallback on ANY cursor/feed doubt (no cursor, corrupt cursor, feed
+    unavailable, a feed entry that won't positively parse, a changed shard that won't read) and
+    (b) a scheduled drift self-check: every `COORD_RECONCILE_FULL_EVERY` passes (default 72), or once
+    the aggregate crosses `MAX_FAST_PATH_HOURS`, a full scan runs and its rows are compared to the
+    incremental-maintained view — a divergence is logged LOUD and rebuilt from the full scan, never
+    silently absorbed. An incremental row is stamped byte-identically to a full-scan row (size from
+    the shard's UTF-8 length, mtime from the feed's `uploaded_at` reformatted to the store's
+    minute-granular listing shape), so the fallback stays byte-identical to today. **Ship-gate: a new
+    reconcile fast/incremental path takes the full scan on ANY doubt (never a false "nothing changed"),
+    keeps a periodic full-scan drift check that rebuilds loudly on divergence, and its cursor key is
+    cut from `build_aggregate`'s passthrough and recomputed in full every pass.**
   - **summaries.json is one shared doc written by many hosts at many versions — a top-level key added
     in version N is wiped by any host older than N.** The whole fleet reconciles ONE index, and an older
     host rebuilds the document from the key set it knows and writes it over everyone else's. This is not
