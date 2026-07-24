@@ -902,6 +902,46 @@ def _mtime_from_uploaded_at(uploaded_at: Any) -> Optional[str]:
     return dt.strftime("%Y-%m-%d %I:%M%p UTC")
 
 
+_FEED_STATE_PRIORITY = {"archived": 0, "deleted": 1, "uploaded": 2}
+
+
+def _feed_change_instant(change: dict[str, Any]) -> Optional[datetime]:
+    """Return the lifecycle instant for one normalized data-updates row."""
+    state = change.get("state")
+    key = {"uploaded": "uploaded_at", "archived": "archived_at",
+           "deleted": "deleted_at"}.get(state)
+    value = change.get(key) if key else None
+    # Archive/delete payloads can retain only uploaded_at.  It is still a
+    # deterministic instant; total absence is feed doubt.
+    return _parse_iso_utc(value or change.get("uploaded_at"))
+
+
+def _collapse_feed_changes(
+    changes: list[dict[str, Any]],
+) -> Optional[dict[str, tuple[datetime, dict[str, Any]]]]:
+    """Collapse normalized feed rows to one authoritative lifecycle per path.
+
+    The feed does not promise order, and one window can contain both sides of a
+    delete/recreate.  Latest instant wins; equal instants use the E2 lifecycle
+    priority ``uploaded > deleted > archived`` so a same-second rewrite keeps
+    the live shard.  ``None`` means an entry lacked a usable instant.
+    """
+    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    for change in changes:
+        path = str(change.get("path") or "")
+        instant = _feed_change_instant(change)
+        if instant is None:
+            return None
+        prior = latest.get(path)
+        if prior is None or (
+            instant, _FEED_STATE_PRIORITY[str(change.get("state"))]
+        ) >= (
+            prior[0], _FEED_STATE_PRIORITY[str(prior[1].get("state"))]
+        ):
+            latest[path] = (instant, change)
+    return latest
+
+
 def _feed_task_delta(
     transport: Any, team: str, *, cursor: dict[str, Any], now: str, log: Any
 ) -> Optional[tuple[dict[str, str], set, dict[str, str]]]:
@@ -943,9 +983,7 @@ def _feed_task_delta(
         return None
     task_pfx = task_prefix(team)
     prior_processed = cursor.get("processed", {})
-    changed: dict[str, str] = {}
-    deleted: set = set()
-    new_processed: dict[str, str] = {}
+    relevant: list[dict[str, Any]] = []
     margin_floor = end - timedelta(seconds=2 * FAST_PATH_SKEW_MARGIN_SECONDS)
     for c in changes:
         # Shape guard, fail-CLOSED: any entry we cannot positively parse is doubt,
@@ -955,10 +993,7 @@ def _feed_task_delta(
             return None
         path = c.get("path", c.get("full_name"))
         state = c.get("state")
-        at = c.get("uploaded_at") or c.get("archived_at") or c.get("deleted_at")
         if not isinstance(path, str) or not path.strip():
-            return None
-        if state not in ("uploaded", "archived", "deleted"):
             return None
         norm = path.strip().lstrip("/")
         if not norm.startswith(task_pfx):
@@ -968,21 +1003,39 @@ def _feed_task_delta(
         # (task/archive/…) is not a live task row.
         if "/" in rest or not rest.endswith(".md") or rest in ("index.md", "log.md"):
             continue
-        slug = rest[:-3]
+        # Only a direct task change can affect this fold.  Irrelevant feed rows
+        # may be the older path-only shape accepted by the global fast path.
+        if state not in ("uploaded", "archived", "deleted"):
+            return None
+        relevant.append({
+            "path": norm,
+            "state": state,
+            "uploaded_at": c.get("uploaded_at"),
+            "archived_at": c.get("archived_at"),
+            "deleted_at": c.get("deleted_at"),
+        })
+
+    collapsed = _collapse_feed_changes(relevant)
+    if collapsed is None:
+        return None
+
+    changed: dict[str, str] = {}
+    deleted: set = set()
+    new_processed: dict[str, str] = {}
+    for norm, (instant, event) in collapsed.items():
+        state = str(event.get("state"))
+        slug = norm[len(task_pfx):-3]
+        at = instant.isoformat().replace("+00:00", "Z")
         sig = f"{state}:{at}"
         already = prior_processed.get(norm) == sig
         # Keep only recent entries in the next ledger — those are the only ones an
         # overlapping next window can re-surface; older entries can't reappear.
-        at_dt = _parse_iso_utc(at)
-        if at_dt is None or at_dt >= margin_floor:
+        if instant >= margin_floor:
             new_processed[norm] = sig
         if already:
             continue
         if state == "uploaded":
-            mt = _mtime_from_uploaded_at(at)
-            if mt is None:
-                return None  # can't stamp a parity mtime -> doubt -> full scan
-            changed[slug] = mt
+            changed[slug] = instant.strftime("%Y-%m-%d %I:%M%p UTC")
         else:  # archived | deleted -> the row goes away
             deleted.add(slug)
     return changed, deleted, new_processed
@@ -1021,7 +1074,6 @@ def _full_scan_task_rows(
     """Fold the full ``task/`` listing into rows, reusing unchanged prior rows.
     The authoritative pass — the fail-closed fallback and the drift self-check's
     reference. Returns ``(rows, warnings, reused, parsed)``."""
-    prefix = task_prefix(team)
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     reused = parsed = 0
@@ -1165,14 +1217,45 @@ def reconcile(
     due_for_full = prior_cursor is None or rec_streak + 1 >= full_every or stale
 
     # Fast path — nothing relevant changed — only when NOT owed a full/drift pass.
+    # It still advances the E1 cursor after independently confirming the feed
+    # delta: unrelated events must not leave an old watermark to grow forever.
     if not due_for_full and _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
-        # NOTE: warnings from the prior aggregate are not resurfaced here; they
-        # reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
-        result = {"tasks": len(prior_rows), "parsed": 0, "reused": len(prior_rows),
-                  "transitions": 0, "warnings": [], "fast_path": True}
-        _write_health_shard(transport, team, host=host, now=now, result=result, log=log)
-        log.info("reconciled (fast path)", team=team, tasks=len(prior_rows))
-        return result
+        fast_delta = _feed_task_delta(
+            transport, team, cursor=prior_cursor, now=now, log=log)
+        if fast_delta is not None:
+            fast_changed, fast_deleted, fast_processed = fast_delta
+            if not fast_changed and not fast_deleted:
+                fast_agg = dict(prior_agg or {})
+                fast_agg[RECONCILE_CURSOR_KEY] = {
+                    "watermark": now,
+                    "processed": fast_processed,
+                    "streak": rec_streak + 1,
+                }
+                if not transport.write(
+                        summaries_path(team), jsonutil.dumps(fast_agg)):
+                    result = {
+                        "degraded": True,
+                        "reason": "reconcile cursor write failed",
+                        "tasks": len(prior_rows),
+                    }
+                    _write_health_shard(
+                        transport, team, host=host, now=now, result=result, log=log)
+                    return result
+                # NOTE: warnings from the prior aggregate are not resurfaced here;
+                # they reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
+                result = {
+                    "tasks": len(prior_rows),
+                    "parsed": 0,
+                    "reused": len(prior_rows),
+                    "transitions": 0,
+                    "warnings": [],
+                    "fast_path": True,
+                }
+                _write_health_shard(
+                    transport, team, host=host, now=now, result=result, log=log)
+                log.info(
+                    "reconciled (fast path)", team=team, tasks=len(prior_rows))
+                return result
 
     # Try the feed-delta fold when a cursor is usable; None at any step is doubt.
     inc: Optional[tuple] = None
@@ -1310,8 +1393,7 @@ def reconcile(
     # The E1 reconcile cursor rides here too (watermark + processed ledger + the
     # incremental-streak backstop counter). THIS build owns it — it is cut from the
     # passthrough below and rewritten in full every pass, so a stale value can never
-    # resurrect. The fast path returns before this and rewrites nothing, so a
-    # skipped pass leaves the cursor untouched (correct: it folded nothing).
+    # resurrect. The fast path advances it in its own verified write above.
     ack_state[RECONCILE_CURSOR_KEY] = new_cursor
     # `prior` carries any top-level key a NEWER host wrote that this build does not
     # know about — see build_aggregate's invariant: rebuilding from a fixed key set

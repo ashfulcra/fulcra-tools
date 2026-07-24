@@ -243,6 +243,61 @@ def test_incremental_removes_deleted_shard():
     assert "team/r/task/" not in t.lists
 
 
+# --- same-slug feed lifecycles collapse by event time ----------------------
+
+def test_incremental_delete_then_upload_retains_recreated_row():
+    t = CountingTransport()
+    path = "team/r/task/a.md"
+    t.put(path, _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+
+    # One feed window can contain both sides of a delete/recreate lifecycle.
+    # The later upload is authoritative even when the feed arrives unordered.
+    t.put(path, _task("Alpha recreated", "active"),
+          mtime="2026-07-01 12:15PM UTC")
+    t.set_feed([
+        _up(path, state="uploaded", at="2026-07-01T12:15:30Z"),
+        _up(path, state="deleted", at="2026-07-01T12:15:20Z"),
+    ])
+
+    res = _run(t, "2026-07-01T12:30:00Z")
+    assert res.get("incremental") is True
+    assert _rows_by_name(_agg(t))["a"]["title"] == "Alpha recreated"
+
+
+def test_incremental_upload_then_delete_removes_row():
+    t = CountingTransport()
+    path = "team/r/task/a.md"
+    t.put(path, _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+
+    t.drop(path)
+    t.set_feed([
+        _up(path, state="deleted", at="2026-07-01T12:15:30Z"),
+        _up(path, state="uploaded", at="2026-07-01T12:15:20Z"),
+    ])
+
+    res = _run(t, "2026-07-01T12:30:00Z")
+    assert res.get("incremental") is True
+    assert "a" not in _rows_by_name(_agg(t))
+
+
+def test_incremental_unrelated_feed_events_still_advance_cursor():
+    t = CountingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+    t.set_feed([
+        _up("team/r/presence/other.md", at="2026-07-01T12:15:30Z"),
+    ])
+
+    res = _run(t, "2026-07-01T12:30:00Z")
+    cursor, reason = reconcile._parse_reconcile_cursor(
+        _agg(t)[reconcile.RECONCILE_CURSOR_KEY])
+    assert res.get("fast_path") is True
+    assert reason is None and cursor is not None
+    assert cursor["watermark"] == "2026-07-01T12:30:00Z"
+
+
 # --- drift detection triggers a loud rebuild -------------------------------
 
 def test_drift_check_detects_and_rebuilds_loudly():

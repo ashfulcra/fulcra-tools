@@ -195,16 +195,6 @@ def _team_updates(
     return parsed
 
 
-def _change_instant(change: dict[str, Any]) -> Optional[datetime]:
-    state = change.get("state")
-    key = {"uploaded": "uploaded_at", "archived": "archived_at",
-           "deleted": "deleted_at"}.get(state)
-    value = change.get(key) if key else None
-    # Some archive/delete payloads retain only uploaded_at.  That timestamp is
-    # still usable for deterministic collapsing; total absence is feed doubt.
-    return rec._parse_iso_utc(value or change.get("uploaded_at"))
-
-
 def _feed_task_rows(
     transport: Any, team: str, index_rows: list[dict[str, Any]],
     changes: list[dict[str, Any]],
@@ -212,12 +202,7 @@ def _feed_task_rows(
     """Apply changed task shards to aggregate rows without a task-dir listing."""
     from . import model
     prefix = rec.task_prefix(team)
-    # A store rewrite emits same-second archived(old)+uploaded(new) entries and
-    # does not promise feed order.  Total state priority makes that lifecycle
-    # collapse deterministic: the live upload wins an equal-instant rewrite,
-    # while a strictly-later terminal event still removes the row.
-    state_priority = {"archived": 0, "deleted": 1, "uploaded": 2}
-    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    relevant: list[dict[str, Any]] = []
     for change in changes:
         path = str(change.get("path") or "")
         if not path.startswith(prefix) or not path.endswith(".md"):
@@ -225,16 +210,12 @@ def _feed_task_rows(
         name = path[len(prefix):]
         if "/" in name or name in ("index.md", "log.md"):
             continue
-        instant = _change_instant(change)
-        if instant is None:
-            return [], False, f"data-updates change for {name} lacks a usable timestamp"
-        prior = latest.get(path)
-        if prior is None or (
-            instant, state_priority[str(change.get("state"))]
-        ) >= (
-            prior[0], state_priority[str(prior[1].get("state"))]
-        ):
-            latest[path] = (instant, change)
+        relevant.append(change)
+
+    # Shared with E1 reconcile: one deterministic lifecycle winner per path.
+    latest = rec._collapse_feed_changes(relevant)
+    if latest is None:
+        return [], False, "data-updates task change lacks a usable timestamp"
 
     by_name = {str(r.get("name")): r for r in index_rows
                if isinstance(r, dict) and r.get("name")}
