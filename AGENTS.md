@@ -907,6 +907,100 @@ Author commits as `ashfulcra
 trailer `Co-Authored-By: <your model> <noreply@anthropic.com>` (e.g.
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
 
+## Fleet bot identity & PAT custody (W9)
+
+**The fleet's machine account is `AnachronixBot`** — a dedicated bot User, distinct
+from `ashfulcra` (Ash's personal account) and from `FulcraBot` (reserved for
+Fulcra-side repos, operator decision 2026-07-22). Agent-driven GitHub actions run
+as the bot so they are **attributable to the fleet, not to Ash personally**; when
+you see a push or merge by `AnachronixBot`, an agent did it.
+
+**Custody — keychain, read at runtime, never embedded.** The token lives in the
+macOS keychain as service `FLEET_GH_PAT` (account = the host user). Read it only
+at the moment of use:
+
+```bash
+GH_TOKEN=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT -w)
+```
+
+Hard rules, each one a real leak vector:
+- **NEVER put it in a launchd plist `EnvironmentVariables`.** Plists under
+  `~/Library/LaunchAgents` are readable; a token there is plaintext at rest. A
+  scheduled job that needs it shells out to the keychain *at runtime*.
+- **Never** commit it, echo it, paste it into a chat/transcript, or log it. Print
+  derived facts (identity, permissions), never the value.
+- Agents **cannot mint tokens** — only the operator can. An expired PAT is an
+  operator action, never an agent workaround.
+
+**Least privilege (verified 2026-07-24).** Fine-grained, per-repo:
+Contents RW + Pull requests RW + Metadata R. **No admin, no workflows** — the
+workflows scope would let a bot rewrite CI, which is far more blast radius than
+the fleet needs. Confirmed on `ashfulcra/fulcra-tools`: `push: true`,
+`admin: false`. A PAT can never exceed its account's own repo access — if a merge
+fails with a permissions error, the fix is granting the **bot account** access,
+not re-minting the token.
+
+**Rotation.** 90-day expiry; the current token expires **2026-10-22**, with a P1
+bus reminder armed for 2026-10-15 (7 days' lead). **The operator runs every step;
+agents cannot mint or revoke tokens.** Order matters — the new token is verified
+*before* the old one is revoked, so a failed rotation is always recoverable.
+
+**Stage, verify, then promote — never overwrite the incumbent first.** A
+fine-grained PAT value is shown exactly once, so overwriting `FLEET_GH_PAT` before
+the new token is proven leaves nothing to roll back to (and stashing a copy of the
+old value would violate the custody rules above). The incumbent stays untouched
+and working until the candidate has passed verification.
+
+1. **Mint** (GitHub UI, signed in as `AnachronixBot`): Settings → Developer
+   settings → Personal access tokens → Fine-grained → *Generate new token*. Same
+   scopes as the incumbent — **Contents: RW, Pull requests: RW, Metadata: R**, no
+   administration, no workflows — same repos, 90-day expiry. Keep the value
+   available (password manager / the once-shown page) until step 5.
+2. **Stage** it under a *separate* item — the incumbent is not touched. `-w` with
+   **no value** prompts, so the token never enters argv or shell history:
+   ```bash
+   security add-generic-password -a "$USER" -s FLEET_GH_PAT_NEW -w
+   ```
+3. **Verify the candidate from staging** — prints only derived facts:
+   ```bash
+   T=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT_NEW -w)
+   GH_TOKEN="$T" gh api user --jq .login                     # expect AnachronixBot
+   GH_TOKEN="$T" gh api repos/ashfulcra/fulcra-tools \
+     --jq '{push: .permissions.push, admin: .permissions.admin}'
+   unset T                                    # expect push true, admin false
+   ```
+   Wrong `login` ⇒ minted on the wrong account. `push: false` ⇒ the **bot
+   account** lacks repo access — grant it, don't re-mint.
+4. **If step 3 fails, abort cleanly.** The fleet never noticed:
+   ```bash
+   security delete-generic-password -a "$USER" -s FLEET_GH_PAT_NEW
+   ```
+   The incumbent is untouched and still working. Fix and retry from step 1.
+5. **Promote** — re-enter the *same* value at the prompt:
+   ```bash
+   security add-generic-password -U -a "$USER" -s FLEET_GH_PAT -w
+   ```
+   **Do NOT pipe a value into `-w`.** Verified 2026-07-24: a piped
+   `-w` creates the item with an **empty** value and still exits 0 — a silent
+   empty-credential promotion that looks like success. Always type/paste at the
+   interactive prompt.
+6. **Re-verify `FLEET_GH_PAT` itself** by re-running step 3 against service
+   `FLEET_GH_PAT`. Promotion is a fresh manual paste, so it must be proven too —
+   this is what catches the empty-value footgun. If it fails, the staging item
+   still holds the verified-good token (readable via Keychain Access): redo
+   step 5. Do not proceed until this passes.
+7. **Revoke the old token** — only now. GitHub UI → previous token → *Revoke*.
+   Skipping this leaves a live credential in circulation.
+8. **Clean up staging and re-arm:**
+   ```bash
+   security delete-generic-password -a "$USER" -s FLEET_GH_PAT_NEW
+   ```
+   Then arm the next rotation reminder (~7 days before the new expiry) and update
+   the expiry date recorded above.
+
+Never let the value reach argv, stdout, shell history, a repo file, a launchd
+plist, a log, or a chat transcript at any step.
+
 ## Documentation rules (standing, operator-set)
 
 The docs' primary reader is an **agent**; the showcase test is the goal: a
