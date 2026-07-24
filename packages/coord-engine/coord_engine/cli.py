@@ -26,7 +26,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, atc_dash, budget as budget_mod, config, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, jsonutil, okf, presence, query, review, roles, router, stash, tasks
+from . import (
+    aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
+    continuity_audit, digest as digest_mod, directives, forge as forge_mod,
+    health as health_mod, jsonutil, okf, presence, query, review, roles, router,
+    stash, tasks, wake_adapters,
+)
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -54,6 +59,25 @@ def _iso(dt: datetime) -> str:
 
 def _host() -> str:
     return os.environ.get("FULCRA_COORD_AGENT") or f"coord-reconcile:{socket.gethostname()}"
+
+
+def cmd_wake_queue_file(args: argparse.Namespace, transport: Any) -> int:
+    inv = {
+        "adapter": "queued-wake-file",
+        "agent": args.agent,
+        "idempotency_key": args.key,
+    }
+    print(wake_adapters.queue_wake_file(args.team, inv))
+    return 0
+
+
+def cmd_wake_consume(args: argparse.Namespace, transport: Any) -> int:
+    result = wake_adapters.consume_wake_files(args.team, args.agent)
+    if result["context"]:
+        print(result["context"])
+    for error in result["errors"]:
+        print(f"queued-wake degraded: {error}", file=sys.stderr)
+    return 0
 
 
 def _human() -> str:
@@ -104,6 +128,142 @@ def _overlay_budget() -> float:
     """Time bound (seconds) for the freshness overlay's doc reads. Env
     ``COORD_OVERLAY_BUDGET`` (see the DEFAULT_OVERLAY_BUDGET rationale)."""
     return config.env_float("COORD_OVERLAY_BUDGET", DEFAULT_OVERLAY_BUDGET)
+
+
+DELTA_FEED_MAX_HOURS = 24.0
+
+
+def _delta_feed_window(since: Any, *, now: str) -> Optional[str]:
+    """Return the inclusive data-updates period for ``since`` → ``now``.
+
+    Missing/corrupt/future/too-old cursors are doubt and therefore return None;
+    callers take their existing full-listing fallback.  The same skew margin as
+    reconcile makes the rescan inclusive across host/store clock boundaries.
+    """
+    start = rec._parse_iso_utc(since)
+    end = rec._parse_iso_utc(now)
+    if start is None or end is None:
+        return None
+    seconds = (end - start).total_seconds()
+    if seconds < 0 or seconds > DELTA_FEED_MAX_HOURS * 3600:
+        return None
+    return f"{int(seconds) + rec.FAST_PATH_SKEW_MARGIN_SECONDS} seconds"
+
+
+def _team_updates(
+    transport: Any, team: str, *, since: Any, now: str,
+) -> Optional[list[dict[str, Any]]]:
+    """One parsed, team-filtered feed call, or None for UNKNOWN.
+
+    The TypeError retry preserves duck-typed/mixed-version transports while the
+    real transport owns the new ``team=`` filtering contract.
+    """
+    updates_fn = getattr(transport, "updates", None)
+    window = _delta_feed_window(since, now=now)
+    if updates_fn is None or window is None:
+        return None
+    try:
+        try:
+            changes = updates_fn(window, team=team)
+        except TypeError:
+            changes = updates_fn(window)
+    except Exception:
+        return None
+    if not isinstance(changes, list):
+        return None
+    prefix = f"team/{team}/"
+    parsed: list[dict[str, Any]] = []
+    for change in changes:
+        if not isinstance(change, dict):
+            return None
+        path = change.get("path", change.get("full_name"))
+        if not isinstance(path, str) or not path.strip():
+            return None
+        path = path.strip().lstrip("/")
+        if not path.startswith(prefix):
+            continue
+        state = change.get("state")
+        if state not in ("uploaded", "archived", "deleted"):
+            return None
+        parsed.append({
+            "path": path,
+            "state": state,
+            "uploaded_at": change.get("uploaded_at"),
+            "archived_at": change.get("archived_at"),
+            "deleted_at": change.get("deleted_at"),
+        })
+    return parsed
+
+
+def _change_instant(change: dict[str, Any]) -> Optional[datetime]:
+    state = change.get("state")
+    key = {"uploaded": "uploaded_at", "archived": "archived_at",
+           "deleted": "deleted_at"}.get(state)
+    value = change.get(key) if key else None
+    # Some archive/delete payloads retain only uploaded_at.  That timestamp is
+    # still usable for deterministic collapsing; total absence is feed doubt.
+    return rec._parse_iso_utc(value or change.get("uploaded_at"))
+
+
+def _feed_task_rows(
+    transport: Any, team: str, index_rows: list[dict[str, Any]],
+    changes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Apply changed task shards to aggregate rows without a task-dir listing."""
+    from . import model
+    prefix = rec.task_prefix(team)
+    # A store rewrite emits same-second archived(old)+uploaded(new) entries and
+    # does not promise feed order.  Total state priority makes that lifecycle
+    # collapse deterministic: the live upload wins an equal-instant rewrite,
+    # while a strictly-later terminal event still removes the row.
+    state_priority = {"archived": 0, "deleted": 1, "uploaded": 2}
+    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    for change in changes:
+        path = str(change.get("path") or "")
+        if not path.startswith(prefix) or not path.endswith(".md"):
+            continue
+        name = path[len(prefix):]
+        if "/" in name or name in ("index.md", "log.md"):
+            continue
+        instant = _change_instant(change)
+        if instant is None:
+            return [], False, f"data-updates change for {name} lacks a usable timestamp"
+        prior = latest.get(path)
+        if prior is None or (
+            instant, state_priority[str(change.get("state"))]
+        ) >= (
+            prior[0], state_priority[str(prior[1].get("state"))]
+        ):
+            latest[path] = (instant, change)
+
+    by_name = {str(r.get("name")): r for r in index_rows
+               if isinstance(r, dict) and r.get("name")}
+    for path in sorted(latest):
+        instant, change = latest[path]
+        name = path[len(prefix):]
+        slug = name[:-3]
+        if change.get("state") in ("archived", "deleted"):
+            by_name.pop(slug, None)
+            continue
+        try:
+            raw = transport.read(path)
+        except Exception:
+            raw = None
+        if raw is None:
+            return [], False, f"data-updates task shard {name} unreadable"
+        try:
+            fm = okf.parse_frontmatter(raw)
+            if fm is not None and model.is_task(fm):
+                by_name[slug] = model.row_from_frontmatter(
+                    fm, name=slug, path=f"task/{name}",
+                    mtime=instant.strftime("%Y-%m-%d %I:%M%p UTC"))
+            else:
+                return [], False, (
+                    f"data-updates task shard {name} is malformed or not a Task")
+        except Exception as exc:
+            return [], False, (
+                f"data-updates task shard {name} is malformed ({exc})")
+    return [by_name[k] for k in sorted(by_name)], True, ""
 
 
 def _fresh_overlay_rows(
@@ -220,6 +380,8 @@ def _fresh_overlay_rows(
 
 def _load_rows_status(
     transport: Any, team: str, *, deadline: "Optional[Deadline]" = None,
+    feed_changes: "Optional[list[dict[str, Any]]]" = None,
+    feed_attempted: bool = False,
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
     was not, a short ``reason`` for the degraded surface to print (attribution: a
@@ -248,10 +410,30 @@ def _load_rows_status(
         return [], False, "caller row-load budget exhausted after summaries read"
     if raw:
         try:
-            rows = aggregate.aggregate_rows(json.loads(raw))
+            aggregate_doc = json.loads(raw)
+            rows = aggregate.aggregate_rows(aggregate_doc)
         except Exception:
             # index present but corrupt -> unreadable, surface it
             return [], False, "summaries index unreadable"
+        # E2 primary path: one authoritative feed call since the aggregate cursor,
+        # then direct reads of only changed task shards.  No task-dir listing is
+        # consulted, so listing lag cannot hide a verified feed entry.
+        aggregate_cursor = (
+            aggregate_doc.get("generated_at")
+            if isinstance(aggregate_doc, dict)
+            else None
+        )
+        feed = (feed_changes if feed_attempted else _team_updates(
+            transport, team, since=aggregate_cursor, now=_iso(_now())))
+        if feed is not None:
+            delta_rows, delta_ok, _delta_reason = _feed_task_rows(
+                transport, team, rows, feed)
+            if delta_ok:
+                if deadline is not None and deadline.expired():
+                    return [], False, "caller row-load budget exhausted during feed delta"
+                return delta_rows, True, ""
+            # Any feed/read doubt takes the byte-for-byte legacy listing overlay
+            # below.  A healthy fallback is not a degraded public read.
         # Live-freshness overlay: union in task docs written since the last
         # reconcile (absent from this index). Any overlay problem flips ``ok`` so
         # the inbox source degrades visibly; the index rows are still served.
@@ -2894,47 +3076,103 @@ def _listen_state_path(team: str, agent: str) -> pathlib.Path:
     return _listen_state_dir() / f"listen-{tasks.slugify(team) or 'team'}-{tasks.agent_key(agent)}.json"
 
 
-def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
-    """Load the one-doc state, tolerating a missing/corrupt/foreign file (fresh
-    default). Never raises — a tick never fails on its own bookkeeping."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        data = {}
+def _listen_store_state_path(team: str, agent: str) -> str:
+    """Durable listener state in the agent's existing store namespace."""
+    return f"team/{team}/_coord/agents/{agent}/listen-state.json"
+
+
+def _coerce_listen_state_doc(data: Any) -> Optional[dict[str, Any]]:
+    """Normalize one decoded state document, or None when its shape is corrupt."""
     if not isinstance(data, dict):
-        data = {}
-    return {
-        "inbox_ids": list(data.get("inbox_ids") or []),
-        "response_keys": list(data.get("response_keys") or []),
-        "slug_owned": dict(data.get("slug_owned") or {}),
-        # Source 3 (verdicts) bookkeeping — legacy state files lack these keys;
-        # they default empty, so an upgrade re-surfaces nothing spuriously.
-        "verdict_keys": list(data.get("verdict_keys") or []),
-        "review_requested": dict(data.get("review_requested") or {}),
-        "settled_reviews": list(data.get("settled_reviews") or []),
-        # Orphan review dirs already reported (verdicts dir, no doc) — cached so
-        # each is surfaced ONCE; legacy files lack the key and default empty.
-        "orphan_slugs": list(data.get("orphan_slugs") or []),
-        # Emit-once caches for a PERMANENTLY-absent owner/requester doc at the
-        # responses / verdicts sources — a slug whose directive|review doc reads
-        # None has its degrade emitted ONCE, then is skipped silently (a fail-closed
-        # watcher treats persistent DEGRADED as fatal). Distinct from orphan_slugs,
-        # which caches emitted-orphan EVENTS; these cache emitted-DEGRADE slugs.
-        # Legacy files lack the keys and default empty.
-        "flagged_orphan_responses": list(data.get("flagged_orphan_responses") or []),
-        "flagged_orphan_verdicts": list(data.get("flagged_orphan_verdicts") or []),
-        "degraded": _coerce_degraded(data.get("degraded")),
-    }
+        return None
+    try:
+        return {
+            "inbox_ids": list(data.get("inbox_ids") or []),
+            "response_keys": list(data.get("response_keys") or []),
+            "slug_owned": dict(data.get("slug_owned") or {}),
+            # Source 3 (verdicts) bookkeeping — legacy state files lack these keys;
+            # they default empty, so an upgrade re-surfaces nothing spuriously.
+            "verdict_keys": list(data.get("verdict_keys") or []),
+            "review_requested": dict(data.get("review_requested") or {}),
+            "settled_reviews": list(data.get("settled_reviews") or []),
+            # Orphan review dirs already reported (verdicts dir, no doc) — cached so
+            # each is surfaced ONCE; legacy files lack the key and default empty.
+            "orphan_slugs": list(data.get("orphan_slugs") or []),
+            # Emit-once caches for a PERMANENTLY-absent owner/requester doc at the
+            # responses / verdicts sources — a slug whose directive|review doc reads
+            # None has its degrade emitted ONCE, then is skipped silently (a
+            # fail-closed watcher treats persistent DEGRADED as fatal). Distinct
+            # from orphan_slugs, which caches emitted-orphan EVENTS; these cache
+            # emitted-DEGRADE slugs. Legacy files default empty.
+            "flagged_orphan_responses": list(
+                data.get("flagged_orphan_responses") or []),
+            "flagged_orphan_verdicts": list(
+                data.get("flagged_orphan_verdicts") or []),
+            # E2 authoritative data-updates cursor. Missing/corrupt -> one legacy
+            # full-listing pass, which seeds it only after that tick is conclusive.
+            "feed_cursor": data.get("feed_cursor"),
+            "degraded": _coerce_degraded(data.get("degraded")),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
-def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
-    # Best-effort: a state-write failure must never crash a tick. Worst case of a
-    # lost write is one re-notify on the next run, never a missed event.
+def _write_local_listen_cache(path: pathlib.Path, payload: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        path.write_text(payload, encoding="utf-8")
     except OSError as e:
         _log.warning("listen state write failed", path=str(path), error=str(e))
+
+
+def _load_listen_state(
+    path: pathlib.Path, *, transport: Any = None,
+    team: Optional[str] = None, agent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Load durable store state, using the local file as a restart cache.
+
+    A valid store copy is authoritative and refreshes the local cache. Missing,
+    corrupt, or unreadable store state falls back to the legacy local file, then
+    to a fresh state. Never raises — bookkeeping cannot kill the listener.
+    """
+    if transport is not None and team is not None and agent is not None:
+        try:
+            raw = transport.read(_listen_store_state_path(team, agent))
+            decoded = json.loads(raw) if raw else None
+        except Exception:
+            decoded = None
+        state = _coerce_listen_state_doc(decoded)
+        if state is not None:
+            _write_local_listen_cache(path, json.dumps(state, sort_keys=True))
+            return state
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        decoded = None
+    return (_coerce_listen_state_doc(decoded)
+            or _coerce_listen_state_doc({})
+            or {})  # the empty schema is statically valid
+
+
+def _save_listen_state(
+    path: pathlib.Path, state: dict[str, Any], *, transport: Any = None,
+    team: Optional[str] = None, agent: Optional[str] = None,
+) -> None:
+    """Write through to local cache and durable store, both best-effort.
+
+    A lost write may cause one re-notify after restart, never a missed event.
+    """
+    payload = json.dumps(state, sort_keys=True)
+    _write_local_listen_cache(path, payload)
+    if transport is None or team is None or agent is None:
+        return
+    store_path = _listen_store_state_path(team, agent)
+    try:
+        if not transport.write(store_path, payload):
+            _log.warning("listen store state write failed", path=store_path)
+    except Exception as e:
+        _log.warning("listen store state write failed", path=store_path,
+                     error=str(e))
 
 
 def _listen_inbox_phase(
@@ -2972,6 +3210,123 @@ def _listen_inbox_phase(
     return out, True, scanned, len(candidates)
 
 
+def _listen_feed_history(
+    transport: Any, team: str, agent: str, changes: list[dict[str, Any]], *,
+    response_keys: set[str], slug_owned: dict[str, Any],
+    verdict_keys: set[str], review_requested: dict[str, Any],
+    settled_reviews: set[str],
+) -> Optional[dict[str, Any]]:
+    """Classify changed response/verdict shards without history-root listings.
+
+    The result is copy-on-success. Any unreadable owner/requester/shard returns
+    None so the caller discards the partial work and takes the unchanged
+    listing-based tail fallback.
+    """
+    next_response_keys = set(response_keys)
+    next_slug_owned = dict(slug_owned)
+    next_verdict_keys = set(verdict_keys)
+    next_review_requested = dict(review_requested)
+    next_settled_reviews = set(settled_reviews)
+    events: list[dict[str, Any]] = []
+    responses_prefix = _responses_prefix(team)
+    review_prefix = f"team/{team}/review/"
+
+    # A settling change must be observed after its verdict shards in the same
+    # inclusive feed window, regardless of endpoint ordering.
+    ordered = sorted(
+        changes,
+        key=lambda c: (
+            str(c.get("path") or "").endswith("/.settled"),
+            str(c.get("path") or ""),
+        ),
+    )
+    for change in ordered:
+        if change.get("state") != "uploaded":
+            continue
+        path = str(change.get("path") or "")
+        if path.startswith(responses_prefix):
+            rest = path[len(responses_prefix):]
+            parts = rest.split("/")
+            if len(parts) != 2 or not parts[0] or not parts[1].endswith(".md"):
+                continue
+            slug, filename = parts
+            key = f"{slug}/{filename[:-3]}"
+            if key in next_response_keys:
+                continue
+            owned = next_slug_owned.get(slug)
+            if owned is None:
+                doc = transport.read(_task_path(team, slug))
+                if doc is None:
+                    return None
+                fm = okf.parse_frontmatter(doc) or {}
+                owned = str(fm.get("owner") or "").strip() == agent
+                next_slug_owned[slug] = owned
+            if not owned:
+                continue
+            shard = transport.read(path)
+            if shard is None:
+                return None
+            fm = okf.parse_frontmatter(shard) or {}
+            events.append({
+                "type": "response",
+                "slug": slug,
+                "agent": str(fm.get("agent") or "?"),
+                "outcome": str(fm.get("outcome") or "?"),
+            })
+            next_response_keys.add(key)
+            continue
+
+        if not path.startswith(review_prefix):
+            continue
+        rest = path[len(review_prefix):]
+        parts = rest.split("/")
+        if len(parts) != 3 or parts[1] != "verdicts":
+            continue
+        slug, _verdicts, filename = parts
+        if not slug or slug in next_settled_reviews:
+            continue
+        requested = next_review_requested.get(slug)
+        if requested is None:
+            doc = transport.read(_review_doc_path(team, slug))
+            if doc is None:
+                return None
+            fm = okf.parse_frontmatter(doc) or {}
+            requested = str(fm.get("requested_by") or "").strip() == agent
+            next_review_requested[slug] = requested
+        if not requested:
+            continue
+        if filename == SETTLED_MARKER:
+            events.append({"type": "settled", "slug": slug,
+                           "state": review.APPROVED})
+            next_settled_reviews.add(slug)
+            continue
+        if not filename.endswith(".md"):
+            continue
+        key = f"{slug}/{filename[:-3]}"
+        if key in next_verdict_keys:
+            continue
+        shard = transport.read(path)
+        if shard is None:
+            return None
+        fm = okf.parse_frontmatter(shard) or {}
+        events.append({
+            "type": "verdict",
+            "slug": slug,
+            "reviewer": filename[:-3],
+            "verdict": str(fm.get("verdict") or "?"),
+        })
+        next_verdict_keys.add(key)
+
+    return {
+        "events": events,
+        "response_keys": next_response_keys,
+        "slug_owned": next_slug_owned,
+        "verdict_keys": next_verdict_keys,
+        "review_requested": next_review_requested,
+        "settled_reviews": next_settled_reviews,
+    }
+
+
 def _listen_tick(transport: Any, team: str, agent: str,
                  state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
@@ -3006,6 +3361,9 @@ def _listen_tick(transport: Any, team: str, agent: str,
     inbox_ids = set(state["inbox_ids"])
     response_keys = set(state["response_keys"])
     slug_owned: dict[str, Any] = dict(state["slug_owned"])
+    verdict_keys = set(state.get("verdict_keys") or [])
+    review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
+    settled_reviews = set(state.get("settled_reviews") or [])
     # Emit-once caches: slugs whose owner/requester doc read None and have already
     # had their degrade emitted. Skipped SILENTLY thereafter so a fail-closed
     # watcher (persistent DEGRADED == fatal) survives a permanently-missing doc;
@@ -3018,9 +3376,14 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # directives routed to a fresh-lease ROLE this agent holds. An unreadable
     # summaries index is degraded, NOT a legitimately-empty inbox.
     now_iso = _iso(_now())
+    feed_attempted = bool(state.get("feed_cursor"))
+    feed_changes = (_team_updates(
+        transport, team, since=state.get("feed_cursor"), now=now_iso)
+        if feed_attempted else None)
     head_dl = Deadline.open(_listen_head_budget())
     rows, inbox_ok, inbox_reason = _load_rows_status(
-        transport, team, deadline=head_dl)
+        transport, team, deadline=head_dl, feed_changes=feed_changes,
+        feed_attempted=feed_attempted)
     if not inbox_ok:
         # The reason attributes WHICH leg failed (summaries index vs the freshness
         # overlay — different outages, same inbox source/streak).
@@ -3107,11 +3470,30 @@ def _listen_tick(transport: Any, team: str, agent: str,
                        "title": str(r.get("title") or slug)})
         inbox_ids.add(slug)
 
+    # Feed-first history tail.  This is copy-on-success: any changed shard whose
+    # ownership/requester/content cannot be read discards the partial result and
+    # falls through to the unchanged listing-based W8-budgeted tail.
+    history_feed = False
+    if feed_changes is not None and _tail_ready("feed history"):
+        targeted = _listen_feed_history(
+            transport, team, agent, feed_changes,
+            response_keys=response_keys, slug_owned=slug_owned,
+            verdict_keys=verdict_keys, review_requested=review_requested,
+            settled_reviews=settled_reviews)
+        if targeted is not None:
+            history_feed = True
+            events.extend(targeted["events"])
+            response_keys = targeted["response_keys"]
+            slug_owned = targeted["slug_owned"]
+            verdict_keys = targeted["verdict_keys"]
+            review_requested = targeted["review_requested"]
+            settled_reviews = targeted["settled_reviews"]
+
     # Source 2 — new responses to directives THIS agent owns. One list_dir of the
     # responses root; per-slug work only for owned slugs, ownership cached.
     prefix = _responses_prefix(team)
-    entries = None
-    if _tail_ready("responses"):
+    entries = [] if history_feed else None
+    if not history_feed and _tail_ready("responses"):
         try:
             entries = transport.list_dir(prefix)
         except TransportError as e:
@@ -3184,14 +3566,11 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # slugs. A `.settled` listing first EMITS every unseen shard + one terminal
     # SETTLED event, then drops the slug so it is never listed again (the review
     # is immutable once settled). Its OWN degraded source `verdicts`.
-    review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
-    verdict_keys = set(state.get("verdict_keys") or [])
-    settled_reviews = set(state.get("settled_reviews") or [])
     if _tail_ready("settled-review index"):
         settled_reviews.update(rec._load_settled_index(transport, team))
     review_prefix = f"team/{team}/review/"
-    rentries = None
-    if _tail_ready("verdicts"):
+    rentries = [] if history_feed else None
+    if not history_feed and _tail_ready("verdicts"):
         try:
             rentries = transport.list_dir(review_prefix)
         except TransportError as e:
@@ -3346,6 +3725,11 @@ def _listen_tick(transport: Any, team: str, agent: str,
     state["orphan_slugs"] = sorted(orphan_slugs)
     state["flagged_orphan_responses"] = sorted(flagged_orphan_responses)
     state["flagged_orphan_verdicts"] = sorted(flagged_orphan_verdicts)
+    # Never consume a window whose tick was incomplete.  A conclusive feed tick
+    # OR a conclusive full-listing fallback may advance; any degraded source
+    # leaves the old cursor intact so recovery inclusively replays the window.
+    if not failures:
+        state["feed_cursor"] = now_iso
     return events, failures
 
 
@@ -3401,7 +3785,8 @@ def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
         # engine rather than reimplementing it. Print and exit; no tick, no writes.
         print(str(state_path))
         return 0
-    state = _load_listen_state(state_path)
+    state = _load_listen_state(
+        state_path, transport=transport, team=args.team, agent=agent)
     json_mode = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", False))
 
@@ -3409,7 +3794,8 @@ def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
         _events, failures = _run_listen_tick(
             transport, args.team, agent, state,
             json_mode=json_mode, verbose=verbose)
-        _save_listen_state(state_path, state)
+        _save_listen_state(
+            state_path, state, transport=transport, team=args.team, agent=agent)
         return failures
 
     if args.once:
@@ -3997,9 +4383,298 @@ def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
     print(f"presence — team/{args.team}: {len(ros)} agent(s)")
     for r in ros:
         ws = ", ".join(r["workstreams"])
-        print(f"  [{r['liveness']:5}] {r['agent']}" + (f"  ({ws})" if ws else "")
-              + (f" — {r['summary']}" if r["summary"] else ""))
+        # Render the engagement-aware STATE (may be `lapsed`) and append the
+        # annotation — the orthogonal second-axis fact (freshness for a lapsed
+        # row, a stale-beat nudge otherwise). dormancy ⊥ staleness: never merged.
+        line = (f"  [{r['state']:6}] {r['agent']}" + (f"  ({ws})" if ws else "")
+                + (f" — {r['summary']}" if r["summary"] else ""))
+        if r.get("annotation"):
+            line += f"  · {r['annotation']}"
+        print(line)
     return 0
+
+
+# --- engagement gate (wake-router W2 mixed-fleet gate, plan §3) --------------
+
+def _presence_shards_status(
+    transport: Any, team: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read presence shards for the gate, PRESERVING read degradation. Returns
+    ``(shards, ok)``.
+
+    ``_presence_shards`` swallows a listing ``TransportError`` to ``[]`` — fine
+    for a best-effort roster, but the gate CERTIFIES that population, so an
+    UNKNOWN roster read must never look like a confirmed-empty one (an empty gate
+    passes vacuously — fail-OPEN). Same read-contract class as the defaults read:
+      - the presence-dir ``list_dir`` raises   -> roster UNKNOWN, ``ok=False``;
+      - a listed shard reads ``None``           -> that agent present-but-unreadable,
+        coverage unknowable, ``ok=False`` (the rest are still collected);
+      - a listed shard reads non-empty but its frontmatter will not parse, or
+        carries no usable ``timestamp`` -> its freshness (hence coverage) is
+        UNKNOWN, ``ok=False``. Emitting a synthesized ``{}``/timestampless row
+        (the ``parse_frontmatter(raw) or {}`` idiom) would classify it stale and
+        SILENTLY EXCLUDE it from the live population while ``ok`` stayed True —
+        the same certification-boundary fail-OPEN as an unreadable shard, so we
+        drop the phantom row and degrade instead;
+      - listing succeeds and every shard parses with a classifiable timestamp
+        -> CONFIRMED, ``ok=True`` (an empty result here is a confirmed-empty
+        roster, distinct from UNKNOWN)."""
+    pfx = _presence_prefix(team)
+    try:
+        entries = transport.list_dir(pfx)
+    except TransportError:
+        return [], False
+    shards: list[dict[str, Any]] = []
+    ok = True
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        raw = transport.read(pfx + n)
+        if raw is None:
+            ok = False                    # listed but unreadable -> UNKNOWN coverage
+            continue
+        fm = okf.parse_frontmatter(raw)
+        if not fm or presence.parse_iso_z(fm.get("timestamp")) is None:
+            # non-empty read but unparseable frontmatter, or no usable timestamp
+            # to classify freshness -> UNKNOWN coverage. Do NOT synthesize a
+            # phantom row that gets silently excluded — fail closed.
+            ok = False
+            continue
+        fm.setdefault("agent", n[:-3])
+        shards.append(fm)
+    return shards, ok
+
+
+def _router_prefix(team: str) -> str:
+    return f"team/{team}/_coord/router/"
+
+
+def _engagement_defaults_path(team: str) -> str:
+    return f"{_router_prefix(team)}engagement-defaults.json"
+
+
+def _load_engagement_defaults(
+    transport: Any, team: str
+) -> tuple[dict[str, Any], bool]:
+    """Read the operator defaults map (agent -> mode), returning
+    ``(defaults, ok)``. ``ok`` is False when coverage is UNKNOWN and the gate must
+    fail closed.
+
+    READ-CONTRACT LENS (this class of bug hit W1 and W1.5): ``transport.read``
+    returns ``None`` on BOTH a missing file AND a transient failure, so a falsy
+    read alone can NEVER be read as "confirmed absent". A ``None`` read is
+    disambiguated against the RAISING ``list_dir`` contract:
+      - the router dir lists and does NOT contain the file  -> genuinely absent
+        -> an empty defaults map, ``ok=True`` (the file is optional; a missing one
+        must not fail an otherwise-covered fleet);
+      - the router dir lists and DOES contain the file, yet the read returned None
+        -> present-but-unreadable -> UNKNOWN, ``ok=False`` (fail closed);
+      - the listing itself raises -> UNKNOWN, ``ok=False`` (fail closed).
+    A present-but-unparseable body is likewise UNKNOWN (``ok=False``)."""
+    path = _engagement_defaults_path(team)
+    raw = transport.read(path)
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return {}, False              # present but unparseable -> UNKNOWN
+        return (data, True) if isinstance(data, dict) else ({}, False)
+    # raw is None: missing OR transient failure. Confirm which via the raising list.
+    try:
+        entries = transport.list_dir(_router_prefix(team))
+    except TransportError:
+        return {}, False                  # listing failed -> UNKNOWN -> fail closed
+    present = any((e.get("name") or "") == "engagement-defaults.json"
+                  for e in entries)
+    if present:
+        return {}, False                  # listed but unreadable -> UNKNOWN
+    return {}, True                       # confirmed absent -> legitimately empty
+
+
+def _engagement_gate_passes(transport: Any, team: str, *, now: str) -> bool:
+    """Predicate the gated vacancy/escalation semantic change branches on. True
+    ONLY when the gate is PASS; any degradation/failure returns False, so the
+    caller falls back to today's behavior verbatim (fail closed)."""
+    try:
+        shards, roster_ok = _presence_shards_status(transport, team)
+        defaults, ok = _load_engagement_defaults(transport, team)
+        res = presence.engagement_gate(shards, defaults, now=now,
+                                       defaults_ok=ok, roster_ok=roster_ok)
+        return res["status"] == "PASS"
+    except Exception:
+        return False
+
+
+def cmd_engagement_gate(args: argparse.Namespace, transport: Any) -> int:
+    now = _iso(_now())
+    shards, roster_ok = _presence_shards_status(transport, args.team)
+    defaults, defaults_ok = _load_engagement_defaults(transport, args.team)
+    result = presence.engagement_gate(shards, defaults, now=now,
+                                      defaults_ok=defaults_ok, roster_ok=roster_ok)
+    if args.json:
+        out = dict(result)
+        out["team"] = args.team
+        jsonutil.print_json(out)
+        return 0 if result["status"] == "PASS" else 1
+    print(f"engagement gate — team/{args.team}: {result['status']}")
+    if not roster_ok:
+        print("  ! presence roster is UNKNOWN (listing failed or a shard was "
+              "present-but-unreadable — coverage cannot be enumerated); failing "
+              "closed", file=sys.stderr)
+    if not defaults_ok:
+        print("  ! engagement-defaults.json is UNKNOWN (present-but-unreadable or "
+              "unparseable — cannot be confirmed absent); failing closed, coverage "
+              "cannot be certified", file=sys.stderr)
+    for a in result["agents"]:
+        via = f" (via {a['via']})" if a.get("via") else ""
+        print(f"  [{a['coverage']:9}] {a['agent']}{via}")
+    if not result["agents"]:
+        print("  (no live agents to gate)")
+    return 0 if result["status"] == "PASS" else 1
+
+
+# --- engagement sweep (wake-router W3 zero-token lapse sweep) ----------------
+
+def _split_body_verbatim(raw: str) -> str:
+    """Return the shard body — everything after the closing frontmatter ``---``
+    delimiter line — BYTE-PRESERVED (unlike ``okf.split_frontmatter``, which
+    routes through ``splitlines`` and drops the exact tail). The sweep re-renders
+    only the frontmatter, so the body must survive verbatim. A shard with no
+    parseable frontmatter block returns ``""`` (the caller never marks such a
+    shard, so this is only reached on the mark path)."""
+    lines = raw.splitlines(keepends=True)
+    i = 0
+    if lines and lines[0].startswith("﻿"):
+        lines[0] = lines[0][1:]
+    while i < len(lines) and lines[i].strip() == "":
+        i += 1
+    if i >= len(lines) or lines[i].strip() != "---":
+        return ""
+    for j in range(i + 1, len(lines)):
+        if lines[j].strip() == "---":
+            return "".join(lines[j + 1:])
+    return ""
+
+
+def cmd_engagement_sweep(args: argparse.Namespace, transport: Any) -> int:
+    """Host-tick, model-free lapse sweep. For each presence shard, mark a session
+    past its ``until`` as LAPSED by writing EXACTLY ``engagement.state: lapsed`` +
+    ``engagement.lapsed_at`` (this sweep's evaluation time) — the ONE sanctioned
+    exception to agent-owned presence writes, scoped to those two fields. Never
+    parks, never releases roles, never touches any doc but the presence shard.
+
+    READ-CONTRACT LENS: enumeration is via the RAISING ``list_dir``; if it raises,
+    the roster is UNKNOWN and the sweep is DEGRADED — loud (stderr + degraded
+    line), rc nonzero, and it must NEVER read as a clean ``0 marked`` swept roster.
+    Per shard, the ``read``-None / unparseable / ``_engagement_degraded`` cases
+    fail CLOSED — SKIP, never mark (a failed read never causes a write)."""
+    now_iso = _iso(_now())
+    pfx = _presence_prefix(args.team)
+
+    marked: list[str] = []
+    already: list[str] = []
+    skipped: dict[str, list[str]] = {}
+    degraded: list[dict[str, str]] = []
+    write_failures: list[str] = []
+
+    try:
+        entries = transport.list_dir(pfx)
+    except TransportError as e:
+        # Enumeration UNKNOWN — the roster cannot be certified, so we cannot claim
+        # anything about lapses. Fail loud and closed; never a silent clean sweep.
+        result = {
+            "team": args.team, "now": now_iso, "dry_run": bool(args.dry_run),
+            "enumeration_ok": False, "marked": [], "already_lapsed": [],
+            "skipped": {}, "degraded": [], "write_failures": [],
+        }
+        if args.json:
+            jsonutil.print_json(result)
+        else:
+            print(f"engagement sweep — team/{args.team}: DEGRADED — roster "
+                  f"enumeration failed ({e}); NOT swept", file=sys.stderr)
+        return 1
+
+    def _agent_of(fm: dict[str, Any], name: str) -> str:
+        return str(fm.get("agent") or name[:-3])
+
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        raw = transport.read(pfx + n)
+        if raw is None:
+            # listed but unreadable — a failed read must never cause a write.
+            degraded.append({"shard": n, "reason": "unreadable"})
+            continue
+        fm = okf.parse_frontmatter(raw)
+        if not fm:
+            degraded.append({"shard": n, "reason": "unparseable"})
+            continue
+        decision = presence.sweep_decision(fm, now=now_iso)
+        action, reason = decision["action"], decision["reason"]
+        agent = _agent_of(fm, n)
+        if reason == "degraded":
+            # A malformed engagement is fail-visible degradation, not a clean skip.
+            degraded.append({"shard": n, "reason": "engagement-degraded"})
+            continue
+        if action == presence.NOOP:
+            already.append(agent)
+            continue
+        if action == presence.SKIP:
+            skipped.setdefault(reason, []).append(agent)
+            continue
+        # action == MARK: write EXACTLY the two engagement fields, preserving all
+        # else. Mutate the RAW parsed engagement map (not the normalized parse)
+        # so mode/until survive byte-for-byte; the top-level timestamp is NOT
+        # bumped — the sweep is not a beat.
+        marked.append(agent)
+        if args.dry_run:
+            continue
+        new_fm = dict(fm)
+        raw_eng = fm.get("engagement")
+        new_eng = dict(raw_eng) if isinstance(raw_eng, dict) else {}
+        new_eng["state"] = "lapsed"
+        new_eng["lapsed_at"] = now_iso
+        new_fm["engagement"] = new_eng
+        body = _split_body_verbatim(raw)
+        content = okf.render_frontmatter(new_fm) + "\n" + body
+        if not transport.write(pfx + n, content):
+            # per-shard write failure: report + continue, never abort the sweep.
+            marked.pop()
+            write_failures.append(agent)
+
+    marked.sort(); already.sort()
+    for v in skipped.values():
+        v.sort()
+    clean = not degraded and not write_failures
+    result = {
+        "team": args.team, "now": now_iso, "dry_run": bool(args.dry_run),
+        "enumeration_ok": True, "marked": marked, "already_lapsed": already,
+        "skipped": skipped, "degraded": degraded, "write_failures": write_failures,
+    }
+    if args.json:
+        jsonutil.print_json(result)
+        return 0 if clean else 1
+
+    skip_n = sum(len(v) for v in skipped.values())
+    tag = " [DRY-RUN]" if args.dry_run else ""
+    print(f"engagement sweep — team/{args.team}: {len(marked)} marked, "
+          f"{len(already)} already-lapsed, {skip_n} skipped, "
+          f"{len(degraded)} degraded{tag}")
+    if marked:
+        print(f"  marked: {', '.join(marked)}")
+    if skipped:
+        buckets = ", ".join(f"{k}={len(v)}" for k, v in sorted(skipped.items()))
+        print(f"  skipped: {buckets}")
+    if write_failures:
+        print(f"  ! write failed (mark did not land): {', '.join(write_failures)}",
+              file=sys.stderr)
+    if degraded:
+        for d in degraded:
+            print(f"  ! DEGRADED shard {d['shard']}: {d['reason']} (skipped, "
+                  "not marked)", file=sys.stderr)
+    return 0 if clean else 1
 
 
 def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
@@ -4015,8 +4690,12 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
         _surface_read_degraded(reason, json_mode=False)
     for a in digest:
         counts = ", ".join(f"{k}={v}" for k, v in sorted(a["open"].items())) or "no open work"
-        print(f"  [{a['liveness']:7}] {a['agent']} — {counts}"
-              + (f" — {a['summary']}" if a["summary"] else ""))
+        state = a.get("state", a["liveness"])
+        line = (f"  [{state:7}] {a['agent']} — {counts}"
+                + (f" — {a['summary']}" if a["summary"] else ""))
+        if a.get("annotation"):
+            line += f"  · {a['annotation']}"
+        print(line)
     return 0
 
 
@@ -4128,10 +4807,19 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
 
     # delivered view — decision-plane-owned fold over the delivery records
     delivered_shards: list[dict] = []
+    delivered_listing_ok = True
     try:
         dl_entries = transport.list_dir(prefix + "delivered/")
-    except TransportError:
-        dl_entries = []  # empty on first runs; a listing error just skips refold
+    except TransportError as e:
+        # codex #460 fix: a listing ERROR is NOT "genuinely empty". Fold no
+        # shards this pass, but do NOT refold delivered.json (that would
+        # overwrite the populated view with {} and feed empty last_delivered_at
+        # into decide() for the whole pass). Skip the refold, stay fail-visible.
+        dl_entries = []
+        delivered_listing_ok = False
+        print(f"router: delivered/ listing degraded ({e}) — skipping "
+              f"delivered.json refold this pass (the populated view is "
+              f"preserved; it regenerates next pass)", file=sys.stderr)
     for e in dl_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
@@ -4142,7 +4830,33 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                 delivered_shards.append(json.loads(raw))
             except ValueError:
                 pass  # a corrupt record shard is bookkeeping loss, not a stop
-    delivered_view = router.fold_delivered(delivered_shards)
+    if delivered_listing_ok:
+        delivered_view = router.fold_delivered(delivered_shards)
+    else:
+        # codex #466: the delivered/ shard listing failed. DECIDE from the
+        # last-known-good persisted delivered.json so last_delivered_at is
+        # honored per-agent (no early lapsed check-ins / weakened debounce).
+        # A valid mapping — INCLUDING {} — is KNOWN history and proceeds. But if
+        # delivered.json is ALSO unavailable (None), malformed, or not a
+        # mapping, delivery history is UNKNOWN (not empty): FAIL THE PASS CLOSED
+        # — do not enqueue or advance the cursor from unknown history (that
+        # recreates the premature-checkin/weakened-debounce bug). Retries next
+        # pass once either read recovers.
+        delivered_view = None
+        prior_raw = transport.read(prefix + "delivered.json")
+        if prior_raw is not None:
+            try:
+                loaded = json.loads(prior_raw)
+                if isinstance(loaded, dict):
+                    delivered_view = loaded
+            except ValueError:
+                pass
+        if delivered_view is None:
+            print("router: delivered/ listing degraded AND delivered.json "
+                  "unavailable/malformed — delivery history is UNKNOWN; failing "
+                  "the pass closed (nothing enqueued, cursor not advanced; "
+                  "retries next pass)", file=sys.stderr)
+            return 1
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}
@@ -4169,28 +4883,74 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             if agent not in queue_last or qa > queue_last[agent]:
                 queue_last[agent] = qa
 
-    # the cursor scan — the store listing IS the event source (never `listen`)
-    try:
-        entries = transport.list_dir(task_prefix)
-    except TransportError as e:
-        print(f"router: scan degraded: {e}, retry next pass", file=sys.stderr)
-        return 1
     watermark_dt = router.parse_iso(cursor["watermark"]) if not observe else None
     processed = dict(cursor["processed"]) if not observe else {}
     max_seen = watermark_dt
-    candidates = []
-    for e in entries:
-        name = e.get("name") or ""
-        if e.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
-            continue
-        mt = router.parse_store_mtime(e.get("mtime"))
-        if mt is None:
-            continue
-        # INCLUSIVE >= — equal-mtime shards are the common case (minute
-        # granularity); the processed ledger suppresses replays.
-        if watermark_dt is not None and mt < watermark_dt:
-            continue
-        candidates.append((mt, name))
+    candidates: list = []
+
+    # E3 (addendum §3.3): FEED-FIRST candidate source. The router's candidates
+    # are `uploaded` events under task/ from the data-updates feed (server-
+    # written, second-granular — subsumes the minute-granularity tie). The task-
+    # directory LISTING stays as the fail-closed fallback, taken on ANY feed
+    # doubt (feed unsupported/error, or cursor missing/corrupt so no window).
+    # The cursor/ledger/decide seams are UNCHANGED: both sources yield (ts, name)
+    # candidates into the same loop below; the inclusive `>= watermark` rescan +
+    # processed ledger stay as defense in depth. When Fulcra webhooks ship, the
+    # receiver replaces this feed poll and nothing downstream moves.
+    feed = None if observe else _team_updates(
+        transport, team, since=cursor["watermark"], now=router.iso(now))
+    feed_usable = feed is not None
+    if feed_usable:
+        feed_candidates: list = []
+        for change in feed:
+            if change.get("state") != "uploaded":
+                continue
+            path = change.get("path") or ""
+            if not path.startswith(task_prefix):
+                continue
+            name = path[len(task_prefix):]
+            if ("/" in name or not name.endswith(".md")
+                    or name in ("index.md", "log.md")):
+                continue
+            ts = router.parse_iso(change.get("uploaded_at"))
+            if ts is None:
+                # Addendum principle 2: malformed feed data is DOUBT, never a
+                # skip. A relevant task upload with an unparseable timestamp,
+                # silently dropped, would be LOST FOREVER — the watermark
+                # advances via other candidates, the shard is never ledgered,
+                # and a later listing pass excludes it (mtime < the advanced
+                # watermark). Abandon the partial feed and take the full listing
+                # fallback; the watermark does not advance from the doubtful feed.
+                print("router: feed task event has an unparseable uploaded_at — "
+                      "feed doubtful this pass; using the listing fallback (no "
+                      "watermark advance from the partial feed)", file=sys.stderr)
+                feed_usable = False
+                break
+            if watermark_dt is not None and ts < watermark_dt:
+                continue
+            feed_candidates.append((ts, name))
+        if feed_usable:
+            candidates = feed_candidates
+    if not feed_usable:
+        # fail-closed fallback: the full task-directory listing (the W4 source).
+        try:
+            entries = transport.list_dir(task_prefix)
+        except TransportError as e:
+            print(f"router: scan degraded (feed unavailable, task listing "
+                  f"failed): {e}, retry next pass", file=sys.stderr)
+            return 1
+        for e in entries:
+            name = e.get("name") or ""
+            if e.get("is_dir") or not name.endswith(".md") or name in ("index.md", "log.md"):
+                continue
+            mt = router.parse_store_mtime(e.get("mtime"))
+            if mt is None:
+                continue
+            # INCLUSIVE >= — equal-mtime shards are the common case (minute
+            # granularity); the processed ledger suppresses replays.
+            if watermark_dt is not None and mt < watermark_dt:
+                continue
+            candidates.append((mt, name))
     candidates.sort()
 
     counts = {d: 0 for d in router.DECISIONS}
@@ -4264,7 +5024,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             enqueued += 1
         processed[key] = router.iso(now)
 
-    if not observe:
+    if not observe and delivered_listing_ok:
         if not transport.write(prefix + "delivered.json",
                                json.dumps(delivered_view, sort_keys=True) + "\n"):
             # observability bookkeeping only — dedup authority is the ledger
@@ -4294,13 +5054,396 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     return 1 if pass_failed else 0
 
 
+def _default_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
+    """Default decision-plane adapter invoker → (status, detail), status one of
+    "delivered" | "failed" | "unconfigured".
+
+    This is the host-side integration SEAM. The real cloud-adapter clients plug
+    in here: `managed-agents-message` needs a Managed Agents client + creds
+    (fail-closed secrets — never in team paths); `routine-align`'s alignment
+    mechanism is W6. Until a client is wired on THIS host, the default reports
+    `unconfigured` — the wake stays VISIBLY QUEUED (never silently dropped, never
+    a burned retry), which is the plan's fail-visible degradation mode. Tests
+    inject a fake invoker to exercise the delivered/failed paths."""
+    return ("unconfigured",
+            f"no host-side client wired for adapter "
+            f"{inv.get('adapter')!r} on this decision plane yet")
+
+
+def _router_execute_cloud(args: argparse.Namespace, transport: Any,
+                          invoke: Any = None) -> "dict[str, int]":
+    """Drain the decision-plane-owned queue entries (cloud-reachable adapters):
+    claim → invoke → delivered/dead-letter with BOUNDED cross-pass retry. Only
+    `executor == decision-plane` entries are touched; host-local entries are
+    left for the W5.5 thin executor. Delivery is at-least-once — safe by the
+    adapter content rule (`router.adapter_invocation`)."""
+    invoke = invoke or _default_adapter_invoke
+    team = args.team
+    prefix = router.router_prefix(team)
+    now = _now()
+    counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
+              "unconfigured": 0, "skipped": 0, "deferred": 0}
+
+    try:
+        q_entries = transport.list_dir(prefix + "queue/")
+    except TransportError as e:
+        print(f"router: queue listing degraded ({e}) — no execution this pass, "
+              f"entries stay queued and retry next pass", file=sys.stderr)
+        return counts
+
+    agents_cfg, _executors, _errs = router.validate_config(
+        transport.read(prefix + "config.json"))
+
+    for e in q_entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or not name.endswith(".json"):
+            continue
+        raw = transport.read(prefix + "queue/" + name)
+        try:
+            entry = json.loads(raw) if raw else None
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or not router.is_decision_plane_entry(entry):
+            continue  # host-local (or malformed) — W5.5's, never fired here
+        # deferred wakes wait for their idle boundary
+        nb = router.parse_iso(entry.get("not_before"))
+        if nb is not None and nb > now:
+            counts["deferred"] += 1
+            continue
+        # respect a fresh FOREIGN claim (another decision-plane process mid-flight)
+        if router.claim_is_skippable(entry, router.DECISION_PLANE, now):
+            counts["skipped"] += 1
+            continue
+
+        key = router.idempotency_key(str(entry.get("source_shard")),
+                                     str(entry.get("agent")))
+        cfg = agents_cfg.get(entry.get("agent")) or {}
+        qpath = prefix + "queue/" + name
+
+        def _terminate(sub: str, record: dict, tally: str) -> None:
+            """Write a delivered/dead-letter record, then remove the queue entry
+            ONLY if that write landed. A failed record write must NOT be followed
+            by the delete — else the wake is lost (same class as the W4 P1). Left
+            queued, it retries next pass (at-least-once, safe by the content
+            rule)."""
+            if transport.write(prefix + sub + router.record_filename(key),
+                               json.dumps(record, sort_keys=True) + "\n"):
+                transport.delete(qpath)
+                counts[tally] += 1
+            else:
+                print(f"router execute: {sub.rstrip('/')} record write failed "
+                      f"for {key} — entry stays queued, retries next pass",
+                      file=sys.stderr)
+                counts["retried"] += 1
+
+        try:
+            inv = router.adapter_invocation(entry, cfg.get("adapter_args"))
+        except ValueError as ve:
+            # unroutable at execution — dead-letter immediately (never succeeds)
+            _terminate("dead-letter/", router.dead_letter_record(
+                entry, attempts=int(entry.get("attempts", 0)) + 1,
+                last_error=f"unroutable: {ve}", gave_up_at=router.iso(now)),
+                "dead_lettered")
+            continue
+
+        status, detail = invoke(inv)
+        if status == "delivered":
+            _terminate("delivered/",
+                       router.delivery_record(entry, router.iso(now)),
+                       "delivered")
+        elif status == "unconfigured":
+            # visibly queued, not a burned retry — awaits a wired host client
+            counts["unconfigured"] += 1
+        else:  # "failed" — bounded cross-pass retry, then dead-letter
+            attempts = int(entry.get("attempts", 0)) + 1
+            if attempts >= router.MAX_DELIVERY_ATTEMPTS:
+                _terminate("dead-letter/", router.dead_letter_record(
+                    entry, attempts=attempts, last_error=detail,
+                    gave_up_at=router.iso(now)), "dead_lettered")
+            else:
+                retried = router.claim_stamp(entry, router.DECISION_PLANE, now)
+                retried["attempts"] = attempts
+                retried["last_error"] = detail
+                if not transport.write(qpath,
+                                       json.dumps(retried, sort_keys=True) + "\n"):
+                    print(f"router execute: retry-state write failed for {key} "
+                          f"— entry unchanged, retries next pass", file=sys.stderr)
+                counts["retried"] += 1
+
+    active = {k: v for k, v in counts.items() if v}
+    if active:
+        print("router execute: "
+              + ", ".join(f"{k}={v}" for k, v in active.items()))
+    return counts
+
+
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
     rc = _router_pass(args, transport)
+    _router_execute_cloud(args, transport)
     if getattr(args, "once", False):
         return rc
     while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
         time.sleep(router.ROUTER_POLL_SECONDS)
         _router_pass(args, transport)
+        _router_execute_cloud(args, transport)
+
+
+# --- W5.5: thin host executor -----------------------------------------------
+#
+# The SOLE executor for host-local adapters (plan §W5/W5.5). Policy-free and
+# config-authority-free: it makes NO wake decisions (W4's `router run` did that
+# and stamped `executor`/`adapter` into the queue entry — the trusted routing
+# source) and re-runs NO policy. It drains exactly the queue entries whose
+# `executor` matches its own host id, fires the sanctioned host-local adapter
+# through the one invoker seam, and records the outcome. A flaky desktop delays
+# only its own adapters' wakes — visibly, in the durable queue (plan §2.5).
+# Delivery is at-least-once and safe by `router.adapter_invocation`'s keyed-nudge
+# content rule; deployment (wiring the real adapter scripts, scheduling the
+# poller on a host) is a separate Ash-gated step — this command wakes nothing.
+
+def _default_host_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
+    """Default host-local adapter invoker → (status, detail), status one of
+    "delivered" | "failed" | "unconfigured".
+
+    The host-side integration SEAM. Real deployment wires the sanctioned
+    host-local adapter SCRIPT here (`codex-exec-resume` resumes a Codex thread,
+    `openclaw-post` posts to a local endpoint, `macos-notify` posts a
+    notification, `queued-wake-file` drops a SessionStart nudge) — each fires a
+    check-your-queue nudge and reports delivered/failed. Until a script is wired
+    on THIS host the default reports `unconfigured`: the wake stays VISIBLY
+    QUEUED (never dropped, never a burned retry), the plan's fail-visible
+    degradation. Tests inject a fake invoker to exercise the delivered/failed
+    paths — so nothing in this component ever wakes anything on its own."""
+    return ("unconfigured",
+            f"no host-local adapter script wired for "
+            f"{inv.get('adapter')!r} on this executor yet")
+
+
+def _claim_owner(executor_id: str) -> str:
+    """This process's claim identity: the host executor id plus its pid.
+
+    SELECTION and delivered/dead-letter OWNERSHIP stay keyed to the bare host
+    executor id (`entry.executor`); the claim additionally names the CLAIMING
+    PROCESS. That distinction is what lets `claim_is_skippable` bound duplicates
+    across two processes sharing one host id: a sibling process has a different
+    owner token, so it reads a fresh claim as FOREIGN and skips (the local
+    pidfile is the primary single-process guard — this is defense-in-depth). The
+    token is STABLE across a resident process's passes (pid is constant), so the
+    process's own at-least-once retry is never blocked by its own fresh claim."""
+    return f"{executor_id}#pid{os.getpid()}"
+
+
+def _router_execute_host(args: argparse.Namespace, transport: Any,
+                         invoke: Any = None,
+                         claim_owner: Optional[str] = None) -> "dict[str, int]":
+    """Drain the queue entries resolved to THIS host's executor id: select →
+    idempotency-skip → skip-fresh-foreign-claim → CLAIM → invoke →
+    delivered/dead-letter with BOUNDED cross-pass retry. Only
+    `executor == <this host id>` entries are touched; everything else (other
+    hosts, the decision plane, malformed) is left untouched. Policy-free: an
+    entry present in the queue executes regardless of priority — W4 already
+    decided.
+
+    Claim-then-invoke (plan §2 duplicate bound): the advisory claim is PERSISTED
+    to the queue entry BEFORE the adapter is invoked, so the side-effect window
+    is always claimed and the claim-holder owns the delivered/dead-letter
+    transition. If the claim write does not land, the adapter is NOT invoked and
+    the entry stays visibly queued for the next tick (`claim_unpersisted`,
+    loud) — never a wake without a persisted claim. The claim is advisory, not a
+    lock: a stale own/foreign claim stays retryable, so nothing wedges.
+
+    Read-contract (plan §2, and the bug that hit W1–W3): a queue OR delivered/
+    listing that RAISES is UNKNOWN-degraded — reported loudly, `degraded` set, no
+    execution this pass, wakes stay VISIBLY queued (a dead/blind executor never
+    reports a clean "0 delivered"). A per-entry read that is None/unparseable is
+    SKIPPED (never invoke an adapter on an UNKNOWN entry — a failed read must
+    cause no wake and no delivery-record). The delivered/ existence check that
+    drives idempotency confirms via the RAISING `list_dir`, never a falsy read."""
+    invoke = invoke or _default_host_adapter_invoke
+    executor_id = getattr(args, "host", None) or _host()
+    claim_owner = claim_owner or _claim_owner(executor_id)
+    dry_run = getattr(args, "dry_run", False)
+    prefix = router.router_prefix(args.team)
+    now = _now()
+    counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
+              "unconfigured": 0, "skipped": 0, "deferred": 0,
+              "already_delivered": 0, "would_execute": 0,
+              "claim_unpersisted": 0, "degraded": 0}
+
+    try:
+        q_entries = transport.list_dir(prefix + "queue/")
+    except TransportError as e:
+        print(f"router execute [{executor_id}]: queue listing degraded ({e}) — "
+              f"UNKNOWN, no execution this pass; wakes stay visibly queued (a "
+              f"dead executor leaves wakes queued, never a silent 0 delivered)",
+              file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
+
+    # Idempotency source: the delivered/ record set. Existence is confirmed via
+    # the RAISING list_dir — a listing that raises is degraded (cannot rule out a
+    # re-fire we shouldn't make), never read as "nothing delivered yet".
+    try:
+        delivered_names = {e.get("name")
+                           for e in transport.list_dir(prefix + "delivered/")
+                           if not e.get("is_dir")}
+    except TransportError as e:
+        print(f"router execute [{executor_id}]: delivered/ listing degraded "
+              f"({e}) — cannot confirm idempotency, no execution this pass; "
+              f"wakes stay visibly queued", file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
+
+    # config.json is read ONLY for the host-resolved adapter_args routing target
+    # (thread_id/endpoint_name) — not for policy. No config authority here.
+    agents_cfg, _executors, _errs = router.validate_config(
+        transport.read(prefix + "config.json"))
+
+    for e in q_entries:
+        name = e.get("name") or ""
+        if e.get("is_dir") or not name.endswith(".json"):
+            continue
+        raw = transport.read(prefix + "queue/" + name)
+        try:
+            entry = json.loads(raw) if raw else None
+        except ValueError:
+            entry = None
+        if not isinstance(entry, dict):
+            # read None / unparseable → UNKNOWN entry: SKIP, never invoke on it
+            counts["skipped"] += 1
+            continue
+        if entry.get("executor") != executor_id:
+            continue  # another host's, the decision plane's, or malformed routing
+        # deferred wakes wait for their idle boundary (W4 stamped not_before)
+        nb = router.parse_iso(entry.get("not_before"))
+        if nb is not None and nb > now:
+            counts["deferred"] += 1
+            continue
+
+        key = router.idempotency_key(str(entry.get("source_shard")),
+                                     str(entry.get("agent")))
+        qpath = prefix + "queue/" + name
+
+        # step 2: a delivery-record already exists for this key → SKIP, never
+        # re-invoke (existence confirmed via the RAISING list_dir above).
+        if router.record_filename(key) in delivered_names:
+            counts["already_delivered"] += 1
+            continue
+
+        # respect a FRESH FOREIGN claim (a DIFFERENT process mid-flight — the
+        # owner token names the process, not just the host id). Our own claim and
+        # a STALE foreign claim are retryable — at-least-once again, safe by the
+        # content rule; a stale claim never wedges an entry forever.
+        if router.claim_is_skippable(entry, claim_owner, now):
+            counts["skipped"] += 1
+            continue
+
+        if dry_run:
+            counts["would_execute"] += 1        # select + report only
+            continue
+
+        cfg = agents_cfg.get(entry.get("agent")) or {}
+
+        def _terminate(sub: str, record: dict, tally: str) -> None:
+            """Write a delivered/dead-letter record, then remove the queue entry
+            ONLY if that write landed. A failed record write must NOT be followed
+            by the delete — else the wake is lost. Left queued, it retries next
+            pass (at-least-once, safe by the content rule)."""
+            if transport.write(prefix + sub + router.record_filename(key),
+                               json.dumps(record, sort_keys=True) + "\n"):
+                transport.delete(qpath)
+                counts[tally] += 1
+            else:
+                print(f"router execute [{executor_id}]: {sub.rstrip('/')} "
+                      f"record write failed for {key} — entry stays queued, "
+                      f"retries next pass", file=sys.stderr)
+                counts["retried"] += 1
+
+        # only the four host-local adapters are executable on a host executor; a
+        # cloud adapter mis-resolved here (or anything unknown) is a per-entry
+        # error → dead-letter, never a silent skip or mis-fire.
+        adapter = entry.get("adapter")
+        if adapter not in router.ADAPTERS_HOST_LOCAL:
+            _terminate("dead-letter/", router.dead_letter_record(
+                entry, attempts=int(entry.get("attempts", 0)) + 1,
+                last_error=(f"adapter {adapter!r} is not a host-local adapter "
+                            f"({sorted(router.ADAPTERS_HOST_LOCAL)}) — not "
+                            f"executable on this host executor"),
+                gave_up_at=router.iso(now)), "dead_lettered")
+            continue
+
+        try:
+            inv = router.adapter_invocation(entry, cfg.get("adapter_args"))
+        except ValueError as ve:
+            _terminate("dead-letter/", router.dead_letter_record(
+                entry, attempts=int(entry.get("attempts", 0)) + 1,
+                last_error=f"unroutable: {ve}", gave_up_at=router.iso(now)),
+                "dead_lettered")
+            continue
+
+        # CLAIM-THEN-INVOKE: persist this process's claim to the queue entry
+        # BEFORE the side effect, so the fire window is never unclaimed and a
+        # concurrent sibling reads the fresh claim and skips. If the claim does
+        # NOT land (write False or raises), do NOT invoke — the entry stays
+        # visibly queued for the next tick. No wake without a persisted claim.
+        entry = router.claim_stamp(entry, claim_owner, now)
+        try:
+            claim_ok = transport.write(
+                qpath, json.dumps(entry, sort_keys=True) + "\n")
+        except TransportError:
+            claim_ok = False
+        if not claim_ok:
+            print(f"router execute [{executor_id}]: claim write failed for "
+                  f"{key} — adapter NOT invoked, entry stays visibly queued, "
+                  f"retries next pass", file=sys.stderr)
+            counts["claim_unpersisted"] += 1
+            continue
+
+        status, detail = invoke(inv)
+        if status == "delivered":
+            _terminate("delivered/",
+                       router.delivery_record(entry, router.iso(now)),
+                       "delivered")
+        elif status == "unconfigured":
+            # visibly queued, not a burned retry — awaits a wired host script
+            counts["unconfigured"] += 1
+        else:  # "failed" — bounded cross-pass retry, then dead-letter
+            attempts = int(entry.get("attempts", 0)) + 1
+            if attempts >= router.MAX_DELIVERY_ATTEMPTS:
+                _terminate("dead-letter/", router.dead_letter_record(
+                    entry, attempts=attempts, last_error=detail,
+                    gave_up_at=router.iso(now)), "dead_lettered")
+            else:
+                # Build on the already-claimed entry (refresh claimed_at, same
+                # owner) and add the retry audit — one consistent claim, no
+                # conflicting stamp. Advisory: it only suppresses a concurrent
+                # fresh foreign fire; correctness rests on the content rule.
+                retried = router.claim_stamp(entry, claim_owner, now)
+                retried["attempts"] = attempts
+                retried["last_error"] = detail
+                if not transport.write(qpath,
+                                       json.dumps(retried, sort_keys=True) + "\n"):
+                    print(f"router execute [{executor_id}]: retry-state write "
+                          f"failed for {key} — entry unchanged, retries next "
+                          f"pass", file=sys.stderr)
+                counts["retried"] += 1
+
+    active = {k: v for k, v in counts.items() if v}
+    if active:
+        print(f"router execute [{executor_id}]: "
+              + ", ".join(f"{k}={v}" for k, v in active.items())
+              + (" [dry-run]" if dry_run else ""))
+    return counts
+
+
+def cmd_router_execute(args: argparse.Namespace, transport: Any) -> int:
+    counts = _router_execute_host(args, transport)
+    rc = 1 if counts.get("degraded") else 0
+    if getattr(args, "once", False) or getattr(args, "dry_run", False):
+        return rc
+    while True:  # resident thin executor: FIXED 60s cadence (plan §2.5)
+        time.sleep(router.ROUTER_POLL_SECONDS)
+        _router_execute_host(args, transport)
 
 
 # --- stash (fulcra-agent-durable-state) ---
@@ -4665,6 +5808,16 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     except TransportError:
         print("escalate: roles dir unreadable", file=sys.stderr)
         return 1
+    # W2 gated (dormant today): a VACANT role whose holder's SESSION has LAPSED is
+    # EXPLAINED absence — role-retaining, not gone-dark — so the vacancy escalation
+    # is suppressed WITH a note. This mirrors the dormant_until suppress discipline
+    # (roles.escalation_due) and activates ONLY when the mixed-fleet gate PASSES
+    # (plan §3). While the gate is BLOCKED/DEGRADED (the fleet is not fully
+    # covered) the branch is dormant and every role escalates by today's rules
+    # verbatim. The gate + presence roster are team-global — read them ONCE, and
+    # only when the gate passes (a BLOCKED fleet pays nothing new).
+    gate_passes = _engagement_gate_passes(transport, args.team, now=now)
+    pres_shards = _presence_shards(transport, args.team) if gate_passes else []
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
@@ -4742,6 +5895,18 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if not roles.escalation_due(leases, now=now, sla_hours=sla,
                                     marker_exists_today=marker_exists):
             continue
+        # W2 gated semantic change (dormant while the gate is BLOCKED): a lapsed
+        # session holder is explained absence — suppress, and SAY so (never
+        # silently). When gate_passes is False this block is skipped entirely and
+        # control falls through to today's escalation behavior verbatim.
+        if gate_passes:
+            holder = presence.lapsed_holder(
+                [str(l.get("agent")) for l in (leases or [])], pres_shards, now=now)
+            if holder is not None:
+                print(f"escalate: {role} vacancy explained — holder {holder}'s "
+                      f"session has lapsed (declared window ended; role retained, "
+                      f"not gone-dark); escalation suppressed", file=sys.stderr)
+                continue
         maintainer = str(reg.get("maintainer") or _human())
         transport.write(marker_path, okf.render_frontmatter(
             {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
@@ -4954,9 +6119,21 @@ def build_parser() -> argparse.ArgumentParser:
     prb.add_argument("--until", help="session expiry (ISO-8601); only valid with "
                      "--engagement session, defaults to beat time + 8h")
     prb.set_defaults(func=cmd_presence_beat)
-    prs = prsub.add_parser("show", help="roster with live/idle/stale liveness")
+    prs = prsub.add_parser("show", help="roster with live/idle/stale/lapsed liveness")
     prs.add_argument("team"); add_json(prs)
     prs.set_defaults(func=cmd_presence_show)
+
+    en = sub.add_parser("engagement", help="engagement coverage gate (wake-router mixed-fleet gate)")
+    ensub = en.add_subparsers(dest="engagement_command", required=True)
+    eng = ensub.add_parser("gate", help="mixed-fleet gate: is every LIVE agent's engagement covered? (PASS/BLOCKED)")
+    eng.add_argument("team"); add_json(eng)
+    eng.set_defaults(func=cmd_engagement_gate)
+    esw = ensub.add_parser("sweep", help="host-tick: mark expired sessions LAPSED "
+                           "(zero-token; idempotent; never parks/releases roles)")
+    esw.add_argument("team"); add_json(esw)
+    esw.add_argument("--dry-run", action="store_true",
+                     help="preview what WOULD be marked without writing")
+    esw.set_defaults(func=cmd_engagement_sweep)
 
     ag = sub.add_parser("agents", help="cross-agent digest (open work by agent + liveness)")
     ag.add_argument("team"); add_json(ag)
@@ -5200,6 +6377,26 @@ def build_parser() -> argparse.ArgumentParser:
     ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)
+    roe = rosub.add_parser("execute", help="W5.5 thin host executor: fire host-local adapters for queue entries resolved to THIS host (policy-free; --once for one pass)")
+    roe.add_argument("team")
+    roe.add_argument("--host", default=None, help="executor id to drain (default: this host's own id)")
+    roe.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
+    roe.add_argument("--dry-run", action="store_true", help="select + report only; invoke nothing, write nothing")
+    add_json(roe)
+    roe.set_defaults(func=cmd_router_execute)
+
+    wk = sub.add_parser(
+        "wake", help="zero-model wake adapter utilities (queued file / SessionStart)")
+    wksub = wk.add_subparsers(dest="wake_command", required=True)
+    wkq = wksub.add_parser(
+        "queue-file", help="write an idempotency-keyed local SessionStart nudge")
+    wkq.add_argument("team"); wkq.add_argument("--agent", required=True)
+    wkq.add_argument("--key", required=True)
+    wkq.set_defaults(func=cmd_wake_queue_file)
+    wkc = wksub.add_parser(
+        "consume", help="consume this identity's queued SessionStart nudges")
+    wkc.add_argument("team"); wkc.add_argument("--agent", required=True)
+    wkc.set_defaults(func=cmd_wake_consume)
 
     sh = sub.add_parser("stash", help="durable per-agent tooling stash + manifest (fulcra-agent-durable-state)")
     shsub = sh.add_subparsers(dest="stash_command", required=True)

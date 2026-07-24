@@ -385,16 +385,38 @@ def test_delivered_view_regenerated_from_shards():
 
 
 class FlakyTransport(FakeTransport):
-    """FakeTransport whose writes can be made to fail by path substring."""
+    """FakeTransport whose writes/listings can be made to fail by path substring."""
 
     def __init__(self):
         super().__init__()
         self.fail_write_containing: set = set()
+        self.fail_list_containing: set = set()
 
     def write(self, path, content):
         if any(s in path for s in self.fail_write_containing):
             return False
         return super().write(path, content)
+
+    def list_dir(self, prefix):
+        if any(s in prefix for s in self.fail_list_containing):
+            from coord_engine.transport import TransportError
+            raise TransportError("boom")
+        return super().list_dir(prefix)
+
+
+class FeedTransport(FlakyTransport):
+    """FlakyTransport that also serves a data-updates feed (E3). ``_feed`` is
+    the raw change list `updates()` returns; set to None to model feed doubt."""
+
+    def __init__(self):
+        super().__init__()
+        self._feed: object = []
+
+    def set_feed(self, feed):
+        self._feed = feed
+
+    def updates(self, since, *, team=None):
+        return None if self._feed is None else list(self._feed)
 
 
 def test_failed_queue_write_is_not_ledgered_and_retries(capsys):
@@ -436,3 +458,412 @@ def test_corrupt_config_is_loud_and_enqueues_nothing(capsys):
     assert cli.cmd_router_run(_args(), t) == 0
     assert _queue_entries(t) == {}
     assert "config" in capsys.readouterr().err.lower()
+
+
+# --- W5 opening commit: two codex #460 verdict fixes ------------------------
+
+def test_delivered_listing_failure_preserves_the_populated_view(capsys):
+    """codex #460 Fix 1: a delivered/ LISTING error must NOT overwrite the
+    populated delivered.json with {} (which would also feed empty
+    last_delivered_at into decide() for the whole pass). Skip the refold, stay
+    fail-visible, and let the pass otherwise proceed."""
+    t = FlakyTransport()
+    t.put(TASKP + "item-1.md", _task("item-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    prior = {"other": {"last_delivered_at": "2026-07-23T09:00:00Z",
+                       "count": 5, "last_source_shard": "old"}}
+    t.put(RP + "delivered.json", json.dumps(prior))
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 0              # pass proceeds
+    assert json.loads(t.store[RP + "delivered.json"]) == prior   # NOT clobbered
+    assert "delivered/ listing degraded" in capsys.readouterr().err
+    assert len(_queue_entries(t)) == 1                      # P1 still enqueued
+
+
+def test_degraded_delivered_listing_decides_from_persisted_view(capsys):
+    """codex #466: when the delivered/ listing fails, decide() must use the
+    last-known-good delivered.json — an agent delivered inside its debounce
+    window keeps that debounce instead of being re-woken from an empty fold."""
+    t = FlakyTransport()
+    t.put(TASKP + "item-1.md", _task("item-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    # persisted view: AGENT delivered 5 min ago (inside the 15-min debounce)
+    t.put(RP + "delivered.json", json.dumps(
+        {AGENT: {"last_delivered_at": "2026-07-23T11:55:00Z", "count": 1,
+                 "last_source_shard": "prior"}}))
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 0
+    assert _queue_entries(t) == {}          # debounced from the persisted view
+    assert "delivered/ listing degraded" in capsys.readouterr().err
+
+
+def test_double_degradation_fails_closed_when_history_unknown(capsys):
+    """codex #466 P1: delivered/ listing fails AND delivered.json is absent
+    (read None) ⇒ delivery history is UNKNOWN, not empty. Fail the pass CLOSED
+    — nonzero, no queue write, no cursor advancement."""
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)                                   # cursor watermark 11:00:00Z
+    # delivered.json intentionally absent → read returns None
+    t.fail_list_containing.add("delivered/")   # authoritative shard listing down
+    assert cli.cmd_router_run(_args(), t) == 1
+    assert _queue_entries(t) == {}             # nothing enqueued from unknown history
+    cur = json.loads(t.store[RP + "cursor.json"])
+    assert cur["watermark"] == "2026-07-23T11:00:00Z"   # cursor NOT advanced
+    assert f"urgent-1:{AGENT}" not in cur["processed"]  # NOT consumed
+    assert "UNKNOWN" in capsys.readouterr().err
+
+
+def test_double_degradation_fails_closed_on_malformed_persisted_view(capsys):
+    """codex #466 P1: listing fails AND delivered.json is malformed (not a valid
+    mapping) ⇒ still unknown history ⇒ fail closed."""
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.put(RP + "delivered.json", "{not valid json")
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 1
+    assert _queue_entries(t) == {}
+    assert json.loads(t.store[RP + "cursor.json"])["watermark"] == "2026-07-23T11:00:00Z"
+
+
+def test_degraded_listing_with_empty_persisted_view_is_known_history():
+    """A valid EMPTY mapping is KNOWN history (router ran, delivered nothing) —
+    it must proceed, not fail closed."""
+    t = FlakyTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.put(RP + "delivered.json", json.dumps({}))   # known-empty
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(), t) == 0      # proceeds
+    assert len(_queue_entries(t)) == 1              # P1 enqueued (no history ⇒ no debounce)
+
+
+def test_delivered_fold_orders_by_parsed_time_not_lexical_string():
+    """codex #460 Fix 2: a later UTC delivery must win over an earlier one whose
+    +offset string sorts later lexically ('…T14:00+02:00' = 12:00Z is earlier
+    than '…T12:30Z' but sorts after it as a string)."""
+    shards = [
+        {"agent": "a", "delivered_at": "2026-07-23T14:00:00+02:00",  # 12:00Z
+         "source_shard": "early"},
+        {"agent": "a", "delivered_at": "2026-07-23T12:30:00Z",       # later
+         "source_shard": "late"},
+    ]
+    view = router.fold_delivered(shards)
+    assert view["a"]["last_source_shard"] == "late"
+    assert view["a"]["last_delivered_at"] == "2026-07-23T12:30:00Z"  # normalized Z
+
+
+# --- W5: adapter integration + execution (pure core) ------------------------
+
+def _q_entry(agent=AGENT, adapter="managed-agents-message",
+             executor=router.DECISION_PLANE, source="item-1", **extra):
+    e = {"agent": agent, "reason": "check your bus", "source_shard": source,
+         "priority": "P1", "queued_at": NOW_ISO, "not_before": NOW_ISO,
+         "adapter": adapter, "executor": executor}
+    e.update(extra)
+    return e
+
+
+def test_decision_plane_owns_only_its_executor():
+    """The decision plane executes exactly `executor: decision-plane`; a
+    host-local executor id is W5.5's, never fired here (plan §W5)."""
+    assert router.is_decision_plane_entry(_q_entry()) is True
+    assert router.is_decision_plane_entry(
+        _q_entry(executor="mac-mini-1")) is False
+    assert router.is_decision_plane_entry({"executor": None}) is False
+
+
+def test_adapter_invocation_is_a_keyed_nudge_with_no_command():
+    """The relay content rule (plan §2): the wake payload carries the
+    idempotency key and NO per-event command/session-mutation/raw content, so
+    at-least-once delivery converges to one bus check."""
+    inv = router.adapter_invocation(
+        _q_entry(source="urgent-9"), {"session_ref": "sess-42"})
+    key = router.idempotency_key("urgent-9", AGENT)
+    assert inv["idempotency_key"] == key
+    assert key in inv["message"]
+    assert inv["session_ref"] == "sess-42"          # target from adapter_args
+    # NO command / session-mutation / raw-content field ever rides the payload
+    for banned in ("command", "cmd", "exec", "run", "payload", "session_patch",
+                   "permission_mode", "url"):
+        assert banned not in inv
+    # the message is a fixed nudge — it names no action to take
+    assert "no action is encoded" in inv["message"].lower()
+
+
+def test_adapter_invocation_targets_are_allowlisted_per_adapter():
+    assert router.adapter_invocation(
+        _q_entry(adapter="codex-exec-resume", executor="host-x"),
+        {"thread_id": "th-1"})["thread_id"] == "th-1"
+    assert router.adapter_invocation(
+        _q_entry(adapter="openclaw-post", executor="host-x"),
+        {"endpoint_name": "wake"})["endpoint_name"] == "wake"
+    # a no-target adapter carries only the safe nudge fields
+    inv = router.adapter_invocation(_q_entry(adapter="routine-align"))
+    assert set(inv) == {"adapter", "agent", "idempotency_key", "message"}
+
+
+def test_adapter_invocation_rejects_unknown_adapter():
+    with pytest.raises(ValueError):
+        router.adapter_invocation(_q_entry(adapter="curl-the-internet"))
+
+
+def test_claim_skippable_only_for_a_fresh_foreign_claim():
+    fresh = "2026-07-23T11:55:00Z"   # 5 min before PINNED_NOW (< 10)
+    stale = "2026-07-23T11:30:00Z"   # 30 min before PINNED_NOW (> 10)
+    me = router.DECISION_PLANE
+    # foreign + fresh → another executor is mid-flight → skip
+    assert router.claim_is_skippable(
+        _q_entry(claimed_by="other", claimed_at=fresh), me, PINNED_NOW) is True
+    # foreign + stale → retryable (at-least-once, safe by content rule)
+    assert router.claim_is_skippable(
+        _q_entry(claimed_by="other", claimed_at=stale), me, PINNED_NOW) is False
+    # our own claim → retryable
+    assert router.claim_is_skippable(
+        _q_entry(claimed_by=me, claimed_at=fresh), me, PINNED_NOW) is False
+    # unclaimed → claimable
+    assert router.claim_is_skippable(_q_entry(), me, PINNED_NOW) is False
+
+
+def test_delivery_record_is_readable_by_the_delivered_fold():
+    """A delivery-record shard must fold cleanly into `delivered.json` — the
+    single-writer-per-key contract feeds the decision-plane view."""
+    rec = router.delivery_record(_q_entry(source="s-7"), NOW_ISO)
+    assert rec["key"] == router.idempotency_key("s-7", AGENT)
+    view = router.fold_delivered([rec])
+    assert view[AGENT]["last_delivered_at"] == NOW_ISO
+    assert view[AGENT]["count"] == 1
+    assert view[AGENT]["last_source_shard"] == "s-7"
+
+
+def test_dead_letter_record_carries_entry_plus_audit():
+    e = _q_entry(source="s-3")
+    dl = router.dead_letter_record(
+        e, attempts=3, last_error="boom", gave_up_at=NOW_ISO)
+    assert dl["source_shard"] == "s-3" and dl["adapter"] == e["adapter"]
+    assert (dl["attempts"], dl["last_error"], dl["gave_up_at"]) == (
+        3, "boom", NOW_ISO)
+
+
+def test_record_filename_deterministic_and_safe_for_colon_agent_ids():
+    key = router.idempotency_key("s-1", "openclaw:discord:fulcra-skills")
+    a, b = router.record_filename(key), router.record_filename(key)
+    assert a == b                                   # single-writer-per-key
+    assert ":" not in a and a.endswith(".json")     # store-safe
+    assert router.record_filename(key) != router.record_filename(key + "x")
+
+
+# --- E3: router feed-first candidate source (addendum §3.3) -----------------
+
+def _uploaded(name, at):
+    return {"path": TASKP + name, "state": "uploaded", "uploaded_at": at}
+
+
+def test_router_feed_first_bypasses_a_failed_task_listing():
+    """E3: with the feed available, candidates come from it — a failing
+    task-directory LISTING no longer degrades the pass (feed is the source)."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.set_feed([_uploaded("urgent-1.md", "2026-07-23T11:30:05Z")])
+    t.fail_list_containing.add("task/")          # listing would fail — feed bypasses it
+    assert cli.cmd_router_run(_args(), t) == 0
+    q = _queue_entries(t)
+    assert len(q) == 1
+    (entry,) = q.values()
+    assert entry["source_shard"] == "urgent-1"
+
+
+def test_router_feed_wins_over_listing_divergence():
+    """E3: the feed is authoritative — a shard present in the listing but NOT
+    reported by the feed is not a candidate this pass."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    t.put(TASKP + "listing-only.md", _task("listing-only", AGENT, "P1"),
+          mtime="2026-07-23 11:40AM UTC")
+    _base(t)
+    t.set_feed([_uploaded("urgent-1.md", "2026-07-23T11:30:05Z")])  # not listing-only
+    assert cli.cmd_router_run(_args(), t) == 0
+    q = _queue_entries(t)
+    assert len(q) == 1
+    (entry,) = q.values()
+    assert entry["source_shard"] == "urgent-1"   # NOT listing-only
+
+
+def test_router_falls_back_to_listing_when_feed_unavailable():
+    """E3: feed doubt (updates returns None) ⇒ the full task-listing scan, the
+    unchanged W4 source — same enqueue outcome."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.set_feed(None)                              # feed unavailable -> listing
+    assert cli.cmd_router_run(_args(), t) == 0
+    assert len(_queue_entries(t)) == 1
+
+
+def test_router_malformed_feed_timestamp_is_doubt_not_skip():
+    """codex + Tycho E3 blocking (addendum principle 2): an unparseable
+    uploaded_at on a task upload is feed DOUBT, never a silent skip — dropping
+    it while other candidates advance the watermark loses that wake forever. The
+    pass abandons the partial feed and takes the healthy listing, surfacing BOTH
+    shards; nothing is ledgered from the doubtful feed read."""
+    t = FeedTransport()
+    t.put(TASKP + "good-1.md", _task("good-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    t.put(TASKP + "bad-1.md", _task("bad-1", AGENT, "P1"),
+          mtime="2026-07-23 11:31AM UTC")
+    _base(t)
+    t.set_feed([
+        _uploaded("good-1.md", "2026-07-23T11:30:05Z"),
+        _uploaded("bad-1.md", "not-a-timestamp"),      # malformed ⇒ feed doubt
+    ])
+    assert cli.cmd_router_run(_args(), t) == 0
+    cur = json.loads(t.store[RP + "cursor.json"])
+    # BOTH shards surfaced via the listing fallback and were ledgered — neither
+    # lost to the doubtful feed. (bad-1 coalesces into good-1's wake by debounce
+    # for the same agent, but it IS ledgered, not dropped. Under the buggy skip
+    # the feed advances the watermark past bad-1 and it never enters `processed`.)
+    assert f"good-1:{AGENT}" in cur["processed"]
+    assert f"bad-1:{AGENT}" in cur["processed"]        # the at-risk wake is NOT lost
+    assert len(_queue_entries(t)) >= 1                 # good-1 enqueued
+    # watermark came from the LISTING (bad-1 mtime 11:31), NOT the partial feed
+    # (good-1 ts 11:30:05) — the doubtful feed advanced nothing independently.
+    assert cur["watermark"] == "2026-07-23T11:31:00Z"
+
+
+def test_router_feed_second_granularity_advances_watermark():
+    """E3: the watermark advances to the feed's second-granular uploaded_at
+    (subsuming the minute tie), and the processed ledger records the key."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.set_feed([_uploaded("urgent-1.md", "2026-07-23T11:30:05Z")])
+    assert cli.cmd_router_run(_args(), t) == 0
+    cur = json.loads(t.store[RP + "cursor.json"])
+    assert cur["watermark"] == "2026-07-23T11:30:05Z"      # second-granular
+    assert f"urgent-1:{AGENT}" in cur["processed"]
+
+
+# --- W5: cloud-execution loop (claim → invoke → delivered/dead-letter) -------
+
+def _seed_queue(t, entry):
+    key = router.idempotency_key(entry["source_shard"], entry["agent"])
+    name = router.queue_filename(entry["agent"], key)
+    t.put(RP + "queue/" + name, json.dumps(entry))
+    return RP + "queue/" + name
+
+
+def _shards_under(t, sub):
+    return {p: json.loads(c) for p, c in t.store.items()
+            if p.startswith(RP + sub)}
+
+
+def _invoke(status, detail=""):
+    return lambda inv: (status, detail)
+
+
+def test_execute_delivers_cloud_entry_writes_record_and_clears_queue():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-1"))
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 1
+    assert qpath not in t.store                          # queue entry cleared
+    recs = list(_shards_under(t, "delivered/").values())
+    assert len(recs) == 1 and recs[0]["agent"] == AGENT
+    assert router.fold_delivered(recs)[AGENT]["last_delivered_at"] == NOW_ISO
+
+
+def test_execute_leaves_host_local_entries_for_w55():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(adapter="codex-exec-resume",
+                                    executor="mac-mini-1", source="s-2"))
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 0
+    assert qpath in t.store                              # untouched — W5.5's
+    assert _shards_under(t, "delivered/") == {}
+
+
+def test_execute_defers_entry_until_not_before():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-3",
+                                    not_before="2026-07-23T13:00:00Z"))  # future
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["deferred"] == 1 and counts["delivered"] == 0
+    assert qpath in t.store and _shards_under(t, "delivered/") == {}
+
+
+def test_execute_bounded_retry_then_dead_letter():
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-4"))
+    fail = _invoke("failed", "adapter boom")
+    # attempts 1,2 retry (entry stays); attempt 3 == MAX → dead-letter + clear
+    for expect_attempts in (1, 2):
+        counts = cli._router_execute_cloud(_args(), t, invoke=fail)
+        assert counts["retried"] == 1
+        assert json.loads(t.store[qpath])["attempts"] == expect_attempts
+    counts = cli._router_execute_cloud(_args(), t, invoke=fail)
+    assert counts["dead_lettered"] == 1
+    assert qpath not in t.store
+    dl = list(_shards_under(t, "dead-letter/").values())
+    assert len(dl) == 1
+    assert dl[0]["attempts"] == router.MAX_DELIVERY_ATTEMPTS
+    assert dl[0]["last_error"] == "adapter boom"
+
+
+def test_execute_respects_a_fresh_foreign_claim():
+    t = FakeTransport()
+    _base(t)
+    _seed_queue(t, _q_entry(source="s-5", claimed_by="other-plane",
+                            claimed_at="2026-07-23T11:55:00Z"))  # 5 min, fresh
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["skipped"] == 1 and counts["delivered"] == 0
+
+
+def test_execute_default_invoker_leaves_wake_visibly_queued():
+    """No host-side client wired ⇒ `unconfigured`: the wake stays queued (never
+    dropped, never a burned retry) — the plan's fail-visible degradation."""
+    t = FakeTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-6"))
+    counts = cli._router_execute_cloud(_args(), t)      # default invoker
+    assert counts["unconfigured"] == 1
+    assert qpath in t.store and json.loads(t.store[qpath]).get("attempts") is None
+    assert _shards_under(t, "delivered/") == {} and _shards_under(t, "dead-letter/") == {}
+
+
+def test_execute_delivery_record_is_single_writer_per_key():
+    t = FakeTransport()
+    _base(t)
+    _seed_queue(t, _q_entry(source="s-7"))
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    _seed_queue(t, _q_entry(source="s-7"))              # same key, re-delivered
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert len(_shards_under(t, "delivered/")) == 1     # self-overwrite, one shard
+
+
+def test_execute_failed_record_write_keeps_entry_queued(capsys):
+    """Same class as the W4 P1: a failed delivered-record write must NOT be
+    followed by the queue delete — the wake stays queued to retry, never lost."""
+    t = FlakyTransport()
+    _base(t)
+    qpath = _seed_queue(t, _q_entry(source="s-9"))
+    t.fail_write_containing.add("delivered/")
+    counts = cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert counts["delivered"] == 0
+    assert qpath in t.store                              # NOT lost
+    assert _shards_under(t, "delivered/") == {}
+    assert "record write failed" in capsys.readouterr().err

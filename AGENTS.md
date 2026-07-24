@@ -164,18 +164,60 @@ it (not on PyPI).
 - **Named identities** (Tycho = `coord-boss`, …): the registry is
   [`MAINTAINERS.md`](MAINTAINERS.md) — names are personas for human legibility;
   bus routing always uses the functional id.
-- **Wake router (decision plane — W4, enqueue-only).** `coord-engine router run
-  <team> [--once]` is the fleet's model-free wake policy: a cursor-based store
-  scan (deliberately NOT the `listen` fold — structurally immune to the
-  2026-07-22 listen-starvation class) with a tie-safe inclusive `>= watermark`
-  rescan + durable processed ledger, per-agent policy (interrupt floor,
-  debounce, busy deferral, LAPSED reduced-cadence check-ins), and durable state
-  ONLY under `team/<team>/_coord/router/`. Enablement is explicit per agent in
-  `config.json` — an unconfigured agent is observe-only; invalid config routes
-  to the fail-visible `unroutable` lane. W4 enqueues and never executes
-  (execution is W5/W5.5); a missing/corrupt cursor restarts observe-only.
-  Contract: [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
-  [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4.
+- **Wake router (decision plane — W4/W5).** `coord-engine router run
+  <team> [--once]` is the fleet's model-free wake policy: a cursor-based scan
+  (deliberately NOT the `listen` fold — structurally immune to the 2026-07-22
+  listen-starvation class) with a tie-safe inclusive `>= watermark` rescan +
+  durable processed ledger, per-agent policy (interrupt floor, debounce, busy
+  deferral, LAPSED reduced-cadence check-ins), and durable state ONLY under
+  `team/<team>/_coord/router/`. Candidate source is **feed-first** (E3): the
+  `data-updates` feed's `uploaded` events under `task/` (second-granular), with
+  the task-directory listing kept as the fail-closed fallback on any feed doubt;
+  the cursor/ledger/decide seams are identical across both sources. Enablement is
+  explicit per agent in `config.json` — an unconfigured agent is observe-only;
+  invalid config routes to the fail-visible `unroutable` lane. The decision plane
+  **executes** cloud-reachable adapters (`managed-agents-message`,
+  `routine-align`) directly — claim → invoke → delivered/dead-letter with bounded
+  retry, at-least-once and safe by the keyed-nudge content rule; host-local
+  adapters are enqueued with an `executor` id for the W5.5 thin executor. A
+  missing/corrupt cursor restarts observe-only. Contract:
+  [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
+  [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
+  [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
+- **Thin host executor (W5.5).** `coord-engine router execute <team> [--host
+  <id>] [--once] [--dry-run]` is the SOLE executor for host-local adapters
+  (`codex-exec-resume`, `openclaw-post`, `macos-notify`, `queued-wake-file`). It
+  is **policy-free and has no config authority**: it makes no wake decisions (W4
+  did, stamping `executor`/`adapter` into the queue entry — the trusted routing
+  source) and re-runs no policy — an entry present in the queue executes
+  regardless of priority; it reads `config.json` only for the host-resolved
+  `adapter_args` routing target. Per pass it drains exactly the queue entries
+  whose `executor` matches this host's id (default `_host()`), skips any whose
+  delivery-record already exists (**idempotency-keyed skip — never re-invoke**),
+  skips a fresh claim held by another process, then **persists its own claim to
+  the entry BEFORE invoking** (claim-then-invoke: `claimed_by` names the claiming
+  process, `claimed_at` stamps the window) — a claim that does not persist blocks
+  the invoke and leaves the entry visibly queued (**no wake without a persisted
+  claim**), so the side-effect window is always claimed and the claim-holder owns
+  the delivered/dead-letter transition; the claim stays advisory (a stale claim
+  never wedges an entry — a resident process still retries its own). It fires the
+  sanctioned host-local adapter through one invoker seam, and records the outcome:
+  success ⇒ an idempotency-keyed `delivered/` shard
+  (the `fold_delivered` view reads it), failure ⇒ bounded retry (`attempts` ≤
+  `MAX_DELIVERY_ATTEMPTS`) then a **dead-letter transition** (`{attempts,
+  last_error, gave_up_at}` under `dead-letter/`, owned as claim-holder); a
+  non-host-local or unknown adapter dead-letters immediately. Delivery is
+  **at-least-once and safe by the keyed-nudge content rule** — the wake carries
+  no per-event command, so executing the same entry twice converges to one bus
+  check (the §2 acceptance test). **Read-contract, fail-visible:** a queue or
+  `delivered/` listing that RAISES is UNKNOWN-degraded — reported loudly, no
+  execution, wakes stay VISIBLY queued and the command exits non-zero (a dead
+  executor never reports a clean "0 delivered"); a per-entry read that is
+  None/unparseable is SKIPPED (never invoke on an UNKNOWN entry). The default
+  invoker wires no real adapter (reports `unconfigured`, wake stays queued), so
+  the command wakes nothing on its own — **DEPLOYMENT (wiring the real adapter
+  scripts and scheduling the poller on a host) is a separate Ash-gated step.**
+  Contract: [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) W5.5 + §2.
 - **Durable tooling stash.** An agent's operational bundle (scripts, loops,
   config templates) survives ephemeral machines via
   `coord-engine stash push/pull/list` against
@@ -212,6 +254,20 @@ it (not on PyPI).
   non-head tail truncated and will retry. Shared tail work may never drain the head
   budget. **A listener loop must never die on degradation:** degraded folds back
   off and keep beating; only affirmative delivery or the configured horizon exits.
+  **The healthy read path is feed-first.** Listener state carries an inclusive
+  `data-updates` cursor; one team-filtered feed call identifies changed task,
+  response, and verdict shards, and the fold reads those shards directly instead
+  of relisting their roots. `briefing`/`needs-me` likewise combine the last
+  aggregate with changed task docs. A missing, corrupt, or over-age cursor, an
+  unavailable/malformed feed, or any doubtful direct read falls through to the
+  unchanged W8-budgeted listing path. The cursor advances only after a conclusive
+  tick, never after degradation. Listener cursor/seen state writes through to
+  `team/<team>/_coord/agents/<agent>/listen-state.json`; the local state file is a
+  cache, so a container restart does not replay already-seen work. A missing,
+  corrupt, or unreadable store copy falls back to the local cache, then the legacy
+  fresh start. Presence is deliberately **time-dirty** rather than feed-cached:
+  each briefing evaluates the bounded roster against the current clock, so an
+  unchanged session shard still becomes `LAPSED` when `now >= until`.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
@@ -492,6 +548,88 @@ it (not on PyPI).
   throttle memo is process-global module state — reset it between
   tests; any new write verb added to the engine must join `_ACTIVITY_WRITE_FUNCS` (or the omission is
   justified), and the preserve-everything-but-timestamp rule stays red-first pinned.**
+- **Engagement-aware liveness is a combiner over two ORTHOGONAL axes (wake-router W2).** `classify(ts,
+  now)` stays PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone — and is
+  NOT changed (it is called widely under that contract). The truth table is layered on top by
+  `presence.liveness(shard, now=…)`, which returns `{state, freshness, annotation, engagement}`: it reads
+  freshness from `classify` and mode/until/state from `parse_engagement`, then applies the authored table.
+  **STALENESS** (timestamp freshness — post-W1.5 a working agent's bus write already refreshes it, so a
+  fresh timestamp IS "recent activity"; no separate signal) and **DORMANCY** (a `session` past its `until`,
+  `now ≥ until` boundary-inclusive, OR a durable W3 `engagement.state: lapsed` marker) are INDEPENDENT and
+  rendered as two facts, NEVER a merged label. A dormant shard renders primary state **LAPSED** — distinct
+  from stale/dead, EXPLAINED ("declared session window ended"), ROLE-RETAINING — with the freshness axis in
+  the annotation: "still beating … — extend session or release" when fresh (a session overrunning its
+  window while beating is honestly **LAPSED+active**, a nudge to extend, NEVER silently live), "stale Nh"
+  when not. A degraded engagement reads as the legacy `resident`/`active` default and can therefore never
+  manufacture dormancy. **CONCUR conditions in output:** any stale row shows a beat nudge (`stale Nh —
+  nudge`); all agent lookups match by EXACT id (no substring/fuzzy — the corrupt-id lesson), incl.
+  `presence.lapsed_holder`; dormancy ⊥ staleness stays two facts. **The verdict rides ADDITIVELY:** roster
+  rows keep `liveness` = the pure freshness band (every existing caller — broadcast_roster, briefing,
+  agents_digest — reads it and its meaning must not shift) and gain `state`/`freshness`/`annotation`;
+  `presence show` and `agents` render `state` + annotation; `--json` carries all three. **`engagement gate
+  <team>`** is the deterministic mixed-fleet gate (plan §3): for every **LIVE** roster agent, COVERED iff
+  it beats with a well-formed `engagement` field OR appears in the operator map
+  `_coord/router/engagement-defaults.json`; else UNCOVERED. Stale/idle/dead shards never block; overall
+  **PASS** iff all live agents COVERED, else **BLOCKED**. **READ-CONTRACT LENS (mandatory — this bit W1
+  and W1.5, and it bit the gate's ROSTER read too):** `transport.read` returns `None` on BOTH a missing
+  file AND a transient failure, and `list_dir` degradation must never fold to an empty result, so a falsy
+  read/listing is NEVER "confirmed absent/empty" on its own. This governs BOTH reads the gate makes, and
+  an UNKNOWN on either is **DEGRADED** (fail closed — never PASS on unknown coverage): **(a) defaults**
+  (`_load_engagement_defaults`) — router-dir lists without the file ⇒ genuinely absent ⇒ empty map +
+  PASS-eligible; file listed but read `None`, body unparseable, or the listing raises ⇒ UNKNOWN. **(b) the
+  presence ROSTER** (`_presence_shards_status`, a sibling of `_presence_shards` that PRESERVES degradation
+  rather than swallowing a listing `TransportError` to `[]`) — the gate CERTIFIES the roster population, so
+  an UNKNOWN roster read must never look like a confirmed-empty one (an empty gate PASSes vacuously —
+  fail-OPEN, the P1 codex caught): presence-dir listing raises, a listed shard reads `None`, OR a listed
+  shard reads non-empty but its frontmatter will not parse / carries no usable `timestamp` (a parse failure
+  is UNKNOWN coverage exactly like an unreadable shard — never synthesize a `{}`/timestampless phantom row,
+  which `classify` would fold to stale and SILENTLY EXCLUDE while `ok` stayed True), ⇒ `roster_ok=False` ⇒
+  DEGRADED; only a CONFIRMED enumeration (listing succeeded and every live shard parsed with a classifiable
+  timestamp) may PASS, and a confirmed-EMPTY roster still PASSes vacuously. `_engagement_gate_passes` routes through
+  the same `(shards, ok)` helper, so a degraded roster returns False and the escalation falls back to
+  today's behavior, never the suppression branch. **The vacancy/escalation SEMANTIC
+  change is gated (§3, dormant today):** LAPSED RENDERING lands unconditionally (additive), but reading a
+  LAPSED session role-holder as EXPLAINED ABSENCE (role-retaining, suppress the vacancy escalation WITH a
+  note — mirroring `roles.escalation_due`'s dormant-suppress precedent) activates ONLY when
+  `_engagement_gate_passes(team)` — `if gate_passes: <lapsed-holder suppression> else: <today's behavior
+  verbatim>`. The gate is BLOCKED until the fleet is covered, so the new behavior ships DORMANT; BOTH
+  branches are red-first pinned (a gate-PASS fixture suppresses-explained, a gate-BLOCKED fixture escalates
+  as today). **Ship-gate: `classify` stays pure (no engagement read); any new dormancy/coverage input
+  class gets a red-first test; the gate fails closed on any UNKNOWN; the gated semantic change keeps both
+  branches pinned until the gate is satisfied fleet-wide (W10).**
+- **The zero-token lapse sweep writes two fields and nothing else (wake-router W3).** `coord-engine
+  engagement sweep <team>` is a host-tick, model-free pass that marks a session past its `until` as
+  **LAPSED** by writing EXACTLY `engagement.state: lapsed` + `engagement.lapsed_at` (the sweep's
+  evaluation time, UTC `…Z`) into the presence shard — the **ONE sanctioned exception** to agent-owned
+  presence writes, scoped to those two qualified names. **MARK predicate** (`presence.sweep_decision`,
+  the pure read-only seam — reads through `parse_engagement`, never a raw dict-walk): mark iff
+  `mode == session` AND `until` present AND `now ≥ until` (boundary-inclusive) AND `state == active` AND
+  engagement WELL-FORMED. Otherwise: `resident`/`occasional`/legacy-absent → SKIP (no session, no lapse
+  concept); session `now < until` → SKIP `within-until`; `state == lapsed` already → **NOOP** (idempotent
+  — a second sweep with no time change writes nothing, pinned with a write-count fake transport);
+  degraded/unparseable engagement → SKIP (fail-closed — a malformed shard, e.g. a session missing its
+  required `until`, NEVER manufactures a lapse). **The write preserves everything but the two fields:**
+  the RAW parsed `engagement` map is mutated (so `mode`/`until` survive byte-for-byte) and re-rendered;
+  the top-level `timestamp` is **NOT bumped** (the sweep is not a beat) and `until` is **NOT slid**; the
+  body is preserved verbatim (`_split_body_verbatim` keeps the exact tail after the closing `---`, which
+  `okf.split_frontmatter`'s `splitlines` would drop). **NEVER parks, NEVER releases roles** (operator
+  decision 2026-07-22: park is explicit-only) — only the presence shard is ever written; role leases and
+  continuity docs are untouched (blast-radius pinned to the one shard path). **READ-CONTRACT LENS (this
+  class bit W1/W1.5/W2 — every read swept):** `transport.read` returns `None` on BOTH missing and
+  failure; `list_dir` RAISES on failure. Enumeration via `list_dir`: if it raises, the roster is UNKNOWN
+  and the sweep is **DEGRADED** — loud (stderr `DEGRADED` line / `enumeration_ok: false`), rc 1, and it
+  must NEVER read as a clean `0 marked` swept roster (that would read as swept-clean). Per shard: read
+  `None` / unparseable frontmatter / `_engagement_degraded` → SKIP into the `degraded` bucket (a failed
+  read must NEVER cause a write; marking is a WRITE derived only from a CONFIRMED session-past-until-
+  active shard). A per-shard write failure is reported and the sweep continues (never aborts). Output:
+  `N marked, N already-lapsed, N skipped (bucketed by reason), N degraded`; `--json` returns the
+  structured result; `--dry-run` previews would-be-marks and writes nothing. **rc 0 only on a clean
+  sweep** (enumeration OK, zero degraded shards, zero write failures); rc 1 on enumeration-degrade, any
+  degraded shard, or any write failure. **W4 consumes the marker** (reduced-cadence check-ins); the
+  `lapsed → active` clearing happens via an explicit W1 session re-declaration in the beat, never the
+  sweep. **Ship-gate: the sweep writes ONLY `state`/`lapsed_at`; the mark predicate stays fail-closed
+  (no mark on UNKNOWN/malformed); enumeration-degrade is loud + rc-nonzero, never a silent clean sweep;
+  idempotency and the two-field-only / never-park / never-release invariants stay red-first pinned.**
 - **The rc / error register a watcher parses.** Machine `type` fields ride the degraded **fold rows**
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
@@ -514,13 +652,14 @@ it (not on PyPI).
     `sv` != current `ROW_SCHEMA_VERSION` — e.g. a pre-text-cap row) is likewise reparsed once, so a
     projection change (like the summaries text cap) self-heals the whole index within one full pass
     rather than waiting for each task to organically change.
-  - **A freshness overlay surfaces new docs THIS read.** Every summaries-index fold (`inbox`, `listen`,
-    `briefing`, `needs-me`, `board`, `status`) lists the task dir once and unions in any doc written
-    since the last reconcile, so a directive delivered between heartbeats surfaces now, not a
-    reconcile-period later. It is bounded (`COORD_OVERLAY_CAP` reads, default 16; `COORD_OVERLAY_BUDGET`
-    time, default 10s) and **degrades the `inbox` source visibly** when capped, budget-breached, or a
-    listed doc is unreadable — capped-but-visible, never silent truncation. A fresh team (no index yet)
-    is unchanged.
+  - **A feed delta surfaces new docs THIS read.** On the healthy path, summaries-index folds combine
+    the aggregate with team-filtered `data-updates` changes and read only the changed task docs, so a
+    directive delivered between heartbeats surfaces now without relisting the task root. If the feed
+    or any changed-doc read is doubtful, the legacy freshness overlay lists the task dir once and
+    unions in docs written since the last reconcile. That fallback remains bounded
+    (`COORD_OVERLAY_CAP` reads, default 16; `COORD_OVERLAY_BUDGET` time, default 10s) and **degrades the
+    `inbox` source visibly** when capped, budget-breached, or a listed doc is unreadable —
+    capped-but-visible, never silent truncation. A fresh team (no index yet) is unchanged.
   - **Acks are folded change-driven, and reuse needs positive evidence.** Listing every ack dir every
     pass costs one op per dir (~280 on the live bus), so reconcile asks the store what changed
     (`/input/v1/file/recent_changes`) since the instant it last provably folded acks through — the ack
@@ -622,6 +761,20 @@ it (not on PyPI).
     **never trust it as complete**. `--json` is ONE array (dropped items + the optional
     degraded element), not JSON-Lines — see the `--json` purity doctrine above. coord-boss runs
     `threads fulcra --for ash --json` in its loop and owns the curation/push call.
+- **Blocked-on-operator doctrine — a harness approval-gate is a bus event
+  (operator order, 2026-07-23, after the W5 stall).** When work waits on an
+  operator/harness approval that only a human can grant (a "nod before you build",
+  a deploy sign-off, an entered credential, any approval you cannot self-serve),
+  the blocked agent does THREE things the same turn, not one: (1) immediately post
+  a **P1 BLOCKED-ON-OPERATOR** shard to coord-boss naming the EXACT approval and
+  the EXACT artifact it gates (PR #, slug, host) — so the block is a visible,
+  routable bus item, not a private wait; (2) **continue all non-blocked work** —
+  the block scopes to the gated artifact, never to the agent; idle-while-blocked
+  on one item when other work is ready is itself a failure; (3) **keep beating** —
+  a blocked agent is still live and must stay so. **Silence-while-blocked is a
+  protocol violation:** never let an operator approval turn into an invisible stall
+  (the failure this codifies). The operator's absence is never approval — surface
+  the block loudly and persistently, and take the other ready work meanwhile.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
   `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
   model that covers the work, and log the outcome after:

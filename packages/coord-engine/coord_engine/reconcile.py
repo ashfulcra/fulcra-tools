@@ -151,16 +151,23 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
     # of one beat — accepted, the engine owns those files.)
     derived = (f"/team/{team}/task/index.md", f"/team/{team}/task/log.md")
     try:
-        changes = updates_fn(period)
+        try:
+            changes = updates_fn(period, team=team)
+        except TypeError:
+            # Duck-typed transports from before the parsed/team-filtered feed
+            # contract (including mixed-version test/adapter transports).
+            changes = updates_fn(period)
         if changes is None:
             return False
         for c in changes:
             # Shape guard, fail-CLOSED: any entry we cannot positively parse is
             # doubt, and doubt means full pass — feed-shape drift must degrade
             # to full passes, never to false no-change evidence.
-            if not isinstance(c, dict) or not isinstance(c.get("full_name"), str):
+            if not isinstance(c, dict):
                 return False
-            name = c["full_name"]
+            name = c.get("path", c.get("full_name"))
+            if not isinstance(name, str):
+                return False
             if not name.strip():
                 return False
             name = "/" + name.lstrip("/")   # feed shape pins nothing; normalize

@@ -35,7 +35,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` |
 | Directives & messaging | `tell` · `broadcast` · `remind` · `respond` · `later` (backlog) · `intent` (spoken commitment) · `listen` (the engine-owned watcher) |
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
-| Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` |
+| Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
 | Review handshake | `review` (request/status) — obligation persists until the verdict file exists |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
@@ -89,8 +89,8 @@ disable a bound or make an op hang.
 | `COORD_LISTEN_HEAD_BUDGET` | `10` | seconds | Dedicated budget for caller-directed literal-agent and wildcard directives; shared tail work cannot spend it. |
 | `COORD_LISTEN_TAIL_BUDGET` | `20` | seconds | Shared aggregate budget for role routing and response/review history after the caller-directed head. |
 | `COORD_ROLE_FOLD_BUDGET` | `20` | seconds | Cumulative deadline for one role-resolution pass (`_held_roles_for_rows`), which `briefing`/`inbox`/`needs-me`/`listen` all run. Spent across the `roles/` listing, each role's doc + lease listing, and each lease shard read; a cut marks every unfinished candidate `unresolved` and emits `role-degraded`. |
-| `COORD_OVERLAY_BUDGET` | `10` | seconds | Time bound on the freshness overlay's fresh-doc reads (the cap bounds read COUNT; this bounds TIME). |
-| `COORD_OVERLAY_CAP` | `16` | count | Max fresh (unsummarized) task docs the overlay reads per surface-read before truncating (visibly). |
+| `COORD_OVERLAY_BUDGET` | `10` | seconds | Time bound on the listing-based freshness fallback's fresh-doc reads (the cap bounds read COUNT; this bounds TIME). Healthy folds use the team-filtered updates feed instead. |
+| `COORD_OVERLAY_CAP` | `16` | count | Max fresh (unsummarized) task docs the listing fallback reads per surface-read before truncating (visibly). |
 | `COORD_SUMMARY_TEXT_CAP` | `280` | chars | Per-field cap on `title`/`description` in a summaries row (ellipsis-marked). The index stays a *summary* — the full payload lives in the task doc; uncapped multi-KB directive payloads inflate `_coord/summaries.json` past what remote transports can read inside the fold budgets. |
 | `COORD_THREADS_FOLD_BUDGET` | `30` | seconds | Aggregate deadline for the `threads` dropped-work fold's per-candidate reads; breach emits a `threads-degraded` row. |
 | `COORD_THREADS_SILENCE_DAYS` | `3` | days | `threads` started-then-silent window (flag `--silence-days` wins). |
@@ -105,8 +105,16 @@ disable a bound or make an op hang.
 | `FULCRA_COORD_AGENT` | `coord-reconcile:<host>` | Agent identity — set it to the **role** you act as (`--from` overrides per-command). Legacy prefix; still canonical for identity. |
 | `FULCRA_COORD_HUMAN` | `human` | Operator handle for `--on-user` / `asks`. |
 | `COORD_ENGINE_STATE_DIR` | `~/.local/state/coord-engine` | Local state root (write-verify nonce cache, etc.). |
-| `COORD_LISTENER_STATE` | *(under the state dir)* | `listen` watcher's seen-ids state file. |
+| `COORD_LISTENER_STATE` | *(under the state dir)* | Local cache for the `listen` watcher's seen-ids state and inclusive updates-feed cursor. Durable authority lives at `team/<team>/_coord/agents/<agent>/listen-state.json`; missing/corrupt store state falls back to this cache. A degraded tick does not advance the cursor. |
 | `COORD_LOG_LEVEL` | `info` | Structured-log level to stderr (`debug`/`info`/`warn`/`error`). |
+
+`listen` and the aggregate-backed task surfaces are feed-first: one
+team-filtered `data-updates` call identifies changed task, response, and verdict
+shards, which are read directly. A missing/corrupt/old cursor, unavailable or
+malformed feed, or doubtful shard read falls back to the existing bounded
+listing path without consuming the cursor. Presence remains a bounded
+current-time evaluation on every briefing, so session dormancy can become
+`LAPSED` even when no shard bytes changed.
 
 ## Dev
 
