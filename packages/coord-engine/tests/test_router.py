@@ -729,7 +729,16 @@ def test_router_shadow_mode_persists_decisions_enqueues_nothing():
     assert f"urgent-1:{AGENT}" in cur["processed"]       # cursor still advances
     marks = [json.loads(c) for p, c in t.store.items()
              if p.startswith(RP + router.SHADOW_MARKS_SUBPATH)]
-    assert len(marks) == 1 and marks[0]["count"] == 1
+    assert len(marks) == 1 and marks[0]["slots"] == [NOW_ISO]
+
+
+def test_router_shadow_failed_pass_writes_no_duty_mark():
+    t = FlakyTransport()
+    _base(t)
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(shadow=True), t) == 1
+    assert not any(p.startswith(RP + router.SHADOW_MARKS_SUBPATH)
+                   for p in t.store)
 
 
 def test_router_shadow_arm_writes_marker_and_is_idempotent(capsys):
@@ -764,20 +773,18 @@ def _put_healthy_marks(t, start, hours):
     from datetime import timedelta
     for hour in range(hours):
         first = start + timedelta(hours=hour)
-        last = first + timedelta(minutes=59)
+        slots = [router.iso(first + timedelta(minutes=minute))
+                 for minute in range(60)]
         record = {
             "bucket": router.iso(first)[:13],
-            "first": router.iso(first),
-            "last": router.iso(last),
-            "count": 60,
+            "slots": slots,
         }
         t.put(RP + router.SHADOW_MARKS_SUBPATH
               + router.shadow_mark_bucket(first), json.dumps(record))
     end = start + timedelta(hours=hours)
     t.put(RP + router.SHADOW_MARKS_SUBPATH
           + router.shadow_mark_bucket(end), json.dumps({
-              "bucket": router.iso(end)[:13], "first": router.iso(end),
-              "last": router.iso(end), "count": 1}))
+              "bucket": router.iso(end)[:13], "slots": [router.iso(end)]}))
 
 
 def test_shadow_report_cli_happy_completed_task_passes(monkeypatch, capsys):
@@ -817,6 +824,31 @@ def test_shadow_report_cli_quiet_pass_marks_prove_uptime(monkeypatch, capsys):
     _put_healthy_marks(t, start, 48)
     assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
     assert json.loads(capsys.readouterr().out)["duty_cycle"]["uptime"] >= .95
+
+
+def test_shadow_report_cli_sparse_bursts_do_not_fabricate_uptime(
+    monkeypatch, capsys
+):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    for hour in range(48):
+        base = start + timedelta(hours=hour)
+        observed = list(range(10)) + [59]  # burst at both bounds, 49m unseen
+        t.put(RP + router.SHADOW_MARKS_SUBPATH
+              + router.shadow_mark_bucket(base), json.dumps({
+                  "bucket": router.iso(base)[:13],
+                  "slots": [router.iso(base + timedelta(minutes=m))
+                            for m in observed]}))
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "FAIL"
+    assert report["gates"]["duty_uptime"] is False
 
 
 def test_shadow_report_cli_feed_proves_deleted_task_existed(monkeypatch, capsys):

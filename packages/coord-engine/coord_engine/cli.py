@@ -4938,24 +4938,10 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         print("router: SHADOW pass — W7 read-only acceptance measurement; a "
               "decision is logged + persisted per directed item, nothing "
               "enqueued or executed", file=sys.stderr)
-        mark_path = (prefix + router.SHADOW_MARKS_SUBPATH
-                     + router.shadow_mark_bucket(now))
-        try:
-            raw_mark = transport.read(mark_path)
-            existing_mark = json.loads(raw_mark) if raw_mark else None
-        except (TransportError, ValueError) as e:
-            print(f"router: shadow mark {mark_path} is unreadable ({e}) — pass "
-                  "measurement UNKNOWN; refusing to overwrite",
-                  file=sys.stderr)
-            return 1
-        mark = router.shadow_mark_record(existing_mark, at=router.iso(now))
-        if not transport.write(mark_path, json.dumps(mark, sort_keys=True) + "\n"):
-            print("router: shadow pass-mark write failed — pass measurement "
-                  "UNKNOWN", file=sys.stderr)
-            return 1
 
     agents_cfg, _executors, cfg_errors = router.validate_config(
         transport.read(prefix + "config.json"))
+    measurement_failed = bool(shadow and cfg_errors)
     if "_config" in cfg_errors:
         print(f"router: {cfg_errors['_config']} — every agent reads "
               f"unconfigured (observe-only) until config.json is fixed",
@@ -4976,6 +4962,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         # into decide() for the whole pass). Skip the refold, stay fail-visible.
         dl_entries = []
         delivered_listing_ok = False
+        measurement_failed = bool(shadow)
         print(f"router: delivered/ listing degraded ({e}) — skipping "
               f"delivered.json refold this pass (the populated view is "
               f"preserved; it regenerates next pass)", file=sys.stderr)
@@ -5172,6 +5159,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                         decided_at=router.iso(now)), sort_keys=True) + "\n"):
                 print(f"router: shadow decision write failed for {key} "
                       f"(measurement gap, non-fatal)", file=sys.stderr)
+                measurement_failed = True
         elif not observe and decision in ("interrupt", "defer", "checkin"):
             cfg = agents_cfg[assignee]
             entry = {
@@ -5218,6 +5206,32 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
               "rescans from the prior cursor (ledger no-ops make the replay "
               "safe)", file=sys.stderr)
         return 1
+
+    # A duty sample certifies a COMPLETED shadow measurement pass, never merely
+    # that the resident process woke. Persist the exact observed minute slot
+    # only after all decision/population work and the cursor checkpoint landed.
+    if shadow:
+        if measurement_failed:
+            pass_failed = True
+        else:
+            mark_path = (prefix + router.SHADOW_MARKS_SUBPATH
+                         + router.shadow_mark_bucket(now))
+            try:
+                raw_mark = transport.read(mark_path)
+                existing_mark = json.loads(raw_mark) if raw_mark else None
+            except (TransportError, ValueError) as e:
+                print(f"router: shadow mark {mark_path} is unreadable ({e}) — "
+                      "pass measurement UNKNOWN; refusing to overwrite",
+                      file=sys.stderr)
+                pass_failed = True
+            else:
+                mark = router.shadow_mark_record(
+                    existing_mark, at=router.iso(now))
+                if not transport.write(
+                        mark_path, json.dumps(mark, sort_keys=True) + "\n"):
+                    print("router: shadow pass-mark write failed — pass "
+                          "measurement UNKNOWN", file=sys.stderr)
+                    pass_failed = True
 
     if args.json:
         result = {"observe_only": observe, "scanned": len(candidates),
@@ -5478,7 +5492,7 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
     prefix = router.router_prefix(args.team)
     unknown: list[str] = []
 
-    def _rows(subpath: str, *, timestamp: str,
+    def _rows(subpath: str, *, timestamp: Optional[str],
               required: tuple[str, ...]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         try:
@@ -5498,7 +5512,8 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
                 continue
             if (isinstance(doc, dict)
                     and all(doc.get(field) is not None for field in required)
-                    and router.parse_iso(doc.get(timestamp)) is not None):
+                    and (timestamp is None
+                         or router.parse_iso(doc.get(timestamp)) is not None)):
                 rows.append(doc)
             else:
                 unknown.append(f"{subpath}{name} malformed required fields")
@@ -5536,24 +5551,19 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
                 or row.get("path") not in router.SHADOW_EVIDENCE_PATHS):
             unknown.append("shadow-evidence contains malformed record")
     mark_rows = _rows(
-        router.SHADOW_MARKS_SUBPATH, timestamp="last",
-        required=("bucket", "first", "last", "count"))
+        router.SHADOW_MARKS_SUBPATH, timestamp=None,
+        required=("bucket", "slots"))
     pass_marks: list[str] = []
     for mark in mark_rows:
-        first = router.parse_iso(mark.get("first"))
-        last = router.parse_iso(mark.get("last"))
-        count = mark.get("count")
-        if (first is None or last is None or first > last
-                or not isinstance(count, int) or count < 1 or count > 10000):
+        slots = mark.get("slots")
+        if (not isinstance(mark.get("bucket"), str)
+                or not isinstance(slots, list) or len(slots) > 60
+                or any(not isinstance(slot, str)
+                       or router.parse_iso(slot) is None for slot in slots)):
             unknown.append(f"{router.SHADOW_MARKS_SUBPATH}"
-                           f"{mark.get('bucket')} has invalid bounds/count")
+                           f"{mark.get('bucket')} has invalid observed slots")
             continue
-        if count == 1:
-            pass_marks.append(router.iso(last))
-        else:
-            step = (last - first) / (count - 1)
-            pass_marks.extend(router.iso(first + step * i)
-                              for i in range(count))
+        pass_marks.extend(slots)
     if not mark_rows:
         unknown.append("shadow-marks population missing")
 

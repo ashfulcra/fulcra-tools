@@ -475,11 +475,12 @@ def shadow_mark_bucket(at: datetime) -> str:
 
 
 def shadow_mark_record(existing: Any, *, at: str) -> dict[str, Any]:
-    """Idempotently advance one hourly pass bucket."""
+    """Record the actual observed minute slot in one bounded hourly bucket."""
     doc = existing if isinstance(existing, dict) else {}
-    first = doc.get("first") if parse_iso(doc.get("first")) else at
-    count = int(doc.get("count", 0)) if str(doc.get("count", 0)).isdigit() else 0
-    return {"bucket": at[:13], "first": first, "last": at, "count": count + 1}
+    slots = doc.get("slots") if isinstance(doc.get("slots"), list) else []
+    slot = at[:16] + ":00Z"
+    observed = sorted({s for s in slots if parse_iso(s) is not None} | {slot})
+    return {"bucket": at[:13], "slots": observed}
 
 
 def shadow_decision_record(*, key: str, agent: str, decision: str, reason: str,
