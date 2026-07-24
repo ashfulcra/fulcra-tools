@@ -673,6 +673,22 @@ it (not on PyPI).
     anchor is behind `generated_at`, so a quiet beat can't skip the fold that still owes a read. A forced full fold every `COORD_ACKS_FULL_EVERY`
     passes (default 72, ~daily on a 20-min heartbeat) bounds anything the query could miss, and carries the
     orphan-shard GC.
+  - **Reconcile's own pass is a feed delta, not a directory scan (E1).** A reconcile pass consumes
+    `data-updates` since a durable cursor (`reconcile_cursor` in summaries.json — watermark +
+    processed ledger + an incremental-streak counter, the W4 pattern), reads ONLY the changed task
+    shards, and updates the rows in place — so "fresh" means "feed entries since the last pass"
+    (0–a handful), not "every doc the index hasn't met". The full `list_dir(task/)` scan stays as
+    (a) the fail-closed fallback on ANY cursor/feed doubt (no cursor, corrupt cursor, feed
+    unavailable, a feed entry that won't positively parse, a changed shard that won't read) and
+    (b) a scheduled drift self-check: every `COORD_RECONCILE_FULL_EVERY` passes (default 72), or once
+    the aggregate crosses `MAX_FAST_PATH_HOURS`, a full scan runs and its rows are compared to the
+    incremental-maintained view — a divergence is logged LOUD and rebuilt from the full scan, never
+    silently absorbed. An incremental row is stamped byte-identically to a full-scan row (size from
+    the shard's UTF-8 length, mtime from the feed's `uploaded_at` reformatted to the store's
+    minute-granular listing shape), so the fallback stays byte-identical to today. **Ship-gate: a new
+    reconcile fast/incremental path takes the full scan on ANY doubt (never a false "nothing changed"),
+    keeps a periodic full-scan drift check that rebuilds loudly on divergence, and its cursor key is
+    cut from `build_aggregate`'s passthrough and recomputed in full every pass.**
   - **summaries.json is one shared doc written by many hosts at many versions — a top-level key added
     in version N is wiped by any host older than N.** The whole fleet reconciles ONE index, and an older
     host rebuilds the document from the key set it knows and writes it over everyone else's. This is not
