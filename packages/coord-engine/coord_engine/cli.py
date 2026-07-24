@@ -77,7 +77,7 @@ def cmd_wake_consume(args: argparse.Namespace, transport: Any) -> int:
         print(result["context"])
     for error in result["errors"]:
         print(f"queued-wake degraded: {error}", file=sys.stderr)
-    return 0
+    return 1 if result["errors"] else 0
 
 
 def _human() -> str:
@@ -5135,11 +5135,14 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         if (observe or shadow) and decision in ("interrupt", "defer", "checkin"):
             suffix = (" [shadow: not enqueued]" if shadow
                       else " [observe-only: not enqueued]")
-        print(f"decision {assignee} {shard_id} -> {decision} ({reason}){suffix}")
+        detail_stream = sys.stderr if args.json else sys.stdout
+        print(f"decision {assignee} {shard_id} -> {decision} ({reason}){suffix}",
+              file=detail_stream)
         if decision == "unroutable":
             # fail-visible lane: never a silent drop
             print(f"router: wake unroutable for {assignee} — {reason}; item "
-                  f"{shard_id} batches to the digest until config is fixed")
+                  f"{shard_id} batches to the digest until config is fixed",
+                  file=detail_stream)
         if shadow:
             # W7: persist the decision for EVERY directed item (the report's
             # comparison population) so it can be correlated with delivery-probe
@@ -5202,9 +5205,13 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         return 1
 
     if args.json:
-        jsonutil.print_json({"observe_only": observe, "scanned": len(candidates),
-                             "enqueued": enqueued, "decisions": counts,
-                             "pass_failed": pass_failed})
+        result = {"observe_only": observe, "scanned": len(candidates),
+                  "enqueued": enqueued, "decisions": counts,
+                  "pass_failed": pass_failed}
+        if getattr(args, "_defer_json", False):
+            args._router_pass_result = result
+        else:
+            jsonutil.print_json(result)
         return 1 if pass_failed else 0
     summary = ", ".join(f"{d}={counts[d]}" for d in router.DECISIONS if counts[d])
     print(f"router pass: {len(candidates)} candidate(s), {enqueued} enqueued"
@@ -5231,7 +5238,7 @@ def _default_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
 
 
 def _router_execute_cloud(args: argparse.Namespace, transport: Any,
-                          invoke: Any = None) -> "dict[str, int]":
+                          invoke: Any = None, *, emit: bool = True) -> "dict[str, int]":
     """Drain the decision-plane-owned queue entries (cloud-reachable adapters):
     claim → invoke → delivered/dead-letter with BOUNDED cross-pass retry. Only
     `executor == decision-plane` entries are touched; host-local entries are
@@ -5350,7 +5357,7 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
                 counts["retried"] += 1
 
     active = {k: v for k, v in counts.items() if v}
-    if active:
+    if active and emit:
         print("router execute: "
               + ", ".join(f"{k}={v}" for k, v in active.items()))
     return counts
@@ -5360,9 +5367,22 @@ def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
     # W7 shadow mode is READ-ONLY: log + persist decisions, never enqueue OR
     # execute (the pass suppresses the enqueue; the executor is skipped here).
     shadow = bool(getattr(args, "shadow", False))
+    json_mode = bool(getattr(args, "json", False))
+    if json_mode and not getattr(args, "once", False):
+        print("router run: --json requires --once", file=sys.stderr)
+        return 2
+    if json_mode:
+        args._defer_json = True
     rc = _router_pass(args, transport)
+    execute_counts = None
     if not shadow:
-        _router_execute_cloud(args, transport)
+        execute_counts = _router_execute_cloud(
+            args, transport, emit=not json_mode)
+    if json_mode:
+        jsonutil.print_json({
+            "pass": getattr(args, "_router_pass_result", None),
+            "execute": execute_counts,
+        })
     if getattr(args, "once", False):
         return rc
     while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
@@ -5438,6 +5458,93 @@ def cmd_router_shadow_status(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
+    """Fold the armed W7 window into one fail-closed acceptance report."""
+    prefix = router.router_prefix(args.team)
+    unknown: list[str] = []
+
+    def _rows(subpath: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        try:
+            entries = transport.list_dir(prefix + subpath)
+        except TransportError as e:
+            unknown.append(f"{subpath} listing unreadable: {e}")
+            return rows
+        for entry in entries:
+            name = entry.get("name") or ""
+            if entry.get("is_dir") or not name.endswith(".json"):
+                continue
+            try:
+                raw = transport.read(prefix + subpath + name)
+                doc = json.loads(raw) if raw else None
+            except (TransportError, ValueError) as e:
+                unknown.append(f"{subpath}{name} unreadable: {e}")
+                continue
+            if isinstance(doc, dict):
+                rows.append(doc)
+            else:
+                unknown.append(f"{subpath}{name} is not an object")
+        return rows
+
+    try:
+        raw = transport.read(prefix + "shadow-window.json")
+        window = json.loads(raw) if raw else None
+    except (TransportError, ValueError) as e:
+        window = None
+        unknown.append(f"shadow-window unreadable: {e}")
+    start = window.get("started_at") if isinstance(window, dict) else None
+    if router.parse_iso(start) is None:
+        unknown.append("shadow-window marker missing or invalid")
+
+    decisions = _rows(router.SHADOW_DECISIONS_SUBPATH)
+    evidence = _rows(router.SHADOW_EVIDENCE_SUBPATH)
+    store_keys: set[str] = set()
+    try:
+        task_entries = transport.list_dir(f"team/{args.team}/task/")
+    except TransportError as e:
+        task_entries = []
+        unknown.append(f"task population unreadable: {e}")
+    for entry in task_entries:
+        name = entry.get("name") or ""
+        if entry.get("is_dir") or not name.endswith(".md"):
+            continue
+        try:
+            fm = okf.parse_frontmatter(
+                transport.read(f"team/{args.team}/task/{name}"))
+        except TransportError as e:
+            unknown.append(f"task/{name} unreadable: {e}")
+            continue
+        assignee = str((fm or {}).get("assignee") or "").strip()
+        status = str((fm or {}).get("status") or "").strip().lower()
+        if assignee and assignee != "*" and status not in router.TERMINAL_STATUSES:
+            store_keys.add(router.idempotency_key(name[:-3], assignee))
+
+    end = router.iso(_now())
+    if unknown:
+        report: dict[str, Any] = {
+            "pass": False, "verdict": "UNKNOWN", "unknown": unknown,
+            "counts": {}, "window": {"start": start, "end": end},
+        }
+        rc = 1
+    else:
+        report = router.shadow_report(
+            decisions, evidence, store_keys=store_keys,
+            pass_marks=[d["decided_at"] for d in decisions
+                        if isinstance(d.get("decided_at"), str)],
+            window_start=start, window_end=end)
+        report["verdict"] = "PASS" if report["pass"] else "FAIL"
+        rc = 0 if report["pass"] else 1
+    if getattr(args, "json", False):
+        jsonutil.print_json(report)
+    else:
+        counts = ", ".join(f"{k}={v}" for k, v in sorted(
+            report.get("counts", {}).items())) or "none"
+        print(f"shadow report: {report['verdict']} — {counts}")
+        for reason in report.get("unknown", []):
+            print(f"  UNKNOWN: {reason}", file=sys.stderr)
+    return rc
+
+
 # --- W5.5: thin host executor -----------------------------------------------
 #
 # The SOLE executor for host-local adapters (plan §W5/W5.5). Policy-free and
@@ -5492,7 +5599,8 @@ def _claim_owner(executor_id: str) -> str:
 
 def _router_execute_host(args: argparse.Namespace, transport: Any,
                          invoke: Any = None,
-                         claim_owner: Optional[str] = None) -> "dict[str, int]":
+                         claim_owner: Optional[str] = None, *,
+                         emit: bool = True) -> "dict[str, int]":
     """Drain the queue entries resolved to THIS host's executor id: select →
     idempotency-skip → skip-fresh-foreign-claim → CLAIM → invoke →
     delivered/dead-letter with BOUNDED cross-pass retry. Only
@@ -5706,7 +5814,7 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
                 counts["retried"] += 1
 
     active = {k: v for k, v in counts.items() if v}
-    if active:
+    if active and emit:
         print(f"router execute [{executor_id}]: "
               + ", ".join(f"{k}={v}" for k, v in active.items())
               + (" [dry-run]" if dry_run else ""))
@@ -5714,7 +5822,15 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
 
 
 def cmd_router_execute(args: argparse.Namespace, transport: Any) -> int:
-    counts = _router_execute_host(args, transport)
+    json_mode = bool(getattr(args, "json", False))
+    if json_mode and not (
+            getattr(args, "once", False) or getattr(args, "dry_run", False)):
+        print("router execute: --json requires --once or --dry-run",
+              file=sys.stderr)
+        return 2
+    counts = _router_execute_host(args, transport, emit=not json_mode)
+    if json_mode:
+        jsonutil.print_json(counts)
     rc = 1 if counts.get("degraded") else 0
     if getattr(args, "once", False) or getattr(args, "dry_run", False):
         return rc
@@ -6679,6 +6795,12 @@ def build_parser() -> argparse.ArgumentParser:
     roshs = roshsub.add_parser("status", help="report the shadow-window marker (armed?, started_at, elapsed vs min_hours)")
     roshs.add_argument("team")
     roshs.set_defaults(func=cmd_router_shadow_status)
+    roshr = roshsub.add_parser(
+        "report",
+        help="fold the armed W7 window into a fail-closed acceptance verdict")
+    roshr.add_argument("team")
+    add_json(roshr)
+    roshr.set_defaults(func=cmd_router_shadow_report)
     roe = rosub.add_parser("execute", help="W5.5 thin host executor: fire host-local adapters for queue entries resolved to THIS host (policy-free; --once for one pass)")
     roe.add_argument("team")
     roe.add_argument("--host", default=None, help="executor id to drain (default: this host's own id)")

@@ -265,6 +265,21 @@ def test_queue_listing_raises_is_degraded_not_clean_zero(capsys):
     assert cli.cmd_router_execute(_args(), t) == 1
 
 
+def test_execute_json_is_one_document(capsys):
+    t = FakeTransport()
+    _hbase(t)
+    assert cli.cmd_router_execute(_args(json=True, dry_run=True), t) == 0
+    captured = capsys.readouterr()
+    assert isinstance(json.loads(captured.out), dict)
+    assert captured.out.count("\n") == 1
+
+
+def test_execute_rejects_json_resident_mode(capsys):
+    args = _args(json=True, once=False, dry_run=False)
+    assert cli.cmd_router_execute(args, FakeTransport()) == 2
+    assert capsys.readouterr().out == ""
+
+
 def test_delivered_listing_raises_is_degraded(capsys):
     t = FlakyTransport()
     _hbase(t)
