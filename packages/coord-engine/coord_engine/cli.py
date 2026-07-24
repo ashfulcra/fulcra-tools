@@ -3757,7 +3757,10 @@ def _shadow_window_active(transport: Any, team: str) -> bool:
         doc = json.loads(raw)
     except ValueError:
         return False
-    return isinstance(doc, dict) and bool(doc.get("started_at"))
+    # codex #470 P2: a PARSEABLE started_at, not mere truthiness — a malformed
+    # marker ({"started_at":"bogus"}) is doubt ⇒ off, matching this fn's own
+    # contract and `shadow status`.
+    return isinstance(doc, dict) and router.parse_iso(doc.get("started_at")) is not None
 
 
 def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any],
@@ -5183,21 +5186,22 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
         cfg = agents_cfg.get(entry.get("agent")) or {}
         qpath = prefix + "queue/" + name
 
-        def _terminate(sub: str, record: dict, tally: str) -> None:
+        def _terminate(sub: str, record: dict, tally: str) -> bool:
             """Write a delivered/dead-letter record, then remove the queue entry
             ONLY if that write landed. A failed record write must NOT be followed
             by the delete — else the wake is lost (same class as the W4 P1). Left
             queued, it retries next pass (at-least-once, safe by the content
-            rule)."""
+            rule). Returns True iff the record landed and the entry was cleared."""
             if transport.write(prefix + sub + router.record_filename(key),
                                json.dumps(record, sort_keys=True) + "\n"):
                 transport.delete(qpath)
                 counts[tally] += 1
-            else:
-                print(f"router execute: {sub.rstrip('/')} record write failed "
-                      f"for {key} — entry stays queued, retries next pass",
-                      file=sys.stderr)
-                counts["retried"] += 1
+                return True
+            print(f"router execute: {sub.rstrip('/')} record write failed "
+                  f"for {key} — entry stays queued, retries next pass",
+                  file=sys.stderr)
+            counts["retried"] += 1
+            return False
 
         try:
             inv = router.adapter_invocation(entry, cfg.get("adapter_args"))
@@ -5211,9 +5215,27 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
 
         status, detail = invoke(inv)
         if status == "delivered":
-            _terminate("delivered/",
-                       router.delivery_record(entry, router.iso(now)),
-                       "delivered")
+            if _terminate("delivered/",
+                          router.delivery_record(entry, router.iso(now)),
+                          "delivered"):
+                # W7 delivery probe (path=adapter): a GENUINE cloud-adapter
+                # delivery (record landed). While a window is armed, record
+                # evidence — guarded so a probe failure never affects execution.
+                # Quiet during a shadow window (the shadow runner executes
+                # nothing); meaningful when a live router runs during a window.
+                try:
+                    if _shadow_window_active(transport, team):
+                        transport.write(
+                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            + router.shadow_evidence_filename(
+                                str(entry.get("agent")), key),
+                            json.dumps(router.shadow_evidence_record(
+                                key=key, agent=str(entry.get("agent")),
+                                delivered_at=router.iso(now), path="adapter"),
+                                sort_keys=True) + "\n")
+                except Exception as e:
+                    print(f"router execute: W7 adapter probe skipped "
+                          f"({type(e).__name__}: {e})", file=sys.stderr)
         elif status == "unconfigured":
             # visibly queued, not a burned retry — awaits a wired host client
             counts["unconfigured"] += 1
@@ -5273,9 +5295,18 @@ def cmd_router_shadow_arm(args: argparse.Namespace, transport: Any) -> int:
                 return 0
         except ValueError:
             pass  # malformed marker -> re-arm cleanly
+    mh = getattr(args, "min_hours", 48)
+    min_hours = 48 if mh is None else int(mh)  # NOT `or 48` — that maps 0 -> 48
+    # codex #470 P1: the normative window is >=48h — refuse to arm a shorter (or
+    # negative) one that `shadow status` would then treat as the acceptance
+    # minimum, letting the gate pass early.
+    if min_hours < 48:
+        print(f"shadow arm: --min-hours {min_hours} is below the normative "
+              f"minimum of 48 — refusing to arm a window that could pass "
+              f"acceptance early", file=sys.stderr)
+        return 1
     started_at = router.iso(_now())
-    doc = {"started_at": started_at,
-           "min_hours": int(getattr(args, "min_hours", 48) or 48),
+    doc = {"started_at": started_at, "min_hours": min_hours,
            "poll_seconds": router.ROUTER_POLL_SECONDS}
     if not transport.write(path, json.dumps(doc, sort_keys=True) + "\n"):
         print("shadow arm: marker write failed — window NOT armed", file=sys.stderr)

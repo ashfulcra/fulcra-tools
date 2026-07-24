@@ -456,7 +456,11 @@ def dead_letter_record(entry: dict[str, Any], *, attempts: int,
 
 SHADOW_EVIDENCE_SUBPATH = "shadow-evidence/"
 
-#: The live-delivery mechanisms a probe shard may attribute a wake to.
+#: The live-delivery mechanisms a probe shard may attribute a wake to. WIRED:
+#: `listener` (the listen tick) and `adapter` (cloud-adapter execution).
+#: `watchdog` is RESERVED for the fleet-watchdog wake path and is instrumented
+#: when/where that path delivers — no component writes it yet, so no delivery is
+#: mis-attributed to it.
 SHADOW_EVIDENCE_PATHS = frozenset({"listener", "adapter", "watchdog"})
 
 

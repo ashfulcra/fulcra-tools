@@ -779,6 +779,52 @@ def test_listener_probe_silent_when_window_not_armed(monkeypatch):
     assert _shadow_evidence(t) == {}
 
 
+def test_adapter_probe_records_evidence_on_delivery_when_armed():
+    """codex #470 P1: a genuine cloud-adapter delivery, while a window is armed,
+    writes path=adapter evidence."""
+    t = FakeTransport()
+    _base(t)
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    _seed_queue(t, _q_entry(source="s-1"))
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    ev = _shadow_evidence(t)
+    assert len(ev) == 1
+    (s,) = ev.values()
+    assert (s["path"], s["key"]) == ("adapter", f"s-1:{AGENT}")
+
+
+def test_adapter_probe_silent_when_window_not_armed():
+    t = FakeTransport()
+    _base(t)
+    _seed_queue(t, _q_entry(source="s-1"))
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert _shadow_evidence(t) == {}
+
+
+def test_shadow_arm_rejects_sub_48_hour_windows(capsys):
+    """codex #470 P1: the normative window is >=48h — 47/0/negative are refused,
+    48 is the accepted boundary."""
+    t = FakeTransport()
+    for bad in (47, 0, -1):
+        assert cli.cmd_router_shadow_arm(_args(min_hours=bad), t) == 1
+    assert RP + "shadow-window.json" not in t.store       # nothing armed
+    assert cli.cmd_router_shadow_arm(_args(min_hours=48), t) == 0
+    assert json.loads(t.store[RP + "shadow-window.json"])["min_hours"] == 48
+
+
+def test_malformed_started_at_does_not_activate_probes(monkeypatch):
+    """codex #470 P2: a marker with an unparseable started_at is doubt ⇒ off."""
+    t = FakeTransport()
+    t.put(RP + "shadow-window.json", json.dumps({"started_at": "bogus"}))
+    ev = {"type": "directive", "slug": "urgent-1", "owner": "b", "title": "x"}
+    monkeypatch.setattr(cli, "_listen_tick", lambda *a, **k: ([ev], {}))
+    cli._run_listen_tick(t, TEAM, AGENT, _listen_state(),
+                         json_mode=False, verbose=False)
+    assert _shadow_evidence(t) == {}
+    assert cli.cmd_router_shadow_status(_args(), t) == 1   # status agrees: invalid
+
+
 # --- E3: router feed-first candidate source (addendum §3.3) -----------------
 
 def _uploaded(name, at):
