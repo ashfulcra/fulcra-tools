@@ -1118,6 +1118,27 @@ def _settled_marker_path(team: str, slug: str) -> str:
     return _verdicts_prefix(team, slug) + SETTLED_MARKER
 
 
+def _clear_settled_marker(transport: Any, team: str, slug: str) -> bool:
+    """Clear a prior round's fold cache, failing closed when that cannot be proven.
+
+    A head advance must become visible to ``needs-me`` before reviewers are
+    notified. Listings are only used to distinguish a confirmed empty prefix from
+    a marker that needs deletion; a positive direct read catches a marker omitted
+    by an eventually-consistent listing. A failed delete is never treated as
+    absence.
+    """
+    prefix = _verdicts_prefix(team, slug)
+    marker_path = _settled_marker_path(team, slug)
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError:
+        return False
+    listed = any((entry.get("name") or "") == SETTLED_MARKER for entry in entries)
+    if not listed and transport.read(marker_path) is None:
+        return True
+    return bool(hasattr(transport, "delete") and transport.delete(marker_path))
+
+
 def _review_fold_budget() -> float:
     """Aggregate deadline for `_pending_reviews_for`, seconds. Env
     ``COORD_REVIEW_FOLD_BUDGET`` (see the DEFAULT_REVIEW_FOLD_BUDGET rationale)."""
@@ -2323,6 +2344,11 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
             # SAME PR slug + requester + required set, NEW exact head: advance the
             # single durable review to an append-only head-keyed round. Prior
             # verdict files remain in place and the tally ignores them.
+            if not _clear_settled_marker(transport, team, slug):
+                print("review request cannot clear the prior settled marker — "
+                      "active-head obligations may remain hidden; retry",
+                      file=sys.stderr)
+                return 1
             try:
                 prior_round = max(1, int(existing_fm.get("round") or 1))
             except (TypeError, ValueError):
@@ -2341,7 +2367,6 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
                 print("review request head advance write failed (transport)",
                       file=sys.stderr)
                 return 1
-            transport.delete(_settled_marker_path(team, slug))
             delivered, failed = _deliver_all_review_directives(
                 transport, team, slug, required, owner=owner, of=args.of,
                 head=requested_head)
@@ -2361,7 +2386,10 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         # — hash-path dedup re-verifies the ones that landed (rc 0 "already
         # delivered") and delivers the ones a prior partial failure dropped. This
         # is what makes a partial-delivery retry CONVERGE instead of dying here.
-        transport.delete(_settled_marker_path(team, slug))
+        if not _clear_settled_marker(transport, team, slug):
+            print("review request cannot clear the settled marker — active-head "
+                  "obligations may remain hidden; retry", file=sys.stderr)
+            return 1
         delivered, failed = _deliver_all_review_directives(
             transport, team, slug, required, owner=owner, of=args.of,
             head=existing_head)

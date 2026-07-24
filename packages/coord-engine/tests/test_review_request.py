@@ -830,6 +830,54 @@ def test_new_head_clears_settled_round_and_returns_to_pending_fold(capsys):
     )
 
 
+def test_new_head_fails_loud_until_settled_marker_delete_recovers(capsys):
+    class MarkerDeleteFailsOnce(FakeTransport):
+        fail_marker_delete = True
+
+        def delete(self, path):
+            if self.fail_marker_delete and path.endswith("/verdicts/.settled"):
+                return False
+            return super().delete(path)
+
+    t = MarkerDeleteFailsOnce()
+    base = ["review", "request", "r", "pr-86", "--of", "https://example/pr/86",
+            "--reviewer", "alice", "--from", "requester"]
+    assert cli.main([*base, "--head", HEAD_A], transport=t) == 0
+    t.put(_head_verdict_path("pr-86", HEAD_A), _head_verdict(HEAD_A))
+    capsys.readouterr()
+    assert not cli._pending_reviews_for(t, "r", "alice")
+    marker = "team/r/review/pr-86/verdicts/.settled"
+    assert marker in t.store
+
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "settled marker" in cap.err and "retry" in cap.err
+    assert marker in t.store
+    assert okf.parse_frontmatter(t.read("team/r/review/pr-86.md"))["head"] == HEAD_A
+    assert not any(
+        HEAD_B in content
+        for path, content in t.store.items()
+        if path.startswith("team/r/task/")
+    ), "reviewers must not be notified while the pending fold still skips the round"
+
+    # The failed cache clear leaves the old round intact. Retrying the new head
+    # clears the marker first, then advances and delivers the missing directive.
+    t.fail_marker_delete = False
+    assert cli.main([*base, "--head", HEAD_B], transport=t) == 0
+    capsys.readouterr()
+    assert marker not in t.store
+    assert any(
+        HEAD_B in content
+        for path, content in t.store.items()
+        if path.startswith("team/r/task/")
+    )
+    pending = cli._pending_reviews_for(t, "r", "alice")
+    assert any(
+        row.get("type") == "review-pending" and row.get("name") == "pr-86"
+        for row in pending
+    )
+
+
 def test_current_head_requires_matching_head_in_verdict_frontmatter(capsys):
     t = FakeTransport()
     cli.main(
