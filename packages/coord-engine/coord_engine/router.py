@@ -466,6 +466,21 @@ def shadow_evidence_record(*, key: str, agent: str, delivered_at: str,
 
 
 SHADOW_DECISIONS_SUBPATH = "shadow-decisions/"
+SHADOW_MARKS_SUBPATH = "shadow-marks/"
+
+
+def shadow_mark_bucket(at: datetime) -> str:
+    """Hourly bounded bucket filename for resident shadow-pass heartbeats."""
+    return at.astimezone(timezone.utc).strftime("%Y%m%dT%H.json")
+
+
+def shadow_mark_record(existing: Any, *, at: str) -> dict[str, Any]:
+    """Record the actual observed minute slot in one bounded hourly bucket."""
+    doc = existing if isinstance(existing, dict) else {}
+    slots = doc.get("slots") if isinstance(doc.get("slots"), list) else []
+    slot = at[:16] + ":00Z"
+    observed = sorted({s for s in slots if parse_iso(s) is not None} | {slot})
+    return {"bucket": at[:13], "slots": observed}
 
 
 def shadow_decision_record(*, key: str, agent: str, decision: str, reason: str,
