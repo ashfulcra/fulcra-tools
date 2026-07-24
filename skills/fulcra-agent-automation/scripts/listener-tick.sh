@@ -126,9 +126,17 @@ trap 'rm -f "$ERR_FILE"' EXIT
 RC=0
 OUT="$(coord-engine listen "$TEAM" --agent "$AGENT" --once 2>"$ERR_FILE")" || RC=$?
 ERR="$(cat "$ERR_FILE")"
-[ -z "$ERR" ] || printf '%s\n' "$ERR" >&2
-if [[ "$RC" -ne 0 && -z "$ERR" ]]; then
+DEGRADATION_PULSE=0
+if [[ -n "$ERR" ]]; then
+  printf '%s\n' "$ERR" >&2
+  DEGRADATION_PULSE=1
+elif [[ "$RC" -ne 0 && "$RC" -ne 3 ]]; then
+  # Exit 3 is the engine's persistent-degradation state. It deliberately emits
+  # stderr only for a new source pulse, so an empty-stderr 3 must remain quiet
+  # while still driving retry backoff. Other silent failures are unexpected and
+  # need a synthetic fail-visible pulse.
   printf 'LISTEN DEGRADED: engine exited %s (no stderr)\n' "$RC" >&2
+  DEGRADATION_PULSE=1
 fi
 NEW="$(printf '%s\n' "$OUT" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
 DEGRADED=0
@@ -188,7 +196,7 @@ fi
 if [[ "$NEW" -eq 0 && "$PENDING_WAKE_DUE" -eq 1 && -n "$PENDING_EVENT_REFS" ]]; then
   EVENT_REFS="$PENDING_EVENT_REFS"
 fi
-if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 ||
+if [[ "$NEW" -gt 0 || "$DEGRADATION_PULSE" -eq 1 ||
       ( "$PENDING_WAKE_DUE" -eq 1 && "$#" -gt 0 ) ]]; then
   if [[ "$NEW" -gt 0 ]]; then
     MSG="coord: ${NEW} new event(s) for ${AGENT} in team/${TEAM}"
@@ -198,7 +206,7 @@ if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 ||
     MSG="coord: listener degraded for ${AGENT} in team/${TEAM}"
   fi
   echo "$(date -u +%FT%TZ) $MSG"
-  if [[ "$NEW" -gt 0 || "$DEGRADED" -eq 1 ]] && command -v osascript >/dev/null 2>&1; then
+  if [[ "$NEW" -gt 0 || "$DEGRADATION_PULSE" -eq 1 ]] && command -v osascript >/dev/null 2>&1; then
     # display only; TEAM/AGENT are validated by the installer, but escape quotes anyway
     SAFE_MSG="${MSG//\"/}"
     osascript -e "display notification \"${SAFE_MSG}\" with title \"coord inbox\"" || true

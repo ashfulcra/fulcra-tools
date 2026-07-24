@@ -277,7 +277,10 @@ it (not on PyPI).
   healthy quiet pass; `COORD_LISTENER_VERBOSE=1` is diagnostics only. Never
   suppress `LISTEN DEGRADED`: degradation is actionable, does not clear the
   queue, and the awakened session must apply the targeted fallback before it
-  reports quiet. Host listeners should use the bundled adaptive cadence: poll
+  reports quiet. The engine emits that human-facing degradation pulse once per
+  source streak; a later exit 3 without stderr means the same degradation is
+  continuing, so the scheduled wrapper advances backoff without logging,
+  notifying, or waking again. Host listeners should use the bundled adaptive cadence: poll
   frequently while events are arriving and through a configurable hot tail,
   then back off locally to a longer idle interval. A skipped tick must not call
   the bus or a model; without source-side push, idle cadence is maximum pickup
