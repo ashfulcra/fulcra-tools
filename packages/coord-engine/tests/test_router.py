@@ -659,6 +659,37 @@ def test_record_filename_deterministic_and_safe_for_colon_agent_ids():
     assert router.record_filename(key) != router.record_filename(key + "x")
 
 
+# --- W7: shadow-mode delivery-probe evidence primitive ----------------------
+
+def test_shadow_evidence_record_is_a_keyed_delivery_probe():
+    key = router.idempotency_key("s-1", AGENT)
+    rec = router.shadow_evidence_record(
+        key=key, agent=AGENT, delivered_at=NOW_ISO, path="listener")
+    assert rec == {"key": key, "agent": AGENT,
+                   "delivered_at": NOW_ISO, "path": "listener"}
+
+
+def test_shadow_evidence_record_rejects_unknown_path():
+    for good in ("listener", "adapter", "watchdog"):
+        router.shadow_evidence_record(
+            key="k", agent=AGENT, delivered_at=NOW_ISO, path=good)
+    with pytest.raises(ValueError):
+        router.shadow_evidence_record(
+            key="k", agent=AGENT, delivered_at=NOW_ISO, path="somewhere-else")
+
+
+def test_shadow_evidence_filename_deterministic_agent_prefixed_colon_safe():
+    key = router.idempotency_key("s-1", "openclaw:discord:fulcra-skills")
+    a = router.shadow_evidence_filename("openclaw:discord:fulcra-skills", key)
+    assert a == router.shadow_evidence_filename(
+        "openclaw:discord:fulcra-skills", key)          # deterministic
+    assert a.startswith("openclaw-discord-fulcra-skills-") and a.endswith(".json")
+    assert ":" not in a                                 # store-safe
+    # one shard per (agent, key) — different keys ⇒ different shards
+    assert a != router.shadow_evidence_filename(
+        "openclaw:discord:fulcra-skills", key + "x")
+
+
 # --- E3: router feed-first candidate source (addendum §3.3) -----------------
 
 def _uploaded(name, at):
