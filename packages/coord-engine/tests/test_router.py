@@ -404,6 +404,21 @@ class FlakyTransport(FakeTransport):
         return super().list_dir(prefix)
 
 
+class FeedTransport(FlakyTransport):
+    """FlakyTransport that also serves a data-updates feed (E3). ``_feed`` is
+    the raw change list `updates()` returns; set to None to model feed doubt."""
+
+    def __init__(self):
+        super().__init__()
+        self._feed: object = []
+
+    def set_feed(self, feed):
+        self._feed = feed
+
+    def updates(self, since, *, team=None):
+        return None if self._feed is None else list(self._feed)
+
+
 def test_failed_queue_write_is_not_ledgered_and_retries(capsys):
     """codex P1 (r1): a queue upload that returns False must fail the pass —
     the key stays un-ledgered and the cursor does not advance past the item,
@@ -642,6 +657,101 @@ def test_record_filename_deterministic_and_safe_for_colon_agent_ids():
     assert a == b                                   # single-writer-per-key
     assert ":" not in a and a.endswith(".json")     # store-safe
     assert router.record_filename(key) != router.record_filename(key + "x")
+
+
+# --- E3: router feed-first candidate source (addendum §3.3) -----------------
+
+def _uploaded(name, at):
+    return {"path": TASKP + name, "state": "uploaded", "uploaded_at": at}
+
+
+def test_router_feed_first_bypasses_a_failed_task_listing():
+    """E3: with the feed available, candidates come from it — a failing
+    task-directory LISTING no longer degrades the pass (feed is the source)."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.set_feed([_uploaded("urgent-1.md", "2026-07-23T11:30:05Z")])
+    t.fail_list_containing.add("task/")          # listing would fail — feed bypasses it
+    assert cli.cmd_router_run(_args(), t) == 0
+    q = _queue_entries(t)
+    assert len(q) == 1
+    (entry,) = q.values()
+    assert entry["source_shard"] == "urgent-1"
+
+
+def test_router_feed_wins_over_listing_divergence():
+    """E3: the feed is authoritative — a shard present in the listing but NOT
+    reported by the feed is not a candidate this pass."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    t.put(TASKP + "listing-only.md", _task("listing-only", AGENT, "P1"),
+          mtime="2026-07-23 11:40AM UTC")
+    _base(t)
+    t.set_feed([_uploaded("urgent-1.md", "2026-07-23T11:30:05Z")])  # not listing-only
+    assert cli.cmd_router_run(_args(), t) == 0
+    q = _queue_entries(t)
+    assert len(q) == 1
+    (entry,) = q.values()
+    assert entry["source_shard"] == "urgent-1"   # NOT listing-only
+
+
+def test_router_falls_back_to_listing_when_feed_unavailable():
+    """E3: feed doubt (updates returns None) ⇒ the full task-listing scan, the
+    unchanged W4 source — same enqueue outcome."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.set_feed(None)                              # feed unavailable -> listing
+    assert cli.cmd_router_run(_args(), t) == 0
+    assert len(_queue_entries(t)) == 1
+
+
+def test_router_malformed_feed_timestamp_is_doubt_not_skip():
+    """codex + Tycho E3 blocking (addendum principle 2): an unparseable
+    uploaded_at on a task upload is feed DOUBT, never a silent skip — dropping
+    it while other candidates advance the watermark loses that wake forever. The
+    pass abandons the partial feed and takes the healthy listing, surfacing BOTH
+    shards; nothing is ledgered from the doubtful feed read."""
+    t = FeedTransport()
+    t.put(TASKP + "good-1.md", _task("good-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    t.put(TASKP + "bad-1.md", _task("bad-1", AGENT, "P1"),
+          mtime="2026-07-23 11:31AM UTC")
+    _base(t)
+    t.set_feed([
+        _uploaded("good-1.md", "2026-07-23T11:30:05Z"),
+        _uploaded("bad-1.md", "not-a-timestamp"),      # malformed ⇒ feed doubt
+    ])
+    assert cli.cmd_router_run(_args(), t) == 0
+    cur = json.loads(t.store[RP + "cursor.json"])
+    # BOTH shards surfaced via the listing fallback and were ledgered — neither
+    # lost to the doubtful feed. (bad-1 coalesces into good-1's wake by debounce
+    # for the same agent, but it IS ledgered, not dropped. Under the buggy skip
+    # the feed advances the watermark past bad-1 and it never enters `processed`.)
+    assert f"good-1:{AGENT}" in cur["processed"]
+    assert f"bad-1:{AGENT}" in cur["processed"]        # the at-risk wake is NOT lost
+    assert len(_queue_entries(t)) >= 1                 # good-1 enqueued
+    # watermark came from the LISTING (bad-1 mtime 11:31), NOT the partial feed
+    # (good-1 ts 11:30:05) — the doubtful feed advanced nothing independently.
+    assert cur["watermark"] == "2026-07-23T11:31:00Z"
+
+
+def test_router_feed_second_granularity_advances_watermark():
+    """E3: the watermark advances to the feed's second-granular uploaded_at
+    (subsuming the minute tie), and the processed ledger records the key."""
+    t = FeedTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    t.set_feed([_uploaded("urgent-1.md", "2026-07-23T11:30:05Z")])
+    assert cli.cmd_router_run(_args(), t) == 0
+    cur = json.loads(t.store[RP + "cursor.json"])
+    assert cur["watermark"] == "2026-07-23T11:30:05Z"      # second-granular
+    assert f"urgent-1:{AGENT}" in cur["processed"]
 
 
 # --- W5: cloud-execution loop (claim → invoke → delivered/dead-letter) -------

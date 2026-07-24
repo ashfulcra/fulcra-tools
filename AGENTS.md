@@ -164,18 +164,26 @@ it (not on PyPI).
 - **Named identities** (Tycho = `coord-boss`, …): the registry is
   [`MAINTAINERS.md`](MAINTAINERS.md) — names are personas for human legibility;
   bus routing always uses the functional id.
-- **Wake router (decision plane — W4, enqueue-only).** `coord-engine router run
-  <team> [--once]` is the fleet's model-free wake policy: a cursor-based store
-  scan (deliberately NOT the `listen` fold — structurally immune to the
-  2026-07-22 listen-starvation class) with a tie-safe inclusive `>= watermark`
-  rescan + durable processed ledger, per-agent policy (interrupt floor,
-  debounce, busy deferral, LAPSED reduced-cadence check-ins), and durable state
-  ONLY under `team/<team>/_coord/router/`. Enablement is explicit per agent in
-  `config.json` — an unconfigured agent is observe-only; invalid config routes
-  to the fail-visible `unroutable` lane. W4 enqueues and never executes
-  (execution is W5/W5.5); a missing/corrupt cursor restarts observe-only.
-  Contract: [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
-  [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4.
+- **Wake router (decision plane — W4/W5).** `coord-engine router run
+  <team> [--once]` is the fleet's model-free wake policy: a cursor-based scan
+  (deliberately NOT the `listen` fold — structurally immune to the 2026-07-22
+  listen-starvation class) with a tie-safe inclusive `>= watermark` rescan +
+  durable processed ledger, per-agent policy (interrupt floor, debounce, busy
+  deferral, LAPSED reduced-cadence check-ins), and durable state ONLY under
+  `team/<team>/_coord/router/`. Candidate source is **feed-first** (E3): the
+  `data-updates` feed's `uploaded` events under `task/` (second-granular), with
+  the task-directory listing kept as the fail-closed fallback on any feed doubt;
+  the cursor/ledger/decide seams are identical across both sources. Enablement is
+  explicit per agent in `config.json` — an unconfigured agent is observe-only;
+  invalid config routes to the fail-visible `unroutable` lane. The decision plane
+  **executes** cloud-reachable adapters (`managed-agents-message`,
+  `routine-align`) directly — claim → invoke → delivered/dead-letter with bounded
+  retry, at-least-once and safe by the keyed-nudge content rule; host-local
+  adapters are enqueued with an `executor` id for the W5.5 thin executor. A
+  missing/corrupt cursor restarts observe-only. Contract:
+  [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
+  [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
+  [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
 - **Durable tooling stash.** An agent's operational bundle (scripts, loops,
   config templates) survives ephemeral machines via
   `coord-engine stash push/pull/list` against
