@@ -194,9 +194,15 @@ it (not on PyPI).
   `adapter_args` routing target. Per pass it drains exactly the queue entries
   whose `executor` matches this host's id (default `_host()`), skips any whose
   delivery-record already exists (**idempotency-keyed skip — never re-invoke**),
-  claims by id-match + a `claimed_at` stamp (advisory; a stale claim never wedges
-  an entry), fires the sanctioned host-local adapter through one invoker seam,
-  and records the outcome: success ⇒ an idempotency-keyed `delivered/` shard
+  skips a fresh claim held by another process, then **persists its own claim to
+  the entry BEFORE invoking** (claim-then-invoke: `claimed_by` names the claiming
+  process, `claimed_at` stamps the window) — a claim that does not persist blocks
+  the invoke and leaves the entry visibly queued (**no wake without a persisted
+  claim**), so the side-effect window is always claimed and the claim-holder owns
+  the delivered/dead-letter transition; the claim stays advisory (a stale claim
+  never wedges an entry — a resident process still retries its own). It fires the
+  sanctioned host-local adapter through one invoker seam, and records the outcome:
+  success ⇒ an idempotency-keyed `delivered/` shard
   (the `fold_delivered` view reads it), failure ⇒ bounded retry (`attempts` ≤
   `MAX_DELIVERY_ATTEMPTS`) then a **dead-letter transition** (`{attempts,
   last_error, gave_up_at}` under `dead-letter/`, owned as claim-holder); a

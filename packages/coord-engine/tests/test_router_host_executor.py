@@ -236,7 +236,7 @@ def test_bounded_retry_then_dead_letter_transient_stays_queued():
         assert qpath in t.store                 # transient failure → stays queued
         stamped = json.loads(t.store[qpath])
         assert stamped["attempts"] == expect_attempts
-        assert stamped["claimed_by"] == HOST    # id-match + claimed_at stamp
+        assert stamped["claimed_by"] == cli._claim_owner(HOST)  # id-match + stamp
     counts = cli._router_execute_host(_args(), t, invoke=fail)
     assert counts["dead_lettered"] == 1
     assert qpath not in t.store
@@ -379,6 +379,47 @@ def test_respects_a_fresh_foreign_claim():
     counts = cli._router_execute_host(_args(), t, invoke=inv)
     assert counts["skipped"] == 1 and counts["delivered"] == 0
     assert inv.invocations == []
+
+
+def test_concurrent_sibling_process_observes_claim_and_does_not_invoke():
+    """Claim-then-invoke BOUNDS duplicates: process A persists its claim BEFORE
+    invoking; a second process B under the same host executor id then reads the
+    entry, sees the fresh claim as foreign (distinct process identity), and does
+    NOT invoke the adapter — so the side-effect window is never unclaimed."""
+    t = FlakyTransport()
+    _hbase(t)
+    _seed(t, _host_entry(source="s-c"))
+    qpath = RP + "queue/" + router.queue_filename(
+        AGENT, router.idempotency_key("s-c", AGENT))
+    inv_a = RecordingInvoker("unconfigured")   # A claims + invokes, leaves queued
+    inv_b = RecordingInvoker("delivered")
+    ca = cli._router_execute_host(_args(), t, invoke=inv_a, claim_owner="HOST#procA")
+    assert len(inv_a.invocations) == 1         # A claimed, then invoked
+    stamped = json.loads(t.store[qpath])
+    assert stamped["claimed_by"] == "HOST#procA"   # claim persisted BEFORE invoke
+    assert ca["unconfigured"] == 1
+    cb = cli._router_execute_host(_args(), t, invoke=inv_b, claim_owner="HOST#procB")
+    assert inv_b.invocations == []             # B saw the fresh claim → did NOT invoke
+    assert cb["skipped"] == 1
+
+
+def test_claim_write_failure_blocks_invoke_and_leaves_entry_queued(capsys):
+    """No wake without a persisted claim: if the pre-invoke claim stamp does not
+    land, the adapter is NOT invoked, the entry stays VISIBLY queued for the next
+    tick, and the failure is loud — never a silent skip and never a wake."""
+    t = FlakyTransport()
+    _hbase(t)
+    qpath = _seed(t, _host_entry(source="s-cf"))
+    original = t.store[qpath]
+    t.fail_write_containing.add("queue/")       # the claim stamp write fails
+    inv = RecordingInvoker("delivered")
+    counts = cli._router_execute_host(_args(), t, invoke=inv)
+    assert inv.invocations == []                # NEVER invoked without a claim
+    assert counts["claim_unpersisted"] == 1
+    assert counts["delivered"] == 0
+    assert qpath in t.store and t.store[qpath] == original   # unchanged, still queued
+    assert _shards_under(t, "delivered/") == {}
+    assert "claim" in capsys.readouterr().err.lower()
 
 
 def test_failed_delivery_record_write_keeps_entry_queued(capsys):

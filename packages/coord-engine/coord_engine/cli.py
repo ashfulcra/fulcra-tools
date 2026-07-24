@@ -5219,14 +5219,38 @@ def _default_host_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
             f"{inv.get('adapter')!r} on this executor yet")
 
 
+def _claim_owner(executor_id: str) -> str:
+    """This process's claim identity: the host executor id plus its pid.
+
+    SELECTION and delivered/dead-letter OWNERSHIP stay keyed to the bare host
+    executor id (`entry.executor`); the claim additionally names the CLAIMING
+    PROCESS. That distinction is what lets `claim_is_skippable` bound duplicates
+    across two processes sharing one host id: a sibling process has a different
+    owner token, so it reads a fresh claim as FOREIGN and skips (the local
+    pidfile is the primary single-process guard — this is defense-in-depth). The
+    token is STABLE across a resident process's passes (pid is constant), so the
+    process's own at-least-once retry is never blocked by its own fresh claim."""
+    return f"{executor_id}#pid{os.getpid()}"
+
+
 def _router_execute_host(args: argparse.Namespace, transport: Any,
-                         invoke: Any = None) -> "dict[str, int]":
+                         invoke: Any = None,
+                         claim_owner: Optional[str] = None) -> "dict[str, int]":
     """Drain the queue entries resolved to THIS host's executor id: select →
-    idempotency-skip → claim → invoke → delivered/dead-letter with BOUNDED
-    cross-pass retry. Only `executor == <this host id>` entries are touched;
-    everything else (other hosts, the decision plane, malformed) is left
-    untouched. Policy-free: an entry present in the queue executes regardless of
-    priority — W4 already decided.
+    idempotency-skip → skip-fresh-foreign-claim → CLAIM → invoke →
+    delivered/dead-letter with BOUNDED cross-pass retry. Only
+    `executor == <this host id>` entries are touched; everything else (other
+    hosts, the decision plane, malformed) is left untouched. Policy-free: an
+    entry present in the queue executes regardless of priority — W4 already
+    decided.
+
+    Claim-then-invoke (plan §2 duplicate bound): the advisory claim is PERSISTED
+    to the queue entry BEFORE the adapter is invoked, so the side-effect window
+    is always claimed and the claim-holder owns the delivered/dead-letter
+    transition. If the claim write does not land, the adapter is NOT invoked and
+    the entry stays visibly queued for the next tick (`claim_unpersisted`,
+    loud) — never a wake without a persisted claim. The claim is advisory, not a
+    lock: a stale own/foreign claim stays retryable, so nothing wedges.
 
     Read-contract (plan §2, and the bug that hit W1–W3): a queue OR delivered/
     listing that RAISES is UNKNOWN-degraded — reported loudly, `degraded` set, no
@@ -5237,12 +5261,14 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
     drives idempotency confirms via the RAISING `list_dir`, never a falsy read."""
     invoke = invoke or _default_host_adapter_invoke
     executor_id = getattr(args, "host", None) or _host()
+    claim_owner = claim_owner or _claim_owner(executor_id)
     dry_run = getattr(args, "dry_run", False)
     prefix = router.router_prefix(args.team)
     now = _now()
     counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
               "unconfigured": 0, "skipped": 0, "deferred": 0,
-              "already_delivered": 0, "would_execute": 0, "degraded": 0}
+              "already_delivered": 0, "would_execute": 0,
+              "claim_unpersisted": 0, "degraded": 0}
 
     try:
         q_entries = transport.list_dir(prefix + "queue/")
@@ -5304,10 +5330,11 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
             counts["already_delivered"] += 1
             continue
 
-        # respect a FRESH FOREIGN claim (another executor process mid-flight). Our
-        # own claim and a STALE foreign claim are retryable — at-least-once again,
-        # safe by the content rule; a stale claim never wedges an entry forever.
-        if router.claim_is_skippable(entry, executor_id, now):
+        # respect a FRESH FOREIGN claim (a DIFFERENT process mid-flight — the
+        # owner token names the process, not just the host id). Our own claim and
+        # a STALE foreign claim are retryable — at-least-once again, safe by the
+        # content rule; a stale claim never wedges an entry forever.
+        if router.claim_is_skippable(entry, claim_owner, now):
             counts["skipped"] += 1
             continue
 
@@ -5354,6 +5381,24 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
                 "dead_lettered")
             continue
 
+        # CLAIM-THEN-INVOKE: persist this process's claim to the queue entry
+        # BEFORE the side effect, so the fire window is never unclaimed and a
+        # concurrent sibling reads the fresh claim and skips. If the claim does
+        # NOT land (write False or raises), do NOT invoke — the entry stays
+        # visibly queued for the next tick. No wake without a persisted claim.
+        entry = router.claim_stamp(entry, claim_owner, now)
+        try:
+            claim_ok = transport.write(
+                qpath, json.dumps(entry, sort_keys=True) + "\n")
+        except TransportError:
+            claim_ok = False
+        if not claim_ok:
+            print(f"router execute [{executor_id}]: claim write failed for "
+                  f"{key} — adapter NOT invoked, entry stays visibly queued, "
+                  f"retries next pass", file=sys.stderr)
+            counts["claim_unpersisted"] += 1
+            continue
+
         status, detail = invoke(inv)
         if status == "delivered":
             _terminate("delivered/",
@@ -5369,10 +5414,11 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
                     entry, attempts=attempts, last_error=detail,
                     gave_up_at=router.iso(now)), "dead_lettered")
             else:
-                # id-match + claimed_at claim stamp on the retry (advisory: it
-                # only suppresses a concurrent fresh foreign fire; correctness
-                # rests on the content rule, not the claim).
-                retried = router.claim_stamp(entry, executor_id, now)
+                # Build on the already-claimed entry (refresh claimed_at, same
+                # owner) and add the retry audit — one consistent claim, no
+                # conflicting stamp. Advisory: it only suppresses a concurrent
+                # fresh foreign fire; correctness rests on the content rule.
+                retried = router.claim_stamp(entry, claim_owner, now)
                 retried["attempts"] = attempts
                 retried["last_error"] = detail
                 if not transport.write(qpath,
