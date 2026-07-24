@@ -250,25 +250,6 @@ def fold_delivered(shards: list[dict[str, Any]]) -> dict[str, Any]:
     return view
 
 
-def record_filename(key: str) -> str:
-    """Return the canonical idempotency-keyed delivery-record filename."""
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", key)
-    return f"{safe}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}.json"
-
-
-def delivery_record(entry: dict[str, Any], delivered_at: str) -> dict[str, Any]:
-    """Build the standard successful-execution record consumed by the fold."""
-    return {
-        "key": idempotency_key(str(entry.get("source_shard")),
-                               str(entry.get("agent"))),
-        "agent": entry.get("agent"),
-        "source_shard": entry.get("source_shard"),
-        "adapter": entry.get("adapter"),
-        "executor": entry.get("executor"),
-        "delivered_at": delivered_at,
-    }
-
-
 # --- policy -----------------------------------------------------------------
 
 def queue_filename(agent: str, key: str) -> str:
@@ -442,3 +423,64 @@ def dead_letter_record(entry: dict[str, Any], *, attempts: int,
     transition is a self-overwrite no-op."""
     return {**entry, "attempts": attempts, "last_error": last_error,
             "gave_up_at": gave_up_at}
+
+
+# --- W7: shadow-mode delivery-probe evidence (plan W7) -----------------------
+#
+# During the read-only shadow window the router LOGS a decision for every
+# directed item but enqueues nothing; the live delivery paths (listener tick,
+# adapter execution, watchdog/fleet loop) each write a tiny evidence shard to
+# `_coord/router/shadow-evidence/` at the moment delivery SUCCEEDS. The
+# acceptance report correlates router decisions against these probes on the
+# idempotency key. Zero model tokens; the whole probe is removable after
+# acceptance.
+
+SHADOW_EVIDENCE_SUBPATH = "shadow-evidence/"
+
+#: The live-delivery mechanisms a probe shard may attribute a wake to. WIRED:
+#: `listener` (the listen tick) and `adapter` (cloud-adapter execution).
+#: `watchdog` is RESERVED for the fleet-watchdog wake path and is instrumented
+#: when/where that path delivers — no component writes it yet, so no delivery is
+#: mis-attributed to it.
+SHADOW_EVIDENCE_PATHS = frozenset({"listener", "adapter", "watchdog"})
+
+
+def shadow_evidence_filename(agent: str, key: str) -> str:
+    """`<agent>-<hash>.json` — one shard per (agent, idempotency-key). Sanitized
+    agent prefix for legibility + a key hash for uniqueness and collision-safety
+    (agent ids carry ':'). Same key ⇒ same filename (self-overwriting, so a
+    duplicate probe write is idempotent, never a second shard)."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", agent)
+    return f"{safe}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}.json"
+
+
+def shadow_evidence_record(*, key: str, agent: str, delivered_at: str,
+                           path: str) -> dict[str, Any]:
+    """A delivery-probe evidence shard — `{key, agent, delivered_at, path}`.
+    `path` is the delivery mechanism and MUST be one of SHADOW_EVIDENCE_PATHS;
+    an unknown path is a fail-visible ValueError, never a silently
+    mis-attributed measurement (the report's classification depends on it)."""
+    if path not in SHADOW_EVIDENCE_PATHS:
+        raise ValueError(
+            f"shadow-evidence path {path!r} not in "
+            f"{sorted(SHADOW_EVIDENCE_PATHS)}")
+    return {"key": key, "agent": agent, "delivered_at": delivered_at,
+            "path": path}
+
+
+SHADOW_DECISIONS_SUBPATH = "shadow-decisions/"
+
+
+def shadow_decision_record(*, key: str, agent: str, decision: str, reason: str,
+                           priority: str, decided_at: str) -> dict[str, Any]:
+    """A read-only shadow-mode decision shard — the router's `decision` for a
+    directed item, persisted so the acceptance report can correlate it against
+    the delivery-probe evidence on the idempotency `key`. Persisted (not just
+    logged to stdout) because decisions depend on decision-time state
+    (presence/debounce/delivered-view) and cannot be recomputed at report time,
+    and because the decision plane is duty-cycled — an ephemeral host must not
+    lose the window's decisions. `decision` must be a known DECISIONS class."""
+    if decision not in DECISIONS:
+        raise ValueError(f"decision {decision!r} not in {DECISIONS}")
+    return {"key": key, "agent": agent, "decision": decision, "reason": reason,
+            "priority": priority, "decided_at": decided_at}

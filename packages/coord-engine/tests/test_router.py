@@ -659,6 +659,172 @@ def test_record_filename_deterministic_and_safe_for_colon_agent_ids():
     assert router.record_filename(key) != router.record_filename(key + "x")
 
 
+# --- W7: shadow-mode delivery-probe evidence primitive ----------------------
+
+def test_shadow_evidence_record_is_a_keyed_delivery_probe():
+    key = router.idempotency_key("s-1", AGENT)
+    rec = router.shadow_evidence_record(
+        key=key, agent=AGENT, delivered_at=NOW_ISO, path="listener")
+    assert rec == {"key": key, "agent": AGENT,
+                   "delivered_at": NOW_ISO, "path": "listener"}
+
+
+def test_shadow_evidence_record_rejects_unknown_path():
+    for good in ("listener", "adapter", "watchdog"):
+        router.shadow_evidence_record(
+            key="k", agent=AGENT, delivered_at=NOW_ISO, path=good)
+    with pytest.raises(ValueError):
+        router.shadow_evidence_record(
+            key="k", agent=AGENT, delivered_at=NOW_ISO, path="somewhere-else")
+
+
+def test_shadow_evidence_filename_deterministic_agent_prefixed_colon_safe():
+    key = router.idempotency_key("s-1", "openclaw:discord:fulcra-skills")
+    a = router.shadow_evidence_filename("openclaw:discord:fulcra-skills", key)
+    assert a == router.shadow_evidence_filename(
+        "openclaw:discord:fulcra-skills", key)          # deterministic
+    assert a.startswith("openclaw-discord-fulcra-skills-") and a.endswith(".json")
+    assert ":" not in a                                 # store-safe
+    # one shard per (agent, key) — different keys ⇒ different shards
+    assert a != router.shadow_evidence_filename(
+        "openclaw:discord:fulcra-skills", key + "x")
+
+
+def test_shadow_decision_record_valid_and_rejects_unknown_decision():
+    rec = router.shadow_decision_record(
+        key="k", agent=AGENT, decision="interrupt", reason="r",
+        priority="P1", decided_at=NOW_ISO)
+    assert rec["decision"] == "interrupt" and rec["key"] == "k"
+    with pytest.raises(ValueError):
+        router.shadow_decision_record(
+            key="k", agent=AGENT, decision="frobnicate", reason="r",
+            priority="P1", decided_at=NOW_ISO)
+
+
+def _shadow_decisions(t):
+    return {p: json.loads(c) for p, c in t.store.items()
+            if p.startswith(RP + router.SHADOW_DECISIONS_SUBPATH)}
+
+
+def _shadow_evidence(t):
+    return {p: json.loads(c) for p, c in t.store.items()
+            if p.startswith(RP + router.SHADOW_EVIDENCE_SUBPATH)}
+
+
+def test_router_shadow_mode_persists_decisions_enqueues_nothing():
+    """W7: `router run --shadow` logs + persists a decision per directed item,
+    enqueues and executes nothing, but stays cursor-tracked (decides once)."""
+    t = FakeTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    assert cli.cmd_router_run(_args(shadow=True), t) == 0
+    assert _queue_entries(t) == {}                       # nothing enqueued
+    dec = _shadow_decisions(t)
+    assert len(dec) == 1
+    (d,) = dec.values()
+    assert (d["agent"], d["decision"], d["key"]) == (
+        AGENT, "interrupt", f"urgent-1:{AGENT}")
+    cur = json.loads(t.store[RP + "cursor.json"])
+    assert f"urgent-1:{AGENT}" in cur["processed"]       # cursor still advances
+
+
+def test_router_shadow_arm_writes_marker_and_is_idempotent(capsys):
+    t = FakeTransport()
+    assert cli.cmd_router_shadow_arm(_args(min_hours=48), t) == 0
+    marker = json.loads(t.store[RP + "shadow-window.json"])
+    assert marker["started_at"] == NOW_ISO and marker["min_hours"] == 48
+    capsys.readouterr()
+    assert cli.cmd_router_shadow_arm(_args(min_hours=48), t) == 0  # re-arm
+    assert "already armed" in capsys.readouterr().out
+    assert json.loads(t.store[RP + "shadow-window.json"])["started_at"] == NOW_ISO
+
+
+def test_router_shadow_status_reports_elapsed(capsys):
+    t = FakeTransport()
+    cli.cmd_router_shadow_arm(_args(), t)
+    capsys.readouterr()
+    assert cli.cmd_router_shadow_status(_args(), t) == 0
+    assert "ARMED" in capsys.readouterr().out
+
+
+def _listen_state():
+    return {"inbox_ids": set(), "response_keys": set(),
+            "verdict_keys": set(), "degraded": {}}
+
+
+def test_listener_probe_records_evidence_when_window_armed(monkeypatch):
+    """W7: a DIRECTIVE surfaced by a listen tick, while a window is armed, writes
+    a listener-path evidence shard keyed by (agent, source-shard:agent)."""
+    t = FakeTransport()
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    ev = {"type": "directive", "slug": "urgent-1", "owner": "boss", "title": "x"}
+    monkeypatch.setattr(cli, "_listen_tick", lambda *a, **k: ([ev], {}))
+    cli._run_listen_tick(t, TEAM, AGENT, _listen_state(),
+                         json_mode=False, verbose=False)
+    shards = _shadow_evidence(t)
+    assert len(shards) == 1
+    (s,) = shards.values()
+    assert (s["path"], s["agent"], s["key"]) == (
+        "listener", AGENT, f"urgent-1:{AGENT}")
+
+
+def test_listener_probe_silent_when_window_not_armed(monkeypatch):
+    t = FakeTransport()                                  # no marker
+    ev = {"type": "directive", "slug": "urgent-1", "owner": "boss", "title": "x"}
+    monkeypatch.setattr(cli, "_listen_tick", lambda *a, **k: ([ev], {}))
+    cli._run_listen_tick(t, TEAM, AGENT, _listen_state(),
+                         json_mode=False, verbose=False)
+    assert _shadow_evidence(t) == {}
+
+
+def test_adapter_probe_records_evidence_on_delivery_when_armed():
+    """codex #470 P1: a genuine cloud-adapter delivery, while a window is armed,
+    writes path=adapter evidence."""
+    t = FakeTransport()
+    _base(t)
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    _seed_queue(t, _q_entry(source="s-1"))
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    ev = _shadow_evidence(t)
+    assert len(ev) == 1
+    (s,) = ev.values()
+    assert (s["path"], s["key"]) == ("adapter", f"s-1:{AGENT}")
+
+
+def test_adapter_probe_silent_when_window_not_armed():
+    t = FakeTransport()
+    _base(t)
+    _seed_queue(t, _q_entry(source="s-1"))
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
+    assert _shadow_evidence(t) == {}
+
+
+def test_shadow_arm_rejects_sub_48_hour_windows(capsys):
+    """codex #470 P1: the normative window is >=48h — 47/0/negative are refused,
+    48 is the accepted boundary."""
+    t = FakeTransport()
+    for bad in (47, 0, -1):
+        assert cli.cmd_router_shadow_arm(_args(min_hours=bad), t) == 1
+    assert RP + "shadow-window.json" not in t.store       # nothing armed
+    assert cli.cmd_router_shadow_arm(_args(min_hours=48), t) == 0
+    assert json.loads(t.store[RP + "shadow-window.json"])["min_hours"] == 48
+
+
+def test_malformed_started_at_does_not_activate_probes(monkeypatch):
+    """codex #470 P2: a marker with an unparseable started_at is doubt ⇒ off."""
+    t = FakeTransport()
+    t.put(RP + "shadow-window.json", json.dumps({"started_at": "bogus"}))
+    ev = {"type": "directive", "slug": "urgent-1", "owner": "b", "title": "x"}
+    monkeypatch.setattr(cli, "_listen_tick", lambda *a, **k: ([ev], {}))
+    cli._run_listen_tick(t, TEAM, AGENT, _listen_state(),
+                         json_mode=False, verbose=False)
+    assert _shadow_evidence(t) == {}
+    assert cli.cmd_router_shadow_status(_args(), t) == 1   # status agrees: invalid
+
+
 # --- E3: router feed-first candidate source (addendum §3.3) -----------------
 
 def _uploaded(name, at):
