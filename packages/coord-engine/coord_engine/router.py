@@ -481,3 +481,152 @@ def shadow_decision_record(*, key: str, agent: str, decision: str, reason: str,
         raise ValueError(f"decision {decision!r} not in {DECISIONS}")
     return {"key": key, "agent": agent, "decision": decision, "reason": reason,
             "priority": priority, "decided_at": decided_at}
+
+
+#: Correlation window (plan W7): one poll interval + 5 minutes.
+SHADOW_CORRELATION_WINDOW_S = ROUTER_POLL_SECONDS + 300
+#: p95 interrupt-decision latency bound (plan W7): poll interval + 2 minutes.
+SHADOW_P95_LATENCY_BOUND_S = ROUTER_POLL_SECONDS + 120
+#: Duty-cycle gate (plan §2.5): uptime >= 95%, max single gap <= 90 min.
+SHADOW_DUTY_UPTIME_MIN = 0.95
+SHADOW_DUTY_MAX_GAP_S = 90 * 60
+
+#: Decision classes that represent a WAKE (an enqueue in a live pass) — the
+#: phantom check applies to these; batch/debounce/observe/unroutable wake nobody.
+WAKE_DECISIONS = frozenset({"interrupt", "defer", "checkin"})
+
+
+def shadow_report(
+    decisions: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+    *,
+    store_keys: Optional[set] = None,
+    pass_marks: Optional[list[str]] = None,
+    window_start: str,
+    window_end: str,
+) -> dict[str, Any]:
+    """The W7 acceptance fold — deterministic, so two reviewers mechanically
+    reach the same verdict from the same shards.
+
+    Correlates shadow-decision shards against delivery-probe evidence on the
+    idempotency key. Outcome classes per key (plan W7): ``matched`` (interrupt
+    ≤ probe delivery + correlation window), ``policy-divergent`` (a non-wake or
+    reduced-cadence decision where the probe shows live delivery — EXPECTED,
+    itemized), ``lagged`` (interrupt > window after delivery), ``missed``
+    (evidence, no decision — zero-tolerance), ``phantom`` (a WAKE decision whose
+    item never existed in the store — zero-tolerance; only checkable when
+    ``store_keys`` is provided), plus ``no-probe-evidence`` (a decision the live
+    paths never evidenced — counted and itemized so 100% of the population is
+    classified, surfaced rather than gated).
+
+    ``pass_marks`` are the shadow passes' timestamps for the §2.5 duty-cycle
+    gate (uptime >= 95%, max gap <= 90 min over [window_start, window_end]).
+    Absent pass_marks ⇒ duty cycle is UNKNOWN ⇒ the report cannot PASS —
+    fail-closed, never assumed.
+    """
+    ws, we = parse_iso(window_start), parse_iso(window_end)
+    if ws is None or we is None or we <= ws:
+        raise ValueError("invalid window bounds")
+    window = timedelta(seconds=SHADOW_CORRELATION_WINDOW_S)
+
+    # codex #475: the window BOUNDS the record population — a record whose
+    # timestamp is outside [start, end] (inclusive), or unparseable, is dropped
+    # before correlation so stale shards cannot alter the 48h verdict. The
+    # consequences then flow conservatively: in-window evidence whose decision
+    # was stale reads as `missed`, never silently matched.
+    def _in_window(ts_value: Any) -> bool:
+        ts = parse_iso(ts_value)
+        return ts is not None and ws <= ts <= we
+
+    dec_by_key: dict[str, dict] = {}
+    for d in decisions:
+        if (isinstance(d, dict) and isinstance(d.get("key"), str)
+                and _in_window(d.get("decided_at"))):
+            dec_by_key[d["key"]] = d
+    ev_by_key: dict[str, dict] = {}
+    for e in evidence:
+        if (isinstance(e, dict) and isinstance(e.get("key"), str)
+                and _in_window(e.get("delivered_at"))):
+            prev = ev_by_key.get(e["key"])
+            # earliest delivery wins — latency measures against first delivery
+            if prev is None or (parse_iso(e.get("delivered_at")) or we) < (
+                    parse_iso(prev.get("delivered_at")) or we):
+                ev_by_key[e["key"]] = e
+
+    classes: dict[str, str] = {}
+    latencies: list[float] = []
+    for key in sorted(set(dec_by_key) | set(ev_by_key)):
+        d, e = dec_by_key.get(key), ev_by_key.get(key)
+        if d is None:
+            classes[key] = "missed"
+            continue
+        # codex #475: phantom is checked BEFORE the evidence branch — a WAKE
+        # decision whose item never existed in the store is phantom even when
+        # probe evidence exists (zero-tolerance; evidence of a nonexistent
+        # item's delivery must never launder the wake into `matched`).
+        if (store_keys is not None and d.get("decision") in WAKE_DECISIONS
+                and key not in store_keys):
+            classes[key] = "phantom"
+            continue
+        if e is None:
+            classes[key] = "no-probe-evidence"
+            continue
+        decided = parse_iso(d.get("decided_at"))
+        delivered = parse_iso(e.get("delivered_at"))
+        if d.get("decision") == "interrupt":
+            if decided is None or delivered is None:
+                classes[key] = "lagged"  # unparseable timing is never a pass
+                continue
+            latency = (decided - delivered).total_seconds()
+            latencies.append(max(latency, 0.0))
+            classes[key] = "matched" if decided <= delivered + window else "lagged"
+        else:
+            classes[key] = "policy-divergent"
+
+    counts: dict[str, int] = {}
+    for cls in classes.values():
+        counts[cls] = counts.get(cls, 0) + 1
+
+    p95 = None
+    if latencies:
+        ordered = sorted(latencies)
+        p95 = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))]
+
+    duty: dict[str, Any] = {"known": False, "uptime": None, "max_gap_s": None}
+    if pass_marks:
+        marks = sorted(m for m in (parse_iso(x) for x in pass_marks)
+                       if m is not None and ws <= m <= we)
+        if marks:
+            edges = [ws] + marks + [we]
+            gaps = [(b - a).total_seconds()
+                    for a, b in zip(edges, edges[1:])]
+            max_gap = max(gaps)
+            total = (we - ws).total_seconds()
+            covered = sum(min(g, ROUTER_POLL_SECONDS) for g in gaps[:-1])
+            # uptime = fraction of the window within one poll interval of a pass
+            uptime = min(1.0, covered / total) if total else 0.0
+            duty = {"known": True, "uptime": round(uptime, 4),
+                    "max_gap_s": max_gap}
+
+    gates = {
+        "missed_zero": counts.get("missed", 0) == 0,
+        "phantom_zero": counts.get("phantom", 0) == 0,
+        "lagged_zero": counts.get("lagged", 0) == 0,
+        "p95_within_bound": (p95 is None
+                             or p95 <= SHADOW_P95_LATENCY_BOUND_S),
+        "fully_classified": True,  # by construction: every key gets a class
+        "duty_uptime": bool(duty["known"]
+                            and duty["uptime"] >= SHADOW_DUTY_UPTIME_MIN),
+        "duty_max_gap": bool(duty["known"]
+                             and duty["max_gap_s"] <= SHADOW_DUTY_MAX_GAP_S),
+    }
+    return {
+        "window": {"start": iso(ws), "end": iso(we),
+                   "correlation_window_s": SHADOW_CORRELATION_WINDOW_S},
+        "classes": classes,
+        "counts": counts,
+        "p95_interrupt_latency_s": p95,
+        "duty_cycle": duty,
+        "gates": gates,
+        "pass": all(gates.values()),
+    }
