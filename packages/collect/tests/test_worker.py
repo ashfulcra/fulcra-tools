@@ -230,6 +230,23 @@ def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: P
     assert "api-key" in events[-1]["error"]
 
 
+def test_worker_does_not_block_on_a_missing_optional_credential(collect_home: Path):
+    """A ``required=False`` credential is one that only some operating modes
+    need (e.g. PurpleAir's api_key: cloud yes, LAN no). Its absence must NOT
+    hard-block the run — run() is invoked and decides for itself."""
+    from fulcra_collect.plugin import Credential
+    ran = []
+    plugin = Plugin(id="opt-key", name="Opt Key", kind="manual",
+                    collect_mode="historical",
+                    run=lambda ctx: ran.append(True),
+                    required_credentials=(
+                        Credential(key="api-key", label="K", help="h", required=False),))
+    events = _run_capturing(plugin, collect_home)
+    assert ran == [True]  # run() WAS called despite the unset credential
+    assert events[-1]["type"] == "result"
+    assert events[-1]["outcome"] == "done"
+
+
 def test_worker_reads_user_level_credentials_from_user_store(
         collect_home: Path, monkeypatch):
     """P3 #14: a Credential declared ``user_level=True`` lives in the

@@ -66,6 +66,23 @@ under `skills/`, each package with its own README, build, and tests.
   account, mark ✓/✗ examples, derive → preview → save; rules persist to
   `plugin_settings.gmail.rules` (the store the engine already reads). The `long_text`
   rules setting stays as a power-user escape hatch.
+- **`packages/purpleair`** (`fulcra-purpleair`) — a `scheduled` / `live_polled`
+  Collect plugin polling PurpleAir air-quality sensors (10-min default). Two
+  sources: the PurpleAir cloud API (`mode=api`, needs an `api_key` credential +
+  `sensor_index`) or a sensor on the LAN (`mode=local`, needs `sensor_ips`, no
+  key). Each reading fans out to six per-measure custom **NumericAnnotation**
+  tracks (PM2.5, PM10, EPA AQI, Temperature, Humidity, Barometric Pressure); AQI
+  is **derived locally** from PM2.5 (EPA piecewise breakpoints, truncate-not-round,
+  capped at 500 — neither source reports AQI). Load-bearing facts: definitions
+  are found-or-created **per measure** — `resolved_definition_id` caches a single
+  id in `state.definition_id`, so the plugin drives it once per measure by
+  presetting that slot from its own plugin-KV cache (`definition_ids`).
+  Idempotency is **per-reading** via the daemon `claim_dedup_keys` on the
+  sensor's own observation timestamp (the typed-ingest endpoint does no
+  server-side dedup); a failed POST unclaims so the reading retries. `api_key`
+  is an **optional** credential (`Credential(required=False)`) so `mode=local`
+  runs without it — the worker only hard-blocks a run on a *required* missing
+  credential (`required=True`, the default).
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the thirteen `fulcra-agent-*` skills under `skills/` are how an agent
