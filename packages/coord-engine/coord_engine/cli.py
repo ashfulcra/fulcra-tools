@@ -4899,7 +4899,9 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     # receiver replaces this feed poll and nothing downstream moves.
     feed = None if observe else _team_updates(
         transport, team, since=cursor["watermark"], now=router.iso(now))
-    if feed is not None:
+    feed_usable = feed is not None
+    if feed_usable:
+        feed_candidates: list = []
         for change in feed:
             if change.get("state") != "uploaded":
                 continue
@@ -4912,11 +4914,24 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                 continue
             ts = router.parse_iso(change.get("uploaded_at"))
             if ts is None:
-                continue
+                # Addendum principle 2: malformed feed data is DOUBT, never a
+                # skip. A relevant task upload with an unparseable timestamp,
+                # silently dropped, would be LOST FOREVER — the watermark
+                # advances via other candidates, the shard is never ledgered,
+                # and a later listing pass excludes it (mtime < the advanced
+                # watermark). Abandon the partial feed and take the full listing
+                # fallback; the watermark does not advance from the doubtful feed.
+                print("router: feed task event has an unparseable uploaded_at — "
+                      "feed doubtful this pass; using the listing fallback (no "
+                      "watermark advance from the partial feed)", file=sys.stderr)
+                feed_usable = False
+                break
             if watermark_dt is not None and ts < watermark_dt:
                 continue
-            candidates.append((ts, name))
-    else:
+            feed_candidates.append((ts, name))
+        if feed_usable:
+            candidates = feed_candidates
+    if not feed_usable:
         # fail-closed fallback: the full task-directory listing (the W4 source).
         try:
             entries = transport.list_dir(task_prefix)

@@ -710,6 +710,36 @@ def test_router_falls_back_to_listing_when_feed_unavailable():
     assert len(_queue_entries(t)) == 1
 
 
+def test_router_malformed_feed_timestamp_is_doubt_not_skip():
+    """codex + Tycho E3 blocking (addendum principle 2): an unparseable
+    uploaded_at on a task upload is feed DOUBT, never a silent skip — dropping
+    it while other candidates advance the watermark loses that wake forever. The
+    pass abandons the partial feed and takes the healthy listing, surfacing BOTH
+    shards; nothing is ledgered from the doubtful feed read."""
+    t = FeedTransport()
+    t.put(TASKP + "good-1.md", _task("good-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    t.put(TASKP + "bad-1.md", _task("bad-1", AGENT, "P1"),
+          mtime="2026-07-23 11:31AM UTC")
+    _base(t)
+    t.set_feed([
+        _uploaded("good-1.md", "2026-07-23T11:30:05Z"),
+        _uploaded("bad-1.md", "not-a-timestamp"),      # malformed ⇒ feed doubt
+    ])
+    assert cli.cmd_router_run(_args(), t) == 0
+    cur = json.loads(t.store[RP + "cursor.json"])
+    # BOTH shards surfaced via the listing fallback and were ledgered — neither
+    # lost to the doubtful feed. (bad-1 coalesces into good-1's wake by debounce
+    # for the same agent, but it IS ledgered, not dropped. Under the buggy skip
+    # the feed advances the watermark past bad-1 and it never enters `processed`.)
+    assert f"good-1:{AGENT}" in cur["processed"]
+    assert f"bad-1:{AGENT}" in cur["processed"]        # the at-risk wake is NOT lost
+    assert len(_queue_entries(t)) >= 1                 # good-1 enqueued
+    # watermark came from the LISTING (bad-1 mtime 11:31), NOT the partial feed
+    # (good-1 ts 11:30:05) — the doubtful feed advanced nothing independently.
+    assert cur["watermark"] == "2026-07-23T11:31:00Z"
+
+
 def test_router_feed_second_granularity_advances_watermark():
     """E3: the watermark advances to the feed's second-granular uploaded_at
     (subsuming the minute tie), and the processed ledger records the key."""
