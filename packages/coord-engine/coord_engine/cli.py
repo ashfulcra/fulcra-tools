@@ -5205,18 +5205,25 @@ def _default_host_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
     """Default host-local adapter invoker → (status, detail), status one of
     "delivered" | "failed" | "unconfigured".
 
-    The host-side integration SEAM. Real deployment wires the sanctioned
-    host-local adapter SCRIPT here (`codex-exec-resume` resumes a Codex thread,
-    `openclaw-post` posts to a local endpoint, `macos-notify` posts a
-    notification, `queued-wake-file` drops a SessionStart nudge) — each fires a
-    check-your-queue nudge and reports delivered/failed. Until a script is wired
-    on THIS host the default reports `unconfigured`: the wake stays VISIBLY
-    QUEUED (never dropped, never a burned retry), the plan's fail-visible
-    degradation. Tests inject a fake invoker to exercise the delivered/failed
-    paths — so nothing in this component ever wakes anything on its own."""
-    return ("unconfigured",
-            f"no host-local adapter script wired for "
-            f"{inv.get('adapter')!r} on this executor yet")
+    The host-side integration SEAM. A sanctioned host-local adapter is a small
+    host-provisioned SCRIPT at `$COORD_WAKE_ADAPTER_DIR/<adapter>.sh`; the first
+    one in-tree is `macos-notify` (posts a desktop notification and spawns
+    nothing). The rest of `router.ADAPTERS_HOST_LOCAL` still reports
+    `unconfigured` until its script lands (W6).
+
+    Three properties hold at this seam (see `wake_adapters.run_script_adapter`):
+    NUDGE-ONLY — the adapter receives the agent id, the idempotency key and a
+    STATIC reason constant, never a per-event command/URL/payload, so
+    at-least-once delivery converges to one bus check; BOUNDED — the script runs
+    under a hard timeout with its whole process group killed at the bound, so a
+    hung adapter cannot wedge the executor (reported `failed`); FAIL-VISIBLE —
+    an un-provisioned host (env unset, or no script) reports `unconfigured` and
+    the wake stays VISIBLY QUEUED, never dropped and never a burned retry.
+
+    `COORD_WAKE_ADAPTER_DIR` is unset by default, so an engine that has merely
+    been installed wakes nothing; tests inject a fake invoker or a stub script.
+    """
+    return wake_adapters.run_script_adapter(inv)
 
 
 def _claim_owner(executor_id: str) -> str:

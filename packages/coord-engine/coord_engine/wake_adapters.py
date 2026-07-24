@@ -13,12 +13,14 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from . import router
+from . import config, router
+from .transport import run_bounded
 
 _KEY = re.compile(r"^[A-Za-z0-9_./:-]{1,512}$")
 
@@ -207,3 +209,120 @@ def align_routine(
     if transport.write(path, json.dumps(record, sort_keys=True) + "\n") is False:
         raise RuntimeError(f"routine alignment write failed: {path}")
     return path
+
+
+# --- host-local SCRIPT adapters (W5.5 invoker seam) --------------------------
+#
+# A host-local adapter is a small, host-provisioned SHELL SCRIPT invoked by the
+# thin host executor through `cli._default_host_adapter_invoke`. Two rules make
+# that safe:
+#
+#   1. NUDGE-ONLY (plan §2 content rule): the only things that cross the process
+#      boundary are the agent id, the idempotency key and `NUDGE_REASON` — a
+#      module CONSTANT. No per-event command, shell, URL or payload can reach an
+#      adapter, because the argv is built from those three values and nothing
+#      else. At-least-once delivery is therefore safe: N fires converge to one
+#      bus check.
+#   2. PROVISIONING IS EXPLICIT: scripts are located only under
+#      `COORD_WAKE_ADAPTER_DIR`. An un-provisioned host reports `unconfigured`,
+#      leaving the wake VISIBLY QUEUED (never a silent drop, never a burned
+#      retry) — and, since the variable is unset by default, an engine that
+#      merely has the repo checked out fires nothing.
+
+#: Host provisioning switch: directory holding `<adapter>.sh`. Unset ⇒ this host
+#: runs no host-local adapter script at all.
+WAKE_ADAPTER_DIR_ENV = "COORD_WAKE_ADAPTER_DIR"
+
+#: Hard upper bound (seconds) on one adapter run. A hung adapter must never
+#: wedge the executor, so the process GROUP is killed at the bound and the wake
+#: is reported `failed` (bounded retry → dead-letter), never left hanging.
+WAKE_ADAPTER_TIMEOUT_ENV = "COORD_WAKE_ADAPTER_TIMEOUT"
+DEFAULT_WAKE_ADAPTER_TIMEOUT = 10.0
+
+#: Adapters with a real script in-tree. Everything else in
+#: `router.ADAPTERS_HOST_LOCAL` still reports `unconfigured` (W6 owns them).
+SCRIPT_ADAPTERS = frozenset({"macos-notify"})
+
+#: The ONLY reason text an adapter ever receives. Fixed bytes, never derived
+#: from the queue entry — that is what makes the content rule structural.
+NUDGE_REASON = "directed item on your bus - check your inbox / needs-me"
+
+#: Accepted shape for the two identity fields that cross the boundary. Must
+#: start alphanumeric, so a value can never be read as an option by the adapter
+#: or by anything it hands its arguments to.
+_ADAPTER_FIELD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,255}$")
+
+#: Adapter stderr is quoted into a durable delivery/dead-letter record; keep it
+#: bounded so a chatty failure cannot bloat the store.
+_DETAIL_CHARS = 300
+
+
+def adapter_script(adapter: str) -> Optional[Path]:
+    """The provisioned script for ``adapter``, or ``None`` when this host is not
+    provisioned for it (env unset, or no such file). ``None`` is the
+    `unconfigured` path — deliberately indistinguishable from "not provisioned",
+    because both mean the same thing operationally: leave the wake queued."""
+    root = (os.environ.get(WAKE_ADAPTER_DIR_ENV) or "").strip()
+    if not root:
+        return None
+    path = Path(root).expanduser() / f"{adapter}.sh"
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _detail(text: str) -> str:
+    flat = " ".join((text or "").split())
+    return flat[:_DETAIL_CHARS]
+
+
+def run_script_adapter(inv: dict[str, Any]) -> tuple[str, str]:
+    """Run a provisioned host-local adapter script → (status, detail), status one
+    of ``delivered`` | ``failed`` | ``unconfigured``.
+
+    - not provisioned / script absent / present-but-not-executable ⇒
+      ``unconfigured``: the wake stays VISIBLY QUEUED and no retry is burned.
+    - exit 0 ⇒ ``delivered``; any other exit, an un-spawnable script, or the
+      timeout ⇒ ``failed`` (the executor's bounded retry → dead-letter path).
+    - the invocation is reduced to ``--agent``/``--key``/``--reason`` with the
+      reason fixed at ``NUDGE_REASON``; an agent id or key outside
+      ``_ADAPTER_FIELD`` is refused BEFORE the script runs.
+    """
+    adapter = str(inv.get("adapter") or "")
+    if adapter not in SCRIPT_ADAPTERS:
+        return ("unconfigured",
+                f"no host-local adapter script wired for {adapter!r} on this "
+                f"executor yet")
+    script = adapter_script(adapter)
+    if script is None:
+        return ("unconfigured",
+                f"host not provisioned for {adapter!r}: no "
+                f"${WAKE_ADAPTER_DIR_ENV}/{adapter}.sh — wake stays queued")
+    if not os.access(script, os.X_OK):
+        return ("unconfigured",
+                f"{script} is present but not executable — wake stays queued")
+
+    agent = str(inv.get("agent") or "")
+    key = str(inv.get("idempotency_key") or "")
+    if not (_ADAPTER_FIELD.match(agent) and _ADAPTER_FIELD.match(key)):
+        return ("failed",
+                f"agent id / idempotency key outside the accepted charset for "
+                f"{adapter!r} — nothing was passed to the adapter")
+
+    # The whole content surface. Nothing else from `inv` is ever read.
+    argv = [str(script), "--agent", agent, "--key", key,
+            "--reason", NUDGE_REASON]
+    timeout = config.env_float(WAKE_ADAPTER_TIMEOUT_ENV,
+                               DEFAULT_WAKE_ADAPTER_TIMEOUT)
+    try:
+        rc, out, err = run_bounded(argv, timeout)
+    except subprocess.TimeoutExpired:
+        return ("failed",
+                f"{adapter} timed out after {timeout:g}s — process group "
+                f"killed, wake not delivered")
+    except OSError as exc:
+        return ("failed", f"{adapter} could not be spawned: {_detail(str(exc))}")
+    if rc == 0:
+        return ("delivered", f"{adapter} posted a keyed nudge for {agent}")
+    return ("failed", f"{adapter} exited {rc}: {_detail(err or out)}")
