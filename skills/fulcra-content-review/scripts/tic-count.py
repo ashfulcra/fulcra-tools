@@ -25,7 +25,7 @@ def main(path: str) -> None:
         return len(re.findall(pattern, txt, re.I))
 
     rows = [
-        ("em-dashes", count("—"), "< 0.35/100w"),
+        ("em-dashes", count("—"), "< 0.15/100w"),
         ("'rather than'", count(r"\brather than\b"), "< 8"),
         ("', not X' antithesis", count(r", not [a-z]"), "<= 3"),
         ("'which is the/what/why'", count(r"which is (the|what|why|exactly)"), "< 4"),

@@ -52,7 +52,7 @@ Judging your own prose by taste fails; counts do not. Thresholds from a real
 
 | Tell | Found | Target |
 |---|---|---|
-| Em-dashes per 100 words | 1.0 | < 0.35 |
+| Em-dashes per 100 words | 1.0 | < 0.15 |
 | "rather than" | 31 | < 8 |
 | ", not X" antithesis | 17 | ≤ 3 that earn it |
 | "which is the/what/why…" | 13 | < 4 |
