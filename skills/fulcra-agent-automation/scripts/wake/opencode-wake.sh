@@ -138,8 +138,11 @@ if [ -n "$PASSWORD_FILE" ]; then
 fi
 [ -n "$PASSWORD" ] || die "password is empty"
 
-[[ "$PORT" =~ ^[0-9]{1,5}$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] \
-  || die "invalid PORT"
+if ! [[ "$PORT" =~ ^[0-9]{1,5}$ ]] \
+  || [ "$PORT" -lt 1 ] \
+  || [ "$PORT" -gt 65535 ]; then
+  die "invalid PORT"
+fi
 [[ "$SESSION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,255}$ ]] \
   || die "invalid SESSION_ID"
 [[ "$USERNAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,255}$ ]] || die "invalid USERNAME"
