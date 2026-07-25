@@ -84,6 +84,30 @@ def _host_entry(*, agent=AGENT, adapter="codex-exec-resume", executor=HOST,
     return e
 
 
+def test_router_execute_resident_mode_uses_fixed_rate_scheduler(monkeypatch):
+    labels = []
+    passes = []
+
+    class StopLoop(Exception):
+        pass
+
+    def scheduled(pass_fn, *, label):
+        labels.append(label)
+        pass_fn()
+        raise StopLoop
+
+    monkeypatch.setattr(cli, "_run_fixed_rate", scheduled)
+    monkeypatch.setattr(
+        cli, "_router_execute_host",
+        lambda args, transport, emit=True: passes.append(args.team) or {})
+
+    with pytest.raises(StopLoop):
+        cli.cmd_router_execute(_args(once=False), FakeTransport())
+
+    assert labels == ["router execute"]
+    assert passes == [TEAM]
+
+
 def _seed(t, entry):
     key = router.idempotency_key(entry["source_shard"], entry["agent"])
     name = router.queue_filename(entry["agent"], key)

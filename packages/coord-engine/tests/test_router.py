@@ -107,6 +107,94 @@ def test_poll_interval_is_the_fixed_plan_constant():
     assert router.ROUTER_POLL_SECONDS == 60  # plan §2.5: FIXED, not tunable
 
 
+@pytest.mark.parametrize("pass_duration", [5, 20, 59])
+def test_fixed_rate_scheduler_holds_sixty_second_cycle(pass_duration):
+    now = 0.0
+    starts = []
+    sleeps = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += pass_duration
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == [0.0, 60.0, 120.0]
+    assert sleeps == [60 - pass_duration] * 3
+
+
+def test_fixed_rate_scheduler_skips_overrun_without_burst(capsys):
+    now = 0.0
+    starts = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += 70
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == [0.0, 120.0, 240.0]
+    error = capsys.readouterr().err
+    assert "cadence overrun" in error
+    assert "no burst catch-up" in error
+
+
+def test_router_run_resident_mode_uses_fixed_rate_scheduler(monkeypatch):
+    labels = []
+    passes = []
+
+    class StopLoop(Exception):
+        pass
+
+    def scheduled(pass_fn, *, label):
+        labels.append(label)
+        pass_fn()
+        raise StopLoop
+
+    monkeypatch.setattr(cli, "_run_fixed_rate", scheduled)
+    monkeypatch.setattr(
+        cli, "_router_pass",
+        lambda args, transport: passes.append(args.team) or 0)
+
+    with pytest.raises(StopLoop):
+        cli.cmd_router_run(
+            _args(once=False, shadow=True), FakeTransport())
+
+    assert labels == ["router run"]
+    assert passes == [TEAM]
+
+
 def test_parse_store_mtime():
     dt = router.parse_store_mtime("2026-07-22 04:22PM UTC")
     assert dt == datetime(2026, 7, 22, 16, 22, tzinfo=timezone.utc)

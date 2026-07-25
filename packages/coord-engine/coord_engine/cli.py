@@ -5392,6 +5392,26 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
     return counts
 
 
+def _run_fixed_rate(pass_fn: Any, *, label: str,
+                    period_s: float = router.ROUTER_POLL_SECONDS,
+                    clock: Any = None, sleeper: Any = None) -> None:
+    """Run ``pass_fn`` on an anchored cadence without burst catch-up."""
+    monotonic = clock or time.monotonic
+    sleep = sleeper or time.sleep
+    next_tick = monotonic()
+    while True:
+        pass_fn()
+        next_tick += period_s
+        now = monotonic()
+        if now > next_tick:
+            late_by = now - next_tick
+            skipped = int(late_by // period_s) + 1
+            next_tick += skipped * period_s
+            print(f"{label}: cadence overrun by {late_by:.3f}s — skipped "
+                  f"{skipped} tick(s), no burst catch-up", file=sys.stderr)
+        sleep(max(0.0, next_tick - now))
+
+
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
     # W7 shadow mode is READ-ONLY: log + persist decisions, never enqueue OR
     # execute (the pass suppresses the enqueue; the executor is skipped here).
@@ -5402,23 +5422,25 @@ def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
         return 2
     if json_mode:
         args._defer_json = True
-    rc = _router_pass(args, transport)
-    execute_counts = None
-    if not shadow:
-        execute_counts = _router_execute_cloud(
-            args, transport, emit=not json_mode)
+    def _pass() -> tuple[int, Optional[dict[str, int]]]:
+        pass_rc = _router_pass(args, transport)
+        counts = None
+        if not shadow:
+            counts = _router_execute_cloud(
+                args, transport, emit=not json_mode)
+        return pass_rc, counts
+
+    if not getattr(args, "once", False):
+        _run_fixed_rate(lambda: _pass(), label="router run")
+        raise AssertionError("resident router loop returned")
+
+    rc, execute_counts = _pass()
     if json_mode:
         jsonutil.print_json({
             "pass": getattr(args, "_router_pass_result", None),
             "execute": execute_counts,
         })
-    if getattr(args, "once", False):
-        return rc
-    while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
-        time.sleep(router.ROUTER_POLL_SECONDS)
-        _router_pass(args, transport)
-        if not shadow:
-            _router_execute_cloud(args, transport)
+    return rc
 
 
 def cmd_router_shadow_arm(args: argparse.Namespace, transport: Any) -> int:
@@ -5950,15 +5972,18 @@ def cmd_router_execute(args: argparse.Namespace, transport: Any) -> int:
         print("router execute: --json requires --once or --dry-run",
               file=sys.stderr)
         return 2
-    counts = _router_execute_host(args, transport, emit=not json_mode)
+    def _pass() -> dict[str, int]:
+        return _router_execute_host(args, transport, emit=not json_mode)
+
+    if not (getattr(args, "once", False)
+            or getattr(args, "dry_run", False)):
+        _run_fixed_rate(_pass, label="router execute")
+        raise AssertionError("resident router executor loop returned")
+
+    counts = _pass()
     if json_mode:
         jsonutil.print_json(counts)
-    rc = 1 if counts.get("degraded") else 0
-    if getattr(args, "once", False) or getattr(args, "dry_run", False):
-        return rc
-    while True:  # resident thin executor: FIXED 60s cadence (plan §2.5)
-        time.sleep(router.ROUTER_POLL_SECONDS)
-        _router_execute_host(args, transport)
+    return 1 if counts.get("degraded") else 0
 
 
 # --- stash (fulcra-agent-durable-state) ---
@@ -6904,7 +6929,11 @@ def build_parser() -> argparse.ArgumentParser:
               "host-local wakes (fixed 60s cadence; --once for one pass)"),
     )
     ror.add_argument("team")
-    ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
+    ror.add_argument(
+        "--once", action="store_true",
+        help="one pass then exit; resident mode uses an anchored fixed-rate "
+             "cadence compatible with the duty gate, while externally "
+             "scheduled --once inherits that scheduler's throttle semantics")
     ror.add_argument("--shadow", action="store_true", help="W7 read-only shadow mode: log + persist a decision per directed item, enqueue and execute NOTHING (the >=48h acceptance measurement)")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)

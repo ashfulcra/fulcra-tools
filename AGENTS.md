@@ -187,7 +187,10 @@ it (not on PyPI).
   `shadow-decisions/` and enqueues/executes nothing, while the live delivery
   paths (listener tick, adapter execution) write `shadow-evidence/` shards at
   delivery success. The acceptance report correlates the two on the idempotency
-  key over a ≥48h window (duty-cycle gated). Contract:
+  key over a ≥48h window (duty-cycle gated). Resident router loops use an
+  anchored fixed-rate cadence; externally scheduling per-tick `--once` runs
+  inherits that scheduler's throttle semantics and is not the duty-gate
+  deployment. Contract:
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
