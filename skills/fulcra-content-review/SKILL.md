@@ -22,6 +22,15 @@ credits itself in the colophon is incoherent the moment the owner shares it as
 theirs. If the owner's voice: first person, owner's diction, agents described as
 tools they used. (Provenance: the Modest Proposal draft failed exactly this way.)
 
+**Pronoun-referent audit.** Once POV is chosen, extract every "we/us/our"
+sentence programmatically and check each referent against the choice. One
+document, one "we" — a draft that uses "we" for the authors in one sentence
+and for the company being addressed in the next reads as sloppy to exactly
+the reader it's trying to persuade. Same failure class as everything else on
+this list: two names for one thing, and the text trusts the wrong one.
+(Provenance: v3 of the same draft shipped 8 referent slips; the owner caught
+them in the first few sentences.)
+
 ## 1. Claims discipline — before style, always
 
 - **A single measurement is not a rate.** Label it: "first live wake: 55 s",
@@ -34,8 +43,15 @@ tools they used. (Provenance: the Modest Proposal draft failed exactly this way.
   overclaim, and the honest second test then passed cleanly.)
 - **Unforgeable evidence beats self-report.** Verify from the system of record
   (a change feed, a timestamped upload), not the actor's account of itself. Put
-  an unguessable token in the test so the result can only have come from the
-  path under test.
+  a token in the test that exists only on the path under test — and call it
+  read-evidence, not "unguessable"; a short hex nonce proves the file was read,
+  it is not cryptography.
+- **Preserve every leg of the evidence.** Result files prove the actor did the
+  work; only the preserved *instructions* prove the work wasn't smuggled in
+  with them. Archive the prompt/charter verbatim next to the result, and state
+  preconditions a skeptic would ask about (e.g. a one-time human pre-approval
+  that let the run act unattended). (Provenance: second-round review caught
+  the missing prompt artifact after the test itself had already passed.)
 - **Numbers are measured or labeled estimates.** If the colophon claims "every
   number was measured," make that true.
 - **Enumerate, don't name-match, when auditing claims.** Checking a document
@@ -108,6 +124,18 @@ they can earn their place when the journey is the argument.
   (lane 2–3 above).
 - The author reviews too, but grounded in counts (§2) — an author's taste pass
   over their own prose finds nothing.
+- **Reviews of a superseded draft still pay.** When the draft was rewritten
+  while reviews were in flight, triage every finding against the *current*
+  text before discarding any: some resolve by rewrite, some survive verbatim,
+  some survive reworded. Grep the current draft for each contested passage;
+  don't trust memory of what the rewrite fixed.
+- **Close the loop with a reconciliation note.** After applying fixes, file a
+  map of finding → applied / resolved-by-rewrite / declined-with-reason, and
+  point the next review round at it. Without it, round N+1 re-flags round N's
+  fixes and burns its budget re-litigating.
+- **Meter your own fixes.** Edits made *while applying* review feedback
+  reintroduce the tics — twice now, consciously avoiding them. Re-run the §2
+  meter after reconciliation, not just after the original edit.
 
 ## Scripts
 
