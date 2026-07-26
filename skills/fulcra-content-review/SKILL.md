@@ -54,6 +54,13 @@ them in the first few sentences.)
   the missing prompt artifact after the test itself had already passed.)
 - **Numbers are measured or labeled estimates.** If the colophon claims "every
   number was measured," make that true.
+- **Don't infer intent from your own experience of the surface.** "We didn't
+  have to change it" does not mean "it wasn't built for this" — ease of use is
+  usually evidence of deliberate design, not of accident. Claims about why a
+  product is the way it is belong to its owner; check before printing one.
+  (Provenance: a draft claimed the platform "wasn't built for agents" because
+  the fleet rode it unmodified; the owner's correction was that the
+  agent-facing surfaces are heavily worked precisely so models find them easy.)
 - **Enumerate, don't name-match, when auditing claims.** Checking a document
   for "the claims I remember making" has unbounded false negatives — walk every
   number, every stat block, every "we proved" systematically. (Same failure
