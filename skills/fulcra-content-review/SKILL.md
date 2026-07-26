@@ -144,6 +144,41 @@ they can earn their place when the journey is the argument.
   reintroduce the tics — twice now, consciously avoiding them. Re-run the §2
   meter after reconciliation, not just after the original edit.
 
+## 7. House style for internal documents — simple and direct (operator-set 2026-07-26)
+
+The Modest Proposal cycle ended with the operator choosing the plain
+first-person draft over a longer essay version, then cutting it harder. That
+choice is the standing style for internal documents. Review against it:
+
+- **Simple and direct.** Short declaratives, first person, thinks out loud.
+  If a passage needs re-reading, it is wrong — the operator's word for a
+  dense-but-correct block was "incomprehensible," and the fix he accepted was
+  five plain sentences in sequence.
+- **The last sentence of a block is usually the good one.** ("Really only the
+  last sentence is any good.") Find the sentence that earns its place and
+  rebuild the block as the shortest path to it. Additions must clarify, not
+  decorate: "you can add more if it is clarifying not obtuse."
+- **Put the ask right after the argument** that motivates it, not at the end
+  of the document. Conclusions don't need restating; one is enough.
+- **Cut on sight:** thesis announcements ("X is the argument"), restatements
+  of a point a list already made, second conclusions, slogans that echo the
+  numbered structure beside them, go-to-market speculation, and flourishes
+  that trade accuracy for rhythm (a "three vendors" line that counted wrong
+  shipped three review rounds before dying).
+- **Keep charm that is true and the owner's.** The incident-track story, the
+  operator metaphor, the before/after tapes, "MVP first, awesome later" —
+  reviewer taste does not outrank the owner's voice. When a reviewer flags an
+  owner-dictated passage as slop, the reconciliation answer is "declined,
+  operator ruling," not a compromise rewrite.
+- **Sweat absolutes.** "Can't be done at all" → "we couldn't do it." "Means
+  migrating" → "can require migrating." Every absolute is a claim someone at
+  the receiving company can falsify; write what was observed. And check the
+  same claim's OTHER homes — the fix that lands in one section leaves its
+  twin behind (two names for one thing, again).
+- **Package for shipping.** The browser-tab title, gloss for any acronym less
+  universal than MVP, cross-refs re-checked after every structural move.
+  Working-copy labels in shipped metadata are a real blocker class.
+
 ## Scripts
 
 - `scripts/tic-count.py <file>` — strips HTML/Markdown, counts the §2 table,
