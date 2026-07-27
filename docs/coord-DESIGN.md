@@ -34,7 +34,7 @@ disagreement heals nothing.
 | fulcra-agent-reconcile | engine-owned `task/index.md` + `log.md`; status/board/needs-me/search | 2* |
 | fulcra-agent-tasks | typed task lifecycle; validated state machine; done-requires-evidence | 2 |
 | fulcra-agent-forge | GitHub PR state mirrored as review evidence; auto-approve on merge | 2 |
-| fulcra-agent-automation | launchd/cron heartbeat + inbox listener installers (hardened) | 2 |
+| fulcra-agent-automation | launchd/cron heartbeat installers (hardened); listener half retired 2026-07-27 under bus v3 | 2 |
 | fulcra-agent-operator | waiting-on-operator asks fold; atomic answer verb; courier conventions | 2 |
 
 \* reconcile is the one semantic conversation: it makes the task index engine-owned, so wave 2
