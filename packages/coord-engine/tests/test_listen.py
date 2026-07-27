@@ -1113,9 +1113,9 @@ def test_main_wires_listen_once(tmp_path, monkeypatch, capsys):
 
 
 def test_listen_state_path_prints_and_does_not_tick(tmp_path, monkeypatch, capsys):
-    """The hidden `--state-path` resolver (listener-tick.sh's migration uses it)
-    prints the engine-resolved state file path and exits 0 WITHOUT ticking or
-    writing — the slug/agent_key naming stays owned by the engine, not the shell."""
+    """The hidden legacy-state resolver prints the engine-resolved path and
+    exits 0 WITHOUT ticking or writing — slug/agent_key naming stays owned by
+    the engine rather than a caller."""
     monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path))
     t = FakeTransport()
     _put_directive(t, "np-1", "NoTick", owner="alice", assignee="bob")
