@@ -31,6 +31,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from . import model
+
 #: Poll interval while `router run` is resident. FIXED by plan §2.5 — the W7
 #: acceptance latency bounds reference this constant, so it is not tunable.
 ROUTER_POLL_SECONDS = 60
@@ -67,7 +69,11 @@ ADAPTER_ARG_KEYS: dict[str, frozenset] = {
     "routine-align": frozenset(),
 }
 
-PRIORITY_RANK = {"P1": 1, "P2": 2, "P3": 3}
+#: Rank table DERIVED from the canonical vocabulary in ``model`` — never
+#: restated. It was restated once, as {"P1":1,"P2":2,"P3":3}, and the omission
+#: of P0 silently demoted every urgent item in the fleet to P2 (2026-07-27).
+#: Lower rank = more urgent, matching ``model.VALID_PRIORITIES`` order.
+PRIORITY_RANK = {p: i for i, p in enumerate(model.VALID_PRIORITIES)}
 
 #: Terminal statuses — a settled item wakes nobody.
 TERMINAL_STATUSES = frozenset({"done", "abandoned", "archived"})
@@ -175,7 +181,9 @@ def validate_config(
         problems: list[str] = []
         floor = cfg.get("priority_floor", "P1")
         if floor not in PRIORITY_RANK:
-            problems.append(f"priority_floor {floor!r} not in P1|P2|P3")
+            problems.append(
+                f"priority_floor {floor!r} not in "
+                + "|".join(model.VALID_PRIORITIES))
         debounce = cfg.get("debounce_min", 15)
         if not isinstance(debounce, int) or isinstance(debounce, bool) or debounce < 0:
             problems.append(f"debounce_min {debounce!r} not a non-negative int")
@@ -282,7 +290,14 @@ def decide(
         return "unroutable", None, f"config invalid: {config_error}"
     if agent_cfg is None:
         return "observe", None, "agent not enabled in router config"
-    rank = PRIORITY_RANK.get(item_priority, PRIORITY_RANK["P2"])
+    # An unknown priority is malformed input, not a P2. Coercing it silently is
+    # how P0 went unrouted for weeks. Route it to the fail-visible lane so a
+    # human sees it, rather than guessing at an urgency we cannot know.
+    if item_priority not in PRIORITY_RANK:
+        return ("unroutable", None,
+                f"unknown priority {item_priority!r}; expected one of "
+                + "|".join(model.VALID_PRIORITIES))
+    rank = PRIORITY_RANK[item_priority]
     floor = PRIORITY_RANK[agent_cfg["priority_floor"]]
     debounce = timedelta(minutes=agent_cfg["debounce_min"])
     recent = [t for t in (last_wake_at, last_delivered_at) if t is not None]
