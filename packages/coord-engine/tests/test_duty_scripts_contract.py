@@ -78,6 +78,12 @@ def test_queue_sweep_actually_prints_events_from_a_nonempty_window(tmp_path):
     stub.write_text("#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' '" +
                     rec + "' '" + directed + "' '" + other + "'\n")
     stub.chmod(0o755)
+    # macOS runners ship no `timeout` in the base dirs (found out via a CI
+    # rc-127 DEGRADED); stub it as a passthrough so the sandbox PATH is
+    # complete on every platform.
+    timeout_stub = tmp_path / "timeout"
+    timeout_stub.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+    timeout_stub.chmod(0o755)
     env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)}
     proc = subprocess.run(["bash", str(script), "tester", "1 hour"],
                           capture_output=True, text=True, env=env, timeout=30)
