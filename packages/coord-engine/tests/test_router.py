@@ -144,6 +144,12 @@ def test_config_validation_unknown_adapter():
     assert AGENT not in agents and "adapter" in errors[AGENT]
 
 
+def test_config_validation_accepts_p0_priority_floor():
+    agents, _, errors = router.validate_config(_config({
+        AGENT: {**CLOUD_CFG, "priority_floor": "P0"}}))
+    assert AGENT in agents and not errors
+
+
 def test_delivered_fold():
     shards = [
         {"agent": "a", "delivered_at": "2026-07-23T10:00:00Z", "source_shard": "s1"},
@@ -223,6 +229,57 @@ def test_processed_ledger_suppresses_second_pass():
 
 
 # --- policy -----------------------------------------------------------------
+
+def test_p0_interrupts_at_p1_floor():
+    decision, not_before, reason = router.decide(
+        item_priority="P0",
+        agent_cfg={**CLOUD_CFG, "priority_floor": "P1"},
+        config_error=None,
+        presence_ts=None,
+        lapsed=False,
+        last_wake_at=None,
+        last_delivered_at=None,
+        now=PINNED_NOW,
+    )
+    assert decision == "interrupt"
+    assert not_before == PINNED_NOW
+    assert reason == "priority P0 at/above floor"
+
+
+def test_p0_floor_only_interrupts_p0():
+    cfg = {**CLOUD_CFG, "priority_floor": "P0"}
+    p0, _, _ = router.decide(
+        item_priority="P0", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    p1, _, _ = router.decide(
+        item_priority="P1", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    assert p0 == "interrupt"
+    assert p1 == "batch"
+
+
+def test_known_priority_floor_regression_and_unknown_priority_is_visible():
+    cfg = {**CLOUD_CFG, "priority_floor": "P1"}
+    p1, _, p1_reason = router.decide(
+        item_priority="P1", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    p2, _, p2_reason = router.decide(
+        item_priority="P2", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    unknown, _, unknown_reason = router.decide(
+        item_priority="PX", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    assert (p1, p1_reason) == ("interrupt", "priority P1 at/above floor")
+    assert (p2, p2_reason) == ("batch",
+                               "below interrupt floor — rides digest/next check-in")
+    assert unknown == "batch"
+    assert "unknown priority 'PX' treated as P2" in unknown_reason
+
 
 def test_interrupt_enqueued_with_cloud_executor():
     t = FakeTransport()
