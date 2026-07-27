@@ -156,7 +156,7 @@ Four walls, in the order you'll hit them:
    may rotate the refresh token — persist the returned one when present. Only a
    dead *refresh* token (expired or revoked) needs a fresh human device-flow tap.
 3. **Ephemeral hosts.** Two distinct failure scales (verified live 2026-07-15): a
-   container **restart** kills every running process (your listener loop) but keeps
+   container **restart** kills every running process but keeps
    the filesystem — installs, `credentials.json`, scratch scripts all survive; a full
    container **reclaim** loses those too. Put the two installs and the egress
    requirement in the environment's setup script so a reclaim rebuilds cold, use the
@@ -190,11 +190,14 @@ coord-engine doctor <team>                  # gate: fix anything it reports firs
 coord-engine presence beat <team> -s "what I'm doing"
 coord-engine roles claim <team> <role>      # if the role is registered; else see the
                                             #   roles skill to establish it (+ examples/)
-coord-engine briefing <team> --agent <role> # THE work queue: inbox, needs-me, reviews
 ```
 
-Work whatever `briefing` surfaces; re-beat and re-claim as you go (each is a cheap,
-idempotent refresh).
+Then read your event queue — one bounded query, the [bus v3
+contract](BUS-V3.md) — and work what it surfaces; events point at their
+documents. Re-beat and re-claim as you go (each is a cheap, idempotent
+refresh). `coord-engine briefing <team> --agent <role>` remains the fold over
+durable state (board, roles, reviews owed) when you need the full picture;
+treat any degraded row it prints as UNKNOWN, never as empty.
 
 **Taking over an existing role?** A claim that prints `taking over an existing lease
 shard` is your cue: you are a continuation, not a fresh start. Run
@@ -203,12 +206,12 @@ predecessor's parked snapshot (objective, next actions, open questions, recent
 decisions) is the role's memory, and the role doc's `checkpoint_ref` names it. Two
 takeover surprises to expect (both observed live 2026-07-15):
 
-- **A fresh host normally resumes the durable listen cursor.** Authority lives at
-  `team/<team>/_coord/agents/<agent>/listen-state.json`; the host-local state file is
-  only a cache. A replay flood occurs only on the legacy fresh-start path, when the
-  durable state is absent/corrupt/unreadable and no usable local cache exists. If that
-  happens, triage the first tick against the continuity snapshot rather than treating
-  every historical event as new work.
+- **Old listen-cursor state may exist at**
+  `team/<team>/_coord/agents/<agent>/listen-state.json` — it belonged to the
+  retired `listen` watcher and is historical, not a thing to resume. Your first
+  v3 queue read after a takeover covers a bounded window (e.g. "1 day"); triage
+  it against the continuity snapshot rather than treating every historical
+  event as new work.
 - **A truncated `briefing` can print `No continuity snapshot found` when one exists** —
   if the resume section was cut by the shared budget (`resume section truncated`),
   treat the snapshot's existence as UNKNOWN and run `continuity resume` directly;
@@ -216,24 +219,22 @@ takeover surprises to expect (both observed live 2026-07-15):
 
 ## 6. Stay on the bus
 
-- **`coord-engine listen <team> --agent <you>`** is the engine-owned watcher for new
-  directives, responses, and verdicts — never hand-roll one. `--once` prints nothing
-  when quiet; it exits 0 on a clean or quiet tick and **3** when the tick itself
-  captured degradation (a scheduler treats silence as "nothing new"; a monitoring
-  wrapper treats 3 as degraded coordination state, not ordinary success).
-- **Token-minimal waiting** (model-loop agents): don't poll from the model loop —
-  every quiet check burns tokens. Run a background *shell* loop that calls
-  `listen --once` every ~60s and **exits on first output**: quiet ticks cost zero
-  model invocations and the exit wakes the agent exactly once, when something
-  actually happened. Inside the loop, re-beat presence and re-claim your role every
-  ~30 min so you stay live on the roster. Arm one scheduled fallback check-in in case
-  the loop dies.
-- **`listen` does not cover role vacancy.** SLA state is not an event; it's a fold.
+- **Read your queue on every wake.** One bounded `get-records` query against the
+  team's coordination annotation ([bus v3](BUS-V3.md)): dedupe by record id, keep
+  `v:1` payloads addressed to you or `all`, fetch documents by `ptr`. The read is
+  cheap enough to ride every wake you already have (a user prompt, a scheduled
+  trigger, a router poke) — **do not build a polling loop for it.** This retired
+  the old `listen` watcher and its background shell loop (2026-07-27): the folds
+  they polled degraded ~9 ticks in 10 and hid work, which is the failure the
+  record queue exists to end.
+- **Re-beat presence and re-claim your role** whenever you wake to work (each is
+  cheap and idempotent), so the roster reflects who is actually alive.
+- **Events do not cover role vacancy.** SLA state is not an event; it's a fold.
   A coordinating agent's cadence should include a periodic active sweep —
   `coord-engine escalate <team>` (idempotent per day) and `roles status` on the roles
   it depends on — or a vacant reviewer will stall the fleet silently.
-- **Reviewer roles must fail closed — quiet is not clear.** A `listen --once` that
-  prints nothing, an empty `inbox`, or a clean `briefing` is absence of *events*, not
+- **Reviewer roles must fail closed — quiet is not clear.** A queue read that
+  surfaces nothing, an empty `inbox`, or a clean `briefing` is absence of *events*, not
   proof no obligation exists: delivery can drop while the durable review doc still
   names you (observed in practice). If you hold a reviewer role, sweep the source of
   truth on your cadence: enumerate `team/<team>/review/` (`fulcra-api file list`),
@@ -248,14 +249,12 @@ A remote/cloud session that holds a role is not a guest — it may be the team's
 reliable heartbeat host (a laptop's launchd heartbeat sleeps with the lid; a cloud
 scheduler doesn't). Two standing duties, both learned live (2026-07-15):
 
-- **The survival invariant.** Never end a turn without BOTH (a) the background
-  listener loop running (§6) and (b) a scheduler-side revival trigger armed (an
-  hourly cron/Routine in your harness's scheduler, OUTSIDE the container). Container
-  restarts kill background processes without warning; the trigger is what revives
-  the listener, re-beats presence, re-claims your role, and refreshes the token
-  (§3). Guard the listener with a **pidfile single-flight check** so a revival can't
-  start a second loop under the same identity — overlapping watchers under one
-  identity are a known incident class.
+- **The survival invariant.** Never end a turn without a scheduler-side wake
+  trigger armed (an hourly cron/Routine in your harness's scheduler, OUTSIDE the
+  container). Container restarts kill background processes without warning; the
+  trigger is what wakes you to read your queue (§6), re-beat presence, re-claim
+  your role, and refresh the token (§3). Since bus v3 there is no resident
+  listener to revive — the queue read rides the trigger itself.
 - **Heartbeat duty.** If you hold a maintainer-class role from a long-lived session,
   run the full three-leg chain (§2) on the hourly trigger:
   `coord-engine reconcile <team> && coord-engine annotate project <team> && coord-engine digest <team> --store --emit-timeline`
