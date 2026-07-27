@@ -12,6 +12,13 @@ who it's for, what kind, how urgent, and where the document is if there is
 one. **Documents** are files on the Fulcra File Store, versioned; most events
 need no document at all. Reading your queue is one bounded range query.
 
+## Versions
+
+Be on the latest `fulcra-api` before anything else (`uv tool install --force
+fulcra-api`). Standing rule: any agent updating coord tooling updates
+`fulcra-api` in the same pass — an old CLI against a moving API is a
+silent-failure factory.
+
 ## Setup (once per account)
 
 Events ride a **moment annotation** — a user-defined typed-record stream. Pick
