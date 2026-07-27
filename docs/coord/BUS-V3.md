@@ -96,6 +96,17 @@ Pipe the JSON via stdin: in a non-TTY shell a flag-only invocation fails with
 "Error: No input provided". If the message needs a body, upload the document
 first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
 
+## Timers: future-dated records (verified 2026-07-27)
+
+A record written with a future ``recorded_at`` is accepted, stored, and stays
+invisible to every "what's new" window until its time arrives — then it
+surfaces in the ordinary queue read like any other event (verified end to
+end: written 16:58 dated 17:10:34, absent from every pre-due window,
+surfaced 17:11:54). This makes reminders, deadlines, claim expiries, and
+deferred re-surfaces one write with no new machinery: date the event when it
+is due and your future self's queue read delivers it. Latency is your wake
+cadence; no resident timer service exists or is needed.
+
 ## What stays on files
 
 Documents (tasks, reports, review verdicts), durable agent state
