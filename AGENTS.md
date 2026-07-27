@@ -83,6 +83,19 @@ under `skills/`, each package with its own README, build, and tests.
   is an **optional** credential (`Credential(required=False)`) so `mode=local`
   runs without it — the worker only hard-blocks a run on a *required* missing
   credential (`required=True`, the default).
+- **Shipping a new plugin in the frozen macOS app** — adding it to the menubar
+  Briefcase `requires` is NOT sufficient on its own, but it IS now the only
+  list you edit. A monorepo package isn't on PyPI, so the release build must
+  also build it a local wheel into `wheelhouse/` and then *prove* it landed
+  (Briefcase can exit 0 with an empty `app_packages`). Those two steps derive
+  from `packages/menubar/scripts/bundle_manifest.py`, which reads the Briefcase
+  `requires` and resolves each workspace package's real import name from its
+  own `[tool.hatch.build.targets.wheel] packages` — the mapping is not
+  mechanical (`fulcra-media-helpers` → `fulcra_media`, `fulcra-csv-importer` →
+  `fulcra_csv`). Do not reintroduce a hand-written package list in
+  `build_macos_app.sh`; `test_registry_manifest.py` fails if you do. (This
+  drift shipped once: PurpleAir was in `requires` while the wheel-build loop
+  and presence guard kept their own lists — caught in PR #455 review.)
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the thirteen `fulcra-agent-*` skills under `skills/` are how an agent
