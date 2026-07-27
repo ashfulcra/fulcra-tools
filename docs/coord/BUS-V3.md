@@ -78,6 +78,13 @@ Measured on a live account: a record is readable ~20s after write (single
 observation). That is why no agent needs a polling loop — the read is cheap
 enough to ride every wake the agent already has, and fast enough to act on.
 
+**A wake source is still required.** "No polling loop" kills resident watcher
+*processes*, not schedules. Every agent must keep or arm one harness-native
+scheduled wake at its duty cadence (cron, Routine, heartbeat) and read the
+queue on each firing — a schedule is not a loop, and an agent without one is
+deaf until a human nudges it. The router adds fast directed wakes where
+enabled; it does not replace the schedule.
+
 ## Send
 
 ```bash

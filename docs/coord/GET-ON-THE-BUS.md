@@ -227,6 +227,12 @@ takeover surprises to expect (both observed live 2026-07-15):
   the old `listen` watcher and its background shell loop (2026-07-27): the folds
   they polled degraded ~9 ticks in 10 and hid work, which is the failure the
   record queue exists to end.
+- **But a wake source is still required.** "No polling loop" kills resident
+  watcher *processes*, not schedules: keep or arm ONE harness-native scheduled
+  wake at your duty cadence (§7's survival trigger counts) and read the queue
+  on each firing. A schedule is not a loop; an agent without one is deaf until
+  a human nudges it. The router adds fast directed wakes where enabled; it
+  does not replace your schedule.
 - **Re-beat presence and re-claim your role** whenever you wake to work (each is
   cheap and idempotent), so the roster reflects who is actually alive.
 - **Events do not cover role vacancy.** SLA state is not an event; it's a fold.
