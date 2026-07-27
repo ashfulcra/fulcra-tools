@@ -1262,6 +1262,19 @@ def webhook_serve(host: str, port: int, bearer_token: str | None,
 
     bound_host, bound_port = server.server_address[:2]
 
+    # Install handlers before advertising readiness. A caller may signal the
+    # process immediately after reading the ready line; advertising first left
+    # a narrow race where SIGTERM used its default action and skipped the clean
+    # shutdown path.
+    import threading
+    stop_event = threading.Event()
+
+    def _handle(signum, _frame):
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+
     # Emit the "ready" line so callers (especially tests + parent agents)
     # can stop waiting on stdout and start sending webhooks. JSON mode
     # writes one line; human mode prints a friendly banner.
@@ -1298,15 +1311,6 @@ def webhook_serve(host: str, port: int, bearer_token: str | None,
     # main thread, but they only set a flag; we then call shutdown after
     # serve_forever returns from the handler-induced exception. Simpler:
     # run serve_forever on a background thread and block on a stop event.
-    import threading
-    stop_event = threading.Event()
-
-    def _handle(signum, _frame):
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, _handle)
-    signal.signal(signal.SIGINT, _handle)
-
     server_thread = threading.Thread(
         target=lambda: server.serve_forever(poll_interval=0.1),
         name="fulcra-webhook", daemon=True,
