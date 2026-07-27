@@ -3,25 +3,39 @@
 Vibe-coded by Fulcra's lawyer on Fulcra's own primitives — unofficial,
 unsupported, and a genuinely useful thing to point your agents at.
 
-**Point your agents here.** Clone it, then tell your agent: "read AGENTS.md
-and tell me how this could help our work." The rest of this file is for you;
-AGENTS.md is for them.
+**This repo is a working demo of Fulcra as agent infrastructure.** A dozen
+agents across five vendors run on it daily: they hand each other work, review
+each other's changes, survive container resets, and record what happened —
+coordinating through one Fulcra account and nothing else. No broker, no
+queue, no coordination server.
 
-This is a uv-workspace monorepo of helper projects built on
-[Fulcra](https://fulcradynamics.com). **Fulcra helps agents know their user,
-know what's happening in their user's world, work with their user's other
-agents, and become more helpful over time.** To get there, it gives agents a
-shared place to access and store real-world data — hard-to-get streams like
-health, location, and calendar (via the [Context App](https://apps.apple.com/us/app/context-personal-data-kit/id1633037434)),
-media plays and browsing attention (via the alpha [Collect app](packages/collect)),
-or anything else your agent wants to add — to record what matters, coordinate
-work, and discover what's new on every loop. That context belongs to you
-rather than any individual agent, so it can be securely shared across your
-agents and other AI applications over time. Code lives
-under [`packages/`](packages) (Python and TypeScript both appear here), agent
-skills live under [`skills/`](skills), and each package keeps its own README,
-build, and tests. This file is the front door; the package READMEs carry the
-detail.
+## The demo: point two agents at this repo
+
+The acceptance test for everything here: point two agents at this repo and
+get them coordinating.
+
+1. **One-time, human:** `uv tool install fulcra-api && fulcra auth login`
+   (browser sign-in; your account is created on first login).
+2. **Both agents:** clone this repo and read [`AGENTS.md`](AGENTS.md) — it is
+   written for them, not you.
+3. **Join the bus:** [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md)
+   takes an agent from zero to a named member of a team, verified cold from a
+   sandboxed container. There is no infrastructure to run.
+4. **Coordinate:** events move as typed records on your Fulcra timeline
+   ([bus v3](docs/coord/BUS-V3.md)) — agent A writes a directive record, agent
+   B reads its queue at its next wake with one query, does the work, and
+   answers with a response record. Documents (tasks, reports, review
+   verdicts) ride the File Store, versioned. Durable tasks, roles, and the
+   review handshake are [`coord-engine`](packages/coord-engine)'s job.
+
+Two kinds of thing move, and that's the whole architecture: **events** (typed
+records: who it's for, what kind, how urgent, where the document is if there
+is one) and **documents** (files). Reading your queue is one bounded range
+query, readable ~20 seconds after write. Cloud containers were reset seven
+times in one day and the fleet resumed each time, because the state lives in
+the account — and a plain chat session with a connector, no shell at all, has
+joined and done work. Everything else is convention, and the conventions are
+what this repo ships.
 
 ## No Fulcra account? Start here
 
@@ -38,19 +52,18 @@ token, and this file won't pretend otherwise.
   every data source Fulcra can pull from today and the pathway for each.
 - The [`skills/`](skills) directory — thirteen `fulcra-agent-*` skills (of 15
   total) — is the prose an agent reads to learn the coordination layer;
-  [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) and
+  [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) and
   [`docs/coord-DESIGN.md`](docs/coord-DESIGN.md) explain the bus without
   touching it. ([`docs/README.md`](docs/README.md) indexes which docs are
   written for a cold reader.)
 - The coord engine is stdlib-only, so it installs with no Fulcra account (see
   [Getting started](#getting-started)); `coord-engine --help` then prints the
   full verb surface offline.
-- The **wake router** is the fleet's always-on wake plane: a model-free
-  decision loop (`coord-engine router run`) routes directed work to agents via
-  content-safe adapters — cloud sessions align to their own Routines, desktop
-  hosts get a notification or queued wake file via a thin host executor
-  (`router execute`) — so agents no longer need per-agent poll loops to hear
-  the bus. Design and status: [`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md).
+- The **wake router** is the optional latency ceiling: agents need no polling
+  loops (the queue read rides any wake), but only an always-on process can
+  notice a deadline passing or wake an agent that's asleep. `coord-engine
+  router run` routes directed work to agents via content-safe adapters.
+  Design and status: [`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md).
 
 **Needs your Fulcra token — live data:** anything that reads or writes your
 actual data — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the
@@ -68,7 +81,7 @@ as you:
 
 | Project | What it is | Start here |
 |---|---|---|
-| **coord** | The agent-coordination layer (second generation): judgment stays in prose (skills), bookkeeping is deterministic stdlib-only code ([`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenClaw, CI — coordinate durable tasks over Fulcra Files as a bus: a cross-agent inbox, role-based identity with leases, a review handshake whose obligation persists until the verdict file exists (no ack can clear it), continuity checkpoints, and `briefing`/`needs-me` as the single entry fold for a waking agent. The thirteen `fulcra-agent-*` skills (of 15 total) under [`skills/`](skills) are how an agent actually uses it. | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [`README.md`](packages/coord-engine/README.md) · [`skills/`](skills) (agents) · [design](docs/coord-DESIGN.md) |
+| **coord** | The agent-coordination layer: judgment stays in prose (skills), bookkeeping is deterministic stdlib-only code ([`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenCode, OpenClaw, CI — coordinate durable work over one Fulcra account: events on typed records ([bus v3](docs/coord/BUS-V3.md)), documents on Fulcra Files, role-based identity with leases, and a review handshake whose obligation persists until the verdict file exists (no ack can clear it). The thirteen `fulcra-agent-*` skills (of 15 total) under [`skills/`](skills) are how an agent actually uses it. | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [bus v3](docs/coord/BUS-V3.md) · [`README.md`](packages/coord-engine/README.md) · [design](docs/coord-DESIGN.md) |
 | **coord tracker bridge** *(alpha)* | Mirrors coord work into external trackers without making the tracker authoritative: normalized snapshots, full source-identity state, versioned policy, pure diff planning, `coord-engine --json` and strict read-only teams sources, plus a paginated/retrying Linear adapter with explicit `plan` / `apply-resources` / `sync` phases. | [`README.md`](packages/coord-tracker-bridge/README.md) |
 | **ATC** | Air-traffic control for a fleet running on subscription caps — capability-matched model routing. A versioned capability map ships in the engine (current Claude/GPT/Gemini/Grok lineups + the local OSS tier); `coord-engine route <team> --needs code,long-context` ranks the cheapest capable model on the account with headroom, agents log usage and outcomes after each dispatch (`usage log`), and three bad outcomes demote a model for that kind of work. `coord-engine atc init` gets a solo operator from zero to routed dispatch in one command — no team concepts required; `atc report` and `atc dash` (localhost) show the tier mix and estimated frontier-cap days preserved. | [`SKILL.md`](skills/fulcra-agent-atc/SKILL.md) · [design](docs/coord/atc-DESIGN.md) |
 | **Fulcra Collect** | A local daemon that imports your personal-data streams into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md)) hosts every importer plugin, runs them on schedule in worker subprocesses, stores secrets in the OS keychain, and serves the onboarding wizard + dashboard at `127.0.0.1:9292` ([`packages/web-ui`](packages/web-ui/README.md)). [`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the shared API client + ingest pipeline every importer builds against; and [`packages/dayone`](packages/dayone/README.md), [`packages/csv-importer`](packages/csv-importer/README.md), and [`packages/media-helpers`](packages/media-helpers/README.md) are data-source importers (Day One journals, arbitrary CSVs, and watched/listened/read history from ~13 services). | [`docs/collect.md`](docs/collect.md) |
@@ -130,12 +143,10 @@ environment — the required `uv` extras, the launchd daemon, the PATH/keychain
 gotchas — plus the coordination and backlog conventions. Joining the coord bus
 for the first time — especially from a **remote or sandboxed environment**
 (Claude Code cloud, CI) — start with the
-[get-on-the-bus quickstart](docs/coord/GET-ON-THE-BUS.md): team bootstrap from
-zero, egress/auth requirements, and the join sequence. Coordinate durable
-work on the bus via the [coord skills](skills): on wake, `coord-engine
-briefing <team> --agent <you>` is the one command that surfaces your inbox,
-your roles' inboxes, and every review you owe — start there, not with a
-narrower check.
+[get-on-the-bus quickstart](docs/coord/GET-ON-THE-BUS.md), then adopt the
+[bus v3 read/send contract](docs/coord/BUS-V3.md): on any wake, read your
+record queue first (one query), and let events point you at documents. Don't
+build a polling loop for the bus; the read rides every wake you already have.
 [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps the whole platform surface
 (auth, files, annotations, queries, MCP) by agent capability tier — CLI, raw
 HTTP, or MCP-only. If you only need to **read** Fulcra data, the official MCP
