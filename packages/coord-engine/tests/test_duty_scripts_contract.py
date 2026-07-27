@@ -53,3 +53,35 @@ def test_retired_scripts_stay_deleted():
     for name in ("listener-loop.sh", "bus-sweep.sh"):
         assert not (_SCRIPTS_DIR / name).exists(), (
             f"{name} was retired by the bus v3 contract and must not return")
+
+
+def test_queue_sweep_actually_prints_events_from_a_nonempty_window(tmp_path):
+    """Functional guard: the sweep must surface events, not just exit 0.
+
+    The first shipped version fed its filter program to ``python3 -`` over a
+    heredoc while piping the records — both claim stdin, the records lose, and
+    a 34-record window printed nothing while exiting 0. Silence that looks
+    like success is the exact failure bus v3 exists to end, so this test runs
+    the real script against a stub ``fulcra-api``.
+    """
+    import subprocess
+    script = _SCRIPTS_DIR / "queue-sweep.sh"
+    stub = tmp_path / "fulcra-api"
+    rec = ('{"id":"r1","recorded_at":"2026-07-27T12:00:00+00:00",'
+           '"sources":["coord-boss"],'
+           '"note":"{\\"v\\":1,\\"to\\":\\"all\\",\\"kind\\":\\"directive\\",'
+           '\\"pri\\":\\"P0\\",\\"slug\\":\\"fleet-wide\\"}"}')
+    directed = rec.replace('"r1"', '"r2"').replace("fleet-wide", "just-me") \
+                  .replace('\\"all\\"', '\\"tester\\"')
+    other = rec.replace('"r1"', '"r3"').replace("fleet-wide", "not-mine") \
+               .replace('\\"all\\"', '\\"someone-else\\"')
+    stub.write_text("#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' '" +
+                    rec + "' '" + directed + "' '" + other + "'\n")
+    stub.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    proc = subprocess.run(["bash", str(script), "tester", "1 hour"],
+                          capture_output=True, text=True, env=env, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert "fleet-wide" in proc.stdout, "broadcast event not surfaced"
+    assert "just-me" in proc.stdout, "directed event not surfaced"
+    assert "not-mine" not in proc.stdout, "third-party event leaked"

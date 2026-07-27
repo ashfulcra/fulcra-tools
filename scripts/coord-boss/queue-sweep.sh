@@ -8,20 +8,18 @@
 # on wake. Quiet output means no events in the window, not proof of nothing —
 # a transport error prints DEGRADED and exits 3 (fail closed).
 #
+# The filter program rides in a variable and is passed via -c: it must NOT be
+# fed to `python3 -` over a heredoc while the data is piped, because both
+# claim stdin and the data silently loses (shipped that bug 2026-07-27; a
+# 34-record window printed zero events while exiting 0).
+#
 # USAGE: queue-sweep.sh [AGENT] [WINDOW]     defaults: coord-boss, "70 minutes"
 set -u
 AGENT="${1:-coord-boss}"
 WINDOW="${2:-70 minutes}"
 COORD_TYPE="MomentAnnotation/ea49d0d3-acb7-49c6-93b6-bee81d126c92"
 
-OUT="$(timeout 90 fulcra-api get-records "$COORD_TYPE" "$WINDOW" 2>/dev/null)"
-rc=$?
-if [ $rc -ne 0 ]; then
-  echo "DEGRADED: get-records rc=$rc — window UNKNOWN, not empty" >&2
-  exit 3
-fi
-
-printf '%s\n' "$OUT" | python3 - "$AGENT" <<'PYEOF'
+FILTER='
 import json, sys
 agent = sys.argv[1]
 seen = set()
@@ -44,4 +42,13 @@ for line in sys.stdin:
     src = [s for s in rec.get("sources", []) if not s.startswith("com.fulcradynamics.")]
     print(rec.get("recorded_at", "")[:19], src[0] if src else "?",
           p.get("kind"), p.get("pri"), p.get("slug"), p.get("ptr") or "-")
-PYEOF
+'
+
+OUT="$(timeout 90 fulcra-api get-records "$COORD_TYPE" "$WINDOW" 2>/dev/null)"
+rc=$?
+if [ $rc -ne 0 ]; then
+  echo "DEGRADED: get-records rc=$rc — window UNKNOWN, not empty" >&2
+  exit 3
+fi
+
+printf '%s\n' "$OUT" | python3 -c "$FILTER" "$AGENT"
