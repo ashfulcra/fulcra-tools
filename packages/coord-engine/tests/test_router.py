@@ -170,6 +170,43 @@ def test_fixed_rate_scheduler_skips_overrun_without_burst(capsys):
     assert "no burst catch-up" in error
 
 
+@pytest.mark.parametrize(
+    ("pass_duration", "expected_starts"),
+    [
+        (60, [0.0, 60.0, 120.0]),
+        (120, [0.0, 120.0, 240.0]),
+        (70, [0.0, 120.0, 240.0]),
+    ],
+)
+def test_fixed_rate_scheduler_preserves_on_time_boundary(
+        pass_duration, expected_starts):
+    now = 0.0
+    starts = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += pass_duration
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == expected_starts
+
+
 def test_router_run_resident_mode_uses_fixed_rate_scheduler(monkeypatch):
     labels = []
     passes = []

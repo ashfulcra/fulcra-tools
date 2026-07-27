@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pathlib
 import secrets
@@ -5405,7 +5406,10 @@ def _run_fixed_rate(pass_fn: Any, *, label: str,
         now = monotonic()
         if now > next_tick:
             late_by = now - next_tick
-            skipped = int(late_by // period_s) + 1
+            # Advance to the first anchor at or after ``now``.  ``floor + 1``
+            # incorrectly skips an anchor when lateness is an exact multiple
+            # of the period (for example, a 120s pass on a 60s cadence).
+            skipped = math.ceil(late_by / period_s)
             next_tick += skipped * period_s
             print(f"{label}: cadence overrun by {late_by:.3f}s — skipped "
                   f"{skipped} tick(s), no burst catch-up", file=sys.stderr)
