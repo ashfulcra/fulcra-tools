@@ -93,6 +93,32 @@ def test_queue_sweep_actually_prints_events_from_a_nonempty_window(tmp_path):
     assert "not-mine" not in proc.stdout, "third-party event leaked"
 
 
+def test_queue_sweep_malformed_line_makes_the_window_unknown(tmp_path):
+    """One truncated/malformed line ⇒ DEGRADED rc 3 and NO events printed —
+    the same one-bad-line-poisons-the-window rule as transport.records()."""
+    import subprocess
+    script = _SCRIPTS_DIR / "queue-sweep.sh"
+    stub = tmp_path / "fulcra-api"
+    good = ('{"id":"g1","recorded_at":"2026-07-27T12:00:00+00:00",'
+            '"sources":["coord-boss"],'
+            '"note":"{\\"v\\":1,\\"to\\":\\"tester\\",\\"kind\\":\\"directive\\",'
+            '\\"pri\\":\\"P0\\",\\"slug\\":\\"good-event\\"}"}')
+    stub.write_text("#!/bin/sh\nprintf '%s\\n%s\\n' '" + good +
+                    "' '{\"id\":\"trunc\",\"recorded_'\n")
+    stub.chmod(0o755)
+    timeout_stub = tmp_path / "timeout"
+    timeout_stub.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+    timeout_stub.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    proc = subprocess.run(["bash", str(script), "tester", "1 hour"],
+                          capture_output=True, text=True, env=env, timeout=30)
+    assert proc.returncode == 3
+    assert "DEGRADED" in proc.stderr
+    assert "good-event" not in proc.stdout, (
+        "events from a doubtful window must not print as if the window "
+        "were valid")
+
+
 def test_queue_sweep_transport_failure_is_degraded_rc3_not_quiet(tmp_path):
     """A failed fetch must exit 3 and say DEGRADED — never read as empty."""
     import subprocess

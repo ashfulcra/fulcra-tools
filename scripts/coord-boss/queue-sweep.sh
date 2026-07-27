@@ -21,13 +21,27 @@ COORD_TYPE="MomentAnnotation/ea49d0d3-acb7-49c6-93b6-bee81d126c92"
 
 FILTER='
 import json, sys
+# One malformed record LINE means the window is UNKNOWN: print nothing, say
+# DEGRADED, exit 3 — same contract as FulcraFileTransport.records(). A record
+# whose *note* is not a v1 payload is different: that is an ordinary
+# annotation sharing the track, and skipping it is correct.
 agent = sys.argv[1]
 seen = set()
+out = []
 for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
     try:
         rec = json.loads(line)
     except ValueError:
-        continue
+        print("DEGRADED: malformed record line — window UNKNOWN, not empty",
+              file=sys.stderr)
+        sys.exit(3)
+    if not isinstance(rec, dict):
+        print("DEGRADED: non-object record line — window UNKNOWN, not empty",
+              file=sys.stderr)
+        sys.exit(3)
     if rec.get("id") in seen:
         continue
     seen.add(rec.get("id"))
@@ -40,8 +54,11 @@ for line in sys.stdin:
     if p.get("to") not in (agent, "all"):
         continue
     src = [s for s in rec.get("sources", []) if not s.startswith("com.fulcradynamics.")]
-    print(rec.get("recorded_at", "")[:19], src[0] if src else "?",
-          p.get("kind"), p.get("pri"), p.get("slug"), p.get("ptr") or "-")
+    out.append(" ".join(str(x) for x in (
+        rec.get("recorded_at", "")[:19], src[0] if src else "?",
+        p.get("kind"), p.get("pri"), p.get("slug"), p.get("ptr") or "-")))
+for row in out:
+    print(row)
 '
 
 OUT="$(timeout 90 fulcra-api get-records "$COORD_TYPE" "$WINDOW" 2>/dev/null)"
