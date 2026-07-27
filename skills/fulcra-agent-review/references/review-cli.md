@@ -47,6 +47,10 @@ reviewer reviewer -> file verdict at team/<team>/review/<review-slug>/verdicts/<
 await verdicts: coord-engine listen <team> --agent <me>
 ```
 
+(The echoed `listen` line predates bus v3 — since 2026-07-27 you await verdicts
+by reading your event queue on your next wake, not by running the retired
+watcher. The verdict-file gate itself is unchanged.)
+
 ### Recovery semantics (idempotent, fail-closed)
 - **New PR head** — re-run the SAME PR slug/URL/requester/required set with a new
   exact `--head`. The doc advances to the next round, the settled marker clears,
