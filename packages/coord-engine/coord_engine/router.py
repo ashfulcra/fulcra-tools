@@ -31,6 +31,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from . import model
+
 #: Poll interval while `router run` is resident. FIXED by plan §2.5 — the W7
 #: acceptance latency bounds reference this constant, so it is not tunable.
 ROUTER_POLL_SECONDS = 60
@@ -67,7 +69,10 @@ ADAPTER_ARG_KEYS: dict[str, frozenset] = {
     "routine-align": frozenset(),
 }
 
-PRIORITY_RANK = {"P1": 1, "P2": 2, "P3": 3}
+# One canonical priority vocabulary.  A restated router-local table caused the
+# P0 demotion bug when model.VALID_PRIORITIES gained P0 and this copy did not.
+PRIORITY_RANK = {priority: rank
+                 for rank, priority in enumerate(model.VALID_PRIORITIES)}
 
 #: Terminal statuses — a settled item wakes nobody.
 TERMINAL_STATUSES = frozenset({"done", "abandoned", "archived"})
@@ -175,7 +180,9 @@ def validate_config(
         problems: list[str] = []
         floor = cfg.get("priority_floor", "P1")
         if floor not in PRIORITY_RANK:
-            problems.append(f"priority_floor {floor!r} not in P1|P2|P3")
+            problems.append(
+                f"priority_floor {floor!r} not in "
+                f"{'|'.join(PRIORITY_RANK)}")
         debounce = cfg.get("debounce_min", 15)
         if not isinstance(debounce, int) or isinstance(debounce, bool) or debounce < 0:
             problems.append(f"debounce_min {debounce!r} not a non-negative int")
@@ -282,23 +289,36 @@ def decide(
         return "unroutable", None, f"config invalid: {config_error}"
     if agent_cfg is None:
         return "observe", None, "agent not enabled in router config"
-    rank = PRIORITY_RANK.get(item_priority, PRIORITY_RANK["P2"])
+    if item_priority in PRIORITY_RANK:
+        rank = PRIORITY_RANK[item_priority]
+        priority_note = ""
+    else:
+        rank = PRIORITY_RANK["P2"]
+        priority_note = f"unknown priority {item_priority!r} treated as P2"
+
+    def reason(text: str) -> str:
+        return f"{text}; {priority_note}" if priority_note else text
+
     floor = PRIORITY_RANK[agent_cfg["priority_floor"]]
     debounce = timedelta(minutes=agent_cfg["debounce_min"])
     recent = [t for t in (last_wake_at, last_delivered_at) if t is not None]
     if recent and debounce and max(recent) > now - debounce:
-        return "debounce", None, "coalesced into a wake inside the debounce window"
+        return "debounce", None, reason(
+            "coalesced into a wake inside the debounce window")
     if rank <= floor:
-        return "interrupt", now, f"priority {item_priority} at/above floor"
+        return "interrupt", now, reason(
+            f"priority {item_priority} at/above floor")
     if lapsed:
         cadence = timedelta(minutes=agent_cfg["lapsed_checkin_min"])
         due = (last_delivered_at + cadence) if last_delivered_at else now
         return "checkin", max(due, now) if due > now else now, \
-            "lapsed session — reduced check-in cadence"
+            reason("lapsed session — reduced check-in cadence")
     if presence_ts is not None and presence_ts > now - timedelta(minutes=BUSY_FRESH_MIN):
         boundary = presence_ts + timedelta(minutes=BUSY_FRESH_MIN)
-        return "defer", boundary, "agent busy — queued to idle boundary"
-    return "batch", None, "below interrupt floor — rides digest/next check-in"
+        return "defer", boundary, reason(
+            "agent busy — queued to idle boundary")
+    return "batch", None, reason(
+        "below interrupt floor — rides digest/next check-in")
 
 
 # --- W5: adapter integration + execution (pure core) ------------------------
