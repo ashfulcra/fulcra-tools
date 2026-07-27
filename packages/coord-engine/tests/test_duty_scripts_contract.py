@@ -91,3 +91,21 @@ def test_queue_sweep_actually_prints_events_from_a_nonempty_window(tmp_path):
     assert "fleet-wide" in proc.stdout, "broadcast event not surfaced"
     assert "just-me" in proc.stdout, "directed event not surfaced"
     assert "not-mine" not in proc.stdout, "third-party event leaked"
+
+
+def test_queue_sweep_transport_failure_is_degraded_rc3_not_quiet(tmp_path):
+    """A failed fetch must exit 3 and say DEGRADED — never read as empty."""
+    import subprocess
+    script = _SCRIPTS_DIR / "queue-sweep.sh"
+    stub = tmp_path / "fulcra-api"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+    timeout_stub = tmp_path / "timeout"
+    timeout_stub.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+    timeout_stub.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    proc = subprocess.run(["bash", str(script), "tester", "1 hour"],
+                          capture_output=True, text=True, env=env, timeout=30)
+    assert proc.returncode == 3
+    assert "DEGRADED" in proc.stderr
+    assert proc.stdout == "", "a failed window must not print events"
