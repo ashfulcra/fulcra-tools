@@ -185,3 +185,138 @@ def test_remind_record_failure_degrades_loudly_but_rc_stays_zero(monkeypatch, ca
     assert cli.main(["remind", "r", "amy", "2h", "Degraded"], transport=t) == 0
     assert len(t.records_written) == 1
     assert "emission failed" in capsys.readouterr().out
+
+
+# --- the queue verb: cursored read (the window rule made automatic) ----------
+
+class QueueTransport(RecordingTransport):
+    def __init__(self, window=None, record_ok=True, write_ok=True):
+        super().__init__(record_ok=record_ok)
+        self.window = window          # what records() returns
+        self.write_ok = write_ok
+        self.record_queries: list[tuple] = []
+
+    def records(self, data_type, since, until):
+        self.record_queries.append((data_type, since, until))
+        return self.window
+
+    def write(self, path, content):
+        if not self.write_ok and path.endswith("records-cursor.json"):
+            return False
+        self.put(path, content)
+        return True
+
+
+def _event_rec(rid, slug, to="amy", at="2026-07-27T17:00:00+00:00"):
+    note = records.build_payload(to=to, kind="directive", priority="P2",
+                                 slug=slug)
+    return {"id": rid, "recorded_at": at, "sources": ["boss"], "note": note}
+
+
+def test_queue_first_run_uses_default_lookback_and_saves_cursor(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    t = QueueTransport(window=[_event_rec("r1", "hello")])
+    t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "hello" in out
+    (query,) = t.record_queries
+    assert query[1] == "2026-07-20T18:00:00Z"   # now - 7d lookback
+    assert query[2] == "2026-07-27T18:00:00Z"
+    cur = json.loads(t.store[records.cursor_path("r", "amy")])
+    assert cur["last_read"] == "2026-07-27T18:00:00Z"
+    assert cur["seen_ids"] == ["r1"]
+
+
+def test_queue_cursor_window_overlaps_by_skew_and_suppresses_seen(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = QueueTransport(window=[_event_rec("r1", "old-already-seen"),
+                               _event_rec("r2", "fresh")])
+    t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
+    t.put(records.cursor_path("r", "amy"),
+          '{"v":1,"last_read":"2026-07-27T17:30:00Z","seen_ids":["r1"]}')
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "fresh" in out and "old-already-seen" not in out
+    (query,) = t.record_queries
+    assert query[1] == "2026-07-27T17:28:00Z"   # last_read - 120s skew
+    cur = json.loads(t.store[records.cursor_path("r", "amy")])
+    assert set(cur["seen_ids"]) == {"r1", "r2"}
+
+
+def test_queue_unknown_window_is_degraded_rc3_cursor_untouched(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = QueueTransport(window=None)
+    t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
+    t.put(records.cursor_path("r", "amy"),
+          '{"v":1,"last_read":"2026-07-27T17:30:00Z","seen_ids":[]}')
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 3
+    assert "DEGRADED" in capsys.readouterr().err
+    cur = json.loads(t.store[records.cursor_path("r", "amy")])
+    assert cur["last_read"] == "2026-07-27T17:30:00Z"  # unmoved
+
+
+def test_queue_malformed_cursor_widens_to_lookback_not_shrinks(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = QueueTransport(window=[])
+    t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
+    t.put(records.cursor_path("r", "amy"), "not json at all")
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 0
+    (query,) = t.record_queries
+    assert query[1] == "2026-07-20T18:00:00Z"   # full lookback, never a guess
+
+
+def test_queue_cursor_save_failure_warns_but_rc_zero(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = QueueTransport(window=[_event_rec("r1", "x")], write_ok=False)
+    t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 0
+    assert "cursor save failed" in capsys.readouterr().err
+
+
+def test_queue_without_config_is_rc2(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = QueueTransport(window=[])
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 2
+    assert "records config" in capsys.readouterr().err
+
+
+def test_degraded_first_read_cannot_cause_a_second_timer(monkeypatch, capsys):
+    """Round-2 finding: a pre-read returning None (absent OR degraded — the
+    reader cannot tell) must not gate emission. Only the write path's verified
+    'written' outcome may emit; a dedupe detected by _write_directive's OWN
+    resolution emits nothing, even when an earlier read lied."""
+    _pin_clock(monkeypatch)
+    t = RecordingTransport()
+    t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
+    assert cli.main(["remind", "r", "amy", "2h", "Same", "--from", "boss"],
+                    transport=t) == 0
+    assert len(t.records_written) == 1
+
+    # Degrade exactly one subsequent read; _write_directive still detects the
+    # dedupe via its own (later) read of the same path.
+    real_read = t.read
+    state = {"failed": False}
+
+    def flaky_read(path):
+        if not state["failed"] and path.startswith("team/r/task/"):
+            state["failed"] = True
+            return None
+        return real_read(path)
+
+    t.read = flaky_read
+    # With the ambiguous pre-read REMOVED, the degraded read is now the write
+    # path's own read — which fails LOUD (slot present but unreadable, retry)
+    # instead of silently proceeding. rc 1, zero emission: the round-2 repro
+    # is structurally impossible at this head.
+    assert cli.main(["remind", "r", "amy", "3h", "Same", "--from", "boss"],
+                    transport=t) == 1
+    assert len(t.records_written) == 1, "degraded read must not add a timer"
+    err = capsys.readouterr().err
+    assert "cannot verify delivery, retry" in err
+    # And a clean retry converges on the dedupe outcome with no second timer.
+    assert cli.main(["remind", "r", "amy", "3h", "Same", "--from", "boss"],
+                    transport=t) == 0
+    assert len(t.records_written) == 1
+    assert "already scheduled" in capsys.readouterr().out

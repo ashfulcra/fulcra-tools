@@ -243,3 +243,65 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     return bool(transport.record_write(
         config["data_type"], config["api_version"], note, sender,
         recorded_at=recorded_at))
+
+
+# --- read side: the durable cursor (the window rule, 2026-07-27) --------------
+
+#: Team-relative per-agent cursor path. Durable ON THE BUS so a container roll
+#: cannot reset coverage; the local disk is never the authority.
+CURSOR_VERSION = 1
+
+#: First-run lookback when no cursor exists: long enough that a newly joining
+#: (or long-dark) agent sweeps real history, bounded so it terminates.
+DEFAULT_LOOKBACK_SECONDS = 7 * 24 * 3600
+
+#: Windows overlap backwards by this skew so a record that indexed AFTER a
+#: read closed (write->visibility lag, ~20s observed) is still covered by the
+#: next read. Overlap is free: seen-id suppression collapses the repeats.
+CURSOR_SKEW_SECONDS = 120
+
+#: Bound on remembered record ids. Must comfortably exceed the events a fleet
+#: writes within one skew overlap; 500 is ~two orders above today's rate.
+SEEN_IDS_CAP = 500
+
+
+def cursor_path(team: str, agent: str) -> str:
+    return f"team/{team}/_coord/agents/{agent}/records-cursor.json"
+
+
+def load_cursor(transport: Any, team: str, agent: str) -> Optional[dict[str, Any]]:
+    """The agent's durable cursor, or None when absent/unreadable/malformed.
+
+    None means "no trustworthy coverage claim exists" — the caller falls back
+    to the default lookback. A malformed cursor must NOT be treated as a
+    recent one: that would shrink coverage and silently skip work.
+    """
+    raw = transport.read(cursor_path(team, agent))
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or doc.get("v") != CURSOR_VERSION:
+        return None
+    last = doc.get("last_read")
+    if not isinstance(last, str) or not last.strip():
+        return None
+    seen = doc.get("seen_ids")
+    if seen is not None and not isinstance(seen, list):
+        return None
+    return {"last_read": last.strip(),
+            "seen_ids": [s for s in (seen or []) if isinstance(s, str)]}
+
+
+def save_cursor(transport: Any, team: str, agent: str, *, last_read: str,
+                seen_ids: list[str]) -> bool:
+    """Persist coverage. Returns False on failure — the caller WARNS and moves
+    on: an unadvanced cursor re-covers the same window next read, and seen-id
+    suppression makes the re-coverage free. Losing the write is latency;
+    pretending it landed would be the real bug."""
+    doc = {"v": CURSOR_VERSION, "last_read": last_read,
+           "seen_ids": list(seen_ids)[-SEEN_IDS_CAP:]}
+    return bool(transport.write(
+        cursor_path(team, agent), json.dumps(doc, separators=(",", ":"))))
