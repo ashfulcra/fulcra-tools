@@ -84,6 +84,30 @@ def _host_entry(*, agent=AGENT, adapter="codex-exec-resume", executor=HOST,
     return e
 
 
+def test_router_execute_resident_mode_uses_fixed_rate_scheduler(monkeypatch):
+    labels = []
+    passes = []
+
+    class StopLoop(Exception):
+        pass
+
+    def scheduled(pass_fn, *, label):
+        labels.append(label)
+        pass_fn()
+        raise StopLoop
+
+    monkeypatch.setattr(cli, "_run_fixed_rate", scheduled)
+    monkeypatch.setattr(
+        cli, "_router_execute_host",
+        lambda args, transport, emit=True: passes.append(args.team) or {})
+
+    with pytest.raises(StopLoop):
+        cli.cmd_router_execute(_args(once=False), FakeTransport())
+
+    assert labels == ["router execute"]
+    assert passes == [TEAM]
+
+
 def _seed(t, entry):
     key = router.idempotency_key(entry["source_shard"], entry["agent"])
     name = router.queue_filename(entry["agent"], key)
@@ -263,6 +287,21 @@ def test_queue_listing_raises_is_degraded_not_clean_zero(capsys):
     # command surfaces the degradation as a non-zero exit
     t.fail_list_containing.add("queue/")
     assert cli.cmd_router_execute(_args(), t) == 1
+
+
+def test_execute_json_is_one_document(capsys):
+    t = FakeTransport()
+    _hbase(t)
+    assert cli.cmd_router_execute(_args(json=True, dry_run=True), t) == 0
+    captured = capsys.readouterr()
+    assert isinstance(json.loads(captured.out), dict)
+    assert captured.out.count("\n") == 1
+
+
+def test_execute_rejects_json_resident_mode(capsys):
+    args = _args(json=True, once=False, dry_run=False)
+    assert cli.cmd_router_execute(args, FakeTransport()) == 2
+    assert capsys.readouterr().out == ""
 
 
 def test_delivered_listing_raises_is_degraded(capsys):

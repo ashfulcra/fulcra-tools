@@ -93,11 +93,12 @@ _EVENTS: "dict[str, tuple[str, str | None]]" = {
 COORD_WATCH_PROMPT = """\
 [coord watch — managed by fulcra-agent-automation/scripts/codex; do not hand-edit]
 You are {agent} on coord team {team}. Apply the fulcra-agent-automation tick contract:
-resume continuity, run `coord-engine briefing {team} --agent {agent}` once, and handle every
-surfaced item end-to-end. A degraded section is not clear: use its documented targeted
-fallback. For reviews, write and verify the exact required verdict before acking. Snapshot
-material work, refresh presence/held-role leases, then report last. If nothing is actionable,
-the final output is exactly WATCH_OK.
+resume continuity, run `coord-engine inbox {team} --agent {agent} --json` once, then run
+`coord-engine briefing {team} --agent {agent}` once. Do not rely on briefing's inbox section:
+if either read is degraded, use its documented direct-listing fallback. Handle every surfaced
+item end-to-end. For reviews, write and verify the exact required verdict before acking.
+Snapshot material work, refresh presence/held-role leases, then report last. If nothing is
+actionable, the final output is exactly WATCH_OK.
 """
 
 SESSION_START_SH = """\

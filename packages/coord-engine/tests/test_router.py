@@ -24,7 +24,7 @@ Cheap-beats-clever: stdlib-only, FakeTransport, pinned clock.
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -107,6 +107,131 @@ def test_poll_interval_is_the_fixed_plan_constant():
     assert router.ROUTER_POLL_SECONDS == 60  # plan §2.5: FIXED, not tunable
 
 
+@pytest.mark.parametrize("pass_duration", [5, 20, 59])
+def test_fixed_rate_scheduler_holds_sixty_second_cycle(pass_duration):
+    now = 0.0
+    starts = []
+    sleeps = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += pass_duration
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == [0.0, 60.0, 120.0]
+    assert sleeps == [60 - pass_duration] * 3
+
+
+def test_fixed_rate_scheduler_skips_overrun_without_burst(capsys):
+    now = 0.0
+    starts = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += 70
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == [0.0, 120.0, 240.0]
+    error = capsys.readouterr().err
+    assert "cadence overrun" in error
+    assert "no burst catch-up" in error
+
+
+@pytest.mark.parametrize(
+    ("pass_duration", "expected_starts"),
+    [
+        (60, [0.0, 60.0, 120.0]),
+        (120, [0.0, 120.0, 240.0]),
+        (70, [0.0, 120.0, 240.0]),
+    ],
+)
+def test_fixed_rate_scheduler_preserves_on_time_boundary(
+        pass_duration, expected_starts):
+    now = 0.0
+    starts = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += pass_duration
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == expected_starts
+
+
+def test_router_run_resident_mode_uses_fixed_rate_scheduler(monkeypatch):
+    labels = []
+    passes = []
+
+    class StopLoop(Exception):
+        pass
+
+    def scheduled(pass_fn, *, label):
+        labels.append(label)
+        pass_fn()
+        raise StopLoop
+
+    monkeypatch.setattr(cli, "_run_fixed_rate", scheduled)
+    monkeypatch.setattr(
+        cli, "_router_pass",
+        lambda args, transport: passes.append(args.team) or 0)
+
+    with pytest.raises(StopLoop):
+        cli.cmd_router_run(
+            _args(once=False, shadow=True), FakeTransport())
+
+    assert labels == ["router run"]
+    assert passes == [TEAM]
+
+
 def test_parse_store_mtime():
     dt = router.parse_store_mtime("2026-07-22 04:22PM UTC")
     assert dt == datetime(2026, 7, 22, 16, 22, tzinfo=timezone.utc)
@@ -142,6 +267,12 @@ def test_config_validation_unknown_adapter():
     agents, _, errors = router.validate_config(_config({
         AGENT: {**CLOUD_CFG, "adapter": "spawn-session"}}))
     assert AGENT not in agents and "adapter" in errors[AGENT]
+
+
+def test_config_validation_accepts_p0_priority_floor():
+    agents, _, errors = router.validate_config(_config({
+        AGENT: {**CLOUD_CFG, "priority_floor": "P0"}}))
+    assert AGENT in agents and not errors
 
 
 def test_delivered_fold():
@@ -223,6 +354,75 @@ def test_processed_ledger_suppresses_second_pass():
 
 
 # --- policy -----------------------------------------------------------------
+
+@pytest.mark.parametrize("floor", ["P0", "P1", "P2", "P3"])
+def test_p0_interrupts_at_every_floor(floor):
+    decision, not_before, reason = router.decide(
+        item_priority="P0",
+        agent_cfg={**CLOUD_CFG, "priority_floor": floor},
+        config_error=None,
+        presence_ts=None,
+        lapsed=False,
+        last_wake_at=None,
+        last_delivered_at=None,
+        now=PINNED_NOW,
+    )
+    assert decision == "interrupt"
+    assert not_before == PINNED_NOW
+    assert reason == "priority P0 at/above floor"
+
+
+def test_enablement_and_debounce_still_outrank_p0():
+    observed, _, observed_reason = router.decide(
+        item_priority="P0", agent_cfg=None, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    debounced, _, debounced_reason = router.decide(
+        item_priority="P0", agent_cfg={**CLOUD_CFG, "priority_floor": "P0"},
+        config_error=None, presence_ts=None, lapsed=False,
+        last_wake_at=PINNED_NOW - timedelta(minutes=1),
+        last_delivered_at=None, now=PINNED_NOW)
+
+    assert (observed, observed_reason) == (
+        "observe", "agent not enabled in router config")
+    assert debounced == "debounce"
+    assert "inside the debounce window" in debounced_reason
+
+
+def test_p0_floor_only_interrupts_p0():
+    cfg = {**CLOUD_CFG, "priority_floor": "P0"}
+    p0, _, _ = router.decide(
+        item_priority="P0", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    p1, _, _ = router.decide(
+        item_priority="P1", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    assert p0 == "interrupt"
+    assert p1 == "batch"
+
+
+def test_known_priority_floor_regression_and_unknown_priority_is_visible():
+    cfg = {**CLOUD_CFG, "priority_floor": "P1"}
+    p1, _, p1_reason = router.decide(
+        item_priority="P1", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    p2, _, p2_reason = router.decide(
+        item_priority="P2", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    unknown, _, unknown_reason = router.decide(
+        item_priority="PX", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    assert (p1, p1_reason) == ("interrupt", "priority P1 at/above floor")
+    assert (p2, p2_reason) == ("batch",
+                               "below interrupt floor — rides digest/next check-in")
+    assert unknown == "batch"
+    assert "unknown priority 'PX' treated as P2" in unknown_reason
+
 
 def test_interrupt_enqueued_with_cloud_executor():
     t = FakeTransport()
@@ -727,6 +927,18 @@ def test_router_shadow_mode_persists_decisions_enqueues_nothing():
         AGENT, "interrupt", f"urgent-1:{AGENT}")
     cur = json.loads(t.store[RP + "cursor.json"])
     assert f"urgent-1:{AGENT}" in cur["processed"]       # cursor still advances
+    marks = [json.loads(c) for p, c in t.store.items()
+             if p.startswith(RP + router.SHADOW_MARKS_SUBPATH)]
+    assert len(marks) == 1 and marks[0]["slots"] == [NOW_ISO]
+
+
+def test_router_shadow_failed_pass_writes_no_duty_mark():
+    t = FlakyTransport()
+    _base(t)
+    t.fail_list_containing.add("delivered/")
+    assert cli.cmd_router_run(_args(shadow=True), t) == 1
+    assert not any(p.startswith(RP + router.SHADOW_MARKS_SUBPATH)
+                   for p in t.store)
 
 
 def test_router_shadow_arm_writes_marker_and_is_idempotent(capsys):
@@ -746,6 +958,166 @@ def test_router_shadow_status_reports_elapsed(capsys):
     capsys.readouterr()
     assert cli.cmd_router_shadow_status(_args(), t) == 0
     assert "ARMED" in capsys.readouterr().out
+
+
+def test_router_shadow_report_missing_population_is_unknown_json(capsys):
+    t = FakeTransport()
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "UNKNOWN"
+    assert report["pass"] is False
+    assert any("shadow-window" in reason for reason in report["unknown"])
+
+
+def _put_healthy_marks(t, start, hours):
+    from datetime import timedelta
+    for hour in range(hours):
+        first = start + timedelta(hours=hour)
+        slots = [router.iso(first + timedelta(minutes=minute))
+                 for minute in range(60)]
+        record = {
+            "bucket": router.iso(first)[:13],
+            "slots": slots,
+        }
+        t.put(RP + router.SHADOW_MARKS_SUBPATH
+              + router.shadow_mark_bucket(first), json.dumps(record))
+    end = start + timedelta(hours=hours)
+    t.put(RP + router.SHADOW_MARKS_SUBPATH
+          + router.shadow_mark_bucket(end), json.dumps({
+              "bucket": router.iso(end)[:13], "slots": [router.iso(end)]}))
+
+
+def test_shadow_report_cli_happy_completed_task_passes(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    key = f"done-item:{AGENT}"
+    t.put(RP + router.SHADOW_DECISIONS_SUBPATH + "d.json",
+          json.dumps(_dec(key, decided_at="2026-07-23T12:01:00Z")))
+    t.put(RP + router.SHADOW_EVIDENCE_SUBPATH + "e.json",
+          json.dumps(_ev(key)))
+    t.put(TASKP + "done-item.md",
+          _task("done-item", AGENT, "P1", status="done"))
+    _put_healthy_marks(t, start, 48)
+
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "PASS"
+    assert report["classes"][key] == "matched"
+    assert report["gates"]["window_duration"] is True
+
+
+def test_shadow_report_cli_quiet_pass_marks_prove_uptime(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    _put_healthy_marks(t, start, 48)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
+    assert json.loads(capsys.readouterr().out)["duty_cycle"]["uptime"] >= .95
+
+
+def test_shadow_report_cli_sparse_bursts_do_not_fabricate_uptime(
+    monkeypatch, capsys
+):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    for hour in range(48):
+        base = start + timedelta(hours=hour)
+        observed = list(range(10)) + [59]  # burst at both bounds, 49m unseen
+        t.put(RP + router.SHADOW_MARKS_SUBPATH
+              + router.shadow_mark_bucket(base), json.dumps({
+                  "bucket": router.iso(base)[:13],
+                  "slots": [router.iso(base + timedelta(minutes=m))
+                            for m in observed]}))
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "FAIL"
+    assert report["gates"]["duty_uptime"] is False
+
+
+def test_shadow_report_cli_feed_proves_deleted_task_existed(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([{"path": TASKP + "deleted-item.md", "state": "deleted",
+                 "deleted_at": "2026-07-23T18:00:00Z"}])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    key = f"deleted-item:{AGENT}"
+    t.put(RP + router.SHADOW_DECISIONS_SUBPATH + "d.json",
+          json.dumps(_dec(key, decided_at="2026-07-23T12:01:00Z")))
+    t.put(RP + router.SHADOW_EVIDENCE_SUBPATH + "e.json",
+          json.dumps(_ev(key)))
+    _put_healthy_marks(t, start, 48)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
+    assert json.loads(capsys.readouterr().out)["classes"][key] == "matched"
+
+
+def test_shadow_report_cli_rejects_short_window(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    monkeypatch.setattr(cli, "_now", lambda: start + timedelta(hours=1))
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    _put_healthy_marks(t, start, 1)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "FAIL"
+    assert report["gates"]["window_duration"] is False
+
+
+def test_shadow_report_cli_malformed_record_is_unknown(monkeypatch, capsys):
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    monkeypatch.setattr(cli, "_now", lambda: start + timedelta(hours=48))
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    t.put(RP + router.SHADOW_DECISIONS_SUBPATH + "bad.json",
+          json.dumps({"key": "bad", "agent": AGENT, "decision": "interrupt",
+                      "decided_at": "not-a-time"}))
+    _put_healthy_marks(t, start, 48)
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 1
+    assert json.loads(capsys.readouterr().out)["verdict"] == "UNKNOWN"
+
+
+def test_router_run_json_is_one_document_and_details_are_stderr(capsys):
+    t = FakeTransport()
+    t.put(TASKP + "urgent-1.md", _task("urgent-1", AGENT, "P1"),
+          mtime="2026-07-23 11:30AM UTC")
+    _base(t)
+    assert cli.cmd_router_run(_args(json=True), t) == 0
+    captured = capsys.readouterr()
+    doc = json.loads(captured.out)
+    assert doc["pass"]["scanned"] == 1
+    assert isinstance(doc["execute"], dict)
+    assert "decision " in captured.err
+
+
+def test_router_run_rejects_json_resident_mode(capsys):
+    assert cli.cmd_router_run(_args(json=True, once=False), FakeTransport()) == 2
+    assert capsys.readouterr().out == ""
 
 
 def _listen_state():

@@ -67,7 +67,7 @@ fail-closed fallback).
   overwrite) after each batch; on missing/corrupt cursor the router restarts in observe-only and
   reports.
 - **Router config** (`_coord/router/config.json`): per-agent
-  `{priority_floor: "P1"|"P2"|"P3", debounce_min: <int, minutes>, adapter: <enum — exactly one of
+  `{priority_floor: "P0"|"P1"|"P2"|"P3", debounce_min: <int, minutes>, adapter: <enum — exactly one of
   the §W5/W6 allowlist: "codex-exec-resume"|"openclaw-post"|"managed-agents-message"|
   "macos-notify"|"queued-wake-file"|"routine-align">, adapter_args: <per-adapter allowlisted keys
   ONLY — e.g. codex-exec-resume: {thread_id}; openclaw-post: {endpoint_name} (resolved from local

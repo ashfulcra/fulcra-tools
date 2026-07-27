@@ -187,7 +187,10 @@ it (not on PyPI).
   `shadow-decisions/` and enqueues/executes nothing, while the live delivery
   paths (listener tick, adapter execution) write `shadow-evidence/` shards at
   delivery success. The acceptance report correlates the two on the idempotency
-  key over a ≥48h window (duty-cycle gated). Contract:
+  key over a ≥48h window (duty-cycle gated). Resident router loops use an
+  anchored fixed-rate cadence; externally scheduling per-tick `--once` runs
+  inherits that scheduler's throttle semantics and is not the duty-gate
+  deployment. Contract:
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
@@ -277,6 +280,14 @@ it (not on PyPI).
   `coord-engine briefing <team> --agent <you>` remains the fold over durable
   state — identity, role inboxes, reviews owed — for when you need the full
   board; honor every degraded row it prints as UNKNOWN.
+- **The Codex safety-net watch checks its literal inbox before briefing**
+  (PR 484). On Codex hosts, the managed heartbeat runs one direct
+  `inbox --json` read and then one authoritative `briefing` read; it never
+  treats briefing's inbox subsection as a substitute for the direct read, and
+  if either surface degrades it uses the documented direct-listing fallback
+  before reporting quiet. Deliberate redundancy against a stale or unreadable
+  summaries index, kept alongside the v3 queue read as that harness's
+  fail-closed backstop.
 - **Retired (2026-07-27, operator-ordered): the `listen` watcher as the wake
   surface.** The per-agent `coord-engine listen` loop and its adaptive-cadence
   host listeners existed because discovering work meant walking the file tree;
@@ -879,6 +890,120 @@ Author commits as `ashfulcra
 <114089064+ashfulcra@users.noreply.github.com>` and end the message with the
 trailer `Co-Authored-By: <your model> <noreply@anthropic.com>` (e.g.
 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
+
+## Fleet bot identity & PAT custody (W9)
+
+**The fleet's machine account is `AnachronixBot`** — a dedicated bot User, distinct
+from `ashfulcra` (Ash's personal account) and from `FulcraBot` (reserved for
+Fulcra-side repos, operator decision 2026-07-22). Agent-driven GitHub actions run
+as the bot so they are **attributable to the fleet, not to Ash personally**; when
+you see a push or merge by `AnachronixBot`, an agent did it.
+
+**Custody — TWO homes, read at runtime, never embedded.** The same credential
+lives in two places and **both must be rotated together**:
+
+| Home | Where | Holders |
+|---|---|---|
+| **PRIMARY** | `FLEET_GH_TOKEN` + `FLEET_BOT_NAME` in the **CCR env config** | the four cloud agents: `coord-boss`, `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer` |
+| Mac host | macOS keychain, service `FLEET_GH_PAT` (account = host user) | host-local jobs on the resident Mac |
+| VPS | per the deploy package | added at the VPS migration |
+
+Cloud agents read `FLEET_GH_TOKEN` from their environment; on the Mac host, read
+the keychain only at the moment of use:
+
+```bash
+GH_TOKEN=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT -w)
+```
+
+**Rotating one home only is the trap:** revoking the old PAT after refreshing just
+the keychain leaves every cloud agent holding a dead token. The rotation runbook
+below updates the CCR envs *before* revocation for exactly this reason.
+
+Hard rules, each one a real leak vector:
+- **NEVER put it in a launchd plist `EnvironmentVariables`.** Plists under
+  `~/Library/LaunchAgents` are readable; a token there is plaintext at rest. A
+  scheduled job that needs it shells out to the keychain *at runtime*.
+- **Never** commit it, echo it, paste it into a chat/transcript, or log it. Print
+  derived facts (identity, permissions), never the value.
+- Agents **cannot mint tokens** — only the operator can. An expired PAT is an
+  operator action, never an agent workaround.
+
+**Least privilege (verified 2026-07-24).** Fine-grained, per-repo:
+Contents RW + Pull requests RW + Metadata R. **No admin, no workflows** — the
+workflows scope would let a bot rewrite CI, which is far more blast radius than
+the fleet needs. Confirmed on `ashfulcra/fulcra-tools`: `push: true`,
+`admin: false`. A PAT can never exceed its account's own repo access — if a merge
+fails with a permissions error, the fix is granting the **bot account** access,
+not re-minting the token.
+
+**Rotation.** 90-day expiry; the current token expires **2026-10-22**, with a P1
+bus reminder armed for 2026-10-15 (7 days' lead). **The operator runs every step;
+agents cannot mint or revoke tokens.** Order matters — the new token is verified
+*before* the old one is revoked, so a failed rotation is always recoverable.
+
+**Stage, verify, then promote — never overwrite the incumbent first.** A
+fine-grained PAT value is shown exactly once, so overwriting `FLEET_GH_PAT` before
+the new token is proven leaves nothing to roll back to (and stashing a copy of the
+old value would violate the custody rules above). The incumbent stays untouched
+and working until the candidate has passed verification.
+
+1. **Mint** (GitHub UI, signed in as `AnachronixBot`): Settings → Developer
+   settings → Personal access tokens → Fine-grained → *Generate new token*. Same
+   scopes as the incumbent — **Contents: RW, Pull requests: RW, Metadata: R**, no
+   administration, no workflows — same repos, 90-day expiry. Keep the value
+   available (password manager / the once-shown page) until step 5.
+2. **Stage** it under a *separate* item — the incumbent is not touched. `-w` with
+   **no value** prompts, so the token never enters argv or shell history:
+   ```bash
+   security add-generic-password -a "$USER" -s FLEET_GH_PAT_NEW -w
+   ```
+3. **Verify the candidate from staging** — prints only derived facts:
+   ```bash
+   T=$(security find-generic-password -a "$USER" -s FLEET_GH_PAT_NEW -w)
+   GH_TOKEN="$T" gh api user --jq .login                     # expect AnachronixBot
+   GH_TOKEN="$T" gh api repos/ashfulcra/fulcra-tools \
+     --jq '{push: .permissions.push, admin: .permissions.admin}'
+   unset T                                    # expect push true, admin false
+   ```
+   Wrong `login` ⇒ minted on the wrong account. `push: false` ⇒ the **bot
+   account** lacks repo access — grant it, don't re-mint.
+4. **If step 3 fails, abort cleanly.** The fleet never noticed:
+   ```bash
+   security delete-generic-password -a "$USER" -s FLEET_GH_PAT_NEW
+   ```
+   The incumbent is untouched and still working. Fix and retry from step 1.
+5. **Promote** — re-enter the *same* value at the prompt:
+   ```bash
+   security add-generic-password -U -a "$USER" -s FLEET_GH_PAT -w
+   ```
+   **Do NOT pipe a value into `-w`.** Verified 2026-07-24: a piped
+   `-w` creates the item with an **empty** value and still exits 0 — a silent
+   empty-credential promotion that looks like success. Always type/paste at the
+   interactive prompt.
+6. **Re-verify `FLEET_GH_PAT` itself** by re-running step 3 against service
+   `FLEET_GH_PAT`. Promotion is a fresh manual paste, so it must be proven too —
+   this is what catches the empty-value footgun. If it fails, the staging item
+   still holds the verified-good token (readable via Keychain Access): redo
+   step 5. Do not proceed until this passes.
+7. **Propagate to the PRIMARY home — the cloud agents — BEFORE revoking.** Steps
+   2–6 rotate the Mac keychain only; the four cloud agents (`coord-boss`,
+   `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer`) still hold the
+   **old** token in `FLEET_GH_TOKEN`. Update `FLEET_GH_TOKEN` in each of their CCR
+   env configs (and the VPS deploy package once migrated), then **confirm one real
+   cloud push or PR operation succeeds** with the new value. Revoking before this
+   step strands the entire cloud fleet on a dead credential — the whole reason
+   custody is documented as two homes.
+8. **Revoke the old token** — only after step 7 confirms. GitHub UI → previous
+   token → *Revoke*. Skipping this leaves a live credential in circulation.
+9. **Clean up staging and re-arm:**
+   ```bash
+   security delete-generic-password -a "$USER" -s FLEET_GH_PAT_NEW
+   ```
+   Then arm the next rotation reminder (~7 days before the new expiry) and update
+   the expiry date recorded above.
+
+Never let the value reach argv, stdout, shell history, a repo file, a launchd
+plist, a log, or a chat transcript at any step.
 
 ## Documentation rules (standing, operator-set)
 

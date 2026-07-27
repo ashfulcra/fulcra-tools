@@ -96,6 +96,19 @@ def test_malformed_wake_is_left_fail_visible(tmp_path):
     assert quarantined[0].read_text() == "{not-json"
 
 
+def test_wake_consume_returns_nonzero_for_unreadable_wakes(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("COORD_WAKE_DIR", str(tmp_path))
+    agent_dir = wake_adapters.wake_agent_dir(
+        "fulcra", "codex:box:repo", root=tmp_path)
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "bad.json").write_text("{not-json")
+    args = type("Args", (), {"team": "fulcra", "agent": "codex:box:repo"})()
+    assert cli.cmd_wake_consume(args, None) == 1
+    assert "queued-wake degraded" in capsys.readouterr().err
+
+
 def test_invalid_claim_quarantine_never_clobbers_valid_replacement(
     tmp_path, monkeypatch
 ):
