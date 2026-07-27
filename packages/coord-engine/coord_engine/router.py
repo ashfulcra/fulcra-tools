@@ -31,6 +31,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from . import model
+
 #: Poll interval while `router run` is resident. FIXED by plan §2.5 — the W7
 #: acceptance latency bounds reference this constant, so it is not tunable.
 ROUTER_POLL_SECONDS = 60
@@ -67,7 +69,10 @@ ADAPTER_ARG_KEYS: dict[str, frozenset] = {
     "routine-align": frozenset(),
 }
 
-PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+# One canonical priority vocabulary.  A restated router-local table caused the
+# P0 demotion bug when model.VALID_PRIORITIES gained P0 and this copy did not.
+PRIORITY_RANK = {priority: rank
+                 for rank, priority in enumerate(model.VALID_PRIORITIES)}
 
 #: Terminal statuses — a settled item wakes nobody.
 TERMINAL_STATUSES = frozenset({"done", "abandoned", "archived"})

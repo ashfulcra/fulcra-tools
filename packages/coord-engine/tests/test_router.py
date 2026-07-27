@@ -24,7 +24,7 @@ Cheap-beats-clever: stdlib-only, FakeTransport, pinned clock.
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -230,10 +230,11 @@ def test_processed_ledger_suppresses_second_pass():
 
 # --- policy -----------------------------------------------------------------
 
-def test_p0_interrupts_at_p1_floor():
+@pytest.mark.parametrize("floor", ["P0", "P1", "P2", "P3"])
+def test_p0_interrupts_at_every_floor(floor):
     decision, not_before, reason = router.decide(
         item_priority="P0",
-        agent_cfg={**CLOUD_CFG, "priority_floor": "P1"},
+        agent_cfg={**CLOUD_CFG, "priority_floor": floor},
         config_error=None,
         presence_ts=None,
         lapsed=False,
@@ -244,6 +245,23 @@ def test_p0_interrupts_at_p1_floor():
     assert decision == "interrupt"
     assert not_before == PINNED_NOW
     assert reason == "priority P0 at/above floor"
+
+
+def test_enablement_and_debounce_still_outrank_p0():
+    observed, _, observed_reason = router.decide(
+        item_priority="P0", agent_cfg=None, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    debounced, _, debounced_reason = router.decide(
+        item_priority="P0", agent_cfg={**CLOUD_CFG, "priority_floor": "P0"},
+        config_error=None, presence_ts=None, lapsed=False,
+        last_wake_at=PINNED_NOW - timedelta(minutes=1),
+        last_delivered_at=None, now=PINNED_NOW)
+
+    assert (observed, observed_reason) == (
+        "observe", "agent not enabled in router config")
+    assert debounced == "debounce"
+    assert "inside the debounce window" in debounced_reason
 
 
 def test_p0_floor_only_interrupts_p0():
