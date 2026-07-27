@@ -17,6 +17,9 @@ kept for provenance, not written for you.
 - [`coord/GET-ON-THE-BUS.md`](coord/GET-ON-THE-BUS.md) — the from-zero
   quickstart for joining the coord bus (install → auth → team bootstrap →
   join), including remote/sandboxed hosts.
+- [`coord/BUS-V3.md`](coord/BUS-V3.md) — the bus v3 contract (adopted
+  2026-07-27): events as typed records, documents as files, one queue read
+  per wake, no resident listeners.
 - [`coord/wake-router-SPEC.md`](coord/wake-router-SPEC.md) and
   [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
   implementation plan for the wake router + engagement model build
