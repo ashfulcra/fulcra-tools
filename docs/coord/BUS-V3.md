@@ -98,6 +98,14 @@ first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
 
 ## Timers: future-dated records (verified 2026-07-27)
 
+**Engine support:** `coord-engine remind <team> <assignee> <when> <title>`
+emits the future-dated record automatically (durable directive doc first,
+then the scheduled record pointing at it via `ptr`). The stream is resolved
+from `team/<team>/_coord/bus-v3/records.json` (`{"data_type": ...,
+"api_version": ...}`) or the `COORD_RECORDS_TYPE` env override; with neither,
+the reminder rides the file plane only and says so — the engine never writes
+into a guessed stream.
+
 A record written with a future ``recorded_at`` is accepted, stored, and stays
 invisible to every "what's new" window until its time arrives — then it
 surfaces in the ordinary queue read like any other event (verified end to

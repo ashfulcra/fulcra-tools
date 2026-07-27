@@ -30,8 +30,8 @@ from typing import Any, Optional
 from . import (
     aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
-    health as health_mod, jsonutil, okf, presence, query, review, roles, router,
-    stash, tasks, wake_adapters,
+    health as health_mod, jsonutil, okf, presence, query, records, review,
+    roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
 from . import reconcile as rec
@@ -2810,7 +2810,45 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
     if when is None:
         print(f"remind failed: cannot parse WHEN {args.when!r} (ISO or 5d/36h/10m)", file=sys.stderr)
         return 1
-    return _create_directive(args, transport, assignee=args.assignee, not_before=when)
+    rc = _create_directive(args, transport, assignee=args.assignee, not_before=when)
+    if rc == 0:
+        _emit_scheduled_record(args, transport, when=when)
+    return rc
+
+
+def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
+                           when: str) -> None:
+    """Best-effort bus-v3 timer for a reminder: a FUTURE-DATED record.
+
+    The platform hides a future ``recorded_at`` from every "what's new" window
+    until it comes due, then it surfaces in the assignee's ordinary queue read
+    (verified live 2026-07-27) — so the reminder DELIVERS itself at WHEN with
+    no timer service anywhere. Durable-first: the directive doc has already
+    landed and is the truth; this record is delivery. Absent config or a
+    failed write therefore degrades latency (file-plane visibility only),
+    never loses the reminder — say which, quietly, and move on.
+    """
+    cfg = records.load_config(transport, args.team)
+    if cfg is None:
+        print("record: no bus-v3 records config — reminder rides the file plane only")
+        return
+    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
+    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    ok = False
+    try:
+        ok = records.emit_event(
+            transport, cfg,
+            sender=_known_sender(args) or _host(),
+            to=args.assignee, kind="directive",
+            priority=getattr(args, "priority", None) or "P2",
+            slug=slug, ptr=f"task/{slug}.md", recorded_at=when)
+    except ValueError as e:  # unknown kind cannot happen here; belt and braces
+        print(f"record: not emitted ({e})", file=sys.stderr)
+        return
+    if ok:
+        print(f"record: scheduled, due {when} (surfaces in {args.assignee}'s queue read)")
+    else:
+        print("record: emission failed — reminder rides the file plane only")
 
 
 def cmd_later(args: argparse.Namespace, transport: Any) -> int:
