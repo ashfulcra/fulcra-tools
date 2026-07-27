@@ -2810,14 +2810,28 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
     if when is None:
         print(f"remind failed: cannot parse WHEN {args.when!r} (ISO or 5d/36h/10m)", file=sys.stderr)
         return 1
+    # Identity excludes WHEN (same rule as intent): a repeated identical
+    # reminder dedupes onto the existing doc, which KEEPS its original
+    # not_before. Probe existence BEFORE the write so the timer record is
+    # emitted only for a NEWLY landed doc — a deduped re-remind must not add
+    # a second timer whose time disagrees with the doc it points at.
+    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
+    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    pre_existing = transport.read(_task_path(args.team, slug))
     rc = _create_directive(args, transport, assignee=args.assignee, not_before=when)
     if rc == 0:
-        _emit_scheduled_record(args, transport, when=when)
+        if pre_existing is not None:
+            fm = okf.parse_frontmatter(pre_existing) or {}
+            orig = fm.get("not_before") or "unknown"
+            print(f"record: reminder already scheduled (existing doc keeps "
+                  f"not_before {orig}); no second timer emitted")
+        else:
+            _emit_scheduled_record(args, transport, when=when, slug=slug)
     return rc
 
 
 def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
-                           when: str) -> None:
+                           when: str, slug: str) -> None:
     """Best-effort bus-v3 timer for a reminder: a FUTURE-DATED record.
 
     The platform hides a future ``recorded_at`` from every "what's new" window
@@ -2832,8 +2846,6 @@ def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
     if cfg is None:
         print("record: no bus-v3 records config — reminder rides the file plane only")
         return
-    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
-    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
     ok = False
     try:
         ok = records.emit_event(

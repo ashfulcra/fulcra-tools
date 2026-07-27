@@ -157,6 +157,27 @@ def test_remind_without_config_stays_file_plane_only(monkeypatch, capsys):
     assert "file plane only" in capsys.readouterr().out
 
 
+def test_repeated_identical_reminder_emits_no_second_conflicting_timer(
+        monkeypatch, capsys):
+    """WHEN is excluded from directive identity, so a re-remind dedupes onto
+    the existing doc and KEEPS its original not_before. The timer record must
+    follow the doc: exactly ONE record, at the ORIGINAL time — a second record
+    at the new time would deliver the same directive twice with a timer that
+    disagrees with the document it points at (the round-1 finding)."""
+    _pin_clock(monkeypatch)
+    t = RecordingTransport()
+    t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
+    assert cli.main(["remind", "r", "amy", "2h", "Same", "--from", "boss"],
+                    transport=t) == 0
+    assert cli.main(["remind", "r", "amy", "3h", "Same", "--from", "boss"],
+                    transport=t) == 0
+    out = capsys.readouterr().out
+    assert len(t.records_written) == 1
+    assert t.records_written[0]["recorded_at"] == "2026-07-27T20:00:00Z"
+    assert "already scheduled" in out
+    assert "not_before 2026-07-27T20:00:00Z" in out
+
+
 def test_remind_record_failure_degrades_loudly_but_rc_stays_zero(monkeypatch, capsys):
     _pin_clock(monkeypatch)
     t = RecordingTransport(record_ok=False)
