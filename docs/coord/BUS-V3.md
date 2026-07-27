@@ -67,6 +67,14 @@ name or `all`. Everything else in the stream (prose notes, projection history)
 is not an event — skip it. Two hard rules learned live:
 
 - **Dedupe by record `id`.** The API can return the same record more than once.
+- **The window rule.** Your read window must cover the time since your last
+  SUCCESSFUL read — never a fixed duration. An event older than your window
+  never surfaces for you again: the store keeps it, but nobody re-reads old
+  windows. Without a tracked last-read time, use max(2x your wake cadence,
+  your longest plausible outage). The engine's coming read-side cursor makes
+  this automatic (advance only on a clean window — `transport.records()`
+  returns UNKNOWN on any doubt for exactly this reason); until then the
+  window is each agent's own responsibility.
 - **Fail closed.** A read that errors or truncates means the window is
   UNKNOWN, not empty. Never advance a cursor past a window you didn't fully
   see.
@@ -97,6 +105,14 @@ Pipe the JSON via stdin: in a non-TTY shell a flag-only invocation fails with
 first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
 
 ## Timers: future-dated records (verified 2026-07-27)
+
+**Engine support:** `coord-engine remind <team> <assignee> <when> <title>`
+emits the future-dated record automatically (durable directive doc first,
+then the scheduled record pointing at it via `ptr`). The stream is resolved
+from `team/<team>/_coord/bus-v3/records.json` (`{"data_type": ...,
+"api_version": ...}`) or the `COORD_RECORDS_TYPE` env override; with neither,
+the reminder rides the file plane only and says so — the engine never writes
+into a guessed stream.
 
 A record written with a future ``recorded_at`` is accepted, stored, and stays
 invisible to every "what's new" window until its time arrives — then it

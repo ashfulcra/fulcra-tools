@@ -30,8 +30,8 @@ from typing import Any, Optional
 from . import (
     aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
-    health as health_mod, jsonutil, okf, presence, query, review, roles, router,
-    stash, tasks, wake_adapters,
+    health as health_mod, jsonutil, okf, presence, query, records, review,
+    roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
 from . import reconcile as rec
@@ -2683,6 +2683,11 @@ def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
         # The path is the payload identity, so an existing readable doc here IS
         # our message. Matching payload -> sanctioned dedup (already delivered).
         if _doc_payload(existing) == payload:
+            # Outcome signal for callers that act differently on dedupe vs
+            # fresh write (remind's timer emission): set ONLY at the two
+            # verified success exits, so "written" can never mean "unverified".
+            args._directive_outcome = "deduped"
+            args._directive_existing = existing
             print(f"directive {slug} already delivered")
             return 0
         # Present but NOT our payload: unparseable/corrupt content (or a hash
@@ -2723,6 +2728,7 @@ def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
         print(f"directive {slug}: write unverifiable (read-back mismatch, "
               f"transport corruption)", file=sys.stderr)
         return 1
+    args._directive_outcome = "written"
     print(f"directive {slug} -> {assignee}"
           + (f" (visible {not_before})" if not_before else ""))
     return 0
@@ -2810,7 +2816,63 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
     if when is None:
         print(f"remind failed: cannot parse WHEN {args.when!r} (ISO or 5d/36h/10m)", file=sys.stderr)
         return 1
-    return _create_directive(args, transport, assignee=args.assignee, not_before=when)
+    # Identity excludes WHEN (same rule as intent): a repeated identical
+    # reminder dedupes onto the existing doc, which KEEPS its original
+    # not_before. The write path itself reports which outcome happened —
+    # a pre-read cannot distinguish absent from degraded (None is ambiguous),
+    # so only the verified "written" outcome may emit the timer record.
+    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
+    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    rc = _create_directive(args, transport, assignee=args.assignee, not_before=when)
+    if rc == 0:
+        outcome = getattr(args, "_directive_outcome", None)
+        if outcome == "written":
+            _emit_scheduled_record(args, transport, when=when, slug=slug)
+        elif outcome == "deduped":
+            fm = okf.parse_frontmatter(
+                getattr(args, "_directive_existing", "") or "") or {}
+            orig = fm.get("not_before") or "unknown"
+            print(f"record: reminder already scheduled (existing doc keeps "
+                  f"not_before {orig}); no second timer emitted")
+        else:
+            # No outcome set on a zero rc: an unexpected path. Emitting could
+            # double-deliver; not emitting only costs latency. Fail safe.
+            print("record: directive outcome unknown — no timer emitted "
+                  "(file-plane visibility stands)")
+    return rc
+
+
+def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
+                           when: str, slug: str) -> None:
+    """Best-effort bus-v3 timer for a reminder: a FUTURE-DATED record.
+
+    The platform hides a future ``recorded_at`` from every "what's new" window
+    until it comes due, then it surfaces in the assignee's ordinary queue read
+    (verified live 2026-07-27) — so the reminder DELIVERS itself at WHEN with
+    no timer service anywhere. Durable-first: the directive doc has already
+    landed and is the truth; this record is delivery. Absent config or a
+    failed write therefore degrades latency (file-plane visibility only),
+    never loses the reminder — say which, quietly, and move on.
+    """
+    cfg = records.load_config(transport, args.team)
+    if cfg is None:
+        print("record: no bus-v3 records config — reminder rides the file plane only")
+        return
+    ok = False
+    try:
+        ok = records.emit_event(
+            transport, cfg,
+            sender=_known_sender(args) or _host(),
+            to=args.assignee, kind="directive",
+            priority=getattr(args, "priority", None) or "P2",
+            slug=slug, ptr=f"task/{slug}.md", recorded_at=when)
+    except ValueError as e:  # unknown kind cannot happen here; belt and braces
+        print(f"record: not emitted ({e})", file=sys.stderr)
+        return
+    if ok:
+        print(f"record: scheduled, due {when} (surfaces in {args.assignee}'s queue read)")
+    else:
+        print("record: emission failed — reminder rides the file plane only")
 
 
 def cmd_later(args: argparse.Namespace, transport: Any) -> int:
@@ -3058,6 +3120,65 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
         print(_role_degraded_line(_role_degraded_row(unresolved_roles)))
     for r in got:
         print(_line(r))
+    return 0
+
+
+def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
+    """THE bus v3 read: cursored event queue for one agent.
+
+    Window = [cursor − skew, now]; no cursor ⇒ the default lookback. The
+    cursor advances ONLY after a clean window whose events have been printed
+    (delivery to stdout is the handoff); an UNKNOWN window (transport doubt,
+    malformed line — ``transport.records()`` collapses all of it to None)
+    prints DEGRADED, exits 3, and leaves coverage untouched, so the next read
+    re-covers it. This is the window rule made automatic: an agent can be
+    dark for a week and its next read covers the week.
+    """
+    agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
+    if not agent:
+        print("queue: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
+        return 2
+    cfg = records.load_config(transport, args.team)
+    if cfg is None:
+        print("queue: no bus-v3 records config "
+              f"(team/{args.team}/{records.CONFIG_NAME} or "
+              f"{records.ENV_DATA_TYPE}) — cannot read the record queue",
+              file=sys.stderr)
+        return 2
+    now = _now()
+    cursor = records.load_cursor(transport, args.team, agent)
+    if cursor is None:
+        since_dt = now - timedelta(seconds=records.DEFAULT_LOOKBACK_SECONDS)
+        seen: list[str] = []
+    else:
+        try:
+            last = datetime.fromisoformat(cursor["last_read"].replace("Z", "+00:00"))
+        except ValueError:
+            last = now - timedelta(seconds=records.DEFAULT_LOOKBACK_SECONDS)
+        since_dt = last - timedelta(seconds=records.CURSOR_SKEW_SECONDS)
+        seen = list(cursor["seen_ids"])
+    window = transport.records(cfg["data_type"], _iso(since_dt), _iso(now))
+    events = records.events_for(window, agent)
+    if events is None:
+        print("queue: DEGRADED — window UNKNOWN, cursor NOT advanced "
+              "(re-covered next read)", file=sys.stderr)
+        return 3
+    seen_set = set(seen)
+    fresh = [e for e in events if e.get("record_id") not in seen_set]
+    if getattr(args, "json", False):
+        for e in fresh:
+            jsonutil.print_json(e)
+    else:
+        for e in fresh:
+            print(f"{e.get('recorded_at','')[:19]} {e.get('from') or '?'} "
+                  f"{e['kind']} {e.get('priority') or '-'} {e['slug']} "
+                  f"{e.get('ptr') or '-'}")
+    new_seen = seen + [e["record_id"] for e in fresh
+                       if isinstance(e.get("record_id"), str)]
+    if not records.save_cursor(transport, args.team, agent,
+                               last_read=_iso(now), seen_ids=new_seen):
+        print("queue: cursor save failed — coverage unadvanced, next read "
+              "re-covers this window", file=sys.stderr)
     return 0
 
 
@@ -6710,6 +6831,10 @@ def build_parser() -> argparse.ArgumentParser:
     it.add_argument("--from", dest="sender", help="capturing agent (records ownership)")
     it.add_argument("--priority", "-p", default="P2")
     it.set_defaults(func=cmd_intent)
+    qu = sub.add_parser("queue", help="bus v3 cursored event read — THE wake surface (window auto-covers since your last successful read)")
+    qu.add_argument("team"); qu.add_argument("--agent", "-a")
+    add_json(qu)
+    qu.set_defaults(func=cmd_queue)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
     ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
     ib.add_argument("--all", action="store_true",

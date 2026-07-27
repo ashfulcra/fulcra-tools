@@ -33,7 +33,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 |---|---|
 | Wake up / what needs me | the bus v3 queue read ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)) is the wake surface; `briefing` · `needs-me` · `inbox` · `digest` fold the durable state |
 | Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` |
-| Directives & messaging | `tell` · `broadcast` · `remind` · `respond` · `later` (backlog) · `intent` (spoken commitment) · `listen` (retired as the wake surface 2026-07-27; kept for reference until removal) |
+| Directives & messaging | `tell` · `broadcast` · `remind` (schedules a future-dated bus-v3 record: the reminder delivers itself at WHEN via the assignee's queue read) · `respond` · `later` (backlog) · `intent` (spoken commitment) · `listen` (retired as the wake surface 2026-07-27; kept for reference until removal) |
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |

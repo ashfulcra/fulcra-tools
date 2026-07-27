@@ -68,7 +68,8 @@ def _kill_process_group(proc: "subprocess.Popen") -> None:
 
 
 def run_bounded(
-    argv: list[str], timeout: float, **popen_kw: Any
+    argv: list[str], timeout: float, *, stdin_data: Optional[str] = None,
+    **popen_kw: Any
 ) -> "tuple[int, str, str]":
     """Run ``argv`` with a HARD upper bound of ``timeout`` + ``_TRANSPORT_GRACE``,
     no matter what the child's descendant tree does. Returns
@@ -85,6 +86,7 @@ def run_bounded(
     — callers convert both to their documented failure mode."""
     proc = subprocess.Popen(
         argv,
+        stdin=subprocess.PIPE if stdin_data is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -92,7 +94,7 @@ def run_bounded(
         **popen_kw,
     )
     try:
-        out, err = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(input=stdin_data, timeout=timeout)
         return proc.returncode, out, err
     except subprocess.TimeoutExpired as exc:
         _kill_process_group(proc)
@@ -291,6 +293,37 @@ class FulcraFileTransport:
             return parsed
         except Exception:
             return None
+
+    def record_write(self, data_type: str, api_version: str, note: str,
+                     source: str, recorded_at: Optional[str] = None) -> bool:
+        """Write ONE typed record — the coord v3 write path.
+
+        ``recorded_at`` may be in the FUTURE: the platform accepts it and the
+        record stays invisible to every "what's new" window until that time
+        arrives, then surfaces in the ordinary queue read (verified live
+        2026-07-27). That makes a future-dated record a timer, and this method
+        the engine's scheduling primitive.
+
+        The payload rides stdin as JSON — in a non-TTY process a flag-only
+        ``record`` invocation fails with "No input provided". Returns True only
+        on rc 0; any failure or exception returns False and the CALLER decides
+        what that means (the convention: the durable file doc is the truth and
+        the record is delivery, so a failed write degrades latency, never
+        loses work). Never raises.
+        """
+        try:
+            doc: dict[str, Any] = {"note": note}
+            if recorded_at:
+                doc["recorded_at"] = recorded_at
+            rc, _out, _err = run_bounded(
+                [*self.command, "record", data_type,
+                 "--api-version", api_version, "--source", source],
+                self.timeout,
+                stdin_data=json.dumps(doc, separators=(",", ":")),
+            )
+            return rc == 0
+        except Exception:
+            return False
 
     def _access_token(self) -> Optional[str]:
         """A Fulcra bearer token, or None if one can't be had. Same source the

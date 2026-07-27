@@ -170,3 +170,138 @@ def compare_to_file_fold(record_events: Optional[list[dict[str, Any]]],
         "only_in_records": only_rec,
         "only_in_files": only_file,
     }
+
+
+# --- write side: config + emission (the timer leg, 2026-07-27) ---------------
+
+#: Team-relative path of the records config: which annotation stream carries
+#: this team's control plane. Kept ON THE BUS so every host resolves the same
+#: stream — a host-local guess would silently fork the fleet across streams.
+CONFIG_NAME = "_coord/bus-v3/records.json"
+
+#: Env overrides (host- or test-level). When BOTH the type is set via env and
+#: the store config exists, env wins — it is the operator's local override.
+ENV_DATA_TYPE = "COORD_RECORDS_TYPE"
+ENV_API_VERSION = "COORD_RECORDS_API_VERSION"
+
+DEFAULT_API_VERSION = "v1alpha1"
+
+
+def config_path(team: str) -> str:
+    return f"team/{team}/{CONFIG_NAME}"
+
+
+def load_config(transport: Any, team: str) -> Optional[dict[str, str]]:
+    """Resolve the records stream for ``team`` → ``{data_type, api_version}``.
+
+    Fail-closed: no env override and no readable, well-formed store config
+    means None — callers then skip record emission rather than write into a
+    guessed stream. A malformed store config is None, not a default: writing
+    control-plane events to the wrong stream is worse than not writing them.
+    """
+    import os
+    env_type = (os.environ.get(ENV_DATA_TYPE) or "").strip()
+    if env_type:
+        return {
+            "data_type": env_type,
+            "api_version": (os.environ.get(ENV_API_VERSION) or "").strip()
+            or DEFAULT_API_VERSION,
+        }
+    raw = transport.read(config_path(team))
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    data_type = doc.get("data_type")
+    if not isinstance(data_type, str) or not data_type.strip():
+        return None
+    api_version = doc.get("api_version")
+    if api_version is not None and (
+            not isinstance(api_version, str) or not api_version.strip()):
+        return None
+    return {
+        "data_type": data_type.strip(),
+        "api_version": (api_version or DEFAULT_API_VERSION).strip(),
+    }
+
+
+def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
+               kind: str, priority: str, slug: str, ptr: Optional[str] = None,
+               recorded_at: Optional[str] = None) -> bool:
+    """Emit one control-plane event; ``recorded_at`` in the future is a timer.
+
+    ``build_payload`` raises on an unknown kind — a mistyped event class fails
+    at the write. Returns the transport's verdict; False means the record did
+    NOT land and the caller falls back to file-plane-only delivery (durable
+    doc = truth, record = delivery).
+    """
+    note = build_payload(to=to, kind=kind, priority=priority, slug=slug, ptr=ptr)
+    return bool(transport.record_write(
+        config["data_type"], config["api_version"], note, sender,
+        recorded_at=recorded_at))
+
+
+# --- read side: the durable cursor (the window rule, 2026-07-27) --------------
+
+#: Team-relative per-agent cursor path. Durable ON THE BUS so a container roll
+#: cannot reset coverage; the local disk is never the authority.
+CURSOR_VERSION = 1
+
+#: First-run lookback when no cursor exists: long enough that a newly joining
+#: (or long-dark) agent sweeps real history, bounded so it terminates.
+DEFAULT_LOOKBACK_SECONDS = 7 * 24 * 3600
+
+#: Windows overlap backwards by this skew so a record that indexed AFTER a
+#: read closed (write->visibility lag, ~20s observed) is still covered by the
+#: next read. Overlap is free: seen-id suppression collapses the repeats.
+CURSOR_SKEW_SECONDS = 120
+
+#: Bound on remembered record ids. Must comfortably exceed the events a fleet
+#: writes within one skew overlap; 500 is ~two orders above today's rate.
+SEEN_IDS_CAP = 500
+
+
+def cursor_path(team: str, agent: str) -> str:
+    return f"team/{team}/_coord/agents/{agent}/records-cursor.json"
+
+
+def load_cursor(transport: Any, team: str, agent: str) -> Optional[dict[str, Any]]:
+    """The agent's durable cursor, or None when absent/unreadable/malformed.
+
+    None means "no trustworthy coverage claim exists" — the caller falls back
+    to the default lookback. A malformed cursor must NOT be treated as a
+    recent one: that would shrink coverage and silently skip work.
+    """
+    raw = transport.read(cursor_path(team, agent))
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or doc.get("v") != CURSOR_VERSION:
+        return None
+    last = doc.get("last_read")
+    if not isinstance(last, str) or not last.strip():
+        return None
+    seen = doc.get("seen_ids")
+    if seen is not None and not isinstance(seen, list):
+        return None
+    return {"last_read": last.strip(),
+            "seen_ids": [s for s in (seen or []) if isinstance(s, str)]}
+
+
+def save_cursor(transport: Any, team: str, agent: str, *, last_read: str,
+                seen_ids: list[str]) -> bool:
+    """Persist coverage. Returns False on failure — the caller WARNS and moves
+    on: an unadvanced cursor re-covers the same window next read, and seen-id
+    suppression makes the re-coverage free. Losing the write is latency;
+    pretending it landed would be the real bug."""
+    doc = {"v": CURSOR_VERSION, "last_read": last_read,
+           "seen_ids": list(seen_ids)[-SEEN_IDS_CAP:]}
+    return bool(transport.write(
+        cursor_path(team, agent), json.dumps(doc, separators=(",", ":"))))
