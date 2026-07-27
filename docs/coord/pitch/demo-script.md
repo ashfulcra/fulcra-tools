@@ -1,7 +1,7 @@
 # 5-minute live demo script — coord on team/fulcra
 
 *Run on real production data. No slides. Every command is copy-pasteable from this file.*
-*Prep (once, before the meeting): `export FULCRA_COORD_AGENT=coord-maintainer`; confirm `coord-engine doctor fulcra` is green; have this file open.*
+*Prep (once, before the meeting): `export FULCRA_COORD_AGENT=coord-maintainer`; set `COORD_TYPE` to the team's coordination annotation id (see [`../BUS-V3.md`](../BUS-V3.md)); confirm `coord-engine doctor fulcra` is green; have this file open.*
 
 ## 0:00 — the space is just teams (30s)
 
@@ -12,12 +12,26 @@
 fulcra-api file list team/fulcra/ | head
 ```
 
-## 0:30 — deterministic task views (60s)
+## 0:30 — the bus is a range query (45s)
 
-> "The task index is engine-owned: any agent, any host, same answer."
+> "Events move as typed records on the timeline — bus v3. Sending is one write; an agent's
+> whole work queue is one bounded query, readable ~20 seconds after write. No broker, no
+> server, no polling loop anywhere."
 
 ```bash
-coord-engine briefing fulcra          # one-read morning brief
+# send an event (payload in note, sender in sources):
+echo '{"note":"{\"v\":1,\"to\":\"coord-maintainer\",\"kind\":\"directive\",\"pri\":\"P2\",\"slug\":\"demo-hello\"}"}' | \
+  fulcra-api record "$COORD_TYPE" --api-version v1alpha1 --source=demo
+# read a queue (this IS an agent's wake surface):
+fulcra-api get-records "$COORD_TYPE" "1 hour"
+```
+
+## 1:15 — deterministic task views (45s)
+
+> "Durable state — tasks, roles, reviews — folds the same for any agent on any host."
+
+```bash
+coord-engine briefing fulcra          # the durable-state fold
 coord-engine board fulcra             # status-grouped board
 coord-engine needs-me fulcra --agent coord-maintainer
 ```
@@ -25,7 +39,7 @@ coord-engine needs-me fulcra --agent coord-maintainer
 Point out: typed statuses, done-requires-evidence, the state machine (`proposed→active→done`)
 enforced in code — an illegal transition is an error, not a style violation.
 
-## 1:30 — presence + roles: who's alive, who's responsible (60s)
+## 2:00 — presence + roles: who's alive, who's responsible (60s)
 
 ```bash
 coord-engine agents fulcra            # live/idle/stale fold + what each agent is on
@@ -40,7 +54,7 @@ coord-engine roles status fulcra coord-maintainer --json
 coord-engine roles claim fulcra coord-maintainer    # note the shard echo; re-run = refresh
 ```
 
-## 2:30 — the operator loop: nothing waits silently (90s)
+## 3:00 — the operator loop: nothing waits silently (60s)
 
 > "The one that paid for itself on day one. Agents that hit a wall file a structured ask; the
 > orchestrator pulls this fold on every heartbeat; the operator's answer flows back as ONE atomic

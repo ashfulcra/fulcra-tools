@@ -69,6 +69,15 @@ def test_updates_returns_none_on_timeout():
     assert _slow().updates("60 seconds") is None
 
 
+def test_records_returns_none_on_timeout():
+    # coord v3 read path: a hung get-records is UNKNOWN, never an empty window.
+    assert _slow().records("MomentAnnotation/x", "a", "b") is None
+
+
+def test_records_returns_none_on_missing_binary():
+    assert _missing().records("MomentAnnotation/x", "a", "b") is None
+
+
 # --- missing binary: same conversion (FileNotFoundError -> TransportError/soft) ---
 
 def test_read_returns_none_on_missing_binary():

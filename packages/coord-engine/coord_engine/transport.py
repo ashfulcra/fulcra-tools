@@ -241,6 +241,57 @@ class FulcraFileTransport:
         except Exception:
             return None
 
+    def records(self, data_type: str, since: str, until: str) -> Optional[list]:
+        """Typed-record window for ``[since, until]`` — the coord v3 read path.
+
+        ``fulcra-api get-records <type> <since> <until>`` emits JSONL, one record
+        per line. Normalize to the transport-independent shape
+        ``{id, recorded_at, sources, note}`` and return them in the order the
+        endpoint gave them.
+
+        Fail-closed, exactly like :meth:`updates`: ANY doubt returns **None**
+        (UNKNOWN), never ``[]``. A malformed line makes the whole window unknown
+        rather than a silently short list, because a consumer that treats a
+        truncated window as complete advances its cursor past work it never saw.
+        An empty window with clean parses is a legitimate ``[]``.
+
+        Never raises. Hard-bounded by ``run_bounded`` so a hung child cannot
+        stall a listener pass.
+        """
+        try:
+            rc, out, _err = run_bounded(
+                [*self.command, "get-records", data_type, since, until],
+                self.timeout,
+            )
+            if rc != 0:
+                return None
+            parsed: list[dict[str, Any]] = []
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    return None  # one bad line ⇒ the window is UNKNOWN
+                if not isinstance(rec, dict):
+                    return None
+                recorded_at = rec.get("recorded_at")
+                if not isinstance(recorded_at, str) or not recorded_at.strip():
+                    return None  # no timestamp ⇒ cannot order or checkpoint it
+                sources = rec.get("sources")
+                if sources is not None and not isinstance(sources, list):
+                    return None
+                parsed.append({
+                    "id": rec.get("id"),
+                    "recorded_at": recorded_at.strip(),
+                    "sources": list(sources or []),
+                    "note": rec.get("note"),
+                })
+            return parsed
+        except Exception:
+            return None
+
     def _access_token(self) -> Optional[str]:
         """A Fulcra bearer token, or None if one can't be had. Same source the
         rest of the repo uses: ``FULCRA_ACCESS_TOKEN`` when set, else the stdout

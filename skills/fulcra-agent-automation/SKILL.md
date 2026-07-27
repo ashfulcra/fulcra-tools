@@ -9,6 +9,15 @@ metadata: { "openclaw": { "emoji": "⏱️" } }
 
 # Fulcra Agent Automation
 
+> **BUS V3 (2026-07-27, operator-ordered): the listener half of this skill is RETIRED.**
+> Agents read their event queue on every wake — one bounded `get-records` query
+> ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)) — and run **no resident
+> listener**. Do not install new listeners (§2) or listener-tick automation; hosts still
+> running one should stand it down. The **heartbeat** (§1: scheduled `reconcile` +
+> projection + digest) and the **wake-on-schedule adapters** (§3, repurposed to trigger
+> a queue-reading wake rather than a listen tick) remain current. Listener mechanics
+> below are retained as reference for the engine code until its removal is decided.
+
 Ties the coord skills together for **unattended** operation. `fulcra-agent-reconcile` heals a team's
 index/views, but someone has to run it; this skill **schedules** it, and makes wake-ups
 (cron/heartbeat) **resume structured continuity** first. Scheduling is a single, platform-specific action

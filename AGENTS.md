@@ -29,7 +29,7 @@ touching. First failing probe is where your setup gap is.
 | Probe / question | Command | Passes when | Where to go |
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 — tooling present, store reachable | never installed / `command not found` / no team yet → [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) (install → auth → bootstrap → join). Otherwise fix the reported gap (auth: `fulcra auth login`; missing/old `coord-engine`: reinstall) |
-| On the bus? | `coord-engine briefing <team> --agent <you>` | prints your identity, role inboxes, and everything that needs you | [Coordinate on the bus](#coordinate-on-the-bus) — that fold IS your work queue |
+| On the bus? | one `get-records` queue read ([bus v3](docs/coord/BUS-V3.md)), then `coord-engine briefing <team> --agent <you>` for the durable board | queue read returns (possibly empty) events; briefing prints your identity, role inboxes, reviews owed | [Coordinate on the bus](#coordinate-on-the-bus) — events are the wake surface, the fold is the full picture |
 | Own worktree? | `git worktree list` | your cwd is a dedicated worktree, not a shared checkout (no conflict markers or foreign staged files) | [Working tree](#working-tree) — carve your own before committing |
 | Touching Collect / the daemon? | — | — | [The daemon (Collect)](#the-daemon-collect) |
 | Touching coord conventions? | — | — | [Coordinate on the bus](#coordinate-on-the-bus) |
@@ -269,51 +269,36 @@ it (not on PyPI).
   headers) are refused with the tripped rule named; `--unsafe-allow-secrets`
   is for false positives only, because `team/<team>/**` is readable by every
   agent on the bus. Procedures: [`fulcra-agent-durable-state`](skills/fulcra-agent-durable-state/SKILL.md).
-- **On wake, `coord-engine briefing <team> --agent <you>` is THE entry fold.**
-  One call surfaces your identity, your roles' inboxes, and everything that
-  needs you including reviews you owe. Start there — never watch a narrower
-  surface (a bare inbox or a single view file misses role-addressed work and
-  pending reviews).
-- **The Codex safety-net watch checks its literal inbox before briefing.**
-  The managed heartbeat runs one direct `inbox --json` read and then one
-  authoritative `briefing` read. It never treats briefing's inbox subsection
-  as a substitute for the direct read: if either surface degrades, it uses the
-  documented direct-listing fallback before reporting quiet. This redundancy
-  is intentional protection against a stale or unreadable summaries index.
-- **Quiet listeners must stay model-free.** Use one `coord-engine listen` owner
-  per agent identity and wake a model-backed harness only for a new event or a
-  newly reported degradation. The bundled scheduled tick emits nothing on a
-  healthy quiet pass; `COORD_LISTENER_VERBOSE=1` is diagnostics only. Never
-  suppress `LISTEN DEGRADED`: degradation is actionable, does not clear the
-  queue, and the awakened session must apply the targeted fallback before it
-  reports quiet. Host listeners should use the bundled adaptive cadence: poll
-  frequently while events are arriving and through a configurable hot tail,
-  then back off locally to a longer idle interval. A skipped tick must not call
-  the bus or a model; without source-side push, idle cadence is maximum pickup
-  latency. Model-backed harness automations that cannot reschedule themselves
-  retain a coarse safety net instead of emulating adaptation in prompt text.
-  **The listen fold is head/tail budgeted:** literal-agent and wildcard directives
-  are the caller-directed head and run first under their dedicated
-  `COORD_LISTEN_HEAD_BUDGET`; role routing plus response/review history is the tail
-  under shared `COORD_LISTEN_TAIL_BUDGET`. `listen-head-degraded` means the caller's
-  own head is UNKNOWN and is incident-grade; `listen-tail-degraded` means the
-  non-head tail truncated and will retry. Shared tail work may never drain the head
-  budget. **A listener loop must never die on degradation:** degraded folds back
-  off and keep beating; only affirmative delivery or the configured horizon exits.
-  **The healthy read path is feed-first.** Listener state carries an inclusive
-  `data-updates` cursor; one team-filtered feed call identifies changed task,
-  response, and verdict shards, and the fold reads those shards directly instead
-  of relisting their roots. `briefing`/`needs-me` likewise combine the last
-  aggregate with changed task docs. A missing, corrupt, or over-age cursor, an
-  unavailable/malformed feed, or any doubtful direct read falls through to the
-  unchanged W8-budgeted listing path. The cursor advances only after a conclusive
-  tick, never after degradation. Listener cursor/seen state writes through to
-  `team/<team>/_coord/agents/<agent>/listen-state.json`; the local state file is a
-  cache, so a container restart does not replay already-seen work. A missing,
-  corrupt, or unreadable store copy falls back to the local cache, then the legacy
-  fresh start. Presence is deliberately **time-dirty** rather than feed-cached:
-  each briefing evaluates the bounded roster against the current clock, so an
-  unchanged session shard still becomes `LAPSED` when `now >= until`.
+- **On wake, read your event queue first — bus v3.** One bounded
+  `get-records` query against the team's coordination annotation
+  ([`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md)): dedupe by record id, keep
+  `v:1` payloads addressed to you or `all`, fetch documents by `ptr`, fail
+  closed on any error or truncation (an unreadable window is UNKNOWN, never
+  empty). The read is cheap enough to ride every wake you already have — **do
+  not run a polling loop or resident listener for it.** Keep `fulcra-api`
+  current whenever you touch coord tooling (same pass, standing rule).
+  `coord-engine briefing <team> --agent <you>` remains the fold over durable
+  state — identity, role inboxes, reviews owed — for when you need the full
+  board; honor every degraded row it prints as UNKNOWN.
+- **The Codex safety-net watch checks its literal inbox before briefing**
+  (PR 484). On Codex hosts, the managed heartbeat runs one direct
+  `inbox --json` read and then one authoritative `briefing` read; it never
+  treats briefing's inbox subsection as a substitute for the direct read, and
+  if either surface degrades it uses the documented direct-listing fallback
+  before reporting quiet. Deliberate redundancy against a stale or unreadable
+  summaries index, kept alongside the v3 queue read as that harness's
+  fail-closed backstop.
+- **Retired (2026-07-27, operator-ordered): the `listen` watcher as the wake
+  surface.** The per-agent `coord-engine listen` loop and its adaptive-cadence
+  host listeners existed because discovering work meant walking the file tree;
+  the folds compensating for that degraded ~9 ticks in 10 at fleet scale and
+  hid work. The v3 queue read replaces them. The `listen` verb and its fold
+  machinery (head/tail budgets, feed-first cursor at
+  `team/<team>/_coord/agents/<agent>/listen-state.json`) remain in the engine
+  and its docs until their removal is decided; do not build new automation on
+  them. Presence stays **time-dirty** rather than feed-cached: each briefing
+  evaluates the bounded roster against the current clock, so an unchanged
+  session shard still becomes `LAPSED` when `now >= until`.
 - **Review handshake.** Nothing lands without an independent review by a
   *different agent identity* than the author — that review is the control, not
   who clicks merge. Where a forge exists the change goes through a **PR, never
@@ -760,33 +745,23 @@ it (not on PyPI).
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and
   [`packages/coord-engine`](packages/coord-engine/README.md).
-- **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
-  <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
-  against a per-agent state file — new **inbox directives, role-routed ones included** (the SAME fold
-  `inbox`/`briefing` now show — a lease handoff re-routes the very next tick), except self-authored
-  unscheduled rows: self-tells and your own broadcasts do not wake you; `remind` yourself does, at WHEN,
-  new **responses to directives you own** (the reply leg of `respond`), and new **verdicts on reviews you
-  requested** (the await leg of `review request`, including the terminal `SETTLED <slug>` line). One event
-  line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`; `--json` = one object per line);
-  a quiet tick prints NOTHING. It never advances state over an unread tick (a failed read re-surfaces the
-  pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** across
-  six independent sources (`inbox`, `responses`, `orphans`, `verdicts`, `roles`, `tail`) — so a permanent orphan
-  can't pin the flag and silence a fresh outage. `--once` exits **3** when its tick captured degraded
-  sources; exit 0 means clean/nothing-new — run it on a scheduler, or bare for a poll loop (`--interval`,
-  SIGINT-clean). Every send verb
-  arms you with the exact `listen` line to run for replies. The deeper mechanics — the
-  orphan/tombstone/unknown
-  classification of dir-only review slugs, and the classify budgets (`COORD_LISTEN_CLASSIFY_BUDGET`) —
-  live in [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md), the one skill the
-  launchd/cron listener, live sessions, Codex, and headless all delegate to. (`review status` on a
-  tombstone slug is terminal rc 1 — see [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md).)
-- **Idle-listener reaping (standing, operator-set 2026-07-20).** An agent whose
-  listener has run **2 days (48h) with no work** — no events, directives,
-  reviews, or responses surfaced or handled in that window — **parks a
-  continuity checkpoint to the bus and stands down its listener**:
-  `coord-engine continuity park <team> --agent <self> --objective "<what you
-  watch>" --next "resume on directed wake or new assignment"`, then stop the
-  poll loop. A directed wake or a new assignment resumes it
+- **`listen` is retired as the wake surface (2026-07-27, operator-ordered) —
+  and don't hand-roll a replacement.** Replies to `tell`/`respond`/`review
+  request` arrive as v3 events on the record queue; read it on your next wake
+  instead of running the watcher. The `coord-engine listen` verb still exists
+  (id-diffed fold over inbox/responses/verdicts with per-source `LISTEN
+  DEGRADED` streaks; mechanics in
+  [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)) but
+  new automation must not be built on it; its folds are the surface that
+  degraded ~9 ticks in 10 at fleet scale. (`review status` on a tombstone slug
+  is terminal rc 1 — see [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md).)
+- **Idle-agent parking (standing, operator-set 2026-07-20; restated for v3).**
+  An agent with **2 days (48h) of no work** — no events, directives, reviews,
+  or responses in its queue in that window — **parks a continuity checkpoint
+  to the bus**: `coord-engine continuity park <team> --agent <self>
+  --objective "<what you watch>" --next "resume on directed wake or new
+  assignment"`, and stops any remaining scheduled cadence beyond a coarse
+  daily check. A directed wake or a new assignment resumes it
   (`continuity resume`). Dormant watchers must not burn compute indefinitely;
   the parked checkpoint loses nothing. Applies to every agent, coord-boss
   included.

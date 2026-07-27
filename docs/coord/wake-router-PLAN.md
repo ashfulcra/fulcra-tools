@@ -1,5 +1,13 @@
 # Wake Router + Engagement Model — stage-2 implementation plan
 
+> **STATUS (2026-07-27): EXECUTED through W8 + E-track + W5.5/W6/W7; W7.6 cadence fix
+> approved; W9 in progress; W10 pending.** Every task below except W9/W10 is merged and
+> live; the router left shadow 2026-07-27 ~00:02Z. This plan is the build's contract
+> record — per-task detail below is historical; do not re-dispatch from it. Note one
+> superseded assumption: §"priority_floor" as written (P1|P2|P3) caused the live P0
+> demotion bug (fixed via PR 483's coerce-with-note path); and under bus v3 the router
+> complements the queue read — it is the waker, agents run no listeners.
+
 **Parent spec:** [`wake-router-SPEC.md`](wake-router-SPEC.md) (merged `8211776`, Part C resolution
 `5d44b68`). **Owner:** Tycho (`coord-boss`). **Gate:** dual-green (codex-reviewer + owner) on this
 plan before any task below is dispatched; then per-task dual-green during execution.
