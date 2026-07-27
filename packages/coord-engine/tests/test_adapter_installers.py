@@ -117,8 +117,11 @@ class TestCodex:
     def test_watch_prompt_is_compact_but_keeps_safety_contract(self):
         prompt = cx.COORD_WATCH_PROMPT.format(team="teamx", agent="agent")
         assert len(prompt) < 900
+        assert "inbox teamx --agent agent --json" in prompt
         assert "briefing teamx --agent agent" in prompt
-        assert "degraded section is not clear" in prompt
+        assert prompt.index("inbox teamx") < prompt.index("briefing teamx")
+        assert "Do not rely on briefing's inbox section" in prompt
+        assert "documented direct-listing fallback" in prompt
         assert "write and verify the exact required verdict before acking" in prompt
 
     def test_session_start_consumes_queued_wakes_before_briefing(self):
