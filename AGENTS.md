@@ -271,6 +271,12 @@ it (not on PyPI).
   needs you including reviews you owe. Start there — never watch a narrower
   surface (a bare inbox or a single view file misses role-addressed work and
   pending reviews).
+- **The Codex safety-net watch checks its literal inbox before briefing.**
+  The managed heartbeat runs one direct `inbox --json` read and then one
+  authoritative `briefing` read. It never treats briefing's inbox subsection
+  as a substitute for the direct read: if either surface degrades, it uses the
+  documented direct-listing fallback before reporting quiet. This redundancy
+  is intentional protection against a stale or unreadable summaries index.
 - **Quiet listeners must stay model-free.** Use one `coord-engine listen` owner
   per agent identity and wake a model-backed harness only for a new event or a
   newly reported degradation. The bundled scheduled tick emits nothing on a
