@@ -39,7 +39,7 @@ fi
 mkdir -p "$DEST" || { echo "bootstrap: cannot create $DEST" >&2; exit 2; }
 
 installed=0
-for f in bus-sweep.sh listener-loop.sh linear-sync.sh restore-tooling.sh; do
+for f in queue-sweep.sh linear-sync.sh restore-tooling.sh; do
   [ -f "$SRC/$f" ] || continue
   if cp "$SRC/$f" "$DEST/$f" && chmod +x "$DEST/$f"; then
     installed=$((installed + 1))

@@ -90,6 +90,30 @@ def test_only_events_addressed_to_this_agent_are_returned():
     assert [e["slug"] for e in got] == ["fix-the-thing"]
 
 
+def test_broadcast_events_reach_every_agent():
+    got = records.events_for(
+        [_rec(_payload(to="all", slug="fleet-wide"))], "codex-coder")
+    assert [e["slug"] for e in got] == ["fleet-wide"]
+
+
+def test_broadcast_event_returned_exactly_once_despite_duplicate_records():
+    dup = _rec(_payload(to="all", slug="fleet-wide"), rid="same-id")
+    got = records.events_for([dup, dict(dup)], "codex-coder")
+    assert [e["slug"] for e in got] == ["fleet-wide"]
+
+
+def test_broadcast_does_not_leak_events_for_a_named_third_party():
+    got = records.events_for(
+        [_rec(_payload(to="someone-else", slug="not-mine"))], "codex-coder")
+    assert got == []
+
+
+def test_duplicate_directed_records_collapse_to_one_event():
+    dup = _rec(_payload(slug="once"), rid="same-id")
+    got = records.events_for([dup, dict(dup)], "codex-coder")
+    assert [e["slug"] for e in got] == ["once"]
+
+
 def test_events_are_ordered_oldest_first():
     got = records.events_for([
         _rec(_payload(slug="second"), at="2026-07-27T00:00:02+00:00", rid="b"),

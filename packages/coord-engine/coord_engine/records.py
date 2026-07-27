@@ -104,24 +104,39 @@ def sender_of(record: dict[str, Any]) -> Optional[str]:
     return None
 
 
+#: Recipient value that addresses every agent on the bus. Readers keep events
+#: whose ``to`` is their own name OR this value; a reader that matches only its
+#: literal name silently drops fleet-wide directives.
+BROADCAST = "all"
+
+
 def events_for(records: Optional[list], agent: str) -> Optional[list[dict[str, Any]]]:
-    """Control-plane events addressed to ``agent``, newest last.
+    """Control-plane events addressed to ``agent`` (or broadcast), newest last.
 
     ``records is None`` propagates as None — an UNKNOWN window must never be
     presented as an empty one. That is the same fail-closed rule the file folds
     follow, and it matters more here: the caller advances a cursor on success.
+
+    Duplicate records (same id) collapse to one event — the record API can
+    return the same record more than once (observed live 2026-07-27).
     """
     if records is None:
         return None
     out: list[dict[str, Any]] = []
+    seen_ids: set = set()
     for rec in records:
         if not isinstance(rec, dict):
             return None
         payload = parse_payload(rec.get("note"))
         if payload is None:
             continue  # ordinary annotation on the same track
-        if payload["to"] != agent:
+        if payload["to"] not in (agent, BROADCAST):
             continue
+        rec_id = rec.get("id")
+        if rec_id is not None:
+            if rec_id in seen_ids:
+                continue
+            seen_ids.add(rec_id)
         out.append({
             "slug": payload["slug"],
             "kind": payload["kind"],
