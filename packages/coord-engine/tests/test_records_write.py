@@ -402,3 +402,56 @@ def test_queue_truly_absent_config_stays_rc2(monkeypatch, capsys):
     rc = cli.cmd_queue(_queue_args(), t)
     assert rc == 2
     assert "no bus-v3 records config" in capsys.readouterr().err
+
+
+# --- consumption guard (live incident 2026-07-28: an operator diagnostic run
+# --- as another agent's identity consumed that agent's pending directives)
+
+def _guarded_queue_transport():
+    t = ClassifiedTransport(read_status="ok",
+                            window=[_event_rec("r1", "job-1")])
+    t.put(records.config_path("fulcra"),
+          '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
+    return t
+
+
+def test_queue_as_foreign_identity_peeks_and_never_advances(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "operator")
+    t = _guarded_queue_transport()
+    rc = cli.cmd_queue(_queue_args(agent="amy"), t)
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "job-1" in out.out                       # events still shown
+    assert "peek" in out.err and "--consume" in out.err
+    assert t.read(records.cursor_path("fulcra", "amy")) is None  # not consumed
+
+
+def test_queue_consume_flag_restores_deliberate_takeover(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "operator")
+    t = _guarded_queue_transport()
+    args = _queue_args(agent="amy"); args.consume = True
+    rc = cli.cmd_queue(args, t)
+    assert rc == 0
+    assert t.read(records.cursor_path("fulcra", "amy")) is not None
+
+
+def test_queue_as_self_still_consumes(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "amy")
+    t = _guarded_queue_transport()
+    rc = cli.cmd_queue(_queue_args(agent="amy"), t)
+    assert rc == 0
+    assert t.read(records.cursor_path("fulcra", "amy")) is not None
+
+
+def test_queue_explicit_peek_as_self(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "amy")
+    t = _guarded_queue_transport()
+    args = _queue_args(agent="amy"); args.peek = True
+    rc = cli.cmd_queue(args, t)
+    out = capsys.readouterr()
+    assert rc == 0 and "job-1" in out.out
+    assert t.read(records.cursor_path("fulcra", "amy")) is None

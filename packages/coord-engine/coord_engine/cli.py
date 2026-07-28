@@ -3133,11 +3133,32 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     prints DEGRADED, exits 3, and leaves coverage untouched, so the next read
     re-covers it. This is the window rule made automatic: an agent can be
     dark for a week and its next read covers the week.
+
+    CONSUMPTION GUARD (live incident 2026-07-28): the cursor belongs to the
+    agent's own duty loop — a read under another identity CONSUMED that
+    agent's queue (operator diagnostics ate pending directives). Reading as
+    an agent other than the caller's own ``$FULCRA_COORD_AGENT`` therefore
+    defaults to PEEK (no cursor advance); ``--consume`` restores the old
+    behavior for a deliberate takeover, and ``--peek`` forces a safe read
+    even as yourself.
     """
     agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
     if not agent:
         print("queue: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
         return 2
+    own_identity = os.environ.get("FULCRA_COORD_AGENT")
+    peek = bool(getattr(args, "peek", False))
+    # Guard fires ONLY when the caller HAS a declared identity that differs:
+    # `--agent X` with no FULCRA_COORD_AGENT set is the normal automation
+    # pattern (the flag IS the identity declaration) and must keep consuming,
+    # or shipping this guard would silently freeze every fleet cursor.
+    if (not peek and own_identity and agent != own_identity
+            and not getattr(args, "consume", False)):
+        peek = True
+        print(f"queue: reading as '{agent}' but this caller is "
+              f"'{own_identity}' — peek mode (cursor NOT advanced); pass "
+              "--consume to take over their queue deliberately",
+              file=sys.stderr)
     cfg, cfg_status = records.load_config_classified(transport, args.team)
     if cfg is None:
         if cfg_status == "error":
@@ -3184,6 +3205,12 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
                   f"{e.get('ptr') or '-'}")
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
+    if peek:
+        if fresh:
+            print(f"queue: peek — {len(fresh)} event(s) shown, cursor NOT "
+                  "advanced (the owning agent still receives them)",
+                  file=sys.stderr)
+        return 0
     if not records.save_cursor(transport, args.team, agent,
                                last_read=_iso(now), seen_ids=new_seen):
         print("queue: cursor save failed — coverage unadvanced, next read "
@@ -6842,6 +6869,10 @@ def build_parser() -> argparse.ArgumentParser:
     it.set_defaults(func=cmd_intent)
     qu = sub.add_parser("queue", help="bus v3 cursored event read — THE wake surface (window auto-covers since your last successful read)")
     qu.add_argument("team"); qu.add_argument("--agent", "-a")
+    qu.add_argument("--peek", action="store_true",
+                    help="show events without advancing the cursor (safe diagnostic read)")
+    qu.add_argument("--consume", action="store_true",
+                    help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
