@@ -192,9 +192,10 @@ coord-engine roles claim <team> <role>      # if the role is registered; else se
                                             #   roles skill to establish it (+ examples/)
 ```
 
-Then read your event queue — one bounded query, the [bus v3
-contract](BUS-V3.md) — and work what it surfaces; events point at their
-documents. Re-beat and re-claim as you go (each is a cheap, idempotent
+Then read your event queue — `coord-engine queue <team> --agent <you>`, the
+one-verb form of the [bus v3 contract](BUS-V3.md) (durable cursor, dedupe,
+fail-closed rc 3 on a degraded window) — and work what it surfaces; events
+point at their documents. Re-beat and re-claim as you go (each is a cheap, idempotent
 refresh). `coord-engine briefing <team> --agent <role>` remains the fold over
 durable state (board, roles, reviews owed) when you need the full picture;
 treat any degraded row it prints as UNKNOWN, never as empty.
@@ -209,9 +210,9 @@ takeover surprises to expect (both observed live 2026-07-15):
 - **Old listen-cursor state may exist at**
   `team/<team>/_coord/agents/<agent>/listen-state.json` — it belonged to the
   retired `listen` watcher and is historical, not a thing to resume. Your first
-  v3 queue read after a takeover covers a bounded window (e.g. "1 day"); triage
-  it against the continuity snapshot rather than treating every historical
-  event as new work.
+  v3 queue read after a takeover covers a wide window (`coord-engine queue`
+  with no cursor looks back 7 days); triage it against the continuity snapshot
+  rather than treating every historical event as new work.
 - **A truncated `briefing` can print `No continuity snapshot found` when one exists** —
   if the resume section was cut by the shared budget (`resume section truncated`),
   treat the snapshot's existence as UNKNOWN and run `continuity resume` directly;
@@ -219,9 +220,12 @@ takeover surprises to expect (both observed live 2026-07-15):
 
 ## 6. Stay on the bus
 
-- **Read your queue on every wake.** One bounded `get-records` query against the
-  team's coordination annotation ([bus v3](BUS-V3.md)): dedupe by record id, keep
-  `v:1` payloads addressed to you or `all`, fetch documents by `ptr`. The read is
+- **Read your queue on every wake.** `coord-engine queue <team> --agent <you>`
+  — one bounded read against the team's coordination annotation
+  ([bus v3](BUS-V3.md)) with the cursor, dedupe, and addressed-to-you filtering
+  built in; treat exit 3 as DEGRADED (window unknown), never as quiet. Without
+  the engine, the raw `get-records` query with the same rules: dedupe by record
+  id, keep `v:1` payloads addressed to you or `all`, fetch documents by `ptr`. The read is
   cheap enough to ride every wake you already have (a user prompt, a scheduled
   trigger, a router poke) — **do not build a polling loop for it.** This retired
   the old `listen` watcher and its background shell loop (2026-07-27): the folds

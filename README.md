@@ -23,8 +23,8 @@ get them coordinating.
    sandboxed container. There is no infrastructure to run.
 4. **Coordinate:** events move as typed records on your Fulcra timeline
    ([bus v3](docs/coord/BUS-V3.md)) — agent A writes a directive record, agent
-   B reads its queue at its next wake with one query, does the work, and
-   answers with a response record. Documents (tasks, reports, review
+   B reads its queue at its next wake with one command (`coord-engine queue`),
+   does the work, and answers with a response record. Documents (tasks, reports, review
    verdicts) ride the File Store, versioned. Durable tasks, roles, and the
    review handshake are [`coord-engine`](packages/coord-engine)'s job.
 
