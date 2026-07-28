@@ -34,11 +34,11 @@ outcomes, authors, or bodies into its wake prompt.
 
 | Harness | Event-driven path | Fallback |
 | --- | --- | --- |
-| OpenClaw Gateway | Adaptive model-free listener → authenticated `POST /hooks/wake`; use `skills/fulcra-agent-automation/scripts/wake/openclaw.sh` | Existing Gateway heartbeat |
+| OpenClaw Gateway | Router adapter → authenticated `POST /hooks/wake` (host-local `$COORD_WAKE_ADAPTER_DIR` adapter; the bundled `wake/openclaw.sh` was removed with the listener stack, cleanup slice 1) | Existing Gateway heartbeat |
 | Claude Managed Agents | Supported by its session events API: send `user.message` to an idle persisted session | Scheduled deployment |
-| Claude Code local/desktop | Host adaptive listener handles cold sessions; a foreground `coord-engine listen` can surface events while live. No exact interactive-session inbound hook is documented, so do not start a competing resume client automatically. | SessionStart briefing plus an idempotency-keyed queued wake file consumed once on open |
+| Claude Code local/desktop | Scheduled bus v3 queue read (`coord-engine queue`) on the agent's harness-native wake; the router's queued-wake-file lane covers directed wakes. No exact interactive-session inbound hook is documented, so do not start a competing resume client automatically. | SessionStart briefing plus an idempotency-keyed queued wake file consumed once on open |
 | Claude Code web/cloud UI | No exact-session inbound wake is documented. Do not substitute a different Managed Agents session without explicit migration. | Standard router `delivered/` record for alignment to the agent's self-armed platform Routine; for this lane delivered means alignment-recorded, with `no_session_created: true` |
-| Codex Desktop | Adaptive listener → `skills/fulcra-agent-automation/scripts/wake/codex.sh` → stable `codex exec resume <thread-id>` (the Codex session id). It resumes the exact persisted thread without bypassing approvals/sandboxing or forwarding raw event text. | Compact app-thread safety automation, configurable with `--interval-minutes` |
+| Codex Desktop | Router adapter (host-local `codex-exec-resume`) → stable `codex exec resume <thread-id>` (the Codex session id). It resumes the exact persisted thread without bypassing approvals/sandboxing or forwarding raw event text. The bundled `wake/codex.sh` was removed with the listener stack. | Compact app-thread safety automation, configurable with `--interval-minutes` |
 | Codex app-server integration | A trusted integration can alternatively `thread/resume` and `turn/start` over local stdio/socket transport. | `codex exec resume` adapter |
 
 ## OpenClaw deployment
@@ -49,8 +49,9 @@ bearer token from `~/.config/coord-engine/openclaw-hook-token` (directory mode
 `0700`, file mode `0600`). Mechanics, flags, and adapter contracts —
 installer command lines, adaptive-cadence flags, wake env-var fields:
 [`fulcra-agent-automation` SKILL](../../skills/fulcra-agent-automation/SKILL.md)
-— the one home for listener/wake operations; the adapter is
-`skills/fulcra-agent-automation/scripts/wake/openclaw.sh`.
+— the one home for listener/wake operations. The bundled OpenClaw adapter was
+removed with the listener stack; the live adapter is host-local on the router's
+executor (`$COORD_WAKE_ADAPTER_DIR/<adapter>.sh`).
 
 The scheduled adapter defaults to the loopback Gateway URL. For a non-default
 trusted endpoint, use HTTPS and a small operator-owned wrapper that sets

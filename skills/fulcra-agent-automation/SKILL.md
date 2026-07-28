@@ -35,15 +35,15 @@ fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`):
 | Engine usable? | `coord-engine doctor <team>` | exits 0 and last line is `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT install jobs on a broken engine |
 | Heartbeat installed? | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.heartbeat.<team>.plist` (macOS) or `crontab -l \| grep coord-engine.heartbeat.<team>` (Linux) | file/line exists | §1 (install the heartbeat) |
 | Heartbeat loaded? | `launchctl list \| grep coord-engine.heartbeat.<team>` (macOS only) | a line appears | reinstall via §1 (plist exists but is not loaded — a reboot-era failure mode) |
-| Listener installed + loaded? (RETIRED — see banner) | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.listener.<team>.*.plist` and `launchctl list \| grep coord-engine.listener.<team>.` | **inverted since bus v3**: this probe passing means a retired listener is still running — stand it down (`./scripts/install-listener.sh --uninstall <team> <agent>`) | nothing — a missing listener is now the healthy state; do NOT enter §2 |
+| Listener installed + loaded? (RETIRED — see banner) | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.listener.<team>.*.plist` and `launchctl list \| grep coord-engine.listener.<team>.` | **inverted since bus v3**: this probe passing means a retired listener is still running — stand it down: `launchctl bootout gui/$(id -u)/<label> && rm ~/Library/LaunchAgents/<label>.plist` (macOS) or delete its crontab line (Linux); the installer script was removed with the listener stack | nothing — a missing listener is now the healthy state; do NOT enter §2 |
 | Views actually fresh? | `coord-engine health <team>` | this host's row shows a recent `last reconcile` | jobs exist but are not ticking — check `log show` / cron mail, then reinstall |
 | Claude Code hooks installed? | `ls ~/.claude/fulcra-agent-hooks/` | 3 scripts | §3 (install-claude-code.sh) |
 | Codex watch coord-first? | `grep -l "coord watch" ~/.codex/hooks.json` | file matches | §3 (install_codex_watch.py) |
 | OpenClaw block present? | `grep "fulcra-agent:begin" <workspace>/HEARTBEAT.md` | one match | §3 (install_openclaw.py) |
 
 All probes pass → nothing to install; re-running any installer is safe anyway (reinstall replaces the
-job, never duplicates — CI-tested for both the launchd and cron paths in
-`packages/coord-engine/tests/test_installers.py`). Re-running after this upgrade also MIGRATES any
+job, never duplicates — CI-tested for the heartbeat's launchd and cron paths; the listener installer
+and its test suite were removed with the retired stack). Re-running after this upgrade also MIGRATES any
 coord2-era artifacts (old `fulcra-coord2-hooks/` dir, `coord2-watch-<agent>` automation, `coord2 watch`
 hooks marker, `fulcra-coord2:begin` fence) to the new names in place — old artifacts removed, zero
 orphans (host-simulation-tested in `packages/coord-engine/tests/test_adapter_installers.py`).
@@ -143,17 +143,11 @@ output as "nothing new", while a monitoring wrapper can distinguish a degraded t
 without parsing stderr. Long-running mode loops at `--interval` seconds and exits cleanly on SIGINT.
 
 ### Per-platform — pick the leg that matches how the agent runs
-- **launchd / cron (unattended host):** the bundled installer — unchanged UX. The scheduled job's tick
-  delegates to `listen --once` and keeps the notification + consent-gated wake around it.
-  ```bash
-  ./scripts/install-listener.sh <team> <agent> [active-minutes]            # adaptive: default 1m/30m tail/30m idle
-  ./scripts/install-listener.sh <team> <agent> 1 --tail-minutes 30 --idle-minutes 60
-  ./scripts/install-listener.sh <team> <agent> 1 --wake-cmd "…headless…"    # + consent-gated wake
-  ./scripts/install-listener.sh <team> <agent> 10 --fixed                  # legacy fixed cadence
-  ./scripts/install-listener.sh --uninstall <team> <agent>
-  ```
-  On NEW events it posts a macOS notification (or a log line) and, only if you consented to `--wake-cmd`
-  at install, runs your wake command. A healthy quiet tick emits nothing by default
+- **launchd / cron (unattended host):** was the bundled installer, **removed with the retired stack
+  (cleanup slice 1, 2026-07-28)** — do not install; stand down any survivor per the probe table. The
+  scheduled job's tick delegated to `listen --once` and kept the notification + consent-gated wake
+  around it. On NEW events it posted a macOS notification (or a log line) and, only with consent to `--wake-cmd`
+  at install, ran the wake command. A healthy quiet tick emitted nothing by default
   (`COORD_LISTENER_VERBOSE=1` restores diagnostic quiet lines). Listener stderr is never discarded:
   a newly emitted `LISTEN DEGRADED` diagnostic is forwarded and also wakes the consented adapter so
   the session can run the targeted fallback. Wake adapters receive fixed advisory environment fields
@@ -176,43 +170,29 @@ without parsing stderr. Long-running mode loops at `--interval` seconds and exit
   `COORD_LISTENER_MARK_ACTIVE=1` also restarts the hot tail for trusted lifecycle adapters. Hardened like the heartbeat:
   validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent project's wake
   silently 401'd on exactly this), `plutil` lint, install-time self-test.
-- **Claude Code live session:** THE one command is `coord-engine listen` wrapped in the harness's
-  background monitor — no hand-rolled watcher. The monitor surfaces each event line
-  (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`) into the session as it arrives, closing the
-  live-session gap where an agent waiting on a reply used to poll by hand:
-  ```bash
-  coord-engine listen <team> --agent <agent> --interval 60
-  ```
-- **Codex:** one automation-prompt line, ticked once per automation run:
-  ```bash
-  coord-engine listen <team> --agent <agent> --once
-  ```
-- **headless / any foreground process:** run the loop in the foreground and stream its output:
-  ```bash
-  coord-engine listen <team> --agent <agent>
-  ```
+- **Every other leg (Claude Code live, Codex, headless): RETIRED.** These platforms ran
+  `coord-engine listen` variants (`--interval` loop in a background monitor, `--once` per
+  automation tick, foreground stream). Do not start any of them — the current pickup on every
+  platform is the bus v3 queue read (`coord-engine queue <team> --agent <agent>`) on the wake
+  the platform already has (automation tick, scheduled job, session start).
 
 For push-capable harnesses and the fleet security contract, see
-[`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). OpenClaw can use the
-bundled fixed adapter at `scripts/wake/openclaw.sh`; Codex Desktop and Claude Code UI sessions retain
-the documented safety nets appropriate to their harness. Codex's stable exact-thread adapter is
-`scripts/wake/codex.sh`; it uses `codex exec resume` without bypassing approvals or sandboxing:
-```bash
-COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<repo> \
-  ./scripts/install-listener.sh <team> <agent> 1 \
-  --wake-cmd "COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<repo> /absolute/path/to/scripts/wake/codex.sh"
-```
+[`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). The bundled
+`wake/openclaw.sh` and `wake/codex.sh` adapters were removed with the listener stack (cleanup
+slice 1); directed wakes are now the wake router's job — its adapters are **host-local**
+(`$COORD_WAKE_ADAPTER_DIR/<adapter>.sh` on the executor host, e.g. `codex-exec-resume` still using
+`codex exec resume <thread-id>` without bypassing approvals or sandboxing), registered per agent in
+`_coord/router/config.json`. `wake/macos-notify.sh` remains in-repo as a live router adapter.
 
-**Single-flight — one watcher identity per agent.** Run exactly one listener per `<agent>` on a host:
-the per-agent state file is not a concurrency lock, so two listeners for the same agent (or a canonical
-listener running alongside a legacy alias listener for the same identity) race the state and double-fire
-or drop events. Serialize ticks (`--once` on a scheduler, or a single long-running `--interval` loop —
-never both), coalesce overlapping schedules onto one cadence rather than stacking timers, and retire any
-legacy alias listener before arming the canonical one (the scheduling-overlap P1). Distinct agents get
-distinct state files and run independently; the constraint is per-identity.
+**Single-flight (historical, and it survives v3 in one form).** The listener-era rule was one
+watcher identity per agent — two listeners on one state file race and double-fire or drop events.
+The v3 descendant of that rule: one *queue-reading identity* per agent — the records cursor is
+per-agent state exactly like the listen state file was, so two concurrent queue readers for the
+same agent race the cursor. Keep one scheduled wake per agent identity; coalesce overlapping
+schedules onto one cadence.
 
 ## 3. Harness adapters — lifecycle wiring
-The listener (§2) delivers inbox notifications, but the **lifecycle contract** — resume-on-wake,
+Bus v3 queue reads (on each wake) deliver events, but the **lifecycle contract** — resume-on-wake,
 snapshot-on-change, park-before-context-loss — is owned by a per-harness adapter that hooks the
 platform's own session events. The contract itself (rules 1–4) lives in
 [`fulcra-agent-continuity` §The lifecycle contract](../fulcra-agent-continuity/SKILL.md); the adapters
@@ -291,8 +271,8 @@ Merges SessionStart (matcher `startup|resume|clear|compact`) + PreCompact entrie
 `~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord-first app-thread automation
 under `~/.codex/automations/coord-watch-<agent>/` whose prompt embeds contract rules 1–3 and ticks the
 inbox. The default safety-net cadence is 30 minutes (override with `--interval-minutes`), replacing the
-old 5-minute model-backed poll. For event-driven wake, pair its exact thread id with
-`scripts/wake/codex.sh` through the consent-gated listener command above. The adapter uses the stable
+old 5-minute model-backed poll. For event-driven wake, register its exact thread id with the wake
+router (host-local `codex-exec-resume` adapter in `_coord/router/config.json`). The adapter uses the stable
 `codex exec resume <SESSION_ID>` interface, never passes
 `--dangerously-bypass-approvals-and-sandbox`, and never places raw bus event text in the prompt; the
 resumed agent fetches authoritative briefing state. Deployment precondition: on the first real host, verify the SessionStart hook actually fires
