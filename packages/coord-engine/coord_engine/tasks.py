@@ -103,6 +103,8 @@ def apply_update(
     add_tags: Optional[list[str]] = None,
     checkpoint_ref: Optional[str] = None,
     remove_tags: Optional[list[str]] = None,
+    unlock: Optional[str] = None,
+    superseded_by: Optional[str] = None,
 ) -> str:
     """Read-modify-write a task doc, enforcing the status machine. Raises
     ``TaskError`` on a missing doc, unparseable frontmatter, or illegal transition."""
@@ -112,11 +114,26 @@ def apply_update(
     split = okf.split_frontmatter(existing or "")
     body = split[1] if split else ""
     old_status = fm.get("status") or DEFAULT_STATUS
+    if superseded_by and old_status in ("done", "abandoned"):
+        # Terminal dispositions are immutable (pr-491 round 1): supersession
+        # closes LIVE work; it must never rewrite already-closed history —
+        # including the done->done "no-op" path, which would append a fresh
+        # completion record onto settled work.
+        raise TaskError(
+            f"cannot supersede a terminal task (status {old_status})")
     if status is not None:
         if status not in VALID_STATUSES:
             raise TaskError(f"invalid status {status!r}")
         if not is_valid_transition(old_status, status):
-            raise TaskError(f"illegal transition {old_status} -> {status}")
+            # Supersession (D3, respec 2026-07-28) is a legal close from any
+            # LIVE state — its whole point is closing a copy that was never
+            # driven through the normal lifecycle (reassigned-away work).
+            # Terminal states stay immutable: a superseded record must never
+            # rewrite an existing terminal disposition (pr-491 round 1).
+            _live = {"proposed", "active", "waiting", "blocked"}
+            if not (status == "done" and superseded_by
+                    and old_status in _live):
+                raise TaskError(f"illegal transition {old_status} -> {status}")
         # Enforce "done requires evidence" HERE so it holds through every entry
         # point (`task update --status done`, not only `task done`).
         if status == "done" and not evidence:
@@ -134,6 +151,10 @@ def apply_update(
         fm["assignee"] = assignee
     if blocked_on is not None:
         fm["blocked_on"] = blocked_on
+    if unlock is not None:
+        fm["unlock"] = unlock
+    if superseded_by is not None:
+        fm["superseded_by"] = superseded_by
     if checkpoint_ref is not None:
         fm["checkpoint_ref"] = checkpoint_ref
     if add_tags:

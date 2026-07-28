@@ -455,3 +455,25 @@ def test_queue_explicit_peek_as_self(monkeypatch, capsys):
     out = capsys.readouterr()
     assert rc == 0 and "job-1" in out.out
     assert t.read(records.cursor_path("fulcra", "amy")) is None
+
+
+def test_read_classified_requires_exact_not_found_signature():
+    # codex-reviewer acceptance test 4: an auth error CONTAINING "not found"
+    # must remain a transport error, never classify as an absent file.
+    import subprocess
+    from coord_engine import transport as T
+
+    class FakeCLI(T.FulcraFileTransport):
+        def __init__(self, stderr):
+            super().__init__(["true"])
+            self._stderr = stderr
+
+        def _run(self, args, **kw):
+            return subprocess.CompletedProcess(args, 1, "", self._stderr)
+
+    assert FakeCLI("Error: File not found in Fulcra: /x")\
+        .read_classified("x")[1] == "absent"
+    assert FakeCLI("Error: auth token not found; run fulcra auth login")\
+        .read_classified("x")[1] == "error"
+    assert FakeCLI("Error: connection reset")\
+        .read_classified("x")[1] == "error"
