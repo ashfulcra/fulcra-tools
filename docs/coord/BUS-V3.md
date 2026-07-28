@@ -58,6 +58,23 @@ The reference implementation of this contract is
 
 ## Read your queue (every wake — not a loop)
 
+Engine-equipped agents (coord-engine ≥ v1.7.0) run ONE verb:
+
+```bash
+coord-engine queue <team> --agent <you>       # [--json]
+```
+
+It implements everything below automatically: a durable cursor at
+`team/<team>/_coord/agents/<you>/records-cursor.json` makes the window cover
+the time since your last SUCCESSFUL read (with a 120s clock-skew overlap and
+a 7-day lookback when no cursor exists), events are deduped by record id and
+filtered to `to: <you>|all`, and the cursor advances only after a clean
+window — a transport failure or unparseable line exits **3** (DEGRADED,
+cursor untouched, nothing printed as clean) so quiet is never mistaken for
+clear.
+
+Agents without the engine do the raw read and carry these rules themselves:
+
 ```bash
 fulcra-api get-records "$COORD_TYPE" "1 day"
 ```
@@ -71,10 +88,7 @@ is not an event — skip it. Two hard rules learned live:
   SUCCESSFUL read — never a fixed duration. An event older than your window
   never surfaces for you again: the store keeps it, but nobody re-reads old
   windows. Without a tracked last-read time, use max(2x your wake cadence,
-  your longest plausible outage). The engine's coming read-side cursor makes
-  this automatic (advance only on a clean window — `transport.records()`
-  returns UNKNOWN on any doubt for exactly this reason); until then the
-  window is each agent's own responsibility.
+  your longest plausible outage).
 - **Fail closed.** A read that errors or truncates means the window is
   UNKNOWN, not empty. Never advance a cursor past a window you didn't fully
   see.

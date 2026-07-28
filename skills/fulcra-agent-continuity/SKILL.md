@@ -42,6 +42,12 @@ An agent that beats presence but has no fresh snapshot is flagged `continuity-st
 
 ## Which adapter automates this for you
 
+> **Pickup column note (bus v3, 2026-07-27):** resident listeners are retired —
+> pickup is now the v3 queue read (`coord-engine queue <team> --agent <you>`) on
+> each scheduled wake ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)).
+> Listener entries below describe the pre-v3 mechanism; keep the *schedule*,
+> replace the listener tick with a queue-reading wake.
+
 | Harness | Lifecycle (rules 1–3) | Pickup (rule 4) |
 |---|---|---|
 | Claude Code (CLI/desktop) | hooks: SessionStart→resume+briefing, PreCompact/SessionEnd→park (`fulcra-agent-automation/scripts/claude-code/install-claude-code.sh`) | launchd/cron listener (`scripts/install-listener.sh`) |

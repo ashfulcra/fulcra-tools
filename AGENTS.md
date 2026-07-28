@@ -29,7 +29,7 @@ touching. First failing probe is where your setup gap is.
 | Probe / question | Command | Passes when | Where to go |
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 — tooling present, store reachable | never installed / `command not found` / no team yet → [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) (install → auth → bootstrap → join). Otherwise fix the reported gap (auth: `fulcra auth login`; missing/old `coord-engine`: reinstall) |
-| On the bus? | one `get-records` queue read ([bus v3](docs/coord/BUS-V3.md)), then `coord-engine briefing <team> --agent <you>` for the durable board | queue read returns (possibly empty) events; briefing prints your identity, role inboxes, reviews owed | [Coordinate on the bus](#coordinate-on-the-bus) — events are the wake surface, the fold is the full picture |
+| On the bus? | `coord-engine queue <team> --agent <you>` ([bus v3](docs/coord/BUS-V3.md); raw `get-records` if the engine predates v1.7.0), then `coord-engine briefing <team> --agent <you>` for the durable board | queue read returns (possibly empty) events; briefing prints your identity, role inboxes, reviews owed | [Coordinate on the bus](#coordinate-on-the-bus) — events are the wake surface, the fold is the full picture |
 | Own worktree? | `git worktree list` | your cwd is a dedicated worktree, not a shared checkout (no conflict markers or foreign staged files) | [Working tree](#working-tree) — carve your own before committing |
 | Touching Collect / the daemon? | — | — | [The daemon (Collect)](#the-daemon-collect) |
 | Touching coord conventions? | — | — | [Coordinate on the bus](#coordinate-on-the-bus) |
@@ -292,7 +292,8 @@ it (not on PyPI).
   surface.** The per-agent `coord-engine listen` loop and its adaptive-cadence
   host listeners existed because discovering work meant walking the file tree;
   the folds compensating for that degraded ~9 ticks in 10 at fleet scale and
-  hid work. The v3 queue read replaces them. The `listen` verb and its fold
+  hid work. The v3 queue read (`coord-engine queue`, cursored and fail-closed)
+  replaces them. The `listen` verb and its fold
   machinery (head/tail budgets, feed-first cursor at
   `team/<team>/_coord/agents/<agent>/listen-state.json`) remain in the engine
   and its docs until their removal is decided; do not build new automation on
