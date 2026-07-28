@@ -170,21 +170,11 @@ without parsing stderr. Long-running mode loops at `--interval` seconds and exit
   `COORD_LISTENER_MARK_ACTIVE=1` also restarts the hot tail for trusted lifecycle adapters. Hardened like the heartbeat:
   validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent project's wake
   silently 401'd on exactly this), `plutil` lint, install-time self-test.
-- **Claude Code live session:** THE one command is `coord-engine listen` wrapped in the harness's
-  background monitor — no hand-rolled watcher. The monitor surfaces each event line
-  (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`) into the session as it arrives, closing the
-  live-session gap where an agent waiting on a reply used to poll by hand:
-  ```bash
-  coord-engine listen <team> --agent <agent> --interval 60
-  ```
-- **Codex:** one automation-prompt line, ticked once per automation run:
-  ```bash
-  coord-engine listen <team> --agent <agent> --once
-  ```
-- **headless / any foreground process:** run the loop in the foreground and stream its output:
-  ```bash
-  coord-engine listen <team> --agent <agent>
-  ```
+- **Every other leg (Claude Code live, Codex, headless): RETIRED.** These platforms ran
+  `coord-engine listen` variants (`--interval` loop in a background monitor, `--once` per
+  automation tick, foreground stream). Do not start any of them — the current pickup on every
+  platform is the bus v3 queue read (`coord-engine queue <team> --agent <agent>`) on the wake
+  the platform already has (automation tick, scheduled job, session start).
 
 For push-capable harnesses and the fleet security contract, see
 [`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). The bundled
@@ -194,16 +184,15 @@ slice 1); directed wakes are now the wake router's job — its adapters are **ho
 `codex exec resume <thread-id>` without bypassing approvals or sandboxing), registered per agent in
 `_coord/router/config.json`. `wake/macos-notify.sh` remains in-repo as a live router adapter.
 
-**Single-flight — one watcher identity per agent.** Run exactly one listener per `<agent>` on a host:
-the per-agent state file is not a concurrency lock, so two listeners for the same agent (or a canonical
-listener running alongside a legacy alias listener for the same identity) race the state and double-fire
-or drop events. Serialize ticks (`--once` on a scheduler, or a single long-running `--interval` loop —
-never both), coalesce overlapping schedules onto one cadence rather than stacking timers, and retire any
-legacy alias listener before arming the canonical one (the scheduling-overlap P1). Distinct agents get
-distinct state files and run independently; the constraint is per-identity.
+**Single-flight (historical, and it survives v3 in one form).** The listener-era rule was one
+watcher identity per agent — two listeners on one state file race and double-fire or drop events.
+The v3 descendant of that rule: one *queue-reading identity* per agent — the records cursor is
+per-agent state exactly like the listen state file was, so two concurrent queue readers for the
+same agent race the cursor. Keep one scheduled wake per agent identity; coalesce overlapping
+schedules onto one cadence.
 
 ## 3. Harness adapters — lifecycle wiring
-The listener (§2) delivers inbox notifications, but the **lifecycle contract** — resume-on-wake,
+Bus v3 queue reads (on each wake) deliver events, but the **lifecycle contract** — resume-on-wake,
 snapshot-on-change, park-before-context-loss — is owned by a per-harness adapter that hooks the
 platform's own session events. The contract itself (rules 1–4) lives in
 [`fulcra-agent-continuity` §The lifecycle contract](../fulcra-agent-continuity/SKILL.md); the adapters

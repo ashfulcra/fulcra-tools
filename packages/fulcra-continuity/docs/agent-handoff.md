@@ -284,9 +284,9 @@ fast directed wakes, where enabled, come from the wake router's host-local
 OpenClaw adapter (the bundled per-agent listener and `wake/openclaw.sh` were
 removed with the retired listener stack).
 
-The heartbeat is machine-global; the listener is per-agent, so the agent value
-must be the identity whose inbox should be polled. Install the team heartbeat
-separately with
+The heartbeat is machine-global; the queue read is per-agent, so each OpenClaw
+identity reads its own queue (`coord-engine queue <team> --agent <identity>`)
+on the HEARTBEAT tick. Install the team heartbeat separately with
 `skills/fulcra-agent-automation/scripts/install-heartbeat.sh <team>` when the
 host does not already have one.
 
