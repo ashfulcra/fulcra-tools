@@ -53,9 +53,10 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
   [`EVENT-DRIVEN-WAKE.md`](EVENT-DRIVEN-WAKE.md) is canonical; this spec adds no claim it
   contradicts):
   - *Deployed today:* `codex exec resume <thread-id>` (exact persisted thread, works with the app
-    closed — `scripts/wake/codex.sh`), OpenClaw authenticated `POST /hooks/wake`
-    (`scripts/wake/openclaw.sh`), Claude Managed Agents `user.message` to an idle persisted
-    session, macOS notification to the human for consent-gated harnesses.
+    closed), OpenClaw authenticated `POST /hooks/wake`, Claude Managed Agents `user.message` to an
+    idle persisted session, macOS notification to the human for consent-gated harnesses. Adapters
+    are host-local on the executor (`$COORD_WAKE_ADAPTER_DIR/<adapter>.sh`); the bundled
+    `wake/codex.sh` / `wake/openclaw.sh` repo copies were removed with the listener stack.
   - *Proposed in this build (new code, stage-2 tasks):* a **queued wake file** consumed by the
     SessionStart briefing hook on next human open (local/desktop fallback lane), and a **platform
     scheduled-routine leg** for Claude Code web/cloud — which has **no documented exact-session
