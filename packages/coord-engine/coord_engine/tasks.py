@@ -103,6 +103,8 @@ def apply_update(
     add_tags: Optional[list[str]] = None,
     checkpoint_ref: Optional[str] = None,
     remove_tags: Optional[list[str]] = None,
+    unlock: Optional[str] = None,
+    superseded_by: Optional[str] = None,
 ) -> str:
     """Read-modify-write a task doc, enforcing the status machine. Raises
     ``TaskError`` on a missing doc, unparseable frontmatter, or illegal transition."""
@@ -116,7 +118,11 @@ def apply_update(
         if status not in VALID_STATUSES:
             raise TaskError(f"invalid status {status!r}")
         if not is_valid_transition(old_status, status):
-            raise TaskError(f"illegal transition {old_status} -> {status}")
+            # Supersession (D3, respec 2026-07-28) is a legal close from ANY
+            # live state — its whole point is closing a copy that was never
+            # driven through the normal lifecycle (reassigned-away work).
+            if not (status == "done" and superseded_by):
+                raise TaskError(f"illegal transition {old_status} -> {status}")
         # Enforce "done requires evidence" HERE so it holds through every entry
         # point (`task update --status done`, not only `task done`).
         if status == "done" and not evidence:
@@ -134,6 +140,10 @@ def apply_update(
         fm["assignee"] = assignee
     if blocked_on is not None:
         fm["blocked_on"] = blocked_on
+    if unlock is not None:
+        fm["unlock"] = unlock
+    if superseded_by is not None:
+        fm["superseded_by"] = superseded_by
     if checkpoint_ref is not None:
         fm["checkpoint_ref"] = checkpoint_ref
     if add_tags:

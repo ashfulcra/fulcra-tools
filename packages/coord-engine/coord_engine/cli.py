@@ -893,17 +893,37 @@ def cmd_task_block(args: argparse.Namespace, transport: Any) -> int:
     if args.blocked_on and args.on_user:
         print("task block failed: pass --blocked-on OR --on-user, not both", file=sys.stderr)
         return 1
+    if not args.unlock and not args.on_user:
+        # D4 (respec 2026-07-28): an agent-blocked item without a named unlock
+        # is malformed — the sweep can chase "who" but not "what would clear
+        # it", and unlock-less blocks rot. Rejected at write time. `--on-user`
+        # asks are exempt: the ask itself is the unlock (auto-derived below).
+        print("task block failed: --unlock <what specifically unblocks this> "
+              "is required with --blocked-on (name the concrete unlock, not "
+              "just the blocker)", file=sys.stderr)
+        return 1
     # TYPE the human block: `--on-user <name>` writes `blocked_on: user:<name>` so
     # the blocked-on-human fold can classify it at ZERO transport cost (a plain
     # value would need an agent/role lookup to tell human from agent). Additive:
     # `--blocked-on <agent>` stays an untyped agent value, and legacy `user:`-less
     # rows still parse (the fold's legacy branch handles them).
     blocked_val = f"{query._USER_PREFIX}{args.on_user}" if args.on_user else args.blocked_on
-    kw = {"status": "blocked", "blocked_on": blocked_val}
+    unlock_val = args.unlock or (f"answer from {args.on_user}" if args.on_user else None)
+    kw = {"status": "blocked", "blocked_on": blocked_val, "unlock": unlock_val}
     if args.on_user:
         kw["assignee"] = _human()
         kw["add_tags"] = ["needs:human"]
     return _task_apply(args, transport, **kw)
+
+
+def cmd_task_supersede(args: argparse.Namespace, transport: Any) -> int:
+    """D3 (respec 2026-07-28): reassignment without closure is data loss with
+    extra steps. Supersession closes the origin copy from ANY live state and
+    names its successor — the dispatcher's duty made mechanical."""
+    reason = args.reason or f"work re-dispatched as {args.by}"
+    return _task_apply(args, transport, status="done",
+                       superseded_by=args.by,
+                       evidence=f"superseded by {args.by} ({reason})")
 
 
 def cmd_task_pause(args: argparse.Namespace, transport: Any) -> int:
@@ -7048,10 +7068,11 @@ def build_parser() -> argparse.ArgumentParser:
     tdn = tksub.add_parser("done", help="mark done (requires evidence)")
     tdn.add_argument("team"); tdn.add_argument("name"); tdn.add_argument("--evidence", "-e", required=True)
     tdn.set_defaults(func=cmd_task_done)
-    tbl = tksub.add_parser("block", help="mark blocked (sets blocked_on; --on-user routes to a human)")
+    tbl = tksub.add_parser("block", help="mark blocked (requires --unlock; sets blocked_on; --on-user routes to a human)")
     tbl.add_argument("team"); tbl.add_argument("name")
     tbl.add_argument("--blocked-on", dest="blocked_on")
     tbl.add_argument("--on-user", dest="on_user", help="human-facing ask; assigns to FULCRA_COORD_HUMAN/human + tags needs:human")
+    tbl.add_argument("--unlock", help="REQUIRED: what specifically unblocks this (the concrete unlock, not just the blocker)")
     tbl.set_defaults(func=cmd_task_block, verb="block")
     tpa = tksub.add_parser("pause", help="pause to waiting (requires --next)")
     tpa.add_argument("team"); tpa.add_argument("name"); tpa.add_argument("--next", "-n", required=True)
@@ -7065,6 +7086,11 @@ def build_parser() -> argparse.ArgumentParser:
     tas = tksub.add_parser("assign", help="set/redirect assignee")
     tas.add_argument("team"); tas.add_argument("name"); tas.add_argument("assignee")
     tas.set_defaults(func=cmd_task_assign, verb="assign")
+    tsp = tksub.add_parser("supersede", help="close a re-dispatched task's origin copy, naming its successor (legal from any live state)")
+    tsp.add_argument("team"); tsp.add_argument("name")
+    tsp.add_argument("--by", required=True, help="the successor task slug (or PR/artifact) that replaces this copy")
+    tsp.add_argument("--reason", "-r")
+    tsp.set_defaults(func=cmd_task_supersede, verb="supersede")
 
     rv = sub.add_parser("review", help="review verdict tally (fulcra-agent-review)")
     rvsub = rv.add_subparsers(dest="review_command", required=True)
