@@ -22,11 +22,9 @@ adapter mechanics onto the coord engine, in three layers:
     stolen by a later (possibly headless) session.
 
 EVENT WAKE: the legacy ``wake.json`` layer remains omitted because it bypassed
-approvals and sandboxing. The separate consent-gated listener now ships a safe
-fixed adapter at ``scripts/wake/codex.sh`` using the stable
-``codex exec resume <SESSION_ID>`` interface with the resumed thread's ordinary
-policy. This installer retains the coarse automation as a safety net; fleet
-deployment pairs its exact thread id with that adapter.
+approvals and sandboxing. The listener-era fixed adapter has also been retired;
+host-local wake delivery is owned by the router executor's provisioned adapter
+directory. This installer retains the coarse automation as a safety net.
 
 COEXISTENCE + MIGRATION: this installer keys everything on the marker
 ``fulcra-agent-hooks`` and automation id prefix ``coord-watch-``. Two other
@@ -74,9 +72,9 @@ AUTOMATION_ID_PREFIX = "coord-watch-"
 # coord2-era names of THIS installer, recognized for in-place migration only.
 LEGACY_MANAGED_DIRNAME = "fulcra-coord2-hooks"
 LEGACY_AUTOMATION_ID_PREFIX = "coord2-watch-"
-# Keep a low-frequency safety net. Exact-thread event wake is separately
-# consent-gated through scripts/wake/codex.sh; the automation remains useful
-# for missed-event recovery and hosts where the listener is not installed.
+# Keep a low-frequency safety net. Exact-thread event wake is owned by the
+# separately provisioned router executor; the automation remains useful for
+# missed-event recovery and hosts where that executor is not installed.
 WATCH_INTERVAL_MIN = 30
 # Marker carried once in hooks.json (as a trailing shell comment on the
 # SessionStart command — inert under sh -c) and as the automation prompt's
