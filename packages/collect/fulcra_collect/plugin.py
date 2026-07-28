@@ -71,11 +71,19 @@ class Credential:
 
     The credential-status endpoint and any code that probes presence MUST
     consult the same scope the plugin actually reads, or it reports a working
-    secret as "missing" (the attention-relay false-"missing" bug)."""
+    secret as "missing" (the attention-relay false-"missing" bug).
+
+    `required` (default True): when False, the worker will NOT abort the run
+    if this credential is unset. Use it for a credential that only one of
+    several operating modes needs — e.g. PurpleAir's `api_key`, needed for
+    the cloud source but not when reading a sensor on the LAN. A required
+    (default) credential that is missing still hard-blocks the run with a
+    clear error, unchanged."""
     key: str
     label: str
     help: str
     user_level: bool = False
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -681,10 +689,17 @@ class RunContext:
         cached: str | None,
         expected_spec: dict,
         canonical_name: str,
+        create_extra: dict | None = None,
     ) -> str:
         """Return a guaranteed-fresh definition id for callers that
         maintain their own per-package cache (alongside the per-plugin
         ``state.definition_id``).
+
+        ``create_extra`` (optional) is forwarded to the resolver and merged
+        into the create POST body ONLY when a new definition is created —
+        never when an existing one is adopted or validated. A caller that
+        keeps several distinct definitions (one per measure) uses this to
+        enrich each first-time create (e.g. a per-measure description).
 
         Pattern: media-helpers has a ``state.json`` with fields like
         ``listened_definition_id`` shared across Last.fm + Deezer +
@@ -744,6 +759,7 @@ class RunContext:
         self.state.definition_id = None
         new_id = self.resolved_definition_id(
             expected_spec, canonical_name=canonical_name,
+            create_extra=create_extra,
         )
         if had_stale_cache and new_id != cached:
             # Surface the auto-recovery in the dashboard. ok=True
