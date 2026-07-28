@@ -320,3 +320,85 @@ def test_degraded_first_read_cannot_cause_a_second_timer(monkeypatch, capsys):
                     transport=t) == 0
     assert len(t.records_written) == 1
     assert "already scheduled" in capsys.readouterr().out
+
+
+# --- absent vs unreadable config (live incident 2026-07-28: expired-auth host
+# --- reported "config missing" for hours; the queue must say DEGRADED instead)
+
+class ClassifiedTransport(QueueTransport):
+    """QueueTransport whose read path can simulate a transport outage."""
+
+    def __init__(self, *a, read_status="ok", **kw):
+        super().__init__(*a, **kw)
+        self.read_status = read_status
+
+    def read_classified(self, path):
+        if self.read_status == "error":
+            return None, "error"
+        content = self.read(path)
+        if content is None:
+            return None, "absent"
+        return content, "ok"
+
+
+def _queue_args(team="fulcra", agent="amy"):
+    import argparse
+    return argparse.Namespace(team=team, agent=agent, json=False)
+
+
+def test_load_config_classified_absent_vs_error():
+    t = ClassifiedTransport(read_status="ok")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "absent"
+
+    t = ClassifiedTransport(read_status="error")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "error"
+
+    t = ClassifiedTransport(read_status="ok")
+    t.put(records.config_path("fulcra"),
+          '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert status == "ok" and cfg["data_type"] == "MomentAnnotation/x"
+
+
+def test_load_config_classified_env_override_wins_even_during_outage(monkeypatch):
+    monkeypatch.setenv(records.ENV_DATA_TYPE, "MomentAnnotation/env")
+    t = ClassifiedTransport(read_status="error")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert status == "ok" and cfg["data_type"] == "MomentAnnotation/env"
+
+
+def test_load_config_classified_malformed_store_config_is_absent_not_error():
+    # Malformed is human-fixable state, not transport state — rc 2 territory.
+    t = ClassifiedTransport(read_status="ok")
+    t.put(records.config_path("fulcra"), "not json at all")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "absent"
+
+
+def test_load_config_classified_falls_back_when_transport_lacks_classified_read():
+    # Old transports without read_classified keep the legacy absent behavior.
+    t = QueueTransport()
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "absent"
+
+
+def test_queue_unreadable_config_is_degraded_rc3_not_missing_rc2(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = ClassifiedTransport(read_status="error")
+    rc = cli.cmd_queue(_queue_args(), t)
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "DEGRADED" in err
+    assert "missing" not in err.split("DEGRADED")[0]
+    # No cursor may be created off an unknown window.
+    assert t.read(records.cursor_path("fulcra", "amy")) is None
+
+
+def test_queue_truly_absent_config_stays_rc2(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = ClassifiedTransport(read_status="ok")
+    rc = cli.cmd_queue(_queue_args(), t)
+    assert rc == 2
+    assert "no bus-v3 records config" in capsys.readouterr().err

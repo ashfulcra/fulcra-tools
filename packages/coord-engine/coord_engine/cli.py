@@ -3138,8 +3138,17 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if not agent:
         print("queue: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
         return 2
-    cfg = records.load_config(transport, args.team)
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
     if cfg is None:
+        if cfg_status == "error":
+            # Unreadable is NOT missing: an expired-auth/offline host must
+            # report DEGRADED (retryable), or its automation reads "config
+            # missing" as a durable state and goes quietly deaf (2026-07-28).
+            print("queue: DEGRADED — records config could not be read "
+                  "(transport failure, not a missing config); window UNKNOWN, "
+                  "cursor untouched — check auth/network and retry",
+                  file=sys.stderr)
+            return 3
         print("queue: no bus-v3 records config "
               f"(team/{args.team}/{records.CONFIG_NAME} or "
               f"{records.ENV_DATA_TYPE}) — cannot read the record queue",
