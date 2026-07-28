@@ -229,6 +229,54 @@ def load_config(transport: Any, team: str) -> Optional[dict[str, str]]:
     }
 
 
+def load_config_classified(
+        transport: Any, team: str) -> tuple[Optional[dict[str, str]], str]:
+    """``load_config`` that separates absent from unreadable.
+
+    Returns (config, "ok") | (None, "absent") | (None, "error"). "absent"
+    means the store affirmatively has no config (or it is malformed — a
+    human-fixable state, not a transport state); "error" means the store
+    could not be consulted, so the caller must treat the config as UNKNOWN
+    (degraded), never as missing. Live incident 2026-07-28: an expired-auth
+    host reported "records configuration is still missing" for hours because
+    the unreadable path was indistinguishable from the absent path.
+    """
+    import os
+    env_type = (os.environ.get(ENV_DATA_TYPE) or "").strip()
+    if env_type:
+        return {
+            "data_type": env_type,
+            "api_version": (os.environ.get(ENV_API_VERSION) or "").strip()
+            or DEFAULT_API_VERSION,
+        }, "ok"
+    reader = getattr(transport, "read_classified", None)
+    if reader is None:
+        cfg = load_config(transport, team)
+        return cfg, ("ok" if cfg is not None else "absent")
+    raw, status = reader(config_path(team))
+    if status == "error":
+        return None, "error"
+    if raw is None:
+        return None, "absent"
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None, "absent"
+    if not isinstance(doc, dict):
+        return None, "absent"
+    data_type = doc.get("data_type")
+    if not isinstance(data_type, str) or not data_type.strip():
+        return None, "absent"
+    api_version = doc.get("api_version")
+    if api_version is not None and (
+            not isinstance(api_version, str) or not api_version.strip()):
+        return None, "absent"
+    return {
+        "data_type": data_type.strip(),
+        "api_version": (api_version or DEFAULT_API_VERSION).strip(),
+    }, "ok"
+
+
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
                kind: str, priority: str, slug: str, ptr: Optional[str] = None,
                recorded_at: Optional[str] = None) -> bool:

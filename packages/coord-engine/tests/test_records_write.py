@@ -320,3 +320,138 @@ def test_degraded_first_read_cannot_cause_a_second_timer(monkeypatch, capsys):
                     transport=t) == 0
     assert len(t.records_written) == 1
     assert "already scheduled" in capsys.readouterr().out
+
+
+# --- absent vs unreadable config (live incident 2026-07-28: expired-auth host
+# --- reported "config missing" for hours; the queue must say DEGRADED instead)
+
+class ClassifiedTransport(QueueTransport):
+    """QueueTransport whose read path can simulate a transport outage."""
+
+    def __init__(self, *a, read_status="ok", **kw):
+        super().__init__(*a, **kw)
+        self.read_status = read_status
+
+    def read_classified(self, path):
+        if self.read_status == "error":
+            return None, "error"
+        content = self.read(path)
+        if content is None:
+            return None, "absent"
+        return content, "ok"
+
+
+def _queue_args(team="fulcra", agent="amy"):
+    import argparse
+    return argparse.Namespace(team=team, agent=agent, json=False)
+
+
+def test_load_config_classified_absent_vs_error():
+    t = ClassifiedTransport(read_status="ok")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "absent"
+
+    t = ClassifiedTransport(read_status="error")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "error"
+
+    t = ClassifiedTransport(read_status="ok")
+    t.put(records.config_path("fulcra"),
+          '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert status == "ok" and cfg["data_type"] == "MomentAnnotation/x"
+
+
+def test_load_config_classified_env_override_wins_even_during_outage(monkeypatch):
+    monkeypatch.setenv(records.ENV_DATA_TYPE, "MomentAnnotation/env")
+    t = ClassifiedTransport(read_status="error")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert status == "ok" and cfg["data_type"] == "MomentAnnotation/env"
+
+
+def test_load_config_classified_malformed_store_config_is_absent_not_error():
+    # Malformed is human-fixable state, not transport state — rc 2 territory.
+    t = ClassifiedTransport(read_status="ok")
+    t.put(records.config_path("fulcra"), "not json at all")
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "absent"
+
+
+def test_load_config_classified_falls_back_when_transport_lacks_classified_read():
+    # Old transports without read_classified keep the legacy absent behavior.
+    t = QueueTransport()
+    cfg, status = records.load_config_classified(t, "fulcra")
+    assert cfg is None and status == "absent"
+
+
+def test_queue_unreadable_config_is_degraded_rc3_not_missing_rc2(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = ClassifiedTransport(read_status="error")
+    rc = cli.cmd_queue(_queue_args(), t)
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "DEGRADED" in err
+    assert "missing" not in err.split("DEGRADED")[0]
+    # No cursor may be created off an unknown window.
+    assert t.read(records.cursor_path("fulcra", "amy")) is None
+
+
+def test_queue_truly_absent_config_stays_rc2(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = ClassifiedTransport(read_status="ok")
+    rc = cli.cmd_queue(_queue_args(), t)
+    assert rc == 2
+    assert "no bus-v3 records config" in capsys.readouterr().err
+
+
+# --- consumption guard (live incident 2026-07-28: an operator diagnostic run
+# --- as another agent's identity consumed that agent's pending directives)
+
+def _guarded_queue_transport():
+    t = ClassifiedTransport(read_status="ok",
+                            window=[_event_rec("r1", "job-1")])
+    t.put(records.config_path("fulcra"),
+          '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
+    return t
+
+
+def test_queue_as_foreign_identity_peeks_and_never_advances(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "operator")
+    t = _guarded_queue_transport()
+    rc = cli.cmd_queue(_queue_args(agent="amy"), t)
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "job-1" in out.out                       # events still shown
+    assert "peek" in out.err and "--consume" in out.err
+    assert t.read(records.cursor_path("fulcra", "amy")) is None  # not consumed
+
+
+def test_queue_consume_flag_restores_deliberate_takeover(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "operator")
+    t = _guarded_queue_transport()
+    args = _queue_args(agent="amy"); args.consume = True
+    rc = cli.cmd_queue(args, t)
+    assert rc == 0
+    assert t.read(records.cursor_path("fulcra", "amy")) is not None
+
+
+def test_queue_as_self_still_consumes(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "amy")
+    t = _guarded_queue_transport()
+    rc = cli.cmd_queue(_queue_args(agent="amy"), t)
+    assert rc == 0
+    assert t.read(records.cursor_path("fulcra", "amy")) is not None
+
+
+def test_queue_explicit_peek_as_self(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "amy")
+    t = _guarded_queue_transport()
+    args = _queue_args(agent="amy"); args.peek = True
+    rc = cli.cmd_queue(args, t)
+    out = capsys.readouterr()
+    assert rc == 0 and "job-1" in out.out
+    assert t.read(records.cursor_path("fulcra", "amy")) is None

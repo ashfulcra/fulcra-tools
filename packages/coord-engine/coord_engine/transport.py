@@ -421,13 +421,26 @@ class FulcraFileTransport:
     def read(self, path: str) -> Optional[str]:
         # contract: None on any failure — timeout/exec error follow the same path
         # as a non-zero return code.
+        content, _ = self.read_classified(path)
+        return content
+
+    def read_classified(self, path: str) -> tuple[Optional[str], str]:
+        # contract: (content, "ok") | (None, "absent") | (None, "error").
+        # "absent" is claimed ONLY on the CLI's affirmative not-found message;
+        # every other failure (timeout, exec, network, auth) is "error" so a
+        # degraded transport can never masquerade as a missing file. Callers
+        # that need only content keep using read(); callers whose behavior
+        # forks on absent-vs-unreadable (e.g. the queue verb's records config)
+        # use this.
         try:
             cp = self._run(["download", path, "-"])
         except TransportError:
-            return None
+            return None, "error"
         if cp.returncode != 0:
-            return None  # not found / error -> None (caller handles)
-        return cp.stdout
+            if "not found" in (cp.stderr or "").lower():
+                return None, "absent"
+            return None, "error"
+        return cp.stdout, "ok"
 
     def write(self, path: str, content: str) -> bool:
         # contract: True on success, False on any REMOTE failure (incl. timeout/exec
