@@ -437,7 +437,12 @@ class FulcraFileTransport:
         except TransportError:
             return None, "error"
         if cp.returncode != 0:
-            if "not found" in (cp.stderr or "").lower():
+            # Claim "absent" ONLY on the CLI's exact not-found signature —
+            # generic substring matching would classify an auth error like
+            # "token not found" as a missing file (codex-reviewer spec,
+            # acceptance test 4). Anything else stays "error".
+            stderr = (cp.stderr or "").strip().lower()
+            if stderr.startswith("error: file not found in fulcra"):
                 return None, "absent"
             return None, "error"
         return cp.stdout, "ok"
