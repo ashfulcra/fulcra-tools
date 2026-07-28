@@ -114,14 +114,25 @@ def apply_update(
     split = okf.split_frontmatter(existing or "")
     body = split[1] if split else ""
     old_status = fm.get("status") or DEFAULT_STATUS
+    if superseded_by and old_status in ("done", "abandoned"):
+        # Terminal dispositions are immutable (pr-491 round 1): supersession
+        # closes LIVE work; it must never rewrite already-closed history —
+        # including the done->done "no-op" path, which would append a fresh
+        # completion record onto settled work.
+        raise TaskError(
+            f"cannot supersede a terminal task (status {old_status})")
     if status is not None:
         if status not in VALID_STATUSES:
             raise TaskError(f"invalid status {status!r}")
         if not is_valid_transition(old_status, status):
-            # Supersession (D3, respec 2026-07-28) is a legal close from ANY
-            # live state — its whole point is closing a copy that was never
+            # Supersession (D3, respec 2026-07-28) is a legal close from any
+            # LIVE state — its whole point is closing a copy that was never
             # driven through the normal lifecycle (reassigned-away work).
-            if not (status == "done" and superseded_by):
+            # Terminal states stay immutable: a superseded record must never
+            # rewrite an existing terminal disposition (pr-491 round 1).
+            _live = {"proposed", "active", "waiting", "blocked"}
+            if not (status == "done" and superseded_by
+                    and old_status in _live):
                 raise TaskError(f"illegal transition {old_status} -> {status}")
         # Enforce "done requires evidence" HERE so it holds through every entry
         # point (`task update --status done`, not only `task done`).

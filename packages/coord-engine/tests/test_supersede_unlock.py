@@ -87,3 +87,13 @@ def test_cmd_supersede(capsys):
     assert rc == 0
     assert "superseded_by: pr-500" in t.written
     assert "superseded by pr-500" in t.written
+
+
+def test_supersede_cannot_rewrite_terminal_states():
+    # pr-491 round-1 finding: terminal dispositions are immutable — a
+    # supersession may close live work, never rewrite closed work.
+    for status in ("done", "abandoned"):
+        with pytest.raises(tasks.TaskError):
+            tasks.apply_update(_doc(status), now=NOW, status="done",
+                               superseded_by="new-slug",
+                               evidence="superseded by new-slug")
