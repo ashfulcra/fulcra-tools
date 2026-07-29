@@ -173,8 +173,12 @@ without parsing stderr. Long-running mode loops at `--interval` seconds and exit
 - **Every other leg (Claude Code live, Codex, headless): RETIRED.** These platforms ran
   `coord-engine listen` variants (`--interval` loop in a background monitor, `--once` per
   automation tick, foreground stream). Do not start any of them — the current pickup on every
-  platform is the bus v3 queue read (`coord-engine queue <team> --agent <agent>`) on the wake
-  the platform already has (automation tick, scheduled job, session start).
+  platform is the bus v3 queue delivery (`coord-engine queue <team> --agent
+  <agent>`) on the wake the platform already has (automation tick, scheduled
+  job, session start). Under cursor v2, the harness must leave the token
+  uncommitted while the agent works and run `queue commit` only after every
+  event in the staged batch has a durable terminal classification, supplied as
+  one `--result <record-id>=<outcome>` per event.
 
 For push-capable harnesses and the fleet security contract, see
 [`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). The bundled
@@ -184,12 +188,13 @@ slice 1); directed wakes are now the wake router's job — its adapters are **ho
 `codex exec resume <thread-id>` without bypassing approvals or sandboxing), registered per agent in
 `_coord/router/config.json`. `wake/macos-notify.sh` remains in-repo as a live router adapter.
 
-**Single-flight (historical, and it survives v3 in one form).** The listener-era rule was one
-watcher identity per agent — two listeners on one state file race and double-fire or drop events.
-The v3 descendant of that rule: one *queue-reading identity* per agent — the records cursor is
-per-agent state exactly like the listen state file was, so two concurrent queue readers for the
-same agent race the cursor. Keep one scheduled wake per agent identity; coalesce overlapping
-schedules onto one cadence.
+**Single-flight remains an efficiency rule, not a correctness assumption.**
+The listener-era cursor could lose work when two same-agent wakes overlapped.
+Cursor v2 CAS-stages one pending batch: a losing wake reloads and replays the
+winner, stale commit tokens cannot advance coverage, and successful commit
+retries are idempotent. Still keep one scheduled wake per agent identity and
+coalesce overlaps—the second wake adds cost and may duplicate processing even
+though it cannot corrupt coverage.
 
 ## 3. Harness adapters — lifecycle wiring
 Bus v3 queue reads (on each wake) deliver events, but the **lifecycle contract** — resume-on-wake,

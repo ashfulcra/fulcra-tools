@@ -323,6 +323,22 @@ it (not on PyPI).
   can never mutate v2. After activation, legacy activity is a loud health
   signal and never authoritative coverage. Full authority and activation
   contract: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md).
+- **Cursor v2 is transactional: read → process → commit.** Under an activated
+  schema-v2 authority, `queue` CAS-stages one pending batch and prints a
+  `queue-delivery` token; it does **not** advance coverage. Process every
+  surfaced event to a durable terminal classification, then run
+  `coord-engine queue commit <team> --agent <you> --token <token> --result
+  <record-id>=<completed|blocked|superseded|ignored>` (repeat `--result` for
+  every staged event). The classifications are persisted in the bounded cursor
+  history; an incomplete or extra set is refused. A crash,
+  processing failure, or missing commit replays the identical token and batch;
+  a stale token is rejected and a repeated successful commit is idempotent.
+  Concurrent wakes serialize at the staged batch instead of racing a
+  last-writer-wins cursor. The current Fulcra File Store transport exposes no
+  conditional write, so schema v2 remains fail-closed until a transport
+  provides a proven `compare_and_swap`; a write/read-back imitation is not
+  CAS. Keep the authority on schema v1 until both `doctor` proves every active
+  writer is compatible **and** the transport CAS gate passes.
 - **The Codex safety-net watch checks its literal inbox before briefing**
   (PR 484). On Codex hosts, the managed heartbeat runs one direct
   `inbox --json` read and then one authoritative `briefing` read; it never

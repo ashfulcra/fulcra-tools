@@ -56,82 +56,55 @@ def test_retired_scripts_stay_deleted():
 
 
 def test_queue_sweep_actually_prints_events_from_a_nonempty_window(tmp_path):
-    """Functional guard: the sweep must surface events, not just exit 0.
-
-    The first shipped version fed its filter program to ``python3 -`` over a
-    heredoc while piping the records — both claim stdin, the records lose, and
-    a 34-record window printed nothing while exiting 0. Silence that looks
-    like success is the exact failure bus v3 exists to end, so this test runs
-    the real script against a stub ``fulcra-api``.
-    """
+    """The bootstrap wrapper delegates to the transactional engine unchanged."""
     import subprocess
     script = _SCRIPTS_DIR / "queue-sweep.sh"
-    stub = tmp_path / "fulcra-api"
-    rec = ('{"id":"r1","recorded_at":"2026-07-27T12:00:00+00:00",'
-           '"sources":["coord-boss"],'
-           '"note":"{\\"v\\":1,\\"to\\":\\"all\\",\\"kind\\":\\"directive\\",'
-           '\\"pri\\":\\"P0\\",\\"slug\\":\\"fleet-wide\\"}"}')
-    directed = rec.replace('"r1"', '"r2"').replace("fleet-wide", "just-me") \
-                  .replace('\\"all\\"', '\\"tester\\"')
-    other = rec.replace('"r1"', '"r3"').replace("fleet-wide", "not-mine") \
-               .replace('\\"all\\"', '\\"someone-else\\"')
-    stub.write_text("#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' '" +
-                    rec + "' '" + directed + "' '" + other + "'\n")
+    stub = tmp_path / "coord-engine"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "'{\"kind\":\"directive\",\"slug\":\"fleet-wide\"}' "
+        "'{\"type\":\"queue-delivery\",\"token\":\"tok\",\"event_count\":1}'\n"
+    )
     stub.chmod(0o755)
-    # macOS runners ship no `timeout` in the base dirs (found out via a CI
-    # rc-127 DEGRADED); stub it as a passthrough so the sandbox PATH is
-    # complete on every platform.
-    timeout_stub = tmp_path / "timeout"
-    timeout_stub.write_text('#!/bin/sh\nshift\nexec "$@"\n')
-    timeout_stub.chmod(0o755)
     env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)}
-    proc = subprocess.run(["bash", str(script), "tester", "1 hour"],
+    proc = subprocess.run(["bash", str(script), "tester"],
                           capture_output=True, text=True, env=env, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert "fleet-wide" in proc.stdout, "broadcast event not surfaced"
-    assert "just-me" in proc.stdout, "directed event not surfaced"
-    assert "not-mine" not in proc.stdout, "third-party event leaked"
+    assert '"token":"tok"' in proc.stdout
 
 
-def test_queue_sweep_malformed_line_makes_the_window_unknown(tmp_path):
-    """One truncated/malformed line ⇒ DEGRADED rc 3 and NO events printed —
-    the same one-bad-line-poisons-the-window rule as transport.records()."""
+def test_queue_sweep_never_auto_commits_the_printed_token(tmp_path):
+    """Print-before-process must not be recreated in the bootstrap wrapper."""
     import subprocess
     script = _SCRIPTS_DIR / "queue-sweep.sh"
-    stub = tmp_path / "fulcra-api"
-    good = ('{"id":"g1","recorded_at":"2026-07-27T12:00:00+00:00",'
-            '"sources":["coord-boss"],'
-            '"note":"{\\"v\\":1,\\"to\\":\\"tester\\",\\"kind\\":\\"directive\\",'
-            '\\"pri\\":\\"P0\\",\\"slug\\":\\"good-event\\"}"}')
-    stub.write_text("#!/bin/sh\nprintf '%s\\n%s\\n' '" + good +
-                    "' '{\"id\":\"trunc\",\"recorded_'\n")
+    calls = tmp_path / "calls"
+    stub = tmp_path / "coord-engine"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {calls}\n"
+        "printf '%s\\n' "
+        "'{\"type\":\"queue-delivery\",\"token\":\"tok\",\"event_count\":0}'\n"
+    )
     stub.chmod(0o755)
-    timeout_stub = tmp_path / "timeout"
-    timeout_stub.write_text('#!/bin/sh\nshift\nexec "$@"\n')
-    timeout_stub.chmod(0o755)
     env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)}
-    proc = subprocess.run(["bash", str(script), "tester", "1 hour"],
+    proc = subprocess.run(["bash", str(script), "tester"],
                           capture_output=True, text=True, env=env, timeout=30)
-    assert proc.returncode == 3
-    assert "DEGRADED" in proc.stderr
-    assert "good-event" not in proc.stdout, (
-        "events from a doubtful window must not print as if the window "
-        "were valid")
+    assert proc.returncode == 0
+    assert calls.read_text().strip() == "queue fulcra --agent tester --json"
 
 
 def test_queue_sweep_transport_failure_is_degraded_rc3_not_quiet(tmp_path):
-    """A failed fetch must exit 3 and say DEGRADED — never read as empty."""
+    """A failed engine read retains its rc and the literal failure doctrine."""
     import subprocess
     script = _SCRIPTS_DIR / "queue-sweep.sh"
-    stub = tmp_path / "fulcra-api"
-    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub = tmp_path / "coord-engine"
+    stub.write_text("#!/bin/sh\necho 'transport down' >&2\nexit 3\n")
     stub.chmod(0o755)
-    timeout_stub = tmp_path / "timeout"
-    timeout_stub.write_text('#!/bin/sh\nshift\nexec "$@"\n')
-    timeout_stub.chmod(0o755)
     env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)}
-    proc = subprocess.run(["bash", str(script), "tester", "1 hour"],
+    proc = subprocess.run(["bash", str(script), "tester"],
                           capture_output=True, text=True, env=env, timeout=30)
     assert proc.returncode == 3
-    assert "DEGRADED" in proc.stderr
+    assert "QUEUE READ FAILED (rc=3)" in proc.stderr
     assert proc.stdout == "", "a failed window must not print events"

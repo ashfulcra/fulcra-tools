@@ -34,7 +34,7 @@ Run in order; enter at the first probe that fails.
 | Store reachable? | `fulcra-api user-info` | prints your account | §2 (auth; remote-sandbox walls) |
 | Engine present? | `coord-engine --help` | verb list prints | §2 (install) |
 | Identity established? | `fulcra-api file download team/<team>/_coord/agents/<you>/census.md -` | your census prints | §3 |
-| On the bus? | `coord-engine queue <team> --agent <you>` | rc 0 (or events), no VERSION WARNING/INCOMPATIBLE result | §3 |
+| On the bus? | `coord-engine queue <team> --agent <you>` | rc 0 plus a handled/committed delivery (if schema v2), no VERSION WARNING/INCOMPATIBLE result | §3 |
 | Recovery self-heals? | `ls scripts/<you>/bootstrap.sh` in the repo checkout | exists | §4 |
 | Wakes armed? | your standing schedules exist (see §5's inventory check) | every duty has a wake | §5 |
 | Duties silent-when-healthy? | last several duty runs produced no operator noise | quiet | §6 |
@@ -67,7 +67,8 @@ The cloud-specific walls (permission classifier blocking installers, the
 device-flow proxy bypass, egress) are documented there with verified
 fallbacks; do not re-derive them. Verify end-to-end with
 `coord-engine doctor <team>`.
-Doctor also prints the Bus-v3 fleet version census. Do not activate a new
+Doctor also prints the Bus-v3 fleet version census and cursor-CAS transport
+gate. Do not activate a new
 cursor schema while it reports mixed/unknown agents: a presence row proves the
 version is actively running, while an adoption claim proves only installation.
 The shared authority and physically isolated cursor-generation contract are in
@@ -80,7 +81,10 @@ identity rules). Then make the identity durable:
 
 ```bash
 coord-engine presence beat <team> --agent <you> -s "born: cloud coordinator"
-coord-engine queue <team> --agent <you>          # first read; 7-day lookback
+coord-engine queue <team> --agent <you>          # first delivery; 7-day lookback
+# If it prints a queue-delivery token: process first, then:
+coord-engine queue commit <team> --agent <you> --token <token> \
+  --result <record-id>=<completed|blocked|superseded|ignored>  # repeat per event
 # announce on the record plane (stdin pipe — flag-only fails in non-TTY):
 echo '{"note":"{\"v\":1,\"to\":\"all\",\"kind\":\"claim\",\"pri\":\"P3\",\"slug\":\"on-bus-v3-<you>\"}"}' | \
   fulcra-api record "<COORD_TYPE>" --api-version v1alpha1 --source=<you>
@@ -103,8 +107,9 @@ session: the `managed-agents-message` adapter with your session ref).
 A cloud container can be reclaimed at ANY moment — mid-turn, mid-task,
 seven times a day. Design so a reset costs seconds, not state:
 
-**4a. State placement rules.** On the bus: records cursor (the engine
-already keeps it at `_coord/agents/<you>/records-cursor.json`), duty
+**4a. State placement rules.** On the bus: records cursor (schema v1:
+`_coord/agents/<you>/records-cursor.json`; schema v2:
+`_coord/bus-v3/cursors/v2/generation-<N>/<you>.json`), duty
 scripts (stash), operator grants, standing-duty specs, continuity
 checkpoints, reports. In the repo: anything reviewable. In the container:
 NOTHING you are not willing to lose this second. The scratchpad is a cache.
@@ -186,7 +191,12 @@ the record of what is owed).
 
 ## 6. Operating doctrine (what makes it a coordinator, not a cron job)
 
-- **Queue first, every wake.** Then act on what surfaced, oldest first.
+- **Queue first, every wake; commit last.** Act on what surfaced oldest first.
+  Under cursor v2, the final `queue-delivery` row is a staged token, not an
+  acknowledgement. Durably classify every event as completed, blocked,
+  superseded, or intentionally ignored, then run `queue commit` with that
+  token and one `--result` for every staged record id. A container reset or processing failure before commit must replay the
+  same batch; never commit in a shell wrapper before the agent has acted.
 - **Durable-first dispatch**: obligation doc before delivery record; the
   record plane is best-effort wake hints, documents are the truth.
 - **Batch the operator**: operator-gated items accumulate into ONE message
@@ -205,11 +215,13 @@ the record of what is owed).
 
 1. **The reset test**: note your state, ask the operator to restart the
    container (or wait — one will come), confirm the next wake self-heals
-   and the cursor covered the gap. This is the acceptance test.
+   and the cursor covered the gap. Under v2, also interrupt after delivery and
+   verify the same token replays before testing commit. This is the acceptance
+   test.
 2. **The silence test**: a healthy day produces near-zero operator
    messages. If your duties chat when nothing is wrong, fix the prompts.
 3. **The blindness test**: no gap in bus coverage longer than your longest
-   wake interval — check `records-cursor.json` advances across a day.
+   wake interval — check the authority-selected cursor advances across a day.
 
 ## Relationship to the other skills
 

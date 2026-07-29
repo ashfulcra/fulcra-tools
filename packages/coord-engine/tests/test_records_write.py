@@ -142,7 +142,7 @@ def test_version_gate_refuses_old_or_unknown_writer():
     assert unknown["ok"] is False and "unknown engine/floor" in unknown["reason"]
 
 
-def test_slice1_refuses_v2_activation_before_any_cursor_write():
+def test_v18_refuses_v2_activation_before_any_cursor_write():
     cfg = dict(_versioned_config(
         cursor_schema_version=2, cursor_generation=1,
         cursor_activated_at="2026-07-29T00:00:00Z"),
@@ -150,7 +150,7 @@ def test_slice1_refuses_v2_activation_before_any_cursor_write():
     gate = records.compatibility(
         cfg, engine_version="1.8.0", write_cursor=True)
     assert gate["ok"] is False
-    assert "not safe to write" in gate["reason"]
+    assert "predates cursor schema v2" in gate["reason"]
 
 
 def test_v2_cursor_is_physically_isolated_from_legacy_path():
