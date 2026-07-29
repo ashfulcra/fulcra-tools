@@ -94,6 +94,8 @@ def test_actual_v172_binary_cannot_mutate_generation_scoped_v2_cursor(tmp_path):
     v2_before = '{"v":2,"generation":7,"committed":"safe"}'
     v2.write_text(v2_before)
 
+    before = _snapshot(store)
+
     env = dict(os.environ)
     env["PYTHONPATH"] = str(package_root)
     env.pop("FULCRA_COORD_AGENT", None)
@@ -107,3 +109,44 @@ def test_actual_v172_binary_cannot_mutate_generation_scoped_v2_cursor(tmp_path):
     assert legacy.exists(), "actual v1.7.2 engine did not exercise its writer"
     assert '"v":1' in legacy.read_text()
     assert v2.read_text() == v2_before
+
+    # Write-set CLOSURE, not just "this one path survived".
+    #
+    # Checking a single v2 path proves generation 7's cursor at that exact
+    # location is safe. It cannot prove the old engine left everything else
+    # alone — another generation's path, a future v2 layout, any file nobody
+    # thought to assert on. Closure is the property the isolation argument
+    # actually rests on: once the write-set is pinned, ANY namespace disjoint
+    # from it is unreachable by this binary, including layouts not yet
+    # designed. That generality is what slice 5's legacy-state migration will
+    # need, and it is exactly where an unanticipated path shows up.
+    touched = _touched_since(store, before)
+    assert touched == {records.cursor_path("r", "amy")}, (
+        "a pre-slice-1 engine touched something outside its legacy cursor: "
+        f"{sorted(touched)}. The slice-1 isolation argument assumes this set is "
+        "closed; if it grew, every v2 namespace must be re-checked for overlap "
+        "before cursor v2 is activated."
+    )
+
+
+def _snapshot(root):
+    """Content of every file under ``root``, keyed by store-relative path."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*") if path.is_file()
+    }
+
+
+def _touched_since(root, before):
+    """Store-relative paths created or modified since ``before``.
+
+    Content comparison rather than mtime: a same-second rewrite is invisible to
+    mtime on coarse-granularity filesystems, and a write the harness cannot see
+    is the one failure mode that would make this gate lie in the safe-looking
+    direction.
+    """
+    after = _snapshot(root)
+    return {
+        path for path, blob in after.items() if before.get(path) != blob
+    } | {path for path in before if path not in after}
+
