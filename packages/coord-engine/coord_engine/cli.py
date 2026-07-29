@@ -3195,25 +3195,33 @@ def _queue_result_envelope(
 
 
 def _write_consume_audit(transport: Any, team: str, *, caller: str,
-                         target: str, cursor_path: str, prior: Any,
-                         new: dict[str, Any], ts: str) -> bool:
+                         target: str, cursor_path: str, observed_prior: Any,
+                         intended_authority: dict[str, Any], ts: str) -> bool:
     """Durably record a deliberate ``--consume`` takeover BEFORE it happens.
 
     The consumption guard exists because a foreign-identity read silently ate
     another agent's pending directives (live incident 2026-07-28); the audit
-    doc is what makes the deliberate override reconstructable after the fact,
-    which per the r2 spec requires naming the state being overtaken and the
-    state the takeover creates: ``prior`` is the target cursor's pre-takeover
-    coverage claim (v2: authority generation + per-agent revision; legacy
-    schema 1: its ``last_read``; or the bare classification ``absent`` /
-    ``invalid`` / ``error`` when there is no readable claim) and ``new`` is
-    the generation/coverage the takeover will operate under.
+    doc is what makes the deliberate override reconstructable after the fact.
+    The fields record OBSERVATIONS and INTENT, never predictions — under
+    concurrency this process cannot know what state its consuming read will
+    actually overtake, only what it saw and what it meant to do:
+
+    - ``observed_prior``: the target cursor's coverage claim as read at ``ts``
+      (v2: authority generation + per-agent revision; legacy schema 1: its
+      ``last_read``; or the bare classification ``absent``/``invalid``/
+      ``error`` when there was no readable claim). A concurrent writer may
+      advance the cursor between this observation and the consuming read.
+    - ``intended_authority``: the cursor schema (and, for v2, the authority
+      generation) the takeover intends to operate under. No predicted
+      revision or timestamp: a staged delivery may never commit, a CAS loser
+      adopts the winner's state, and the legacy save stamps its own clock.
+      The actual transition is evidenced by the cursor document afterward.
 
     ORDERING INVARIANT: this audit document must land before any cursor
-    MUTATION or consuming read — the window/records query and every cursor
+    MUTATION or consuming READ — the window/records query and every cursor
     write happen strictly after this returns True. Reading the target cursor
-    to capture ``prior`` is deliberately allowed beforehand: it is a read,
-    not a mutation, and consumes nothing.
+    to capture ``observed_prior`` is deliberately allowed beforehand: it is
+    a plain observation read, not a mutation, and consumes nothing.
 
     Returns False when the document did not verifiably land — the caller then
     REFUSES the takeover, because an unauditable takeover is the silent
@@ -3229,8 +3237,8 @@ def _write_consume_audit(transport: Any, team: str, *, caller: str,
         "caller": caller,
         "target": target,
         "cursor": cursor_path,
-        "prior": prior,
-        "new": new,
+        "observed_prior": observed_prior,
+        "intended_authority": intended_authority,
         "reason": (f"caller '{caller}' read the queue as '{target}' with "
                    "--consume — deliberate consumption-guard override"),
     }
@@ -3764,10 +3772,14 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if takeover:
         # The audit doc lands BEFORE the takeover read touches anything: an
         # unauditable takeover does not happen (fail closed), and plain reads
-        # and --peek never reach this write. Capturing the prior coverage
-        # claim below is a plain READ of the target cursor — allowed before
+        # and --peek never reach this write. Capturing observed_prior below
+        # is a plain observation READ of the target cursor — allowed before
         # the audit lands (it mutates and consumes nothing); the window/
-        # records query still runs only after the audit write succeeds.
+        # records query still runs only after the audit write succeeds. The
+        # audit records what THIS process observed and intended, never a
+        # prediction: a concurrent writer may move the cursor between the
+        # observation and the consuming read, so the actual transition is
+        # evidenced by the cursor document itself afterward.
         audit_ts = _iso(_now())
         if v2:
             generation = cfg["cursor_generation"]
@@ -3776,31 +3788,26 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
                 records.load_v2_cursor_classified(
                     transport, args.team, agent, generation))
             if prior_status == "ok" and prior_cursor is not None:
-                prior: Any = {"schema": 2, "generation": generation,
-                              "revision": prior_cursor["revision"]}
-                new_revision: Optional[int] = prior_cursor["revision"] + 1
+                observed_prior: Any = {
+                    "schema": 2, "generation": generation,
+                    "revision": prior_cursor["revision"]}
             else:
-                # absent seeds revision 0 (commit -> 1); invalid/error leave
-                # the successor unknowable — the read path fails closed on
-                # them right after, before any mutation.
-                prior = prior_status
-                new_revision = 1 if prior_status == "absent" else None
-            new = {"schema": 2, "generation": generation,
-                   "revision": new_revision}
+                observed_prior = prior_status
+            intended_authority = {"schema": 2, "generation": generation}
         else:
             target_cursor = records.cursor_path(args.team, agent)
             prior_cursor_v1, prior_status = records.load_cursor_classified(
                 transport, args.team, agent)
             if prior_status == "ok" and prior_cursor_v1 is not None:
-                prior = {"schema": 1,
-                         "last_read": prior_cursor_v1["last_read"]}
+                observed_prior = {
+                    "schema": 1, "last_read": prior_cursor_v1["last_read"]}
             else:
-                prior = prior_status
-            new = {"schema": 1, "last_read": audit_ts}
+                observed_prior = prior_status
+            intended_authority = {"schema": 1}
         if not _write_consume_audit(
                 transport, args.team, caller=own_identity, target=agent,
-                cursor_path=target_cursor, prior=prior, new=new,
-                ts=audit_ts):
+                cursor_path=target_cursor, observed_prior=observed_prior,
+                intended_authority=intended_authority, ts=audit_ts):
             return _queue_failure(
                 args,
                 state="UNKNOWN",

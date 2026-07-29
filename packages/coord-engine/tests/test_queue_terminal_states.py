@@ -180,11 +180,13 @@ def _audit_doc(t):
 
 
 def test_consume_takeover_writes_audit_before_cursor(monkeypatch, capsys):
-    """The r2 spec's full audit record: actor (caller), target, reason,
-    timestamp, prior generation/coverage, and the new one the takeover
-    operates under — plus the exact cursor path. Reading the target cursor
-    to capture ``prior`` happens BEFORE the audit lands (a read consumes
-    nothing); the write log proves no cursor MUTATION precedes the audit."""
+    """The audit record: actor (caller), target, reason, timestamp, the
+    OBSERVED prior coverage claim, and the authority the takeover INTENDS to
+    operate under — observations and intent, never predictions (under
+    concurrency this process cannot know what its consuming read will
+    actually overtake). Reading the target cursor to capture the observation
+    happens BEFORE the audit lands (a read consumes nothing); the write log
+    proves no cursor MUTATION precedes the audit."""
     t = _transport(window=[_event_rec("r1", "job")])
     t.put(CURSOR, '{"v":1,"last_read":"2026-07-27T17:30:00Z","seen_ids":[]}')
     assert _takeover(monkeypatch, t, "--consume") == 0
@@ -200,35 +202,42 @@ def test_consume_takeover_writes_audit_before_cursor(monkeypatch, capsys):
     assert fm["caller"] == "operator"
     assert fm["target"] == AGENT
     assert fm["cursor"] == CURSOR
-    # the coverage claim being overtaken, and the claim replacing it
-    assert fm["prior"] == {"schema": "1",
-                           "last_read": "2026-07-27T17:30:00Z"}
-    assert fm["new"] == {"schema": "1", "last_read": "2026-07-27T18:00:00Z"}
+    # what the caller SAW at ts, and the schema it meant to operate under —
+    # no predicted timestamp: the actual transition is evidenced by the
+    # cursor document afterward.
+    assert fm["observed_prior"] == {"schema": "1",
+                                    "last_read": "2026-07-27T17:30:00Z"}
+    assert fm["intended_authority"] == {"schema": "1"}
     assert "--consume" in fm["reason"]
 
 
-def test_consume_audit_records_absent_prior(monkeypatch, capsys):
-    """A takeover of an agent with no cursor yet must say so: prior is the
-    bare classification ``absent``, not a fabricated empty claim."""
+def test_consume_audit_records_absent_observed_prior(monkeypatch, capsys):
+    """A takeover of an agent with no cursor yet must say so: the observation
+    is the bare classification ``absent``, not a fabricated empty claim."""
     t = _transport(window=[_event_rec("r1", "job")])
     assert _takeover(monkeypatch, t, "--consume") == 0
     _path, fm = _audit_doc(t)
-    assert fm["prior"] == "absent"
-    assert fm["new"] == {"schema": "1", "last_read": "2026-07-27T18:00:00Z"}
+    assert fm["observed_prior"] == "absent"
+    assert fm["intended_authority"] == {"schema": "1"}
 
 
-def test_consume_audit_records_v2_generation_and_revision(monkeypatch, capsys):
-    """Under an activated v2 authority the audit names the authority
-    generation and the per-agent revision being overtaken, plus the revision
-    the takeover's commit will create."""
+def test_consume_audit_records_v2_observation_and_intended_generation(
+        monkeypatch, capsys):
+    """Under an activated v2 authority the audit names the observed authority
+    generation + per-agent revision and the generation the takeover intends
+    to operate under — no predicted successor revision: a staged delivery may
+    never commit, and a CAS loser adopts the winner's state."""
     t = ClassifiedCas([])
     t.put(records.config_path(TEAM), json.dumps(_config()))
     t.put(V2_CURSOR, _v2_doc())
     assert _takeover(monkeypatch, t, "--consume") == 0
     _path, fm = _audit_doc(t)
     assert fm["cursor"] == V2_CURSOR
-    assert fm["prior"] == {"schema": "2", "generation": "3", "revision": "0"}
-    assert fm["new"] == {"schema": "2", "generation": "3", "revision": "1"}
+    assert fm["observed_prior"] == {"schema": "2", "generation": "3",
+                                    "revision": "0"}
+    assert fm["intended_authority"] == {"schema": "2", "generation": "3"}
+    assert "revision" not in fm["intended_authority"], \
+        "a successor revision would be a prediction, not intent"
 
 
 def test_consume_refused_when_audit_write_fails(monkeypatch, capsys):

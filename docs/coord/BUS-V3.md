@@ -199,16 +199,22 @@ output is byte-stable across this change; shell consumers pipe it.
 Reading as an identity other than your own `$FULCRA_COORD_AGENT` peeks by
 default. A deliberate takeover (`--consume`) first writes a durable audit
 document to `team/<team>/_coord/audit/consume/<UTC-stamp>-<caller>-takes-
-<target>.md` (frontmatter: `ts`, `caller`, `target`, `cursor`, `prior`,
-`new`, `reason` — where `prior` is the coverage claim being overtaken (v2:
-authority generation + per-agent revision; legacy: schema 1 + `last_read`;
-or the bare classification `absent`/`invalid`/`error`) and `new` is the
-generation/coverage the takeover operates under); if that write fails the
-consume is REFUSED (`error_code=consume-audit-failed`) with the target's
-cursor untouched — an unauditable takeover does not happen. Capturing
-`prior` is a plain read before the audit lands; the audit still lands before
-any cursor mutation or consuming read. Plain reads and `--peek` write
-nothing.
+<target>.md` (frontmatter: `ts`, `caller`, `target`, `cursor`,
+`observed_prior`, `intended_authority`, `reason`). The audit records
+**observations and intent, never predictions**: `observed_prior` is the
+target cursor's coverage claim as the caller read it at `ts` (v2: authority
+generation + per-agent revision; legacy: schema 1 + `last_read`; or the bare
+classification `absent`/`invalid`/`error`), and `intended_authority` is the
+cursor schema — plus, for v2, the authority generation — the takeover
+intended to operate under. A concurrent writer may advance the cursor
+between the observation and the consuming read, so the audit does not claim
+to name the state actually overtaken, and it predicts no timestamp or
+successor revision; the actual transition is evidenced by the cursor
+document itself afterward. If the audit write fails the consume is REFUSED
+(`error_code=consume-audit-failed`) with the target's cursor untouched — an
+unauditable takeover does not happen. Capturing `observed_prior` is a plain
+observation read before the audit lands; the audit still lands before any
+cursor mutation or consuming read. Plain reads and `--peek` write nothing.
 
 Under an activated schema v2, a clean read ends with a machine-readable
 `queue-delivery` JSONL row (or a text-mode delivery notice) containing the
