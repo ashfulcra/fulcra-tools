@@ -13,7 +13,7 @@ fleet or a new wall is hit, add it here in the same PR as the fix.
 |---|---------|----------------|--------------------|
 | 1 | Claude Code, local macOS | coord-maintainer, fulcra-primitives-maintainer (Mac); prefs_maintainer (Workbook) | Full CLI + browser auth, direct git (tags OK), launchd access, persistent disk |
 | 2 | Claude Code, remote/web container | coord-boss (this doc's author) | TLS-intercepting proxy, egress allowlist, ephemeral disk, container restarts kill background loops, git **gateway** (no `gh`; GitHub via MCP), 24h token loop |
-| 3 | Codex CLI (OpenAI) | codex-reviewer, codex-coder | Tick-based loops, separate account/limits (ATC-tracked), own sandbox quirks |
+| 3 | Codex CLI/Desktop (OpenAI) | codex-reviewer, codex-coder | Tick-based loops, separate account/limits (ATC-tracked), managed filesystem/network sandbox with per-command escalation |
 | 4 | OpenClaw | Arc (openclaw:discord:*) | Discord-fronted, long-lived, different skill loading |
 | 5 | GitHub Actions CI | resolve gate (ubuntu), macOS suite | **No Fulcra credentials by design** — test hermeticity is a safety boundary, not a convenience |
 | 6 | Headless heartbeats (launchd/cron) | coord-reconcile:* hosts | Restricted PATH, no browser, no human at the keyboard — silent failure is the default failure mode |
@@ -82,6 +82,18 @@ the wall exists — not where it happened first.
     **same-owner fork**. Plan this in the parking doc's operator pre-flight
     (fulcra-agent-continuity, "Parking for a successor") — discovering it
     serially costs a human round-trip per failed attempt.
+12. **Codex's default sandbox can make a live queue look silent** (3).
+    `fulcra-api get-records` needs network access, but a Codex task may start
+    with network restricted. Hit live on 2026-07-29: the reviewer duty
+    automation repeatedly woke without completing its Bus V3 read, so review
+    requests accumulated while the task appeared quiet. A DNS/connect failure
+    proves the window is UNKNOWN, never empty. In the Codex harness, rerun the
+    same single mandated queue-read command with network escalation
+    (`sandbox_permissions=require_escalated`) and report any nonzero result as
+    `QUEUE READ FAILED (rc=N): <error>`. Do not emit a quiet heartbeat, advance
+    queue state, or claim there are no events after a sandbox-denied read.
+    Once the escalated command succeeds, process that result; do not perform a
+    second logical queue read in the same wake.
 
 ## What "monitoring" should grow into
 
@@ -105,3 +117,5 @@ nobody was looking.** The monitoring vision, staged:
 - 2026-07-14: initial map (coord-boss), from the 07-11..07-14 incident record.
 - 2026-07-22: wall 11 (cloud repo scoping), from Webster's handoff
   retrospective + the Fabio session restart (BUS-79).
+- 2026-07-29: wall 12 (Codex sandboxed Bus V3 read), from the
+  `codex-reviewer` duty-loop outage.
