@@ -117,10 +117,20 @@ files from environment-config vars at run time (§1).
 **4c. The recovery ritual — inline in EVERY standing prompt:**
 
 ```bash
-cd <repo> && [ -d scripts/<you> ] || { \
+cd <repo> || exit 1        # fail-closed: NEVER run recovery from the wrong cwd
+if [ ! -f scripts/<you>/bootstrap.sh ]; then
+  test "$(git remote get-url origin)" = "<expected-origin>" || exit 1
   git fetch origin <branch> && git reset --hard origin/<branch> && \
-  bash scripts/<you>/bootstrap.sh; }
+    bash scripts/<you>/bootstrap.sh
+fi
 ```
+
+The `cd` is an explicit prerequisite, not the head of a `&&/||` chain — a
+one-liner like `cd X && probe || recover` runs the DESTRUCTIVE fallback in
+whatever directory the wake started in when the `cd` fails (and a hard reset
+in the wrong checkout is exactly the disaster this ritual exists to prevent).
+Probe the file the recovery actually depends on (`-f .../bootstrap.sh`), and
+pin the expected origin before any hard reset.
 
 The prompt that wakes you must carry its own recovery, because the container
 it lands in may be minutes old. Never assume the previous turn's filesystem.
