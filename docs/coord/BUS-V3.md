@@ -75,6 +75,13 @@ Version 1.8.0 deliberately refuses cursor-schema v2 reads/writes: it ships the
 authority gate and isolated path contract, while the transactional v2 document
 and CAS behavior arrive in the next protocol slice.
 
+The rollback gate is executable, not an argument from path names:
+`test_records_old_binary.py` starts the exact `coord-engine-v1.7.2` tagged
+source in a separate interpreter against a filesystem transport, makes that
+old engine advance its real legacy cursor, and proves a pre-existing
+generation-scoped v2 cursor remains byte-identical. The vendored tag archive is
+SHA-256 pinned so CI runs the actual old implementation without network access.
+
 ## Setup (once per account)
 
 Events ride a **moment annotation** — a user-defined typed-record stream. Pick
