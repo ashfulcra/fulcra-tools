@@ -71,9 +71,26 @@ only write that old path, so it cannot overwrite v2 state. After activation,
 v2 readers never derive authoritative coverage from the legacy cursor; later
 legacy writes are health evidence of an old active binary, not state. A new
 generation is required for a later activation—never reuse or rewind one.
-Version 1.8.0 deliberately refuses cursor-schema v2 reads/writes: it ships the
-authority gate and isolated path contract, while the transactional v2 document
-and CAS behavior arrive in the next protocol slice.
+Version 1.9.0 implements cursor-schema v2 behind two hard activation gates:
+
+1. `doctor <team>` must prove that every active writer is v1.9.0-or-newer, and
+   the authority must atomically select schema `2`, a new positive generation,
+   minimum reader/writer floors of at least `1.9.0`, and an activation time.
+2. The selected transport must expose a **proven atomic compare-and-swap**;
+   `doctor` reports the gate and is unhealthy if v2 is active without it.
+   The current Fulcra File Store CLI is last-writer-wins and exposes no
+   conditional upload, so the built-in transport fails closed rather than
+   pretending that write/read-back is CAS. Keep the live authority on schema
+   v1 until a CAS-capable transport is available.
+
+The v2 document contains an authority generation, a monotonically increasing
+per-agent revision, bounded committed record/token sets, and at most one
+pending delivery (`token`, base revision, exact window, staged time, events).
+Reads CAS-stage that pending delivery without increasing the revision.
+Commits CAS the matching token into committed coverage and increment the
+revision. A losing concurrent wake reloads and replays the winner. A stale
+token cannot advance coverage; retrying a previously committed token is
+idempotent.
 
 The rollback gate is executable, not an argument from path names:
 `test_records_old_binary.py` starts the exact `coord-engine-v1.7.2` tagged
@@ -104,8 +121,8 @@ compact JSON in `note`, with the sender's bare agent name in `sources`:
 ```json
 {"v":1, "to":"codex-coder", "kind":"directive", "pri":"P0",
  "slug":"fix-the-router", "ptr":"task/2026-07-27-fix-the-router.md",
- "writer":{"engine_version":"1.8.0","protocol_version":1,
-           "cursor_schema_version":1}}
+ "writer":{"engine_version":"1.9.0","protocol_version":1,
+           "cursor_schema_version":2}}
 ```
 
 - `v` — payload version, currently `1`. Ignore payloads with versions you
@@ -126,13 +143,13 @@ The reference implementation of this contract is
 
 ## Read your queue (every wake — not a loop)
 
-Engine-equipped agents (coord-engine ≥ v1.7.0) run ONE verb:
+Engine-equipped agents run the delivery verb:
 
 ```bash
 coord-engine queue <team> --agent <you>       # [--json]
 ```
 
-It implements everything below automatically: a durable cursor at
+Under the still-default schema v1, it implements the legacy behavior: a durable cursor at
 `team/<team>/_coord/agents/<you>/records-cursor.json` makes the window cover
 the time since your last SUCCESSFUL read (with a 120s clock-skew overlap and
 a 7-day lookback when no cursor exists), events are deduped by record id and
@@ -140,6 +157,39 @@ filtered to `to: <you>|all`, and the cursor advances only after a clean
 window — a transport failure or unparseable line exits **3** (DEGRADED,
 cursor untouched, nothing printed as clean) so quiet is never mistaken for
 clear.
+
+Under an activated schema v2, a clean read ends with a machine-readable
+`queue-delivery` JSONL row (or a text-mode delivery notice) containing the
+token, event ids, exact window, event count, cursor revision, outcome, and rc.
+The read **does not advance coverage**. Process every preceding event and
+durably classify it as completed, blocked, superseded, or intentionally
+ignored; then acknowledge the whole batch:
+
+```bash
+coord-engine queue commit <team> --agent <you> --token <token> \
+  --result <record-id>=completed \
+  --result <record-id>=blocked                         # [--json]
+```
+
+Supply exactly one result for every staged record id; allowed classifications
+are `completed`, `blocked`, `superseded`, and `ignored`. Missing, duplicate,
+unknown, or extra classifications are refused, and the bounded handled history
+is stored with the committed token. An empty batch needs no `--result`.
+
+No commit means no coverage advance. A process crash, acknowledgement failure,
+or container reset therefore replays the same token and batch—even after an
+arbitrarily long interruption. A commit is idempotent; a token for any other
+pending/base revision is rejected as stale. Two concurrent same-agent reads
+may both query, but only one CAS-stages; the loser reloads and returns the
+winner's batch. The pending batch serializes later windows until it is
+committed, so no cursor update can be overwritten.
+
+The one-time v2 bootstrap dual-reads the legacy cursor only when the selected
+generation has no v2 document. That preserves pre-upgrade coverage. From the
+first successful v2 stage onward, only the generation-scoped v2 document is
+authoritative. A rollback-capable v1.9 reader may replay an existing pending
+v2 batch even when its writer gate is closed, but it never falls back to a
+legacy last-writer-wins update.
 
 Agents without the engine do the raw read and carry these rules themselves:
 

@@ -3143,6 +3143,278 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
+    if json_mode:
+        for event in events:
+            jsonutil.print_json(event)
+        return
+    for event in events:
+        print(f"{event.get('recorded_at','')[:19]} {event.get('from') or '?'} "
+              f"{event['kind']} {event.get('priority') or '-'} "
+              f"{event['slug']} {event.get('ptr') or '-'}")
+
+
+def _print_v2_delivery(
+        pending: dict[str, Any], *, cursor_revision: int, json_mode: bool,
+        replay: bool
+) -> None:
+    events = pending["events"]
+    _print_queue_events(events, json_mode=json_mode)
+    envelope = {
+        "type": "queue-delivery",
+        "token": pending["token"],
+        "event_count": len(events),
+        "event_ids": [event.get("record_id") for event in events],
+        "window_start": pending["window_start"],
+        "window_end": pending["window_end"],
+        "cursor_revision": cursor_revision,
+        "outcome": "replayed" if replay else "staged",
+        "rc": 0,
+    }
+    if json_mode:
+        jsonutil.print_json(envelope)
+    else:
+        print("queue: DELIVERY "
+              f"token={pending['token']} events={len(events)} "
+              f"revision={cursor_revision}; process the batch, then run "
+              "`coord-engine queue commit <team> --agent <you> "
+              f"--token {pending['token']} --result "
+              "<record-id>=<outcome> ...`",
+              file=sys.stderr)
+
+
+def _cmd_queue_v2(
+        args: argparse.Namespace, transport: Any, cfg: dict[str, Any],
+        agent: str, *, peek: bool, engine_version: str
+) -> int:
+    """Transactional v2 read: stage first, advance only on explicit commit."""
+    generation = cfg["cursor_generation"]
+    cursor, raw, status = records.load_v2_cursor_classified(
+        transport, args.team, agent, generation)
+    if status in ("error", "invalid"):
+        return _queue_failure(
+            args,
+            state="INVALID" if status == "invalid" else "UNKNOWN",
+            error_code=(
+                "cursor-invalid" if status == "invalid"
+                else "cursor-read-failed"
+            ),
+            message=(
+                f"queue: DEGRADED — transactional cursor {status}; "
+                "coverage untouched, retry"
+            ),
+            rc=3,
+        )
+    if cursor is None:
+        # One-time dual-read migration. After the first successful v2 CAS the
+        # isolated v2 document is authoritative forever.
+        legacy, legacy_status = records.load_legacy_cursor_classified(
+            transport, args.team, agent)
+        if legacy_status in ("error", "invalid"):
+            return _queue_failure(
+                args,
+                state="INVALID" if legacy_status == "invalid" else "UNKNOWN",
+                error_code=(
+                    "legacy-cursor-invalid"
+                    if legacy_status == "invalid"
+                    else "legacy-cursor-read-failed"
+                ),
+                message=(
+                    "queue: DEGRADED — cannot safely seed cursor v2 because "
+                    f"the legacy cursor is {legacy_status}; coverage untouched, "
+                    "retry"
+                ),
+                rc=3,
+            )
+        cursor = records.initial_v2_cursor(generation, legacy)
+        raw = None
+    pending = cursor.get("pending")
+    if isinstance(pending, dict):
+        if peek:
+            _print_queue_events(
+                pending["events"],
+                json_mode=bool(getattr(args, "json", False)))
+            if pending["events"]:
+                print("queue: peek — pending transactional batch shown; "
+                      "token withheld and cursor untouched", file=sys.stderr)
+            return 0
+        _print_v2_delivery(
+            pending, cursor_revision=cursor["revision"],
+            json_mode=bool(getattr(args, "json", False)), replay=True)
+        return 0
+
+    if not peek:
+        write_gate = records.compatibility(
+            cfg, engine_version=engine_version, write_cursor=True)
+        if not write_gate["ok"]:
+            print(f"queue: INCOMPATIBLE — {write_gate['reason']}; v2 cursor "
+                  "untouched", file=sys.stderr)
+            return 3
+        if not records.v2_transport_ready(transport):
+            print("queue: DEGRADED — active cursor v2 requires a proven atomic "
+                  "compare-and-swap, but this transport does not provide one; "
+                  "coverage untouched", file=sys.stderr)
+            return 3
+
+    committed = cursor["committed"]
+    now = _now()
+    last_read = committed.get("last_read")
+    if last_read is None:
+        since_dt = now - timedelta(seconds=records.DEFAULT_LOOKBACK_SECONDS)
+    else:
+        try:
+            last = datetime.fromisoformat(last_read.replace("Z", "+00:00"))
+        except ValueError:
+            print("queue: DEGRADED — transactional cursor has invalid "
+                  "committed time; coverage untouched, retry", file=sys.stderr)
+            return 3
+        since_dt = last - timedelta(seconds=records.CURSOR_SKEW_SECONDS)
+    window_start, window_end = _iso(since_dt), _iso(now)
+    window = transport.records(
+        cfg["data_type"], window_start, window_end)
+    events = records.events_for(window, agent)
+    if events is None:
+        print("queue: DEGRADED — window UNKNOWN, transactional cursor NOT "
+              "staged or advanced", file=sys.stderr)
+        return 3
+    for warning in records.observed_version_warnings(window):
+        print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    seen = set(committed["seen_ids"])
+    fresh = [event for event in events
+             if event.get("record_id") not in seen]
+    if any(not isinstance(event.get("record_id"), str)
+           or not event["record_id"] for event in fresh):
+        print("queue: DEGRADED — recognized event lacks a stable record id; "
+              "transactional batch not staged", file=sys.stderr)
+        return 3
+    if peek:
+        _print_queue_events(
+            fresh, json_mode=bool(getattr(args, "json", False)))
+        if fresh:
+            print("queue: peek — transactional cursor NOT staged or advanced",
+                  file=sys.stderr)
+        return 0
+
+    staged = records.stage_v2_delivery(
+        transport, args.team, agent, generation,
+        cursor=cursor, expected_raw=raw, staged_at=_iso(now),
+        window_start=window_start, window_end=window_end, events=fresh)
+    if staged["status"] == "unsupported":
+        print("queue: DEGRADED — active cursor v2 requires a proven atomic "
+              "compare-and-swap, but this transport does not provide one; "
+              "coverage untouched", file=sys.stderr)
+        return 3
+    if staged["status"] == "lost":
+        winner, _winner_raw, winner_status = records.load_v2_cursor_classified(
+            transport, args.team, agent, generation)
+        if (winner_status != "ok" or winner is None
+                or not isinstance(winner.get("pending"), dict)):
+            print("queue: DEGRADED — concurrent stage lost and winner could "
+                  "not be verified; coverage untouched, retry", file=sys.stderr)
+            return 3
+        _print_v2_delivery(
+            winner["pending"], cursor_revision=winner["revision"],
+            json_mode=bool(getattr(args, "json", False)), replay=True)
+        return 0
+    staged_cursor = staged["cursor"]
+    _print_v2_delivery(
+        staged_cursor["pending"], cursor_revision=staged_cursor["revision"],
+        json_mode=bool(getattr(args, "json", False)), replay=False)
+    return 0
+
+
+def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
+    team = getattr(args, "commit_team", None)
+    agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
+    token = getattr(args, "token", None)
+    if not team or not agent or not token:
+        print("queue commit: TEAM, --agent, and --token are required",
+              file=sys.stderr)
+        return 2
+    classifications: dict[str, str] = {}
+    for value in getattr(args, "results", None) or []:
+        record_id, separator, outcome = value.partition("=")
+        if (not separator or not record_id
+                or outcome not in records.DELIVERY_OUTCOMES
+                or record_id in classifications):
+            print("queue commit: each --result must be a unique "
+                  "RECORD_ID=completed|blocked|superseded|ignored",
+                  file=sys.stderr)
+            return 2
+        classifications[record_id] = outcome
+    cfg, cfg_status = records.load_config_classified(transport, team)
+    if cfg is None or not records.v2_active(cfg):
+        print(f"queue commit: INCOMPATIBLE — active cursor-v2 authority "
+              f"required (config={cfg_status}); cursor untouched",
+              file=sys.stderr)
+        return 3
+    from . import __version__ as engine_version
+    write_gate = records.compatibility(
+        cfg, engine_version=engine_version, write_cursor=True)
+    if not write_gate["ok"]:
+        print(f"queue commit: INCOMPATIBLE — {write_gate['reason']}; "
+              "cursor untouched", file=sys.stderr)
+        return 3
+    outcome = records.commit_v2_delivery(
+        transport, team, agent, cfg["cursor_generation"], token=token,
+        classifications=classifications)
+    status = outcome["status"]
+    if status in ("committed", "idempotent"):
+        cursor = outcome["cursor"]
+        payload = {
+            "type": "queue-commit", "token": token, "outcome": status,
+            "cursor_revision": cursor["revision"], "rc": 0,
+        }
+        if getattr(args, "json", False):
+            jsonutil.print_json(payload)
+        else:
+            print(f"queue commit: {status} token={token} "
+                  f"revision={cursor['revision']}")
+        return 0
+    if status == "stale":
+        print(f"queue commit: STALE token rejected: {token}; cursor "
+              "untouched", file=sys.stderr)
+        return 3
+    if status == "unsupported":
+        print("queue commit: DEGRADED — transport cannot prove atomic CAS; "
+              "cursor untouched", file=sys.stderr)
+        return 3
+    if status == "unclassified":
+        print("queue commit: REFUSED — every staged event requires exactly one "
+              f"--result; missing={outcome['missing']} "
+              f"unexpected={outcome['unexpected']}; cursor untouched",
+              file=sys.stderr)
+        return 2
+    if status == "invalid-events":
+        print("queue commit: DEGRADED — pending batch contains an event "
+              "without a stable record id; cursor untouched", file=sys.stderr)
+        return 3
+    print(f"queue commit: DEGRADED — cursor {status}; cursor untouched, retry",
+          file=sys.stderr)
+    return 3
+
+
+def _queue_failure(
+        args: argparse.Namespace, *, state: str, error_code: str,
+        message: str, rc: int
+) -> int:
+    """Emit one stable queue failure for humans and JSONL automation.
+
+    Exit status alone cannot distinguish INVALID from UNKNOWN: both are rc=3
+    fail-closed outcomes.  In JSON mode stdout therefore carries a terminal
+    envelope while stderr retains the actionable human diagnostic.
+    """
+    print(message, file=sys.stderr)
+    if bool(getattr(args, "json", False)):
+        jsonutil.print_json({
+            "type": "queue-error",
+            "state": state,
+            "error_code": error_code,
+            "rc": rc,
+        })
+    return rc
+
+
 def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     """THE bus v3 read: cursored event queue for one agent.
 
@@ -3162,6 +3434,11 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     behavior for a deliberate takeover, and ``--peek`` forces a safe read
     even as yourself.
     """
+    if args.team == "commit":
+        return cmd_queue_commit(args, transport)
+    if getattr(args, "commit_team", None) is not None:
+        print("queue: unexpected second team argument", file=sys.stderr)
+        return 2
     agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
     if not agent:
         print("queue: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
@@ -3185,15 +3462,28 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             # Unreadable is NOT missing: an expired-auth/offline host must
             # report DEGRADED (retryable), or its automation reads "config
             # missing" as a durable state and goes quietly deaf (2026-07-28).
-            print("queue: DEGRADED — records config could not be read "
-                  "(transport failure, not a missing config); window UNKNOWN, "
-                  "cursor untouched — check auth/network and retry",
-                  file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="UNKNOWN",
+                error_code="config-read-failed",
+                message=(
+                    "queue: DEGRADED — records config could not be read "
+                    "(transport failure, not a missing config); window UNKNOWN, "
+                    "cursor untouched — check auth/network and retry"
+                ),
+                rc=3,
+            )
         if cfg_status == "invalid":
-            print("queue: INCOMPATIBLE — bus-v3 authority is malformed or "
-                  "partially versioned; cursor untouched", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="INVALID",
+                error_code="config-invalid",
+                message=(
+                    "queue: INCOMPATIBLE — bus-v3 authority is malformed or "
+                    "partially versioned; cursor untouched"
+                ),
+                rc=3,
+            )
         print("queue: no bus-v3 records config "
               f"(team/{args.team}/{records.CONFIG_NAME} or "
               f"{records.ENV_DATA_TYPE}) — cannot read the record queue",
@@ -3208,6 +3498,10 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         return 3
     for warning in read_gate["warnings"]:
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    if records.v2_active(cfg):
+        return _cmd_queue_v2(
+            args, transport, cfg, agent, peek=peek,
+            engine_version=engine_version)
     if not peek:
         write_gate = records.compatibility(
             cfg, engine_version=engine_version, write_cursor=True)
@@ -3240,14 +3534,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
-    if getattr(args, "json", False):
-        for e in fresh:
-            jsonutil.print_json(e)
-    else:
-        for e in fresh:
-            print(f"{e.get('recorded_at','')[:19]} {e.get('from') or '?'} "
-                  f"{e['kind']} {e.get('priority') or '-'} {e['slug']} "
-                  f"{e.get('ptr') or '-'}")
+    _print_queue_events(
+        fresh, json_mode=bool(getattr(args, "json", False)))
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
     if peek:
@@ -6453,6 +6741,15 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
                 ok = False
             for warning in gate["warnings"]:
                 print(f"  ! Bus V3 version warning: {warning}")
+            if records.v2_transport_ready(transport):
+                print("  ✓ Bus V3 cursor CAS transport available")
+            elif records.v2_active(cfg):
+                print("  ✗ Bus V3 cursor v2 is active but this transport "
+                      "cannot prove atomic CAS", file=sys.stderr)
+                ok = False
+            else:
+                print("  ! Bus V3 cursor CAS transport unavailable; schema v2 "
+                      "activation remains blocked")
             record_rows = None
             try:
                 record_rows = transport.records(
@@ -6966,8 +7263,16 @@ def build_parser() -> argparse.ArgumentParser:
     it.add_argument("--from", dest="sender", help="capturing agent (records ownership)")
     it.add_argument("--priority", "-p", default="P2")
     it.set_defaults(func=cmd_intent)
-    qu = sub.add_parser("queue", help="bus v3 cursored event read — THE wake surface (window auto-covers since your last successful read)")
-    qu.add_argument("team"); qu.add_argument("--agent", "-a")
+    qu = sub.add_parser("queue", help="bus v3 transactional event delivery (`queue TEAM` stages; `queue commit TEAM --token TOKEN` advances)")
+    qu.add_argument("team", help="team name, or literal `commit`")
+    qu.add_argument("commit_team", nargs="?",
+                    help=argparse.SUPPRESS)
+    qu.add_argument("--agent", "-a")
+    qu.add_argument("--token",
+                    help="delivery token (required by `queue commit TEAM`)")
+    qu.add_argument(
+        "--result", dest="results", action="append",
+        help="commit classification RECORD_ID=completed|blocked|superseded|ignored (repeat for every staged event)")
     qu.add_argument("--peek", action="store_true",
                     help="show events without advancing the cursor (safe diagnostic read)")
     qu.add_argument("--consume", action="store_true",

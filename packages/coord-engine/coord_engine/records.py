@@ -28,6 +28,7 @@ body and cost no file read at all.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any, Optional
@@ -40,9 +41,10 @@ PAYLOAD_VERSION = 1
 #: contract.  These are deliberately separate from ``PAYLOAD_VERSION``: the
 #: payload envelope can stay readable while cursor semantics evolve.
 PROTOCOL_VERSION = 1
-CURSOR_SCHEMA_VERSION = 1
-READABLE_CURSOR_SCHEMAS = (1,)
-WRITABLE_CURSOR_SCHEMAS = (1,)
+CURSOR_SCHEMA_VERSION = 2
+READABLE_CURSOR_SCHEMAS = (1, 2)
+WRITABLE_CURSOR_SCHEMAS = (1, 2)
+CURSOR_SCHEMA_ENGINE_FLOORS = {2: "1.9.0"}
 
 #: Event classes carried on the control plane. One data type carries all of
 #: them, discriminated by ``kind``: ``get-records`` filters by type, so one type
@@ -506,6 +508,13 @@ def compatibility(config: dict[str, Any], *, engine_version: str,
         return {"ok": False, "warnings": [], "reason":
                 f"coord-engine v{engine_version} is below {floor_name} "
                 f"v{config[floor_name]}"}
+    schema_floor_value = CURSOR_SCHEMA_ENGINE_FLOORS.get(schema)
+    schema_floor = (_version_tuple(schema_floor_value)
+                    if schema_floor_value is not None else None)
+    if schema_floor is not None and own < schema_floor:
+        return {"ok": False, "warnings": [], "reason":
+                f"coord-engine v{engine_version} predates cursor schema "
+                f"v{schema} support (requires v{schema_floor_value})"}
     if schema != CURSOR_SCHEMA_VERSION:
         warnings.append(
             f"mixed cursor semantics: authority v{schema}, this engine "
@@ -534,6 +543,7 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
 #: Team-relative per-agent cursor path. Durable ON THE BUS so a container roll
 #: cannot reset coverage; the local disk is never the authority.
 CURSOR_VERSION = 1
+V2_CURSOR_VERSION = 2
 
 #: First-run lookback when no cursor exists: long enough that a newly joining
 #: (or long-dark) agent sweeps real history, bounded so it terminates.
@@ -547,6 +557,8 @@ CURSOR_SKEW_SECONDS = 120
 #: Bound on remembered record ids. Must comfortably exceed the events a fleet
 #: writes within one skew overlap; 500 is ~two orders above today's rate.
 SEEN_IDS_CAP = 500
+COMMITTED_TOKENS_CAP = 100
+DELIVERY_OUTCOMES = ("completed", "blocked", "superseded", "ignored")
 
 
 def cursor_path(team: str, agent: str) -> str:
@@ -579,19 +591,15 @@ def v2_active(config: dict[str, Any]) -> bool:
     )
 
 
-def load_cursor(transport: Any, team: str, agent: str) -> Optional[dict[str, Any]]:
-    """The agent's durable cursor, or None when absent/unreadable/malformed.
+def v2_transport_ready(transport: Any) -> bool:
+    """Whether this transport exposes a proven atomic cursor CAS."""
+    return callable(getattr(transport, "compare_and_swap", None))
 
-    None means "no trustworthy coverage claim exists" — the caller falls back
-    to the default lookback. A malformed cursor must NOT be treated as a
-    recent one: that would shrink coverage and silently skip work.
-    """
-    raw = transport.read(cursor_path(team, agent))
-    if raw is None:
-        return None
+
+def _parse_legacy_cursor(raw: Any) -> Optional[dict[str, Any]]:
     try:
         doc = json.loads(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
     if not isinstance(doc, dict) or doc.get("v") != CURSOR_VERSION:
         return None
@@ -605,6 +613,32 @@ def load_cursor(transport: Any, team: str, agent: str) -> Optional[dict[str, Any
             "seen_ids": [s for s in (seen or []) if isinstance(s, str)]}
 
 
+def load_cursor(transport: Any, team: str, agent: str) -> Optional[dict[str, Any]]:
+    """The agent's durable cursor, or None when absent/unreadable/malformed.
+
+    None means "no trustworthy coverage claim exists" — the caller falls back
+    to the default lookback. A malformed cursor must NOT be treated as a
+    recent one: that would shrink coverage and silently skip work.
+    """
+    return _parse_legacy_cursor(transport.read(cursor_path(team, agent)))
+
+
+def load_legacy_cursor_classified(
+        transport: Any, team: str, agent: str
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Classified legacy read used only for the one-time v2 migration."""
+    reader = getattr(transport, "read_classified", None)
+    if reader is None:
+        return None, "error"
+    raw, status = reader(cursor_path(team, agent))
+    if status == "error":
+        return None, "error"
+    if raw is None:
+        return None, "absent"
+    cursor = _parse_legacy_cursor(raw)
+    return (cursor, "ok") if cursor is not None else (None, "invalid")
+
+
 def save_cursor(transport: Any, team: str, agent: str, *, last_read: str,
                 seen_ids: list[str]) -> bool:
     """Persist coverage. Returns False on failure — the caller WARNS and moves
@@ -615,3 +649,261 @@ def save_cursor(transport: Any, team: str, agent: str, *, last_read: str,
            "seen_ids": list(seen_ids)[-SEEN_IDS_CAP:]}
     return bool(transport.write(
         cursor_path(team, agent), json.dumps(doc, separators=(",", ":"))))
+
+
+def _parse_v2_cursor(raw: Any, authority_generation: int) -> Optional[dict[str, Any]]:
+    """Parse one transactional cursor without repairing or guessing.
+
+    ``revision`` is the compare-and-swap generation for this agent cursor.  It
+    is intentionally distinct from the authority generation in the path.
+    """
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(doc, dict)
+            or doc.get("v") != V2_CURSOR_VERSION
+            or doc.get("authority_generation") != authority_generation
+            or type(doc.get("revision")) is not int
+            or doc["revision"] < 0):
+        return None
+    committed = doc.get("committed")
+    if not isinstance(committed, dict):
+        return None
+    last_read = committed.get("last_read")
+    seen_ids = committed.get("seen_ids")
+    if (last_read is not None and (
+            not isinstance(last_read, str) or not last_read.strip())):
+        return None
+    if not isinstance(seen_ids, list) or any(
+            not isinstance(value, str) for value in seen_ids):
+        return None
+    pending = doc.get("pending")
+    if pending is not None:
+        if not isinstance(pending, dict):
+            return None
+        required_strings = ("token", "staged_at", "window_start", "window_end")
+        if any(not isinstance(pending.get(name), str)
+               or not pending[name].strip() for name in required_strings):
+            return None
+        if (type(pending.get("base_revision")) is not int
+                or pending["base_revision"] != doc["revision"]):
+            return None
+        events = pending.get("events")
+        if not isinstance(events, list) or any(
+                not isinstance(event, dict) for event in events):
+            return None
+    last_token = committed.get("last_token")
+    if last_token is not None and not isinstance(last_token, str):
+        return None
+    committed_tokens = committed.get("committed_tokens")
+    if not isinstance(committed_tokens, list) or any(
+            not isinstance(value, str) for value in committed_tokens):
+        return None
+    handled = committed.get("handled")
+    if not isinstance(handled, list) or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("record_id"), str)
+            or row.get("outcome") not in DELIVERY_OUTCOMES
+            or not isinstance(row.get("token"), str)
+            for row in handled):
+        return None
+    return {
+        "v": V2_CURSOR_VERSION,
+        "authority_generation": authority_generation,
+        "revision": doc["revision"],
+        "committed": {
+            "last_read": last_read.strip() if isinstance(last_read, str) else None,
+            "seen_ids": list(seen_ids)[-SEEN_IDS_CAP:],
+            "last_token": last_token,
+            "committed_tokens": list(committed_tokens)[-COMMITTED_TOKENS_CAP:],
+            "handled": list(handled)[-SEEN_IDS_CAP:],
+        },
+        "pending": pending,
+    }
+
+
+def initial_v2_cursor(authority_generation: int,
+                      legacy: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Create the in-memory v2 bootstrap state.
+
+    The one-time legacy seed preserves pre-activation coverage.  Once a v2
+    document exists, the legacy path is never consulted again.
+    """
+    return {
+        "v": V2_CURSOR_VERSION,
+        "authority_generation": authority_generation,
+        "revision": 0,
+        "committed": {
+            "last_read": legacy.get("last_read") if legacy else None,
+            "seen_ids": list(legacy.get("seen_ids") or [])[-SEEN_IDS_CAP:]
+            if legacy else [],
+            "last_token": None,
+            "committed_tokens": [],
+            "handled": [],
+        },
+        "pending": None,
+    }
+
+
+def load_v2_cursor_classified(
+        transport: Any, team: str, agent: str, authority_generation: int
+) -> tuple[Optional[dict[str, Any]], Optional[str], str]:
+    """Return ``(cursor, exact_raw, ok|absent|invalid|error)``.
+
+    The exact bytes are the CAS precondition.  A transport without a classified
+    read cannot distinguish absence from outage and therefore fails closed.
+    """
+    reader = getattr(transport, "read_classified", None)
+    if reader is None:
+        return None, None, "error"
+    path = v2_cursor_path(team, agent, authority_generation)
+    raw, status = reader(path)
+    if status == "error":
+        return None, None, "error"
+    if raw is None:
+        return None, None, "absent"
+    cursor = _parse_v2_cursor(raw, authority_generation)
+    if cursor is None:
+        return None, raw, "invalid"
+    return cursor, raw, "ok"
+
+
+def _render_v2_cursor(doc: dict[str, Any]) -> str:
+    return json.dumps(doc, sort_keys=True, separators=(",", ":"))
+
+
+def _cas(transport: Any, path: str, expected_raw: Optional[str],
+         new_doc: dict[str, Any]) -> Optional[bool]:
+    """Perform a proven compare-and-swap.
+
+    ``None`` means the transport has no atomic CAS primitive.  A read/write/
+    read-back sequence is deliberately not accepted: on the File Store's
+    last-writer-wins surface it cannot prove that a concurrent writer lost.
+    """
+    operation = getattr(transport, "compare_and_swap", None)
+    if operation is None:
+        return None
+    return bool(operation(path, expected_raw, _render_v2_cursor(new_doc)))
+
+
+def delivery_token(*, agent: str, authority_generation: int,
+                   base_revision: int, staged_at: str, window_start: str,
+                   window_end: str,
+                   events: list[dict[str, Any]]) -> str:
+    material = json.dumps({
+        "agent": agent, "authority_generation": authority_generation,
+        "base_revision": base_revision, "staged_at": staged_at,
+        "window_start": window_start, "window_end": window_end,
+        "event_ids": [event.get("record_id") for event in events],
+    }, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(material).hexdigest()
+
+
+def stage_v2_delivery(
+        transport: Any, team: str, agent: str, authority_generation: int,
+        *, cursor: dict[str, Any], expected_raw: Optional[str],
+        staged_at: str, window_start: str, window_end: str,
+        events: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """CAS a pending delivery into the cursor.
+
+    The cursor revision does not advance until commit.  A losing stage must
+    reload and replay the winner; it may never overwrite it.
+    """
+    if cursor.get("pending") is not None:
+        return {"status": "replay", "cursor": cursor}
+    token = delivery_token(
+        agent=agent, authority_generation=authority_generation,
+        base_revision=cursor["revision"], staged_at=staged_at,
+        window_start=window_start, window_end=window_end, events=events)
+    next_doc = {
+        **cursor,
+        "pending": {
+            "token": token,
+            "base_revision": cursor["revision"],
+            "staged_at": staged_at,
+            "window_start": window_start,
+            "window_end": window_end,
+            "events": events,
+        },
+    }
+    result = _cas(
+        transport, v2_cursor_path(team, agent, authority_generation),
+        expected_raw, next_doc)
+    if result is None:
+        return {"status": "unsupported"}
+    if not result:
+        return {"status": "lost"}
+    return {"status": "staged", "cursor": next_doc}
+
+
+def commit_v2_delivery(
+        transport: Any, team: str, agent: str, authority_generation: int,
+        *, token: str, classifications: dict[str, str]
+) -> dict[str, Any]:
+    """Advance coverage exactly once for the matching staged token."""
+    cursor, raw, status = load_v2_cursor_classified(
+        transport, team, agent, authority_generation)
+    if status != "ok" or cursor is None:
+        return {"status": status}
+    committed = cursor["committed"]
+    if token in committed["committed_tokens"]:
+        return {"status": "idempotent", "cursor": cursor}
+    pending = cursor.get("pending")
+    if not isinstance(pending, dict) or pending.get("token") != token:
+        return {"status": "stale", "cursor": cursor}
+    event_ids = [event.get("record_id") for event in pending["events"]]
+    if any(not isinstance(record_id, str) or not record_id
+           for record_id in event_ids):
+        return {"status": "invalid-events", "cursor": cursor}
+    expected_ids = set(event_ids)
+    if (set(classifications) != expected_ids
+            or any(value not in DELIVERY_OUTCOMES
+                   for value in classifications.values())):
+        return {
+            "status": "unclassified",
+            "cursor": cursor,
+            "missing": sorted(expected_ids - set(classifications)),
+            "unexpected": sorted(set(classifications) - expected_ids),
+        }
+    seen = list(committed["seen_ids"])
+    seen.extend(
+        event["record_id"] for event in pending["events"]
+        if isinstance(event.get("record_id"), str))
+    next_doc = {
+        **cursor,
+        "revision": cursor["revision"] + 1,
+        "committed": {
+            "last_read": pending["window_end"],
+            "seen_ids": seen[-SEEN_IDS_CAP:],
+            "last_token": token,
+            "committed_tokens": (
+                committed["committed_tokens"] + [token]
+            )[-COMMITTED_TOKENS_CAP:],
+            "handled": (
+                committed["handled"] + [{
+                    "record_id": record_id,
+                    "outcome": classifications[record_id],
+                    "token": token,
+                } for record_id in event_ids]
+            )[-SEEN_IDS_CAP:],
+        },
+        "pending": None,
+    }
+    result = _cas(
+        transport, v2_cursor_path(team, agent, authority_generation),
+        raw, next_doc)
+    if result is None:
+        return {"status": "unsupported"}
+    if not result:
+        # A response lost after the CAS is indistinguishable from a CAS race.
+        # Re-read: matching last_token proves idempotent success; every other
+        # state is a stale loser.
+        observed, _raw, observed_status = load_v2_cursor_classified(
+            transport, team, agent, authority_generation)
+        if (observed_status == "ok" and observed is not None
+                and token in observed["committed"]["committed_tokens"]):
+            return {"status": "idempotent", "cursor": observed}
+        return {"status": "stale", "cursor": observed}
+    return {"status": "committed", "cursor": next_doc}

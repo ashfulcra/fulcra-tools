@@ -142,7 +142,7 @@ def test_version_gate_refuses_old_or_unknown_writer():
     assert unknown["ok"] is False and "unknown engine/floor" in unknown["reason"]
 
 
-def test_slice1_refuses_v2_activation_before_any_cursor_write():
+def test_v18_refuses_v2_activation_before_any_cursor_write():
     cfg = dict(_versioned_config(
         cursor_schema_version=2, cursor_generation=1,
         cursor_activated_at="2026-07-29T00:00:00Z"),
@@ -150,7 +150,7 @@ def test_slice1_refuses_v2_activation_before_any_cursor_write():
     gate = records.compatibility(
         cfg, engine_version="1.8.0", write_cursor=True)
     assert gate["ok"] is False
-    assert "not safe to write" in gate["reason"]
+    assert "predates cursor schema v2" in gate["reason"]
 
 
 def test_v2_cursor_is_physically_isolated_from_legacy_path():
@@ -549,6 +549,38 @@ def test_queue_unreadable_config_is_degraded_rc3_not_missing_rc2(monkeypatch, ca
     assert "missing" not in err.split("DEGRADED")[0]
     # No cursor may be created off an unknown window.
     assert t.read(records.cursor_path("fulcra", "amy")) is None
+
+
+def test_queue_json_distinguishes_invalid_config_from_unknown_transport(
+        monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    args = _queue_args()
+    args.json = True
+
+    invalid = ClassifiedTransport(read_status="ok")
+    invalid.put(records.config_path("fulcra"), "not json at all")
+    assert cli.cmd_queue(args, invalid) == 3
+    invalid_io = capsys.readouterr()
+    invalid_row = json.loads(invalid_io.out)
+    assert invalid_row == {
+        "type": "queue-error",
+        "state": "INVALID",
+        "error_code": "config-invalid",
+        "rc": 3,
+    }
+    assert "INCOMPATIBLE" in invalid_io.err
+
+    unknown = ClassifiedTransport(read_status="error")
+    assert cli.cmd_queue(args, unknown) == 3
+    unknown_io = capsys.readouterr()
+    unknown_row = json.loads(unknown_io.out)
+    assert unknown_row == {
+        "type": "queue-error",
+        "state": "UNKNOWN",
+        "error_code": "config-read-failed",
+        "rc": 3,
+    }
+    assert "DEGRADED" in unknown_io.err
 
 
 def test_queue_truly_absent_config_stays_rc2(monkeypatch, capsys):
