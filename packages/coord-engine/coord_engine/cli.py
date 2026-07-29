@@ -3322,14 +3322,28 @@ def _cmd_queue_v2(
         write_gate = records.compatibility(
             cfg, engine_version=engine_version, write_cursor=True)
         if not write_gate["ok"]:
-            print(f"queue: INCOMPATIBLE — {write_gate['reason']}; v2 cursor "
-                  "untouched", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="INCOMPATIBLE",
+                error_code="engine-incompatible",
+                message=(
+                    f"queue: INCOMPATIBLE — {write_gate['reason']}; v2 cursor "
+                    "untouched"
+                ),
+                rc=3,
+            )
         if not records.v2_transport_ready(transport):
-            print("queue: DEGRADED — active cursor v2 requires a proven atomic "
-                  "compare-and-swap, but this transport does not provide one; "
-                  "coverage untouched", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="INCOMPATIBLE",
+                error_code="cas-unsupported",
+                message=(
+                    "queue: DEGRADED — active cursor v2 requires a proven "
+                    "atomic compare-and-swap, but this transport does not "
+                    "provide one; coverage untouched"
+                ),
+                rc=3,
+            )
 
     committed = cursor["committed"]
     now = _now()
@@ -3340,9 +3354,16 @@ def _cmd_queue_v2(
         try:
             last = datetime.fromisoformat(last_read.replace("Z", "+00:00"))
         except ValueError:
-            print("queue: DEGRADED — transactional cursor has invalid "
-                  "committed time; coverage untouched, retry", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="INVALID",
+                error_code="cursor-invalid",
+                message=(
+                    "queue: DEGRADED — transactional cursor has invalid "
+                    "committed time; coverage untouched, retry"
+                ),
+                rc=3,
+            )
         since_dt = last - timedelta(seconds=records.CURSOR_SKEW_SECONDS)
     window_start, window_end = _iso(since_dt), _iso(now)
     window = transport.records(
@@ -3366,9 +3387,18 @@ def _cmd_queue_v2(
              if event.get("record_id") not in seen]
     if any(not isinstance(event.get("record_id"), str)
            or not event["record_id"] for event in fresh):
-        print("queue: DEGRADED — recognized event lacks a stable record id; "
-              "transactional batch not staged", file=sys.stderr)
-        return 3
+        # Bus data, not transport doubt: a record without a stable id will
+        # not grow one on retry, so this is INVALID rather than UNKNOWN.
+        return _queue_failure(
+            args,
+            state="INVALID",
+            error_code="event-id-missing",
+            message=(
+                "queue: DEGRADED — recognized event lacks a stable record "
+                "id; transactional batch not staged"
+            ),
+            rc=3,
+        )
     if peek:
         if bool(getattr(args, "json", False)):
             jsonutil.print_json(_queue_result_envelope(
@@ -3388,18 +3418,32 @@ def _cmd_queue_v2(
         cursor=cursor, expected_raw=raw, staged_at=_iso(now),
         window_start=window_start, window_end=window_end, events=fresh)
     if staged["status"] == "unsupported":
-        print("queue: DEGRADED — active cursor v2 requires a proven atomic "
-              "compare-and-swap, but this transport does not provide one; "
-              "coverage untouched", file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="cas-unsupported",
+            message=(
+                "queue: DEGRADED — active cursor v2 requires a proven atomic "
+                "compare-and-swap, but this transport does not provide one; "
+                "coverage untouched"
+            ),
+            rc=3,
+        )
     if staged["status"] == "lost":
         winner, _winner_raw, winner_status = records.load_v2_cursor_classified(
             transport, args.team, agent, generation)
         if (winner_status != "ok" or winner is None
                 or not isinstance(winner.get("pending"), dict)):
-            print("queue: DEGRADED — concurrent stage lost and winner could "
-                  "not be verified; coverage untouched, retry", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="UNKNOWN",
+                error_code="stage-race-unverified",
+                message=(
+                    "queue: DEGRADED — concurrent stage lost and winner "
+                    "could not be verified; coverage untouched, retry"
+                ),
+                rc=3,
+            )
         _print_v2_delivery(
             winner["pending"], cursor_revision=winner["revision"],
             json_mode=bool(getattr(args, "json", False)), replay=True)
@@ -3416,33 +3460,63 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
     agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
     token = getattr(args, "token", None)
     if not team or not agent or not token:
-        print("queue commit: TEAM, --agent, and --token are required",
-              file=sys.stderr)
-        return 2
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="usage",
+            message="queue commit: TEAM, --agent, and --token are required",
+            rc=2,
+        )
     classifications: dict[str, str] = {}
     for value in getattr(args, "results", None) or []:
         record_id, separator, outcome = value.partition("=")
         if (not separator or not record_id
                 or outcome not in records.DELIVERY_OUTCOMES
                 or record_id in classifications):
-            print("queue commit: each --result must be a unique "
-                  "RECORD_ID=completed|blocked|superseded|ignored",
-                  file=sys.stderr)
-            return 2
+            return _queue_failure(
+                args,
+                state="REFUSED",
+                error_code="usage",
+                message=(
+                    "queue commit: each --result must be a unique "
+                    "RECORD_ID=completed|blocked|superseded|ignored"
+                ),
+                rc=2,
+            )
         classifications[record_id] = outcome
     cfg, cfg_status = records.load_config_classified(transport, team)
     if cfg is None or not records.v2_active(cfg):
-        print(f"queue commit: INCOMPATIBLE — active cursor-v2 authority "
-              f"required (config={cfg_status}); cursor untouched",
-              file=sys.stderr)
-        return 3
+        # One stderr line, three machine states: an unreadable authority is
+        # retryable doubt, a malformed one is human-fixable, and a readable
+        # non-v2 authority means this engine/verb pairing is not usable.
+        state, error_code = {
+            "error": ("UNKNOWN", "config-read-failed"),
+            "invalid": ("INVALID", "config-invalid"),
+        }.get(cfg_status, ("INCOMPATIBLE", "authority-not-v2"))
+        return _queue_failure(
+            args,
+            state=state,
+            error_code=error_code,
+            message=(
+                f"queue commit: INCOMPATIBLE — active cursor-v2 authority "
+                f"required (config={cfg_status}); cursor untouched"
+            ),
+            rc=3,
+        )
     from . import __version__ as engine_version
     write_gate = records.compatibility(
         cfg, engine_version=engine_version, write_cursor=True)
     if not write_gate["ok"]:
-        print(f"queue commit: INCOMPATIBLE — {write_gate['reason']}; "
-              "cursor untouched", file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="engine-incompatible",
+            message=(
+                f"queue commit: INCOMPATIBLE — {write_gate['reason']}; "
+                "cursor untouched"
+            ),
+            rc=3,
+        )
     outcome = records.commit_v2_delivery(
         transport, team, agent, cfg["cursor_generation"], token=token,
         classifications=classifications)
@@ -3460,26 +3534,65 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
                   f"revision={cursor['revision']}")
         return 0
     if status == "stale":
-        print(f"queue commit: STALE token rejected: {token}; cursor "
-              "untouched", file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="stale-token",
+            message=(
+                f"queue commit: STALE token rejected: {token}; cursor "
+                "untouched"
+            ),
+            rc=3,
+        )
     if status == "unsupported":
-        print("queue commit: DEGRADED — transport cannot prove atomic CAS; "
-              "cursor untouched", file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="cas-unsupported",
+            message=(
+                "queue commit: DEGRADED — transport cannot prove atomic CAS; "
+                "cursor untouched"
+            ),
+            rc=3,
+        )
     if status == "unclassified":
-        print("queue commit: REFUSED — every staged event requires exactly one "
-              f"--result; missing={outcome['missing']} "
-              f"unexpected={outcome['unexpected']}; cursor untouched",
-              file=sys.stderr)
-        return 2
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="results-incomplete",
+            message=(
+                "queue commit: REFUSED — every staged event requires exactly "
+                f"one --result; missing={outcome['missing']} "
+                f"unexpected={outcome['unexpected']}; cursor untouched"
+            ),
+            rc=2,
+        )
     if status == "invalid-events":
-        print("queue commit: DEGRADED — pending batch contains an event "
-              "without a stable record id; cursor untouched", file=sys.stderr)
-        return 3
-    print(f"queue commit: DEGRADED — cursor {status}; cursor untouched, retry",
-          file=sys.stderr)
-    return 3
+        return _queue_failure(
+            args,
+            state="INVALID",
+            error_code="event-id-missing",
+            message=(
+                "queue commit: DEGRADED — pending batch contains an event "
+                "without a stable record id; cursor untouched"
+            ),
+            rc=3,
+        )
+    # Remaining statuses come from the classified cursor read at commit time.
+    fallback_state, fallback_code = {
+        "invalid": ("INVALID", "cursor-invalid"),
+        "error": ("UNKNOWN", "cursor-read-failed"),
+    }.get(status, ("UNKNOWN", f"cursor-{status}"))
+    return _queue_failure(
+        args,
+        state=fallback_state,
+        error_code=fallback_code,
+        message=(
+            f"queue commit: DEGRADED — cursor {status}; cursor untouched, "
+            "retry"
+        ),
+        rc=3,
+    )
 
 
 def _queue_failure(
@@ -3488,9 +3601,24 @@ def _queue_failure(
 ) -> int:
     """Emit one stable queue failure for humans and JSONL automation.
 
-    Exit status alone cannot distinguish INVALID from UNKNOWN: both are rc=3
-    fail-closed outcomes.  In JSON mode stdout therefore carries a terminal
-    envelope while stderr retains the actionable human diagnostic.
+    Exit status alone cannot distinguish the failure classes: rc 3 covers
+    every fail-closed outcome and rc 2 every refusal.  In JSON mode stdout
+    therefore carries a terminal envelope while stderr retains the actionable
+    human diagnostic.  EVERY nonzero exit of the queue family (``queue`` and
+    ``queue commit``, legacy and v2-active) routes through here — enforced by
+    the AST completeness gate in tests/test_queue_terminal_states.py — so a
+    ``--json`` consumer never sees a nonzero rc with empty stdout.  States:
+
+    - ``UNKNOWN``       store/transport doubt; backoff and retry.
+    - ``INVALID``       durable bytes exist but are malformed; human-fixable,
+                        never auto-recreated over.
+    - ``INCOMPATIBLE``  version/capability gate: engine below a floor,
+                        unsupported schema, or no proven CAS transport.
+    - ``ABSENT``        the store affirmatively has no records config.
+    - ``REFUSED``       caller-side rejection: usage error, incomplete
+                        ``--result`` set, stale token, unauditable takeover
+                        is NOT here (that write failure is UNKNOWN — the doc
+                        may or may not have landed).
     """
     print(message, file=sys.stderr)
     if bool(getattr(args, "json", False)):
@@ -3530,12 +3658,22 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if args.team == "commit":
         return cmd_queue_commit(args, transport)
     if getattr(args, "commit_team", None) is not None:
-        print("queue: unexpected second team argument", file=sys.stderr)
-        return 2
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="usage",
+            message="queue: unexpected second team argument",
+            rc=2,
+        )
     agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
     if not agent:
-        print("queue: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
-        return 2
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="usage",
+            message="queue: --agent or FULCRA_COORD_AGENT required",
+            rc=2,
+        )
     own_identity = os.environ.get("FULCRA_COORD_AGENT")
     peek = bool(getattr(args, "peek", False))
     # Guard fires ONLY when the caller HAS a declared identity that differs:
@@ -3580,18 +3718,31 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
                 ),
                 rc=3,
             )
-        print("queue: no bus-v3 records config "
-              f"(team/{args.team}/{records.CONFIG_NAME} or "
-              f"{records.ENV_DATA_TYPE}) — cannot read the record queue",
-              file=sys.stderr)
-        return 2
+        return _queue_failure(
+            args,
+            state="ABSENT",
+            error_code="config-absent",
+            message=(
+                "queue: no bus-v3 records config "
+                f"(team/{args.team}/{records.CONFIG_NAME} or "
+                f"{records.ENV_DATA_TYPE}) — cannot read the record queue"
+            ),
+            rc=2,
+        )
     from . import __version__ as engine_version
     read_gate = records.compatibility(
         cfg, engine_version=engine_version, write_cursor=False)
     if not read_gate["ok"]:
-        print(f"queue: INCOMPATIBLE — {read_gate['reason']}; cursor untouched",
-              file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="engine-incompatible",
+            message=(
+                f"queue: INCOMPATIBLE — {read_gate['reason']}; cursor "
+                "untouched"
+            ),
+            rc=3,
+        )
     for warning in read_gate["warnings"]:
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
     v2 = records.v2_active(cfg)
@@ -3624,9 +3775,16 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         write_gate = records.compatibility(
             cfg, engine_version=engine_version, write_cursor=True)
         if not write_gate["ok"]:
-            print(f"queue: INCOMPATIBLE — {write_gate['reason']}; "
-                  "refusing before cursor write", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="INCOMPATIBLE",
+                error_code="engine-incompatible",
+                message=(
+                    f"queue: INCOMPATIBLE — {write_gate['reason']}; "
+                    "refusing before cursor write"
+                ),
+                rc=3,
+            )
         for warning in write_gate["warnings"]:
             if warning not in read_gate["warnings"]:
                 print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)

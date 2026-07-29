@@ -183,10 +183,18 @@ not this). Under `--json`, a successful read prints **exactly one** object:
  "engine_version":…,"protocol":{…authority versions, or null…}}
 ```
 
-and a failed read prints exactly one `queue-error` object — the two share the
-`type` discriminator, so automation switches on one field and empty stdout is
-never an answer. Text-mode success output is byte-stable across this change;
-shell consumers pipe it.
+and **every nonzero exit** of the queue family (`queue` and `queue commit`,
+legacy and v2-active) prints exactly one `queue-error` object — the two share
+the `type` discriminator, so automation switches on one field and empty
+stdout is never an answer. `queue-error` states: `UNKNOWN` (store/transport
+doubt — backoff and retry), `INVALID` (durable bytes exist but are malformed
+— human-fixable, never recreated over), `INCOMPATIBLE` (version/capability
+gate: engine below a floor, unsupported schema, no proven CAS transport),
+`ABSENT` (affirmatively no records config), and `REFUSED` (caller-side
+rejection: usage error, incomplete `--result` set, stale token). The one
+exclusion: argparse's own usage exits (unknown flag, missing positional)
+happen before any queue code runs and carry no envelope. Text-mode success
+output is byte-stable across this change; shell consumers pipe it.
 
 Reading as an identity other than your own `$FULCRA_COORD_AGENT` peeks by
 default. A deliberate takeover (`--consume`) first writes a durable audit

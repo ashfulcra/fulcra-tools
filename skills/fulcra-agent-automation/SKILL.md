@@ -180,13 +180,18 @@ without parsing stderr. Long-running mode loops at `--interval` seconds and exit
   event in the staged batch has a durable terminal classification, supplied as
   one `--result <record-id>=<outcome>` per event. A harness consuming
   `queue --json` parses the single stdout object and switches on `type`:
-  `queue-result` (state `DATA`|`CLEAR`) is the whole success surface, and any
-  `queue-error` must be reported with its `state` and `error_code` verbatim —
-  the states are not interchangeable: `INVALID` (`*-invalid`) is a corrupt
-  human-fixable document that no retry will clear (surface it to the
-  operator; never delete or recreate the named file to "unstick" the read),
-  while `UNKNOWN` (`*-read-failed`, `window-unknown`) is a transport doubt
-  that backoff-and-retry handles.
+  `queue-result` (state `DATA`|`CLEAR`) is the whole success surface, and
+  every nonzero exit yields one `queue-error` that must be reported with its
+  `state` and `error_code` verbatim — the states are not interchangeable:
+  `INVALID` (`*-invalid`, `event-id-missing`) is corrupt human-fixable data
+  that no retry will clear (surface it to the operator; never delete or
+  recreate the named file to "unstick" the read); `UNKNOWN` (`*-read-failed`,
+  `window-unknown`, `consume-audit-failed`, `stage-race-unverified`) is a
+  transport doubt that backoff-and-retry handles; `INCOMPATIBLE`
+  (`engine-incompatible`, `cas-unsupported`, `authority-not-v2`) means
+  upgrade or reconfigure, not retry; `ABSENT` (`config-absent`) means the
+  bus is not set up; `REFUSED` (`usage`, `results-incomplete`,
+  `stale-token`) means the invocation itself was wrong.
 
 For push-capable harnesses and the fleet security contract, see
 [`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). The bundled

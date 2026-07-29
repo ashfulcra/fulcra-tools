@@ -391,3 +391,257 @@ def test_plain_peek_output_byte_identical_to_pre_slice(monkeypatch, capsys):
     assert rc == 0
     assert out == "2026-07-27T17:00:00 boss directive P2 hello -\n"
     assert err == GOLDEN_WARNING + GOLDEN_PEEK_NOTICE
+
+
+# === every nonzero exit carries the envelope (review round 1, P1) ===========
+#
+# The table below enumerates EVERY nonzero-exit branch of the queue family —
+# `queue` (legacy and v2-active) and `queue commit` — and asserts each one
+# emits exactly one parseable queue-error object under --json. The AST gate
+# at the end is the completeness check: a future branch that returns a bare
+# nonzero constant instead of routing through _queue_failure fails it even
+# before anyone writes its table row.
+
+from test_records_transactional import CasTransport, _config  # noqa: E402
+
+V2_CURSOR = records.v2_cursor_path(TEAM, AGENT, 3)
+AUDIT_PREFIX = f"team/{TEAM}/{records.CONSUME_AUDIT_PREFIX}/"
+
+
+class ClassifiedCas(CasTransport):
+    """CasTransport that can simulate per-path transport read failures."""
+
+    def __init__(self, *a, read_errors=(), **kw):
+        super().__init__(*a, **kw)
+        self.read_errors = tuple(read_errors)
+
+    def read_classified(self, path):
+        if path in self.read_errors:
+            return None, "error"
+        return super().read_classified(path)
+
+
+class NoCas(ClassifiedCas):
+    compare_and_swap = None
+
+
+class VanishingCas(ClassifiedCas):
+    """CAS present at the readiness probe, gone at stage time — the only way
+    to reach the defensive stage-unsupported branch through the CLI."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._cas_probes = 0
+
+    @property
+    def compare_and_swap(self):
+        self._cas_probes += 1
+        if self._cas_probes == 1:
+            return lambda path, expected_raw, new_raw: True
+        return None
+
+
+def _v2_doc(*, pending=None, last_read=None):
+    return json.dumps({
+        "v": 2, "authority_generation": 3, "revision": 0,
+        "committed": {"last_read": last_read, "seen_ids": [],
+                      "last_token": None, "committed_tokens": [],
+                      "handled": []},
+        "pending": pending,
+    })
+
+
+def _pending(token="tok", events=None):
+    return {"token": token, "base_revision": 0,
+            "staged_at": "2026-07-29T12:00:00Z",
+            "window_start": "2026-07-29T11:00:00Z",
+            "window_end": "2026-07-29T12:00:00Z",
+            "events": [{"record_id": "r1"}] if events is None else events}
+
+
+def _legacy_t(*, config=CONFIG, window=(), cursor=None, read_errors=(),
+              fail_writes=()):
+    t = LoggedTransport(window=None if window is None else list(window),
+                        read_errors=read_errors, fail_writes=fail_writes)
+    if config is not None:
+        t.put(records.config_path(TEAM), config)
+    if cursor is not None:
+        t.put(records.cursor_path(TEAM, AGENT), cursor)
+    return t
+
+
+def _v2_t(cls=ClassifiedCas, *, config=None, window=(), v2_cursor=None,
+          legacy_cursor=None, read_errors=(), reject_cas=False):
+    t = cls(list(window), read_errors=read_errors)
+    t.put(records.config_path(TEAM), json.dumps(config or _config()))
+    if v2_cursor is not None:
+        t.put(V2_CURSOR, v2_cursor)
+    if legacy_cursor is not None:
+        t.put(records.cursor_path(TEAM, AGENT), legacy_cursor)
+    if reject_cas:
+        t.reject_next_cas = True
+    return t
+
+
+READ = ["queue", TEAM, "--agent", AGENT, "--json"]
+COMMIT = ["queue", "commit", TEAM, "--agent", AGENT, "--token", "tok",
+          "--json"]
+
+#: (branch, argv, transport factory, env identity, rc, state, error_code) —
+#: one row per nonzero-exit branch of cmd_queue/_cmd_queue_v2/cmd_queue_commit.
+ENVELOPE_BRANCHES = [
+    # -- queue: top-level and legacy (schema v1) path
+    ("usage-second-team", ["queue", TEAM, "extra", "--json"],
+     lambda: _legacy_t(), None, 2, "REFUSED", "usage"),
+    ("usage-no-agent", ["queue", TEAM, "--json"],
+     lambda: _legacy_t(), None, 2, "REFUSED", "usage"),
+    ("config-read-failed", READ,
+     lambda: _legacy_t(read_errors=(records.config_path(TEAM),)),
+     None, 3, "UNKNOWN", "config-read-failed"),
+    ("config-invalid", READ,
+     lambda: _legacy_t(config="{not json at all"),
+     None, 3, "INVALID", "config-invalid"),
+    ("config-absent", READ,
+     lambda: _legacy_t(config=None), None, 2, "ABSENT", "config-absent"),
+    ("reader-below-floor", READ,
+     lambda: _legacy_t(config=json.dumps(_versioned_config(
+         minimum_reader_version="9.0.0", minimum_writer_version="9.0.0"))),
+     None, 3, "INCOMPATIBLE", "engine-incompatible"),
+    ("consume-audit-failed", READ + ["--consume"],
+     lambda: _legacy_t(window=[_event_rec("r1", "job")],
+                       fail_writes=(AUDIT_PREFIX,)),
+     "operator", 3, "UNKNOWN", "consume-audit-failed"),
+    ("writer-below-floor-legacy", READ,
+     lambda: _legacy_t(config=json.dumps(_versioned_config(
+         minimum_writer_version="9.0.0"))),
+     None, 3, "INCOMPATIBLE", "engine-incompatible"),
+    ("cursor-read-failed", READ,
+     lambda: _legacy_t(read_errors=(records.cursor_path(TEAM, AGENT),)),
+     None, 3, "UNKNOWN", "cursor-read-failed"),
+    ("cursor-invalid", READ,
+     lambda: _legacy_t(cursor="not json at all"),
+     None, 3, "INVALID", "cursor-invalid"),
+    ("cursor-last-read-invalid", READ,
+     lambda: _legacy_t(cursor='{"v":1,"last_read":"garbage","seen_ids":[]}'),
+     None, 3, "INVALID", "cursor-invalid"),
+    ("window-unknown", READ,
+     lambda: _legacy_t(window=None), None, 3, "UNKNOWN", "window-unknown"),
+    # -- queue: v2-active path
+    ("v2-cursor-read-failed", READ,
+     lambda: _v2_t(read_errors=(V2_CURSOR,)),
+     None, 3, "UNKNOWN", "cursor-read-failed"),
+    ("v2-cursor-invalid", READ,
+     lambda: _v2_t(v2_cursor="not json at all"),
+     None, 3, "INVALID", "cursor-invalid"),
+    ("v2-legacy-seed-read-failed", READ,
+     lambda: _v2_t(read_errors=(records.cursor_path(TEAM, AGENT),)),
+     None, 3, "UNKNOWN", "legacy-cursor-read-failed"),
+    ("v2-legacy-seed-invalid", READ,
+     lambda: _v2_t(legacy_cursor="not json at all"),
+     None, 3, "INVALID", "legacy-cursor-invalid"),
+    ("v2-writer-below-floor", READ,
+     lambda: _v2_t(config=_config(minimum_writer_version="9.0.0")),
+     None, 3, "INCOMPATIBLE", "engine-incompatible"),
+    ("v2-cas-unsupported", READ,
+     lambda: _v2_t(NoCas), None, 3, "INCOMPATIBLE", "cas-unsupported"),
+    ("v2-committed-time-invalid", READ,
+     lambda: _v2_t(v2_cursor=_v2_doc(last_read="garbage")),
+     None, 3, "INVALID", "cursor-invalid"),
+    ("v2-event-id-missing", READ,
+     lambda: _v2_t(window=[dict(_event_rec(None, "no-id"),
+                                recorded_at="2026-07-29T11:30:00Z")]),
+     None, 3, "INVALID", "event-id-missing"),
+    ("v2-stage-cas-vanishes", READ,
+     lambda: _v2_t(VanishingCas,
+                   window=[dict(_event_rec("r1", "job"),
+                                recorded_at="2026-07-29T11:30:00Z")]),
+     None, 3, "INCOMPATIBLE", "cas-unsupported"),
+    ("v2-stage-lost-unverified", READ,
+     lambda: _v2_t(reject_cas=True,
+                   window=[dict(_event_rec("r1", "job"),
+                                recorded_at="2026-07-29T11:30:00Z")]),
+     None, 3, "UNKNOWN", "stage-race-unverified"),
+    # -- queue commit
+    ("commit-usage-missing-token",
+     ["queue", "commit", TEAM, "--agent", AGENT, "--json"],
+     lambda: _v2_t(), None, 2, "REFUSED", "usage"),
+    ("commit-usage-bad-result", COMMIT + ["--result", "r1=bogus"],
+     lambda: _v2_t(), None, 2, "REFUSED", "usage"),
+    ("commit-config-read-failed", COMMIT,
+     lambda: _v2_t(read_errors=(records.config_path(TEAM),)),
+     None, 3, "UNKNOWN", "config-read-failed"),
+    ("commit-config-invalid", COMMIT,
+     lambda: _legacy_t(config="{not json at all"),
+     None, 3, "INVALID", "config-invalid"),
+    ("commit-authority-not-v2", COMMIT,
+     lambda: _legacy_t(), None, 3, "INCOMPATIBLE", "authority-not-v2"),
+    ("commit-authority-absent", COMMIT,
+     lambda: _legacy_t(config=None),
+     None, 3, "INCOMPATIBLE", "authority-not-v2"),
+    ("commit-writer-below-floor", COMMIT,
+     lambda: _v2_t(config=_config(minimum_writer_version="9.0.0")),
+     None, 3, "INCOMPATIBLE", "engine-incompatible"),
+    ("commit-cursor-absent", COMMIT,
+     lambda: _v2_t(), None, 3, "UNKNOWN", "cursor-absent"),
+    ("commit-cursor-invalid", COMMIT,
+     lambda: _v2_t(v2_cursor="not json at all"),
+     None, 3, "INVALID", "cursor-invalid"),
+    ("commit-cursor-read-failed", COMMIT,
+     lambda: _v2_t(read_errors=(V2_CURSOR,)),
+     None, 3, "UNKNOWN", "cursor-read-failed"),
+    ("commit-stale-token", COMMIT + ["--result", "r1=completed"],
+     lambda: _v2_t(v2_cursor=_v2_doc(pending=_pending(token="other"))),
+     None, 3, "REFUSED", "stale-token"),
+    ("commit-results-incomplete", COMMIT,
+     lambda: _v2_t(v2_cursor=_v2_doc(pending=_pending())),
+     None, 2, "REFUSED", "results-incomplete"),
+    ("commit-event-id-missing", COMMIT,
+     lambda: _v2_t(v2_cursor=_v2_doc(pending=_pending(events=[{}]))),
+     None, 3, "INVALID", "event-id-missing"),
+    ("commit-cas-unsupported", COMMIT + ["--result", "r1=completed"],
+     lambda: _v2_t(NoCas, v2_cursor=_v2_doc(pending=_pending())),
+     None, 3, "INCOMPATIBLE", "cas-unsupported"),
+]
+
+
+@pytest.mark.parametrize(
+    "branch,argv,make_transport,identity,rc,state,error_code",
+    ENVELOPE_BRANCHES, ids=[row[0] for row in ENVELOPE_BRANCHES])
+def test_every_nonzero_json_exit_emits_one_error_envelope(
+        monkeypatch, capsys, branch, argv, make_transport, identity, rc,
+        state, error_code):
+    if identity is None:
+        monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    else:
+        monkeypatch.setenv("FULCRA_COORD_AGENT", identity)
+    _pin_clock(monkeypatch)
+    got_rc = cli.main(argv, transport=make_transport())
+    out = capsys.readouterr()
+    assert got_rc == rc, f"{branch}: rc {got_rc} != {rc}"
+    assert _single_json_object(out.out) == {
+        "type": "queue-error", "state": state,
+        "error_code": error_code, "rc": rc,
+    }, f"{branch}: envelope mismatch"
+    assert out.err.strip(), f"{branch}: stderr diagnostic missing"
+
+
+def test_no_queue_branch_can_exit_nonzero_without_the_envelope():
+    """Completeness gate for the table above: every nonzero exit of the queue
+    family must be a ``return _queue_failure(...)``. A bare ``return 2`` or
+    ``return 3`` added later fails here even before its table row exists.
+    (argparse's own usage exits happen before any queue code runs and are
+    outside this contract — see BUS-V3.md.)"""
+    import ast
+    import inspect
+    import textwrap
+
+    for fn in (cli.cmd_queue, cli._cmd_queue_v2, cli.cmd_queue_commit):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Return)
+                    and isinstance(node.value, ast.Constant)
+                    and node.value.value != 0):
+                raise AssertionError(
+                    f"{fn.__name__} line {node.lineno}: bare nonzero exit "
+                    "bypasses the queue-error envelope; route it through "
+                    "_queue_failure")

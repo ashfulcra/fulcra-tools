@@ -312,9 +312,11 @@ it (not on PyPI).
   never ABSENT (the engine refuses to auto-recreate over a corrupt document
   — the bytes are the evidence) and never UNKNOWN (a retry will not fix a
   corrupt file; `*-read-failed` means retry). Under `--json`, success is
-  exactly one `queue-result` object (state DATA|CLEAR) and failure exactly
-  one `queue-error` object (state INVALID|UNKNOWN) — same `type`
-  discriminator, so empty stdout never means anything. A deliberate
+  exactly one `queue-result` object (state DATA|CLEAR) and EVERY nonzero
+  exit of `queue`/`queue commit` exactly one `queue-error` object (state
+  INVALID|UNKNOWN|INCOMPATIBLE|ABSENT|REFUSED) — same `type` discriminator,
+  so empty stdout never means anything (sole exclusion: argparse's own
+  usage exits, which fire before queue code runs). A deliberate
   `queue --consume` takeover of another agent's cursor writes a durable
   audit doc under `_coord/audit/consume/` BEFORE reading, and is refused if
   that write fails; plain reads and `--peek` write nothing. The read is
