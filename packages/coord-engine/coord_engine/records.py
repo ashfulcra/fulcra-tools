@@ -289,6 +289,7 @@ def events_for(records: Optional[list], agent: str) -> Optional[list[dict[str, A
             "kind": payload["kind"],
             "priority": payload["pri"],
             "ptr": payload["ptr"],
+            "to": payload["to"],
             "from": sender_of(rec),
             "recorded_at": rec.get("recorded_at"),
             "record_id": rec.get("id"),
@@ -626,7 +627,13 @@ def load_cursor(transport: Any, team: str, agent: str) -> Optional[dict[str, Any
 def load_legacy_cursor_classified(
         transport: Any, team: str, agent: str
 ) -> tuple[Optional[dict[str, Any]], str]:
-    """Classified legacy read used only for the one-time v2 migration."""
+    """Classified legacy read for the one-time v2 migration seed.
+
+    A transport without a classified read stays "error" here: seeding v2 off a
+    coverage claim whose absence cannot be proven would be a guess.  The
+    ordinary schema-v1 queue read uses :func:`load_cursor_classified`, whose
+    plain-read fallback keeps old transports readable.
+    """
     reader = getattr(transport, "read_classified", None)
     if reader is None:
         return None, "error"
@@ -637,6 +644,42 @@ def load_legacy_cursor_classified(
         return None, "absent"
     cursor = _parse_legacy_cursor(raw)
     return (cursor, "ok") if cursor is not None else (None, "invalid")
+
+
+def load_cursor_classified(
+        transport: Any, team: str, agent: str
+) -> tuple[Optional[dict[str, Any]], str]:
+    """``load_cursor`` with the four terminal read states kept apart.
+
+    Returns (cursor, "ok") | (None, "absent") | (None, "invalid") |
+    (None, "error").  "invalid" means bytes exist but do not parse as a
+    cursor: a corrupt cursor is human-fixable evidence, so callers fail
+    closed instead of adopting the default lookback and then OVERWRITING the
+    corrupt document at cursor-save time (the auto-recreate that destroys the
+    only copy of what went wrong).  On a transport without a classified read
+    the absent/error ambiguity collapses to "absent" exactly as the plain
+    reader always has — but malformed bytes still classify "invalid", because
+    invalidity is a property of the content, not of the transport.
+    """
+    reader = getattr(transport, "read_classified", None)
+    if reader is None:
+        raw = transport.read(cursor_path(team, agent))
+        if raw is None:
+            return None, "absent"
+        cursor = _parse_legacy_cursor(raw)
+        return (cursor, "ok") if cursor is not None else (None, "invalid")
+    return load_legacy_cursor_classified(transport, team, agent)
+
+
+#: Team-relative prefix for durable takeover audit documents. Every
+#: ``queue --consume`` that overrides the consumption guard writes one BEFORE
+#: touching the target's cursor; an unauditable takeover does not happen.
+CONSUME_AUDIT_PREFIX = "_coord/audit/consume"
+
+
+def consume_audit_path(team: str, *, stamp: str, caller: str,
+                       target: str) -> str:
+    return f"team/{team}/{CONSUME_AUDIT_PREFIX}/{stamp}-{caller}-takes-{target}.md"
 
 
 def save_cursor(transport: Any, team: str, agent: str, *, last_read: str,

@@ -3154,6 +3154,76 @@ def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> Non
               f"{event['slug']} {event.get('ptr') or '-'}")
 
 
+def _queue_result_envelope(
+        events: list[dict[str, Any]], *, cfg: dict[str, Any],
+        cursor_path: str, advanced: bool) -> dict[str, Any]:
+    """The single-object ``--json`` success envelope for a queue read.
+
+    Shares the ``type`` discriminator convention with the ``queue-error``
+    failure envelope (:func:`_queue_failure`): automation switches on one
+    field and never has to guess whether a line is an event or a verdict.
+    ``state`` is terminal — DATA (events delivered) or CLEAR (a clean, fully
+    read window with nothing new); the failure envelope owns INVALID and
+    UNKNOWN, so CLEAR can never be a disguise for either.
+    """
+    from . import __version__ as engine_version
+    protocol = None
+    if cfg.get("authority_mode") == "versioned":
+        protocol = {
+            "protocol_version": cfg["protocol_version"],
+            "cursor_schema_version": cfg["cursor_schema_version"],
+            "cursor_generation": cfg["cursor_generation"],
+        }
+    return {
+        "type": "queue-result",
+        "state": "DATA" if events else "CLEAR",
+        "events": [{
+            "id": event.get("record_id"),
+            "ts": event.get("recorded_at"),
+            "sender": event.get("from"),
+            "to": event.get("to"),
+            "kind": event["kind"],
+            "pri": event.get("priority"),
+            "slug": event["slug"],
+            "ptr": event.get("ptr"),
+        } for event in events],
+        "count": len(events),
+        "cursor": {"path": cursor_path, "advanced": advanced},
+        "engine_version": engine_version,
+        "protocol": protocol,
+    }
+
+
+def _write_consume_audit(transport: Any, team: str, *, caller: str,
+                         target: str, cursor_path: str) -> bool:
+    """Durably record a deliberate ``--consume`` takeover BEFORE it happens.
+
+    The consumption guard exists because a foreign-identity read silently ate
+    another agent's pending directives (live incident 2026-07-28); the audit
+    doc is what makes the deliberate override reconstructable after the fact.
+    Returns False when the document did not verifiably land — the caller then
+    REFUSES the takeover, because an unauditable takeover is the silent
+    consumption incident with a flag on it.
+    """
+    now = _iso(_now())
+    safe_time = now.replace(":", "").replace("-", "").replace(".", "")
+    path = records.consume_audit_path(
+        team, stamp=safe_time,
+        caller=tasks.agent_key(caller), target=tasks.agent_key(target))
+    fm = {
+        "type": "ConsumeAudit",
+        "ts": now,
+        "caller": caller,
+        "target": target,
+        "cursor": cursor_path,
+        "reason": (f"caller '{caller}' read the queue as '{target}' with "
+                   "--consume — deliberate consumption-guard override"),
+    }
+    body = (okf.render_frontmatter(fm)
+            + f"\n{caller} takes over {target}'s queue cursor.\n")
+    return bool(transport.write(path, body))
+
+
 def _print_v2_delivery(
         pending: dict[str, Any], *, cursor_revision: int, json_mode: bool,
         replay: bool
@@ -3231,9 +3301,14 @@ def _cmd_queue_v2(
     pending = cursor.get("pending")
     if isinstance(pending, dict):
         if peek:
-            _print_queue_events(
-                pending["events"],
-                json_mode=bool(getattr(args, "json", False)))
+            if bool(getattr(args, "json", False)):
+                jsonutil.print_json(_queue_result_envelope(
+                    pending["events"], cfg=cfg,
+                    cursor_path=records.v2_cursor_path(
+                        args.team, agent, generation),
+                    advanced=False))
+            else:
+                _print_queue_events(pending["events"], json_mode=False)
             if pending["events"]:
                 print("queue: peek — pending transactional batch shown; "
                       "token withheld and cursor untouched", file=sys.stderr)
@@ -3274,9 +3349,16 @@ def _cmd_queue_v2(
         cfg["data_type"], window_start, window_end)
     events = records.events_for(window, agent)
     if events is None:
-        print("queue: DEGRADED — window UNKNOWN, transactional cursor NOT "
-              "staged or advanced", file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="UNKNOWN",
+            error_code="window-unknown",
+            message=(
+                "queue: DEGRADED — window UNKNOWN, transactional cursor NOT "
+                "staged or advanced"
+            ),
+            rc=3,
+        )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
     seen = set(committed["seen_ids"])
@@ -3288,8 +3370,14 @@ def _cmd_queue_v2(
               "transactional batch not staged", file=sys.stderr)
         return 3
     if peek:
-        _print_queue_events(
-            fresh, json_mode=bool(getattr(args, "json", False)))
+        if bool(getattr(args, "json", False)):
+            jsonutil.print_json(_queue_result_envelope(
+                fresh, cfg=cfg,
+                cursor_path=records.v2_cursor_path(
+                    args.team, agent, generation),
+                advanced=False))
+        else:
+            _print_queue_events(fresh, json_mode=False)
         if fresh:
             print("queue: peek — transactional cursor NOT staged or advanced",
                   file=sys.stderr)
@@ -3432,7 +3520,12 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     an agent other than the caller's own ``$FULCRA_COORD_AGENT`` therefore
     defaults to PEEK (no cursor advance); ``--consume`` restores the old
     behavior for a deliberate takeover, and ``--peek`` forces a safe read
-    even as yourself.
+    even as yourself. Every ``--consume`` takeover writes a durable audit
+    document under ``_coord/audit/consume/`` BEFORE the read proceeds; if
+    that write fails the takeover is refused (an unauditable takeover does
+    not happen). Under ``--json``, one ``queue-result`` object (state DATA
+    or CLEAR) is the entire success stdout; failures keep the ``queue-error``
+    envelope. Text-mode success output is unchanged.
     """
     if args.team == "commit":
         return cmd_queue_commit(args, transport)
@@ -3449,13 +3542,16 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     # `--agent X` with no FULCRA_COORD_AGENT set is the normal automation
     # pattern (the flag IS the identity declaration) and must keep consuming,
     # or shipping this guard would silently freeze every fleet cursor.
-    if (not peek and own_identity and agent != own_identity
-            and not getattr(args, "consume", False)):
-        peek = True
-        print(f"queue: reading as '{agent}' but this caller is "
-              f"'{own_identity}' — peek mode (cursor NOT advanced); pass "
-              "--consume to take over their queue deliberately",
-              file=sys.stderr)
+    takeover = False
+    if not peek and own_identity and agent != own_identity:
+        if getattr(args, "consume", False):
+            takeover = True  # deliberate override — audited before any read
+        else:
+            peek = True
+            print(f"queue: reading as '{agent}' but this caller is "
+                  f"'{own_identity}' — peek mode (cursor NOT advanced); pass "
+                  "--consume to take over their queue deliberately",
+                  file=sys.stderr)
     cfg, cfg_status = records.load_config_classified(transport, args.team)
     if cfg is None:
         if cfg_status == "error":
@@ -3498,7 +3594,29 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         return 3
     for warning in read_gate["warnings"]:
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
-    if records.v2_active(cfg):
+    v2 = records.v2_active(cfg)
+    if takeover:
+        # The audit doc lands BEFORE the takeover read touches anything: an
+        # unauditable takeover does not happen (fail closed), and plain reads
+        # and --peek never reach this write.
+        target_cursor = (
+            records.v2_cursor_path(args.team, agent, cfg["cursor_generation"])
+            if v2 else records.cursor_path(args.team, agent))
+        if not _write_consume_audit(
+                transport, args.team, caller=own_identity, target=agent,
+                cursor_path=target_cursor):
+            return _queue_failure(
+                args,
+                state="UNKNOWN",
+                error_code="consume-audit-failed",
+                message=(
+                    "queue: REFUSED — takeover audit record could not be "
+                    f"written; --consume of '{agent}' aborted, cursor "
+                    "untouched"
+                ),
+                rc=3,
+            )
+    if v2:
         return _cmd_queue_v2(
             args, transport, cfg, agent, peek=peek,
             engine_version=engine_version)
@@ -3513,7 +3631,29 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             if warning not in read_gate["warnings"]:
                 print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
     now = _now()
-    cursor = records.load_cursor(transport, args.team, agent)
+    cursor, cursor_status = records.load_cursor_classified(
+        transport, args.team, agent)
+    if cursor_status in ("error", "invalid"):
+        # INVALID is terminal and human-fixable: the cursor document exists
+        # but does not parse, so guessing a lookback and then saving over the
+        # corrupt bytes would auto-recreate the cursor and destroy the only
+        # evidence of what went wrong. Same discrimination the v2 path makes.
+        return _queue_failure(
+            args,
+            state="INVALID" if cursor_status == "invalid" else "UNKNOWN",
+            error_code=(
+                "cursor-invalid" if cursor_status == "invalid"
+                else "cursor-read-failed"
+            ),
+            message=(
+                f"queue: DEGRADED — cursor {cursor_status}; coverage "
+                "untouched"
+                + (", fix or remove "
+                   f"{records.cursor_path(args.team, agent)} and retry"
+                   if cursor_status == "invalid" else ", retry")
+            ),
+            rc=3,
+        )
     if cursor is None:
         since_dt = now - timedelta(seconds=records.DEFAULT_LOOKBACK_SECONDS)
         seen: list[str] = []
@@ -3521,33 +3661,64 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         try:
             last = datetime.fromisoformat(cursor["last_read"].replace("Z", "+00:00"))
         except ValueError:
-            last = now - timedelta(seconds=records.DEFAULT_LOOKBACK_SECONDS)
+            return _queue_failure(
+                args,
+                state="INVALID",
+                error_code="cursor-invalid",
+                message=(
+                    "queue: DEGRADED — cursor has an invalid last_read time; "
+                    "coverage untouched, fix or remove "
+                    f"{records.cursor_path(args.team, agent)} and retry"
+                ),
+                rc=3,
+            )
         since_dt = last - timedelta(seconds=records.CURSOR_SKEW_SECONDS)
         seen = list(cursor["seen_ids"])
     window = transport.records(cfg["data_type"], _iso(since_dt), _iso(now))
     events = records.events_for(window, agent)
     if events is None:
-        print("queue: DEGRADED — window UNKNOWN, cursor NOT advanced "
-              "(re-covered next read)", file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="UNKNOWN",
+            error_code="window-unknown",
+            message=(
+                "queue: DEGRADED — window UNKNOWN, cursor NOT advanced "
+                "(re-covered next read)"
+            ),
+            rc=3,
+        )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
-    _print_queue_events(
-        fresh, json_mode=bool(getattr(args, "json", False)))
+    json_mode = bool(getattr(args, "json", False))
+    if not json_mode:
+        # Text mode stays byte-identical for shell consumers; the JSON
+        # envelope is emitted once below, after the cursor outcome is known.
+        _print_queue_events(fresh, json_mode=False)
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
     if peek:
+        if json_mode:
+            jsonutil.print_json(_queue_result_envelope(
+                fresh, cfg=cfg,
+                cursor_path=records.cursor_path(args.team, agent),
+                advanced=False))
         if fresh:
             print(f"queue: peek — {len(fresh)} event(s) shown, cursor NOT "
                   "advanced (the owning agent still receives them)",
                   file=sys.stderr)
         return 0
-    if not records.save_cursor(transport, args.team, agent,
-                               last_read=_iso(now), seen_ids=new_seen):
+    advanced = records.save_cursor(transport, args.team, agent,
+                                   last_read=_iso(now), seen_ids=new_seen)
+    if not advanced:
         print("queue: cursor save failed — coverage unadvanced, next read "
               "re-covers this window", file=sys.stderr)
+    if json_mode:
+        jsonutil.print_json(_queue_result_envelope(
+            fresh, cfg=cfg,
+            cursor_path=records.cursor_path(args.team, agent),
+            advanced=advanced))
     return 0
 
 

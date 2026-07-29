@@ -32,7 +32,7 @@ def test_payload_round_trips():
                       "slug": "fix-the-thing", "pri": "P0",
                       "ptr": "task/fix-the-thing.md",
                       "writer": {
-                              "engine_version": "1.9.0",
+                              "engine_version": "1.10.0",
                           "protocol_version": 1,
                               "cursor_schema_version": 2,
                       }}

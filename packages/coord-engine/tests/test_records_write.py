@@ -412,14 +412,21 @@ def test_queue_unknown_window_is_degraded_rc3_cursor_untouched(monkeypatch, caps
     assert cur["last_read"] == "2026-07-27T17:30:00Z"  # unmoved
 
 
-def test_queue_malformed_cursor_widens_to_lookback_not_shrinks(monkeypatch, capsys):
+def test_queue_malformed_cursor_is_invalid_fail_closed_not_lookback(
+        monkeypatch, capsys):
+    """Slice-4 doctrine change: this used to widen to the 7d lookback and
+    then SAVE a fresh cursor over the corrupt bytes. INVALID is now terminal
+    — human-fixable, fail closed, never auto-recreated (the corrupt document
+    is the only evidence of what went wrong). Gates: tests/
+    test_queue_terminal_states.py."""
     _pin_clock(monkeypatch)
     t = QueueTransport(window=[])
     t.put(records.config_path("r"), '{"data_type": "MomentAnnotation/x"}')
     t.put(records.cursor_path("r", "amy"), "not json at all")
-    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 0
-    (query,) = t.record_queries
-    assert query[1] == "2026-07-20T18:00:00Z"   # full lookback, never a guess
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 3
+    assert t.record_queries == []               # refused before the read
+    assert t.store[records.cursor_path("r", "amy")] == "not json at all"
+    assert "cursor invalid" in capsys.readouterr().err
 
 
 def test_queue_cursor_save_failure_warns_but_rc_zero(monkeypatch, capsys):

@@ -104,7 +104,7 @@ def test_beat_without_engagement_keeps_engagement_inert_and_stamps_engine():
         "workstreams": ["web"], "summary": "shipping",
         "timestamp": PINNED_NOW.isoformat().replace("+00:00", "Z"),
         "engine": {
-                "engine_version": "1.9.0",
+                "engine_version": "1.10.0",
             "protocol_version": 1,
                 "cursor_schema_version": 2,
         },
