@@ -21,7 +21,8 @@ The reference deployment ran a full fleet day — 4 merged PRs, 2 live-incident
 diagnoses, ~20 dispatches — through **seven container resets**, losing
 nothing. The whole trick is one sentence:
 
-> **The container is cattle; the session is the pet; the store is the truth.**
+> **The machine is disposable, the agent is permanent, and the memory lives
+> in the store.**
 
 ## Where to start — re-entrancy probes
 
