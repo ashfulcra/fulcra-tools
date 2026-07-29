@@ -59,7 +59,7 @@ coord-engine task start <team> "Fix the widget" \
 
 # move it through the machine (illegal transitions are rejected with a clear error)
 coord-engine task update <team> fix-the-widget --status active --next "write the test"
-coord-engine task update <team> fix-the-widget --status blocked --blocked-on "waiting on review"
+coord-engine task block <team> fix-the-widget --blocked-on reviewer --unlock "review lands on PR #42"
 
 # finish it — evidence is required
 coord-engine task done <team> fix-the-widget --evidence "PR #42 merged"

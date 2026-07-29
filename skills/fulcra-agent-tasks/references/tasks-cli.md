@@ -15,8 +15,21 @@ coord-engine task start  <team> <title> [--workstream W] [--status S] [--priorit
                                         [--kind K] [--force]
 coord-engine task update <team> <name>  [--status S] [--priority P] [--assignee A]
                                         [--summary TEXT] [--next TEXT] [--blocked-on TEXT]
+                                        # do NOT enter blocked via update: it skips the --unlock
+                                        #   requirement (known engine gap, fix pending) and leaves
+                                        #   an unlock-less block. Entering blocked = `task block`.
 coord-engine task done   <team> <name>  --evidence TEXT      # evidence required
-coord-engine task block  <team> <name>  [--blocked-on TEXT | --on-user ASK]  # --on-user assigns to FULCRA_COORD_HUMAN/human + tags needs:human
+coord-engine task block  <team> <name>  (--blocked-on WHO --unlock WHAT | --on-user ASK)
+                                        # --unlock (REQUIRED with --blocked-on, v1.7.2): name what
+                                        #   specifically clears the block, not just who blocks it.
+                                        # --on-user is exempt (the ask IS the unlock) and assigns to
+                                        #   FULCRA_COORD_HUMAN/human + tags needs:human
+coord-engine task supersede <team> <name> --by <new-slug> [--reason TEXT]
+                                        # close a re-dispatched task's origin copy from ANY live
+                                        #   state, recording superseded_by (v1.7.2). Terminal tasks
+                                        #   (done/abandoned) are immutable — supersede refuses them.
+                                        #   Reassigning work elsewhere? Superseding the old copy is
+                                        #   the dispatcher's duty, not a courtesy.
 coord-engine task pause  <team> <name>  --next TEXT          # waiting; next action required
 coord-engine task abandon <team> <name> --reason TEXT        # terminal; reason required
 coord-engine task assign <team> <name>  <assignee>           # set/redirect assignee
