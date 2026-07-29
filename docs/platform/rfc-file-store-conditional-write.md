@@ -77,8 +77,9 @@ the write must be **one atomic server-side operation**.
    capability is provable.
 
 Backward compatible by construction: requests without the headers behave
-exactly as today. No data-model change — the store already tracks the
-versions it shows in listings.
+exactly as today. No content-model change is required; the store already
+versions files internally, as exposed by `stat` — the ask is to surface that
+version as a precondition token on the write path.
 
 ## Consumers
 
