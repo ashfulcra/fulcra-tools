@@ -1,0 +1,149 @@
+"""``coord-engine obligations`` — the wiring, and the false CLEAR it must refuse.
+
+The fold's own rules are tested in ``test_obligations.py``. What matters here is
+the binding: whether the real components report UNREADABLE when they cannot be
+read. A perfect fold wired to a probe that swallows failure is still a false
+CLEAR, and that is the bug this file exists to prevent.
+
+The motivating case is ``reviews``. ``_pending_reviews_for`` is deliberately
+best-effort — needs-me and briefing must not fail because a review add-on is down,
+so a failed listing returns ``[]``. Read by a fold, that ``[]`` means "no reviews
+pending", which is precisely the false clear the slice-3 fold was built to make
+impossible. The ``degraded_sink`` parameter is how the fold hears the difference,
+and the tests below are what keep it wired.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from coord_engine import cli, obligations as obligations_mod
+from coord_engine.transport import TransportError
+from coord_engine_test_helpers import FakeTransport
+
+PINNED_NOW = "2026-07-29T22:00:00Z"
+TEAM = "fulcra"
+AGENT = "opie"
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Repo convention: a module that fixes data timestamps pins the clock."""
+    monkeypatch.setattr(cli, "_now", lambda: __import__("datetime").datetime(
+        2026, 7, 29, 22, 0, 0, tzinfo=__import__("datetime").timezone.utc))
+
+
+class ReviewListingDown(FakeTransport):
+    """Every read works except the review listing, which times out.
+
+    The exact shape of the 2026-07-20 starvation incident's transport, and the
+    one that used to yield a confident empty review section.
+    """
+
+    def list_dir(self, prefix: str):
+        if prefix == f"team/{TEAM}/review/":
+            raise TransportError("review listing timed out")
+        return super().list_dir(prefix)
+
+
+def _fold(transport) -> obligations_mod.ObligationResult:
+    return obligations_mod.fold(
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+
+
+def test_review_listing_failure_is_unreadable_not_clear():
+    """The load-bearing test for the whole slice.
+
+    Without the degraded sink this fold reports CLEAR: the task index is fine, no
+    roles are unresolved, and the review helper hands back a tidy empty list. Every
+    component says "nothing here" and one of them is guessing.
+    """
+    result = _fold(ReviewListingDown())
+
+    assert result.state is obligations_mod.ObligationState.UNKNOWN, (
+        "a review listing that timed out must make CLEAR unreachable; reporting "
+        "clear here is the false-clear this fold exists to refuse"
+    )
+    assert "reviews" in result.degraded
+    assert not result.can_claim_clear
+    assert "reviews" in result.reason()
+
+
+def test_degraded_sink_is_actually_wired_into_the_helper():
+    """Non-vacuity: prove the sink fills, not just that the fold went UNKNOWN.
+
+    The fold could report UNKNOWN for unrelated reasons and this suite would look
+    fine while the sink was disconnected.
+    """
+    sink: list[str] = []
+    found = cli._pending_reviews_for(
+        ReviewListingDown(), TEAM, AGENT, rows=[], degraded_sink=sink)
+    assert found == []
+    assert sink == ["review-listing"], (
+        "the helper must report WHY it returned empty when asked; a silent [] is "
+        "indistinguishable from a genuine absence"
+    )
+
+
+def test_best_effort_callers_are_unaffected():
+    """needs-me/briefing keep their tidy empty list — no sink, no behavior change.
+
+    The whole point of an opt-in sink: the fold gets to fail closed without
+    making every other read surface fragile.
+    """
+    assert cli._pending_reviews_for(ReviewListingDown(), TEAM, AGENT, rows=[]) == []
+
+
+def test_healthy_transport_can_reach_clear():
+    """The fold must be *able* to say CLEAR, or it is a stuck alarm not a gate."""
+    result = _fold(FakeTransport())
+    assert result.state is obligations_mod.ObligationState.CLEAR
+    assert result.can_claim_clear
+    assert result.consulted == sorted(obligations_mod.OBLIGATION_COMPONENTS)
+
+
+def test_cli_exit_codes_carry_the_terminal_state(capsys):
+    """Automation switches on rc, never on prose (r2 spec item 5)."""
+    import argparse
+
+    args = argparse.Namespace(team=TEAM, agent=AGENT, json=True)
+    rc = cli.cmd_obligations(args, ReviewListingDown())
+    assert rc == 3, "UNKNOWN must be a distinct nonzero rc"
+    row = json.loads(capsys.readouterr().out)
+    assert row["type"] == "obligations"
+    assert row["state"] == "UNKNOWN"
+    assert "reviews" in row["degraded"]
+
+    args = argparse.Namespace(team=TEAM, agent=AGENT, json=True)
+    rc = cli.cmd_obligations(args, FakeTransport())
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "CLEAR"
+
+
+def test_task_index_failure_degrades_every_row_derived_component():
+    """One index read serves four components, so one failure darkens all four.
+
+    Reporting three of them CLEAR because only one was asked about would be
+    inventing coverage from a single read.
+    """
+    class IndexDown(FakeTransport):
+        def list_dir(self, prefix: str):
+            if prefix.startswith(f"team/{TEAM}/task"):
+                raise TransportError("index down")
+            return super().list_dir(prefix)
+
+        def read(self, path: str):
+            if "/task/" in path or path.endswith("summaries.json"):
+                raise TransportError("index down")
+            return super().read(path)
+
+    result = _fold(IndexDown())
+    assert result.state is obligations_mod.ObligationState.UNKNOWN
+    for component in ("blocks", "directives", "reminders", "tasks"):
+        assert component in result.degraded, (
+            f"{component} derives from the task index and must not report clear "
+            "when that index is unreadable"
+        )

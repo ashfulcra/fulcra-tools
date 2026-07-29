@@ -31,7 +31,7 @@ from . import (
     aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, query, records, review,
-    roles, router, stash, tasks, wake_adapters,
+    obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
 from . import reconcile as rec
@@ -1677,6 +1677,7 @@ def _pending_reviews_for(
     transport: Any, team: str, agent: str, *,
     rows: "Optional[list[dict[str, Any]]]" = None,
     deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
+    degraded_sink: "Optional[list[str]]" = None,
 ) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: the top listing failing yields []
@@ -1740,6 +1741,12 @@ def _pending_reviews_for(
     try:
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
+        # Best-effort for needs-me/briefing (they must not fail because the review
+        # add-on is down), but the obligation fold MUST NOT read this [] as "no
+        # reviews pending" — that is a false CLEAR. A caller that needs the
+        # distinction passes ``degraded_sink`` and gets told.
+        if degraded_sink is not None:
+            degraded_sink.append("review-listing")
         return []
     slug_entries = [
         e for e in entries
@@ -1792,6 +1799,10 @@ def _pending_reviews_for(
         except TransportError:
             # A single slug's tally timed out: UNKNOWN. Skip it, keep scanning the
             # rest — but a HEAD slug that ends here still owes its loud marker.
+            # An unreadable verdict is an unknown obligation, so the fold hears
+            # about it too: partial coverage is not coverage.
+            if degraded_sink is not None:
+                degraded_sink.append(f"review-verdicts:{slug}")
             return "unknown"
         state = tally.get("state")
         pending = tally.get("pending_required") or []
@@ -3108,6 +3119,102 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
                             include_backlog=include_backlog,
                             include_history=include_history),
             ok, reason, unresolved)
+
+
+def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
+                       ) -> "list[obligations_mod.Component]":
+    """Bind the real coordination surface to obligation probes.
+
+    One task-index read serves the four row-derived components, so a single index
+    failure degrades all four — which is correct, not lazy: if the index is
+    unreadable then nothing derived from it is known, and reporting three of them
+    as CLEAR would be inventing coverage.
+
+    ``reviews`` uses the ``degraded_sink`` added to ``_pending_reviews_for``. That
+    helper is deliberately best-effort for needs-me and briefing (they must not
+    fail because a review add-on is down), and its ``[]`` on a failed listing is
+    exactly the false CLEAR this fold exists to refuse. The sink is how the fold
+    hears the difference.
+    """
+    P, S = obligations_mod.ProbeResult, obligations_mod.ProbeState
+    rows, rows_ok, rows_reason = _load_rows_status(transport, team)
+    held_roles, unresolved_roles = _held_roles_for_rows(
+        transport, team, agent, rows, now=now)
+
+    def _rows_probe(kinds: "tuple[str, ...]"):
+        def probe():
+            if not rows_ok:
+                return P(state=S.UNREADABLE, detail=rows_reason)
+            mine = _needs_me_rows(transport, team, agent, rows, now=now,
+                                  held_roles=held_roles, include_history=False)
+            owed = [r for r in mine
+                    if not kinds or (r.get("kind") or "task") in kinds]
+            return P(state=S.OK, owed=owed)
+        return probe
+
+    def _roles_probe():
+        if not rows_ok:
+            return P(state=S.UNREADABLE, detail=rows_reason)
+        if unresolved_roles:
+            # A role whose lease could not be read might route work here. Doubt.
+            return P(state=S.UNREADABLE,
+                     detail="unresolved roles: " + ", ".join(sorted(unresolved_roles)))
+        return P(state=S.OK)
+
+    def _reviews_probe():
+        sink: list[str] = []
+        found = _pending_reviews_for(transport, team, agent, rows=rows,
+                                     degraded_sink=sink)
+        if sink:
+            return P(state=S.UNREADABLE, detail="; ".join(sorted(set(sink))))
+        return P(state=S.OK, owed=list(found))
+
+    C = obligations_mod.Component
+    return [
+        C(name="blocks", probe=_rows_probe(("block",))),
+        C(name="directives", probe=_rows_probe(("directive",))),
+        C(name="reminders", probe=_rows_probe(("remind", "reminder"))),
+        C(name="reviews", probe=_reviews_probe),
+        C(name="role_duties", probe=_roles_probe),
+        C(name="tasks", probe=_rows_probe(())),
+    ]
+
+
+def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
+    """The normative "do I owe anything?" answer (r2 spec item 3).
+
+    Exit codes carry the terminal state so automation never has to parse prose:
+    0 = CLEAR, 0 = DATA (with rows), 3 = UNKNOWN, 4 = INVALID. A wake that reads
+    an empty queue has NOT established that nothing is owed; this has.
+    """
+    now = _iso(_now())
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, args.agent, now=now),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    state = result.state.value
+    if getattr(args, "json", False):
+        print(jsonutil.dumps({
+            "type": "obligations",
+            "state": state,
+            "owed_count": len(result.owed),
+            "consulted": result.consulted,
+            "degraded": result.degraded,
+            "malformed": result.malformed,
+            "reason": result.reason(),
+        }))
+    else:
+        print(f"obligations: {state} — {result.reason()}")
+        for row in result.owed:
+            print(f"  - {row.get('slug') or row.get('id') or row}")
+        for name in result.degraded:
+            print(f"  ! {name}: UNREADABLE — cannot claim clear", file=sys.stderr)
+        for name in result.malformed:
+            print(f"  ! {name}: INVALID — human fix needed", file=sys.stderr)
+    if result.state is obligations_mod.ObligationState.UNKNOWN:
+        return 3
+    if result.state is obligations_mod.ObligationState.INVALID:
+        return 4
+    return 0
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
@@ -7569,6 +7676,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="include acknowledged, closed, and future history")
     add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
+
+    ob = sub.add_parser("obligations",
+                        help="terminal answer: does this agent owe work?")
+    ob.add_argument("team"); ob.add_argument("--agent", required=True)
+    add_json(ob)
+    ob.set_defaults(func=cmd_obligations)
 
     sc = sub.add_parser("search", help="substring search over tasks")
     sc.add_argument("team"); sc.add_argument("query"); add_json(sc)
