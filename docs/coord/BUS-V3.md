@@ -199,10 +199,16 @@ output is byte-stable across this change; shell consumers pipe it.
 Reading as an identity other than your own `$FULCRA_COORD_AGENT` peeks by
 default. A deliberate takeover (`--consume`) first writes a durable audit
 document to `team/<team>/_coord/audit/consume/<UTC-stamp>-<caller>-takes-
-<target>.md` (frontmatter: `ts`, `caller`, `target`, `cursor`, `reason`);
-if that write fails the consume is REFUSED (`error_code=consume-audit-failed`)
-with the target's cursor untouched — an unauditable takeover does not happen.
-Plain reads and `--peek` write nothing.
+<target>.md` (frontmatter: `ts`, `caller`, `target`, `cursor`, `prior`,
+`new`, `reason` — where `prior` is the coverage claim being overtaken (v2:
+authority generation + per-agent revision; legacy: schema 1 + `last_read`;
+or the bare classification `absent`/`invalid`/`error`) and `new` is the
+generation/coverage the takeover operates under); if that write fails the
+consume is REFUSED (`error_code=consume-audit-failed`) with the target's
+cursor untouched — an unauditable takeover does not happen. Capturing
+`prior` is a plain read before the audit lands; the audit still lands before
+any cursor mutation or consuming read. Plain reads and `--peek` write
+nothing.
 
 Under an activated schema v2, a clean read ends with a machine-readable
 `queue-delivery` JSONL row (or a text-mode delivery notice) containing the
