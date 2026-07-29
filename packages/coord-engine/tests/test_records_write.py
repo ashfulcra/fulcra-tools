@@ -84,12 +84,146 @@ def test_config_env_override_wins(monkeypatch):
                    "api_version": records.DEFAULT_API_VERSION}
 
 
+def test_env_stream_override_preserves_version_authority(monkeypatch):
+    monkeypatch.setenv(records.ENV_DATA_TYPE, "MomentAnnotation/env")
+    t = FakeTransport()
+    t.put(records.config_path("r"), json.dumps(_versioned_config()))
+    cfg = records.load_config(t, "r")
+    assert cfg["data_type"] == "MomentAnnotation/env"
+    assert cfg["authority_mode"] == "versioned"
+    assert cfg["minimum_writer_version"] == "1.8.0"
+
+
 def test_config_from_store(monkeypatch):
     t = FakeTransport()
     t.put(records.config_path("r"),
           '{"data_type": "MomentAnnotation/store", "api_version": "v1"}')
     assert records.load_config(t, "r") == {
         "data_type": "MomentAnnotation/store", "api_version": "v1"}
+
+
+def _versioned_config(**overrides):
+    doc = {
+        "data_type": "MomentAnnotation/store",
+        "api_version": "v1alpha1",
+        "protocol_version": 1,
+        "cursor_schema_version": 1,
+        "minimum_reader_version": "1.8.0",
+        "minimum_writer_version": "1.8.0",
+        "cursor_generation": 0,
+        "cursor_activated_at": None,
+    }
+    doc.update(overrides)
+    return doc
+
+
+def test_versioned_authority_parses_as_one_atomic_contract():
+    t = FakeTransport()
+    t.put(records.config_path("r"), json.dumps(_versioned_config()))
+    cfg = records.load_config(t, "r")
+    assert cfg["authority_mode"] == "versioned"
+    assert cfg["cursor_schema_version"] == 1
+
+
+def test_partial_versioned_authority_is_invalid_not_legacy():
+    t = FakeTransport()
+    t.put(records.config_path("r"), json.dumps({
+        "data_type": "T", "protocol_version": 1}))
+    assert records.load_config(t, "r") is None
+
+
+def test_version_gate_refuses_old_or_unknown_writer():
+    cfg = dict(_versioned_config(), authority_mode="versioned")
+    old = records.compatibility(
+        cfg, engine_version="1.7.2", write_cursor=True)
+    assert old["ok"] is False and "below minimum_writer_version" in old["reason"]
+    unknown = records.compatibility(
+        cfg, engine_version="development", write_cursor=True)
+    assert unknown["ok"] is False and "unknown engine/floor" in unknown["reason"]
+
+
+def test_slice1_refuses_v2_activation_before_any_cursor_write():
+    cfg = dict(_versioned_config(
+        cursor_schema_version=2, cursor_generation=1,
+        cursor_activated_at="2026-07-29T00:00:00Z"),
+        authority_mode="versioned")
+    gate = records.compatibility(
+        cfg, engine_version="1.8.0", write_cursor=True)
+    assert gate["ok"] is False
+    assert "not safe to write" in gate["reason"]
+
+
+def test_v2_cursor_is_physically_isolated_from_legacy_path():
+    t = FakeTransport()
+    v2 = records.v2_cursor_path("r", "amy", 7)
+    t.put(v2, '{"v":2,"generation":7,"committed":"safe"}')
+    # v1.7.2's complete public cursor-write operation targets the legacy path.
+    assert records.save_cursor(
+        t, "r", "amy", last_read="2026-07-29T00:00:00Z",
+        seen_ids=["legacy"]) is True
+    assert json.loads(t.read(v2)) == {
+        "v": 2, "generation": 7, "committed": "safe"}
+    assert records.cursor_path("r", "amy") != v2
+
+
+def test_fleet_census_distinguishes_presence_from_adoption_claim():
+    claim = {
+        "id": "c1", "recorded_at": "2026-07-29T01:00:00Z",
+        "sources": ["bob"],
+        "note": records.build_payload(
+            to="all", kind="claim", priority="P1", slug="adopt-latest",
+            stamp={"engine_version": "1.8.0", "protocol_version": 1,
+                   "cursor_schema_version": 1}),
+    }
+    census = records.fleet_version_census([
+        {"agent": "amy", "timestamp": "2026-07-29T02:00:00Z",
+         "engine": {"engine_version": "1.7.2", "protocol_version": None,
+                    "cursor_schema_version": None}},
+    ], [claim])
+    assert [(row["agent"], row["running"], row["adopted"])
+            for row in census["agents"]] == [
+        ("amy", True, False), ("bob", False, True)]
+    assert census["mixed"] is True
+
+
+def test_fleet_census_parses_exact_bootstrap_adoption_payload():
+    raw_claim = {
+        "id": "c1", "recorded_at": "2026-07-29T01:00:00Z",
+        "sources": ["codex-coder"],
+        "note": json.dumps({
+            "v": 1, "to": "coord-boss", "kind": "claim", "pri": "P2",
+            "slug": "adopted-v1.7.2-codex-coder-rc0",
+        }),
+    }
+    census = records.fleet_version_census([], [raw_claim])
+    (row,) = census["agents"]
+    assert row["adopted"] is True
+    assert row["adopted_engine_version"] == "1.7.2"
+    assert row["running"] is False
+    assert census["mixed"] is True  # installed is not actively running
+
+
+def test_empty_fleet_census_is_not_convergence():
+    assert records.fleet_version_census([], [])["mixed"] is True
+
+
+@pytest.mark.parametrize("slug,source", [
+    ("adopted-v1.7.2-codex-coder-rc3", "codex-coder"),
+    ("adopted-v1.7.2-someone-else-rc0", "codex-coder"),
+    ("adopted-vgarbage-codex-coder-rc0", "codex-coder"),
+])
+def test_fleet_census_rejects_unsuccessful_or_spoofed_bootstrap_claim(
+        slug, source):
+    claim = {
+        "id": "c1", "recorded_at": "2026-07-29T01:00:00Z",
+        "sources": [source],
+        "note": json.dumps({
+            "v": 1, "to": "coord-boss", "kind": "claim", "pri": "P2",
+            "slug": slug,
+        }),
+    }
+    (row,) = records.fleet_version_census([], [claim])["agents"]
+    assert row["adopted_engine_version"] is None
 
 
 @pytest.mark.parametrize("raw", [
@@ -229,6 +363,27 @@ def test_queue_first_run_uses_default_lookback_and_saves_cursor(monkeypatch, cap
     assert cur["seen_ids"] == ["r1"]
 
 
+def test_queue_version_floor_refuses_before_query_or_cursor_write(
+        monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = QueueTransport(window=[])
+    t.put(records.config_path("r"), json.dumps(_versioned_config(
+        minimum_reader_version="9.0.0",
+        minimum_writer_version="9.0.0")))
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 3
+    assert t.record_queries == []
+    assert t.read(records.cursor_path("r", "amy")) is None
+    assert "INCOMPATIBLE" in capsys.readouterr().err
+
+
+def test_queue_legacy_authority_is_readable_but_loud(monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    t = QueueTransport(window=[])
+    t.put(records.config_path("r"), '{"data_type":"MomentAnnotation/x"}')
+    assert cli.main(["queue", "r", "--agent", "amy"], transport=t) == 0
+    assert "VERSION WARNING" in capsys.readouterr().err
+
+
 def test_queue_cursor_window_overlaps_by_skew_and_suppresses_seen(monkeypatch, capsys):
     _pin_clock(monkeypatch)
     t = QueueTransport(window=[_event_rec("r1", "old-already-seen"),
@@ -362,19 +517,19 @@ def test_load_config_classified_absent_vs_error():
     assert status == "ok" and cfg["data_type"] == "MomentAnnotation/x"
 
 
-def test_load_config_classified_env_override_wins_even_during_outage(monkeypatch):
+def test_load_config_classified_env_override_cannot_bypass_outage(monkeypatch):
     monkeypatch.setenv(records.ENV_DATA_TYPE, "MomentAnnotation/env")
     t = ClassifiedTransport(read_status="error")
     cfg, status = records.load_config_classified(t, "fulcra")
-    assert status == "ok" and cfg["data_type"] == "MomentAnnotation/env"
+    assert cfg is None and status == "error"
 
 
-def test_load_config_classified_malformed_store_config_is_absent_not_error():
-    # Malformed is human-fixable state, not transport state — rc 2 territory.
+def test_load_config_classified_malformed_store_config_is_invalid_not_absent():
+    # Bytes exist but the authority is unusable: fail closed as incompatible.
     t = ClassifiedTransport(read_status="ok")
     t.put(records.config_path("fulcra"), "not json at all")
     cfg, status = records.load_config_classified(t, "fulcra")
-    assert cfg is None and status == "absent"
+    assert cfg is None and status == "invalid"
 
 
 def test_load_config_classified_falls_back_when_transport_lacks_classified_read():

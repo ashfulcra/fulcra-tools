@@ -19,6 +19,69 @@ fulcra-api`). Standing rule: any agent updating coord tooling updates
 `fulcra-api` in the same pass — an old CLI against a moving API is a
 silent-failure factory.
 
+Bus semantics are governed by the shared
+`team/<team>/_coord/bus-v3/records.json` authority. A versioned authority is
+atomic; all fields below must be present together:
+
+```json
+{
+  "data_type": "MomentAnnotation/<uuid>",
+  "api_version": "v1alpha1",
+  "protocol_version": 1,
+  "cursor_schema_version": 1,
+  "minimum_reader_version": "1.8.0",
+  "minimum_writer_version": "1.8.0",
+  "cursor_generation": 0,
+  "cursor_activated_at": null
+}
+```
+
+Legacy two-field configs remain readable for rollback, but every queue read
+warns that no fleet fence exists and cursor-v2 activation is forbidden.
+Partially versioned or unknown authorities are invalid. An engine below the
+reader/writer floor, or one that does not understand the selected protocol or
+cursor schema, fails closed before advancing any cursor. `doctor <team>`
+reports version evidence from presence (actively running) and stamped adoption
+claims (installed/adopted); mixed or unknown evidence is never convergence.
+`COORD_RECORDS_TYPE` and `COORD_RECORDS_API_VERSION` may override only the
+transport stream fields. When a store authority exists, its protocol, cursor,
+generation, and minimum-version fields are still loaded and enforced; a local
+environment override cannot bypass an unreadable or invalid authority.
+
+The fleet bootstrap's historical direct claims have the exact slug schema
+`adopted-v<MAJOR.MINOR.PATCH>-<agent>-rc0`. Doctor accepts that version only
+when the slug agent equals the record source and the recorded queue result is
+`rc0`; failed, malformed, or source-mismatched lookalikes remain unknown.
+These claims prove installation only. A fresh stamped presence beat is still
+required to prove which binary is actively running.
+
+### Cursor-v2 activation and physical isolation
+
+Cursor v2 is not activated by changing an integer in place. Its authority must
+select a positive immutable generation and an activation timestamp, and its
+state lives at:
+
+```text
+team/<team>/_coord/bus-v3/cursors/v2/generation-<N>/<agent>.json
+```
+
+The legacy v1 path remains
+`team/<team>/_coord/agents/<agent>/records-cursor.json`. A pre-v1.8 engine can
+only write that old path, so it cannot overwrite v2 state. After activation,
+v2 readers never derive authoritative coverage from the legacy cursor; later
+legacy writes are health evidence of an old active binary, not state. A new
+generation is required for a later activation—never reuse or rewind one.
+Version 1.8.0 deliberately refuses cursor-schema v2 reads/writes: it ships the
+authority gate and isolated path contract, while the transactional v2 document
+and CAS behavior arrive in the next protocol slice.
+
+The rollback gate is executable, not an argument from path names:
+`test_records_old_binary.py` starts the exact `coord-engine-v1.7.2` tagged
+source in a separate interpreter against a filesystem transport, makes that
+old engine advance its real legacy cursor, and proves a pre-existing
+generation-scoped v2 cursor remains byte-identical. The vendored tag archive is
+SHA-256 pinned so CI runs the actual old implementation without network access.
+
 ## Setup (once per account)
 
 Events ride a **moment annotation** — a user-defined typed-record stream. Pick
@@ -40,7 +103,9 @@ compact JSON in `note`, with the sender's bare agent name in `sources`:
 
 ```json
 {"v":1, "to":"codex-coder", "kind":"directive", "pri":"P0",
- "slug":"fix-the-router", "ptr":"task/2026-07-27-fix-the-router.md"}
+ "slug":"fix-the-router", "ptr":"task/2026-07-27-fix-the-router.md",
+ "writer":{"engine_version":"1.8.0","protocol_version":1,
+           "cursor_schema_version":1}}
 ```
 
 - `v` — payload version, currently `1`. Ignore payloads with versions you
@@ -51,6 +116,9 @@ compact JSON in `note`, with the sender's bare agent name in `sources`:
 - `slug` — short kebab-case identity for the exchange.
 - `ptr` — optional; a File Store path (relative to the team root) holding the
   document. Present only when there is a body worth reading.
+- `writer` — stamped on engine-authored events: engine, protocol, and cursor
+  schema versions. Unstamped recognized events remain readable but warn as
+  legacy/unknown-writer evidence.
 
 The reference implementation of this contract is
 [`packages/coord-engine/coord_engine/records.py`](../../packages/coord-engine/coord_engine/records.py)
@@ -124,7 +192,7 @@ first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
 emits the future-dated record automatically (durable directive doc first,
 then the scheduled record pointing at it via `ptr`). The stream is resolved
 from `team/<team>/_coord/bus-v3/records.json` (`{"data_type": ...,
-"api_version": ...}`) or the `COORD_RECORDS_TYPE` env override; with neither,
+"api_version": ...}`) or the `COORD_RECORDS_TYPE` stream override; with neither,
 the reminder rides the file plane only and says so — the engine never writes
 into a guessed stream.
 

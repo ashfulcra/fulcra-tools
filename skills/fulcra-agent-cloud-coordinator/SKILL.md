@@ -34,7 +34,7 @@ Run in order; enter at the first probe that fails.
 | Store reachable? | `fulcra-api user-info` | prints your account | §2 (auth; remote-sandbox walls) |
 | Engine present? | `coord-engine --help` | verb list prints | §2 (install) |
 | Identity established? | `fulcra-api file download team/<team>/_coord/agents/<you>/census.md -` | your census prints | §3 |
-| On the bus? | `coord-engine queue <team> --agent <you>` | rc 0 (or events) | §3 |
+| On the bus? | `coord-engine queue <team> --agent <you>` | rc 0 (or events), no VERSION WARNING/INCOMPATIBLE result | §3 |
 | Recovery self-heals? | `ls scripts/<you>/bootstrap.sh` in the repo checkout | exists | §4 |
 | Wakes armed? | your standing schedules exist (see §5's inventory check) | every duty has a wake | §5 |
 | Duties silent-when-healthy? | last several duty runs produced no operator noise | quiet | §6 |
@@ -67,6 +67,11 @@ The cloud-specific walls (permission classifier blocking installers, the
 device-flow proxy bypass, egress) are documented there with verified
 fallbacks; do not re-derive them. Verify end-to-end with
 `coord-engine doctor <team>`.
+Doctor also prints the Bus-v3 fleet version census. Do not activate a new
+cursor schema while it reports mixed/unknown agents: a presence row proves the
+version is actively running, while an adoption claim proves only installation.
+The shared authority and physically isolated cursor-generation contract are in
+[`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md).
 
 ## 3. Identity (durable, on the bus)
 

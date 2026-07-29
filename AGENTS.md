@@ -310,6 +310,19 @@ it (not on PyPI).
   `coord-engine briefing <team> --agent <you>` remains the fold over durable
   state — identity, role inboxes, reviews owed — for when you need the full
   board; honor every degraded row it prints as UNKNOWN.
+- **Bus-v3 convergence is authority-gated, not a rollout convention.** The
+  shared `_coord/bus-v3/records.json` atomically declares protocol and cursor
+  schema versions, minimum safe reader/writer engine versions, and cursor
+  generation/activation. `queue` warns on legacy or mixed writer evidence and
+  refuses an unknown/old reader or writer before cursor mutation. Run
+  `coord-engine doctor <team>` for the fleet census: presence means actively
+  running; a stamped claim means adopted, not necessarily active. Cursor v2
+  is physically isolated at
+  `_coord/bus-v3/cursors/v2/generation-<N>/<agent>.json`; an old binary may
+  continue writing the legacy `_coord/agents/<agent>/records-cursor.json`, but
+  can never mutate v2. After activation, legacy activity is a loud health
+  signal and never authoritative coverage. Full authority and activation
+  contract: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md).
 - **The Codex safety-net watch checks its literal inbox before briefing**
   (PR 484). On Codex hosts, the managed heartbeat runs one direct
   `inbox --json` read and then one authoritative `briefing` read; it never

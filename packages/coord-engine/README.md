@@ -16,7 +16,7 @@ and the agent conventions ([`AGENTS.md`](../../AGENTS.md)).
 ## Install
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.7.2#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.8.0#subdirectory=packages/coord-engine"
 coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 ```
 
@@ -31,7 +31,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 
 | Concern | Verbs |
 |---|---|
-| Wake up / what needs me | `queue` — the bus v3 cursored event read ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)) is the wake surface (durable cursor, dedupe, exit 3 = DEGRADED window); `briefing` · `needs-me` · `inbox` · `digest` fold the durable state |
+| Wake up / what needs me | `queue` — the bus v3 cursored event read ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)) is the wake surface (durable cursor, dedupe, exit 3 = DEGRADED/INCOMPATIBLE window, shared protocol/reader/writer fence); `doctor` includes the adoption-claim + running-presence version census; `briefing` · `needs-me` · `inbox` · `digest` fold the durable state |
 | Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` (incl. `supersede` — close a re-dispatched copy with `superseded_by`; `block` requires `--unlock`) |
 | Directives & messaging | `tell` · `broadcast` · `remind` (schedules a future-dated bus-v3 record: the reminder delivers itself at WHEN via the assignee's queue read) · `respond` · `later` (backlog) · `intent` (spoken commitment) · `listen` (retired as the wake surface 2026-07-27; kept for reference until removal) |
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
