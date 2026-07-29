@@ -84,6 +84,16 @@ def test_config_env_override_wins(monkeypatch):
                    "api_version": records.DEFAULT_API_VERSION}
 
 
+def test_env_stream_override_preserves_version_authority(monkeypatch):
+    monkeypatch.setenv(records.ENV_DATA_TYPE, "MomentAnnotation/env")
+    t = FakeTransport()
+    t.put(records.config_path("r"), json.dumps(_versioned_config()))
+    cfg = records.load_config(t, "r")
+    assert cfg["data_type"] == "MomentAnnotation/env"
+    assert cfg["authority_mode"] == "versioned"
+    assert cfg["minimum_writer_version"] == "1.8.0"
+
+
 def test_config_from_store(monkeypatch):
     t = FakeTransport()
     t.put(records.config_path("r"),
@@ -174,6 +184,46 @@ def test_fleet_census_distinguishes_presence_from_adoption_claim():
             for row in census["agents"]] == [
         ("amy", True, False), ("bob", False, True)]
     assert census["mixed"] is True
+
+
+def test_fleet_census_parses_exact_bootstrap_adoption_payload():
+    raw_claim = {
+        "id": "c1", "recorded_at": "2026-07-29T01:00:00Z",
+        "sources": ["codex-coder"],
+        "note": json.dumps({
+            "v": 1, "to": "coord-boss", "kind": "claim", "pri": "P2",
+            "slug": "adopted-v1.7.2-codex-coder-rc0",
+        }),
+    }
+    census = records.fleet_version_census([], [raw_claim])
+    (row,) = census["agents"]
+    assert row["adopted"] is True
+    assert row["adopted_engine_version"] == "1.7.2"
+    assert row["running"] is False
+    assert census["mixed"] is True  # installed is not actively running
+
+
+def test_empty_fleet_census_is_not_convergence():
+    assert records.fleet_version_census([], [])["mixed"] is True
+
+
+@pytest.mark.parametrize("slug,source", [
+    ("adopted-v1.7.2-codex-coder-rc3", "codex-coder"),
+    ("adopted-v1.7.2-someone-else-rc0", "codex-coder"),
+    ("adopted-vgarbage-codex-coder-rc0", "codex-coder"),
+])
+def test_fleet_census_rejects_unsuccessful_or_spoofed_bootstrap_claim(
+        slug, source):
+    claim = {
+        "id": "c1", "recorded_at": "2026-07-29T01:00:00Z",
+        "sources": [source],
+        "note": json.dumps({
+            "v": 1, "to": "coord-boss", "kind": "claim", "pri": "P2",
+            "slug": slug,
+        }),
+    }
+    (row,) = records.fleet_version_census([], [claim])["agents"]
+    assert row["adopted_engine_version"] is None
 
 
 @pytest.mark.parametrize("raw", [
@@ -467,11 +517,11 @@ def test_load_config_classified_absent_vs_error():
     assert status == "ok" and cfg["data_type"] == "MomentAnnotation/x"
 
 
-def test_load_config_classified_env_override_wins_even_during_outage(monkeypatch):
+def test_load_config_classified_env_override_cannot_bypass_outage(monkeypatch):
     monkeypatch.setenv(records.ENV_DATA_TYPE, "MomentAnnotation/env")
     t = ClassifiedTransport(read_status="error")
     cfg, status = records.load_config_classified(t, "fulcra")
-    assert status == "ok" and cfg["data_type"] == "MomentAnnotation/env"
+    assert cfg is None and status == "error"
 
 
 def test_load_config_classified_malformed_store_config_is_invalid_not_absent():

@@ -180,8 +180,12 @@ def fleet_version_census(presence_shards: list[Any],
         row = evidence.setdefault(agent, {
             "agent": agent, "running": False, "adopted": False,
             "presence_at": None, "adoption_at": None,
-            "engine_version": None, "protocol_version": None,
-            "cursor_schema_version": None,
+            "running_engine_version": None,
+            "running_protocol_version": None,
+            "running_cursor_schema_version": None,
+            "adopted_engine_version": None,
+            "adopted_protocol_version": None,
+            "adopted_cursor_schema_version": None,
         })
         at_value = at if isinstance(at, str) else None
         if source == "presence":
@@ -189,19 +193,19 @@ def fleet_version_census(presence_shards: list[Any],
             if str(at_value or "") >= str(row["presence_at"] or ""):
                 row["presence_at"] = at_value
                 if isinstance(stamp, dict):
-                    for key in ("engine_version", "protocol_version",
-                                "cursor_schema_version"):
-                        row[key] = stamp.get(key)
+                    row["running_engine_version"] = stamp.get("engine_version")
+                    row["running_protocol_version"] = stamp.get("protocol_version")
+                    row["running_cursor_schema_version"] = stamp.get(
+                        "cursor_schema_version")
         else:
             row["adopted"] = True
             row["adoption_at"] = max(
                 str(row["adoption_at"] or ""), str(at_value or "")) or None
-            # Adoption is useful version evidence only until presence proves
-            # which binary is actually running.
-            if not row["running"] and isinstance(stamp, dict):
-                for key in ("engine_version", "protocol_version",
-                            "cursor_schema_version"):
-                    row[key] = stamp.get(key)
+            if isinstance(stamp, dict):
+                row["adopted_engine_version"] = stamp.get("engine_version")
+                row["adopted_protocol_version"] = stamp.get("protocol_version")
+                row["adopted_cursor_schema_version"] = stamp.get(
+                    "cursor_schema_version")
 
     for shard in presence_shards:
         if isinstance(shard, dict):
@@ -214,20 +218,32 @@ def fleet_version_census(presence_shards: list[Any],
         payload = parse_payload(row.get("note"))
         if payload is None or payload.get("kind") != "claim":
             continue
-        add(sender_of(row), row.get("recorded_at"), payload.get("writer"),
-            "adoption-claim")
+        sender = sender_of(row)
+        stamp = payload.get("writer")
+        if not isinstance(stamp, dict):
+            match = _ADOPTION_SLUG.fullmatch(payload["slug"])
+            # This is the exact bootstrap schema. The agent embedded in the
+            # slug must agree with the record source, and rc0 alone is a
+            # successful adoption. Other lookalikes remain UNKNOWN.
+            if (match is not None and sender == match.group("agent")
+                    and match.group("rc") == "0"):
+                stamp = {"engine_version": match.group("version")}
+        add(sender, row.get("recorded_at"), stamp, "adoption-claim")
 
     agents = sorted(evidence.values(), key=lambda item: item["agent"])
     versions = {
-        (row["engine_version"], row["protocol_version"],
-         row["cursor_schema_version"])
-        for row in agents if row["engine_version"] is not None
+        (row["running_engine_version"], row["running_protocol_version"],
+         row["running_cursor_schema_version"])
+        for row in agents if row["running_engine_version"] is not None
     }
     unknown = [row["agent"] for row in agents
-               if row["engine_version"] is None]
+               if (not row["running"]
+                   or row["running_engine_version"] is None
+                   or row["running_protocol_version"] is None
+                   or row["running_cursor_schema_version"] is None)]
     return {
         "agents": agents,
-        "mixed": len(versions) > 1 or bool(unknown),
+        "mixed": not agents or len(versions) > 1 or bool(unknown),
         "unknown_agents": unknown,
         "record_evidence_unknown": unknown_records,
     }
@@ -321,6 +337,9 @@ _AUTHORITY_FIELDS = (
     "cursor_generation", "cursor_activated_at",
 )
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
+_ADOPTION_SLUG = re.compile(
+    r"^adopted-v(?P<version>\d+\.\d+\.\d+)-"
+    r"(?P<agent>[a-zA-Z0-9._-]+)-rc(?P<rc>\d+)$")
 
 
 def config_path(team: str) -> str:
@@ -386,16 +405,24 @@ def load_config(transport: Any, team: str) -> Optional[dict[str, Any]]:
     """
     import os
     env_type = (os.environ.get(ENV_DATA_TYPE) or "").strip()
-    if env_type:
+    raw = transport.read(config_path(team))
+    if raw is None:
+        if not env_type:
+            return None
         return {
             "data_type": env_type,
             "api_version": (os.environ.get(ENV_API_VERSION) or "").strip()
             or DEFAULT_API_VERSION,
         }
-    raw = transport.read(config_path(team))
-    if raw is None:
+    cfg = _parse_config(raw)
+    if cfg is None:
         return None
-    return _parse_config(raw)
+    if env_type:
+        cfg["data_type"] = env_type
+        cfg["api_version"] = (
+            (os.environ.get(ENV_API_VERSION) or "").strip()
+            or cfg["api_version"])
+    return cfg
 
 
 def load_config_classified(
@@ -413,12 +440,6 @@ def load_config_classified(
     """
     import os
     env_type = (os.environ.get(ENV_DATA_TYPE) or "").strip()
-    if env_type:
-        return {
-            "data_type": env_type,
-            "api_version": (os.environ.get(ENV_API_VERSION) or "").strip()
-            or DEFAULT_API_VERSION,
-        }, "ok"
     reader = getattr(transport, "read_classified", None)
     if reader is None:
         cfg = load_config(transport, team)
@@ -427,9 +448,22 @@ def load_config_classified(
     if status == "error":
         return None, "error"
     if raw is None:
-        return None, "absent"
+        if not env_type:
+            return None, "absent"
+        return {
+            "data_type": env_type,
+            "api_version": (os.environ.get(ENV_API_VERSION) or "").strip()
+            or DEFAULT_API_VERSION,
+        }, "ok"
     cfg = _parse_config(raw)
-    return (cfg, "ok") if cfg is not None else (None, "invalid")
+    if cfg is None:
+        return None, "invalid"
+    if env_type:
+        cfg["data_type"] = env_type
+        cfg["api_version"] = (
+            (os.environ.get(ENV_API_VERSION) or "").strip()
+            or cfg["api_version"])
+    return cfg, "ok"
 
 
 def _version_tuple(value: str) -> Optional[tuple[int, int, int]]:

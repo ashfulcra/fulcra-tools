@@ -6474,13 +6474,13 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
             if not census["agents"]:
                 print("  ! Fleet census: no adoption/presence version evidence")
             for row in census["agents"]:
-                version = row["engine_version"] or "UNKNOWN"
-                print(f"  {'!' if version == 'UNKNOWN' else '✓'} "
-                      f"{row['agent']}: engine={version} "
-                      f"protocol={row['protocol_version']} "
-                      f"cursor={row['cursor_schema_version']} "
-                      f"running={'yes' if row['running'] else 'no'} "
-                      f"adopted={'yes' if row['adopted'] else 'no'}")
+                running = row["running_engine_version"] or "UNKNOWN"
+                adopted = row["adopted_engine_version"] or "UNKNOWN"
+                print(f"  {'!' if running == 'UNKNOWN' else '✓'} "
+                      f"{row['agent']}: running={running} "
+                      f"(protocol={row['running_protocol_version']}, "
+                      f"cursor={row['running_cursor_schema_version']}); "
+                      f"adopted={adopted}")
             if census["mixed"]:
                 print("  ! Fleet census: MIXED/UNKNOWN versions; v2 cursor "
                       "activation is unsafe")

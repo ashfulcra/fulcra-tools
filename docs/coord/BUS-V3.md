@@ -43,6 +43,17 @@ reader/writer floor, or one that does not understand the selected protocol or
 cursor schema, fails closed before advancing any cursor. `doctor <team>`
 reports version evidence from presence (actively running) and stamped adoption
 claims (installed/adopted); mixed or unknown evidence is never convergence.
+`COORD_RECORDS_TYPE` and `COORD_RECORDS_API_VERSION` may override only the
+transport stream fields. When a store authority exists, its protocol, cursor,
+generation, and minimum-version fields are still loaded and enforced; a local
+environment override cannot bypass an unreadable or invalid authority.
+
+The fleet bootstrap's historical direct claims have the exact slug schema
+`adopted-v<MAJOR.MINOR.PATCH>-<agent>-rc0`. Doctor accepts that version only
+when the slug agent equals the record source and the recorded queue result is
+`rc0`; failed, malformed, or source-mismatched lookalikes remain unknown.
+These claims prove installation only. A fresh stamped presence beat is still
+required to prove which binary is actively running.
 
 ### Cursor-v2 activation and physical isolation
 
@@ -174,7 +185,7 @@ first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
 emits the future-dated record automatically (durable directive doc first,
 then the scheduled record pointing at it via `ptr`). The stream is resolved
 from `team/<team>/_coord/bus-v3/records.json` (`{"data_type": ...,
-"api_version": ...}`) or the `COORD_RECORDS_TYPE` env override; with neither,
+"api_version": ...}`) or the `COORD_RECORDS_TYPE` stream override; with neither,
 the reminder rides the file plane only and says so — the engine never writes
 into a guessed stream.
 
