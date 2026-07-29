@@ -56,4 +56,25 @@ if [ "$installed" -ne "$expected" ]; then
   exit 1
 fi
 
+# Engine self-heal: container rolls restore a pre-v1.7 coord-engine that lacks
+# the `queue` verb, blinding the session to the bus. Reinstall the pinned
+# engine when the verb is missing. INSTALL ONLY — never run a queue read from
+# here: this can execute before the agent wakes, and a cursor-advancing read
+# whose output nobody processes silently discards wake hints.
+if ! coord-engine queue --help >/dev/null 2>&1; then
+  ENGINE_PIN="coord-engine-v1.7.2"
+  ENGINE_SRC="git+https://github.com/ashfulcra/fulcra-tools@${ENGINE_PIN}#subdirectory=packages/coord-engine"
+  if command -v uv >/dev/null 2>&1; then
+    uv tool install --force fulcra-api >/dev/null 2>&1 || true
+    uv tool install --force "$ENGINE_SRC" >/dev/null 2>&1 || true
+  fi
+  hash -r 2>/dev/null || true
+  if coord-engine queue --help >/dev/null 2>&1; then
+    echo "bootstrap: engine self-healed to $ENGINE_PIN"
+  else
+    echo "bootstrap: engine self-heal FAILED — queue verb still missing" >&2
+    exit 1
+  fi
+fi
+
 echo "bootstrap: installed $installed duty scripts into $DEST"
