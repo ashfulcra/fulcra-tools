@@ -62,9 +62,15 @@ the write must be **one atomic server-side operation**.
 3. **`If-None-Match: *` on upload** — create-only: succeed only if the file
    does not exist (412 otherwise). Gives fleets atomic "first writer mints
    the document" (lease acquisition, identity minting) for free.
-4. *(Optional, weaker)* honor `If-Unmodified-Since` with documented
+4. **`If-Match: <token>` on delete.** Same semantics as upload: token
+   current → file removed; stale → 412, file untouched. Without this, lease
+   *release* stays racy even with atomic acquisition and renewal: a stale
+   holder can read its old ownership, lose a race with a successor's
+   acquisition, and then delete the successor's lease. Conditional delete
+   closes the lease lifecycle end to end.
+5. *(Optional, weaker)* honor `If-Unmodified-Since` with documented
    second-resolution caveats, for clients that only have timestamps.
-5. **Capability discovery.** Advertise conditional-write support
+6. **Capability discovery.** Advertise conditional-write support
    discoverably (API root document, `OPTIONS`, or a documented version
    floor) so clients can gate behavior without probing by side effect. Our
    engine ships a fail-closed transport gate today; it flips on when the
@@ -74,15 +80,27 @@ Backward compatible by construction: requests without the headers behave
 exactly as today. No data-model change — the store already tracks the
 versions it shows in listings.
 
-## What is ready to consume it (day one)
+## Consumers
 
-- **coord-engine cursor schema v2** (merged, inactive): stage/commit
-  delivery with CAS loser-recovery, waiting on this primitive to activate.
-- **FileLease** (bridge + roles): lease acquisition becomes genuinely atomic
-  via create-only + If-Match renewal.
-- **BridgeLedger** (tracker bridge) and the prefs **Privacy Ledger**:
-  append-safe under concurrent writers.
-- Every future cursor, ledger, or checkpoint any agent keeps in the store.
+One consumer is wired and waiting; the rest are candidates that need small
+adapters (their current implementations do not yet speak preconditions —
+claim scoped accordingly):
+
+- **Wired, gated, day one:** coord-engine **cursor schema v2** (merged):
+  stage/commit delivery with CAS loser-recovery behind a fail-closed
+  transport gate that activates only when a proven conditional-write
+  primitive exists. This RFC is that gate's missing half.
+- **Candidates needing adapters:** the bridge **FileLease** (today:
+  local-filesystem `O_EXCL`) and coord-engine **role leases** (today:
+  unconditional transport write/delete) — with create-only acquisition,
+  `If-Match` renewal, and conditional delete for release, both become
+  end-to-end atomic once ported to store preconditions; **BridgeLedger**
+  persistence (today: local tempfile + `os.replace`) similarly. Every
+  future cursor, ledger, or checkpoint any agent keeps in the store.
+
+(The prefs Privacy Ledger is deliberately absent: it is an annotation
+record stream on the timeline, not a File Store document — conditional file
+writes do not apply to it.)
 
 ## Alternatives considered
 
