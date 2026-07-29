@@ -18,8 +18,8 @@ fulcra data-updates "<range>"   # what data actually flowed in a window
 
 (`data-available` / `data-sources` are REST-only — there is no such CLI verb;
 `catalog` + `data-updates` are the CLI discovery path.) If a need maps to a
-stream Fulcra already carries — HRV, heart rate, steps, location/visits,
-workouts, sleep stages/cycles, calendar events — **bind to that existing type**
+stream Fulcra already carries — anything `fulcra catalog` returns for this
+user — **bind to that existing type**
 (`fulcra get-records`, the metric/event helpers). Only `data-type create` for a
 stream Fulcra genuinely doesn't have. Reuse existing, create only the novel,
 **simulate nothing**: a product on invented local data isn't on Fulcra at all.
@@ -30,7 +30,7 @@ For each product need from the interview findings, name the primitive:
 
 | Product need | Fulcra primitive |
 |---|---|
-| A stream Fulcra already collects (HRV, location, workouts, sleep, …) | **reuse the existing data type** — find it in `fulcra catalog`, read via `fulcra get-records` / metric & event helpers (don't recreate it) |
+| A stream Fulcra already collects (anything `fulcra catalog` lists) | **reuse the existing data type** — read via `fulcra get-records` / metric & event helpers (don't recreate it) |
 | A stream genuinely novel to this product | annotation **definitions** (`fulcra data-type create`: moment, duration, boolean, numeric, scale) |
 | Writing timeline data | records via **`fulcra record`** (CLI, 0.1.37+) or the lib's `record_data_type` — the tier-1 path; raw REST ingest (tier 2) is the lower-level fallback. Delete via **`fulcra delete`** (a tombstone, not an erasure); corrections can also supersede. Writing to a *custom* type has a 404 trap → see **Writing records** below |
 | Documents, images, arbitrary state | file library (`fulcra file ...`) — versioned, path-addressed |

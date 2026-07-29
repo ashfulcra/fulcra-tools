@@ -16,12 +16,12 @@ destroyed** — because the session persists across containers and every scrap
 of state lives in the Fulcra store, not on the machine.
 
 This is the OpenClaw/Hermes experience (persistent identity, heartbeat,
-durable memory) rebuilt on managed cloud infrastructure you don't operate.
+durable context) rebuilt on managed cloud infrastructure you don't operate.
 The reference deployment ran a full fleet day — 4 merged PRs, 2 live-incident
 diagnoses, ~20 dispatches — through **seven container resets**, losing
 nothing. The whole trick is one sentence:
 
-> **The machine is disposable, the agent is permanent, and the memory lives
+> **The machine is disposable, the agent is permanent, and the context lives
 > in the store.**
 
 ## Where to start — re-entrancy probes
@@ -227,8 +227,8 @@ the record of what is owed).
 - **Supersede, don't abandon**: re-dispatched work gets
   `task supersede --by <new>`; blocked work names its `--unlock`.
 - **Continuity**: park a checkpoint before context loss; on takeover,
-  `continuity resume` — the session summary is your memory bridge, the
-  store is your memory.
+  `continuity resume` — the session summary is your bridge across context
+  loss; the store is your context.
 
 ## 7. Verification (prove the pattern before trusting it)
 
@@ -247,7 +247,7 @@ the record of what is owed).
 This skill is the ASSEMBLY of the others for one harness: identity/liveness
 ([presence](../fulcra-agent-presence/SKILL.md)), directives/reviews
 ([directives](../fulcra-agent-directives/SKILL.md),
-[review](../fulcra-agent-review/SKILL.md)), memory
+[review](../fulcra-agent-review/SKILL.md)), context
 ([continuity](../fulcra-agent-continuity/SKILL.md)), durable tooling
 ([durable-state](../fulcra-agent-durable-state/SKILL.md)), scheduling
 ([automation](../fulcra-agent-automation/SKILL.md)), and the bus contract
