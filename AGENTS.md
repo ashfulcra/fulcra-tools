@@ -304,7 +304,23 @@ it (not on PyPI).
   ([`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md)): dedupe by record id, keep
   `v:1` payloads addressed to you or `all`, fetch documents by `ptr`, fail
   closed on any error or truncation (an unreadable window is UNKNOWN, never
-  empty). The read is cheap enough to ride every wake you already have — **do
+  empty). **Terminal read states are DATA / CLEAR / ABSENT / UNKNOWN /
+  INVALID — and INVALID is now in code, end to end.** A read that succeeds
+  at transport level but yields malformed bytes (corrupt records config,
+  partially versioned authority, unparseable cursor) classifies INVALID:
+  human-fixable, fail closed, rc 3 with `error_code=*-invalid`. INVALID is
+  never ABSENT (the engine refuses to auto-recreate over a corrupt document
+  — the bytes are the evidence) and never UNKNOWN (a retry will not fix a
+  corrupt file; `*-read-failed` means retry). Under `--json`, success is
+  exactly one `queue-result` object (state DATA|CLEAR) and EVERY nonzero
+  exit of `queue`/`queue commit` exactly one `queue-error` object (state
+  INVALID|UNKNOWN|INCOMPATIBLE|ABSENT|REFUSED) — same `type` discriminator,
+  so empty stdout never means anything (sole exclusion: argparse's own
+  usage exits, which fire before queue code runs). A deliberate
+  `queue --consume` takeover of another agent's cursor writes a durable
+  audit doc under `_coord/audit/consume/` BEFORE reading, and is refused if
+  that write fails; plain reads and `--peek` write nothing. The read is
+  cheap enough to ride every wake you already have — **do
   not run a polling loop or resident listener for it.** Keep `fulcra-api`
   current whenever you touch coord tooling (same pass, standing rule).
   `coord-engine briefing <team> --agent <you>` remains the fold over durable

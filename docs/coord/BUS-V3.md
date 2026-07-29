@@ -83,6 +83,14 @@ Version 1.9.0 implements cursor-schema v2 behind two hard activation gates:
    pretending that write/read-back is CAS. Keep the live authority on schema
    v1 until a CAS-capable transport is available.
 
+Version 1.10.0 makes INVALID a first-class terminal read state on every queue
+read path (a malformed config or cursor fails closed with
+`error_code=*-invalid` and is never treated as absent or silently recreated),
+adds the audited `--consume` takeover (a durable
+`_coord/audit/consume/<UTC-stamp>-<caller>-takes-<target>.md` document must
+land before the takeover read; failure to write it refuses the consume), and
+gives `queue --json` a single-object `queue-result` success envelope.
+
 The v2 document contains an authority generation, a monotonically increasing
 per-agent revision, bounded committed record/token sets, and at most one
 pending delivery (`token`, base revision, exact window, staged time, events).
@@ -157,6 +165,56 @@ filtered to `to: <you>|all`, and the cursor advances only after a clean
 window — a transport failure or unparseable line exits **3** (DEGRADED,
 cursor untouched, nothing printed as clean) so quiet is never mistaken for
 clear.
+
+Terminal read states are **DATA / CLEAR / ABSENT / UNKNOWN / INVALID**.
+INVALID means the read succeeded at transport level but the bytes are
+malformed — a corrupt records config, a partially versioned authority, or an
+unparseable cursor. It is human-fixable and fails closed (rc 3,
+`error_code=config-invalid|cursor-invalid`): the engine never treats INVALID
+as ABSENT (it will not recreate a fresh cursor over a corrupt one — the
+corrupt document is the evidence) and never as UNKNOWN (`*-read-failed` /
+`window-unknown` mean the store could not be consulted; retry fixes those,
+not this). Under `--json`, a successful read prints **exactly one** object:
+
+```json
+{"type":"queue-result","state":"DATA|CLEAR","events":[
+   {"id":…,"ts":…,"sender":…,"to":…,"kind":…,"pri":…,"slug":…,"ptr":…}],
+ "count":N,"cursor":{"path":…,"advanced":true|false},
+ "engine_version":…,"protocol":{…authority versions, or null…}}
+```
+
+and **every nonzero exit** of the queue family (`queue` and `queue commit`,
+legacy and v2-active) prints exactly one `queue-error` object — the two share
+the `type` discriminator, so automation switches on one field and empty
+stdout is never an answer. `queue-error` states: `UNKNOWN` (store/transport
+doubt — backoff and retry), `INVALID` (durable bytes exist but are malformed
+— human-fixable, never recreated over), `INCOMPATIBLE` (version/capability
+gate: engine below a floor, unsupported schema, no proven CAS transport),
+`ABSENT` (affirmatively no records config), and `REFUSED` (caller-side
+rejection: usage error, incomplete `--result` set, stale token). The one
+exclusion: argparse's own usage exits (unknown flag, missing positional)
+happen before any queue code runs and carry no envelope. Text-mode success
+output is byte-stable across this change; shell consumers pipe it.
+
+Reading as an identity other than your own `$FULCRA_COORD_AGENT` peeks by
+default. A deliberate takeover (`--consume`) first writes a durable audit
+document to `team/<team>/_coord/audit/consume/<UTC-stamp>-<caller>-takes-
+<target>.md` (frontmatter: `ts`, `caller`, `target`, `cursor`,
+`observed_prior`, `intended_authority`, `reason`). The audit records
+**observations and intent, never predictions**: `observed_prior` is the
+target cursor's coverage claim as the caller read it at `ts` (v2: authority
+generation + per-agent revision; legacy: schema 1 + `last_read`; or the bare
+classification `absent`/`invalid`/`error`), and `intended_authority` is the
+cursor schema — plus, for v2, the authority generation — the takeover
+intended to operate under. A concurrent writer may advance the cursor
+between the observation and the consuming read, so the audit does not claim
+to name the state actually overtaken, and it predicts no timestamp or
+successor revision; the actual transition is evidenced by the cursor
+document itself afterward. If the audit write fails the consume is REFUSED
+(`error_code=consume-audit-failed`) with the target's cursor untouched — an
+unauditable takeover does not happen. Capturing `observed_prior` is a plain
+observation read before the audit lands; the audit still lands before any
+cursor mutation or consuming read. Plain reads and `--peek` write nothing.
 
 Under an activated schema v2, a clean read ends with a machine-readable
 `queue-delivery` JSONL row (or a text-mode delivery notice) containing the
