@@ -3190,11 +3190,34 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
                   "cursor untouched — check auth/network and retry",
                   file=sys.stderr)
             return 3
+        if cfg_status == "invalid":
+            print("queue: INCOMPATIBLE — bus-v3 authority is malformed or "
+                  "partially versioned; cursor untouched", file=sys.stderr)
+            return 3
         print("queue: no bus-v3 records config "
               f"(team/{args.team}/{records.CONFIG_NAME} or "
               f"{records.ENV_DATA_TYPE}) — cannot read the record queue",
               file=sys.stderr)
         return 2
+    from . import __version__ as engine_version
+    read_gate = records.compatibility(
+        cfg, engine_version=engine_version, write_cursor=False)
+    if not read_gate["ok"]:
+        print(f"queue: INCOMPATIBLE — {read_gate['reason']}; cursor untouched",
+              file=sys.stderr)
+        return 3
+    for warning in read_gate["warnings"]:
+        print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    if not peek:
+        write_gate = records.compatibility(
+            cfg, engine_version=engine_version, write_cursor=True)
+        if not write_gate["ok"]:
+            print(f"queue: INCOMPATIBLE — {write_gate['reason']}; "
+                  "refusing before cursor write", file=sys.stderr)
+            return 3
+        for warning in write_gate["warnings"]:
+            if warning not in read_gate["warnings"]:
+                print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
     now = _now()
     cursor = records.load_cursor(transport, args.team, agent)
     if cursor is None:
@@ -3213,6 +3236,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         print("queue: DEGRADED — window UNKNOWN, cursor NOT advanced "
               "(re-covered next read)", file=sys.stderr)
         return 3
+    for warning in records.observed_version_warnings(window):
+        print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
     if getattr(args, "json", False):
@@ -4684,6 +4709,7 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
         "type": "Presence", "title": f"presence — {agent}", "agent": agent,
         "workstreams": args.workstream or [], "summary": args.summary or "",
         "timestamp": _iso(now),
+        "engine": records.engine_stamp(),
     }
     if engagement_obj is not None:
         fm["engagement"] = engagement_obj
@@ -6405,6 +6431,59 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
         ok = False
     from . import __version__ as _v
     print(f"  ✓ coord-engine v{_v}")
+    if args.team:
+        cfg, cfg_status = records.load_config_classified(transport, args.team)
+        if cfg_status == "error":
+            print("  ✗ Bus V3 authority UNKNOWN (store read failed)",
+                  file=sys.stderr)
+            ok = False
+        elif cfg_status == "invalid":
+            print("  ✗ Bus V3 authority malformed or partially versioned",
+                  file=sys.stderr)
+            ok = False
+        elif cfg is None:
+            print("  ! Bus V3 authority absent or malformed; fleet version "
+                  "census unavailable")
+        else:
+            gate = records.compatibility(
+                cfg, engine_version=_v, write_cursor=True)
+            if not gate["ok"]:
+                print(f"  ✗ Bus V3 version gate: {gate['reason']}",
+                      file=sys.stderr)
+                ok = False
+            for warning in gate["warnings"]:
+                print(f"  ! Bus V3 version warning: {warning}")
+            record_rows = None
+            try:
+                record_rows = transport.records(
+                    cfg["data_type"],
+                    _iso(_now() - timedelta(days=30)), _iso(_now()))
+            except Exception:
+                record_rows = None
+            now_iso = _iso(_now())
+            fresh_presence = [
+                shard for shard in _presence_shards(transport, args.team)
+                if presence.classify(
+                    shard.get("timestamp") if isinstance(shard, dict) else None,
+                    now=now_iso) != "stale"
+            ]
+            census = records.fleet_version_census(
+                fresh_presence, record_rows)
+            if census["record_evidence_unknown"]:
+                print("  ! Fleet census: adoption-claim evidence UNKNOWN")
+            if not census["agents"]:
+                print("  ! Fleet census: no adoption/presence version evidence")
+            for row in census["agents"]:
+                version = row["engine_version"] or "UNKNOWN"
+                print(f"  {'!' if version == 'UNKNOWN' else '✓'} "
+                      f"{row['agent']}: engine={version} "
+                      f"protocol={row['protocol_version']} "
+                      f"cursor={row['cursor_schema_version']} "
+                      f"running={'yes' if row['running'] else 'no'} "
+                      f"adopted={'yes' if row['adopted'] else 'no'}")
+            if census["mixed"]:
+                print("  ! Fleet census: MIXED/UNKNOWN versions; v2 cursor "
+                      "activation is unsafe")
     print("doctor: healthy" if ok else "doctor: PROBLEMS FOUND")
     return 0 if ok else 1
 
@@ -7320,7 +7399,8 @@ def _refresh_activity_presence(
         # list_dir-CONFIRMED absent — the sole safe case for a minimal beat. No
         # engagement object: an activity bump must not manufacture one.
         fm = {"type": "Presence", "title": f"presence — {actor}",
-              "agent": actor, "timestamp": now_iso}
+              "agent": actor, "timestamp": now_iso,
+              "engine": records.engine_stamp()}
         transport.write(shard_path, okf.render_frontmatter(fm) + f"\n# Presence: {actor}\n")
     except Exception as e:
         print(f"presence activity-refresh failed: {e}", file=sys.stderr)

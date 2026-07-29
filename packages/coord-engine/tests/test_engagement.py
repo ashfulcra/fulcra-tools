@@ -91,17 +91,23 @@ def test_beat_engagement_resident_has_null_until():
     assert eng["until"] is None
 
 
-def test_beat_without_engagement_writes_byte_identical_legacy_shard():
+def test_beat_without_engagement_keeps_engagement_inert_and_stamps_engine():
     t = FakeTransport()
     assert cli.main(["presence", "beat", "r", "-a", "amy", "-w", "web",
                      "-s", "shipping"], transport=t) == 0
     content = t.store[_shard_path("amy")]
-    # No engagement field at all — inert step means today's exact bytes.
+    # No engagement field at all — the liveness schema remains inert. Version
+    # evidence is independent and proves which engine is actively running.
     assert "engagement" not in content
     legacy_fm = {
         "type": "Presence", "title": "presence — amy", "agent": "amy",
         "workstreams": ["web"], "summary": "shipping",
         "timestamp": PINNED_NOW.isoformat().replace("+00:00", "Z"),
+        "engine": {
+            "engine_version": "1.8.0",
+            "protocol_version": 1,
+            "cursor_schema_version": 1,
+        },
     }
     expected = okf.render_frontmatter(legacy_fm) + "\n# Presence: amy\n"
     assert content == expected

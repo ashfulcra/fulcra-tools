@@ -30,11 +30,27 @@ def test_payload_round_trips():
     parsed = records.parse_payload(_payload(ptr="task/fix-the-thing.md"))
     assert parsed == {"to": "codex-coder", "kind": "directive",
                       "slug": "fix-the-thing", "pri": "P0",
-                      "ptr": "task/fix-the-thing.md"}
+                      "ptr": "task/fix-the-thing.md",
+                      "writer": {
+                          "engine_version": "1.8.0",
+                          "protocol_version": 1,
+                          "cursor_schema_version": 1,
+                      }}
 
 
 def test_payload_omits_ptr_when_there_is_no_body():
     assert "ptr" not in json.loads(_payload())
+
+
+def test_payload_stamps_engine_protocol_and_cursor_versions():
+    assert json.loads(_payload())["writer"] == records.engine_stamp()
+
+
+def test_unstamped_writer_warns():
+    old = json.dumps({"v": 1, "to": "a", "kind": "claim", "pri": "P1",
+                      "slug": "adopt"})
+    warnings = records.observed_version_warnings([_rec(old, rid="old")])
+    assert any("lack writer-version stamps" in warning for warning in warnings)
 
 
 def test_build_rejects_unknown_kind():

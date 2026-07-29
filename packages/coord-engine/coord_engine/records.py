@@ -29,11 +29,20 @@ body and cost no file read at all.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 #: Payload schema version. Bump only for incompatible shape changes; readers
 #: must ignore payloads whose version they do not know rather than guess.
 PAYLOAD_VERSION = 1
+
+#: Bus protocol metadata stamped by engines that understand the convergence
+#: contract.  These are deliberately separate from ``PAYLOAD_VERSION``: the
+#: payload envelope can stay readable while cursor semantics evolve.
+PROTOCOL_VERSION = 1
+CURSOR_SCHEMA_VERSION = 1
+READABLE_CURSOR_SCHEMAS = (1,)
+WRITABLE_CURSOR_SCHEMAS = (1,)
 
 #: Event classes carried on the control plane. One data type carries all of
 #: them, discriminated by ``kind``: ``get-records`` filters by type, so one type
@@ -45,8 +54,19 @@ KINDS = ("directive", "response", "verdict", "claim")
 PROJECTION_SOURCE_PREFIX = "com.fulcradynamics.fulcra-coord"
 
 
+def engine_stamp() -> dict[str, Any]:
+    """Version evidence attached to every engine-authored bus event."""
+    from . import __version__
+    return {
+        "engine_version": __version__,
+        "protocol_version": PROTOCOL_VERSION,
+        "cursor_schema_version": CURSOR_SCHEMA_VERSION,
+    }
+
+
 def build_payload(*, to: str, kind: str, priority: str, slug: str,
-                  ptr: Optional[str] = None) -> str:
+                  ptr: Optional[str] = None,
+                  stamp: Optional[dict[str, Any]] = None) -> str:
     """Serialize a control-plane payload for the ``note`` field.
 
     Raises ``ValueError`` on an unknown ``kind`` — a mistyped event class must
@@ -60,6 +80,7 @@ def build_payload(*, to: str, kind: str, priority: str, slug: str,
     }
     if ptr:
         payload["ptr"] = ptr
+    payload["writer"] = dict(stamp or engine_stamp())
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -87,6 +108,8 @@ def parse_payload(note: Any) -> Optional[dict[str, Any]]:
     return {
         "to": to, "kind": kind, "slug": slug,
         "pri": obj.get("pri"), "ptr": obj.get("ptr"),
+        "writer": obj.get("writer") if isinstance(obj.get("writer"), dict)
+        else None,
     }
 
 
@@ -102,6 +125,112 @@ def sender_of(record: dict[str, Any]) -> Optional[str]:
         if isinstance(src, str) and src and not src.startswith("com.fulcradynamics."):
             return src
     return None
+
+
+def observed_version_warnings(rows: Optional[list[Any]]) -> list[str]:
+    """Describe mixed/unstamped engine traffic in an already-read window."""
+    if rows is None:
+        return []
+    versions: set[tuple[Any, Any, Any]] = set()
+    unstamped = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        payload = parse_payload(row.get("note"))
+        if payload is None:
+            continue
+        stamp = payload.get("writer")
+        if not isinstance(stamp, dict) or any(
+                stamp.get(key) is None for key in (
+                    "engine_version", "protocol_version",
+                    "cursor_schema_version")):
+            unstamped += 1
+            continue
+        versions.add((
+            stamp.get("engine_version"),
+            stamp.get("protocol_version"),
+            stamp.get("cursor_schema_version"),
+        ))
+    warnings = []
+    if unstamped:
+        warnings.append(
+            f"{unstamped} recognized event(s) lack writer-version stamps "
+            "(legacy or unknown writer)")
+    if len(versions) > 1:
+        rendered = ", ".join(
+            f"engine={v[0]}/protocol={v[1]}/cursor={v[2]}"
+            for v in sorted(versions, key=str))
+        warnings.append(f"mixed writer versions observed: {rendered}")
+    return warnings
+
+
+def fleet_version_census(presence_shards: list[Any],
+                         record_rows: Optional[list[Any]]) -> dict[str, Any]:
+    """Fold running-version evidence from presence and stamped claim events.
+
+    Presence proves a process is running; a claim proves adoption intent.  The
+    two are reported separately so "installed" is never mistaken for "active".
+    Newer evidence wins per agent/source, and missing stamps remain visible.
+    """
+    evidence: dict[str, dict[str, Any]] = {}
+
+    def add(agent: Any, at: Any, stamp: Any, source: str) -> None:
+        if not isinstance(agent, str) or not agent:
+            return
+        row = evidence.setdefault(agent, {
+            "agent": agent, "running": False, "adopted": False,
+            "presence_at": None, "adoption_at": None,
+            "engine_version": None, "protocol_version": None,
+            "cursor_schema_version": None,
+        })
+        at_value = at if isinstance(at, str) else None
+        if source == "presence":
+            row["running"] = True
+            if str(at_value or "") >= str(row["presence_at"] or ""):
+                row["presence_at"] = at_value
+                if isinstance(stamp, dict):
+                    for key in ("engine_version", "protocol_version",
+                                "cursor_schema_version"):
+                        row[key] = stamp.get(key)
+        else:
+            row["adopted"] = True
+            row["adoption_at"] = max(
+                str(row["adoption_at"] or ""), str(at_value or "")) or None
+            # Adoption is useful version evidence only until presence proves
+            # which binary is actually running.
+            if not row["running"] and isinstance(stamp, dict):
+                for key in ("engine_version", "protocol_version",
+                            "cursor_schema_version"):
+                    row[key] = stamp.get(key)
+
+    for shard in presence_shards:
+        if isinstance(shard, dict):
+            add(shard.get("agent"), shard.get("timestamp"),
+                shard.get("engine"), "presence")
+    unknown_records = record_rows is None
+    for row in record_rows or []:
+        if not isinstance(row, dict):
+            continue
+        payload = parse_payload(row.get("note"))
+        if payload is None or payload.get("kind") != "claim":
+            continue
+        add(sender_of(row), row.get("recorded_at"), payload.get("writer"),
+            "adoption-claim")
+
+    agents = sorted(evidence.values(), key=lambda item: item["agent"])
+    versions = {
+        (row["engine_version"], row["protocol_version"],
+         row["cursor_schema_version"])
+        for row in agents if row["engine_version"] is not None
+    }
+    unknown = [row["agent"] for row in agents
+               if row["engine_version"] is None]
+    return {
+        "agents": agents,
+        "mixed": len(versions) > 1 or bool(unknown),
+        "unknown_agents": unknown,
+        "record_evidence_unknown": unknown_records,
+    }
 
 
 #: Recipient value that addresses every agent on the bus. Readers keep events
@@ -186,12 +315,68 @@ ENV_API_VERSION = "COORD_RECORDS_API_VERSION"
 
 DEFAULT_API_VERSION = "v1alpha1"
 
+_AUTHORITY_FIELDS = (
+    "protocol_version", "cursor_schema_version",
+    "minimum_reader_version", "minimum_writer_version",
+    "cursor_generation", "cursor_activated_at",
+)
+_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
+
 
 def config_path(team: str) -> str:
     return f"team/{team}/{CONFIG_NAME}"
 
 
-def load_config(transport: Any, team: str) -> Optional[dict[str, str]]:
+def _parse_config(raw: Any) -> Optional[dict[str, Any]]:
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    data_type = doc.get("data_type")
+    if not isinstance(data_type, str) or not data_type.strip():
+        return None
+    api_version = doc.get("api_version")
+    if api_version is not None and (
+            not isinstance(api_version, str) or not api_version.strip()):
+        return None
+    out: dict[str, Any] = {
+        "data_type": data_type.strip(),
+        "api_version": (api_version or DEFAULT_API_VERSION).strip(),
+    }
+    supplied = [name for name in _AUTHORITY_FIELDS if name in doc]
+    if not supplied:
+        return out
+    # A partially upgraded authority is UNKNOWN, not a legacy default.
+    if any(name not in doc for name in _AUTHORITY_FIELDS):
+        return None
+    if (type(doc["protocol_version"]) is not int
+            or type(doc["cursor_schema_version"]) is not int
+            or type(doc["cursor_generation"]) is not int
+            or doc["protocol_version"] < 1
+            or doc["cursor_schema_version"] < 1
+            or doc["cursor_generation"] < 0):
+        return None
+    for name in ("minimum_reader_version", "minimum_writer_version"):
+        if not isinstance(doc[name], str) or _SEMVER.fullmatch(doc[name]) is None:
+            return None
+    activated = doc["cursor_activated_at"]
+    if activated is not None and (
+            not isinstance(activated, str) or not activated.strip()):
+        return None
+    if doc["cursor_schema_version"] == 1 and (
+            doc["cursor_generation"] != 0 or activated is not None):
+        return None
+    if doc["cursor_schema_version"] >= 2 and (
+            doc["cursor_generation"] < 1 or activated is None):
+        return None
+    out.update({name: doc[name] for name in _AUTHORITY_FIELDS})
+    out["authority_mode"] = "versioned"
+    return out
+
+
+def load_config(transport: Any, team: str) -> Optional[dict[str, Any]]:
     """Resolve the records stream for ``team`` → ``{data_type, api_version}``.
 
     Fail-closed: no env override and no readable, well-formed store config
@@ -210,36 +395,21 @@ def load_config(transport: Any, team: str) -> Optional[dict[str, str]]:
     raw = transport.read(config_path(team))
     if raw is None:
         return None
-    try:
-        doc = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(doc, dict):
-        return None
-    data_type = doc.get("data_type")
-    if not isinstance(data_type, str) or not data_type.strip():
-        return None
-    api_version = doc.get("api_version")
-    if api_version is not None and (
-            not isinstance(api_version, str) or not api_version.strip()):
-        return None
-    return {
-        "data_type": data_type.strip(),
-        "api_version": (api_version or DEFAULT_API_VERSION).strip(),
-    }
+    return _parse_config(raw)
 
 
 def load_config_classified(
-        transport: Any, team: str) -> tuple[Optional[dict[str, str]], str]:
+        transport: Any, team: str) -> tuple[Optional[dict[str, Any]], str]:
     """``load_config`` that separates absent from unreadable.
 
-    Returns (config, "ok") | (None, "absent") | (None, "error"). "absent"
-    means the store affirmatively has no config (or it is malformed — a
-    human-fixable state, not a transport state); "error" means the store
-    could not be consulted, so the caller must treat the config as UNKNOWN
-    (degraded), never as missing. Live incident 2026-07-28: an expired-auth
-    host reported "records configuration is still missing" for hours because
-    the unreadable path was indistinguishable from the absent path.
+    Returns (config, "ok") | (None, "absent") | (None, "invalid") |
+    (None, "error"). "absent" means the store affirmatively has no config;
+    "invalid" means bytes exist but do not satisfy the atomic authority
+    schema; "error" means the store could not be consulted, so the caller must
+    treat the config as UNKNOWN (degraded), never as missing. Live incident
+    2026-07-28: an expired-auth host reported "records configuration is still
+    missing" for hours because the unreadable path was indistinguishable from
+    the absent path.
     """
     import os
     env_type = (os.environ.get(ENV_DATA_TYPE) or "").strip()
@@ -258,23 +428,55 @@ def load_config_classified(
         return None, "error"
     if raw is None:
         return None, "absent"
-    try:
-        doc = json.loads(raw)
-    except ValueError:
-        return None, "absent"
-    if not isinstance(doc, dict):
-        return None, "absent"
-    data_type = doc.get("data_type")
-    if not isinstance(data_type, str) or not data_type.strip():
-        return None, "absent"
-    api_version = doc.get("api_version")
-    if api_version is not None and (
-            not isinstance(api_version, str) or not api_version.strip()):
-        return None, "absent"
-    return {
-        "data_type": data_type.strip(),
-        "api_version": (api_version or DEFAULT_API_VERSION).strip(),
-    }, "ok"
+    cfg = _parse_config(raw)
+    return (cfg, "ok") if cfg is not None else (None, "invalid")
+
+
+def _version_tuple(value: str) -> Optional[tuple[int, int, int]]:
+    match = _SEMVER.fullmatch(value)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def compatibility(config: dict[str, Any], *, engine_version: str,
+                  write_cursor: bool = False) -> dict[str, Any]:
+    """Decide whether this engine may read/write under the shared authority.
+
+    Legacy configs remain readable for rollback, but are always loud.  A
+    versioned authority is strict: unknown protocol/schema and an engine below
+    either declared floor refuse before cursor state is written.
+    """
+    if config.get("authority_mode") != "versioned":
+        return {"ok": True, "warnings": [
+            "legacy bus-v3 authority has no fleet version fence; cursor v2 "
+            "activation is forbidden"]}
+    warnings: list[str] = []
+    if config["protocol_version"] != PROTOCOL_VERSION:
+        return {"ok": False, "warnings": [], "reason":
+                f"unsupported bus protocol v{config['protocol_version']} "
+                f"(engine supports v{PROTOCOL_VERSION})"}
+    schema = config["cursor_schema_version"]
+    supported = WRITABLE_CURSOR_SCHEMAS if write_cursor else READABLE_CURSOR_SCHEMAS
+    if schema not in supported:
+        action = "write" if write_cursor else "read"
+        return {"ok": False, "warnings": [], "reason":
+                f"cursor schema v{schema} is not safe to {action} "
+                f"(supported: {','.join(map(str, supported))})"}
+    own = _version_tuple(engine_version)
+    floor_name = "minimum_writer_version" if write_cursor else "minimum_reader_version"
+    floor = _version_tuple(config[floor_name])
+    if own is None or floor is None:
+        return {"ok": False, "warnings": [], "reason":
+                f"unknown engine/floor version ({engine_version!r}, "
+                f"{config[floor_name]!r})"}
+    if own < floor:
+        return {"ok": False, "warnings": [], "reason":
+                f"coord-engine v{engine_version} is below {floor_name} "
+                f"v{config[floor_name]}"}
+    if schema != CURSOR_SCHEMA_VERSION:
+        warnings.append(
+            f"mixed cursor semantics: authority v{schema}, this engine "
+            f"stamps v{CURSOR_SCHEMA_VERSION}")
+    return {"ok": True, "warnings": warnings}
 
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
@@ -315,6 +517,32 @@ SEEN_IDS_CAP = 500
 
 def cursor_path(team: str, agent: str) -> str:
     return f"team/{team}/_coord/agents/{agent}/records-cursor.json"
+
+
+def v2_cursor_path(team: str, agent: str, generation: int) -> str:
+    """Physically isolated cursor namespace selected by the authority.
+
+    A pre-convergence binary only knows :func:`cursor_path`; it therefore
+    cannot overwrite this path.  Slice 2 owns the v2 document and CAS
+    semantics.  Keeping path selection here makes the isolation testable
+    before activation is allowed.
+    """
+    if not isinstance(generation, int) or generation < 1:
+        raise ValueError("v2 cursor generation must be a positive integer")
+    return (f"team/{team}/_coord/bus-v3/cursors/v2/"
+            f"generation-{generation}/{agent}.json")
+
+
+def v2_active(config: dict[str, Any]) -> bool:
+    """True only for an explicitly activated, non-zero v2 generation."""
+    return bool(
+        config.get("authority_mode") == "versioned"
+        and config.get("cursor_schema_version") == 2
+        and isinstance(config.get("cursor_generation"), int)
+        and config["cursor_generation"] > 0
+        and isinstance(config.get("cursor_activated_at"), str)
+        and config["cursor_activated_at"].strip()
+    )
 
 
 def load_cursor(transport: Any, team: str, agent: str) -> Optional[dict[str, Any]]:
