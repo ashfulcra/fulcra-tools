@@ -551,6 +551,38 @@ def test_queue_unreadable_config_is_degraded_rc3_not_missing_rc2(monkeypatch, ca
     assert t.read(records.cursor_path("fulcra", "amy")) is None
 
 
+def test_queue_json_distinguishes_invalid_config_from_unknown_transport(
+        monkeypatch, capsys):
+    _pin_clock(monkeypatch)
+    args = _queue_args()
+    args.json = True
+
+    invalid = ClassifiedTransport(read_status="ok")
+    invalid.put(records.config_path("fulcra"), "not json at all")
+    assert cli.cmd_queue(args, invalid) == 3
+    invalid_io = capsys.readouterr()
+    invalid_row = json.loads(invalid_io.out)
+    assert invalid_row == {
+        "type": "queue-error",
+        "state": "INVALID",
+        "error_code": "config-invalid",
+        "rc": 3,
+    }
+    assert "INCOMPATIBLE" in invalid_io.err
+
+    unknown = ClassifiedTransport(read_status="error")
+    assert cli.cmd_queue(args, unknown) == 3
+    unknown_io = capsys.readouterr()
+    unknown_row = json.loads(unknown_io.out)
+    assert unknown_row == {
+        "type": "queue-error",
+        "state": "UNKNOWN",
+        "error_code": "config-read-failed",
+        "rc": 3,
+    }
+    assert "DEGRADED" in unknown_io.err
+
+
 def test_queue_truly_absent_config_stays_rc2(monkeypatch, capsys):
     _pin_clock(monkeypatch)
     t = ClassifiedTransport(read_status="ok")

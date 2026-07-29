@@ -150,13 +150,12 @@ class EngineQueueAdapter:
             "queue", self.team, "--agent", self.agent, "--json",
         ])
         if rc != 0:
-            if "INCOMPATIBLE" in error and (
-                    "malformed" in error or "partially versioned" in error):
-                state = ReadState.INVALID
-            elif "transactional cursor invalid" in error:
-                state = ReadState.INVALID
-            else:
-                state = ReadState.UNKNOWN
+            envelope = rows[-1] if rows else {}
+            machine_state = envelope.get("state")
+            state = {
+                "INVALID": ReadState.INVALID,
+                "UNKNOWN": ReadState.UNKNOWN,
+            }.get(machine_state, ReadState.UNKNOWN)
             return ReadResult(state=state, detail=error.strip())
 
         if not rows or rows[-1].get("type") != "queue-delivery":

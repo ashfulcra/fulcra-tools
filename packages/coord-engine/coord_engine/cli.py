@@ -3192,19 +3192,40 @@ def _cmd_queue_v2(
     cursor, raw, status = records.load_v2_cursor_classified(
         transport, args.team, agent, generation)
     if status in ("error", "invalid"):
-        print(f"queue: DEGRADED — transactional cursor {status}; "
-              "coverage untouched, retry", file=sys.stderr)
-        return 3
+        return _queue_failure(
+            args,
+            state="INVALID" if status == "invalid" else "UNKNOWN",
+            error_code=(
+                "cursor-invalid" if status == "invalid"
+                else "cursor-read-failed"
+            ),
+            message=(
+                f"queue: DEGRADED — transactional cursor {status}; "
+                "coverage untouched, retry"
+            ),
+            rc=3,
+        )
     if cursor is None:
         # One-time dual-read migration. After the first successful v2 CAS the
         # isolated v2 document is authoritative forever.
         legacy, legacy_status = records.load_legacy_cursor_classified(
             transport, args.team, agent)
         if legacy_status in ("error", "invalid"):
-            print(f"queue: DEGRADED — cannot safely seed cursor v2 because "
-                  f"the legacy cursor is {legacy_status}; coverage untouched, "
-                  "retry", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="INVALID" if legacy_status == "invalid" else "UNKNOWN",
+                error_code=(
+                    "legacy-cursor-invalid"
+                    if legacy_status == "invalid"
+                    else "legacy-cursor-read-failed"
+                ),
+                message=(
+                    "queue: DEGRADED — cannot safely seed cursor v2 because "
+                    f"the legacy cursor is {legacy_status}; coverage untouched, "
+                    "retry"
+                ),
+                rc=3,
+            )
         cursor = records.initial_v2_cursor(generation, legacy)
         raw = None
     pending = cursor.get("pending")
@@ -3373,6 +3394,27 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
     return 3
 
 
+def _queue_failure(
+        args: argparse.Namespace, *, state: str, error_code: str,
+        message: str, rc: int
+) -> int:
+    """Emit one stable queue failure for humans and JSONL automation.
+
+    Exit status alone cannot distinguish INVALID from UNKNOWN: both are rc=3
+    fail-closed outcomes.  In JSON mode stdout therefore carries a terminal
+    envelope while stderr retains the actionable human diagnostic.
+    """
+    print(message, file=sys.stderr)
+    if bool(getattr(args, "json", False)):
+        jsonutil.print_json({
+            "type": "queue-error",
+            "state": state,
+            "error_code": error_code,
+            "rc": rc,
+        })
+    return rc
+
+
 def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     """THE bus v3 read: cursored event queue for one agent.
 
@@ -3420,15 +3462,28 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             # Unreadable is NOT missing: an expired-auth/offline host must
             # report DEGRADED (retryable), or its automation reads "config
             # missing" as a durable state and goes quietly deaf (2026-07-28).
-            print("queue: DEGRADED — records config could not be read "
-                  "(transport failure, not a missing config); window UNKNOWN, "
-                  "cursor untouched — check auth/network and retry",
-                  file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="UNKNOWN",
+                error_code="config-read-failed",
+                message=(
+                    "queue: DEGRADED — records config could not be read "
+                    "(transport failure, not a missing config); window UNKNOWN, "
+                    "cursor untouched — check auth/network and retry"
+                ),
+                rc=3,
+            )
         if cfg_status == "invalid":
-            print("queue: INCOMPATIBLE — bus-v3 authority is malformed or "
-                  "partially versioned; cursor untouched", file=sys.stderr)
-            return 3
+            return _queue_failure(
+                args,
+                state="INVALID",
+                error_code="config-invalid",
+                message=(
+                    "queue: INCOMPATIBLE — bus-v3 authority is malformed or "
+                    "partially versioned; cursor untouched"
+                ),
+                rc=3,
+            )
         print("queue: no bus-v3 records config "
               f"(team/{args.team}/{records.CONFIG_NAME} or "
               f"{records.ENV_DATA_TYPE}) — cannot read the record queue",
