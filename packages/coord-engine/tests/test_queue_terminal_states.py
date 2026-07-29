@@ -425,6 +425,11 @@ class NoCas(ClassifiedCas):
     compare_and_swap = None
 
 
+class UnknownWindowCas(ClassifiedCas):
+    def records(self, data_type, since, until):
+        return None
+
+
 class VanishingCas(ClassifiedCas):
     """CAS present at the readiness probe, gone at stage time — the only way
     to reach the defensive stage-unsupported branch through the CLI."""
@@ -551,6 +556,9 @@ ENVELOPE_BRANCHES = [
      lambda: _v2_t(window=[dict(_event_rec(None, "no-id"),
                                 recorded_at="2026-07-29T11:30:00Z")]),
      None, 3, "INVALID", "event-id-missing"),
+    ("v2-window-unknown", READ,
+     lambda: _v2_t(UnknownWindowCas),
+     None, 3, "UNKNOWN", "window-unknown"),
     ("v2-stage-cas-vanishes", READ,
      lambda: _v2_t(VanishingCas,
                    window=[dict(_event_rec("r1", "job"),
