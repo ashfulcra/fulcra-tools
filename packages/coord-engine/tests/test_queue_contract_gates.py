@@ -284,7 +284,23 @@ def test_gate_8_obligation_fold_rediscovers_a_lost_wake(store: FakeStore):
 
 
 def test_gate_9_takeover_produces_a_complete_audit_record(queue: ReferenceQueue):
-    """Gate 9: actor, target, reason, timestamp, prior + new generation."""
+    """Gate 9: who, whom, why, when, and what they SAW — never what they predict.
+
+    This gate used to require ``prior_generation`` and
+    ``new_generation == prior + 1``. Both were wrong, and the r2 spec's field
+    list ("prior generation, and new generation recorded durably") is wrong with
+    them: neither is knowable at audit time. The pre-takeover read can be
+    overtaken by a concurrent writer before the takeover lands, so the observed
+    prior is an observation and not necessarily the state actually overtaken; and
+    a successor revision may never exist at all — a replayed pending delivery
+    creates no revision, a staged delivery may never commit, a CAS loser adopts
+    the winner's state.
+
+    So the gate now pins what a caller can honestly record: the observation made
+    at decision time, and the authority it intended to operate under. What
+    actually happened is evidenced by the cursor document afterward, which is the
+    only place it can be evidenced. An audit that guesses is not evidence.
+    """
     first = queue.read(T0)
     assert first.token
 
@@ -293,12 +309,22 @@ def test_gate_9_takeover_produces_a_complete_audit_record(queue: ReferenceQueue)
     assert len(queue.audit) == 1
     entry = queue.audit[0]
     for required in ("actor", "target", "reason", "at",
-                     "prior_generation", "new_generation", "token"):
+                     "observed_prior", "intended_authority", "token"):
         assert required in entry, f"audit record is missing {required}"
     assert entry["actor"] == "coord-boss"
     assert entry["target"] == AGENT
-    assert entry["new_generation"] == entry["prior_generation"] + 1
     assert entry["token"] == first.token
+
+    # The observation must name a real coverage claim, not an empty gesture.
+    assert entry["observed_prior"], "observed_prior must carry the claim seen"
+    assert "schema" in entry["intended_authority"]
+
+    # And it must NOT smuggle a prediction back in under another name.
+    assert "new_generation" not in entry
+    assert "new_revision" not in entry.get("intended_authority", {}), (
+        "intended_authority names the authority, not a successor revision — a "
+        "predicted revision may never come to exist"
+    )
 
 
 def test_gate_10_unreadable_component_makes_nothing_owed_unsayable(store: FakeStore):
