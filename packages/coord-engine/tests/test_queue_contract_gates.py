@@ -108,6 +108,51 @@ def test_gate_2_crash_before_commit_replay_is_idempotent(queue: ReferenceQueue):
     assert queue.coverage() == advanced, "a replayed commit must not advance twice"
 
 
+def test_gate_2b_elapsed_time_replay_still_commits_exactly_once(
+        queue: ReferenceQueue):
+    """Gate 2b: long elapsed time loses no work and double-advances nothing.
+
+    Spec step 5 says an uncommitted token "replays after timeout". That sentence
+    admits two implementations — expire the batch and re-stage it under a fresh
+    token, or never expire it and replay the original — and the shipped engine
+    and the reference model here picked different ones. Neither choice is the
+    contract, so this gate deliberately says NOTHING about token identity.
+
+    What it does pin is the property both must have and that no other gate
+    covers: after an arbitrary gap with no commit, the same work is still
+    delivered, and it still advances coverage exactly once. Gates 1 and 2 cover
+    replay after a *crash*; this covers replay after *elapsed time*, which is
+    the case a long-dark agent and a reclaimed container actually hit.
+    """
+    first = queue.read(T0)
+    assert [e["id"] for e in first.events] == ["r1", "r2"]
+    assert queue.coverage() is None
+
+    # A very long gap: well past any plausible expiry, in either design.
+    later = T0 + 30 * 24 * 3600
+    replay = queue.read(later)
+
+    assert replay.state is ReadState.DATA, (
+        "an uncommitted batch must survive elapsed time; going CLEAR here would "
+        "silently drop work that was delivered but never acknowledged"
+    )
+    assert [e["id"] for e in replay.events] == ["r1", "r2"], (
+        "the redelivered batch must be the same work, whatever token carries it"
+    )
+
+    assert queue.commit(replay.token, later + 1) is CommitOutcome.OK
+    advanced = queue.coverage()
+    assert advanced == "2026-07-29T10:05:00Z"
+
+    # Whatever became of the pre-gap token, it must not advance coverage again.
+    assert queue.commit(first.token, later + 2) in (
+        CommitOutcome.IDEMPOTENT, CommitOutcome.UNKNOWN_TOKEN, CommitOutcome.STALE)
+    assert queue.coverage() == advanced, (
+        "coverage advanced twice for one batch — exactly the double-processing "
+        "that read/process/commit exists to prevent"
+    )
+
+
 def test_gate_3_concurrent_wakes_lose_no_cursor_update(store: FakeStore):
     """Gate 3: two same-agent wakes converge on one batch; neither is lost.
 

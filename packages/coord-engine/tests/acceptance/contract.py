@@ -192,7 +192,16 @@ class ReferenceQueue:
     anticipate codex-coder's internals.
     """
 
-    #: A staged batch older than this is abandoned and replays (spec step 5).
+    #: A staged batch older than this is re-staged under a fresh token.
+    #:
+    #: This is ONE permitted strategy for spec step 5 ("an uncommitted token
+    #: replays after timeout"), not the contract. The shipped engine chose the
+    #: stronger option: no expiry at all, so a pending batch replays unchanged
+    #: under its original token until committed. Both satisfy the property that
+    #: matters — an uncommitted batch is never lost, and it commits exactly once
+    #: — so no gate may assert either one's token behavior as required. That
+    #: distinction is the whole reason the elapsed-time gate below is written
+    #: without reference to token identity.
     STAGE_TIMEOUT_S = 900
 
     #: Protocol version this implementation writes. Gate 7's antagonist writes a
