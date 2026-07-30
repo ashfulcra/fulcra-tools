@@ -3250,6 +3250,14 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+_QUEUE_EMPTY_IS_NOT_CLEAR = (
+    "queue: 0 events — this is NOT proof that nothing is owed. Events are "
+    "best-effort wake hints; a hint never written, or one older than this "
+    "window, leaves a durable obligation unmentioned. For the actual answer: "
+    "coord-engine obligations <team> --agent <you>  (rc 3 = UNKNOWN)"
+)
+
+
 def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
     if json_mode:
         for event in events:
@@ -4013,6 +4021,11 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         # Text mode stays byte-identical for shell consumers; the JSON
         # envelope is emitted once below, after the cursor outcome is known.
         _print_queue_events(fresh, json_mode=False)
+    if not fresh:
+        # r2 spec item 3: an empty queue read is not an obligation answer. On
+        # stderr in BOTH modes, so it cannot disturb the single-object --json
+        # contract slice 4 established, and cannot be lost in text mode either.
+        print(_QUEUE_EMPTY_IS_NOT_CLEAR, file=sys.stderr)
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
     if peek:

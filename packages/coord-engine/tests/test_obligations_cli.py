@@ -147,3 +147,62 @@ def test_task_index_failure_degrades_every_row_derived_component():
             f"{component} derives from the task index and must not report clear "
             "when that index is unreadable"
         )
+
+
+# --- queue integration (slice 3, item: "fold runs in queue/briefing paths") ---
+
+def test_empty_queue_read_says_it_is_not_an_obligation_answer(capsys):
+    """An empty queue must not read as "nothing owed".
+
+    r2 spec item 3: "A wake that reads an empty queue but does not perform this
+    reconciliation cannot prove there is no work." The engine now says so at the
+    exact moment the wrong inference is available — on the empty read itself,
+    where a terse wake prompt would otherwise stop.
+
+    Said on stderr deliberately: stdout stays byte-identical for shell consumers
+    that pipe `queue`, a contract slice 4 pinned with a golden test.
+    """
+    import argparse
+    from test_records_write import QueueTransport
+
+    transport = QueueTransport(window=[])          # readable window, zero events
+    transport.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+                  json.dumps({"data_type": "MomentAnnotation/x",
+                              "api_version": "v1alpha1"}))
+    args = argparse.Namespace(team=TEAM, agent=AGENT, json=False, peek=False,
+                              consume=False, all=False)
+    rc = cli.cmd_queue(args, transport)
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert captured.out == "", "zero events means zero stdout rows"
+    assert "NOT proof that nothing is owed" in captured.err, (
+        "the empty read must carry the disclaimer; without it an empty result is "
+        "the most authoritative-looking wrong answer in the system"
+    )
+    assert "coord-engine obligations" in captured.err, (
+        "name the command that does answer the question — a warning with no "
+        "remedy gets ignored on second reading"
+    )
+
+
+def test_queue_with_events_does_not_emit_the_disclaimer(capsys):
+    """The notice belongs to the empty case only.
+
+    Printing it on every read would train agents to ignore it, which is how a
+    correct warning becomes noise and then becomes invisible.
+    """
+    import argparse
+    from test_records_write import QueueTransport, _event_rec
+
+    transport = QueueTransport(window=[_event_rec("r1", "job", to=AGENT)])
+    transport.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+                  json.dumps({"data_type": "MomentAnnotation/x",
+                              "api_version": "v1alpha1"}))
+    args = argparse.Namespace(team=TEAM, agent=AGENT, json=False, peek=False,
+                              consume=False, all=False)
+    cli.cmd_queue(args, transport)
+    captured = capsys.readouterr()
+
+    assert "job" in captured.out
+    assert "NOT proof that nothing is owed" not in captured.err
