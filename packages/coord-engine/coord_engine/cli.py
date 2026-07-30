@@ -4050,6 +4050,51 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             fresh, cfg=cfg,
             cursor_path=records.cursor_path(args.team, agent),
             advanced=advanced))
+    if not fresh:
+        return _reconcile_after_empty_read(args, transport, agent)
+    return 0
+
+
+def _reconcile_after_empty_read(args: argparse.Namespace, transport: Any,
+                                agent: str) -> int:
+    """Run the obligation fold after an empty queue read, on request.
+
+    An empty queue read establishes that no EVENT arrived in the window. It does
+    not establish that nothing is owed — that is the r2 spec item-3 distinction,
+    and the fold is the only thing that closes it.
+
+    OPT-IN, deliberately. Making this the default adds a task-index listing, a
+    review listing and a roles listing to every wake of every agent in the fleet,
+    on a surface another agent owns. That is a fleet-economics decision rather
+    than a correctness one, so the capability ships switchable and the DEFAULT is
+    coord-boss's to set: flipping it is `default=True` on the flag, one line, with
+    the tests already here.
+
+    Returns the rc the caller should use: the fold's UNKNOWN/INVALID states must
+    reach the exit code, or an agent scripting `queue` learns nothing from them.
+    """
+    if not getattr(args, "obligations", False):
+        return 0
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, agent, now=_iso(_now())),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    if getattr(args, "json", False):
+        jsonutil.print_json({
+            "type": "obligations",
+            "state": result.state.value,
+            "owed_count": len(result.owed),
+            "consulted": result.consulted,
+            "degraded": result.degraded,
+            "malformed": result.malformed,
+            "reason": result.reason(),
+        })
+    else:
+        print(f"queue: obligations {result.state.value} — {result.reason()}",
+              file=sys.stderr)
+    if result.state is obligations_mod.ObligationState.UNKNOWN:
+        return 3
+    if result.state is obligations_mod.ObligationState.INVALID:
+        return 4
     return 0
 
 
@@ -7785,6 +7830,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show events without advancing the cursor (safe diagnostic read)")
     qu.add_argument("--consume", action="store_true",
                     help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
+    # Default is coord-boss's call, not this flag's author's: switching it to
+    # default=True imposes three listings on every wake of every agent in the
+    # fleet. The capability is here and tested either way; see
+    # _reconcile_after_empty_read.
+    qu.add_argument("--obligations", action="store_true",
+                    help="after an EMPTY read, reconcile durable obligations "
+                         "(an empty queue is not proof nothing is owed); "
+                         "rc 3 = UNKNOWN, rc 4 = INVALID")
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")

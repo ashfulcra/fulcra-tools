@@ -167,3 +167,83 @@ def test_empty_queue_notice_is_proposed_but_not_wired():
         "the notice is wired into cmd_queue; slice 4's golden CLEAR test must be "
         "updated in the same change, with coord-boss/codex-coder agreement"
     )
+
+
+# --- queue --obligations: the switchable half of the integration -------------
+
+def _queue_transport():
+    from test_records_write import QueueTransport
+    t = QueueTransport(window=[])
+    t.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+          json.dumps({"data_type": "MomentAnnotation/x",
+                      "api_version": "v1alpha1"}))
+    return t
+
+
+def _queue_args(**kw):
+    import argparse
+    base = dict(team=TEAM, agent=AGENT, json=False, peek=False, consume=False,
+                all=False, obligations=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_empty_read_without_the_flag_costs_nothing_extra():
+    """Default OFF means default cost unchanged — no fold reads on a plain wake.
+
+    This is the property that makes the default safe to leave alone: an agent that
+    does not ask for reconciliation pays exactly what it paid before.
+    """
+    transport = _queue_transport()
+    before = len(getattr(transport, "reads", []) or [])
+    rc = cli.cmd_queue(_queue_args(), transport)
+    assert rc == 0
+    # No obligation probe ran: the review/roles prefixes were never listed.
+    assert not any("review" in str(p) or "roles" in str(p)
+                   for p in getattr(transport, "listed", []) or []), (
+        "an unasked-for fold ran; --obligations must be genuinely opt-in"
+    )
+    del before
+
+
+def test_empty_read_with_the_flag_reconciles_and_can_reach_clear(capsys):
+    transport = _queue_transport()
+    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
+    err = capsys.readouterr().err
+    assert "obligations CLEAR" in err
+    assert rc == 0
+
+
+def test_flag_surfaces_unknown_in_the_exit_code(capsys):
+    """A degraded fold must reach rc, or a scripted wake learns nothing from it."""
+    from coord_engine.transport import TransportError
+
+    transport = _queue_transport()
+    original = transport.list_dir if hasattr(transport, "list_dir") else None
+
+    def dark(prefix):
+        if prefix == f"team/{TEAM}/review/":
+            raise TransportError("review listing down")
+        return original(prefix) if original else []
+
+    transport.list_dir = dark
+    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
+    err = capsys.readouterr().err
+    assert rc == 3, "UNKNOWN must be a distinct nonzero rc, not a printed aside"
+    assert "obligations UNKNOWN" in err
+    assert "reviews" in err
+
+
+def test_flag_does_nothing_when_events_were_delivered(capsys):
+    """Reconciliation is for the empty case; a delivered batch is already work."""
+    from test_records_write import QueueTransport, _event_rec
+
+    transport = QueueTransport(window=[_event_rec("r1", "job", to=AGENT)])
+    transport.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+                  json.dumps({"data_type": "MomentAnnotation/x",
+                              "api_version": "v1alpha1"}))
+    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "job" in captured.out
+    assert "obligations" not in captured.err
