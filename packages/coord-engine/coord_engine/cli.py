@@ -4045,57 +4045,64 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if not advanced:
         print("queue: cursor save failed — coverage unadvanced, next read "
               "re-covers this window", file=sys.stderr)
+    obligations_rc, obligations_fragment = (
+        _reconcile_after_empty_read(args, transport, agent) if not fresh
+        else (0, None))
     if json_mode:
-        jsonutil.print_json(_queue_result_envelope(
+        envelope = _queue_result_envelope(
             fresh, cfg=cfg,
             cursor_path=records.cursor_path(args.team, agent),
-            advanced=advanced))
-    if not fresh:
-        return _reconcile_after_empty_read(args, transport, agent)
-    return 0
+            advanced=advanced)
+        if obligations_fragment is not None:
+            # NESTED, not a second object. Slice 4's contract is that --json
+            # success is exactly one object so a consumer switches on one field;
+            # emitting the fold as a sibling row would break every reader that
+            # relies on it. The reconciliation is part of this read's verdict, so
+            # it belongs inside the verdict.
+            envelope["obligations"] = obligations_fragment
+        jsonutil.print_json(envelope)
+    return obligations_rc
 
 
-def _reconcile_after_empty_read(args: argparse.Namespace, transport: Any,
-                                agent: str) -> int:
+def _reconcile_after_empty_read(
+        args: argparse.Namespace, transport: Any,
+        agent: str) -> "tuple[int, Optional[dict[str, Any]]]":
     """Run the obligation fold after an empty queue read, on request.
 
     An empty queue read establishes that no EVENT arrived in the window. It does
     not establish that nothing is owed — that is the r2 spec item-3 distinction,
     and the fold is the only thing that closes it.
 
-    OPT-IN, deliberately. Making this the default adds a task-index listing, a
-    review listing and a roles listing to every wake of every agent in the fleet,
-    on a surface another agent owns. That is a fleet-economics decision rather
-    than a correctness one, so the capability ships switchable and the DEFAULT is
-    coord-boss's to set: flipping it is `default=True` on the flag, one line, with
-    the tests already here.
+    DEFAULT ON since the 2026-07-30 ruling; ``--no-obligations`` opts out. It
+    costs a task-index listing, a review listing and a roles listing on an empty
+    wake, which is a real bill — but only on the empty read, and only where the
+    wrong inference was otherwise free. A cost-sensitive caller can still decline
+    it explicitly, which is different from never being offered it.
 
     Returns the rc the caller should use: the fold's UNKNOWN/INVALID states must
     reach the exit code, or an agent scripting `queue` learns nothing from them.
     """
     if not getattr(args, "obligations", False):
-        return 0
+        return 0, None
     result = obligations_mod.fold(
         _obligation_probes(transport, args.team, agent, now=_iso(_now())),
         expected=obligations_mod.OBLIGATION_COMPONENTS)
-    if getattr(args, "json", False):
-        jsonutil.print_json({
-            "type": "obligations",
-            "state": result.state.value,
-            "owed_count": len(result.owed),
-            "consulted": result.consulted,
-            "degraded": result.degraded,
-            "malformed": result.malformed,
-            "reason": result.reason(),
-        })
-    else:
+    fragment = {
+        "state": result.state.value,
+        "owed_count": len(result.owed),
+        "consulted": result.consulted,
+        "degraded": result.degraded,
+        "malformed": result.malformed,
+        "reason": result.reason(),
+    }
+    if not getattr(args, "json", False):
         print(f"queue: obligations {result.state.value} — {result.reason()}",
               file=sys.stderr)
     if result.state is obligations_mod.ObligationState.UNKNOWN:
-        return 3
+        return 3, fragment
     if result.state is obligations_mod.ObligationState.INVALID:
-        return 4
-    return 0
+        return 4, fragment
+    return 0, fragment
 
 
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
@@ -7830,14 +7837,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show events without advancing the cursor (safe diagnostic read)")
     qu.add_argument("--consume", action="store_true",
                     help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
-    # Default is coord-boss's call, not this flag's author's: switching it to
-    # default=True imposes three listings on every wake of every agent in the
-    # fleet. The capability is here and tested either way; see
-    # _reconcile_after_empty_read.
-    qu.add_argument("--obligations", action="store_true",
+    # DEFAULT ON (coord-boss ruling, 2026-07-30). The false inference — "no
+    # events, so nothing owed" — exists only on the empty read, and the agents
+    # most at risk are the terse-wake ones who would never pass an opt-in flag.
+    # --no-obligations stays for cost-sensitive callers: three listings per empty
+    # wake is a real cost, just not one that should be the default silence.
+    qu.add_argument("--obligations", action=argparse.BooleanOptionalAction,
+                    default=True,
                     help="after an EMPTY read, reconcile durable obligations "
                          "(an empty queue is not proof nothing is owed); "
-                         "rc 3 = UNKNOWN, rc 4 = INVALID")
+                         "rc 3 = UNKNOWN, rc 4 = INVALID. "
+                         "--no-obligations skips it")
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")

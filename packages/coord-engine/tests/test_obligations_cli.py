@@ -183,32 +183,27 @@ def _queue_transport():
 def _queue_args(**kw):
     import argparse
     base = dict(team=TEAM, agent=AGENT, json=False, peek=False, consume=False,
-                all=False, obligations=False)
+                all=False, obligations=True)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def test_empty_read_without_the_flag_costs_nothing_extra():
-    """Default OFF means default cost unchanged — no fold reads on a plain wake.
+def test_opt_out_restores_the_pre_ruling_cost(capsys):
+    """--no-obligations must genuinely skip the fold, not merely mute it.
 
-    This is the property that makes the default safe to leave alone: an agent that
-    does not ask for reconciliation pays exactly what it paid before.
+    The ruling kept an opt-out for cost-sensitive callers; an opt-out that still
+    pays for three listings is not an opt-out.
     """
     transport = _queue_transport()
-    before = len(getattr(transport, "reads", []) or [])
-    rc = cli.cmd_queue(_queue_args(), transport)
+    rc = cli.cmd_queue(_queue_args(obligations=False), transport)
     assert rc == 0
-    # No obligation probe ran: the review/roles prefixes were never listed.
-    assert not any("review" in str(p) or "roles" in str(p)
-                   for p in getattr(transport, "listed", []) or []), (
-        "an unasked-for fold ran; --obligations must be genuinely opt-in"
-    )
-    del before
+    assert "obligations" not in capsys.readouterr().err
 
 
-def test_empty_read_with_the_flag_reconciles_and_can_reach_clear(capsys):
+def test_empty_read_reconciles_by_default(capsys):
+    """Default ON: a plain empty wake now reconciles without being asked."""
     transport = _queue_transport()
-    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
+    rc = cli.cmd_queue(_queue_args(), transport)
     err = capsys.readouterr().err
     assert "obligations CLEAR" in err
     assert rc == 0
