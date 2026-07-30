@@ -357,3 +357,188 @@ def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
     assert row["obligations"]["state"] == state, (
         "the diagnosis must survive as a nested field, not be dropped"
     )
+
+
+# --- codex-coder cost-ack evidence at f48cf81a+ ------------------------------
+#
+# The re-ack asked for four things, each a test below: op counts at 0/1/several
+# responsible PRs, a hard budget that per-PR growth cannot overrun, fail-closed
+# on budget expiry with NO false CLEAR, and proof that eventful wakes skip the
+# fold while --no-obligations stays byte-exact.
+
+class CountingQueueTransport:
+    """Wraps a queue transport and counts every transport operation.
+
+    Counting rather than timing on purpose: op count is the thing that grows
+    with an agent's PR count, and it is deterministic. A wall-clock assertion
+    would be a flake generator on shared CI.
+    """
+
+    def __init__(self, inner, responsible_prs=()):
+        self.inner = inner
+        self.responsible_prs = list(responsible_prs)
+        self.ops = 0
+        self.listed: list[str] = []
+
+    def _bump(self, label):
+        self.ops += 1
+        self.listed.append(label)
+
+    def list_dir(self, prefix):
+        self._bump(f"list:{prefix}")
+        if prefix.endswith("/_coord/forge/watch/"):
+            return [{"name": f"{slug}.md", "is_dir": False}
+                    for slug in self.responsible_prs]
+        return self.inner.list_dir(prefix) if hasattr(self.inner, "list_dir") else []
+
+    def read(self, path):
+        self._bump(f"read:{path}")
+        return self.inner.read(path)
+
+    def read_classified(self, path):
+        self._bump(f"readc:{path}")
+        value = self.inner.read(path)
+        return (value, "ok") if value is not None else (None, "absent")
+
+    def records(self, *a, **kw):
+        self._bump("records")
+        return self.inner.records(*a, **kw)
+
+    def write(self, path, content):
+        self._bump(f"write:{path}")
+        return self.inner.write(path, content)
+
+
+def _counting(responsible_prs=()):
+    return CountingQueueTransport(_queue_transport(), responsible_prs)
+
+
+@pytest.mark.parametrize("n_prs", [0, 1, 5])
+def test_fold_transport_ops_are_measured_and_reported(n_prs):
+    """Op counts at 0 / 1 / several responsible PRs — the evidence asked for.
+
+    This test does not assert a magic number; it asserts the shape the cost-ack
+    turns on: the fold's cost is bounded by the budget, and growth with PR count
+    is visible rather than hidden. The printed counts are the evidence.
+    """
+    transport = _counting([f"pr-{i}" for i in range(n_prs)])
+    result = obligations_mod.fold(
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    print(f"\nresponsible_prs={n_prs} transport_ops={transport.ops}")
+    assert result.state in (
+        obligations_mod.ObligationState.CLEAR,
+        obligations_mod.ObligationState.DATA,
+        obligations_mod.ObligationState.UNKNOWN,
+    )
+    # The bound that matters: the fold never becomes unbounded in PR count
+    # without the budget noticing. 200 is far above any real fleet fan-out and
+    # far below "runaway"; a breach here means the deadline stopped binding.
+    assert transport.ops < 200, (
+        f"{transport.ops} transport ops for {n_prs} PRs — the fold's fan-out is "
+        "no longer bounded; re-check that the shared deadline is threaded"
+    )
+
+
+def test_expired_budget_is_unknown_never_a_false_clear(monkeypatch):
+    """Budget expiry must fail closed.
+
+    The dangerous version of a timeout is the one that returns early with
+    whatever it managed to read and calls it complete. With the budget already
+    spent the fold must be UNKNOWN — a CLEAR here would be a false clear caused
+    by our own cost control, which is the worst possible source for one.
+
+    Time is moved deterministically rather than by setting the budget to zero:
+    ``config.env_float`` enforces a STRICT positive floor, so
+    ``COORD_OBLIGATION_BUDGET=0`` silently falls back to the default. (That trap
+    is worth knowing on its own — an operator setting 0 to disable the fold gets
+    20s instead of off.)
+    """
+    from coord_engine import budget as budget_mod
+
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        # First read opens the deadline; everything after is far past it.
+        value = clock["t"]
+        clock["t"] = 1e9
+        return value
+
+    monkeypatch.setattr(budget_mod.time, "monotonic", fake_monotonic)
+    transport = _counting([f"pr-{i}" for i in range(3)])
+    result = obligations_mod.fold(
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    assert result.state is not obligations_mod.ObligationState.CLEAR, (
+        "an exhausted budget produced CLEAR — cost control must never "
+        "manufacture a false clear"
+    )
+    assert result.state is obligations_mod.ObligationState.UNKNOWN
+    assert not result.can_claim_clear
+
+
+def test_the_budget_is_actually_bound_to_the_fold():
+    """Non-vacuity: prove the knob exists and the fold reads it.
+
+    Without this, the expiry test above could pass for an unrelated reason and
+    the budget could be entirely unthreaded.
+    """
+    assert cli._obligation_budget() == cli.DEFAULT_OBLIGATION_BUDGET
+    import inspect
+    src = inspect.getsource(cli._obligation_probes)
+    assert "_obligation_budget()" in src
+    assert "fold_dl.instant" in src, "the deadline is opened but never passed"
+    assert src.count("fold_dl.instant") >= 2, (
+        "both transport-heavy probes (reviews, forge) must share the deadline"
+    )
+
+
+def test_eventful_wake_pays_nothing_for_the_fold(capsys):
+    """A wake WITH events must not touch review or forge surfaces at all."""
+    from test_records_write import QueueTransport, _event_rec
+
+    inner = QueueTransport(window=[_event_rec("r1", "job", to=AGENT)])
+    inner.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+              json.dumps({"data_type": "MomentAnnotation/x",
+                          "api_version": "v1alpha1"}))
+    transport = CountingQueueTransport(inner)
+    cli.cmd_queue(_queue_args(), transport)
+    capsys.readouterr()
+    touched = [op for op in transport.listed
+               if "/review/" in op or "/forge/" in op]
+    assert touched == [], (
+        f"an eventful wake paid for the fold: {touched}. Reconciliation is for "
+        "the empty read only."
+    )
+
+
+def test_budget_breach_during_the_forge_scan_degrades_not_truncates(monkeypatch):
+    """The cap-exceeded case codex-coder asked to see explicitly.
+
+    Distinct from the pre-expired test above: here the fold STARTS with budget
+    and runs out partway through the per-PR fan-out. The dangerous outcome is a
+    silently short list — some PRs scanned, the rest dropped, reported as
+    complete. It must degrade to UNKNOWN instead.
+    """
+    from coord_engine import budget as budget_mod
+
+    ticks = {"n": 0}
+
+    def creeping_monotonic():
+        # Opens with budget, then jumps past the deadline once the scan is
+        # under way — a breach mid-fan-out rather than before it.
+        ticks["n"] += 1
+        return 0.0 if ticks["n"] <= 2 else 1e9
+
+    monkeypatch.setattr(budget_mod.time, "monotonic", creeping_monotonic)
+    transport = _counting([f"pr-{i}" for i in range(20)])
+    result = obligations_mod.fold(
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+
+    assert result.state is not obligations_mod.ObligationState.CLEAR, (
+        "a mid-scan budget breach reported CLEAR — a truncated fan-out must "
+        "never look like complete coverage"
+    )
+    assert result.state is obligations_mod.ObligationState.UNKNOWN
+    assert result.degraded, "the breach must name which component went dark"

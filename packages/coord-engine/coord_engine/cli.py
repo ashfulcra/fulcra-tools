@@ -1169,6 +1169,18 @@ def _briefing_budget() -> float:
     return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
 
 
+#: Aggregate deadline (seconds) for ONE obligation fold. The fold runs on every
+#: empty wake now, so its cost is fleet-wide per-wake cost — it needs a hard
+#: ceiling, not a per-component hope. Deliberately tighter than the briefing
+#: budget: a briefing is a human asking a question, a fold is a machine on a
+#: schedule. Env ``COORD_OBLIGATION_BUDGET``.
+DEFAULT_OBLIGATION_BUDGET = 20.0
+
+
+def _obligation_budget() -> float:
+    return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
+
+
 def _role_fold_budget() -> float:
     """Cumulative deadline (seconds) for one role-resolution pass. Env
     ``COORD_ROLE_FOLD_BUDGET`` (see the DEFAULT_ROLE_FOLD_BUDGET rationale). Its own
@@ -3137,6 +3149,13 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     hears the difference.
     """
     P, S = obligations_mod.ProbeResult, obligations_mod.ProbeState
+    # ONE shared deadline for the whole fold, not one per component. The forge
+    # probe is a data-dependent fan-out (responsibility scan, then a listing per
+    # responsible PR), so an unbounded fold grows with the agent's PR count and
+    # can overrun the wake cadence it is supposed to ride inside. A shared
+    # deadline also means an expensive earlier probe shrinks what the next gets,
+    # rather than each one starting the clock fresh.
+    fold_dl = Deadline.open(_obligation_budget())
     rows, rows_ok, rows_reason = _load_rows_status(transport, team)
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, team, agent, rows, now=now)
@@ -3145,6 +3164,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         def probe():
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
+            if fold_dl.expired():
+                return P(state=S.UNREADABLE, detail="obligation budget exhausted")
             mine = _needs_me_rows(transport, team, agent, rows, now=now,
                                   held_roles=held_roles, include_history=False)
             owed = [r for r in mine
@@ -3155,6 +3176,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     def _roles_probe():
         if not rows_ok:
             return P(state=S.UNREADABLE, detail=rows_reason)
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
         if unresolved_roles:
             # A role whose lease could not be read might route work here. Doubt.
             return P(state=S.UNREADABLE,
@@ -3182,8 +3205,15 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         return real, markers
 
     def _reviews_probe():
+        if fold_dl.expired():
+            # The budget was gone before this probe ran. A helper handed an
+            # already-dead deadline can legitimately return [] without ever
+            # attempting a read — and [] here would be a false CLEAR caused by
+            # our own cost control, which is the worst possible source for one.
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
         sink: list[str] = []
         found = _pending_reviews_for(transport, team, agent, rows=rows,
+                                     deadline=fold_dl.instant,
                                      degraded_sink=sink)
         real, markers = _split_markers(found)
         if sink or markers:
@@ -3197,7 +3227,10 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     def _forge_probe():
         """Unacknowledged forge feedback — a durable obligation surfaced by
         needs-me and briefing, and absent from the first cut of this registry."""
-        found = _forge_feedback_for(transport, team, agent)
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+        found = _forge_feedback_for(transport, team, agent,
+                                    deadline=fold_dl.instant)
         real, markers = _split_markers(found)
         if markers:
             return P(state=S.UNREADABLE, owed=real,
