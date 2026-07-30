@@ -149,4 +149,3 @@ def _touched_since(root, before):
     return {
         path for path, blob in after.items() if before.get(path) != blob
     } | {path for path in before if path not in after}
-

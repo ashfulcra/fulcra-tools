@@ -32,12 +32,19 @@ this slice exists to end. Keeping it as a named registry means a wrong or
 incomplete set is a one-line correction visible in review, rather than a missing
 branch buried in control flow.
 
-PROVENANCE, stated plainly because it matters: this set is reconstructed from the
-r2 spec sentence quoted above. It was not confirmed against the execution plan's
-owner text, because the authoritative plan document was overwritten before the
-slice-3 dispatch could be cross-checked against it (620 bytes of addendum
-replacing 6497 bytes of plan). If the authoritative set differs, correcting
-``OBLIGATION_COMPONENTS`` is the entire change.
+PROVENANCE, stated plainly because it matters: this set began as a reconstruction
+from the r2 spec sentence quoted above, unconfirmed against the execution plan's
+owner text (that document was overwritten before slice 3 could be cross-checked
+against it).
+
+``forge_feedback`` was ADDED by review (codex-reviewer, PR 501): unacknowledged
+forge feedback is already a durable obligation surfaced by ``needs-me`` and
+``briefing``, and its absence here meant the fold could return CLEAR while that
+work was owed. That is the exact failure this module warns about two paragraphs
+up — a component nobody named reports nothing and looks identical to one with
+nothing to report — and it was caught by a reviewer reading the surface, not by
+any test here. Worth remembering the next time this list changes: the registry
+is only as good as the last independent read of what an agent can owe.
 """
 
 from __future__ import annotations
@@ -97,6 +104,7 @@ class Component:
 OBLIGATION_COMPONENTS: tuple[str, ...] = (
     "blocks",
     "directives",
+    "forge_feedback",
     "reminders",
     "reviews",
     "role_duties",

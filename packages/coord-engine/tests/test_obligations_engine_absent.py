@@ -143,8 +143,9 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """A fake store plus an env whose PATH has a fake ``fulcra-api`` and whose
     interpreter cannot import ``coord_engine``."""
     store = tmp_path / "store"
-    for prefix in ("task", "review", "roles"):
-        (store / "team" / "fulcra" / prefix).mkdir(parents=True)
+    for prefix in ("task", "review", "roles",
+                   "_coord/forge/watch", "_coord/forge/feedback"):
+        (store / "team" / "fulcra" / prefix).mkdir(parents=True, exist_ok=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "fulcra-api"
@@ -217,7 +218,8 @@ def test_each_component_can_independently_darken(sandbox):
     the text tests and still leave that component unverified forever.
     """
     _store, env = sandbox
-    for prefix in ("team/fulcra/task", "team/fulcra/review", "team/fulcra/roles"):
+    for prefix in ("team/fulcra/task", "team/fulcra/review", "team/fulcra/roles",
+                   "team/fulcra/_coord/forge"):
         codes = _run_procedure(dict(env, FAKE_DARK=prefix))
         assert any(code != 0 for code in codes), (
             f"darkening {prefix} changed nothing — the procedure never reads it, "

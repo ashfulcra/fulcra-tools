@@ -242,3 +242,118 @@ def test_flag_does_nothing_when_events_were_delivered(capsys):
     assert rc == 0
     assert "job" in captured.out
     assert "obligations" not in captured.err
+
+
+# --- codex-reviewer PR 501: the compositions the focused suite missed --------
+
+def _degraded_marker_transport(marker_type: str):
+    """A queue transport whose review fold returns a DEGRADATION MARKER ROW.
+
+    The subtle case: `_pending_reviews_for` signals several incomplete reads with
+    marker rows rather than the degraded_sink, so a sink-only check let the marker
+    ride through as ordinary owed work — the fold then reported DATA/rc 0 with
+    incomplete coverage.
+    """
+    transport = _queue_transport()
+    original = cli._pending_reviews_for
+
+    def patched(*a, **kw):
+        return [{"type": marker_type, "scanned": 1, "total": 9},
+                {"type": "review-pending", "slug": "pr-777"}]
+    return transport, original, patched
+
+
+@pytest.mark.parametrize("marker", [
+    "review-head-degraded",
+    "review-fold-degraded",
+    "review-orphan-degraded",
+    "review-role-degraded",
+])
+def test_review_degradation_markers_make_the_fold_unknown(monkeypatch, marker):
+    """Every review marker degrades the fold, and none of them reach the sink."""
+    transport, _orig, patched = _degraded_marker_transport(marker)
+    monkeypatch.setattr(cli, "_pending_reviews_for", patched)
+
+    result = obligations_mod.fold(
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+
+    assert result.state is obligations_mod.ObligationState.UNKNOWN, (
+        f"{marker} was treated as ordinary owed work; incomplete review coverage "
+        "must make CLEAR/DATA unsayable"
+    )
+    assert "reviews" in result.degraded
+    assert any(r.get("slug") == "pr-777" for r in result.owed), (
+        "the pending rows that WERE read must survive the degradation — partial "
+        "work stays available while the terminal state stays honest"
+    )
+
+
+def test_forge_degradation_marker_makes_the_fold_unknown(monkeypatch):
+    transport = _queue_transport()
+    monkeypatch.setattr(cli, "_forge_feedback_for", lambda *a, **kw: [
+        {"type": "forge-degraded", "scanned": 0, "total": 3, "skipped": 3},
+    ])
+    result = obligations_mod.fold(
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    assert result.state is obligations_mod.ObligationState.UNKNOWN
+    assert "forge_feedback" in result.degraded
+
+
+def test_owed_forge_feedback_is_data_not_clear(monkeypatch):
+    """The gap the reviewer found: unacked forge feedback IS owed work.
+
+    Before `forge_feedback` joined the registry this fold returned CLEAR while a
+    reviewer was waiting — a component nobody named reports nothing and looks
+    exactly like one with nothing to report.
+    """
+    transport = _queue_transport()
+    monkeypatch.setattr(cli, "_forge_feedback_for", lambda *a, **kw: [
+        {"type": "forge-feedback", "pr_slug": "pr-501", "count": 2},
+    ])
+    result = obligations_mod.fold(
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    assert result.state is obligations_mod.ObligationState.DATA
+    assert any(r.get("pr_slug") == "pr-501" for r in result.owed)
+
+
+@pytest.mark.parametrize("state,error_code", [
+    ("UNKNOWN", "obligations-unknown"),
+    ("INVALID", "obligations-invalid"),
+])
+def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
+        monkeypatch, capsys, state, error_code):
+    """A degraded fold is a FAILED queue exit — one queue-error, queue's rc 3.
+
+    The bug: queue printed the SUCCESS envelope (`queue-result`, state CLEAR) and
+    merely returned nonzero, so automation switching on `type` read a clean CLEAR
+    while the process signalled failure.
+    """
+    transport = _queue_transport()
+
+    def fake_fold(*a, **kw):
+        return obligations_mod.ObligationResult(
+            state=obligations_mod.ObligationState[state],
+            degraded=["reviews"] if state == "UNKNOWN" else [],
+            malformed=[] if state == "UNKNOWN" else ["tasks"])
+
+    monkeypatch.setattr(obligations_mod, "fold", fake_fold)
+    rc = cli.cmd_queue(_queue_args(json=True), transport)
+    out = capsys.readouterr().out
+
+    rows = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert len(rows) == 1, f"--json must emit exactly one object, got {rows}"
+    row = rows[0]
+    assert row["type"] == "queue-error", (
+        "a degraded fold emitted the success envelope; slice 4's contract is that "
+        "every nonzero queue exit is one queue-error object"
+    )
+    assert row["state"] == state
+    assert row["error_code"] == error_code
+    assert row["rc"] == 3
+    assert rc == 3, "queue keeps rc 3 for both UNKNOWN and INVALID"
+    assert row["obligations"]["state"] == state, (
+        "the diagnosis must survive as a nested field, not be dropped"
+    )

@@ -3161,18 +3161,54 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
                      detail="unresolved roles: " + ", ".join(sorted(unresolved_roles)))
         return P(state=S.OK)
 
+    def _split_markers(found):
+        """(real work, degradation marker types) from a best-effort fold's rows.
+
+        Detects ANY ``*-degraded`` row rather than an enumerated list. The review
+        and forge folds signal incomplete coverage with marker ROWS
+        (review-head/fold/orphan/role-degraded, forge-degraded), and only some
+        paths reach the degraded_sink — so a sink check alone let a marker ride
+        through as ordinary owed work and the fold reported DATA/rc 0 with
+        incomplete coverage (codex-reviewer, PR 501). Matching the suffix means a
+        marker added later degrades the fold automatically instead of silently
+        joining the work list.
+        """
+        markers = [r.get("type") for r in found
+                   if isinstance(r.get("type"), str)
+                   and r["type"].endswith("-degraded")]
+        real = [r for r in found
+                if not (isinstance(r.get("type"), str)
+                        and r["type"].endswith("-degraded"))]
+        return real, markers
+
     def _reviews_probe():
         sink: list[str] = []
         found = _pending_reviews_for(transport, team, agent, rows=rows,
                                      degraded_sink=sink)
-        if sink:
-            return P(state=S.UNREADABLE, detail="; ".join(sorted(set(sink))))
-        return P(state=S.OK, owed=list(found))
+        real, markers = _split_markers(found)
+        if sink or markers:
+            # Degraded, but the pending rows that WERE read stay available: the
+            # fold's promise is that partial work survives while the terminal
+            # state stays honest.
+            detail = "; ".join(sorted(set(sink) | set(markers)))
+            return P(state=S.UNREADABLE, owed=real, detail=detail)
+        return P(state=S.OK, owed=real)
+
+    def _forge_probe():
+        """Unacknowledged forge feedback — a durable obligation surfaced by
+        needs-me and briefing, and absent from the first cut of this registry."""
+        found = _forge_feedback_for(transport, team, agent)
+        real, markers = _split_markers(found)
+        if markers:
+            return P(state=S.UNREADABLE, owed=real,
+                     detail="; ".join(sorted(set(markers))))
+        return P(state=S.OK, owed=real)
 
     C = obligations_mod.Component
     return [
         C(name="blocks", probe=_rows_probe(("block",))),
         C(name="directives", probe=_rows_probe(("directive",))),
+        C(name="forge_feedback", probe=_forge_probe),
         C(name="reminders", probe=_rows_probe(("remind", "reminder"))),
         C(name="reviews", probe=_reviews_probe),
         C(name="role_duties", probe=_roles_probe),
@@ -3741,7 +3777,8 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
 
 def _queue_failure(
         args: argparse.Namespace, *, state: str, error_code: str,
-        message: str, rc: int
+        message: str, rc: int,
+        extra: "Optional[dict[str, Any]]" = None
 ) -> int:
     """Emit one stable queue failure for humans and JSONL automation.
 
@@ -3766,12 +3803,18 @@ def _queue_failure(
     """
     print(message, file=sys.stderr)
     if bool(getattr(args, "json", False)):
-        jsonutil.print_json({
+        envelope = {
             "type": "queue-error",
             "state": state,
             "error_code": error_code,
             "rc": rc,
-        })
+        }
+        if extra:
+            # Nested diagnosis, still ONE object: a caller switching on `type`
+            # sees queue-error and can drill into the cause without parsing a
+            # second row.
+            envelope.update(extra)
+        jsonutil.print_json(envelope)
     return rc
 
 
@@ -4048,6 +4091,25 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     obligations_rc, obligations_fragment = (
         _reconcile_after_empty_read(args, transport, agent) if not fresh
         else (0, None))
+    if obligations_rc != 0:
+        # A degraded fold is a FAILED queue exit, so it takes the queue family's
+        # failure path — one `queue-error` object, queue's rc 3 for both UNKNOWN
+        # and INVALID (codex-reviewer, PR 501). The earlier version printed the
+        # SUCCESS envelope (`queue-result`, state CLEAR) and merely returned a
+        # nonzero rc, which broke slice 4's contract that every nonzero queue exit
+        # emits exactly one queue-error: automation switching on `type` would have
+        # read a clean CLEAR while the process signalled failure.
+        # rc 4 stays on the standalone `obligations` verb, where UNKNOWN and
+        # INVALID have different remedies and nothing else owns the exit code.
+        state = obligations_fragment["state"] if obligations_fragment else "UNKNOWN"
+        return _queue_failure(
+            args, state=state,
+            error_code=("obligations-invalid" if state == "INVALID"
+                        else "obligations-unknown"),
+            message=("queue: obligations "
+                     f"{state} — {obligations_fragment['reason']}"
+                     if obligations_fragment else "queue: obligations UNKNOWN"),
+            rc=3, extra={"obligations": obligations_fragment})
     if json_mode:
         envelope = _queue_result_envelope(
             fresh, cfg=cfg,
@@ -4057,11 +4119,11 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             # NESTED, not a second object. Slice 4's contract is that --json
             # success is exactly one object so a consumer switches on one field;
             # emitting the fold as a sibling row would break every reader that
-            # relies on it. The reconciliation is part of this read's verdict, so
-            # it belongs inside the verdict.
+            # relies on it. Correct for DATA/CLEAR only — a degraded fold takes
+            # the failure path above.
             envelope["obligations"] = obligations_fragment
         jsonutil.print_json(envelope)
-    return obligations_rc
+    return 0
 
 
 def _reconcile_after_empty_read(

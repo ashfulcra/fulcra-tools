@@ -311,9 +311,11 @@ identical afterward, which is why the list is fixed and why every command has to
 exit 0 before you may claim clear.
 
 ```bash
-fulcra-api file list "team/$TEAM/task/"    # tasks, directives, blocks, reminders
-fulcra-api file list "team/$TEAM/review/"  # reviews
-fulcra-api file list "team/$TEAM/roles/"   # role_duties
+fulcra-api file list "team/$TEAM/task/"                    # tasks, directives, blocks, reminders
+fulcra-api file list "team/$TEAM/review/"                  # reviews
+fulcra-api file list "team/$TEAM/roles/"                   # role_duties
+fulcra-api file list "team/$TEAM/_coord/forge/watch/"      # forge_feedback (PRs you own)
+fulcra-api file list "team/$TEAM/_coord/forge/feedback/"   # forge_feedback (unacked shards)
 ```
 
 Check every one. Then:
@@ -330,6 +332,11 @@ Check every one. Then:
 The four task-derived components share one listing, so a `task/` failure darkens
 all four at once — that is correct, not a shortcut: nothing derived from an
 unreadable index is known.
+
+`forge_feedback` is unacknowledged review feedback on PRs you are responsible
+for. It is easy to forget precisely because it does not arrive as a directive —
+it was missing from the first cut of this procedure, and a fold without it can
+report CLEAR while a reviewer is waiting on you.
 
 
 ## Send
