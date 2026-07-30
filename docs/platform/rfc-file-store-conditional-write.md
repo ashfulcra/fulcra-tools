@@ -17,9 +17,14 @@ that a write can atomically mean "replace the version I read, or fail."
 The File Store is the durable substrate for multi-agent coordination state:
 read cursors, leases, ledgers, task documents. All of these follow the same
 loop — read a file, compute an update, write it back. Today every upload is
-last-writer-wins: when two writers interleave (two agents; or two containers
-of the *same* agent, one stale and finishing an old turn while its
-replacement starts), one write silently vanishes. No error, no trace.
+last-writer-wins for **currency**: when two writers interleave (two agents;
+or two containers of the *same* agent, one stale and finishing an old turn
+while its replacement starts), the earlier write survives as an archived
+version — the store is append-only underneath — but it silently stops being
+current, and the superseded writer has no way to learn that at write time.
+For a cursor, "silently lost currency" and "lost data" are operationally the
+same failure: coverage the fleet believes in has been re-marked by a writer
+that never saw it.
 
 For most documents that is tolerable. For a **cursor** it is data loss with
 a delay: overwrite a peer's coverage advance and events are skipped forever,
@@ -49,7 +54,36 @@ Without that, a "commit" is an overwrite with good intentions.
 The defining property we cannot build client-side: the version compare and
 the write must be **one atomic server-side operation**.
 
+## Measured behavior this proposal builds on (probed 2026-07-30)
+
+Raw-REST observations against the live API, reproducible:
+
+1. Upload is two-step: `POST /input/v1/file` (metadata; returns a fresh
+   version UUID *before* bytes move) → signed **GCS resumable session**
+   (bucket-side object name is stable per path, so GCS generations advance
+   on one object per overwrite).
+2. Every upload mints a new metadata row; the prior version flips to
+   `state: archived` with a timestamp — an append-only, queryable version
+   chain (`GET /input/v1/file/{id}`, list by state, plus
+   `/input/v1/file/recent_changes`).
+3. The bytes-leg response already carries the GCS **ETag**.
+4. Client-supplied preconditions are ignored, confirmed by test:
+   `x-goog-if-generation-match` (header) and `ifGenerationMatch` (query) on
+   the upload leg both returned 200 against a deliberately wrong generation,
+   and generation-0 (create-only) returned 200 against an existing object.
+   GCS binds preconditions at session creation, which only the server does.
+
+So the storage engine underneath already enforces exactly the semantics this
+RFC asks for — today the API mints upload sessions without them.
+
 ## Proposed surface
+
+The cheapest sufficient form, given the measured pipeline: **accept an
+optional precondition (`if_generation_match`, or equivalently
+current-version-id match) in the `POST /input/v1/file` body and bind it to
+the GCS resumable session the server already creates.** GCS enforces it
+natively; the 412 surfaces on the bytes leg; no new storage logic. In
+general terms:
 
 1. **Version token on every file.** A strong ETag (or a monotonically
    increasing per-file generation integer) returned on: upload response,
