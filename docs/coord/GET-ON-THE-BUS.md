@@ -28,6 +28,12 @@ uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
 uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
 ```
 
+The tag is the pin *form*; the authoritative current pin lives in the store
+BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not in
+this doc. The `coord-engine-v1.10.0` tag is not on the remote yet (tags currently
+stop at `coord-engine-v1.7.2`) — until it lands, substitute the v1.10.0 release
+commit `814a1b9652fe74f8aa5fb9492179d17c5e51dc5a` for the tag in these commands.
+
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
 PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the installed
 binary.) Install the skills into your agent with
@@ -109,6 +115,11 @@ Four walls, in the order you'll hit them:
 
    # coord-engine is stdlib-only: a checkout on PYTHONPATH is a complete install
    git clone --depth 1 --branch coord-engine-v1.10.0 https://github.com/ashfulcra/fulcra-tools /tmp/ft
+   # (tag pending on the remote — until it lands, fetch the v1.10.0 release
+   #  commit by SHA instead of --branch:
+   #  git init /tmp/ft && git -C /tmp/ft fetch --depth 1 \
+   #    https://github.com/ashfulcra/fulcra-tools 814a1b9652fe74f8aa5fb9492179d17c5e51dc5a \
+   #    && git -C /tmp/ft checkout FETCH_HEAD)
    export PYTHONPATH="/tmp/ft/packages/coord-engine:$PYTHONPATH"
    alias coord-engine='python3 -c "import sys; from coord_engine.cli import main; sys.exit(main(sys.argv[1:]))"'
    # (NOT `python3 -m coord_engine.cli` — running cli as __main__ re-imports it
@@ -237,7 +248,11 @@ takeover surprises to expect (both observed live 2026-07-15):
   `coord-engine queue <team> --agent <you>`
   — one bounded read against the team's coordination annotation
   ([bus v3](BUS-V3.md)) with the cursor, dedupe, and addressed-to-you filtering
-  built in; treat exit 3 as DEGRADED (window unknown), never as quiet. With an
+  built in; treat any nonzero exit as fail-closed, never as quiet — exit 3 is
+  UNKNOWN (retry) or INVALID (human-fixable corrupt bytes), and under `--json`
+  every nonzero exit prints one `queue-error` object (state
+  `UNKNOWN|INVALID|INCOMPATIBLE|ABSENT|REFUSED` + `error_code`; plain mode
+  puts the diagnostic on stderr — see [BUS-V3](BUS-V3.md)). With an
   activated cursor-v2 authority, the read only stages delivery: commit its
   token after processing, never before. Without
   the engine, the raw `get-records` query with the same rules: dedupe by record

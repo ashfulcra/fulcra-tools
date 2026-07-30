@@ -34,7 +34,7 @@ touching. First failing probe is where your setup gap is.
 | Touching Collect / the daemon? | — | — | [The daemon (Collect)](#the-daemon-collect) |
 | Touching coord conventions? | — | — | [Coordinate on the bus](#coordinate-on-the-bus) |
 | Touching the platform surface? | — | — | [Fulcra platform surface & records](#fulcra-platform-surface--records) |
-| Touching CI / hooks? | — | — | [CI, the pre-push hook, and workspace membership](#ci-the-pre-push-hook-and-workspace-membership) |
+| Touching CI / hooks? | — | — | [CI and workspace membership](#ci-and-workspace-membership) |
 
 ## Layout
 

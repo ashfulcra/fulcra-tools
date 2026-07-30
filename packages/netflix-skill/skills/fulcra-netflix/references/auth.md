@@ -14,15 +14,17 @@ interactive terminal session.
 - `uv` is installed (`uv --version` succeeds). If not, ask the user for consent
   first, then install: `curl -LsSf https://astral.sh/uv/install.sh | sh`
   (macOS/Linux) or `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"` (Windows).
-- Always invoke the CLI as `uv tool run fulcra-api …`. Don't rely on bare
-  `fulcra-api` being on PATH — spawned subshells in many agent runtimes don't
-  inherit it — and don't trust `which fulcra-api` to tell you whether it's
-  installed. `uv tool run` resolves and caches the tool automatically.
+- Install the CLI once — `uv tool install fulcra-api` — and invoke the
+  installed `fulcra-api` binary directly (repo rule: fulcra tools run as
+  installed binaries, never via `uv tool run`/`uvx`, which resolve
+  ephemerally). If a spawned subshell can't find it, invoke it by absolute
+  path (`uv tool dir --bin` names the directory) rather than falling back to
+  `uv tool run`.
 
 ## Step 0 — check whether auth is even needed
 
 ```bash
-uv tool run fulcra-api user-info
+fulcra-api user-info
 ```
 
 Exit 0 with valid JSON means the user is already authenticated — stop here, say
@@ -32,7 +34,7 @@ device flow below.
 ## Step 1 — mint the auth URL (non-interactive)
 
 ```bash
-uv tool run fulcra-api auth login --get-auth-url
+fulcra-api auth login --get-auth-url
 ```
 
 This returns immediately (no polling, no hang) with three items:
@@ -57,7 +59,7 @@ Handling rules:
 - In a public or group channel, also warn the user to treat the auth URL itself
   as sensitive — it shouldn't be pasted onward or shared.
 
-**Never run bare `uv tool run fulcra-api auth login`** (no flags). Interactive
+**Never run bare `fulcra-api auth login`** (no flags). Interactive
 mode blocks the shell polling for up to two minutes, can't show you the URL
 until it's too late in some runtimes, and typically times out before a human
 finishes a browser sign-in. The two-step form exists precisely so agents don't
@@ -68,7 +70,7 @@ have to manage a hanging foreground process.
 Roughly every 15 seconds, run:
 
 ```bash
-uv tool run fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
+fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
 ```
 
 Each invocation polls for up to 5 seconds and returns. The CLI enforces that bound itself (`--poll-timeout=5`), so a single poll cannot hang your shell even on a wedged network — if an invocation somehow exceeds ~60s, kill it and treat the tick as pending. Three outcomes:
@@ -77,7 +79,7 @@ Each invocation polls for up to 5 seconds and returns. The CLI enforces that bou
    wait ~15 seconds and poll again. Don't nag the user on every tick.
 2. **Success** — credentials are persisted to
    `~/.config/fulcra/credentials.json` (mode-restricted; never print its
-   contents). Confirm with `uv tool run fulcra-api user-info` and announce
+   contents). Confirm with `fulcra-api user-info` and announce
    success to the user immediately — the "your bot noticed you signed in" beat
    is the point of watching.
 3. **Expired** — device codes are valid for roughly **10 minutes**. If the code
