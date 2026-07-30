@@ -3250,6 +3250,12 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+#: PROPOSED, NOT WIRED. Emitting this on an empty read would violate slice 4's
+#: golden contract, which pins text-mode CLEAR stderr byte-for-byte
+#: (test_plain_clear_output_byte_identical_to_pre_slice). That contract belongs to
+#: another agent's just-merged surface, so re-pinning it is their call and not a
+#: constant bump I get to make quietly. Kept here so the proposal has an exact
+#: string attached to it; escalated to coord-boss with the golden-test implication.
 _QUEUE_EMPTY_IS_NOT_CLEAR = (
     "queue: 0 events — this is NOT proof that nothing is owed. Events are "
     "best-effort wake hints; a hint never written, or one older than this "
@@ -4021,11 +4027,6 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         # Text mode stays byte-identical for shell consumers; the JSON
         # envelope is emitted once below, after the cursor outcome is known.
         _print_queue_events(fresh, json_mode=False)
-    if not fresh:
-        # r2 spec item 3: an empty queue read is not an obligation answer. On
-        # stderr in BOTH modes, so it cannot disturb the single-object --json
-        # contract slice 4 established, and cannot be lost in text mode either.
-        print(_QUEUE_EMPTY_IS_NOT_CLEAR, file=sys.stderr)
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
     if peek:
