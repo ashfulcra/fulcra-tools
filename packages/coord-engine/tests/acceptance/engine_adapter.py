@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from coord_engine import cli, records
@@ -89,6 +89,9 @@ class EngineQueueAdapter:
         self.team = team
         self.agent = agent
         self.records = list(records or [])
+        #: Seconds added to the engine's pinned clock; a gate ages the store by
+        #: bumping this instead of sleeping.
+        self.clock_offset_s = 0
         self.transport = _HarnessTransport(self)
         self._activate_v2_if_legacy_fixture()
 
@@ -122,13 +125,24 @@ class EngineQueueAdapter:
         self.store.seed(path, json.dumps(doc, sort_keys=True))
 
     def _clock(self) -> datetime:
+        """Engine wall clock, pinned to the newest fixture event plus any offset.
+
+        ``clock_offset_s`` exists so a gate can age the store without waiting.
+        Before it, the adapter's clock could never move, so any gate about
+        elapsed time silently degraded into a gate about zero elapsed time —
+        passing while testing nothing, which is the failure mode this harness is
+        supposed to make impossible.
+        """
         timestamps = [
             event.get("recorded_at") for event in self.records
             if isinstance(event.get("recorded_at"), str)
         ]
-        if timestamps:
-            return datetime.fromisoformat(max(timestamps).replace("Z", "+00:00"))
-        return datetime(2026, 7, 29, 10, 5, tzinfo=timezone.utc)
+        base = (
+            datetime.fromisoformat(max(timestamps).replace("Z", "+00:00"))
+            if timestamps
+            else datetime(2026, 7, 29, 10, 5, tzinfo=timezone.utc)
+        )
+        return base + timedelta(seconds=self.clock_offset_s)
 
     def _run(self, argv: list[str]) -> tuple[int, list[dict[str, Any]], str]:
         stdout, stderr = io.StringIO(), io.StringIO()

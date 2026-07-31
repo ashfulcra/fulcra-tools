@@ -31,7 +31,7 @@ from . import (
     aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, query, records, review,
-    roles, router, stash, tasks, wake_adapters,
+    obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
 from . import reconcile as rec
@@ -1169,6 +1169,18 @@ def _briefing_budget() -> float:
     return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
 
 
+#: Aggregate deadline (seconds) for ONE obligation fold. The fold runs on every
+#: empty wake now, so its cost is fleet-wide per-wake cost — it needs a hard
+#: ceiling, not a per-component hope. Deliberately tighter than the briefing
+#: budget: a briefing is a human asking a question, a fold is a machine on a
+#: schedule. Env ``COORD_OBLIGATION_BUDGET``.
+DEFAULT_OBLIGATION_BUDGET = 20.0
+
+
+def _obligation_budget() -> float:
+    return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
+
+
 def _role_fold_budget() -> float:
     """Cumulative deadline (seconds) for one role-resolution pass. Env
     ``COORD_ROLE_FOLD_BUDGET`` (see the DEFAULT_ROLE_FOLD_BUDGET rationale). Its own
@@ -1677,6 +1689,7 @@ def _pending_reviews_for(
     transport: Any, team: str, agent: str, *,
     rows: "Optional[list[dict[str, Any]]]" = None,
     deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
+    degraded_sink: "Optional[list[str]]" = None,
 ) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: the top listing failing yields []
@@ -1740,6 +1753,12 @@ def _pending_reviews_for(
     try:
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
+        # Best-effort for needs-me/briefing (they must not fail because the review
+        # add-on is down), but the obligation fold MUST NOT read this [] as "no
+        # reviews pending" — that is a false CLEAR. A caller that needs the
+        # distinction passes ``degraded_sink`` and gets told.
+        if degraded_sink is not None:
+            degraded_sink.append("review-listing")
         return []
     slug_entries = [
         e for e in entries
@@ -1792,6 +1811,10 @@ def _pending_reviews_for(
         except TransportError:
             # A single slug's tally timed out: UNKNOWN. Skip it, keep scanning the
             # rest — but a HEAD slug that ends here still owes its loud marker.
+            # An unreadable verdict is an unknown obligation, so the fold hears
+            # about it too: partial coverage is not coverage.
+            if degraded_sink is not None:
+                degraded_sink.append(f"review-verdicts:{slug}")
             return "unknown"
         state = tally.get("state")
         pending = tally.get("pending_required") or []
@@ -3110,6 +3133,159 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
             ok, reason, unresolved)
 
 
+def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
+                       ) -> "list[obligations_mod.Component]":
+    """Bind the real coordination surface to obligation probes.
+
+    One task-index read serves the four row-derived components, so a single index
+    failure degrades all four — which is correct, not lazy: if the index is
+    unreadable then nothing derived from it is known, and reporting three of them
+    as CLEAR would be inventing coverage.
+
+    ``reviews`` uses the ``degraded_sink`` added to ``_pending_reviews_for``. That
+    helper is deliberately best-effort for needs-me and briefing (they must not
+    fail because a review add-on is down), and its ``[]`` on a failed listing is
+    exactly the false CLEAR this fold exists to refuse. The sink is how the fold
+    hears the difference.
+    """
+    P, S = obligations_mod.ProbeResult, obligations_mod.ProbeState
+    # ONE shared deadline for the whole fold, not one per component. The forge
+    # probe is a data-dependent fan-out (responsibility scan, then a listing per
+    # responsible PR), so an unbounded fold grows with the agent's PR count and
+    # can overrun the wake cadence it is supposed to ride inside. A shared
+    # deadline also means an expensive earlier probe shrinks what the next gets,
+    # rather than each one starting the clock fresh.
+    fold_dl = Deadline.open(_obligation_budget())
+    rows, rows_ok, rows_reason = _load_rows_status(transport, team)
+    held_roles, unresolved_roles = _held_roles_for_rows(
+        transport, team, agent, rows, now=now)
+
+    def _rows_probe(kinds: "tuple[str, ...]"):
+        def probe():
+            if not rows_ok:
+                return P(state=S.UNREADABLE, detail=rows_reason)
+            if fold_dl.expired():
+                return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            mine = _needs_me_rows(transport, team, agent, rows, now=now,
+                                  held_roles=held_roles, include_history=False)
+            owed = [r for r in mine
+                    if not kinds or (r.get("kind") or "task") in kinds]
+            return P(state=S.OK, owed=owed)
+        return probe
+
+    def _roles_probe():
+        if not rows_ok:
+            return P(state=S.UNREADABLE, detail=rows_reason)
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+        if unresolved_roles:
+            # A role whose lease could not be read might route work here. Doubt.
+            return P(state=S.UNREADABLE,
+                     detail="unresolved roles: " + ", ".join(sorted(unresolved_roles)))
+        return P(state=S.OK)
+
+    def _split_markers(found):
+        """(real work, degradation marker types) from a best-effort fold's rows.
+
+        Detects ANY ``*-degraded`` row rather than an enumerated list. The review
+        and forge folds signal incomplete coverage with marker ROWS
+        (review-head/fold/orphan/role-degraded, forge-degraded), and only some
+        paths reach the degraded_sink — so a sink check alone let a marker ride
+        through as ordinary owed work and the fold reported DATA/rc 0 with
+        incomplete coverage (codex-reviewer, PR 501). Matching the suffix means a
+        marker added later degrades the fold automatically instead of silently
+        joining the work list.
+        """
+        markers = [r.get("type") for r in found
+                   if isinstance(r.get("type"), str)
+                   and r["type"].endswith("-degraded")]
+        real = [r for r in found
+                if not (isinstance(r.get("type"), str)
+                        and r["type"].endswith("-degraded"))]
+        return real, markers
+
+    def _reviews_probe():
+        if fold_dl.expired():
+            # The budget was gone before this probe ran. A helper handed an
+            # already-dead deadline can legitimately return [] without ever
+            # attempting a read — and [] here would be a false CLEAR caused by
+            # our own cost control, which is the worst possible source for one.
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+        sink: list[str] = []
+        found = _pending_reviews_for(transport, team, agent, rows=rows,
+                                     deadline=fold_dl.instant,
+                                     degraded_sink=sink)
+        real, markers = _split_markers(found)
+        if sink or markers:
+            # Degraded, but the pending rows that WERE read stay available: the
+            # fold's promise is that partial work survives while the terminal
+            # state stays honest.
+            detail = "; ".join(sorted(set(sink) | set(markers)))
+            return P(state=S.UNREADABLE, owed=real, detail=detail)
+        return P(state=S.OK, owed=real)
+
+    def _forge_probe():
+        """Unacknowledged forge feedback — a durable obligation surfaced by
+        needs-me and briefing, and absent from the first cut of this registry."""
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+        found = _forge_feedback_for(transport, team, agent,
+                                    deadline=fold_dl.instant)
+        real, markers = _split_markers(found)
+        if markers:
+            return P(state=S.UNREADABLE, owed=real,
+                     detail="; ".join(sorted(set(markers))))
+        return P(state=S.OK, owed=real)
+
+    C = obligations_mod.Component
+    return [
+        C(name="blocks", probe=_rows_probe(("block",))),
+        C(name="directives", probe=_rows_probe(("directive",))),
+        C(name="forge_feedback", probe=_forge_probe),
+        C(name="reminders", probe=_rows_probe(("remind", "reminder"))),
+        C(name="reviews", probe=_reviews_probe),
+        C(name="role_duties", probe=_roles_probe),
+        C(name="tasks", probe=_rows_probe(())),
+    ]
+
+
+def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
+    """The normative "do I owe anything?" answer (r2 spec item 3).
+
+    Exit codes carry the terminal state so automation never has to parse prose:
+    0 = CLEAR, 0 = DATA (with rows), 3 = UNKNOWN, 4 = INVALID. A wake that reads
+    an empty queue has NOT established that nothing is owed; this has.
+    """
+    now = _iso(_now())
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, args.agent, now=now),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    state = result.state.value
+    if getattr(args, "json", False):
+        print(jsonutil.dumps({
+            "type": "obligations",
+            "state": state,
+            "owed_count": len(result.owed),
+            "consulted": result.consulted,
+            "degraded": result.degraded,
+            "malformed": result.malformed,
+            "reason": result.reason(),
+        }))
+    else:
+        print(f"obligations: {state} — {result.reason()}")
+        for row in result.owed:
+            print(f"  - {row.get('slug') or row.get('id') or row}")
+        for name in result.degraded:
+            print(f"  ! {name}: UNREADABLE — cannot claim clear", file=sys.stderr)
+        for name in result.malformed:
+            print(f"  ! {name}: INVALID — human fix needed", file=sys.stderr)
+    if result.state is obligations_mod.ObligationState.UNKNOWN:
+        return 3
+    if result.state is obligations_mod.ObligationState.INVALID:
+        return 4
+    return 0
+
+
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     if args.ack:
@@ -3141,6 +3317,20 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     for r in got:
         print(_line(r))
     return 0
+
+
+#: PROPOSED, NOT WIRED. Emitting this on an empty read would violate slice 4's
+#: golden contract, which pins text-mode CLEAR stderr byte-for-byte
+#: (test_plain_clear_output_byte_identical_to_pre_slice). That contract belongs to
+#: another agent's just-merged surface, so re-pinning it is their call and not a
+#: constant bump I get to make quietly. Kept here so the proposal has an exact
+#: string attached to it; escalated to coord-boss with the golden-test implication.
+_QUEUE_EMPTY_IS_NOT_CLEAR = (
+    "queue: 0 events — this is NOT proof that nothing is owed. Events are "
+    "best-effort wake hints; a hint never written, or one older than this "
+    "window, leaves a durable obligation unmentioned. For the actual answer: "
+    "coord-engine obligations <team> --agent <you>  (rc 3 = UNKNOWN)"
+)
 
 
 def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
@@ -3620,7 +3810,8 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
 
 def _queue_failure(
         args: argparse.Namespace, *, state: str, error_code: str,
-        message: str, rc: int
+        message: str, rc: int,
+        extra: "Optional[dict[str, Any]]" = None
 ) -> int:
     """Emit one stable queue failure for humans and JSONL automation.
 
@@ -3645,12 +3836,18 @@ def _queue_failure(
     """
     print(message, file=sys.stderr)
     if bool(getattr(args, "json", False)):
-        jsonutil.print_json({
+        envelope = {
             "type": "queue-error",
             "state": state,
             "error_code": error_code,
             "rc": rc,
-        })
+        }
+        if extra:
+            # Nested diagnosis, still ONE object: a caller switching on `type`
+            # sees queue-error and can drill into the cause without parsing a
+            # second row.
+            envelope.update(extra)
+        jsonutil.print_json(envelope)
     return rc
 
 
@@ -3924,12 +4121,83 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if not advanced:
         print("queue: cursor save failed — coverage unadvanced, next read "
               "re-covers this window", file=sys.stderr)
+    obligations_rc, obligations_fragment = (
+        _reconcile_after_empty_read(args, transport, agent) if not fresh
+        else (0, None))
+    if obligations_rc != 0:
+        # A degraded fold is a FAILED queue exit, so it takes the queue family's
+        # failure path — one `queue-error` object, queue's rc 3 for both UNKNOWN
+        # and INVALID (codex-reviewer, PR 501). The earlier version printed the
+        # SUCCESS envelope (`queue-result`, state CLEAR) and merely returned a
+        # nonzero rc, which broke slice 4's contract that every nonzero queue exit
+        # emits exactly one queue-error: automation switching on `type` would have
+        # read a clean CLEAR while the process signalled failure.
+        # rc 4 stays on the standalone `obligations` verb, where UNKNOWN and
+        # INVALID have different remedies and nothing else owns the exit code.
+        state = obligations_fragment["state"] if obligations_fragment else "UNKNOWN"
+        return _queue_failure(
+            args, state=state,
+            error_code=("obligations-invalid" if state == "INVALID"
+                        else "obligations-unknown"),
+            message=("queue: obligations "
+                     f"{state} — {obligations_fragment['reason']}"
+                     if obligations_fragment else "queue: obligations UNKNOWN"),
+            rc=3, extra={"obligations": obligations_fragment})
     if json_mode:
-        jsonutil.print_json(_queue_result_envelope(
+        envelope = _queue_result_envelope(
             fresh, cfg=cfg,
             cursor_path=records.cursor_path(args.team, agent),
-            advanced=advanced))
+            advanced=advanced)
+        if obligations_fragment is not None:
+            # NESTED, not a second object. Slice 4's contract is that --json
+            # success is exactly one object so a consumer switches on one field;
+            # emitting the fold as a sibling row would break every reader that
+            # relies on it. Correct for DATA/CLEAR only — a degraded fold takes
+            # the failure path above.
+            envelope["obligations"] = obligations_fragment
+        jsonutil.print_json(envelope)
     return 0
+
+
+def _reconcile_after_empty_read(
+        args: argparse.Namespace, transport: Any,
+        agent: str) -> "tuple[int, Optional[dict[str, Any]]]":
+    """Run the obligation fold after an empty queue read, on request.
+
+    An empty queue read establishes that no EVENT arrived in the window. It does
+    not establish that nothing is owed — that is the r2 spec item-3 distinction,
+    and the fold is the only thing that closes it.
+
+    DEFAULT ON since the 2026-07-30 ruling; ``--no-obligations`` opts out. It
+    costs a task-index listing, a review listing and a roles listing on an empty
+    wake, which is a real bill — but only on the empty read, and only where the
+    wrong inference was otherwise free. A cost-sensitive caller can still decline
+    it explicitly, which is different from never being offered it.
+
+    Returns the rc the caller should use: the fold's UNKNOWN/INVALID states must
+    reach the exit code, or an agent scripting `queue` learns nothing from them.
+    """
+    if not getattr(args, "obligations", False):
+        return 0, None
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, agent, now=_iso(_now())),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    fragment = {
+        "state": result.state.value,
+        "owed_count": len(result.owed),
+        "consulted": result.consulted,
+        "degraded": result.degraded,
+        "malformed": result.malformed,
+        "reason": result.reason(),
+    }
+    if not getattr(args, "json", False):
+        print(f"queue: obligations {result.state.value} — {result.reason()}",
+              file=sys.stderr)
+    if result.state is obligations_mod.ObligationState.UNKNOWN:
+        return 3, fragment
+    if result.state is obligations_mod.ObligationState.INVALID:
+        return 4, fragment
+    return 0, fragment
 
 
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
@@ -7570,6 +7838,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
 
+    ob = sub.add_parser("obligations",
+                        help="terminal answer: does this agent owe work?")
+    ob.add_argument("team"); ob.add_argument("--agent", required=True)
+    add_json(ob)
+    ob.set_defaults(func=cmd_obligations)
+
     sc = sub.add_parser("search", help="substring search over tasks")
     sc.add_argument("team"); sc.add_argument("query"); add_json(sc)
     sc.add_argument("--archived", action="store_true", help="also search the cold archive")
@@ -7658,6 +7932,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show events without advancing the cursor (safe diagnostic read)")
     qu.add_argument("--consume", action="store_true",
                     help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
+    # DEFAULT ON (coord-boss ruling, 2026-07-30). The false inference — "no
+    # events, so nothing owed" — exists only on the empty read, and the agents
+    # most at risk are the terse-wake ones who would never pass an opt-in flag.
+    # --no-obligations stays for cost-sensitive callers: three listings per empty
+    # wake is a real cost, just not one that should be the default silence.
+    qu.add_argument("--obligations", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="after an EMPTY read, reconcile durable obligations "
+                         "(an empty queue is not proof nothing is owed); "
+                         "rc 3 = UNKNOWN, rc 4 = INVALID. "
+                         "--no-obligations skips it")
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")

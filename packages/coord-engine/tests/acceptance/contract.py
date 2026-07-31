@@ -192,7 +192,16 @@ class ReferenceQueue:
     anticipate codex-coder's internals.
     """
 
-    #: A staged batch older than this is abandoned and replays (spec step 5).
+    #: A staged batch older than this is re-staged under a fresh token.
+    #:
+    #: This is ONE permitted strategy for spec step 5 ("an uncommitted token
+    #: replays after timeout"), not the contract. The shipped engine chose the
+    #: stronger option: no expiry at all, so a pending batch replays unchanged
+    #: under its original token until committed. Both satisfy the property that
+    #: matters — an uncommitted batch is never lost, and it commits exactly once
+    #: — so no gate may assert either one's token behavior as required. That
+    #: distinction is the whole reason the elapsed-time gate below is written
+    #: without reference to token identity.
     STAGE_TIMEOUT_S = 900
 
     #: Protocol version this implementation writes. Gate 7's antagonist writes a
@@ -333,13 +342,28 @@ class ReferenceQueue:
         Gate 9. The audit is attributive, not authoritative (no authenticated
         principals yet) — but an attributive record still makes takeover visible,
         which is the property the spec asks for.
+
+        Records an OBSERVATION and an INTENT, never a prediction. The earlier
+        version of this model wrote ``prior_generation`` and
+        ``new_generation = prior + 1``, and both were claims no process can
+        honestly make: the pre-takeover read can be overtaken by a concurrent
+        writer before the takeover lands, and a successor revision may never
+        exist at all (a replayed pending delivery creates no revision, a staged
+        delivery may never commit, a CAS loser adopts the winner's state). The
+        engine hit exactly that and corrected it; this model follows, because an
+        audit that guesses is not evidence. What actually happened is evidenced
+        by the cursor document afterward — the audit's job is to say who intended
+        what, and what they saw when they decided.
         """
         doc, gen, state = self._load()
         if state is not ReadState.DATA or doc is None:
             raise TransportUnknown("cursor unreadable at takeover")
         staged = doc.get("staged")
         entry = {"actor": actor, "target": self.agent, "reason": reason,
-                 "at": now, "prior_generation": gen, "new_generation": gen + 1,
+                 "at": now,
+                 "observed_prior": {"schema": self.PROTOCOL_VERSION,
+                                    "revision": gen},
+                 "intended_authority": {"schema": self.PROTOCOL_VERSION},
                  "token": (staged or {}).get("token") if isinstance(staged, dict) else None}
         doc["staged"] = None
         ok = self.store.write_cas(cursor_path(self.team, self.agent),

@@ -108,6 +108,51 @@ def test_gate_2_crash_before_commit_replay_is_idempotent(queue: ReferenceQueue):
     assert queue.coverage() == advanced, "a replayed commit must not advance twice"
 
 
+def test_gate_2b_elapsed_time_replay_still_commits_exactly_once(
+        queue: ReferenceQueue):
+    """Gate 2b: long elapsed time loses no work and double-advances nothing.
+
+    Spec step 5 says an uncommitted token "replays after timeout". That sentence
+    admits two implementations — expire the batch and re-stage it under a fresh
+    token, or never expire it and replay the original — and the shipped engine
+    and the reference model here picked different ones. Neither choice is the
+    contract, so this gate deliberately says NOTHING about token identity.
+
+    What it does pin is the property both must have and that no other gate
+    covers: after an arbitrary gap with no commit, the same work is still
+    delivered, and it still advances coverage exactly once. Gates 1 and 2 cover
+    replay after a *crash*; this covers replay after *elapsed time*, which is
+    the case a long-dark agent and a reclaimed container actually hit.
+    """
+    first = queue.read(T0)
+    assert [e["id"] for e in first.events] == ["r1", "r2"]
+    assert queue.coverage() is None
+
+    # A very long gap: well past any plausible expiry, in either design.
+    later = T0 + 30 * 24 * 3600
+    replay = queue.read(later)
+
+    assert replay.state is ReadState.DATA, (
+        "an uncommitted batch must survive elapsed time; going CLEAR here would "
+        "silently drop work that was delivered but never acknowledged"
+    )
+    assert [e["id"] for e in replay.events] == ["r1", "r2"], (
+        "the redelivered batch must be the same work, whatever token carries it"
+    )
+
+    assert queue.commit(replay.token, later + 1) is CommitOutcome.OK
+    advanced = queue.coverage()
+    assert advanced == "2026-07-29T10:05:00Z"
+
+    # Whatever became of the pre-gap token, it must not advance coverage again.
+    assert queue.commit(first.token, later + 2) in (
+        CommitOutcome.IDEMPOTENT, CommitOutcome.UNKNOWN_TOKEN, CommitOutcome.STALE)
+    assert queue.coverage() == advanced, (
+        "coverage advanced twice for one batch — exactly the double-processing "
+        "that read/process/commit exists to prevent"
+    )
+
+
 def test_gate_3_concurrent_wakes_lose_no_cursor_update(store: FakeStore):
     """Gate 3: two same-agent wakes converge on one batch; neither is lost.
 
@@ -239,7 +284,23 @@ def test_gate_8_obligation_fold_rediscovers_a_lost_wake(store: FakeStore):
 
 
 def test_gate_9_takeover_produces_a_complete_audit_record(queue: ReferenceQueue):
-    """Gate 9: actor, target, reason, timestamp, prior + new generation."""
+    """Gate 9: who, whom, why, when, and what they SAW — never what they predict.
+
+    This gate used to require ``prior_generation`` and
+    ``new_generation == prior + 1``. Both were wrong, and the r2 spec's field
+    list ("prior generation, and new generation recorded durably") is wrong with
+    them: neither is knowable at audit time. The pre-takeover read can be
+    overtaken by a concurrent writer before the takeover lands, so the observed
+    prior is an observation and not necessarily the state actually overtaken; and
+    a successor revision may never exist at all — a replayed pending delivery
+    creates no revision, a staged delivery may never commit, a CAS loser adopts
+    the winner's state.
+
+    So the gate now pins what a caller can honestly record: the observation made
+    at decision time, and the authority it intended to operate under. What
+    actually happened is evidenced by the cursor document afterward, which is the
+    only place it can be evidenced. An audit that guesses is not evidence.
+    """
     first = queue.read(T0)
     assert first.token
 
@@ -248,12 +309,22 @@ def test_gate_9_takeover_produces_a_complete_audit_record(queue: ReferenceQueue)
     assert len(queue.audit) == 1
     entry = queue.audit[0]
     for required in ("actor", "target", "reason", "at",
-                     "prior_generation", "new_generation", "token"):
+                     "observed_prior", "intended_authority", "token"):
         assert required in entry, f"audit record is missing {required}"
     assert entry["actor"] == "coord-boss"
     assert entry["target"] == AGENT
-    assert entry["new_generation"] == entry["prior_generation"] + 1
     assert entry["token"] == first.token
+
+    # The observation must name a real coverage claim, not an empty gesture.
+    assert entry["observed_prior"], "observed_prior must carry the claim seen"
+    assert "schema" in entry["intended_authority"]
+
+    # And it must NOT smuggle a prediction back in under another name.
+    assert "new_generation" not in entry
+    assert "new_revision" not in entry.get("intended_authority", {}), (
+        "intended_authority names the authority, not a successor revision — a "
+        "predicted revision may never come to exist"
+    )
 
 
 def test_gate_10_unreadable_component_makes_nothing_owed_unsayable(store: FakeStore):

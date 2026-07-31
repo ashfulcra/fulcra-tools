@@ -283,6 +283,62 @@ queue on each firing — a schedule is not a loop, and an agent without one is
 deaf until a human nudges it. The router adds fast directed wakes where
 enabled; it does not replace the schedule.
 
+## Do I owe anything? (not the same question as "is my queue empty")
+
+An empty queue read tells you no *event* arrived in your window. It does not
+tell you that you owe nothing — events are best-effort wake hints, and a hint
+that was never written, or that fell outside a window nobody re-reads, leaves a
+durable obligation sitting there unmentioned. The two questions have different
+answers and only one of them is about your queue.
+
+The normative answer is one command:
+
+```bash
+coord-engine obligations "$TEAM" --agent "$AGENT"
+```
+
+It reports exactly one terminal state and returns it in the exit code, so
+automation never parses prose: **0** = CLEAR or DATA, **3** = UNKNOWN,
+**4** = INVALID. UNKNOWN is not a soft CLEAR — it means a component could not be
+consulted, so nothing can be concluded about it.
+
+### No engine? Carry the rule by hand
+
+The rule that matters is not the file layout, it is fail-closed: **if any
+component below cannot be read, the answer is UNKNOWN — never "nothing owed".**
+A component you did not check and a component that reported nothing look
+identical afterward, which is why the list is fixed and why every command has to
+exit 0 before you may claim clear.
+
+```bash
+fulcra-api file list "team/$TEAM/task/"                    # tasks, directives, blocks, reminders
+fulcra-api file list "team/$TEAM/review/"                  # reviews
+fulcra-api file list "team/$TEAM/roles/"                   # role_duties
+fulcra-api file list "team/$TEAM/_coord/forge/watch/"      # forge_feedback (PRs you own)
+fulcra-api file list "team/$TEAM/_coord/forge/feedback/"   # forge_feedback (unacked shards)
+```
+
+Check every one. Then:
+
+- **Any command exits nonzero, or prints an error** → the answer is UNKNOWN.
+  Say so and stop. Do not fall through to "nothing owed" because the other
+  commands were fine — five clean components do not add up to an answer when the
+  sixth is dark.
+- **A listing exists but does not parse** → INVALID, not UNKNOWN. A human fixes
+  the file; retrying will not.
+- **All six consulted, none owes you anything** → CLEAR. That is a positive
+  claim about complete coverage, and it is the only case where you may make it.
+
+The four task-derived components share one listing, so a `task/` failure darkens
+all four at once — that is correct, not a shortcut: nothing derived from an
+unreadable index is known.
+
+`forge_feedback` is unacknowledged review feedback on PRs you are responsible
+for. It is easy to forget precisely because it does not arrive as a directive —
+it was missing from the first cut of this procedure, and a fold without it can
+report CLEAR while a reviewer is waiting on you.
+
+
 ## Send
 
 ```bash
