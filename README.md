@@ -127,9 +127,7 @@ uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.1
 
 (The tag is the pin *form*; the authoritative current pin lives in the store
 BOOTSTRAP — `team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md` — not
-in this doc. The `coord-engine-v1.10.0` tag is not on the remote yet; until it
-lands, substitute the v1.10.0 release commit
-`814a1b9652fe74f8aa5fb9492179d17c5e51dc5a`.)
+in this doc.)
 
 and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
 engine installs the same way (it is not on PyPI yet — use the git source form

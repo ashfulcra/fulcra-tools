@@ -46,9 +46,7 @@ fulcra auth login            # browser sign-in; an account is created on first l
 
 The tag is the pin *form*; the authoritative current pin lives in the store
 BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not
-here. The `coord-engine-v1.10.0` tag is not on the remote yet — until it lands,
-substitute the v1.10.0 release commit
-`814a1b9652fe74f8aa5fb9492179d17c5e51dc5a` for the tag.
+here.
 
 Then seed your accounts. `atc init` writes `team/<team>/atc/accounts.json` (team
 defaults to `solo`) and is idempotent — re-running merges new accounts in by id and

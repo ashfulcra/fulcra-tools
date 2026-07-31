@@ -30,9 +30,7 @@ uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.1
 
 The tag is the pin *form*; the authoritative current pin lives in the store
 BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not in
-this doc. The `coord-engine-v1.10.0` tag is not on the remote yet (tags currently
-stop at `coord-engine-v1.7.2`) — until it lands, substitute the v1.10.0 release
-commit `814a1b9652fe74f8aa5fb9492179d17c5e51dc5a` for the tag in these commands.
+this doc.
 
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
 PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the installed
@@ -115,11 +113,6 @@ Four walls, in the order you'll hit them:
 
    # coord-engine is stdlib-only: a checkout on PYTHONPATH is a complete install
    git clone --depth 1 --branch coord-engine-v1.10.0 https://github.com/ashfulcra/fulcra-tools /tmp/ft
-   # (tag pending on the remote — until it lands, fetch the v1.10.0 release
-   #  commit by SHA instead of --branch:
-   #  git init /tmp/ft && git -C /tmp/ft fetch --depth 1 \
-   #    https://github.com/ashfulcra/fulcra-tools 814a1b9652fe74f8aa5fb9492179d17c5e51dc5a \
-   #    && git -C /tmp/ft checkout FETCH_HEAD)
    export PYTHONPATH="/tmp/ft/packages/coord-engine:$PYTHONPATH"
    alias coord-engine='python3 -c "import sys; from coord_engine.cli import main; sys.exit(main(sys.argv[1:]))"'
    # (NOT `python3 -m coord_engine.cli` — running cli as __main__ re-imports it

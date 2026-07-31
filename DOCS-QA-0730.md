@@ -1,18 +1,18 @@
 # Docs QA — nightly sweep 2026-07-30
 
 Base: `origin/main` @ `a7b637d`. Engine ground truth: `coord_engine.__version__` = **1.10.0**;
-current release commit `814a1b9652fe74f8aa5fb9492179d17c5e51dc5a` (v1.10.0 merge). Remote
-coord-engine tags verified via `git ls-remote`: newest is `coord-engine-v1.7.2` —
-v1.8.0/v1.9.0/v1.10.0 tags are pending a human push (NOT a doc bug per operator note; docs
-claiming those tags exist ARE).
+current release v1.10.0. Remote coord-engine tags re-verified via `git ls-remote` during review:
+`coord-engine-v1.8.0`/`v1.9.0`/`v1.10.0` all landed mid-review (at sweep time tags stopped at
+v1.7.2), so the tag-pin install commands work as written; the store BOOTSTRAP
+(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`) remains the live pin authority.
 
 ## Findings
 
 | # | File | Finding | Status |
 |---|---|---|---|
 | 1 | `AGENTS.md` (quick-ref table) | Anchor link `#ci-the-pre-push-hook-and-workspace-membership` pointed at a heading renamed to "CI and workspace membership" — dead same-file anchor | fixed |
-| 2 | `README.md`, `docs/coord/GET-ON-THE-BUS.md` (×2 blocks), `skills/fulcra-agent-atc/SKILL.md`, `packages/coord-engine/README.md` | Install pins reference `@coord-engine-v1.10.0` — correct version, but the tag does not exist on the remote (tags stop at v1.7.2), so the commands fail today, and the docs implicitly claimed the tag exists (rule 3b). Kept the tag pin form (the repo's own `test_docs_install_pin.py` enforces pin == `__version__`), added a note per doc: authoritative current pin lives in the store BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), tag is pending, substitute release commit `814a1b96…` until it lands | fixed |
-| 3 | `docs/coord/GET-ON-THE-BUS.md` (sandbox fallback recipe) | `git clone --depth 1 --branch coord-engine-v1.10.0 …` fails while the tag is unpushed (`--branch` cannot take a SHA). Added a comment with the fetch-by-SHA equivalent (`git init && git fetch --depth 1 <url> 814a1b96… && checkout FETCH_HEAD`) | fixed |
+| 2 | `README.md`, `docs/coord/GET-ON-THE-BUS.md` (×2 blocks), `skills/fulcra-agent-atc/SKILL.md`, `packages/coord-engine/README.md` | Install pins reference `@coord-engine-v1.10.0` — pins verified against the store authority; per-doc notes point at BOOTSTRAP as the live pin home. (Round 2: the v1.10.0 tag landed mid-review and the authority advanced to the s3 merge — the interim 'tag pending' workaround notes were removed as already-false.) | fixed |
+| 3 | `docs/coord/GET-ON-THE-BUS.md` (sandbox fallback recipe) | At sweep time `git clone --depth 1 --branch coord-engine-v1.10.0 …` failed because the tag was unpushed; an interim fetch-by-SHA comment was added. The tag landed mid-review, making the clone work as written — the interim comment was removed (already-false) | fixed (superseded) |
 | 4 | `packages/netflix-skill/skills/fulcra-netflix/references/auth.md` | Instructed "Always invoke the CLI as `uv tool run fulcra-api`" and used that form in every command — the repo-wide anti-pattern (canon: installed binaries only; cf. AGENTS.md:191, GET-ON-THE-BUS, coord-DESIGN). Rewrote preconditions to `uv tool install fulcra-api` + installed binary (abs path via `uv tool dir --bin` as the PATH fallback); replaced all invocations | fixed |
 | 5 | `packages/netflix-skill/skills/fulcra-netflix/SKILL.md` | Same anti-pattern in the probe table and AUTH state (9 occurrences); also added the `uv tool install fulcra-api` step to the probe-first instruction | fixed |
 | 6 | `packages/netflix-skill/README.md` | Doc's `uv tool run` mention describes the *script's actual code fallback* (`netflix_import.py:get_token()` really shells `uv tool run fulcra-api` when the binary is off PATH) — kept the accurate description, marked it as a code-level last resort not a doc-sanctioned invocation. Changing the script itself is out of scope for a docs-only run | fixed (doc); script behavior deferred |
@@ -42,8 +42,8 @@ claiming those tags exist ARE).
    login/print-access-token, get-records, record, catalog, user-info, share, data-updates) verified
    against the installed CLI's `--help`.
 3. **Version-pin freshness** — every `coord-engine-v1.X.Y` / commit-pin string grepped; remote tags
-   listed via `git ls-remote` (newest: v1.7.2). All four primary-install docs pinned v1.10.0 (correct
-   version, nonexistent tag) → #2/#3. Historical version mentions (v1.6.x/v1.7.x prose,
+   listed via `git ls-remote` (newest at sweep time: v1.7.2; v1.8.0–v1.10.0 landed mid-review —
+   see header). All four primary-install docs pinned v1.10.0 → #2/#3. Historical version mentions (v1.6.x/v1.7.x prose,
    pitch/rollout docs, BUS-V3's vendored `coord-engine-v1.7.2` test tag — which exists) left as-is.
    `packages/coord-engine/tests/test_docs_install_pin.py` run and green after the edits (2 passed).
 4. **Command/flag accuracy** — engine help captured for the top level and `queue`, `queue commit`,
