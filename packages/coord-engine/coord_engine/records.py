@@ -966,7 +966,6 @@ def commit_v2_delivery(
 def supersession_adoption(
     events: list[Any],
     outcomes: Optional[dict[str, str]],
-    explicit_ids: Optional[set] = None,
 ) -> dict[str, Any]:
     """Fold the supersession-adoption metric over a window of bus events.
 
@@ -975,9 +974,16 @@ def supersession_adoption(
     classification where durably known (v2 cursor ``handled`` rows);
     ``None`` means NO classification evidence exists for this window (legacy
     fleet) — the whole metric is then UNKNOWN, never 0% (absence of data is
-    not evidence of non-adoption). ``explicit_ids``: record_ids whose
-    supersession went through the explicit ``task supersede`` verb — counted
-    as adopted directly (deputy rule 3).
+    not evidence of non-adoption).
+
+    Scope (narrowed, pr-503 round 1): the explicit signal this fold counts
+    directly is the record-level ``superseded`` classification
+    (``queue commit --result <id>=superseded``). The ``task supersede`` verb
+    (D3) writes its ``superseded_by`` evidence into TASK documents keyed by
+    task slug, and no identity mapping from task slugs to event record ids
+    exists in the data model — so that channel is out of scope here rather
+    than exposed as a parameter no production caller can fill. Wiring it
+    requires a schema-level task→record link first.
 
     Returns ``{"status", "counted", "superseded", "unknown", "ratio"}``:
     ratio is ``None`` when nothing was countable — an empty denominator must
@@ -986,7 +992,6 @@ def supersession_adoption(
     if outcomes is None:
         return {"status": "unknown", "counted": 0, "superseded": 0,
                 "unknown": 0, "ratio": None}
-    explicit = explicit_ids or set()
 
     directives: list[dict[str, Any]] = []
     for event in events:
@@ -1009,7 +1014,7 @@ def supersession_adoption(
         earlier = by_key.get(key)
         if earlier is not None:
             outcome = outcomes.get(earlier["record_id"])
-            if earlier["record_id"] in explicit or outcome == "superseded":
+            if outcome == "superseded":
                 counted += 1
                 superseded += 1
             elif outcome in ("completed", "blocked"):

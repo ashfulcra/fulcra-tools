@@ -7444,16 +7444,21 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
             # definition). Classification evidence exists only in v2 cursor
             # `handled` rows, so pre-activation windows honestly read UNKNOWN
             # — never 0% — and an empty denominator reads n/a, never 100%.
+            # `outcomes` stays None (UNKNOWN) until at least one cursor READS
+            # ok: activation alone proves nothing was read, an empty census
+            # has no sources, and absent/invalid/error reads are unreadable
+            # evidence, not an empty classification set (pr-503 round 1).
             fleet_ev = records.fleet_events(record_rows)
             outcomes = None
             if (fleet_ev is not None and cfg is not None
                     and records.v2_active(cfg)):
-                outcomes = {}
                 for row in census["agents"]:
                     cur, _raw, status = records.load_v2_cursor_classified(
                         transport, args.team, row["agent"],
                         cfg["cursor_generation"])
                     if status == "ok" and cur is not None:
+                        if outcomes is None:
+                            outcomes = {}
                         for h in cur["committed"]["handled"]:
                             outcomes[h["record_id"]] = h["outcome"]
             adoption = records.supersession_adoption(
