@@ -4370,7 +4370,7 @@ def _write_local_listen_cache(path: pathlib.Path, payload: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(payload, encoding="utf-8")
     except OSError as e:
-        _log.warning("listen state write failed", path=str(path), error=str(e))
+        _log.warn("listen state write failed", path=str(path), error=str(e))
 
 
 def _load_listen_state(
@@ -4417,9 +4417,9 @@ def _save_listen_state(
     store_path = _listen_store_state_path(team, agent)
     try:
         if not transport.write(store_path, payload):
-            _log.warning("listen store state write failed", path=store_path)
+            _log.warn("listen store state write failed", path=store_path)
     except Exception as e:
-        _log.warning("listen store state write failed", path=store_path,
+        _log.warn("listen store state write failed", path=store_path,
                      error=str(e))
 
 
