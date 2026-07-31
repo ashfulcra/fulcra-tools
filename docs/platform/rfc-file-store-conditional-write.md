@@ -26,8 +26,10 @@ For a cursor, "silently lost currency" and "lost data" are operationally the
 same failure: coverage the fleet believes in has been re-marked by a writer
 that never saw it.
 
-For most documents that is tolerable. For a **cursor** it is data loss with
-a delay: overwrite a peer's coverage advance and events are skipped forever,
+For most documents that is tolerable. For a **cursor** the stolen currency
+has delayed consequences: re-mark a peer's coverage advance and events are
+skipped on every future read (recoverable from the version chain, but only
+after someone notices),
 or replayed as new. Our fleet has hit both failure shapes in production this
 month, and the engine's new transactional cursor (stage → process → commit)
 is precisely the machinery that turns them into loud, recoverable errors —
@@ -40,8 +42,8 @@ Without that, a "commit" is an overwrite with good intentions.
   created/uploaded time, then upload) is two operations with a gap. Two
   writers both observe a clean timestamp and both write; the second silently
   wins. Agent fleets wake in synchronized bursts (timers, broadcast events),
-  so the gap is hit at the worst moments, not rarely. Listing timestamps are
-  also minute-granular — same-minute writes are indistinguishable.
+  so the gap is hit at the worst moments, not rarely — and the comparison is
+  non-atomic no matter how precise the timestamps are.
 - **Write-then-read-back** proves only that your write was current as of the
   read-back; a third write a moment later still wins silently. It looks like
   a safety check and verifies nothing durable. The engine deliberately
@@ -79,11 +81,17 @@ RFC asks for — today the API mints upload sessions without them.
 ## Proposed surface
 
 The cheapest sufficient form, given the measured pipeline: **accept an
-optional precondition (`if_generation_match`, or equivalently
-current-version-id match) in the `POST /input/v1/file` body and bind it to
-the GCS resumable session the server already creates.** GCS enforces it
-natively; the 412 surfaces on the bytes leg; no new storage logic. In
-general terms:
+optional precondition (`if_generation_match`, or a current-version-UUID
+match) in the `POST /input/v1/file` body and bind it at the creation of the
+GCS resumable session** (GCS accepts `ifGenerationMatch` on JSON resumable
+initiation and `x-goog-if-generation-match` on the XML initiation POST). The
+contract at the Fulcra boundary: a stale precondition returns **412 without
+yielding a usable upload session**. Integration work is small but real, not
+zero: if the precondition is a Fulcra version UUID, the server resolves it
+to the backing generation, and a rejected request must not leave a
+falsely-current metadata row behind. Prefer generation semantics as the
+primary write token (per GCS's own guidance); ETag remains useful response
+evidence. In general terms:
 
 1. **Version token on every file.** A strong ETag (or a monotonically
    increasing per-file generation integer) returned on: upload response,
