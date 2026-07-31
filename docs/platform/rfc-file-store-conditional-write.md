@@ -17,12 +17,19 @@ that a write can atomically mean "replace the version I read, or fail."
 The File Store is the durable substrate for multi-agent coordination state:
 read cursors, leases, ledgers, task documents. All of these follow the same
 loop — read a file, compute an update, write it back. Today every upload is
-last-writer-wins: when two writers interleave (two agents; or two containers
-of the *same* agent, one stale and finishing an old turn while its
-replacement starts), one write silently vanishes. No error, no trace.
+last-writer-wins for **currency**: when two writers interleave (two agents;
+or two containers of the *same* agent, one stale and finishing an old turn
+while its replacement starts), the earlier write survives as an archived
+version — the store is append-only underneath — but it silently stops being
+current, and the superseded writer has no way to learn that at write time.
+For a cursor, "silently lost currency" and "lost data" are operationally the
+same failure: coverage the fleet believes in has been re-marked by a writer
+that never saw it.
 
-For most documents that is tolerable. For a **cursor** it is data loss with
-a delay: overwrite a peer's coverage advance and events are skipped forever,
+For most documents that is tolerable. For a **cursor** the stolen currency
+has delayed consequences: re-mark a peer's coverage advance and events are
+skipped on every future read (recoverable from the version chain, but only
+after someone notices),
 or replayed as new. Our fleet has hit both failure shapes in production this
 month, and the engine's new transactional cursor (stage → process → commit)
 is precisely the machinery that turns them into loud, recoverable errors —
@@ -35,8 +42,8 @@ Without that, a "commit" is an overwrite with good intentions.
   created/uploaded time, then upload) is two operations with a gap. Two
   writers both observe a clean timestamp and both write; the second silently
   wins. Agent fleets wake in synchronized bursts (timers, broadcast events),
-  so the gap is hit at the worst moments, not rarely. Listing timestamps are
-  also minute-granular — same-minute writes are indistinguishable.
+  so the gap is hit at the worst moments, not rarely — and the comparison is
+  non-atomic no matter how precise the timestamps are.
 - **Write-then-read-back** proves only that your write was current as of the
   read-back; a third write a moment later still wins silently. It looks like
   a safety check and verifies nothing durable. The engine deliberately
@@ -49,7 +56,42 @@ Without that, a "commit" is an overwrite with good intentions.
 The defining property we cannot build client-side: the version compare and
 the write must be **one atomic server-side operation**.
 
+## Measured behavior this proposal builds on (probed 2026-07-30)
+
+Raw-REST observations against the live API, reproducible:
+
+1. Upload is two-step: `POST /input/v1/file` (metadata; returns a fresh
+   version UUID *before* bytes move) → signed **GCS resumable session**
+   (bucket-side object name is stable per path, so GCS generations advance
+   on one object per overwrite).
+2. Every upload mints a new metadata row; the prior version flips to
+   `state: archived` with a timestamp — an append-only, queryable version
+   chain (`GET /input/v1/file/{id}`, list by state, plus
+   `/input/v1/file/recent_changes`).
+3. The bytes-leg response already carries the GCS **ETag**.
+4. Client-supplied preconditions are ignored, confirmed by test:
+   `x-goog-if-generation-match` (header) and `ifGenerationMatch` (query) on
+   the upload leg both returned 200 against a deliberately wrong generation,
+   and generation-0 (create-only) returned 200 against an existing object.
+   GCS binds preconditions at session creation, which only the server does.
+
+So the storage engine underneath already enforces exactly the semantics this
+RFC asks for — today the API mints upload sessions without them.
+
 ## Proposed surface
+
+The cheapest sufficient form, given the measured pipeline: **accept an
+optional precondition (`if_generation_match`, or a current-version-UUID
+match) in the `POST /input/v1/file` body and bind it at the creation of the
+GCS resumable session** (GCS accepts `ifGenerationMatch` on JSON resumable
+initiation and `x-goog-if-generation-match` on the XML initiation POST). The
+contract at the Fulcra boundary: a stale precondition returns **412 without
+yielding a usable upload session**. Integration work is small but real, not
+zero: if the precondition is a Fulcra version UUID, the server resolves it
+to the backing generation, and a rejected request must not leave a
+falsely-current metadata row behind. Prefer generation semantics as the
+primary write token (per GCS's own guidance); ETag remains useful response
+evidence. In general terms:
 
 1. **Version token on every file.** A strong ETag (or a monotonically
    increasing per-file generation integer) returned on: upload response,
