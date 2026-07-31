@@ -3346,7 +3346,8 @@ def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> Non
 
 def _queue_result_envelope(
         events: list[dict[str, Any]], *, cfg: dict[str, Any],
-        cursor_path: str, advanced: bool) -> dict[str, Any]:
+        cursor_path: str, advanced: bool,
+        outcome_mix: Optional[dict[str, int]] = None) -> dict[str, Any]:
     """The single-object ``--json`` success envelope for a queue read.
 
     Shares the ``type`` discriminator convention with the ``queue-error``
@@ -3378,7 +3379,14 @@ def _queue_result_envelope(
             "ptr": event.get("ptr"),
         } for event in events],
         "count": len(events),
-        "cursor": {"path": cursor_path, "advanced": advanced},
+        # respec s7: outcome_mix is ADDITIVE under the cursor block (per the
+        # deputy ruling) — the agent's own durable classification mix from v2
+        # `handled` rows. Absent (legacy cursor / no rows) the key is omitted,
+        # keeping the legacy envelope byte-identical for golden tests.
+        "cursor": ({"path": cursor_path, "advanced": advanced,
+                    "outcome_mix": outcome_mix}
+                   if outcome_mix is not None
+                   else {"path": cursor_path, "advanced": advanced}),
         "engine_version": engine_version,
         "protocol": protocol,
     }
@@ -3519,7 +3527,8 @@ def _cmd_queue_v2(
                     pending["events"], cfg=cfg,
                     cursor_path=records.v2_cursor_path(
                         args.team, agent, generation),
-                    advanced=False))
+                    advanced=False,
+                    outcome_mix=records.outcome_mix(cursor)))
             else:
                 _print_queue_events(pending["events"], json_mode=False)
             if pending["events"]:
@@ -3618,7 +3627,8 @@ def _cmd_queue_v2(
                 fresh, cfg=cfg,
                 cursor_path=records.v2_cursor_path(
                     args.team, agent, generation),
-                advanced=False))
+                advanced=False,
+                outcome_mix=records.outcome_mix(cursor)))
         else:
             _print_queue_events(fresh, json_mode=False)
         if fresh:
@@ -7430,6 +7440,40 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
             if census["mixed"]:
                 print("  ! Fleet census: MIXED/UNKNOWN versions; v2 cursor "
                       "activation is unsafe")
+            # respec s7: supersession-adoption metric (deputy-corrected
+            # definition). Classification evidence exists only in v2 cursor
+            # `handled` rows, so pre-activation windows honestly read UNKNOWN
+            # — never 0% — and an empty denominator reads n/a, never 100%.
+            # `outcomes` stays None (UNKNOWN) until at least one cursor READS
+            # ok: activation alone proves nothing was read, an empty census
+            # has no sources, and absent/invalid/error reads are unreadable
+            # evidence, not an empty classification set (pr-503 round 1).
+            fleet_ev = records.fleet_events(record_rows)
+            outcomes = None
+            if (fleet_ev is not None and cfg is not None
+                    and records.v2_active(cfg)):
+                for row in census["agents"]:
+                    cur, _raw, status = records.load_v2_cursor_classified(
+                        transport, args.team, row["agent"],
+                        cfg["cursor_generation"])
+                    if status == "ok" and cur is not None:
+                        if outcomes is None:
+                            outcomes = {}
+                        for h in cur["committed"]["handled"]:
+                            outcomes[h["record_id"]] = h["outcome"]
+            adoption = records.supersession_adoption(
+                fleet_ev or [], outcomes)
+            if adoption["status"] == "unknown":
+                print("  ! Supersession adoption: UNKNOWN (no v2 "
+                      "classification evidence this window — not 0%)")
+            elif adoption["counted"] == 0:
+                print(f"  ✓ Supersession adoption: n/a (0 candidates; "
+                      f"{adoption['unknown']} unmeasurable)")
+            else:
+                print(f"  ✓ Supersession adoption: "
+                      f"{adoption['superseded']}/{adoption['counted']} "
+                      f"({adoption['ratio']:.0%}; "
+                      f"{adoption['unknown']} unmeasurable)")
     print("doctor: healthy" if ok else "doctor: PROBLEMS FOUND")
     return 0 if ok else 1
 

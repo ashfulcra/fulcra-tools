@@ -950,3 +950,128 @@ def commit_v2_delivery(
             return {"status": "idempotent", "cursor": observed}
         return {"status": "stale", "cursor": observed}
     return {"status": "committed", "cursor": next_doc}
+
+
+# --- supersession-adoption metric (respec s7) --------------------------------
+#
+# Deputy-corrected definition (2026-07-30 provisional ruling, slug respec-s7):
+# slug reuse is normally a THREAD, not a supersession — measured live, 11/11
+# repeated sender+slug pairs in 24h were threads. Candidates are therefore
+# directive→directive to the SAME recipient on the SAME slug only; an earlier
+# directive already terminally classified completed/blocked is follow-up, not
+# supersession; explicit `task supersede` evidence counts directly; anything
+# the stream cannot distinguish is UNKNOWN, never silently in the denominator.
+# The denominator is EXPECTED to be small.
+
+def supersession_adoption(
+    events: list[Any],
+    outcomes: Optional[dict[str, str]],
+) -> dict[str, Any]:
+    """Fold the supersession-adoption metric over a window of bus events.
+
+    ``events``: parsed v1 event dicts (need kind/to/slug/record_id, ordered or
+    orderable by recorded_at). ``outcomes``: record_id → DELIVERY_OUTCOMES
+    classification where durably known (v2 cursor ``handled`` rows);
+    ``None`` means NO classification evidence exists for this window (legacy
+    fleet) — the whole metric is then UNKNOWN, never 0% (absence of data is
+    not evidence of non-adoption).
+
+    Scope (narrowed, pr-503 round 1): the explicit signal this fold counts
+    directly is the record-level ``superseded`` classification
+    (``queue commit --result <id>=superseded``). The ``task supersede`` verb
+    (D3) writes its ``superseded_by`` evidence into TASK documents keyed by
+    task slug, and no identity mapping from task slugs to event record ids
+    exists in the data model — so that channel is out of scope here rather
+    than exposed as a parameter no production caller can fill. Wiring it
+    requires a schema-level task→record link first.
+
+    Returns ``{"status", "counted", "superseded", "unknown", "ratio"}``:
+    ratio is ``None`` when nothing was countable — an empty denominator must
+    read n/a, NEVER 100%.
+    """
+    if outcomes is None:
+        return {"status": "unknown", "counted": 0, "superseded": 0,
+                "unknown": 0, "ratio": None}
+
+    directives: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("kind") != "directive":
+            continue
+        rid, to, slug = (event.get("record_id"), event.get("to"),
+                         event.get("slug"))
+        if not (isinstance(rid, str) and isinstance(to, str)
+                and isinstance(slug, str)):
+            continue
+        directives.append(
+            {"record_id": rid, "to": to, "slug": slug,
+             "at": event.get("recorded_at") or ""})
+    directives.sort(key=lambda d: d["at"])
+
+    counted = superseded = unknown = 0
+    by_key: dict[tuple, dict[str, Any]] = {}
+    for d in directives:
+        key = (d["to"], d["slug"])
+        earlier = by_key.get(key)
+        if earlier is not None:
+            outcome = outcomes.get(earlier["record_id"])
+            if outcome == "superseded":
+                counted += 1
+                superseded += 1
+            elif outcome in ("completed", "blocked"):
+                pass  # terminally classified before re-issue: follow-up work
+            elif outcome == "ignored":
+                counted += 1  # implicit resolution of a re-issued directive
+            else:
+                unknown += 1  # unclassified/unmeasurable: NOT the denominator
+        by_key[key] = d
+
+    ratio = (superseded / counted) if counted else None
+    return {"status": "ok", "counted": counted, "superseded": superseded,
+            "unknown": unknown, "ratio": ratio}
+
+
+def outcome_mix(cursor: Optional[dict[str, Any]]) -> Optional[dict[str, int]]:
+    """Per-agent classification mix from a v2 cursor's ``handled`` rows —
+    the agent's own durable adoption signal (surfaced in ``queue --json``
+    under the cursor block). ``None`` when there is no v2 evidence."""
+    if not isinstance(cursor, dict):
+        return None
+    handled = (cursor.get("committed") or {}).get("handled")
+    if not isinstance(handled, list) or not handled:
+        return None
+    mix = {outcome: 0 for outcome in DELIVERY_OUTCOMES}
+    for row in handled:
+        outcome = row.get("outcome") if isinstance(row, dict) else None
+        if outcome in mix:
+            mix[outcome] += 1
+    return mix
+
+
+def fleet_events(records: Optional[list]) -> Optional[list[dict[str, Any]]]:
+    """All parsed v1 events regardless of recipient (fleet folds — the s7
+    metric needs directive pairs across every recipient). Same None-propagation
+    and id-dedupe rules as :func:`events_for`."""
+    if records is None:
+        return None
+    out: list[dict[str, Any]] = []
+    seen_ids: set = set()
+    for rec in records:
+        if not isinstance(rec, dict):
+            return None
+        payload = parse_payload(rec.get("note"))
+        if payload is None:
+            continue
+        rec_id = rec.get("id")
+        if rec_id is not None:
+            if rec_id in seen_ids:
+                continue
+            seen_ids.add(rec_id)
+        out.append({
+            "slug": payload["slug"], "kind": payload["kind"],
+            "priority": payload["pri"], "ptr": payload["ptr"],
+            "to": payload["to"], "from": sender_of(rec),
+            "recorded_at": rec.get("recorded_at"),
+            "record_id": rec.get("id"),
+        })
+    out.sort(key=lambda e: str(e.get("recorded_at") or ""))
+    return out
