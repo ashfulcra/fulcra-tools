@@ -4131,25 +4131,23 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     obligations_rc, obligations_fragment = (
         _reconcile_after_empty_read(args, transport, agent) if not fresh
         else (0, None))
-    if obligations_rc != 0:
-        # A degraded fold is a FAILED queue exit, so it takes the queue family's
-        # failure path — one `queue-error` object, queue's rc 3 for both UNKNOWN
-        # and INVALID (codex-reviewer, PR 501). The earlier version printed the
-        # SUCCESS envelope (`queue-result`, state CLEAR) and merely returned a
-        # nonzero rc, which broke slice 4's contract that every nonzero queue exit
-        # emits exactly one queue-error: automation switching on `type` would have
-        # read a clean CLEAR while the process signalled failure.
-        # rc 4 stays on the standalone `obligations` verb, where UNKNOWN and
-        # INVALID have different remedies and nothing else owns the exit code.
-        state = obligations_fragment["state"] if obligations_fragment else "UNKNOWN"
-        return _queue_failure(
-            args, state=state,
-            error_code=("obligations-invalid" if state == "INVALID"
-                        else "obligations-unknown"),
-            message=("queue: obligations "
-                     f"{state} — {obligations_fragment['reason']}"
-                     if obligations_fragment else "queue: obligations UNKNOWN"),
-            rc=3, extra={"obligations": obligations_fragment})
+    # RC SEPARATION (codex-coder ruling 2026-07-31, codex-reviewer concurring).
+    # `queue`'s exit status describes ONE thing: the record-window transaction and
+    # the cursor result. An advisory obligation verdict must never rewrite that.
+    #
+    # The earlier version returned rc 3 when the fold was UNKNOWN — after the
+    # cursor had already been saved. That made a successful, coverage-advancing
+    # read exit with the code BOOTSTRAP defines as "window UNKNOWN, cursor
+    # untouched": two different facts sharing one exit code, which is the exact
+    # conflation this slice exists to end.
+    #
+    # Deferring the cursor save behind the fold would be the other wrong fix: a
+    # slow or dark obligation surface would then block durable delivery progress
+    # and replay windows forever. Delivery is primary; obligations are advisory.
+    # So the verdict travels in the envelope and the diagnostic, never in the rc.
+    # Shell gating on obligations uses the standalone `obligations` verb, which
+    # owns its own rc contract (3 = UNKNOWN, 4 = INVALID).
+    del obligations_rc
     if json_mode:
         envelope = _queue_result_envelope(
             fresh, cfg=cfg,
@@ -4159,8 +4157,9 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             # NESTED, not a second object. Slice 4's contract is that --json
             # success is exactly one object so a consumer switches on one field;
             # emitting the fold as a sibling row would break every reader that
-            # relies on it. Correct for DATA/CLEAR only — a degraded fold takes
-            # the failure path above.
+            # relies on it. Carries EVERY obligation state now, including
+            # UNKNOWN/INVALID — the read itself succeeded, so the envelope is a
+            # success envelope that reports an advisory verdict inside it.
             envelope["obligations"] = obligations_fragment
         jsonutil.print_json(envelope)
     return 0
@@ -4197,12 +4196,10 @@ def _reconcile_after_empty_read(
         "malformed": result.malformed,
         "reason": result.reason(),
     }
-    degraded = result.state in (obligations_mod.ObligationState.UNKNOWN,
-                                obligations_mod.ObligationState.INVALID)
-    if not getattr(args, "json", False) and not degraded:
-        # Only the NON-failing states announce themselves here. A degraded fold
-        # returns through `_queue_failure`, which prints the same sentence — so
-        # printing it here too emitted the line twice on every degraded wake.
+    if not getattr(args, "json", False):
+        # Every state announces itself here, and ONLY here: the obligation
+        # verdict no longer routes through `_queue_failure`, so this is the one
+        # place it is printed.
         print(f"queue: obligations {result.state.value} — {result.reason()}",
               file=sys.stderr)
     if result.state is obligations_mod.ObligationState.UNKNOWN:
