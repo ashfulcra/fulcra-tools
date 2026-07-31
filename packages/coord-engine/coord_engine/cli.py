@@ -1176,6 +1176,13 @@ def _briefing_budget() -> float:
 #: schedule. Env ``COORD_OBLIGATION_BUDGET``.
 DEFAULT_OBLIGATION_BUDGET = 20.0
 
+#: Marker distinguishing "we ran out of time" from "the store could not be read".
+#: Both are UNKNOWN — CLEAR is unsayable either way — but the remedies are
+#: opposite: one is a knob, the other is an outage. Reporting them with the same
+#: sentence is the UNKNOWN/INVALID conflation this slice exists to end, pointed
+#: inward.
+_BUDGET_EXHAUSTED = "obligation budget exhausted before this component was read"
+
 
 def _obligation_budget() -> float:
     return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
@@ -3165,7 +3172,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
             if fold_dl.expired():
-                return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+                return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
             mine = _needs_me_rows(transport, team, agent, rows, now=now,
                                   held_roles=held_roles, include_history=False)
             owed = [r for r in mine
@@ -3177,7 +3184,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         if not rows_ok:
             return P(state=S.UNREADABLE, detail=rows_reason)
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
         if unresolved_roles:
             # A role whose lease could not be read might route work here. Doubt.
             return P(state=S.UNREADABLE,
@@ -3210,7 +3217,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             # already-dead deadline can legitimately return [] without ever
             # attempting a read — and [] here would be a false CLEAR caused by
             # our own cost control, which is the worst possible source for one.
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
         sink: list[str] = []
         found = _pending_reviews_for(transport, team, agent, rows=rows,
                                      deadline=fold_dl.instant,
@@ -3228,7 +3235,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         """Unacknowledged forge feedback — a durable obligation surfaced by
         needs-me and briefing, and absent from the first cut of this registry."""
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
         found = _forge_feedback_for(transport, team, agent,
                                     deadline=fold_dl.instant)
         real, markers = _split_markers(found)
@@ -4190,7 +4197,12 @@ def _reconcile_after_empty_read(
         "malformed": result.malformed,
         "reason": result.reason(),
     }
-    if not getattr(args, "json", False):
+    degraded = result.state in (obligations_mod.ObligationState.UNKNOWN,
+                                obligations_mod.ObligationState.INVALID)
+    if not getattr(args, "json", False) and not degraded:
+        # Only the NON-failing states announce themselves here. A degraded fold
+        # returns through `_queue_failure`, which prints the same sentence — so
+        # printing it here too emitted the line twice on every degraded wake.
         print(f"queue: obligations {result.state.value} — {result.reason()}",
               file=sys.stderr)
     if result.state is obligations_mod.ObligationState.UNKNOWN:

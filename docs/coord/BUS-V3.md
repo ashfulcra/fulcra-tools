@@ -71,7 +71,7 @@ only write that old path, so it cannot overwrite v2 state. After activation,
 v2 readers never derive authoritative coverage from the legacy cursor; later
 legacy writes are health evidence of an old active binary, not state. A new
 generation is required for a later activation—never reuse or rewind one.
-Version 1.9.0 implements cursor-schema v2 behind two hard activation gates:
+Version 1.9.0 implements cursor-schema v2 behind three hard activation gates:
 
 1. `doctor <team>` must prove that every active writer is v1.9.0-or-newer, and
    the authority must atomically select schema `2`, a new positive generation,
@@ -82,6 +82,14 @@ Version 1.9.0 implements cursor-schema v2 behind two hard activation gates:
    conditional upload, so the built-in transport fails closed rather than
    pretending that write/read-back is CAS. Keep the live authority on schema
    v1 until a CAS-capable transport is available.
+3. **The obligation fold must be hooked on the v2 read path.** `queue`'s
+   default reconciliation (v1.10.0) hooks the **v1** read only. Activating v2
+   without porting that hook silently stops the reconciliation for whoever
+   switches first — they would get a v2 queue that no longer answers "do I owe
+   anything?", and nothing would report the loss, because a fold that never
+   runs looks exactly like a fold that found nothing. Binding precondition,
+   promoted from a known gap at the s3 merge (coord-boss ratification,
+   2026-07-30).
 
 Version 1.10.0 makes INVALID a first-class terminal read state on every queue
 read path (a malformed config or cursor fails closed with

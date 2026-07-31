@@ -225,3 +225,22 @@ def test_each_component_can_independently_darken(sandbox):
             f"darkening {prefix} changed nothing — the procedure never reads it, "
             "so that component is documented but unchecked"
         )
+
+
+def test_v2_activation_gates_include_the_obligation_hook():
+    """The v2 gap is a binding activation precondition, not a footnote.
+
+    Ratified at the s3 merge. `queue --obligations` hooks only the v1 read path,
+    so activating v2 without porting it silently stops reconciliation — and a
+    fold that never runs is indistinguishable from a fold that found nothing.
+    This test is what keeps that promise attached to the gate list rather than
+    to somebody's memory.
+    """
+    body = doc_text()
+    marker = "### Cursor-v2 activation and physical isolation"
+    assert marker in body
+    section_body = body.split(marker, 1)[1].split("\nVersion 1.10.0", 1)[0]
+    assert "three hard activation gates" in section_body, (
+        "the gate count must match the enumerated gates"
+    )
+    assert "obligation fold must be hooked on the v2 read path" in section_body

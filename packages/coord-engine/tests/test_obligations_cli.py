@@ -542,3 +542,67 @@ def test_budget_breach_during_the_forge_scan_degrades_not_truncates(monkeypatch)
     )
     assert result.state is obligations_mod.ObligationState.UNKNOWN
     assert result.degraded, "the breach must name which component went dark"
+
+
+# --- live-board findings (post-merge, f74d44c9) ------------------------------
+
+def test_degraded_wake_prints_the_obligation_line_exactly_once(capsys):
+    """Live regression: the line appeared TWICE on every degraded wake.
+
+    `_reconcile_after_empty_read` printed it, then `_queue_failure` printed the
+    same sentence again. Harmless-looking, but duplicated diagnostics train
+    readers to skim, and a skimmed UNKNOWN is the thing this whole slice is
+    trying to make unmissable.
+    """
+    from coord_engine.transport import TransportError
+
+    transport = _queue_transport()
+    original = transport.list_dir if hasattr(transport, "list_dir") else None
+
+    def dark(prefix):
+        if prefix == f"team/{TEAM}/review/":
+            raise TransportError("review listing down")
+        return original(prefix) if original else []
+
+    transport.list_dir = dark
+    rc = cli.cmd_queue(_queue_args(), transport)
+    err = capsys.readouterr().err
+
+    assert rc == 3
+    assert err.count("obligations UNKNOWN") == 1, (
+        f"the obligation verdict printed {err.count('obligations UNKNOWN')} "
+        "times; a degraded wake must say it once"
+    )
+
+
+def test_budget_exhaustion_is_distinguishable_from_a_dark_store(monkeypatch):
+    """A knob and an outage must not read identically.
+
+    Both are UNKNOWN and both make CLEAR unsayable — that part is right. But the
+    remedies are opposite: one is `COORD_OBLIGATION_BUDGET`, the other is an
+    incident. Reporting them with the same sentence is the UNKNOWN/INVALID
+    conflation this slice exists to end, pointed inward at our own diagnostics.
+    """
+    from coord_engine import budget as budget_mod
+
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        value = clock["t"]
+        clock["t"] = 1e9
+        return value
+
+    monkeypatch.setattr(budget_mod.time, "monotonic", fake_monotonic)
+    result = obligations_mod.fold(
+        cli._obligation_probes(_counting(), TEAM, AGENT, now=PINNED_NOW),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+
+    assert result.state is obligations_mod.ObligationState.UNKNOWN
+    assert result.budget_exhausted, (
+        "components that went dark on the clock must be identified as such"
+    )
+    reason = result.reason()
+    assert "budget ran out" in reason
+    assert "not a store failure" in reason, (
+        "the message must actively deny the wrong diagnosis, not merely omit it"
+    )
