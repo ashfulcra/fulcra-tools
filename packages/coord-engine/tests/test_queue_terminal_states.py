@@ -427,33 +427,27 @@ def test_plain_data_output_byte_identical_to_pre_slice(monkeypatch, capsys):
 
 
 def test_plain_clear_output_byte_identical_to_pre_slice(monkeypatch, capsys):
-    """CLEAR stdout stays byte-identical; stderr gains the obligation verdict.
+    """CLEAR output is byte-identical to pre-slice — stdout AND stderr.
 
-    Updated for the 2026-07-30 slice-3 ruling, which made fold-on-empty the
-    DEFAULT. That necessarily changes what an empty read says, so this golden is
-    re-pinned rather than worked around — and re-pinned narrowly: **stdout is
-    still exactly ""**, which is the half the contract exists for (shell consumers
-    pipe stdout). The verdict lands on stderr, where a pipeline never sees it.
-
-    An agent that wants the old cost and the old silence passes
-    ``--no-obligations``; that path is pinned below.
+    Briefly re-pinned when fold-on-empty shipped default-ON; restored when that
+    default was reverted to opt-in (provisional, 2026-07-31). Worth stating: the
+    revert put this contract back exactly as codex-coder wrote it, rather than
+    leaving someone else's golden permanently bent around a default that did not
+    survive contact with a live board.
     """
     t = _transport(window=[])
     rc, out, err = _run(monkeypatch, capsys, t, [])
     assert rc == 0
-    assert out == "", "the stdout half of the golden contract is unchanged"
-    assert err.startswith(GOLDEN_WARNING)
-    assert "obligations CLEAR" in err
-
-
-def test_plain_clear_with_no_obligations_is_byte_identical_to_pre_slice(
-        monkeypatch, capsys):
-    """The opt-out restores the pre-ruling bytes exactly — stdout AND stderr."""
-    t = _transport(window=[])
-    rc, out, err = _run(monkeypatch, capsys, t, ["--no-obligations"])
-    assert rc == 0
     assert out == ""
     assert err == GOLDEN_WARNING
+
+
+def test_opt_in_obligations_adds_its_verdict_to_stderr_only(monkeypatch, capsys):
+    """--obligations is additive and stays off stdout."""
+    t = _transport(window=[])
+    rc, out, err = _run(monkeypatch, capsys, t, ["--obligations"])
+    assert out == "", "the fold must never write to stdout"
+    assert "obligations" in err
 
 
 def test_plain_peek_output_byte_identical_to_pre_slice(monkeypatch, capsys):

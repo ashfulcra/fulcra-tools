@@ -183,27 +183,32 @@ def _queue_transport():
 def _queue_args(**kw):
     import argparse
     base = dict(team=TEAM, agent=AGENT, json=False, peek=False, consume=False,
-                all=False, obligations=True)
+                all=False, obligations=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def test_opt_out_restores_the_pre_ruling_cost(capsys):
-    """--no-obligations must genuinely skip the fold, not merely mute it.
+def test_plain_wake_pays_nothing_for_the_fold(capsys):
+    """The default wake must not touch the fold at all.
 
-    The ruling kept an opt-out for cost-sensitive callers; an opt-out that still
-    pays for three listings is not an opt-out.
+    A default that still paid for three listings would not be a restored
+    pre-s3 cost, which is exactly what the withdrawn ack requires back.
     """
     transport = _queue_transport()
-    rc = cli.cmd_queue(_queue_args(obligations=False), transport)
+    rc = cli.cmd_queue(_queue_args(), transport)
     assert rc == 0
     assert "obligations" not in capsys.readouterr().err
 
 
-def test_empty_read_reconciles_by_default(capsys):
-    """Default ON: a plain empty wake now reconciles without being asked."""
+def test_empty_read_reconciles_when_asked(capsys):
+    """Opt-in: --obligations reconciles; the plain wake does not (provisional).
+
+    Default flipped back to OFF on two live findings — the rc-contract violation
+    (coverage advanced, then rc 3, which BOOTSTRAP defines as cursor-untouched)
+    and codex-coder's withdrawn cost ack. Both are recorded at the flag.
+    """
     transport = _queue_transport()
-    rc = cli.cmd_queue(_queue_args(), transport)
+    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
     err = capsys.readouterr().err
     assert "obligations CLEAR" in err
     assert rc == 0
@@ -340,7 +345,7 @@ def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
             malformed=[] if state == "UNKNOWN" else ["tasks"])
 
     monkeypatch.setattr(obligations_mod, "fold", fake_fold)
-    rc = cli.cmd_queue(_queue_args(json=True), transport)
+    rc = cli.cmd_queue(_queue_args(json=True, obligations=True), transport)
     out = capsys.readouterr().out
 
     rows = [json.loads(line) for line in out.splitlines() if line.strip()]
@@ -565,7 +570,7 @@ def test_degraded_wake_prints_the_obligation_line_exactly_once(capsys):
         return original(prefix) if original else []
 
     transport.list_dir = dark
-    rc = cli.cmd_queue(_queue_args(), transport)
+    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
     err = capsys.readouterr().err
 
     assert rc == 3

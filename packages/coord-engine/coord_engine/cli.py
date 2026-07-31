@@ -7944,13 +7944,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show events without advancing the cursor (safe diagnostic read)")
     qu.add_argument("--consume", action="store_true",
                     help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
-    # DEFAULT ON (coord-boss ruling, 2026-07-30). The false inference — "no
-    # events, so nothing owed" — exists only on the empty read, and the agents
-    # most at risk are the terse-wake ones who would never pass an opt-in flag.
-    # --no-obligations stays for cost-sensitive callers: three listings per empty
-    # wake is a real cost, just not one that should be the default silence.
+    # DEFAULT OFF (provisional, coord-opus-worker as deputy 2026-07-31; awaiting
+    # coord-boss ratification). It shipped default-ON per the s3 ruling, and two
+    # live findings overturned that:
+    #   1. rc CONTRACT. `save_cursor` runs BEFORE this fold's rc is returned, so
+    #      a quiet wake advanced coverage and then exited rc 3 — while BOOTSTRAP
+    #      tells every agent rc 3 means "window UNKNOWN, cursor untouched". Two
+    #      different facts wearing one exit code is the exact conflation this
+    #      slice exists to end.
+    #   2. COST. Measured on team fulcra: setup alone is ~35.8s against a 20s
+    #      budget, so every probe fails closed and the default fold returns
+    #      UNKNOWN on every component, every wake — paying 6+N ops for an answer
+    #      nobody can act on. codex-coder withdrew the cost ack on that evidence.
+    # Default-ON returns when the aggregate path lands and the measured profile
+    # fits the budget (codex-coder's gate), not before.
     qu.add_argument("--obligations", action=argparse.BooleanOptionalAction,
-                    default=True,
+                    default=False,
                     help="after an EMPTY read, reconcile durable obligations "
                          "(an empty queue is not proof nothing is owed); "
                          "rc 3 = UNKNOWN, rc 4 = INVALID. "
