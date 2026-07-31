@@ -244,3 +244,29 @@ def test_v2_activation_gates_include_the_obligation_hook():
         "the gate count must match the enumerated gates"
     )
     assert "obligation fold must be hooked on the v2 read path" in section_body
+
+
+def test_v2_read_path_has_no_obligation_hook_and_says_so():
+    """Pin the known gap at the code, not only in the doc.
+
+    codex-reviewer's residual finding on the rc separation: v2 reads return
+    before reconciliation, so the opt-in fold is a legacy-cursor integration
+    only. That is fine while v2 is dormant and it is a binding activation
+    precondition — but "fine because documented elsewhere" decays. This asserts
+    the warning lives on the function that would cause the problem, so somebody
+    porting v2 reads it in the diff rather than in a doc they did not open.
+    """
+    import inspect
+    from coord_engine import cli
+
+    src = inspect.getsource(cli._cmd_queue_v2)
+    assert "NO OBLIGATION RECONCILIATION HAPPENS HERE" in src
+    assert "v2-activation precondition" in src
+    # And the gap must still be real. Checking for a CALL (open paren), not a
+    # mention: the warning above names the function, and an assertion that
+    # cannot tell a reference from an invocation would fire on the very comment
+    # it is guarding.
+    assert "_reconcile_after_empty_read(" not in src, (
+        "v2 now reconciles — remove the warning and the third activation gate "
+        "in the same change, and update this test"
+    )

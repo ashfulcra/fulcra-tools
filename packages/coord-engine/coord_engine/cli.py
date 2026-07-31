@@ -3477,7 +3477,17 @@ def _cmd_queue_v2(
         args: argparse.Namespace, transport: Any, cfg: dict[str, Any],
         agent: str, *, peek: bool, engine_version: str
 ) -> int:
-    """Transactional v2 read: stage first, advance only on explicit commit."""
+    """Transactional v2 read: stage first, advance only on explicit commit.
+
+    NO OBLIGATION RECONCILIATION HAPPENS HERE. Every return below exits before
+    ``_reconcile_after_empty_read``, so a v2 wake never runs the fold even with
+    ``--obligations``. That is deliberate for now and it is a BINDING
+    v2-activation precondition (docs/coord/BUS-V3.md, gate 3): activating v2
+    without porting the hook would silently stop reconciliation for whoever
+    switches first, and a fold that never runs is indistinguishable from a fold
+    that found nothing. Said here, at the code that would cause it, rather than
+    only in the doc somebody activating v2 might not re-read.
+    """
     generation = cfg["cursor_generation"]
     cursor, raw, status = records.load_v2_cursor_classified(
         transport, args.team, agent, generation)
@@ -4174,14 +4184,25 @@ def _reconcile_after_empty_read(
     not establish that nothing is owed — that is the r2 spec item-3 distinction,
     and the fold is the only thing that closes it.
 
-    DEFAULT ON since the 2026-07-30 ruling; ``--no-obligations`` opts out. It
-    costs a task-index listing, a review listing and a roles listing on an empty
-    wake, which is a real bill — but only on the empty read, and only where the
-    wrong inference was otherwise free. A cost-sensitive caller can still decline
-    it explicitly, which is different from never being offered it.
+    OPT-IN (``--obligations``). It shipped default-on under the 2026-07-30
+    ruling and was reverted on 2026-07-31: measured setup alone was ~35.8s
+    against a 20s budget on a live board, so every probe failed closed and the
+    default fold returned UNKNOWN on every component, every wake. Default-on
+    returns when the aggregate path lands and the measured profile fits the
+    budget with margin.
 
-    Returns the rc the caller should use: the fold's UNKNOWN/INVALID states must
-    reach the exit code, or an agent scripting `queue` learns nothing from them.
+    The returned rc is the FOLD's own verdict (3 UNKNOWN / 4 INVALID) and the
+    caller deliberately does NOT adopt it: `queue`'s exit status describes the
+    record-window transaction and the cursor result, nothing else. An earlier
+    version did adopt it, which made a successful, cursor-advancing read exit
+    with the code BOOTSTRAP defines as "cursor untouched". The rc survives here
+    only because the standalone ``obligations`` verb — which owns that contract —
+    shares this fold.
+
+    LEGACY-CURSOR ONLY. Transactional cursor-v2 reads return from
+    ``_cmd_queue_v2`` before this runs, so v2 wakes get no reconciliation. That
+    is a known, documented gap and a binding v2-activation precondition (see
+    docs/coord/BUS-V3.md, gate 3), not an oversight to discover later.
     """
     if not getattr(args, "obligations", False):
         return 0, None
