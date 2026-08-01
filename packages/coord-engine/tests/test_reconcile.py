@@ -1,8 +1,28 @@
+import datetime
 import json
 
 from coord_engine import aggregate as aggregate_mod
 from coord_engine import annotate, reconcile
 from coord_engine.transport import TransportError
+
+
+def _recent_mtime() -> str:
+    """A store-format mtime that is always recent RELATIVE TO THE RUN.
+
+    Retention tests seed two kinds of fixture: an explicitly ancient one they
+    assert gets archived, and a default-mtime one they assert is KEPT.  The
+    second only means "recent" if it stays inside `--retention-days` of the
+    clock `reconcile` actually reads, which is the real one.  A hardcoded
+    literal here is a time bomb: it silently ages past the window and then the
+    keep-assertions fail on untouched code.  That is exactly what detonated at
+    the 2026-07→08 rollover, when the former `2026-07-01` default crossed the
+    30-day line and two retention tests started failing on clean main.
+
+    Anchoring to now keeps "recent" meaning recent forever.  Tests that assert
+    on a specific mtime string pass one explicitly and are unaffected.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.strftime("%Y-%m-%d %I:%M%p UTC")
 
 
 class FakeTransport:
@@ -14,9 +34,9 @@ class FakeTransport:
         self.sizes: dict[str, str] = {}
         self.fail_list = False
 
-    def put(self, path, content, mtime="2026-07-01 04:00PM UTC", size=None):
+    def put(self, path, content, mtime=None, size=None):
         self.store[path] = content
-        self.mtimes[path] = mtime
+        self.mtimes[path] = _recent_mtime() if mtime is None else mtime
         # Mirror `fulcra-api file list`, which reports a byte size per entry. Size
         # is the sub-minute change signal the incremental-reuse guard relies on:
         # default it to the content length so a same-minute edit that changes the
@@ -1072,3 +1092,35 @@ class TestAggregateRoundTrip:
         _reconciled(t, now="2026-07-01T16:15:00Z")
         # No anchor -> full fold. Our incremental path is dead until the fleet moves.
         assert _ack_lists(calls), "expected the full fold a wiped anchor forces"
+
+
+def test_default_fixture_mtime_stays_inside_the_retention_window():
+    """Guard the invariant whose violation broke clean main on 2026-08-01.
+
+    Retention tests seed a default-mtime fixture and assert it is KEPT.  That
+    assertion is only meaningful while the default sits inside
+    ``--retention-days`` of the clock ``reconcile`` reads — the real one.  The
+    previous hardcoded ``2026-07-01`` default satisfied it for a month and then
+    silently stopped, failing two tests on code nobody had touched.
+
+    This fails the moment someone reintroduces a fixed literal, and it fails at
+    the source rather than as a puzzling archive assertion three files away.
+    """
+    from coord_engine import router
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", "body")
+    parsed = router.parse_store_mtime(t.mtimes["team/r/task/a.md"])
+
+    assert parsed is not None, (
+        "the default fixture mtime is not in store format, so retention code "
+        f"cannot age it at all: {t.mtimes['team/r/task/a.md']!r}"
+    )
+    age = datetime.datetime.now(datetime.timezone.utc) - parsed
+    # The tightest window any test in this repo exercises is 30 days; 1 day of
+    # slack keeps the guard honest without making it flaky at a minute boundary.
+    assert age < datetime.timedelta(days=1), (
+        "the default fixture mtime has aged out of every retention window this "
+        f"suite exercises (age {age}). It must be derived from the clock, not "
+        "hardcoded — see _recent_mtime."
+    )
