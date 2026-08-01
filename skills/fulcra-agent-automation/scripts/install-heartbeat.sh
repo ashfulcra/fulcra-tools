@@ -87,8 +87,9 @@ selftest() {  # B3 — run once at install so a broken PATH/auth fails LOUDLY no
     echo "  (digest --emit-timeline every tick; annotate project when the team opts in)" >&2
     echo "  but the fulcra_common writer is NOT importable in coord-engine's" >&2
     echo "  environment: those emits will no-op and the timeline stays dark." >&2
-    echo "  Reinstall with the writer:" >&2
-    echo "    uv tool install --force \"git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.6.13#subdirectory=packages/coord-engine\" \\" >&2
+    echo "  Reinstall with the writer, using the CURRENT engine tag from the" >&2
+    echo "  store authority _coord/bus-v3/BOOTSTRAP.md (or its adopt-latest.sh):" >&2
+    echo "    uv tool install --force \"git+https://github.com/ashfulcra/fulcra-tools@<current-coord-engine-tag>#subdirectory=packages/coord-engine\" \\" >&2
     echo "      --with \"git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common\"" >&2
     exit 4
   fi

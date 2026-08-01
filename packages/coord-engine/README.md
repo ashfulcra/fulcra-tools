@@ -21,7 +21,9 @@ coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 ```
 
 Not on PyPI yet — install from the git tag (or a checkout:
-`uv tool install ./packages/coord-engine`). The engine shells out to the
+`uv tool install ./packages/coord-engine`). The tag above is an example
+frozen at writing time; the authoritative current pin lives in the team
+store at `_coord/bus-v3/BOOTSTRAP.md`. The engine shells out to the
 [`fulcra-api` CLI](https://pypi.org/project/fulcra-api/) for storage
 (`uv tool install fulcra-api && fulcra auth login`); override the launcher via
 `$FULCRA_CLI_COMMAND`. Identity comes from `$FULCRA_COORD_AGENT` — set it to the **role**
