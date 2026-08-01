@@ -7359,6 +7359,8 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
+    if getattr(args, "delivery", False):
+        return _doctor_delivery(args, transport)
     import shutil
     ok = True
     from .transport import _split_command
@@ -7476,6 +7478,88 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
                       f"{adoption['unknown']} unmeasurable)")
     print("doctor: healthy" if ok else "doctor: PROBLEMS FOUND")
     return 0 if ok else 1
+
+
+def _doctor_delivery(args: argparse.Namespace, transport: Any) -> int:
+    """Write and read one probe through the production typed-record seams."""
+    agent = args.agent or os.environ.get("FULCRA_COORD_AGENT")
+    if not args.team:
+        print("doctor --delivery: team is required", file=sys.stderr)
+        return 2
+    if not agent:
+        print("doctor --delivery: no agent identity", file=sys.stderr)
+        return 2
+    cfg = records.load_config(transport, args.team)
+    if cfg is None:
+        print("doctor --delivery: no records config — cannot write",
+              file=sys.stderr)
+        return 2
+
+    nonce = uuid.uuid4().hex[:8]
+    slug = f"delivery-probe-{nonce}"
+    # Build once through the public probe helper as a local contract check;
+    # emit_event below is the normal event path used by reminders/directives.
+    payload = records.roundtrip_probe_payload(agent, nonce)
+    if records.parse_payload(payload) is None:  # pragma: no cover - invariant
+        print("doctor --delivery: probe payload is not parseable",
+              file=sys.stderr)
+        return 2
+    started = _now()
+    written = records.emit_event(
+        transport, cfg, sender=agent, to=f"{agent}-probe", kind="claim",
+        priority="P3", slug=slug)
+    if not written:
+        print("doctor --delivery: probe write REFUSED", file=sys.stderr)
+        return 2
+
+    deadline = time.monotonic() + args.deadline
+    while True:
+        now = _now()
+        window = transport.records(
+            cfg["data_type"], _iso(started - timedelta(minutes=2)), _iso(now))
+        if window is not None:
+            for rec in window:
+                if not isinstance(rec, dict):
+                    continue
+                parsed = records.parse_payload(rec.get("note"))
+                if parsed is None or parsed.get("slug") != slug:
+                    continue
+                stamp = parsed.get("writer") or {}
+                from . import __version__
+                if stamp.get("engine_version") != __version__:
+                    print(
+                        "delivery: probe readable but writer stamp is "
+                        f"{stamp.get('engine_version')!r}, engine is "
+                        f"{__version__} — TWO engines are writing as this "
+                        "identity",
+                        file=sys.stderr,
+                    )
+                    return 3
+                lag = max(0.0, (now - started).total_seconds())
+                print("delivery: PROVEN — probe written, ingested and parsed "
+                      f"in {lag:.0f}s (payload v1, stamped {__version__})")
+                return 0
+            for rec in window:
+                if not isinstance(rec, dict):
+                    continue
+                note = rec.get("note")
+                if (isinstance(note, str) and slug in note
+                        and records.parse_payload(note) is None):
+                    print(
+                        "delivery: probe written but NOT readable — this "
+                        "engine wrote a non-v1 note (legacy/rolled-back "
+                        "writer). Run adopt-latest and retry.",
+                        file=sys.stderr,
+                    )
+                    return 3
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(5.0, remaining))
+    print("delivery: UNKNOWN — probe not readable within "
+          f"{args.deadline:.0f}s (ingest lag or store failure); NOT proof of "
+          "delivery", file=sys.stderr)
+    return 3
 
 
 # --- digest + escalate (fulcra-agent-health, A5b) ---
@@ -8086,6 +8170,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
+    dr.add_argument(
+        "--delivery", action="store_true",
+        help="write/read a probe event and prove fleet-readable delivery")
+    dr.add_argument("--agent", help="identity for --delivery (or $FULCRA_COORD_AGENT)")
+    dr.add_argument(
+        "--deadline", type=float, default=90.0,
+        help="seconds to wait for the delivery probe (default 90)")
     dr.set_defaults(func=cmd_doctor)
 
     ak = sub.add_parser("asks", help="waiting-for-operator asks, oldest first (orchestrator pull)")

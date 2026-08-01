@@ -115,6 +115,21 @@ def parse_payload(note: Any) -> Optional[dict[str, Any]]:
     }
 
 
+def roundtrip_probe_payload(agent: str, nonce: str) -> str:
+    """Build the delivery-proof payload consumed by ``doctor --delivery``.
+
+    The synthetic recipient is owned by the caller, so proving the write/read
+    path never consumes or pollutes another agent's queue. Claims are
+    envelope-only and therefore owe no document pointer.
+    """
+    return build_payload(
+        to=f"{agent}-probe",
+        kind="claim",
+        priority="P3",
+        slug=f"delivery-probe-{nonce}",
+    )
+
+
 def sender_of(record: dict[str, Any]) -> Optional[str]:
     """The authoring agent from ``sources``, or None if unattributed.
 
