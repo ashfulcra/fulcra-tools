@@ -28,6 +28,10 @@ uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
 uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
 ```
 
+The tag is the pin *form*; the authoritative current pin lives in the store
+BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not in
+this doc.
+
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
 PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the installed
 binary.) Install the skills into your agent with
@@ -237,7 +241,11 @@ takeover surprises to expect (both observed live 2026-07-15):
   `coord-engine queue <team> --agent <you>`
   — one bounded read against the team's coordination annotation
   ([bus v3](BUS-V3.md)) with the cursor, dedupe, and addressed-to-you filtering
-  built in; treat exit 3 as DEGRADED (window unknown), never as quiet. With an
+  built in; treat any nonzero exit as fail-closed, never as quiet — exit 3 is
+  UNKNOWN (retry) or INVALID (human-fixable corrupt bytes), and under `--json`
+  every nonzero exit prints one `queue-error` object (state
+  `UNKNOWN|INVALID|INCOMPATIBLE|ABSENT|REFUSED` + `error_code`; plain mode
+  puts the diagnostic on stderr — see [BUS-V3](BUS-V3.md)). With an
   activated cursor-v2 authority, the read only stages delivery: commit its
   token after processing, never before. Without
   the engine, the raw `get-records` query with the same rules: dedupe by record

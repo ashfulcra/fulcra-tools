@@ -25,9 +25,9 @@ Before sending anything, probe how far this user already got. Enter at the **fir
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Authed? | `uv tool run fulcra-api user-info` | exits 0 and prints valid JSON | **AUTH** (send HELLO first if this user has never seen the pitch/consent message) |
-| Watched def exists? | `uv tool run fulcra-api catalog -n Watched` | some line's `description` is exactly `com.fulcradynamics.annotation.media.watched` | **EXPORT** (they're authed but never imported) |
-| Records exist? | `uv tool run fulcra-api get-records "DurationAnnotation/<def-uuid>" "2007-01-01T00:00:00Z" "2035-01-01T00:00:00Z" \| head -1` (def-uuid from the catalog line above) | non-empty output | **IMPORT** (def exists but empty — ask for the CSV again) |
+| Authed? | `fulcra-api user-info` | exits 0 and prints valid JSON | **AUTH** (send HELLO first if this user has never seen the pitch/consent message) |
+| Watched def exists? | `fulcra-api catalog -n Watched` | some line's `description` is exactly `com.fulcradynamics.annotation.media.watched` | **EXPORT** (they're authed but never imported) |
+| Records exist? | `fulcra-api get-records "DurationAnnotation/<def-uuid>" "2007-01-01T00:00:00Z" "2035-01-01T00:00:00Z" \| head -1` (def-uuid from the catalog line above) | non-empty output | **IMPORT** (def exists but empty — ask for the CSV again) |
 | Share confirmed? | none — the share happens in Fulcra's web UI, there is no CLI probe | the user has previously told you they completed (or explicitly skipped) the share | **SHARE** |
 
 All four pass → done; congratulate them and point at [Context Web](https://context.fulcradynamics.com) to browse their data. A brand-new user fails the first probe: send HELLO, then proceed through the states in order.
@@ -56,27 +56,27 @@ Do not water down the disclosure, move it after auth, or imply the share is Netf
 
 ## State 2 — AUTH
 
-Goal: `uv tool run fulcra-api user-info` returns valid JSON. Full detail and failure modes in [references/auth.md](references/auth.md); the short version:
+Goal: `fulcra-api user-info` returns valid JSON. Full detail and failure modes in [references/auth.md](references/auth.md); the short version:
 
-1. **Probe first**: run `uv tool run fulcra-api user-info`. Valid JSON → already authenticated; skip straight to EXPORT. (If `uv` itself is missing, ask the user for consent to install it: `curl -LsSf https://astral.sh/uv/install.sh | sh` on macOS/Linux.)
+1. **Probe first**: run `fulcra-api user-info`. Valid JSON → already authenticated; skip straight to EXPORT. (If the `fulcra-api` binary is missing, install it once with `uv tool install fulcra-api`; if `uv` itself is missing, ask the user for consent to install it: `curl -LsSf https://astral.sh/uv/install.sh | sh` on macOS/Linux.)
 
 2. **Mint the login URL** — always the two-step, non-interactive form:
 
    ```bash
-   uv tool run fulcra-api auth login --get-auth-url
+   fulcra-api auth login --get-auth-url
    ```
 
-   **CRITICAL: never run bare `uv tool run fulcra-api auth login`** — interactive mode blocks your shell for up to two minutes waiting on a browser flow you can't see, and typically times out before the user finishes. Always use `--get-auth-url`.
+   **CRITICAL: never run bare `fulcra-api auth login`** — interactive mode blocks your shell for up to two minutes waiting on a browser flow you can't see, and typically times out before the user finishes. Always use `--get-auth-url`.
 
    The output contains three items: a **web auth URL**, a **web auth code** (also embedded in the URL), and a **device code**. Message the user the URL as a clickable markdown link plus the web auth code so they can confirm it matches what the page shows. **The device code stays private** — it appears in the CLI output you read, and it must never appear in a message to the human (anyone holding it can claim the session).
 
 3. **Poll for completion** — roughly every 15 seconds, run:
 
    ```bash
-   uv tool run fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
+   fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
    ```
 
-   While the user hasn't finished, this reports the authorization as pending; keep polling. On success it persists credentials to `~/.config/fulcra/credentials.json` — confirm with `uv tool run fulcra-api user-info` and announce success immediately ("You're in! I can see your Fulcra account now."). If the device code expires before they finish (about 10 minutes), don't treat it as failure: mint a fresh URL with `--get-auth-url` and re-message it. But don't re-loop silently forever: if you've re-minted more than once, or a full ~10-minute cycle passed with no progress, check in with the user in chat before continuing to poll.
+   While the user hasn't finished, this reports the authorization as pending; keep polling. On success it persists credentials to `~/.config/fulcra/credentials.json` — confirm with `fulcra-api user-info` and announce success immediately ("You're in! I can see your Fulcra account now."). If the device code expires before they finish (about 10 minutes), don't treat it as failure: mint a fresh URL with `--get-auth-url` and re-message it. But don't re-loop silently forever: if you've re-minted more than once, or a full ~10-minute cycle passed with no progress, check in with the user in chat before continuing to poll.
 
 4. **Sandbox bailout**: if the CLI can't reach the network at all (connection errors to `fulcra.us.auth0.com` or `api.fulcradynamics.com`, not auth errors), this runtime is network-restricted and cannot do CLI auth. Tell the user plainly and stop — don't loop retrying.
 

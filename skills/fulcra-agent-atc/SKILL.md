@@ -44,6 +44,10 @@ uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.1
 fulcra auth login            # browser sign-in; an account is created on first login
 ```
 
+The tag is the pin *form*; the authoritative current pin lives in the store
+BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not
+here.
+
 Then seed your accounts. `atc init` writes `team/<team>/atc/accounts.json` (team
 defaults to `solo`) and is idempotent — re-running merges new accounts in by id and
 leaves the rest untouched:

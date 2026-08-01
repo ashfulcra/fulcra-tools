@@ -29,12 +29,12 @@ touching. First failing probe is where your setup gap is.
 | Probe / question | Command | Passes when | Where to go |
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 — tooling present, store reachable | never installed / `command not found` / no team yet → [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) (install → auth → bootstrap → join). Otherwise fix the reported gap (auth: `fulcra auth login`; missing/old `coord-engine`: reinstall) |
-| On the bus? | `coord-engine queue <team> --agent <you>` ([bus v3](docs/coord/BUS-V3.md); raw `get-records` if the engine predates v1.7.0), then `coord-engine briefing <team> --agent <you>` for the durable board | queue read returns (possibly empty) events; briefing prints your identity, role inboxes, reviews owed | [Coordinate on the bus](#coordinate-on-the-bus) — events are the wake surface, the fold is the full picture |
+| On the bus? | `coord-engine queue <team> --agent <you>` ([bus v3](docs/coord/BUS-V3.md); raw `get-records` if the engine predates v1.7.0), then `coord-engine briefing <team> --agent <you>` for the durable board | queue read completes — and if it stages a `queue-delivery` token (cursor schema v2), the probe passes only after every record is classified and `queue commit` succeeds; briefing prints your identity, role inboxes, reviews owed | [Coordinate on the bus](#coordinate-on-the-bus) — events are the wake surface, the fold is the full picture |
 | Own worktree? | `git worktree list` | your cwd is a dedicated worktree, not a shared checkout (no conflict markers or foreign staged files) | [Working tree](#working-tree) — carve your own before committing |
 | Touching Collect / the daemon? | — | — | [The daemon (Collect)](#the-daemon-collect) |
 | Touching coord conventions? | — | — | [Coordinate on the bus](#coordinate-on-the-bus) |
 | Touching the platform surface? | — | — | [Fulcra platform surface & records](#fulcra-platform-surface--records) |
-| Touching CI / hooks? | — | — | [CI, the pre-push hook, and workspace membership](#ci-the-pre-push-hook-and-workspace-membership) |
+| Touching CI / hooks? | — | — | [CI and workspace membership](#ci-and-workspace-membership) |
 
 ## Layout
 
