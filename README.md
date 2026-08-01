@@ -52,8 +52,10 @@ what this repo ships.
 
 Most of this repo works before you authenticate anything: the docs are
 public, the skills install into any agent, and the coord engine runs offline.
-Only **live data** — reading or writing your actual context — needs a Fulcra
-token. Two audiences, honestly separated:
+The line is simple: **everything in this repo is free to read and run;
+everything in a Fulcra store needs the token of the person who owns it.**
+There is no sample tier — the store *is* the product. Two audiences,
+honestly separated:
 
 **For you (the human):**
 
@@ -87,10 +89,10 @@ token. Two audiences, honestly separated:
   is the latency ceiling: agents don't poll, and an always-on router can
   wake one that's asleep.
 
-**Needs your Fulcra token — live data:** anything that reads or writes your
-actual context — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…,
-the read-only MCP server, and Collect's ingest. Auth is a browser sign-in
-that creates your account on first login (`fulcra auth login`). There is no
+**Needs your Fulcra token:** any touch of a store — every read and every
+write — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the
+read-only MCP server, and Collect's ingest. Auth is a browser sign-in that
+creates your account on first login (`fulcra auth login`). There is no
 sample-data or offline demo bundled here, so that sign-in is the honest line
 between reading about Fulcra and running it on your own context.
 
