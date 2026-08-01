@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from coord_engine import cli, records
+import pytest
+
+from coord_engine import cli, obligations as obligations_mod, records
 from coord_engine_test_helpers import FakeTransport
 
 
@@ -83,6 +85,51 @@ def _stage(monkeypatch, capsys, t):
     rows = _json_lines(capsys)
     assert rows[-1]["type"] == "queue-delivery"
     return rows[-1]["token"], rows
+
+
+@pytest.mark.parametrize("state", ["UNKNOWN", "INVALID"])
+def test_empty_v2_stage_reports_obligation_fold_without_changing_rc(
+        monkeypatch, capsys, state):
+    t = _setup(CasTransport([]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+
+    def fake_fold(*args, **kwargs):
+        return obligations_mod.ObligationResult(
+            state=obligations_mod.ObligationState[state],
+            degraded=["reviews"] if state == "UNKNOWN" else [],
+            malformed=[] if state == "UNKNOWN" else ["tasks"],
+        )
+
+    monkeypatch.setattr(obligations_mod, "fold", fake_fold)
+    rc = cli.main(
+        ["queue", "r", "--agent", "amy", "--json"], transport=t)
+    row = _json_lines(capsys)[-1]
+
+    # 2026-08-01 rc split: fold degradation is a report, not a failure.
+    assert rc == 0
+    assert row["type"] == "queue-delivery"
+    assert row["event_count"] == 0
+    assert row["obligations"]["state"] == state
+
+
+def test_empty_v2_stage_no_obligations_skips_fold_and_keeps_shape(
+        monkeypatch, capsys):
+    t = _setup(CasTransport([]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    monkeypatch.setattr(
+        obligations_mod, "fold",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("--no-obligations must skip the fold")),
+    )
+
+    rc = cli.main([
+        "queue", "r", "--agent", "amy", "--json", "--no-obligations",
+    ], transport=t)
+    row = _json_lines(capsys)[-1]
+
+    assert rc == 0
+    assert row["type"] == "queue-delivery"
+    assert "obligations" not in row
 
 
 def _commit(capsys, t, token, *, include_results=True):

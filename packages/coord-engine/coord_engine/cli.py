@@ -3451,7 +3451,7 @@ def _write_consume_audit(transport: Any, team: str, *, caller: str,
 
 def _print_v2_delivery(
         pending: dict[str, Any], *, cursor_revision: int, json_mode: bool,
-        replay: bool
+        replay: bool, obligations: Optional[dict[str, Any]] = None,
 ) -> None:
     events = pending["events"]
     _print_queue_events(events, json_mode=json_mode)
@@ -3466,6 +3466,8 @@ def _print_v2_delivery(
         "outcome": "replayed" if replay else "staged",
         "rc": 0,
     }
+    if obligations is not None:
+        envelope["obligations"] = obligations
     if json_mode:
         jsonutil.print_json(envelope)
     else:
@@ -3541,7 +3543,9 @@ def _cmd_queue_v2(
             return 0
         _print_v2_delivery(
             pending, cursor_revision=cursor["revision"],
-            json_mode=bool(getattr(args, "json", False)), replay=True)
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_v2_obligations_fragment(
+                args, transport, agent, pending))
         return 0
 
     if not peek:
@@ -3675,13 +3679,35 @@ def _cmd_queue_v2(
             )
         _print_v2_delivery(
             winner["pending"], cursor_revision=winner["revision"],
-            json_mode=bool(getattr(args, "json", False)), replay=True)
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_v2_obligations_fragment(
+                args, transport, agent, winner["pending"]))
         return 0
     staged_cursor = staged["cursor"]
     _print_v2_delivery(
         staged_cursor["pending"], cursor_revision=staged_cursor["revision"],
-        json_mode=bool(getattr(args, "json", False)), replay=False)
+        json_mode=bool(getattr(args, "json", False)), replay=False,
+        obligations=_v2_obligations_fragment(
+            args, transport, agent, staged_cursor["pending"]))
     return 0
+
+
+def _v2_obligations_fragment(
+        args: argparse.Namespace, transport: Any, agent: str,
+        pending: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Reconcile only an empty staged/replayed transactional delivery.
+
+    The event window is already clean and the pending batch is already durable
+    before this runs. A slow or interrupted fold therefore cannot alter the
+    stage/commit authority; the next read replays the same token and reruns the
+    report. Eventful batches still pay nothing, and ``--no-obligations`` is
+    honored by the shared helper.
+    """
+    if pending.get("events"):
+        return None
+    _, fragment = _reconcile_after_empty_read(args, transport, agent)
+    return fragment
 
 
 def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
