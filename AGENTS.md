@@ -46,6 +46,13 @@ under `skills/`, each package with its own README, build, and tests.
   menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest
   pipeline), plus the importer packages (`dayone`, `csv-importer`,
   `media-helpers`, `attention`, `netflix-skill`, …).
+- **`fulcra-media webhook` readiness is a synchronization contract.** Its
+  JSON `{"stage":"ready"}` lifecycle line is emitted only after the local
+  `/health` endpoint has served a request, not merely after bind/listen. A
+  parent may therefore send SIGINT/SIGTERM immediately after reading that
+  line; the command must emit its shutdown line and exit cleanly. Do not move
+  readiness ahead of the serve-loop health probe — `BaseServer.shutdown()`
+  can deadlock if it races `serve_forever()` initialization.
 - **`packages/gmail`** (`fulcra-gmail`) — the local, read-only (`gmail.readonly`)
   Gmail relay: multi-account, keyed by opaque `account_id` (email is metadata,
   never a path/key segment), crash-safe (append-only per-account ledger + a
