@@ -3604,6 +3604,8 @@ def _cmd_queue_v2(
         )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    for warning in records.invisible_writer_census(window):
+        print(f"queue: DELIVERY WARNING — {warning}", file=sys.stderr)
     seen = set(committed["seen_ids"])
     fresh = [event for event in events
              if event.get("record_id") not in seen]
@@ -4106,6 +4108,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    for warning in records.invisible_writer_census(window):
+        print(f"queue: DELIVERY WARNING — {warning}", file=sys.stderr)
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
     json_mode = bool(getattr(args, "json", False))

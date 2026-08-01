@@ -181,6 +181,41 @@ def observed_version_warnings(rows: Optional[list[Any]]) -> list[str]:
     return warnings
 
 
+_LEGACY_NOTE_PREFIXES = (
+    "create:", "update:", "done:", "block:", "REVIEW REQUEST", "assignee:",
+)
+
+
+def invisible_writer_census(window: Optional[list[Any]]) -> list[str]:
+    """Name senders whose control-looking notes modern readers cannot parse.
+
+    Ordinary free text remains silent. A missing/unreadable window is also
+    silent here because the queue's window-level UNKNOWN path owns that
+    diagnosis; absence of evidence must never become evidence of a clean
+    writer fleet.
+    """
+    if not window:
+        return []
+    offenders: dict[str, int] = {}
+    for rec in window:
+        if not isinstance(rec, dict):
+            continue
+        note = rec.get("note")
+        if not isinstance(note, str) or parse_payload(note) is not None:
+            continue
+        if not any(prefix in note for prefix in _LEGACY_NOTE_PREFIXES):
+            continue
+        sender = sender_of(rec)
+        if sender:
+            offenders[sender] = offenders.get(sender, 0) + 1
+    return [
+        f"{count} note(s) from {sender} look like control traffic but are "
+        "not parseable (v1) — that agent's engine predates bus-v3; its "
+        "messages are invisible to the fleet. It must run adopt-latest."
+        for sender, count in sorted(offenders.items())
+    ]
+
+
 def fleet_version_census(presence_shards: list[Any],
                          record_rows: Optional[list[Any]]) -> dict[str, Any]:
     """Fold running-version evidence from presence and stamped claim events.
