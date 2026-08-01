@@ -3332,6 +3332,13 @@ _QUEUE_EMPTY_IS_NOT_CLEAR = (
     "coord-engine obligations <team> --agent <you>  (rc 3 = UNKNOWN)"
 )
 
+# Queue exit codes are part of the wake contract. Keep rc 3 reserved for a
+# degraded event-delivery read: callers treat it as "you may be blind; do not
+# trust an empty window." The durable obligation fold is a separate read with
+# a different failure mode and therefore a different code.
+QUEUE_RC_READ_DEGRADED = 3
+QUEUE_RC_OBLIGATIONS_UNAVAILABLE = 5
+
 
 def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
     if json_mode:
@@ -3600,7 +3607,8 @@ def _cmd_queue_v2(
                 "queue: DEGRADED — window UNKNOWN, transactional cursor NOT "
                 "staged or advanced"
             ),
-            rc=3,
+            rc=QUEUE_RC_READ_DEGRADED,
+            condition="read-window",
         )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
@@ -3821,16 +3829,18 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
 def _queue_failure(
         args: argparse.Namespace, *, state: str, error_code: str,
         message: str, rc: int,
-        extra: "Optional[dict[str, Any]]" = None
+        extra: "Optional[dict[str, Any]]" = None,
+        condition: "Optional[str]" = None,
 ) -> int:
     """Emit one stable queue failure for humans and JSONL automation.
 
-    Exit status alone cannot distinguish the failure classes: rc 3 covers
-    every fail-closed outcome and rc 2 every refusal.  In JSON mode stdout
-    therefore carries a terminal envelope while stderr retains the actionable
-    human diagnostic.  EVERY nonzero exit of the queue family (``queue`` and
-    ``queue commit``, legacy and v2-active) routes through here — enforced by
-    the AST completeness gate in tests/test_queue_terminal_states.py — so a
+    Exit status distinguishes the broad failure class: rc 3 is reserved for
+    event-delivery/read-path degradation, rc 5 means the event window was clean
+    but the obligation fold was unavailable, and rc 2 is a refusal. In JSON
+    mode stdout therefore carries a terminal envelope while stderr retains the
+    actionable human diagnostic. EVERY nonzero exit of the queue family
+    (``queue`` and ``queue commit``, legacy and v2-active) routes through here —
+    enforced by the AST completeness gate in tests/test_queue_terminal_states.py — so a
     ``--json`` consumer never sees a nonzero rc with empty stdout.  States:
 
     - ``UNKNOWN``       store/transport doubt; backoff and retry.
@@ -3852,6 +3862,8 @@ def _queue_failure(
             "error_code": error_code,
             "rc": rc,
         }
+        if condition is not None:
+            envelope["condition"] = condition
         if extra:
             # Nested diagnosis, still ONE object: a caller switching on `type`
             # sees queue-error and can drill into the cause without parsing a
@@ -4102,7 +4114,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
                 "queue: DEGRADED — window UNKNOWN, cursor NOT advanced "
                 "(re-covered next read)"
             ),
-            rc=3,
+            rc=QUEUE_RC_READ_DEGRADED,
+            condition="read-window",
         )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
@@ -4136,10 +4149,12 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         else (0, None))
     if obligations_rc != 0:
         # A degraded fold is a FAILED queue exit, so it takes the queue family's
-        # failure path — one `queue-error` object, queue's rc 3 for both UNKNOWN
-        # and INVALID (codex-reviewer, PR 501). The earlier version printed the
-        # SUCCESS envelope (`queue-result`, state CLEAR) and merely returned a
-        # nonzero rc, which broke slice 4's contract that every nonzero queue exit
+        # failure path — one `queue-error` object. It MUST NOT use rc 3: that
+        # code means the event-delivery window itself is degraded and the agent
+        # may be blind. A slow/unrunnable obligation fold is a distinct
+        # condition even when the event window was clean. The earlier version
+        # printed the SUCCESS envelope (`queue-result`, state CLEAR) and merely
+        # returned a nonzero rc, which broke slice 4's contract that every nonzero queue exit
         # emits exactly one queue-error: automation switching on `type` would have
         # read a clean CLEAR while the process signalled failure.
         # rc 4 stays on the standalone `obligations` verb, where UNKNOWN and
@@ -4152,7 +4167,9 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             message=("queue: obligations "
                      f"{state} — {obligations_fragment['reason']}"
                      if obligations_fragment else "queue: obligations UNKNOWN"),
-            rc=3, extra={"obligations": obligations_fragment})
+            rc=QUEUE_RC_OBLIGATIONS_UNAVAILABLE,
+            condition="obligations-fold",
+            extra={"obligations": obligations_fragment})
     if json_mode:
         envelope = _queue_result_envelope(
             fresh, cfg=cfg,

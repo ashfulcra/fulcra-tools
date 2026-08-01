@@ -210,7 +210,7 @@ def test_empty_read_reconciles_by_default(capsys):
 
 
 def test_flag_surfaces_unknown_in_the_exit_code(capsys):
-    """A degraded fold must reach rc, or a scripted wake learns nothing from it."""
+    """A degraded fold has its own rc; it cannot impersonate a blind window."""
     from coord_engine.transport import TransportError
 
     transport = _queue_transport()
@@ -224,7 +224,8 @@ def test_flag_surfaces_unknown_in_the_exit_code(capsys):
     transport.list_dir = dark
     rc = cli.cmd_queue(_queue_args(obligations=True), transport)
     err = capsys.readouterr().err
-    assert rc == 3, "UNKNOWN must be a distinct nonzero rc, not a printed aside"
+    assert rc == cli.QUEUE_RC_OBLIGATIONS_UNAVAILABLE
+    assert rc != cli.QUEUE_RC_READ_DEGRADED
     assert "obligations UNKNOWN" in err
     assert "reviews" in err
 
@@ -325,7 +326,7 @@ def test_owed_forge_feedback_is_data_not_clear(monkeypatch):
 ])
 def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
         monkeypatch, capsys, state, error_code):
-    """A degraded fold is a FAILED queue exit — one queue-error, queue's rc 3.
+    """A degraded fold is one queue-error, distinct from window degradation.
 
     The bug: queue printed the SUCCESS envelope (`queue-result`, state CLEAR) and
     merely returned nonzero, so automation switching on `type` read a clean CLEAR
@@ -352,8 +353,10 @@ def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
     )
     assert row["state"] == state
     assert row["error_code"] == error_code
-    assert row["rc"] == 3
-    assert rc == 3, "queue keeps rc 3 for both UNKNOWN and INVALID"
+    assert row["condition"] == "obligations-fold"
+    assert row["rc"] == cli.QUEUE_RC_OBLIGATIONS_UNAVAILABLE
+    assert rc == cli.QUEUE_RC_OBLIGATIONS_UNAVAILABLE
+    assert rc != cli.QUEUE_RC_READ_DEGRADED
     assert row["obligations"]["state"] == state, (
         "the diagnosis must survive as a nested field, not be dropped"
     )

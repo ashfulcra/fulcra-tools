@@ -196,6 +196,14 @@ exclusion: argparse's own usage exits (unknown flag, missing positional)
 happen before any queue code runs and carry no envelope. Text-mode success
 output is byte-stable across this change; shell consumers pipe it.
 
+Exit **3** is reserved for event-delivery/read-path degradation: an empty
+window cannot be trusted and the caller may be blind. If the event window read
+cleanly but the separate durable-obligation fold cannot complete, `queue`
+exits **5** instead. These cases are explicit in JSON: `condition=read-window`
+with `error_code=window-unknown`, versus `condition=obligations-fold` with
+`error_code=obligations-unknown|obligations-invalid`. An unrunnable fold must
+never train callers to ignore the rc-3 blindness signal.
+
 Reading as an identity other than your own `$FULCRA_COORD_AGENT` peeks by
 default. A deliberate takeover (`--consume`) first writes a durable audit
 document to `team/<team>/_coord/audit/consume/<UTC-stamp>-<caller>-takes-

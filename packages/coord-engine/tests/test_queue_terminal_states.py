@@ -397,6 +397,7 @@ def test_json_unknown_window_now_carries_the_error_envelope(
     assert _single_json_object(out) == {
         "type": "queue-error", "state": "UNKNOWN",
         "error_code": "window-unknown", "rc": 3,
+        "condition": "read-window",
     }
     assert "DEGRADED" in err
 
@@ -697,10 +698,13 @@ def test_every_nonzero_json_exit_emits_one_error_envelope(
     got_rc = cli.main(argv, transport=make_transport())
     out = capsys.readouterr()
     assert got_rc == rc, f"{branch}: rc {got_rc} != {rc}"
-    assert _single_json_object(out.out) == {
+    expected = {
         "type": "queue-error", "state": state,
         "error_code": error_code, "rc": rc,
-    }, f"{branch}: envelope mismatch"
+    }
+    if error_code == "window-unknown":
+        expected["condition"] = "read-window"
+    assert _single_json_object(out.out) == expected, f"{branch}: envelope mismatch"
     assert out.err.strip(), f"{branch}: stderr diagnostic missing"
 
 
