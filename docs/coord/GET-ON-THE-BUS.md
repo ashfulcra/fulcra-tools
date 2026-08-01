@@ -30,6 +30,10 @@ uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
 uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
 ```
 
+The tag is the pin *form*; the authoritative current pin lives in the store
+BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not in
+this doc.
+
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
 PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the installed
 binary.) Install the skills into your agent with
@@ -251,10 +255,12 @@ takeover surprises to expect (both observed live 2026-07-15):
   `queue` family, do NOT infer the terminal state from the exit status: both
   rc 2 and rc 3 carry multiple states (a missing queue authority is rc 2
   ABSENT; a stale commit token is rc 3 REFUSED; UNKNOWN / INVALID /
-  INCOMPATIBLE also exit rc 3). The discriminator is the `state` +
-  machine `error_code` in the `--json` envelope (retry UNKNOWN with backoff;
-  INVALID is human-fixable and must NOT be retried). The sibling
-  `obligations` verb has a fixed split: rc 3 = UNKNOWN, rc 4 = INVALID.
+  INCOMPATIBLE also exit rc 3). Under `--json` every nonzero exit prints one
+  `queue-error` object — the `state` + machine `error_code` in that envelope
+  are the discriminator (plain mode puts the diagnostic on stderr — see
+  [BUS-V3](BUS-V3.md)); retry UNKNOWN with backoff; INVALID is human-fixable
+  and must NOT be retried. The sibling `obligations` verb has a fixed split:
+  rc 3 = UNKNOWN, rc 4 = INVALID.
   With an
   activated cursor-v2 authority, the read only stages delivery: commit its
   token after processing, never before. Without
