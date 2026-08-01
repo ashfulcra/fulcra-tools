@@ -3347,7 +3347,8 @@ def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> Non
 def _queue_result_envelope(
         events: list[dict[str, Any]], *, cfg: dict[str, Any],
         cursor_path: str, advanced: bool,
-        outcome_mix: Optional[dict[str, int]] = None) -> dict[str, Any]:
+        outcome_mix: Optional[dict[str, int]] = None,
+        obligations: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """The single-object ``--json`` success envelope for a queue read.
 
     Shares the ``type`` discriminator convention with the ``queue-error``
@@ -3365,7 +3366,7 @@ def _queue_result_envelope(
             "cursor_schema_version": cfg["cursor_schema_version"],
             "cursor_generation": cfg["cursor_generation"],
         }
-    return {
+    envelope = {
         "type": "queue-result",
         "state": "DATA" if events else "CLEAR",
         "events": [{
@@ -3390,6 +3391,9 @@ def _queue_result_envelope(
         "engine_version": engine_version,
         "protocol": protocol,
     }
+    if obligations is not None:
+        envelope["obligations"] = obligations
+    return envelope
 
 
 def _write_consume_audit(transport: Any, team: str, *, caller: str,
@@ -4135,40 +4139,14 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if not advanced:
         print("queue: cursor save failed — coverage unadvanced, next read "
               "re-covers this window", file=sys.stderr)
-    obligations_rc, obligations_fragment = (
+    _, obligations_fragment = (
         _reconcile_after_empty_read(args, transport, agent) if not fresh
         else (0, None))
-    if obligations_rc != 0:
-        # A degraded fold is a FAILED queue exit, so it takes the queue family's
-        # failure path — one `queue-error` object, queue's rc 3 for both UNKNOWN
-        # and INVALID (codex-reviewer, PR 501). The earlier version printed the
-        # SUCCESS envelope (`queue-result`, state CLEAR) and merely returned a
-        # nonzero rc, which broke slice 4's contract that every nonzero queue exit
-        # emits exactly one queue-error: automation switching on `type` would have
-        # read a clean CLEAR while the process signalled failure.
-        # rc 4 stays on the standalone `obligations` verb, where UNKNOWN and
-        # INVALID have different remedies and nothing else owns the exit code.
-        state = obligations_fragment["state"] if obligations_fragment else "UNKNOWN"
-        return _queue_failure(
-            args, state=state,
-            error_code=("obligations-invalid" if state == "INVALID"
-                        else "obligations-unknown"),
-            message=("queue: obligations "
-                     f"{state} — {obligations_fragment['reason']}"
-                     if obligations_fragment else "queue: obligations UNKNOWN"),
-            rc=3, extra={"obligations": obligations_fragment})
     if json_mode:
         envelope = _queue_result_envelope(
             fresh, cfg=cfg,
             cursor_path=records.cursor_path(args.team, agent),
-            advanced=advanced)
-        if obligations_fragment is not None:
-            # NESTED, not a second object. Slice 4's contract is that --json
-            # success is exactly one object so a consumer switches on one field;
-            # emitting the fold as a sibling row would break every reader that
-            # relies on it. Correct for DATA/CLEAR only — a degraded fold takes
-            # the failure path above.
-            envelope["obligations"] = obligations_fragment
+            advanced=advanced, obligations=obligations_fragment)
         jsonutil.print_json(envelope)
     return 0
 
@@ -4188,8 +4166,9 @@ def _reconcile_after_empty_read(
     wrong inference was otherwise free. A cost-sensitive caller can still decline
     it explicitly, which is different from never being offered it.
 
-    Returns the rc the caller should use: the fold's UNKNOWN/INVALID states must
-    reach the exit code, or an agent scripting `queue` learns nothing from them.
+    The fragment reports fold UNKNOWN/INVALID inside a successful queue result.
+    rc 3 is reserved for a degraded event window; the standalone ``obligations``
+    verb retains its own nonzero UNKNOWN/INVALID contract.
     """
     if not getattr(args, "obligations", False):
         return 0, None
@@ -4207,10 +4186,6 @@ def _reconcile_after_empty_read(
     if not getattr(args, "json", False):
         print(f"queue: obligations {result.state.value} — {result.reason()}",
               file=sys.stderr)
-    if result.state is obligations_mod.ObligationState.UNKNOWN:
-        return 3, fragment
-    if result.state is obligations_mod.ObligationState.INVALID:
-        return 4, fragment
     return 0, fragment
 
 

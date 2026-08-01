@@ -323,6 +323,19 @@ it (not on PyPI).
   cheap enough to ride every wake you already have — **do
   not run a polling loop or resident listener for it.** Keep `fulcra-api`
   current whenever you touch coord tooling (same pass, standing rule).
+  The default durable-obligation fold is an additive `obligations` field on
+  that successful envelope: fold UNKNOWN/INVALID is a report at rc 0 when the
+  event window itself read cleanly; **rc 3 is reserved for event-window doubt**.
+  `--no-obligations` omits the field and preserves the legacy envelope shape;
+  the standalone `obligations` verb keeps its own rc 3/4 contract. Queue reads
+  also emit `DELIVERY WARNING` lines naming attributed legacy writers whose
+  control-looking prose cannot parse as bus-v3 events — those writers believe
+  they sent messages that are invisible to the fleet and must adopt latest.
+  Prove the write path after any install/upgrade, and whenever a recipient says
+  it did not hear you, with `coord-engine doctor <team> --delivery --agent
+  <you>`; rc 0 means the stamped probe was written, ingested, and parsed, rc 2
+  means the write was refused, and rc 3 means it was written but not proven
+  fleet-readable before the deadline.
   `coord-engine briefing <team> --agent <you>` remains the fold over durable
   state — identity, role inboxes, reviews owed — for when you need the full
   board; honor every degraded row it prints as UNKNOWN.

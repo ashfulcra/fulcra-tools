@@ -209,8 +209,8 @@ def test_empty_read_reconciles_by_default(capsys):
     assert rc == 0
 
 
-def test_flag_surfaces_unknown_in_the_exit_code(capsys):
-    """A degraded fold must reach rc, or a scripted wake learns nothing from it."""
+def test_flag_reports_unknown_without_saturating_window_rc(capsys):
+    """Fold UNKNOWN is reported, while rc 3 stays reserved for window doubt."""
     from coord_engine.transport import TransportError
 
     transport = _queue_transport()
@@ -222,11 +222,14 @@ def test_flag_surfaces_unknown_in_the_exit_code(capsys):
         return original(prefix) if original else []
 
     transport.list_dir = dark
-    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
-    err = capsys.readouterr().err
-    assert rc == 3, "UNKNOWN must be a distinct nonzero rc, not a printed aside"
-    assert "obligations UNKNOWN" in err
-    assert "reviews" in err
+    rc = cli.cmd_queue(_queue_args(obligations=True, json=True), transport)
+    captured = capsys.readouterr()
+    row = json.loads(captured.out)
+    # 2026-08-01 rc split: fold degradation is a report, not a failure.
+    assert rc == 0
+    assert row["type"] == "queue-result"
+    assert row["obligations"]["state"] == "UNKNOWN"
+    assert row["obligations"]["degraded"]
 
 
 def test_flag_does_nothing_when_events_were_delivered(capsys):
@@ -319,18 +322,10 @@ def test_owed_forge_feedback_is_data_not_clear(monkeypatch):
     assert any(r.get("pr_slug") == "pr-501" for r in result.owed)
 
 
-@pytest.mark.parametrize("state,error_code", [
-    ("UNKNOWN", "obligations-unknown"),
-    ("INVALID", "obligations-invalid"),
-])
-def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
-        monkeypatch, capsys, state, error_code):
-    """A degraded fold is a FAILED queue exit — one queue-error, queue's rc 3.
-
-    The bug: queue printed the SUCCESS envelope (`queue-result`, state CLEAR) and
-    merely returned nonzero, so automation switching on `type` read a clean CLEAR
-    while the process signalled failure.
-    """
+@pytest.mark.parametrize("state", ["UNKNOWN", "INVALID"])
+def test_queue_json_nests_degraded_fold_in_success_envelope(
+        monkeypatch, capsys, state):
+    """A clean event window stays successful while naming fold degradation."""
     transport = _queue_transport()
 
     def fake_fold(*a, **kw):
@@ -346,14 +341,10 @@ def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
     rows = [json.loads(line) for line in out.splitlines() if line.strip()]
     assert len(rows) == 1, f"--json must emit exactly one object, got {rows}"
     row = rows[0]
-    assert row["type"] == "queue-error", (
-        "a degraded fold emitted the success envelope; slice 4's contract is that "
-        "every nonzero queue exit is one queue-error object"
-    )
-    assert row["state"] == state
-    assert row["error_code"] == error_code
-    assert row["rc"] == 3
-    assert rc == 3, "queue keeps rc 3 for both UNKNOWN and INVALID"
+    # 2026-08-01 rc split: fold degradation is a report, not a failure.
+    assert row["type"] == "queue-result"
+    assert row["state"] == "CLEAR"
+    assert rc == 0
     assert row["obligations"]["state"] == state, (
         "the diagnosis must survive as a nested field, not be dropped"
     )

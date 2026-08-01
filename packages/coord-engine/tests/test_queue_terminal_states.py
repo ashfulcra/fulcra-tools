@@ -337,6 +337,15 @@ def test_json_clear_envelope_is_one_object_not_silence(monkeypatch, capsys):
     assert row["cursor"] == {"path": CURSOR, "advanced": True}
 
 
+def test_no_obligations_keeps_success_envelope_legacy_shape(monkeypatch, capsys):
+    t = _transport(window=[])
+    rc, out, _err = _run(
+        monkeypatch, capsys, t, ["--json", "--no-obligations"])
+    row = _single_json_object(out)
+    assert rc == 0
+    assert "obligations" not in row
+
+
 def test_json_envelope_reports_versioned_authority_protocol(monkeypatch, capsys):
     t = _transport(window=[])
     t.put(records.config_path(TEAM), json.dumps(_versioned_config()))
