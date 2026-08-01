@@ -21,8 +21,6 @@ import json
 from coord_engine import reconcile
 from coord_engine.transport import TransportError
 
-from test_reconcile import _recent_mtime
-
 
 class CountingTransport:
     """In-memory store that counts reads/lists and serves a normalized feed.
@@ -42,9 +40,9 @@ class CountingTransport:
         self._feed = None  # None => no updates() support at all
 
     # --- seeding -----------------------------------------------------------
-    def put(self, path, content, mtime=None, size=None):
+    def put(self, path, content, mtime="2026-07-01 04:00PM UTC", size=None):
         self.store[path] = content
-        self.mtimes[path] = _recent_mtime() if mtime is None else mtime
+        self.mtimes[path] = mtime
         self.sizes[path] = size if size is not None else f"{len(content)}B"
 
     def drop(self, path):
