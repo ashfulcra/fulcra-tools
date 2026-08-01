@@ -198,10 +198,13 @@ coord-engine roles claim <team> <role>      # if the role is registered; else se
 
 Then read your event queue — `coord-engine queue <team> --agent <you>`, the
 delivery leg of the [bus v3 contract](BUS-V3.md) (durable cursor, dedupe,
-fail-closed nonzero exits: rc 3 spans UNKNOWN / INVALID / INCOMPATIBLE /
-ABSENT and rc 2 is REFUSED — discriminate by the machine `error_code` in the
-`--json` envelope; INVALID means durable bytes need a human fix and must NOT
-be retried) — and work what it surfaces; events
+fail-closed nonzero exits: every nonzero queue-family exit is fail-closed, and
+the terminal state — UNKNOWN / INVALID / INCOMPATIBLE / ABSENT / REFUSED —
+must be read from the `state` and machine `error_code` in the `--json`
+envelope, never inferred from the exit status alone (both rc 2 and rc 3 carry
+multiple states; e.g. a missing queue authority is rc 2 ABSENT while a stale
+commit token is rc 3 REFUSED); INVALID means durable bytes need a human fix
+and must NOT be retried) — and work what it surfaces; events
 point at their documents. If the final JSONL row is a schema-v2
 `queue-delivery`, durably finish or classify every event and only then run
 `coord-engine queue commit <team> --agent <you> --token <token> --result
@@ -245,11 +248,13 @@ takeover surprises to expect (both observed live 2026-07-15):
   — one bounded read against the team's coordination annotation
   ([bus v3](BUS-V3.md)) with the cursor, dedupe, and addressed-to-you filtering
   built in; treat any nonzero exit as fail-closed, never as quiet. For the
-  `queue` family, rc 3 spans UNKNOWN / INVALID / INCOMPATIBLE / ABSENT and
-  rc 2 is REFUSED — the discriminator is the machine `error_code` in the
-  `--json` envelope, not the exit status alone (retry UNKNOWN with backoff;
+  `queue` family, do NOT infer the terminal state from the exit status: both
+  rc 2 and rc 3 carry multiple states (a missing queue authority is rc 2
+  ABSENT; a stale commit token is rc 3 REFUSED; UNKNOWN / INVALID /
+  INCOMPATIBLE also exit rc 3). The discriminator is the `state` +
+  machine `error_code` in the `--json` envelope (retry UNKNOWN with backoff;
   INVALID is human-fixable and must NOT be retried). The sibling
-  `obligations` verb uses a different split: rc 3 = UNKNOWN, rc 4 = INVALID.
+  `obligations` verb has a fixed split: rc 3 = UNKNOWN, rc 4 = INVALID.
   With an
   activated cursor-v2 authority, the read only stages delivery: commit its
   token after processing, never before. Without
