@@ -998,7 +998,16 @@ def _old_verdict(reviewer, verdict="approve"):
             "timestamp: 2020-01-16T00:00:00Z\n---\n")
 
 
-def test_retention_archives_old_proposed_but_never_active_or_waiting(capsys):
+def _pin_retention_clock(monkeypatch):
+    """Keep the fake transport's default July 1 mtime inside the 30-day window."""
+    from datetime import datetime, timezone
+    pinned_now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "_now", lambda: pinned_now)
+
+
+def test_retention_archives_old_proposed_but_never_active_or_waiting(
+        monkeypatch, capsys):
+    _pin_retention_clock(monkeypatch)
     t = FakeTransport()
     t.put("team/r/task/old-proposed.md", _old_task("Old-proposed", "proposed"),
           mtime="2020-01-15 12:00PM UTC")
@@ -1015,7 +1024,8 @@ def test_retention_archives_old_proposed_but_never_active_or_waiting(capsys):
     assert "team/r/task/old-waiting.md" in t.store
 
 
-def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
+def test_retention_archives_only_single_codex_reviewer_orphan(monkeypatch, capsys):
+    _pin_retention_clock(monkeypatch)
     t = FakeTransport()
     # Eligible: no review doc, exactly one old codex-reviewer verdict.
     t.put("team/r/review/settled/verdicts/codex-reviewer.md",
