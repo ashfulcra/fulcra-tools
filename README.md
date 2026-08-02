@@ -3,11 +3,22 @@
 Vibe-coded by Fulcra's lawyer on Fulcra's own primitives — unofficial,
 unsupported, and a genuinely useful thing to point your agents at.
 
-**This repo is a working demo of Fulcra as agent infrastructure.** A dozen
-agents across five vendors run on it daily: they hand each other work, review
-each other's changes, survive container resets, and record what happened —
-coordinating through one Fulcra account and nothing else. No broker, no
-queue, no coordination server.
+## Why you'd want this
+
+[Fulcra](https://fulcradynamics.com) is the user-owned context backend for AI
+agents: one place where every agent you use — any vendor, any harness — can
+know you, know what's happening in your world, work with your other agents,
+and get more helpful over time, because the context they build outlives every
+session, container, and model switch. Context, not models, makes the agent.
+Rent the reasoning; own the context.
+
+This repo is what that looks like in practice. **A dozen agents across five
+vendors run on it daily**: they hand each other work, review each other's
+changes, survive container resets, and record what happened — coordinating
+through one Fulcra account and nothing else. No broker, no queue, no
+coordination server. If you want agents that stop starting over — that pick
+up their own work, and each other's, across restarts — this repo is the
+shortest working path to that, and everything in it is inspectable.
 
 ## The demo: point two agents at this repo
 
@@ -37,36 +48,49 @@ the account — and a plain chat session with a connector, no shell at all, has
 joined and done work. Everything else is convention, and the conventions are
 what this repo ships.
 
-## No Fulcra account? Start here
+## No Fulcra account yet?
 
-Your agent can get real value out of this repo before you authenticate
-anything. Reading is free; live data is the only thing gated behind a Fulcra
-token, and this file won't pretend otherwise.
+Most of this repo works before you authenticate anything: the docs are
+public, the skills install into any agent, and the coord engine runs offline.
+The line is simple: **everything in this repo is free to read and run;
+everything in a Fulcra store needs the token of the person who owns it.**
+There is no sample tier — the store *is* the product. Two audiences,
+honestly separated:
 
-**No account needed — read and understand:**
+**For you (the human):**
 
-- [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps the whole platform surface
-  (auth, files, annotations, queries, MCP) by agent capability tier — CLI, raw
-  HTTP, or MCP-only.
-- [`docs/how-do-i-get-my-data.md`](docs/how-do-i-get-my-data.md) is a lookup of
-  every data source Fulcra can pull from today and the pathway for each.
-- The [`skills/`](skills) directory — fourteen `fulcra-agent-*` skills (of 16
-  total) — is the prose an agent reads to learn the coordination layer;
-  [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) and
-  [`docs/coord-DESIGN.md`](docs/coord-DESIGN.md) explain the bus without
-  touching it. ([`docs/README.md`](docs/README.md) indexes which docs are
-  written for a cold reader.)
-- The coord engine is stdlib-only, so it installs with no Fulcra account (see
-  [Getting started](#getting-started)); `coord-engine --help` then prints the
-  full verb surface offline.
-- The **wake router** is the optional latency ceiling: agents need no polling
-  loops (the queue read rides any wake), but only an always-on process can
-  notice a deadline passing or wake an agent that's asleep. `coord-engine
-  router run` routes directed work to agents via content-safe adapters.
-  Design and status: [`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md).
+- [`docs/how-do-i-get-my-data.md`](docs/how-do-i-get-my-data.md) — worked
+  examples of getting real sources flowing into Fulcra. Examples, not a
+  catalog: you and your agents can put *anything* in via the primitives —
+  records with schemas, versioned files, time series, event logs.
+- [`docs/coord-DESIGN.md`](docs/coord-DESIGN.md) and
+  [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) — why the coordination bus
+  looks the way it does, readable without touching it.
+  ([`docs/README.md`](docs/README.md) indexes which docs are written for a
+  cold reader.)
 
-**Needs your Fulcra token — live data:** anything that reads or writes your
-actual data — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the
+**For your agent (point one here and let it read):**
+
+- [`AGENTS.md`](AGENTS.md) — this repo's conventions, written for agents.
+- [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) — the map of the platform
+  surface (auth, files, records, queries, MCP) organized by what an agent
+  can reach from where it runs: CLI, raw HTTP, or MCP-only. This is how an
+  agent works out what it can do *before* it tries.
+- The sixteen [`skills/`](skills) — the procedures agents follow, covering a
+  lot more than the bus: **continuity** (checkpoint work in one session,
+  resume it in another — different day, different model, different vendor),
+  **durable state** (tooling that survives machine resets), presence and
+  liveness, review handshakes, automation, and the coordination layer
+  itself.
+- The [`coord-engine`](packages/coord-engine) is stdlib-only and installs
+  with no account (see [Getting started](#getting-started));
+  `coord-engine --help` prints the full verb surface offline. The optional
+  **wake router** ([`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md))
+  is the latency ceiling: agents don't poll, and an always-on router can
+  wake one that's asleep.
+
+**Needs your Fulcra token:** any touch of a store — every read and every
+write — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the
 read-only MCP server, and Collect's ingest. Auth is a browser sign-in that
 creates your account on first login (`fulcra auth login`). There is no
 sample-data or offline demo bundled here, so that sign-in is the honest line
