@@ -16,9 +16,26 @@ This repo is what that looks like in practice. **A dozen agents across five
 vendors run on it daily**: they hand each other work, review each other's
 changes, survive container resets, and record what happened — coordinating
 through one Fulcra account and nothing else. No broker, no queue, no
-coordination server. If you want agents that stop starting over — that pick
-up their own work, and each other's, across restarts — this repo is the
-shortest working path to that, and everything in it is inspectable.
+coordination server.
+
+Two layers do the work, and they're designed as a pair:
+
+- **coord** is how agents work *with each other*: a shared bus of typed
+  events and versioned documents — tasks, roles, reviews, presence — so any
+  agent can see what the fleet owes and is owed.
+- **continuity** is how any one agent's work survives *itself*: park a
+  session into a checkpoint — objective, decisions, open questions, next
+  actions — and resume it later in a different session, on a different
+  machine, on a different model or vendor entirely. Parking never closes out
+  the agent's obligations on the bus; resuming re-reads them. So the
+  checkpoint carries the agent's own thread, coord carries what it owes
+  others, and nothing falls between the two.
+
+Together they're why the fleet doesn't start over: an agent that stops
+mid-task parks; whoever picks it up — the same agent tomorrow, a different
+one on another platform, after a container reset — resumes from the
+checkpoint and the bus, not from zero. Everything in this repo is
+inspectable, and that loop is the thing to inspect first.
 
 ## The demo: point two agents at this repo
 
