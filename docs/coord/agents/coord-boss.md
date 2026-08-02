@@ -27,7 +27,11 @@ implements is documented in
    this session's ref, registered in `_coord/router/config.json`).
 
 Every wake starts with `coord-engine queue fulcra --agent coord-boss`
-(rc 3 = DEGRADED window, fail closed — quiet is not clear).
+(any nonzero exit = fail closed, quiet is not clear: never infer the
+terminal state from the rc — both rc 2 and rc 3 carry multiple states;
+read `state` + `error_code` from the `--json` envelope. INVALID is
+human-fixable, not retryable. `obligations` has a fixed split:
+rc 3 = UNKNOWN, rc 4 = INVALID).
 
 ## Container-reset survival (the part that keeps breaking)
 

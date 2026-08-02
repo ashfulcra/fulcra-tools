@@ -25,6 +25,8 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ```bash
 uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
+# EXAMPLE pin, frozen at writing time — the authoritative CURRENT pin lives in
+# the team store at `_coord/bus-v3/BOOTSTRAP.md` (or run its adopt-latest.sh):
 uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
 ```
 
@@ -46,6 +48,7 @@ needs none of this; projection is the one feature that requires the typed-record
 silent exit-0 no-op — the failure mode that left the timeline dark. Install both together:
 
 ```bash
+# EXAMPLE pins — current tags: store `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh
 uv tool install --force \
   "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine" \
   --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common"
@@ -112,6 +115,7 @@ Four walls, in the order you'll hit them:
    #  entry points target fulcra_api.cli:cli. Whole recipe validated 2026-07-22.)
 
    # coord-engine is stdlib-only: a checkout on PYTHONPATH is a complete install
+   # (EXAMPLE pin — check `_coord/bus-v3/BOOTSTRAP.md` for the current tag)
    git clone --depth 1 --branch coord-engine-v1.10.0 https://github.com/ashfulcra/fulcra-tools /tmp/ft
    export PYTHONPATH="/tmp/ft/packages/coord-engine:$PYTHONPATH"
    alias coord-engine='python3 -c "import sys; from coord_engine.cli import main; sys.exit(main(sys.argv[1:]))"'
@@ -198,7 +202,13 @@ coord-engine roles claim <team> <role>      # if the role is registered; else se
 
 Then read your event queue — `coord-engine queue <team> --agent <you>`, the
 delivery leg of the [bus v3 contract](BUS-V3.md) (durable cursor, dedupe,
-fail-closed rc 3 on a degraded window) — and work what it surfaces; events
+fail-closed nonzero exits: every nonzero queue-family exit is fail-closed, and
+the terminal state — UNKNOWN / INVALID / INCOMPATIBLE / ABSENT / REFUSED —
+must be read from the `state` and machine `error_code` in the `--json`
+envelope, never inferred from the exit status alone (both rc 2 and rc 3 carry
+multiple states; e.g. a missing queue authority is rc 2 ABSENT while a stale
+commit token is rc 3 REFUSED); INVALID means durable bytes need a human fix
+and must NOT be retried) — and work what it surfaces; events
 point at their documents. If the final JSONL row is a schema-v2
 `queue-delivery`, durably finish or classify every event and only then run
 `coord-engine queue commit <team> --agent <you> --token <token> --result
@@ -241,11 +251,17 @@ takeover surprises to expect (both observed live 2026-07-15):
   `coord-engine queue <team> --agent <you>`
   — one bounded read against the team's coordination annotation
   ([bus v3](BUS-V3.md)) with the cursor, dedupe, and addressed-to-you filtering
-  built in; treat any nonzero exit as fail-closed, never as quiet — exit 3 is
-  UNKNOWN (retry) or INVALID (human-fixable corrupt bytes), and under `--json`
-  every nonzero exit prints one `queue-error` object (state
-  `UNKNOWN|INVALID|INCOMPATIBLE|ABSENT|REFUSED` + `error_code`; plain mode
-  puts the diagnostic on stderr — see [BUS-V3](BUS-V3.md)). With an
+  built in; treat any nonzero exit as fail-closed, never as quiet. For the
+  `queue` family, do NOT infer the terminal state from the exit status: both
+  rc 2 and rc 3 carry multiple states (a missing queue authority is rc 2
+  ABSENT; a stale commit token is rc 3 REFUSED; UNKNOWN / INVALID /
+  INCOMPATIBLE also exit rc 3). Under `--json` every nonzero exit prints one
+  `queue-error` object — the `state` + machine `error_code` in that envelope
+  are the discriminator (plain mode puts the diagnostic on stderr — see
+  [BUS-V3](BUS-V3.md)); retry UNKNOWN with backoff; INVALID is human-fixable
+  and must NOT be retried. The sibling `obligations` verb has a fixed split:
+  rc 3 = UNKNOWN, rc 4 = INVALID.
+  With an
   activated cursor-v2 authority, the read only stages delivery: commit its
   token after processing, never before. Without
   the engine, the raw `get-records` query with the same rules: dedupe by record
