@@ -1764,9 +1764,14 @@ def _validated_review_projection(
     non-empty str, ``state`` one of ``review.tally``'s states, ``settled`` a real
     bool (a truthy ``"false"`` string must never suppress a pending row), and
     ``pending_required`` a list of non-empty strs; the three slug lists are lists
-    of non-empty strs (absent -> empty). ANY other nested type/value returns
-    None — the caller then emits "projection malformed" and raw-scans, loudly.
-    Validation runs BEFORE any coverage or row is derived (round-2 P1: a
+    of non-empty strs (absent -> empty). Producer INVARIANTS are enforced too
+    (round-3 P1b) — reconcile can produce neither a duplicate ``name`` (rows key
+    on the listing) nor ``settled: true`` outside a terminal
+    APPROVED-with-nothing-pending tally — so a duplicate row (last-write-wins
+    would let a later settled row silently replace a pending one) or an
+    impossible settled combination is malformed, never served. ANY violation
+    returns None — the caller then emits "projection malformed" and raw-scans,
+    loudly. Validation runs BEFORE any coverage or row is derived (round-2 P1: a
     consumer that tolerates malformed nested values serves them silently, which
     contradicts the loud-fallback contract)."""
     proj_rows = section.get("rows")
@@ -1787,6 +1792,10 @@ def _validated_review_projection(
         if not isinstance(pending, list) or not all(
                 isinstance(x, str) and x for x in pending):
             return None
+        if r["settled"] and (r["state"] != review.APPROVED or pending):
+            return None  # settled is ONLY a terminal APPROVED-nothing-pending
+        if name in by_name:
+            return None  # duplicate name: last-write-wins could hide work
         by_name[name] = r
     slug_lists: list[list[str]] = []
     for key in ("orphans", "orphans_unknown", "tombstones"):
@@ -1868,7 +1877,15 @@ def _pending_reviews_from_projection(
 
     head_scanned = head_skipped = 0
     for slug in head_slugs:
-        tally, doc_ok, vok, listing_ok = _review_tally(transport, team, slug)
+        # Same per-slug fail-closed guard the raw fold's _scan_one carries: a
+        # transient transport failure on ONE verdict read (which escapes
+        # _review_tally — its inner read loop has no TransportError guard) must
+        # degrade THIS slug to UNKNOWN-loud, never crash the whole
+        # projection-backed fold (round-3 P1a).
+        try:
+            tally, doc_ok, vok, listing_ok = _review_tally(transport, team, slug)
+        except TransportError:
+            tally, doc_ok, vok, listing_ok = {}, False, False, False
         head_scanned += 1
         if not (doc_ok and vok and listing_ok):
             head_skipped += 1

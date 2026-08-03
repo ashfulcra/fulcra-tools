@@ -411,6 +411,88 @@ def test_review_fold_malformed_nested_row_falls_back_loud():
                 if r.get("type") == "review-pending"] == ["pr-1"], bad_row
 
 
+def test_review_fold_head_verdict_transport_error_is_unknown_loud():
+    # Round-3 P1a regression: the authoritative head tally routes through
+    # _review_tally, whose inner verdict-read loop has no TransportError guard —
+    # a transient failure on ONE verdict read must degrade that slug to
+    # UNKNOWN-loud (review-head-degraded + degraded-sink entry), never crash
+    # the projection-backed fold.
+    t = FakeTransport()
+    _put_review(t, "pr-down", "alice, bob", verdicts=[("alice", "approve")])
+    _reconcile(t)
+    agg = _agg(t)  # fresh, complete:true, pr-down PENDING for bob
+
+    class VerdictReadDown(FakeTransport):
+        def read(self, path):
+            if "/verdicts/" in path and path.endswith(".md"):
+                raise TransportError("down")
+            return super().read(path)
+
+    down = VerdictReadDown()
+    down.store, down.mtimes, down.sizes = t.store, t.mtimes, t.sizes
+    rows = [{"id": "rr-down", "name": "rr-down",
+             "title": "REVIEW REQUEST: pr-down", "status": "proposed",
+             "assignee": "bob", "priority": "P2", "tags": []}]
+    sink = []
+    out = cli._pending_reviews_for(down, TEAM, "bob", rows=rows,
+                                   aggregate_doc=agg, degraded_sink=sink)
+    # no exception, no confident answer for the caller's own slug — loud UNKNOWN
+    assert not [r for r in out if r.get("type") == "review-pending"]
+    head = [r for r in out if r.get("type") == "review-head-degraded"]
+    assert head == [{"type": "review-head-degraded", "scanned": 1, "total": 1,
+                     "skipped": 1}]
+    assert sink == ["review-verdicts:pr-down"]
+    assert any(r.get("type") == "review-source"
+               and r["source"] == "projection" for r in out)
+
+
+def test_review_fold_duplicate_row_names_are_malformed():
+    # Round-3 P1b regression: reconcile keys rows on the listing, so a duplicate
+    # name cannot be produced — a section carrying one is malformed. Served
+    # last-write-wins, a later settled row would silently replace the pending
+    # one while still claiming source:projection.
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+    dup_rows = [
+        {"name": "pr-1", "state": "PENDING", "pending_required": ["alice"],
+         "settled": False},
+        {"name": "pr-1", "state": "APPROVED", "pending_required": [],
+         "settled": True},
+    ]
+    agg = {projection.REVIEWS_KEY: _fresh_reviews_section(rows=dup_rows)}
+    out = cli._pending_reviews_for(t, TEAM, "alice", rows=[], aggregate_doc=agg)
+    src = [r for r in out if r.get("type") == "review-source"]
+    assert len(src) == 1 and src[0]["source"] == "raw-scan"
+    assert src[0]["reason"] == "reviews projection malformed"
+    # the loud raw scan still surfaces the real obligation
+    assert [r["name"] for r in out
+            if r.get("type") == "review-pending"] == ["pr-1"]
+
+
+def test_review_fold_inconsistent_settled_rows_are_malformed():
+    # Round-3 P1b: settled:true is ONLY legal as a terminal APPROVED tally with
+    # nothing pending — any other combination could suppress live work and is
+    # malformed, never served.
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+    for bad_row in (
+        {"name": "pr-1", "state": "PENDING", "pending_required": ["alice"],
+         "settled": True},
+        {"name": "pr-1", "state": "CHANGES", "pending_required": [],
+         "settled": True},
+        {"name": "pr-1", "state": "APPROVED", "pending_required": ["alice"],
+         "settled": True},
+    ):
+        agg = {projection.REVIEWS_KEY: _fresh_reviews_section(rows=[bad_row])}
+        out = cli._pending_reviews_for(t, TEAM, "alice", rows=[],
+                                       aggregate_doc=agg)
+        src = [r for r in out if r.get("type") == "review-source"]
+        assert len(src) == 1 and src[0]["source"] == "raw-scan", bad_row
+        assert src[0]["reason"] == "reviews projection malformed", bad_row
+        assert [r["name"] for r in out
+                if r.get("type") == "review-pending"] == ["pr-1"], bad_row
+
+
 def test_review_fold_malformed_slug_lists_fall_back_loud():
     t = FakeTransport()
     _put_review(t, "pr-1", "alice")
