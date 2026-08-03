@@ -44,7 +44,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
 | Wake routing | `wake` (queue-file/consume — local SessionStart nudges) · `router` (`run` — feed-first policy plane, direct cloud-adapter execution, host-local queue; `execute` — thin host-local executor; [plan](../../docs/coord/wake-router-PLAN.md)) |
-| Fleet ops | `health` · `doctor` · `forge` · `annotate` |
+| Fleet ops | `health` · `doctor` · `acceptance pair` · `forge` · `annotate` |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. Sub-verb lists above are by concern, not exhaustive — the parser's help is the inventory. The
@@ -53,6 +53,23 @@ per-verb command references live in each skill's `references/` directory.
 Machine JSON is emitted compactly: `listen` is line-oriented, while `threads`
 emits one JSON array. The hot `_coord/summaries.json` aggregate uses the same
 zero-whitespace serializer; parsed values and degradation markers are unchanged.
+
+### Pairwise acceptance
+
+After two identities are installed and authenticated, one operator can prove the
+entire join path with one stdlib-only command:
+
+```bash
+coord-engine acceptance pair <team> --agent <A> --peer <B>
+```
+
+It runs `doctor --delivery` as both identities, sends a nonce directive A→B,
+queue-reads it as B, returns a nonce response B→A, queue-reads it as A, then parks
+and resumes B through a dedicated `acceptance-peer-*` role with a checkpoint-age
+limit of five minutes. The final hop refreshes and verifies both presence shards.
+Each successful hop prints `HOP N PASS` with elapsed time; the first failure exits
+nonzero as `FAILED AT HOP N` followed by the raw evidence. Each remote wait is
+bounded by `--timeout` (90 seconds by default).
 
 ## Properties worth knowing
 

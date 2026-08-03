@@ -8298,6 +8298,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to wait for the delivery probe (default 90)")
     dr.set_defaults(func=cmd_doctor)
 
+    ac = sub.add_parser(
+        "acceptance", help="production acceptance probes across agent identities")
+    acsub = ac.add_subparsers(dest="acceptance_command", required=True)
+    acp = acsub.add_parser(
+        "pair", help="prove delivery, nonce round-trip, park/resume, and join")
+    acp.add_argument("team")
+    acp.add_argument("--agent", required=True, help="initiating identity A")
+    acp.add_argument("--peer", required=True, help="responding identity B")
+    acp.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="seconds allowed for each delivery/queue hop (default 90)")
+    acp.add_argument("--nonce", help=argparse.SUPPRESS)
+    acp.set_defaults(func=cmd_acceptance_pair)
+
     ak = sub.add_parser("asks", help="waiting-for-operator asks, oldest first (orchestrator pull)")
     ak.add_argument("team"); ak.add_argument("--human"); add_json(ak)
     ak.set_defaults(func=cmd_asks)
@@ -8712,6 +8726,10 @@ _threads_blocked_signal = commands_threads._threads_blocked_signal
 _threads_ash_activity = commands_threads._threads_ash_activity
 _threads_candidate_rows = commands_threads._threads_candidate_rows
 cmd_threads = commands_threads.cmd_threads
+
+from . import commands_acceptance  # noqa: E402
+
+cmd_acceptance_pair = commands_acceptance.cmd_acceptance_pair
 
 
 if __name__ == "__main__":  # pragma: no cover
