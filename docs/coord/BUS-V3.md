@@ -38,6 +38,15 @@ atomic; all fields below must be present together:
 
 Legacy two-field configs remain readable for rollback, but every queue read
 warns that no fleet fence exists and cursor-v2 activation is forbidden.
+Migrate that legacy authority explicitly with
+`coord-engine bus-v3 migrate <team> --dry-run`, inspect the per-agent cursor
+classifications, then repeat with `--apply`. The dry run and apply both require
+every discovered or explicitly named (`--agent`, repeatable) legacy cursor to
+classify as `readable-legacy` or `absent`; `malformed-blocks` and transport
+doubt fail closed. Apply is idempotent and its sole possible write is the
+complete schema-v1 authority document. It never seeds or mutates a legacy
+cursor, and task/role documents are intentionally backward-compatible and out
+of this migration's scope.
 Partially versioned or unknown authorities are invalid. An engine below the
 reader/writer floor, or one that does not understand the selected protocol or
 cursor schema, fails closed before advancing any cursor. `doctor <team>`

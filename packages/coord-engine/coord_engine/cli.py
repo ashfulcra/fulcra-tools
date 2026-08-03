@@ -3416,6 +3416,130 @@ def _queue_result_envelope(
     return envelope
 
 
+def _bus_v3_migration_agents(
+        transport: Any, team: str, explicit: list[str]
+) -> tuple[list[str], Optional[str]]:
+    """Discover legacy cursor owners without reading task or role state."""
+    prefix = f"team/{team}/_coord/agents/"
+    try:
+        entries = transport.list_dir(prefix)
+    except (TransportError, OSError) as exc:
+        return [], f"agent-census-read-failed: {exc}"
+    agents = set(explicit)
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str):
+            return [], "agent-census-malformed"
+        if entry.get("is_dir") or name.endswith("/"):
+            agent = name.rstrip("/")
+            if agent and "/" not in agent:
+                agents.add(agent)
+    return sorted(agents), None
+
+
+def cmd_bus_v3_migrate(args: argparse.Namespace, transport: Any) -> int:
+    """Dry-run/apply the ruled s5 authority/cursor-only migration.
+
+    Apply has exactly one possible write: the Bus authority document. Legacy
+    cursors are classified but never seeded, repaired, or rewritten here;
+    task and role paths are neither listed nor read.
+    """
+    mode = "apply" if args.apply else "dry-run"
+    authority_path = records.config_path(args.team)
+    reader = getattr(transport, "read_classified", None)
+    if reader is None:
+        raw, authority_read = None, "error"
+    else:
+        raw, authority_read = reader(authority_path)
+
+    if authority_read == "error":
+        authority_class = "unreadable-blocks"
+        target = None
+    elif raw is None:
+        authority_class = "absent-blocks"
+        target = None
+    else:
+        target, authority_class = records.schema1_authority_migration_target(raw)
+
+    agents, census_error = _bus_v3_migration_agents(
+        transport, args.team, list(args.agents or []))
+    cursor_rows: list[dict[str, Any]] = []
+    blocked = authority_class not in ("readable-legacy", "current")
+    for agent in agents:
+        _cursor, status = records.load_legacy_cursor_classified(
+            transport, args.team, agent)
+        classification = {
+            "ok": "readable-legacy",
+            "absent": "absent",
+            "invalid": "malformed-blocks",
+            "error": "unreadable-blocks",
+        }[status]
+        blocked = blocked or classification.endswith("blocks")
+        cursor_rows.append({
+            "agent": agent,
+            "path": records.cursor_path(args.team, agent),
+            "classification": classification,
+        })
+    if census_error is not None:
+        blocked = True
+
+    wrote_authority = False
+    state = "BLOCKED" if blocked else "READY"
+    rc = 3 if blocked else 0
+    if args.apply and not blocked:
+        if authority_class == "current":
+            state = "CURRENT"
+        else:
+            rendered = records.render_authority_config(target or {})
+            if not transport.write(authority_path, rendered):
+                state, rc = "UNKNOWN", 3
+            else:
+                verify_raw, verify_status = reader(authority_path)
+                verified, verified_class = (
+                    records.schema1_authority_migration_target(verify_raw)
+                    if verify_status == "ok" and verify_raw is not None
+                    else (None, "unreadable-blocks")
+                )
+                if verified_class != "current" or verified != target:
+                    state, rc = "UNKNOWN", 3
+                else:
+                    wrote_authority = True
+                    state = "APPLIED"
+
+    envelope = {
+        "type": "bus-v3-migration",
+        "mode": mode,
+        "state": state,
+        "authority": {
+            "path": authority_path,
+            "classification": authority_class,
+            "target_schema": 1,
+        },
+        "cursors": cursor_rows,
+        "agent_census_error": census_error,
+        "writes": {
+            "authority": 1 if wrote_authority else 0,
+            "legacy_cursors": 0,
+            "tasks": 0,
+            "roles": 0,
+        },
+        "rc": rc,
+    }
+    if args.json:
+        jsonutil.print_json(envelope)
+    else:
+        print(f"bus-v3 migrate: {state} [{mode}] authority="
+              f"{authority_class} cursors={len(cursor_rows)}")
+        for row in cursor_rows:
+            print(f"  {row['agent']}: {row['classification']}")
+        if census_error:
+            print(f"  census: {census_error}", file=sys.stderr)
+        print("  writes: authority="
+              f"{envelope['writes']['authority']} legacy-cursors=0 "
+              "tasks=0 roles=0")
+    return rc
+
+
 def _write_consume_audit(transport: Any, team: str, *, caller: str,
                          target: str, cursor_path: str, observed_prior: Any,
                          intended_authority: dict[str, Any], ts: str) -> bool:
@@ -8168,6 +8292,25 @@ def build_parser() -> argparse.ArgumentParser:
                          "(default) no-op alias")
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
+    bv = sub.add_parser(
+        "bus-v3", help="Bus V3 authority and cursor administration")
+    bvsub = bv.add_subparsers(dest="bus_v3_command", required=True)
+    bvm = bvsub.add_parser(
+        "migrate",
+        help="classify legacy cursors and upgrade the authority to schema v1",
+    )
+    bvm.add_argument("team")
+    modes = bvm.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--dry-run", action="store_true",
+                       help="classify and print the plan; write nothing")
+    modes.add_argument("--apply", action="store_true",
+                       help="apply the schema-v1 authority upgrade")
+    bvm.add_argument(
+        "--agent", dest="agents", action="append",
+        help="include a known agent in cursor proof (repeatable; discovered "
+             "agent directories are always included)")
+    add_json(bvm)
+    bvm.set_defaults(func=cmd_bus_v3_migrate)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
     ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
     ib.add_argument("--all", action="store_true",
