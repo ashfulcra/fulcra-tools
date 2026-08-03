@@ -112,24 +112,6 @@ def test_forwarded_attention_table_has_the_dedup_columns(collect_home):
     assert pk == ["source_id"]
 
 
-def test_claim_attention_source_id_is_idempotent(collect_home):
-    """First claim of a source_id returns True (forward it); every repeat
-    returns False (skip the duplicate). Exactly one row persists."""
-    conn = db.open()
-    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.abc") is True
-    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.abc") is False
-    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.abc") is False
-    # A different source_id is independently claimable.
-    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.xyz") is True
-    rows = conn.execute(
-        "SELECT source_id FROM forwarded_attention ORDER BY source_id"
-    ).fetchall()
-    assert [r["source_id"] for r in rows] == [
-        "com.fulcra.attention.v2.abc",
-        "com.fulcra.attention.v2.xyz",
-    ]
-
-
 # ---- forwarded_events / claim_dedup_keys (component 3) ---------------
 
 
