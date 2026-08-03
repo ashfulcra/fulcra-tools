@@ -173,6 +173,7 @@ class _AcceptancePairAdapter:
         objective = f"pairwise acceptance nonce {self.nonce}"
         rc2, raw2 = self._run([
             "continuity", "park", self.team, "--agent", self.peer,
+            "--role", self.role,
             "--objective", objective, "--next", "GET-ON-THE-BUS final join",
         ])
         raw = raw1 + raw2

@@ -240,10 +240,13 @@ coord-engine acceptance pair <team> --agent <A> --peer <B>
 This is the final join proof: two delivery probes, a nonce directive and response
 through both queue views, a write-verified B checkpoint, an A-side resume with
 `--max-age 5m`, and verified presence for both identities. It is safe on an empty
-or loaded team store: all acceptance artifacts carry a unique nonce and the
-continuity hop uses a dedicated `acceptance-peer-*` role. Do not accept partial
-output—success is the final `PASS pair A<->B`; failures name the exact hop and
-include its raw evidence.
+or loaded team store because the continuity park is explicitly confined to its
+dedicated `acceptance-peer-*` role; checkpoints for the peer's real roles are not
+touched. The exchanged directive/response and checkpoint objective carry a unique
+nonce, but task, role, checkpoint, and presence paths are scoped per pair or
+identity rather than per nonce, so repeated or concurrent probes may replace prior
+acceptance residue. Do not accept partial output—success is the final `PASS pair
+A<->B`; failures name the exact hop and include its raw evidence.
 
 For a versioned Bus-v3 authority, `doctor` also reports which engine versions
 are adopted, which are actively running, and whether the selected transport

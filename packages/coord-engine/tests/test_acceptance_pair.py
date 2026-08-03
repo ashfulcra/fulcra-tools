@@ -150,6 +150,12 @@ def test_production_pair_adapter_passes_fresh_and_loaded_store(
         "data_type": "MomentAnnotation/x", "api_version": "v1alpha1",
     }))
     if loaded:
+        real_ref = "team/r/member/b/continuity/role-real/latest.json"
+        t.put("team/r/roles/real.md",
+              f"---\ntype: Role\nsla_hours: 24\ncheckpoint_ref: {real_ref}\n---\n")
+        t.put(real_ref, json.dumps({"objective": "real work must survive"}))
+        assert cli.main(["roles", "claim", "r", "real", "--agent", "b"], t) == 0
+        capsys.readouterr()
         t.put("team/r/task/unrelated.md",
               "---\ntype: Task\ntitle: Unrelated\nstatus: active\nassignee: somebody\n---\n")
         t.window.append({
@@ -168,3 +174,7 @@ def test_production_pair_adapter_passes_fresh_and_loaded_store(
     assert rc == 0, output
     assert "HOP 9 PASS" in output
     assert "PASS pair a<->b" in output
+    if loaded:
+        real_role = cli.okf.parse_frontmatter(t.store["team/r/roles/real.md"])
+        assert real_role["checkpoint_ref"] == real_ref
+        assert json.loads(t.store[real_ref])["objective"] == "real work must survive"

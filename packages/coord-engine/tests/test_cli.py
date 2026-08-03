@@ -1527,6 +1527,35 @@ def test_cli_park_snapshots_held_roles_only(capsys):
     assert "CHECKPOINT NOT WRITTEN" in capsys.readouterr().err
 
 
+def test_cli_park_role_filter_preserves_other_held_role_checkpoint(capsys):
+    import json as _j
+    from coord_engine import okf
+
+    t = FakeTransport()
+    old_ref = "team/r/member/amy/continuity/role-real/latest.json"
+    t.put("team/r/roles/real.md",
+          f"---\ntype: Role\nsla_hours: 24\ncheckpoint_ref: {old_ref}\n---\n")
+    t.put("team/r/roles/acceptance.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    t.put(old_ref, _j.dumps({"objective": "real work"}))
+    cli.main(["roles", "claim", "r", "real", "-a", "amy"], transport=t)
+    cli.main(["roles", "claim", "r", "acceptance", "-a", "amy"], transport=t)
+    capsys.readouterr()
+
+    assert cli.main([
+        "continuity", "park", "r", "-a", "amy", "--role", "acceptance",
+        "--objective", "acceptance nonce",
+    ], transport=t) == 0
+
+    assert okf.parse_frontmatter(t.store["team/r/roles/real.md"])["checkpoint_ref"] == old_ref
+    acceptance = okf.parse_frontmatter(t.store["team/r/roles/acceptance.md"])
+    assert acceptance["checkpoint_ref"] != old_ref
+    assert _j.loads(t.store[acceptance["checkpoint_ref"]])["objective"] == "acceptance nonce"
+    assert cli.main([
+        "continuity", "park", "r", "-a", "nobody", "--role", "acceptance",
+    ], transport=t) == 2
+    assert "CHECKPOINT NOT WRITTEN" in capsys.readouterr().err
+
+
 def test_cli_briefing_full_and_empty_store(capsys):
     import json as _j
     t = FakeTransport()

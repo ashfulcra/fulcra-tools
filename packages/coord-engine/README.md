@@ -68,8 +68,10 @@ queue-reads it as B, returns a nonce response B→A, queue-reads it as A, then p
 and resumes B through a dedicated `acceptance-peer-*` role with a checkpoint-age
 limit of five minutes. The final hop refreshes and verifies both presence shards.
 Each successful hop prints `HOP N PASS` with elapsed time; the first failure exits
-nonzero as `FAILED AT HOP N` followed by the raw evidence. Each remote wait is
-bounded by `--timeout` (90 seconds by default).
+nonzero as `FAILED AT HOP N` followed by the raw evidence. `--timeout` (90 seconds
+by default) bounds the delivery probes and the two queue polls (hops 1, 2, 4, and
+6); the tell/respond/claim/park/resume/presence operations use their underlying
+transport bounds.
 
 ## Properties worth knowing
 
