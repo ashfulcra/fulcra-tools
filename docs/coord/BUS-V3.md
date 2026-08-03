@@ -207,12 +207,20 @@ conditions must not share one number: an unrunnable fold that spends rc 3
 trains every caller to ignore the blindness signal, which is the one signal
 that has to keep working.
 
-The fold is **opt-in** (`--obligations`); it is not run on a default read.
-The skip is stated, never implied: every machine-readable success envelope
-that did not fold carries `"obligations":{"state":"not-checked"}`, including
-the `queue-delivery` envelope of a cursor-v2 stage or replay, which never
-folds at all. `not-checked` is deliberately outside the fold's own state set
+The fold is **opt-in** (`--obligations`); it is not run on a default read, on
+either cursor schema. The skip is stated, never implied: every machine-readable
+success envelope that did not fold carries `"obligations":{"state":
+"not-checked"}` — `queue-result` on DATA as well as CLEAR, and the
+`queue-delivery` envelope of a cursor-v2 stage, replay or CAS-race handoff.
+`not-checked` is deliberately outside the fold's own state set
 (CLEAR/DATA/UNKNOWN/INVALID) so no consumer can map it to "nothing owed".
+
+The flag is honored on **every** one of those envelopes, cursor v1 and v2
+alike: pass it and the fold runs and its verdict replaces the marker; omit it
+and nothing is folded and nothing is charged. The v2 path used to accept the
+flag from the shared parser and silently discard it, which is worse than not
+offering it — the envelope then reported `not-checked` to a caller who had
+explicitly asked, and `not-checked` is supposed to mean "nobody asked".
 `--no-obligations` remains accepted as a no-op alias of the default.
 
 Reading as an identity other than your own `$FULCRA_COORD_AGENT` peeks by

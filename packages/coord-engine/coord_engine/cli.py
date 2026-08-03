@@ -3471,7 +3471,7 @@ def _write_consume_audit(transport: Any, team: str, *, caller: str,
 
 def _print_v2_delivery(
         pending: dict[str, Any], *, cursor_revision: int, json_mode: bool,
-        replay: bool,
+        replay: bool, obligations: Optional[dict[str, Any]] = None,
 ) -> None:
     events = pending["events"]
     _print_queue_events(events, json_mode=json_mode)
@@ -3484,10 +3484,12 @@ def _print_v2_delivery(
         "window_end": pending["window_end"],
         "cursor_revision": cursor_revision,
         "outcome": "replayed" if replay else "staged",
-        # The transactional read path never folds obligations — it says so
-        # rather than staying silent, so a consumer cannot read a delivery
-        # envelope as "and nothing else is owed".
-        "obligations": _obligations_not_checked(),
+        # A DEFAULT transactional read folds nothing — it says so rather than
+        # staying silent, so a consumer cannot read a delivery envelope as
+        # "and nothing else is owed". An explicit ``--obligations`` is honored
+        # here like anywhere else and supplies the real verdict instead.
+        "obligations": (obligations if obligations is not None
+                        else _obligations_not_checked()),
         "rc": 0,
     }
     if json_mode:
@@ -3506,7 +3508,17 @@ def _cmd_queue_v2(
         args: argparse.Namespace, transport: Any, cfg: dict[str, Any],
         agent: str, *, peek: bool, engine_version: str
 ) -> int:
-    """Transactional v2 read: stage first, advance only on explicit commit."""
+    """Transactional v2 read: stage first, advance only on explicit commit.
+
+    ``--obligations`` is honored here on exactly the same terms as on the v1
+    path (round-2 finding 2): explicit means fold, default means zero fold
+    ops. It was previously accepted by the shared ``queue`` parser and then
+    never read by this function — every v2 envelope claimed ``not-checked``
+    even when the caller had asked for the fold, which is indistinguishable
+    from a fold that ran and could say nothing. The fold is run at the LAST
+    moment before each success envelope, never before the cursor work, so a
+    read that fails still fails at its own cost.
+    """
     generation = cfg["cursor_generation"]
     cursor, raw, status = records.load_v2_cursor_classified(
         transport, args.team, agent, generation)
@@ -3550,13 +3562,15 @@ def _cmd_queue_v2(
     pending = cursor.get("pending")
     if isinstance(pending, dict):
         if peek:
+            fragment = _requested_obligations(args, transport, agent)
             if bool(getattr(args, "json", False)):
                 jsonutil.print_json(_queue_result_envelope(
                     pending["events"], cfg=cfg,
                     cursor_path=records.v2_cursor_path(
                         args.team, agent, generation),
                     advanced=False,
-                    outcome_mix=records.outcome_mix(cursor)))
+                    outcome_mix=records.outcome_mix(cursor),
+                    obligations=fragment))
             else:
                 _print_queue_events(pending["events"], json_mode=False)
             if pending["events"]:
@@ -3565,7 +3579,8 @@ def _cmd_queue_v2(
             return 0
         _print_v2_delivery(
             pending, cursor_revision=cursor["revision"],
-            json_mode=bool(getattr(args, "json", False)), replay=True)
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_requested_obligations(args, transport, agent))
         return 0
 
     if not peek:
@@ -3652,13 +3667,15 @@ def _cmd_queue_v2(
             rc=3,
         )
     if peek:
+        fragment = _requested_obligations(args, transport, agent)
         if bool(getattr(args, "json", False)):
             jsonutil.print_json(_queue_result_envelope(
                 fresh, cfg=cfg,
                 cursor_path=records.v2_cursor_path(
                     args.team, agent, generation),
                 advanced=False,
-                outcome_mix=records.outcome_mix(cursor)))
+                outcome_mix=records.outcome_mix(cursor),
+                obligations=fragment))
         else:
             _print_queue_events(fresh, json_mode=False)
         if fresh:
@@ -3699,12 +3716,14 @@ def _cmd_queue_v2(
             )
         _print_v2_delivery(
             winner["pending"], cursor_revision=winner["revision"],
-            json_mode=bool(getattr(args, "json", False)), replay=True)
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_requested_obligations(args, transport, agent))
         return 0
     staged_cursor = staged["cursor"]
     _print_v2_delivery(
         staged_cursor["pending"], cursor_revision=staged_cursor["revision"],
-        json_mode=bool(getattr(args, "json", False)), replay=False)
+        json_mode=bool(getattr(args, "json", False)), replay=False,
+        obligations=_requested_obligations(args, transport, agent))
     return 0
 
 
