@@ -260,7 +260,13 @@ takeover surprises to expect (both observed live 2026-07-15):
   are the discriminator (plain mode puts the diagnostic on stderr — see
   [BUS-V3](BUS-V3.md)); retry UNKNOWN with backoff; INVALID is human-fixable
   and must NOT be retried. The sibling `obligations` verb has a fixed split:
-  rc 3 = UNKNOWN, rc 4 = INVALID.
+  rc 3 = UNKNOWN, rc 4 = INVALID. Folding on a queue read is OPT-IN
+  (`queue --obligations`): a default read performs zero fold operations and
+  its machine-readable success envelope says
+  `"obligations":{"state":"not-checked"}` — honest bookkeeping, never CLEAR.
+  Opting in costs at minimum three top-level listings and fans out further
+  when role-routed work or responsible-PR feedback exist (the review and
+  forge probes each probe per item) — budget the wake accordingly.
   With an
   activated cursor-v2 authority, the read only stages delivery: commit its
   token after processing, never before. Without
@@ -306,7 +312,7 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
   your role, and refresh the token (§3). Since bus v3 there is no resident
   listener to revive — the queue read rides the trigger itself.
 - **Heartbeat duty.** If you hold a maintainer-class role from a long-lived session,
-  run the full three-leg chain (§2) on the hourly trigger:
+  run the full three-leg chain (§2) on your heartbeat cadence (20 minutes by default from `install-heartbeat.sh`):
   `coord-engine reconcile <team> && coord-engine annotate project <team> && coord-engine digest <team> --store --emit-timeline`
   — idempotent across hosts, safe to run alongside other heartbeat hosts. Budget
   notes (measured live on a 1.2s/op remote transport, ~750-task team, 2026-07-16):
@@ -328,7 +334,7 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
 
 - [`AGENTS.md`](../../AGENTS.md) — the working conventions: review handshake, delivery
   rule, backlog, ATC routing.
-- [`skills/`](../../skills) — the thirteen `fulcra-agent-*` skills, each with re-entrancy
+- [`skills/`](../../skills) — the fourteen `fulcra-agent-*` skills, each with re-entrancy
   probes telling a waking agent exactly where to enter.
 - [`docs/coord/pitch/`](pitch) — the one-pager and demo script, if you're evaluating
   whether to adopt this at all.
