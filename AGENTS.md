@@ -98,7 +98,7 @@ under `skills/`, each package with its own README, build, and tests.
   and presence guard kept their own lists — caught in PR #455 review.)
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
-  and the thirteen `fulcra-agent-*` skills under `skills/` are how an agent
+  and the fourteen `fulcra-agent-*` skills under `skills/` are how an agent
   actually drives it. (The `coord2` codename is fully retired — code,
   identifiers, and prose all say coord; installers migrate coord2-era
   on-host artifacts automatically when re-run.)

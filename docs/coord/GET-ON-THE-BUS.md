@@ -261,8 +261,10 @@ takeover surprises to expect (both observed live 2026-07-15):
   [BUS-V3](BUS-V3.md)); retry UNKNOWN with backoff; INVALID is human-fixable
   and must NOT be retried. The sibling `obligations` verb has a fixed split:
   rc 3 = UNKNOWN, rc 4 = INVALID — and note an EMPTY queue read runs that
-  obligations fold by default (three extra listings; `--no-obligations`
-  skips it when a wake must stay cheap).
+  obligations fold by default (at MINIMUM three extra listings — more when
+  role-routed work or responsible-PR feedback exist, since the review and
+  forge probes each fan out per item; `--no-obligations` skips it when a
+  wake must stay cheap).
   With an
   activated cursor-v2 authority, the read only stages delivery: commit its
   token after processing, never before. Without
