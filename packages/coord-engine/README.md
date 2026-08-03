@@ -85,7 +85,8 @@ transport bounds.
   scheduled drift check rebuilds from the full listing scan; orphaned index entries
   cannot recur, and role/review/presence status are computed, never inferred by a model.
 - **Fails loud, never silent.** Unverifiable writes are retried, cached locally, and
-  announced; a degraded read fold says so (`review-fold-degraded`, `LISTEN DEGRADED`)
+  announced; a degraded read fold says so (`review-fold-degraded`, `review-head-degraded`,
+  a `queue-error` envelope, or a `raw scan — <reason>` source row)
   instead of returning a clean-looking partial answer.
 - **Structured logs** to stderr (`$COORD_LOG_LEVEL`).
 

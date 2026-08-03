@@ -1051,7 +1051,6 @@ lives in two places and **both must be rotated together**:
 |---|---|---|
 | **PRIMARY** | `FLEET_GH_TOKEN` + `FLEET_BOT_NAME` in the **CCR env config** | the four cloud agents: `coord-boss`, `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer` |
 | Mac host | macOS keychain, service `FLEET_GH_PAT` (account = host user) | host-local jobs on the resident Mac |
-| VPS | per the deploy package | added at the VPS migration |
 
 Cloud agents read `FLEET_GH_TOKEN` from their environment; on the Mac host, read
 the keychain only at the moment of use:
@@ -1134,7 +1133,7 @@ and working until the candidate has passed verification.
    2–6 rotate the Mac keychain only; the four cloud agents (`coord-boss`,
    `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer`) still hold the
    **old** token in `FLEET_GH_TOKEN`. Update `FLEET_GH_TOKEN` in each of their CCR
-   env configs (and the VPS deploy package once migrated), then **confirm one real
+   env configs, then **confirm one real
    cloud push or PR operation succeeds** with the new value. Revoking before this
    step strands the entire cloud fleet on a dead credential — the whole reason
    custody is documented as two homes.

@@ -1,7 +1,7 @@
 # 5-minute live demo script — coord on team/fulcra
 
 *Run on real production data. No slides. Every command is copy-pasteable from this file.*
-*Prep (once, before the meeting): `export FULCRA_COORD_AGENT=coord-maintainer`; set `COORD_TYPE` to the team's coordination annotation id (see [`../BUS-V3.md`](../BUS-V3.md)); confirm `coord-engine doctor fulcra` is green; have this file open.*
+*Prep (once, before the meeting): **persist** `FULCRA_COORD_AGENT=coord-maintainer` — in your harness env config or shell profile, NOT a one-shot `export`, which dies with the shell and makes every verb fail `no agent identity` (see [`../GET-ON-THE-BUS.md`](../GET-ON-THE-BUS.md) §5); set `COORD_TYPE` to the team's coordination annotation id (see [`../BUS-V3.md`](../BUS-V3.md)); confirm `coord-engine doctor fulcra` is green; have this file open.*
 
 ## 0:00 — the space is just teams (30s)
 
@@ -84,7 +84,7 @@ coord-engine health fulcra            # which hosts heal the team; who went dark
 
 ## 4:45 — close (15s)
 
-> "Twelve skills, one stdlib-only engine, 800+ tests, dual AI review on every PR. Wave 1 is six
+> "Seventeen skills, one stdlib-only engine, 1600+ engine tests, dual AI review on every PR. Wave 1 is six
 > purely-additive skills. The engine's natural first home is a small Fulcra-owned repo — folding
 > into fulcra-api stays on the table as the long-term convergence, sized with your team. Evidence
 > pack is one page in DESIGN.md."
