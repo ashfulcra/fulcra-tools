@@ -35,6 +35,22 @@ def test_census_none_window_is_no_evidence():
     assert records.invisible_writer_census(None) == []
 
 
+def test_census_caps_output_at_three_senders_with_a_more_tail():
+    """A flooded window must not bloat a wake (promise plan T2, round-2 add).
+
+    The census runs on EVERY queue read; an uncapped list turns one bad
+    window into N stderr lines on every wake of every agent. Three named
+    senders is enough to act on; the tail keeps the total honest.
+    """
+    window = [_rec("create: x", f"agent-{i}") for i in range(6)]
+    warnings = records.invisible_writer_census(window)
+    assert len(warnings) == 4
+    assert "agent-0" in warnings[0]
+    assert "agent-2" in warnings[2]
+    assert warnings[-1] == (
+        "+ 3 more sender(s) writing unparseable control notes")
+
+
 def test_census_groups_and_sorts_by_sender():
     warnings = records.invisible_writer_census([
         _rec("update: one", "z-agent"),

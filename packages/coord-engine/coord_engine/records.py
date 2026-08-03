@@ -185,6 +185,10 @@ _LEGACY_NOTE_PREFIXES = (
     "create:", "update:", "done:", "block:", "REVIEW REQUEST", "assignee:",
 )
 
+# Cap the per-read census so a flooded window cannot bloat a wake: three named
+# senders are enough to act on, the rest are counted in one tail line.
+_CENSUS_SENDER_CAP = 3
+
 
 def invisible_writer_census(window: Optional[list[Any]]) -> list[str]:
     """Name senders whose control-looking notes modern readers cannot parse.
@@ -193,6 +197,10 @@ def invisible_writer_census(window: Optional[list[Any]]) -> list[str]:
     silent here because the queue's window-level UNKNOWN path owns that
     diagnosis; absence of evidence must never become evidence of a clean
     writer fleet.
+
+    At most ``_CENSUS_SENDER_CAP`` senders are named, lowest sender id first
+    (deterministic), with a ``+ N more sender(s)`` tail when the window holds
+    more — this runs on every queue read, so its worst case has to stay small.
     """
     if not window:
         return []
@@ -208,12 +216,18 @@ def invisible_writer_census(window: Optional[list[Any]]) -> list[str]:
         sender = sender_of(rec)
         if sender:
             offenders[sender] = offenders.get(sender, 0) + 1
-    return [
+    ranked = sorted(offenders.items())
+    warnings = [
         f"{count} note(s) from {sender} look like control traffic but are "
         "not parseable (v1) — that agent's engine predates bus-v3; its "
         "messages are invisible to the fleet. It must run adopt-latest."
-        for sender, count in sorted(offenders.items())
+        for sender, count in ranked[:_CENSUS_SENDER_CAP]
     ]
+    hidden = len(ranked) - _CENSUS_SENDER_CAP
+    if hidden > 0:
+        warnings.append(
+            f"+ {hidden} more sender(s) writing unparseable control notes")
+    return warnings
 
 
 def fleet_version_census(presence_shards: list[Any],
