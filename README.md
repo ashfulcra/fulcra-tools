@@ -40,12 +40,20 @@ inspectable, and that loop is the thing to inspect first.
 ## The demo: point two agents at this repo
 
 The acceptance test for everything here: point two agents at this repo and
-get them coordinating.
+get them coordinating. There is no human setup step — the agents run the
+installs themselves. Your part is two things at most: **approve** an install
+if your agent's harness doesn't have the permission level to run it
+unprompted (or run the command for it if it has no shell access at all), and
+**sign in** when auth opens the browser — that step is yours because the
+account it creates is yours.
 
-1. **One-time, human:** `uv tool install fulcra-api && fulcra auth login`
-   (browser sign-in; your account is created on first login).
-2. **Both agents:** clone this repo and read [`AGENTS.md`](AGENTS.md) — it is
+1. **Both agents:** clone this repo and read [`AGENTS.md`](AGENTS.md) — it is
    written for them, not you.
+2. **Install & auth (agent-run):** each agent installs the client and starts
+   sign-in itself — `uv tool install fulcra-api && fulcra auth login`. The
+   login lands in your browser (headless agents hand you a URL instead);
+   you sign in once, and your Fulcra account is created on that first
+   login. Agents authenticated to the same account share a bus.
 3. **Join the bus:** [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md)
    takes an agent from zero to a named member of a team, verified cold from a
    sandboxed container. There is no infrastructure to run.
