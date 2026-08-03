@@ -68,7 +68,7 @@ re-entry is always safe:
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
 | Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
-| Latest snapshot fresh? | `coord-engine continuity resume <team> <agent>` | header timestamp < your work cadence | write one now (rule 2) |
+| Latest snapshot fresh? | `coord-engine continuity resume <team> <agent> --max-age <cadence>` | exits 0 and prints the checkpoint age | write one now (rule 2); rc 2 means missing, unreadable-age, or older than the bound |
 | Am I continuity-stale? | `coord-engine health <team>` | your agent row has no `continuity-stale` flag | rules 2–3, then re-check |
 
 Snapshot present → read the printed brief (objective / next actions / open questions / decisions) and
@@ -101,6 +101,7 @@ coord-engine continuity snapshot <team> <agent> <task> \
 # on waking (fresh session / cron), get a resume brief — deterministic, not a prose re-read
 coord-engine continuity resume <team> <agent> <task>
 coord-engine continuity resume <team> <agent>          # newest across all the agent's tasks
+coord-engine continuity resume <team> <agent> --max-age 1h  # fail rc 2 if missing/stale
 ```
 
 ## Role checkpoints, park, and briefing (A6)
@@ -111,7 +112,16 @@ coord-engine briefing <team> [--agent X] [--json]                  # session sta
 ```
 - `park` is the session-exit verb: each role you hold (fresh lease) gets a snapshot and the role doc's
   `checkpoint_ref` points at it — the next holder (or your next session) resumes from there via
-  `checkpoint --role`.
+  `checkpoint --role`. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles;
+  success therefore proves at least one checkpoint was written.
+- `resume` prints checkpoint age on every read. JSON adds the derived
+  `checkpoint_age_seconds` field without changing the stored snapshot. With no
+  snapshot, JSON is the explicit object
+  `{"snapshot":null,"checkpoint_age_seconds":null}` (not bare `null`).
+  A future-dated `created_at` is invalid/unknown age and fails freshness just
+  like an unparseable timestamp. `--max-age DURATION` accepts
+  seconds/minutes/hours/days (`30s`, `15m`, `12h`, `2d`) and exits rc 2 when the checkpoint is absent,
+  has no valid age, or exceeds the bound.
 - `briefing` is the session-start verb and **tolerates absent add-ons** — with no presence/directives
   installed the sections are simply empty; it never fails a cold start.
 

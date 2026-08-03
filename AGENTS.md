@@ -623,7 +623,10 @@ it (not on PyPI).
   discarding the checkpoint the next session resumes from, with nobody watching. `_held_roles` now
   returns `(held, ok)` and delegates per-role state to `_role_fresh_holders`; on `ok is False` park
   fails **non-zero** and says the checkpoint was NOT written, so the operator can retry while the
-  context is still alive. **Ship-gate extends to write paths: a command that ACTS on the roles you hold
+  context is still alive. A complete fold that proves the agent holds zero fresh roles also exits
+  **rc 2** and says `CHECKPOINT NOT WRITTEN`: park success now certifies that at least one checkpoint
+  was actually written, so an `&&` chain cannot broadcast a false "parked" result. **Ship-gate extends
+  to write paths: a command that ACTS on the roles you hold
   (not just reports them) resolves through the one helper and refuses to act on UNKNOWN rather than
   treating it as "nothing to do".**
   Cost per pass is **`1 + Σ(2 + L_r)` ops** over the roles the open work references (`L_r` = that
@@ -874,7 +877,13 @@ it (not on PyPI).
   daily check. A directed wake or a new assignment resumes it
   (`continuity resume`). Dormant watchers must not burn compute indefinitely;
   the parked checkpoint loses nothing. Applies to every agent, coord-boss
-  included.
+  included. `continuity park` exits rc 2 when the agent holds no fresh roles and
+  therefore writes no checkpoint; treat that as "not parked", never as a clean
+  no-op. `continuity resume` always reports the checkpoint age (human output and
+  JSON `checkpoint_age_seconds`); use `--max-age 1h` (durations accept `s`, `m`,
+  `h`, or `d`) when a wake or acceptance run must fail rc 2 on stale state.
+  Future-dated checkpoints are invalid-age and fail loud; the no-snapshot JSON
+  shape is `{"snapshot":null,"checkpoint_age_seconds":null}`.
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

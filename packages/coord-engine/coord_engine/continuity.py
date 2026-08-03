@@ -9,9 +9,13 @@ snapshots to the latest is code; the prose is when/whether to snapshot.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
+import re
 from typing import Any, Optional
 
 SCHEMA = "coord.teams.continuity.v1"
+_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?|\.\d+)([smhd])$", re.IGNORECASE)
+_MAX_DURATION_SECONDS = 999_999_999 * 86400
 
 
 def _as_list(v: Any) -> list[str]:
@@ -80,6 +84,53 @@ def latest(snapshots: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if not valid:
         return None
     return max(valid, key=lambda item: item[:3])[3]
+
+
+def checkpoint_age_seconds(snapshot: Optional[dict[str, Any]], *, now: datetime) -> Optional[float]:
+    """Return a checkpoint's age, or ``None`` when invalid/unknowable.
+
+    A future ``created_at`` is invalid evidence, not a zero-age checkpoint:
+    treating an impossible timestamp as maximally fresh would let it pass every
+    freshness gate until wall time caught up.
+    """
+    if not snapshot:
+        return None
+    created_at = _parse_created_at(snapshot.get("created_at"))
+    if created_at is None:
+        return None
+    current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    age = (current.astimezone(timezone.utc) - created_at).total_seconds()
+    if age < 0:
+        return None
+    return round(age, 3)
+
+
+def parse_duration_seconds(value: str) -> Optional[float]:
+    """Parse a non-negative ``s``/``m``/``h``/``d`` duration into seconds."""
+    match = _DURATION_RE.fullmatch((value or "").strip())
+    if not match:
+        return None
+    amount = float(match.group(1))
+    if not math.isfinite(amount):
+        return None
+    unit = match.group(2).lower()
+    seconds = amount * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return seconds if math.isfinite(seconds) and seconds <= _MAX_DURATION_SECONDS else None
+
+
+def format_age(seconds: Optional[float]) -> str:
+    """Compact human age with exact seconds retained for mechanical inspection."""
+    if seconds is None:
+        return "unknown"
+    exact = f"{seconds:.3f}".rstrip("0").rstrip(".") + "s"
+    if seconds >= 86400:
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        return f"{days}d {hours}h ({exact})"
+    for unit, scale in (("h", 3600), ("m", 60)):
+        if seconds >= scale and seconds % scale == 0:
+            return f"{seconds / scale:g}{unit} ({exact})"
+    return exact
 
 
 def render_resume(snapshot: Optional[dict[str, Any]]) -> str:
