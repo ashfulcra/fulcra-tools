@@ -221,9 +221,10 @@ than the author. Changes go through a PR where a forge exists — never direct
 pushes to `main` — and the review handshake rides the bus, not the forge:
 `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
 creates a review doc that sits in the reviewer's `needs-me` until their
-verdict file exists at `team/<team>/review/<slug>/verdicts/<role>.md` (the
-filename stem is the `required` token — the role passed to `--reviewer` — not the
-holder's name);
+verdict file exists at `team/<team>/review/<slug>/verdicts/<head>--<role>.md`
+(head-keyed PR rounds; legacy/non-code reviews keep the bare
+`verdicts/<role>.md`) — the filename token is the `required` one, the role
+passed to `--reviewer`, not the holder's name;
 `coord-engine review status <team> <slug>` gates the merge (a GitHub-only
 comment doesn't count, and neither does an ack). The artifact ref is opaque —
 PR#, branch, commit, URL — so the handshake works with any forge or none.

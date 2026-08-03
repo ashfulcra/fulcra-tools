@@ -155,6 +155,18 @@ self-heals on direct query.
 The `, retry` suffix means retryable; a `tombstone` mention means terminal — the
 convention is load-bearing, so match on it, not on the whole string.
 
+## Bring an archived review back
+
+```bash
+coord-engine review restore <team> <review-slug>
+```
+Retention moves a settled review to the cold archive; `restore` moves that whole
+family (the request doc and its verdict shards) back to the hot path so
+`review status` and the fan-out folds see it again. It is the review-side twin of
+`coord-engine task restore` — archival is **move-not-delete** precisely so this
+is possible. Fails closed at rc 1 when the archive listing is unreadable: an
+unknown archive is never reported as "nothing to restore".
+
 **Nudge only against a live obligation.** Before nudging a reviewer, re-run
 `review status <team> <review-slug> --json` on the exact review slug and nudge only if
 `pending_required` still names them — a verdict may have landed since you looked,

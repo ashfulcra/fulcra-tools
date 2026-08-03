@@ -117,7 +117,7 @@ re-entry is always safe:
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
-| Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
+| Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the `No continuity snapshot found.` / `checkpoint age: unknown` pair | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
 | Latest snapshot fresh? | `coord-engine continuity resume <team> <agent> --max-age <cadence>` | exits 0 and prints the checkpoint age | write one now (rule 2); rc 2 means missing, unreadable-age, or older than the bound |
 | Am I continuity-stale? | `coord-engine health <team>` | your agent row has no `continuity-stale` flag | rules 2–3, then re-check |
 
@@ -157,13 +157,18 @@ coord-engine continuity resume <team> <agent> --max-age 1h  # fail rc 2 if missi
 ## Role checkpoints, park, and briefing (A6)
 ```bash
 coord-engine continuity checkpoint <team> --role <r> [--ref PATH]  # get/set the role's durable resume point
-coord-engine continuity park <team> [--agent X] [--objective "…"]  # session exit: snapshot EVERY held role + set its checkpoint_ref
+coord-engine continuity park <team> [--agent X] [--role R] [--objective "…"]  # session exit: snapshot every held role (or just R) + set its checkpoint_ref
 coord-engine briefing <team> [--agent X] [--json]                  # session start: presence + board + inbox + needs-me + pending reviews + latest snapshot in ONE call
 ```
 - `park` is the session-exit verb: each role you hold (fresh lease) gets a snapshot and the role doc's
   `checkpoint_ref` points at it — the next holder (or your next session) resumes from there via
-  `checkpoint --role`. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles;
-  success therefore proves at least one checkpoint was written. Each written checkpoint also emits
+  `checkpoint --role`. **`--role R` narrows it to exactly one role** (you must hold a fresh lease on
+  `R`); with no flag it parks **every** held role. Use `--role` to confine a park to a dedicated role
+  without touching your other roles' checkpoints — that is how `acceptance pair` parks safely against
+  a loaded team store. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles (or,
+  under `--role`, no fresh lease on that one), and rc 1 with the same `CHECKPOINT NOT WRITTEN` banner
+  when the role state was *unreadable* rather than empty — retry that one before ending the session.
+  Success therefore proves at least one checkpoint was written. Each written checkpoint also emits
   one timeline moment — see [the checkpoint channel](#timeline-visibility-the-checkpoint-channel);
   that emission can never change park's exit code.
 - `resume` prints checkpoint age on every read. JSON adds the derived
