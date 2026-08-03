@@ -2,7 +2,7 @@
 
 Generated from EXTERNAL evidence only: 941 immutable record rows (the over-the-network append log) plus store-side incident docs. The container's local files were not consulted.
 
-Method: `docs/coord/rollback-probe.md`. Live store evidence: `team/fulcra/_coord/agents/coord-boss/rollback-probe/` (latest.json, repo.bundle, incidents/).
+Method and live evidence both live in the store: `team/fulcra/_coord/agents/coord-boss/rollback-probe/` (latest.json, repo.bundle, incidents/). (An earlier draft cited `docs/coord/rollback-probe.md`; that method doc was never committed to this repo.)
 
 
 > **FINAL REPORT — completion gate met.** 942 externally-logged appends across

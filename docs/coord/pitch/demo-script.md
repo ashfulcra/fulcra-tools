@@ -87,9 +87,9 @@ coord-engine health fulcra            # which hosts heal the team; who went dark
 > "Seventeen skills, one stdlib-only engine, 1600+ engine tests, dual AI review on every PR. Wave 1 is six
 > purely-additive skills. The engine's natural first home is a small Fulcra-owned repo — folding
 > into fulcra-api stays on the table as the long-term convergence, sized with your team. Evidence
-> pack is one page in DESIGN.md."
+> pack is one page in [`docs/coord-DESIGN.md`](../../coord-DESIGN.md) (§Evidence pack)."
 
 ## Fallbacks
 
 - No live ask at demo time → stage one 10 min before: `coord-engine task start fulcra "Demo: pick deploy window" --status active && coord-engine task block fulcra demo-pick-deploy-window --on-user "window A (tonight) or B (weekend)?"`
-- Network hiccup → screenshots of each command output, captured at prep time, in `docs/pitch/demo-fallback/`.
+- Network hiccup → capture screenshots of each command's output at prep time and keep them with your demo notes; the design story stands on its own in [`docs/coord-DESIGN.md`](../../coord-DESIGN.md).
