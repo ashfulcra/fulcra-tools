@@ -84,19 +84,96 @@ Note the park's own content became stale within the hour (pr-513 merged as
 851fa067; W1-s5 was ruled) — which is F2's point from the other side: a
 checkpoint is a snapshot, and only an age field lets the resumer weigh it.
 
-### Step 2 — coord-maintainer cold-resumes coord-boss's park (PENDING)
+### Step 2 — coord-maintainer cold-resumes coord-boss's park (DONE, 2026-08-03 ~17:35Z)
 
-*Transcript and observations to be inserted from coord-maintainer's step-2
-report when filed.*
+coord-maintainer, on macOS in a different vendor session, using only the
+checkpoint and the bus (their report, quoted):
 
-### Step 3 — coord-boss cold-resumes coord-maintainer's park (PENDING)
+> I cold-resumed coord-boss's 13:40Z park on macOS in a different vendor
+> session, using only the checkpoint and the bus. It carried real in-flight
+> state — PR 509 merged at `4ebe51ed`, pr-513 at round 5, PR 514 awaiting
+> your nod. Coord-boss had also already folded my earlier finding into their
+> own next-actions ("agent is POSITIONAL, not --agent"), so that loop closed.
 
-*Transcript to be inserted after step 2 completes and coord-maintainer parks
-their side: `coord-engine continuity resume fulcra coord-maintainer`.*
+The data half of step 2 worked. The *choreography* half produced findings
+F4–F6 below: their reverse park silently wrote nothing, and the command
+chain announced success anyway.
+
+### Step 3 — coord-boss cold-resumes coord-maintainer's park (DONE, 2026-08-03 ~18:0xZ)
+
+After coord-maintainer replaced the silent no-op with a real checkpoint (via
+`continuity snapshot`) and verified it by resuming their own id:
+
+```
+$ coord-engine continuity resume fulcra coord-maintainer ; echo rc=$?
+Resume: role-coord-maintainer (as of 2026-08-03T17:35:28.927983Z)
+  agent: coord-maintainer
+  objective: T4 step-2 COMPLETE: cold-resumed coord-boss's 2026-08-03T13:40Z park
+    on Ashs-MBP-Work (macOS, Claude Code, different vendor session) using only the
+    checkpoint and the bus. Parked for coord-boss's step-3 reverse resume.
+  next actions:
+    - coord-boss runs step 3: ... Verify you receive THIS objective, not the
+      2026-07-22 context-loss park.
+  ...
+rc=0
+```
+
+Provenance verified by content, not by rc: the checkpoint's own next-action
+instructed the resumer to confirm it received the 17:35 objective rather than
+the stale 2026-07-22 park — and it did. Round trip complete in both
+directions, cross-machine, cross-vendor, same day.
+
+### F4 — park is role-gated and silently no-ops at rc 0 when the agent holds no roles
+
+coord-maintainer's reverse park printed "coord-maintainer holds no fresh
+roles — nothing to park", **wrote no checkpoint, and exited 0**. Any caller
+treating rc 0 as "a checkpoint now exists" is wrong, and nothing in the
+output contract says so machine-readably.
+
+**Disposition:** park must exit nonzero when it snapshots nothing
+(dispatched to codex-coder as P0, 2026-08-03).
+
+### F5 — resume cannot tell you that what you got is not what was parked
+
+Before coord-maintainer's fix, `resume` for their id returned **rc 0 and a
+confident, plausible brief dated 2026-07-22 — twelve days stale**. Combined
+with F4: had step 3 run in that window, it would have received a success
+code, a plausible brief, and twelve-day-old state — and this acceptance run
+would have **PASSED while transmitting nothing**. The test built to catch
+the silent-success class nearly emitted a silent success.
+
+**Disposition:** same fix family as F2 — age on every resume, `--max-age`
+gate (dispatched to codex-coder as P0, 2026-08-03).
+
+### F6 — the orchestrator repeated the pattern: a `&&` chain announced success it never verified
+
+coord-boss (this document's author) supplied the step-2 command chain
+`resume && park && tell`, where the `tell` declared "mine is parked" —
+guarded only by exit codes, on the same day the fleet adopted the doctrine
+that silence and rc 0 are not evidence. F4's silent no-op sailed through the
+`&&` and the bus carried a false claim until coord-maintainer caught it.
+Human-shaped lesson, filed against the coordinator, not the engine:
+**announcements of state must be generated from verified state (read it
+back), never chained off exit codes of the commands that were supposed to
+produce it.**
 
 ## Acceptance verdict
 
-*To be written after steps 2–3: does the round trip, with the findings above
-dispositioned, satisfy the README's promise that work parks in one session
-and resumes in another — different day, different machine, different model or
-vendor?*
+**The data plane passes; the promise as shipped does not — yet.**
+
+- PASS: a checkpoint with genuine in-flight state parked on a cloud
+  container round-tripped through a cold macOS session on a different vendor
+  and back, same day, using only the account. The store, the paths, the
+  formats, and both directions of resume all worked.
+- FAIL (promise as experienced): every finding F1–F6 is an instance of one
+  defect class — **silent no-op or silent staleness rendered as rc-0
+  success**. A cold resumer following the docs faithfully can receive
+  nothing (F3, F4), receive the wrong thing (F5), receive the right thing
+  with no way to know its age (F2), or fail at the first command (F1) — and
+  in no case does the surface say so loudly.
+
+T4 therefore certifies the continuity *substrate* and indicts the
+continuity *interface*. The verdict flips to PASS when the two P0 fixes land
+(park fails loud on empty; resume prints age and enforces `--max-age`) and a
+re-run of this choreography completes with zero human rescue. That re-run
+should take under ten minutes — which is the promise.
