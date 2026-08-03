@@ -3758,6 +3758,11 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
             rc=3,
         )
     from . import __version__ as engine_version
+    # Same zero-transport check as the read side: a commit is a WRITE, so a
+    # stale engine hears about itself before it stamps anything.
+    currency = records.authority_currency(cfg, engine_version=engine_version)
+    if currency:
+        print(f"queue: ENGINE STALE — {currency}", file=sys.stderr)
     write_gate = records.compatibility(
         cfg, engine_version=engine_version, write_cursor=True)
     if not write_gate["ok"]:
@@ -3991,6 +3996,12 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             rc=2,
         )
     from . import __version__ as engine_version
+    # Zero transport: the currency check rides the config this read already
+    # loaded, so a snapshot-restored engine learns it is stale at its FIRST
+    # bus touch instead of writing events nobody can parse.
+    currency = records.authority_currency(cfg, engine_version=engine_version)
+    if currency:
+        print(f"queue: ENGINE STALE — {currency}", file=sys.stderr)
     read_gate = records.compatibility(
         cfg, engine_version=engine_version, write_cursor=False)
     if not read_gate["ok"]:
@@ -7366,6 +7377,8 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
+    if getattr(args, "self", False):
+        return _doctor_self(args, transport)
     if getattr(args, "delivery", False):
         return _doctor_delivery(args, transport)
     import shutil
@@ -7485,6 +7498,47 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
                       f"{adoption['unknown']} unmeasurable)")
     print("doctor: healthy" if ok else "doctor: PROBLEMS FOUND")
     return 0 if ok else 1
+
+
+def _doctor_self(args: argparse.Namespace, transport: Any) -> int:
+    """Am I the engine the fleet expects? rc 0 current, 3 stale, 2 unknown.
+
+    The one-command replacement for the unconditional restore-and-adopt
+    preamble: a wake runs this and only pays for repair when it is nonzero.
+    Tri-state on purpose — rc 0 is claimed ONLY when the pin exists, parses
+    and this engine meets it. An unreadable config, an authority with no pin,
+    and a malformed pin are all rc 2 with the reason named, because
+    "comparison impossible" reported as "current" is the failure mode a
+    self-check exists to prevent.
+    """
+    from . import __version__ as engine_version
+    if not args.team:
+        print("doctor --self: team is required (the authority lives per team)",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        detail = {
+            "error": "the records config could not be READ (transport "
+                     "failure) — retry when the store is reachable",
+            "invalid": "the records config is malformed — human-fixable, the "
+                       "bytes are the evidence",
+        }.get(cfg_status,
+              f"no bus-v3 records config for team {args.team}")
+        print(f"self: UNKNOWN — {detail}", file=sys.stderr)
+        return 2
+    state, detail = records.authority_currency_state(
+        cfg, engine_version=engine_version)
+    if state == "current":
+        print(f"self: CURRENT — {detail}")
+        return 0
+    if state == "stale":
+        print(f"self: STALE — {detail}", file=sys.stderr)
+        print("  run the store's adopt-latest.sh, then re-run "
+              "`coord-engine doctor <team> --self`", file=sys.stderr)
+        return 3
+    print(f"self: UNKNOWN — {detail}", file=sys.stderr)
+    return 2
 
 
 def _doctor_delivery(args: argparse.Namespace, transport: Any) -> int:
@@ -8182,6 +8236,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
+    dr.add_argument(
+        "--self", action="store_true",
+        help="engine currency only: rc 0 current, 3 stale (adopt latest), "
+             "2 unknown (no config, or no/malformed authority pin)")
     dr.add_argument(
         "--delivery", action="store_true",
         help="write/read a probe event and prove fleet-readable delivery")

@@ -339,6 +339,17 @@ it (not on PyPI).
   <you>`; rc 0 means the stamped probe was written, ingested, and parsed, rc 2
   means the write was refused, and rc 3 means it was written but not proven
   fleet-readable before the deadline.
+  Every queue read also compares this engine against the authority's
+  `current_engine_version` pin, for free (the config was already loaded), and
+  prints `queue: ENGINE STALE` when the runtime is older — a restored
+  environment snapshot reinstalls old engines whose writes modern readers
+  skip. `coord-engine doctor <team> --self` is the same check on demand and
+  is TRI-STATE: rc 0 `current` only when the pin exists, parses, and this
+  engine meets it; rc 3 `stale` (run the store's adopt-latest, then re-run);
+  rc 2 `unknown` when the config is unreadable or the pin is absent or
+  malformed — comparison impossible is not current, so never read rc 2 as
+  green. Prefer it to an unconditional restore-and-adopt preamble: repair
+  only when it exits nonzero.
   `coord-engine briefing <team> --agent <you>` remains the fold over durable
   state — identity, role inboxes, reviews owed — for when you need the full
   board; honor every degraded row it prints as UNKNOWN.
