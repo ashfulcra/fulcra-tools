@@ -334,7 +334,10 @@ it (not on PyPI).
   The durable-obligation fold is **opt-in** (`--obligations`) and reports
   through an additive `obligations` field on that successful envelope: fold
   UNKNOWN/INVALID is a report at rc 0 when the event window itself read
-  cleanly; **rc 3 is reserved for event-window doubt**. A skip is never
+  cleanly; **the fold never changes a successful read's rc**. rc 3 is NOT
+  reserved for the read path — nonzero queue-family failures (read and `queue
+  commit` alike; commit returns rc 3 for INCOMPATIBLE, stale-token REFUSED, and
+  unsupported CAS) keep their own `state`/`error_code` contract. A skip is never
   silent — every machine-readable success envelope that did not fold carries
   `"obligations": {"state": "not-checked"}`, which no caller may map to CLEAR.
   `--no-obligations` stays accepted as a no-op alias for the default; the

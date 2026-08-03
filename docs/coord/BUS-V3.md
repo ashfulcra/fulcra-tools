@@ -481,15 +481,17 @@ exclusion: argparse's own usage exits (unknown flag, missing positional)
 happen before any queue code runs and carry no envelope. Text-mode success
 output is byte-stable across this change; shell consumers pipe it.
 
-Exit **3** is reserved for the event read path: the window itself could not be
-trusted, so the caller may be blind and must retry. The separate
-durable-obligation fold never reaches the exit code. When the window read
-cleanly, a fold that cannot complete is a REPORT — rc **0**, `queue-result`,
-with the verdict carried in the additive `obligations` key
+**The obligations fold never changes a successful read's rc.** rc 3 is not
+reserved for the read path — nonzero queue-family failures (read and `queue
+commit` alike; commit returns rc 3 for INCOMPATIBLE, stale-token REFUSED, and
+unsupported CAS) retain the `state`/`error_code` contract above, and rc alone is
+never the discriminator. What the fold must not do is *spend* an exit code: when
+the window read cleanly, a fold that cannot complete is a REPORT — rc **0**,
+`queue-result`, with the verdict carried in the additive `obligations` key
 (`state` UNKNOWN|INVALID plus `degraded`/`malformed`/`reason`). Two different
-conditions must not share one number: an unrunnable fold that spends rc 3
-trains every caller to ignore the blindness signal, which is the one signal
-that has to keep working.
+conditions must not share one number: an unrunnable fold that spends the read
+path's rc 3 trains every caller to ignore the blindness signal, which is the one
+signal that has to keep working.
 
 The fold is **opt-in** (`--obligations`); it is not run on a default read, on
 either cursor schema. The skip is stated, never implied: every machine-readable
