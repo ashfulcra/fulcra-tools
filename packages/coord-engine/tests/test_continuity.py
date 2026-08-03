@@ -72,11 +72,15 @@ def test_checkpoint_age_and_duration_helpers():
     snapshot = {"created_at": NOW}
     assert continuity.checkpoint_age_seconds(snapshot, now=PINNED_NOW) == 1800
     assert continuity.checkpoint_age_seconds({"created_at": "bad"}, now=PINNED_NOW) is None
-    assert continuity.checkpoint_age_seconds(snapshot, now=PINNED_NOW - timedelta(hours=1)) == 0
+    assert continuity.checkpoint_age_seconds(snapshot, now=PINNED_NOW - timedelta(hours=1)) is None
     assert continuity.parse_duration_seconds("30m") == 1800
     assert continuity.parse_duration_seconds("1.5h") == 5400
     assert continuity.parse_duration_seconds("bad") is None
+    assert continuity.parse_duration_seconds("999999999d") == 86399999913600
+    assert continuity.parse_duration_seconds("1000000000d") is None
+    assert continuity.parse_duration_seconds("9" * 400 + "d") is None
     assert continuity.format_age(1800) == "30m (1800s)"
+    assert continuity.format_age(1555940.125) == "18d 0h (1555940.125s)"
 
 
 def test_latest_tiebreak_deterministic():

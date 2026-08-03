@@ -298,6 +298,31 @@ def test_cli_continuity_resume_max_age_passes_and_fails(capsys, monkeypatch):
     assert "checkpoint age is unknown" in capsys.readouterr().err
 
 
+def test_cli_continuity_resume_rejects_huge_duration_and_future_checkpoint(
+        capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    monkeypatch.setattr(cli, "_now", lambda: datetime(
+        2026, 7, 1, tzinfo=timezone.utc))
+    t.put(cli._continuity_path("r", "ash", "future"), json.dumps({
+        "created_at": "2026-07-01T00:00:01Z", "task": "future",
+        "agent": "ash", "objective": "impossible future checkpoint",
+    }))
+
+    assert cli.main([
+        "continuity", "resume", "r", "ash", "future",
+        "--max-age", "1000000000d",
+    ], transport=t) == 2
+    assert "invalid --max-age duration" in capsys.readouterr().err
+
+    assert cli.main([
+        "continuity", "resume", "r", "ash", "future",
+        "--max-age", "1s",
+    ], transport=t) == 2
+    assert "checkpoint age is unknown" in capsys.readouterr().err
+
+
 def test_cli_continuity_resume_picks_latest_across_tasks(capsys):
     t = FakeTransport()
     cli.main(["continuity", "snapshot", "r", "ash", "old", "--objective", "older"], transport=t)

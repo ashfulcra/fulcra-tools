@@ -31,6 +31,9 @@ The brief lists objective, next actions, open questions, recent decisions, and a
 so a fresh session or cron run re-establishes state without re-reading prose. Human and JSON output
 always report checkpoint age. `--max-age DURATION` accepts `s`, `m`, `h`, or `d` units (for example
 `30m` or `2d`) and makes freshness mechanical: missing, invalid-age, or over-age checkpoints exit 2.
+With no snapshot, `--json` returns
+`{"snapshot":null,"checkpoint_age_seconds":null}`; future-dated `created_at`
+is invalid-age rather than being clamped to a fresh zero seconds.
 
 ## Notes
 - One `latest.json` per task; re-snapshotting overwrites it (the File Store keeps prior versions).

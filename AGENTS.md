@@ -882,6 +882,8 @@ it (not on PyPI).
   no-op. `continuity resume` always reports the checkpoint age (human output and
   JSON `checkpoint_age_seconds`); use `--max-age 1h` (durations accept `s`, `m`,
   `h`, or `d`) when a wake or acceptance run must fail rc 2 on stale state.
+  Future-dated checkpoints are invalid-age and fail loud; the no-snapshot JSON
+  shape is `{"snapshot":null,"checkpoint_age_seconds":null}`.
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

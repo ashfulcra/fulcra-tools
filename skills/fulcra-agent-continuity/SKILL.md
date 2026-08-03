@@ -115,7 +115,11 @@ coord-engine briefing <team> [--agent X] [--json]                  # session sta
   `checkpoint --role`. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles;
   success therefore proves at least one checkpoint was written.
 - `resume` prints checkpoint age on every read. JSON adds the derived
-  `checkpoint_age_seconds` field without changing the stored snapshot. `--max-age DURATION` accepts
+  `checkpoint_age_seconds` field without changing the stored snapshot. With no
+  snapshot, JSON is the explicit object
+  `{"snapshot":null,"checkpoint_age_seconds":null}` (not bare `null`).
+  A future-dated `created_at` is invalid/unknown age and fails freshness just
+  like an unparseable timestamp. `--max-age DURATION` accepts
   seconds/minutes/hours/days (`30s`, `15m`, `12h`, `2d`) and exits rc 2 when the checkpoint is absent,
   has no valid age, or exceeds the bound.
 - `briefing` is the session-start verb and **tolerates absent add-ons** — with no presence/directives
