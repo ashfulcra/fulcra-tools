@@ -51,7 +51,7 @@ get them coordinating.
    sandboxed container. There is no infrastructure to run.
 4. **Coordinate:** events move as typed records on your Fulcra timeline
    ([bus v3](docs/coord/BUS-V3.md)) — agent A writes a directive record, agent
-   B reads its queue at its next wake with one command (`coord-engine queue`),
+   B reads its queue at its next wake with one command (`coord-engine queue <team> --agent <you>`),
    does the work, and answers with a response record. Documents (tasks, reports, review
    verdicts) ride the File Store, versioned. Durable tasks, roles, and the
    review handshake are [`coord-engine`](packages/coord-engine)'s job.
@@ -93,7 +93,7 @@ honestly separated:
   surface (auth, files, records, queries, MCP) organized by what an agent
   can reach from where it runs: CLI, raw HTTP, or MCP-only. This is how an
   agent works out what it can do *before* it tries.
-- The sixteen [`skills/`](skills) — the procedures agents follow, covering a
+- The seventeen [`skills/`](skills) — the procedures agents follow, covering a
   lot more than the bus: **continuity** (checkpoint work in one session,
   resume it in another — different day, different model, different vendor),
   **durable state** (tooling that survives machine resets), presence and
@@ -122,7 +122,7 @@ the real-world data you stream in, without ever logging in as you:
 
 | Project | What it is | Start here |
 |---|---|---|
-| **coord** | The agent-coordination layer: judgment stays in prose (skills), bookkeeping is deterministic stdlib-only code ([`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenCode, OpenClaw, CI — coordinate durable work over one Fulcra account: events on typed records ([bus v3](docs/coord/BUS-V3.md)), documents on Fulcra Files, role-based identity with leases, and a review handshake whose obligation persists until the verdict file exists (no ack can clear it). The fourteen `fulcra-agent-*` skills (of 16 total) under [`skills/`](skills) are how an agent actually uses it. | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [bus v3](docs/coord/BUS-V3.md) · [`README.md`](packages/coord-engine/README.md) · [design](docs/coord-DESIGN.md) |
+| **coord** | The agent-coordination layer: judgment stays in prose (skills), bookkeeping is deterministic stdlib-only code ([`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenCode, OpenClaw, CI — coordinate durable work over one Fulcra account: events on typed records ([bus v3](docs/coord/BUS-V3.md)), documents on Fulcra Files, role-based identity with leases, and a review handshake whose obligation persists until the verdict file exists (no ack can clear it). The fourteen `fulcra-agent-*` skills (of 17 total) under [`skills/`](skills) are how an agent actually uses it. | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [bus v3](docs/coord/BUS-V3.md) · [`README.md`](packages/coord-engine/README.md) · [design](docs/coord-DESIGN.md) |
 | **coord tracker bridge** *(alpha)* | Mirrors coord work into external trackers without making the tracker authoritative: normalized snapshots, full source-identity state, versioned policy, pure diff planning, `coord-engine --json` and strict read-only teams sources, plus a paginated/retrying Linear adapter with explicit `plan` / `apply-resources` / `sync` phases. | [`README.md`](packages/coord-tracker-bridge/README.md) |
 | **ATC** | Air-traffic control for a fleet running on subscription caps — capability-matched model routing. A versioned capability map ships in the engine (current Claude/GPT/Gemini/Grok lineups + the local OSS tier); `coord-engine route <team> --needs code,long-context` ranks the cheapest capable model on the account with headroom, agents log usage and outcomes after each dispatch (`usage log`), and three bad outcomes demote a model for that kind of work. `coord-engine atc init` gets a solo operator from zero to routed dispatch in one command — no team concepts required; `atc report` and `atc dash` (localhost) show the tier mix and estimated frontier-cap days preserved. | [`SKILL.md`](skills/fulcra-agent-atc/SKILL.md) · [design](docs/coord/atc-DESIGN.md) |
 | **Fulcra Collect** | A local daemon that imports your real-world data streams into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md)) hosts every importer plugin, runs them on schedule in worker subprocesses, stores secrets in the OS keychain, and serves the onboarding wizard + dashboard at `127.0.0.1:9292` ([`packages/web-ui`](packages/web-ui/README.md)). [`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the shared API client + ingest pipeline every importer builds against; and [`packages/dayone`](packages/dayone/README.md), [`packages/csv-importer`](packages/csv-importer/README.md), and [`packages/media-helpers`](packages/media-helpers/README.md) are data-source importers (Day One journals, arbitrary CSVs, and watched/listened/read history from ~13 services). | [`docs/collect.md`](docs/collect.md) |
