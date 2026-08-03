@@ -180,7 +180,8 @@ not this). Under `--json`, a successful read prints **exactly one** object:
 {"type":"queue-result","state":"DATA|CLEAR","events":[
    {"id":…,"ts":…,"sender":…,"to":…,"kind":…,"pri":…,"slug":…,"ptr":…}],
  "count":N,"cursor":{"path":…,"advanced":true|false},
- "engine_version":…,"protocol":{…authority versions, or null…}}
+ "engine_version":…,"protocol":{…authority versions, or null…},
+ "obligations":{"state":"not-checked"}}
 ```
 
 and **every nonzero exit** of the queue family (`queue` and `queue commit`,
@@ -195,6 +196,24 @@ rejection: usage error, incomplete `--result` set, stale token). The one
 exclusion: argparse's own usage exits (unknown flag, missing positional)
 happen before any queue code runs and carry no envelope. Text-mode success
 output is byte-stable across this change; shell consumers pipe it.
+
+Exit **3** is reserved for the event read path: the window itself could not be
+trusted, so the caller may be blind and must retry. The separate
+durable-obligation fold never reaches the exit code. When the window read
+cleanly, a fold that cannot complete is a REPORT — rc **0**, `queue-result`,
+with the verdict carried in the additive `obligations` key
+(`state` UNKNOWN|INVALID plus `degraded`/`malformed`/`reason`). Two different
+conditions must not share one number: an unrunnable fold that spends rc 3
+trains every caller to ignore the blindness signal, which is the one signal
+that has to keep working.
+
+The fold is **opt-in** (`--obligations`); it is not run on a default read.
+The skip is stated, never implied: every machine-readable success envelope
+that did not fold carries `"obligations":{"state":"not-checked"}`, including
+the `queue-delivery` envelope of a cursor-v2 stage or replay, which never
+folds at all. `not-checked` is deliberately outside the fold's own state set
+(CLEAR/DATA/UNKNOWN/INVALID) so no consumer can map it to "nothing owed".
+`--no-obligations` remains accepted as a no-op alias of the default.
 
 Reading as an identity other than your own `$FULCRA_COORD_AGENT` peeks by
 default. A deliberate takeover (`--consume`) first writes a durable audit
@@ -301,6 +320,15 @@ It reports exactly one terminal state and returns it in the exit code, so
 automation never parses prose: **0** = CLEAR or DATA, **3** = UNKNOWN,
 **4** = INVALID. UNKNOWN is not a soft CLEAR — it means a component could not be
 consulted, so nothing can be concluded about it.
+
+`queue --obligations` folds the same question onto an empty read and reports
+it inside the success envelope (rc 0, `obligations` key) instead of through
+the exit code. It is off by default: measured at the default budget the fold
+reaches no component in production, so a default-on fold charged every empty
+wake, fleet-wide, for an answer that was always UNKNOWN. Ask for it when the
+answer is worth the listings; otherwise the envelope tells you plainly that
+nobody asked (`"state":"not-checked"`), and the command above stays the
+normative way to get a real answer.
 
 ### No engine? Carry the rule by hand
 
