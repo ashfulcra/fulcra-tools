@@ -171,12 +171,13 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 `uv run fulcra-collect doctor`. The coord engine installs on its own:
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine"
 ```
 
-(The tag is the pin *form*; the authoritative current pin lives in the store
-BOOTSTRAP — `team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md` — not
-in this doc.)
+(The release tag is the **cold-install** path — correct for a first install from
+this repo. The **fleet's runtime authority** is the store BOOTSTRAP —
+`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, whose current pin
+scheme is `pp-<sha>` — not this doc. Once you are on the bus, adopt from there.)
 
 and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
 engine installs the same way (it is not on PyPI yet — use the git source form

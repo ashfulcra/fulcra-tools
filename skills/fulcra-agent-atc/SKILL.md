@@ -40,13 +40,14 @@ Three commands to a routable ledger. The engine is stdlib-only and installs on i
 
 ```bash
 uv tool install fulcra-api   # the `fulcra` CLI: auth + the Fulcra File Store (the bus)
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine"
 fulcra auth login            # browser sign-in; an account is created on first login
 ```
 
-The tag is the pin *form*; the authoritative current pin lives in the store
-BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not
-here.
+The release tag is the **cold-install** path. The **fleet's runtime authority**
+is the store BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` +
+`BOOTSTRAP.md`, current pin scheme `pp-<sha>`), not this file — adopt from there
+once you are on the bus.
 
 Then seed your accounts. `atc init` writes `team/<team>/atc/accounts.json` (team
 defaults to `solo`) and is idempotent — re-running merges new accounts in by id and
