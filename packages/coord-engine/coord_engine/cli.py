@@ -3333,6 +3333,18 @@ _QUEUE_EMPTY_IS_NOT_CLEAR = (
 )
 
 
+def _obligations_not_checked() -> dict[str, Any]:
+    """The honest marker for a machine-readable envelope that did not fold.
+
+    Fold-on-empty is OPT-IN (promise plan T3(b), 2026-08-02). A skipped fold
+    must still be *stated*: an omitted key lets a consumer read CLEAR as
+    "nothing owed", which is the precise false inference the fold exists to
+    refuse. ``not-checked`` is deliberately not one of the fold's own states
+    (CLEAR/DATA/UNKNOWN/INVALID) so no caller can map it to any of them.
+    """
+    return {"state": "not-checked"}
+
+
 def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
     if json_mode:
         for event in events:
@@ -3347,7 +3359,8 @@ def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> Non
 def _queue_result_envelope(
         events: list[dict[str, Any]], *, cfg: dict[str, Any],
         cursor_path: str, advanced: bool,
-        outcome_mix: Optional[dict[str, int]] = None) -> dict[str, Any]:
+        outcome_mix: Optional[dict[str, int]] = None,
+        obligations: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """The single-object ``--json`` success envelope for a queue read.
 
     Shares the ``type`` discriminator convention with the ``queue-error``
@@ -3356,6 +3369,14 @@ def _queue_result_envelope(
     ``state`` is terminal — DATA (events delivered) or CLEAR (a clean, fully
     read window with nothing new); the failure envelope owns INVALID and
     UNKNOWN, so CLEAR can never be a disguise for either.
+
+    EVERY envelope carries an ``obligations`` key: the fold's report when it
+    ran, otherwise ``{"state": "not-checked"}``. Not only CLEAR — round-2
+    finding 1. Scoping the marker to CLEAR made its PRESENCE a proxy for "the
+    window was empty" instead of for "the fold did not run", and left a
+    default DATA read — which performs exactly zero fold ops — silent about
+    coverage it never checked. A consumer must be able to test one key on one
+    shape, so the marker is universal and the golden gains the key.
     """
     from . import __version__ as engine_version
     protocol = None
@@ -3365,7 +3386,7 @@ def _queue_result_envelope(
             "cursor_schema_version": cfg["cursor_schema_version"],
             "cursor_generation": cfg["cursor_generation"],
         }
-    return {
+    envelope = {
         "type": "queue-result",
         "state": "DATA" if events else "CLEAR",
         "events": [{
@@ -3390,6 +3411,9 @@ def _queue_result_envelope(
         "engine_version": engine_version,
         "protocol": protocol,
     }
+    envelope["obligations"] = (
+        obligations if obligations is not None else _obligations_not_checked())
+    return envelope
 
 
 def _write_consume_audit(transport: Any, team: str, *, caller: str,
@@ -3447,7 +3471,7 @@ def _write_consume_audit(transport: Any, team: str, *, caller: str,
 
 def _print_v2_delivery(
         pending: dict[str, Any], *, cursor_revision: int, json_mode: bool,
-        replay: bool
+        replay: bool, obligations: Optional[dict[str, Any]] = None,
 ) -> None:
     events = pending["events"]
     _print_queue_events(events, json_mode=json_mode)
@@ -3460,6 +3484,12 @@ def _print_v2_delivery(
         "window_end": pending["window_end"],
         "cursor_revision": cursor_revision,
         "outcome": "replayed" if replay else "staged",
+        # A DEFAULT transactional read folds nothing — it says so rather than
+        # staying silent, so a consumer cannot read a delivery envelope as
+        # "and nothing else is owed". An explicit ``--obligations`` is honored
+        # here like anywhere else and supplies the real verdict instead.
+        "obligations": (obligations if obligations is not None
+                        else _obligations_not_checked()),
         "rc": 0,
     }
     if json_mode:
@@ -3478,7 +3508,17 @@ def _cmd_queue_v2(
         args: argparse.Namespace, transport: Any, cfg: dict[str, Any],
         agent: str, *, peek: bool, engine_version: str
 ) -> int:
-    """Transactional v2 read: stage first, advance only on explicit commit."""
+    """Transactional v2 read: stage first, advance only on explicit commit.
+
+    ``--obligations`` is honored here on exactly the same terms as on the v1
+    path (round-2 finding 2): explicit means fold, default means zero fold
+    ops. It was previously accepted by the shared ``queue`` parser and then
+    never read by this function — every v2 envelope claimed ``not-checked``
+    even when the caller had asked for the fold, which is indistinguishable
+    from a fold that ran and could say nothing. The fold is run at the LAST
+    moment before each success envelope, never before the cursor work, so a
+    read that fails still fails at its own cost.
+    """
     generation = cfg["cursor_generation"]
     cursor, raw, status = records.load_v2_cursor_classified(
         transport, args.team, agent, generation)
@@ -3522,13 +3562,15 @@ def _cmd_queue_v2(
     pending = cursor.get("pending")
     if isinstance(pending, dict):
         if peek:
+            fragment = _requested_obligations(args, transport, agent)
             if bool(getattr(args, "json", False)):
                 jsonutil.print_json(_queue_result_envelope(
                     pending["events"], cfg=cfg,
                     cursor_path=records.v2_cursor_path(
                         args.team, agent, generation),
                     advanced=False,
-                    outcome_mix=records.outcome_mix(cursor)))
+                    outcome_mix=records.outcome_mix(cursor),
+                    obligations=fragment))
             else:
                 _print_queue_events(pending["events"], json_mode=False)
             if pending["events"]:
@@ -3537,7 +3579,8 @@ def _cmd_queue_v2(
             return 0
         _print_v2_delivery(
             pending, cursor_revision=cursor["revision"],
-            json_mode=bool(getattr(args, "json", False)), replay=True)
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_requested_obligations(args, transport, agent))
         return 0
 
     if not peek:
@@ -3604,6 +3647,8 @@ def _cmd_queue_v2(
         )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    for warning in records.invisible_writer_census(window):
+        print(f"queue: DELIVERY WARNING — {warning}", file=sys.stderr)
     seen = set(committed["seen_ids"])
     fresh = [event for event in events
              if event.get("record_id") not in seen]
@@ -3622,13 +3667,15 @@ def _cmd_queue_v2(
             rc=3,
         )
     if peek:
+        fragment = _requested_obligations(args, transport, agent)
         if bool(getattr(args, "json", False)):
             jsonutil.print_json(_queue_result_envelope(
                 fresh, cfg=cfg,
                 cursor_path=records.v2_cursor_path(
                     args.team, agent, generation),
                 advanced=False,
-                outcome_mix=records.outcome_mix(cursor)))
+                outcome_mix=records.outcome_mix(cursor),
+                obligations=fragment))
         else:
             _print_queue_events(fresh, json_mode=False)
         if fresh:
@@ -3669,12 +3716,14 @@ def _cmd_queue_v2(
             )
         _print_v2_delivery(
             winner["pending"], cursor_revision=winner["revision"],
-            json_mode=bool(getattr(args, "json", False)), replay=True)
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_requested_obligations(args, transport, agent))
         return 0
     staged_cursor = staged["cursor"]
     _print_v2_delivery(
         staged_cursor["pending"], cursor_revision=staged_cursor["revision"],
-        json_mode=bool(getattr(args, "json", False)), replay=False)
+        json_mode=bool(getattr(args, "json", False)), replay=False,
+        obligations=_requested_obligations(args, transport, agent))
     return 0
 
 
@@ -3727,6 +3776,11 @@ def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
             rc=3,
         )
     from . import __version__ as engine_version
+    # Same zero-transport check as the read side: a commit is a WRITE, so a
+    # stale engine hears about itself before it stamps anything.
+    currency = records.authority_currency(cfg, engine_version=engine_version)
+    if currency:
+        print(f"queue: ENGINE STALE — {currency}", file=sys.stderr)
     write_gate = records.compatibility(
         cfg, engine_version=engine_version, write_cursor=True)
     if not write_gate["ok"]:
@@ -3960,6 +4014,12 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             rc=2,
         )
     from . import __version__ as engine_version
+    # Zero transport: the currency check rides the config this read already
+    # loaded, so a snapshot-restored engine learns it is stale at its FIRST
+    # bus touch instead of writing events nobody can parse.
+    currency = records.authority_currency(cfg, engine_version=engine_version)
+    if currency:
+        print(f"queue: ENGINE STALE — {currency}", file=sys.stderr)
     read_gate = records.compatibility(
         cfg, engine_version=engine_version, write_cursor=False)
     if not read_gate["ok"]:
@@ -4106,6 +4166,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
         )
     for warning in records.observed_version_warnings(window):
         print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    for warning in records.invisible_writer_census(window):
+        print(f"queue: DELIVERY WARNING — {warning}", file=sys.stderr)
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
     json_mode = bool(getattr(args, "json", False))
@@ -4116,11 +4178,12 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
     if peek:
+        obligations_fragment = _requested_obligations(args, transport, agent)
         if json_mode:
             jsonutil.print_json(_queue_result_envelope(
                 fresh, cfg=cfg,
                 cursor_path=records.cursor_path(args.team, agent),
-                advanced=False))
+                advanced=False, obligations=obligations_fragment))
         if fresh:
             print(f"queue: peek — {len(fresh)} event(s) shown, cursor NOT "
                   "advanced (the owning agent still receives them)",
@@ -4131,64 +4194,49 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if not advanced:
         print("queue: cursor save failed — coverage unadvanced, next read "
               "re-covers this window", file=sys.stderr)
-    obligations_rc, obligations_fragment = (
-        _reconcile_after_empty_read(args, transport, agent) if not fresh
-        else (0, None))
-    if obligations_rc != 0:
-        # A degraded fold is a FAILED queue exit, so it takes the queue family's
-        # failure path — one `queue-error` object, queue's rc 3 for both UNKNOWN
-        # and INVALID (codex-reviewer, PR 501). The earlier version printed the
-        # SUCCESS envelope (`queue-result`, state CLEAR) and merely returned a
-        # nonzero rc, which broke slice 4's contract that every nonzero queue exit
-        # emits exactly one queue-error: automation switching on `type` would have
-        # read a clean CLEAR while the process signalled failure.
-        # rc 4 stays on the standalone `obligations` verb, where UNKNOWN and
-        # INVALID have different remedies and nothing else owns the exit code.
-        state = obligations_fragment["state"] if obligations_fragment else "UNKNOWN"
-        return _queue_failure(
-            args, state=state,
-            error_code=("obligations-invalid" if state == "INVALID"
-                        else "obligations-unknown"),
-            message=("queue: obligations "
-                     f"{state} — {obligations_fragment['reason']}"
-                     if obligations_fragment else "queue: obligations UNKNOWN"),
-            rc=3, extra={"obligations": obligations_fragment})
+    obligations_fragment = _requested_obligations(args, transport, agent)
     if json_mode:
         envelope = _queue_result_envelope(
             fresh, cfg=cfg,
             cursor_path=records.cursor_path(args.team, agent),
-            advanced=advanced)
-        if obligations_fragment is not None:
-            # NESTED, not a second object. Slice 4's contract is that --json
-            # success is exactly one object so a consumer switches on one field;
-            # emitting the fold as a sibling row would break every reader that
-            # relies on it. Correct for DATA/CLEAR only — a degraded fold takes
-            # the failure path above.
-            envelope["obligations"] = obligations_fragment
+            advanced=advanced, obligations=obligations_fragment)
         jsonutil.print_json(envelope)
     return 0
 
 
-def _reconcile_after_empty_read(
+def _requested_obligations(
         args: argparse.Namespace, transport: Any,
-        agent: str) -> "tuple[int, Optional[dict[str, Any]]]":
-    """Run the obligation fold after an empty queue read, on request.
+        agent: str) -> "Optional[dict[str, Any]]":
+    """Run the obligation fold for a queue read, IF the caller asked for it.
 
-    An empty queue read establishes that no EVENT arrived in the window. It does
-    not establish that nothing is owed — that is the r2 spec item-3 distinction,
-    and the fold is the only thing that closes it.
+    One rule, applied at every queue success envelope: an explicit
+    ``--obligations`` always folds; anything else never does. Returning None
+    is what makes the envelope say ``{"state": "not-checked"}``.
 
-    DEFAULT ON since the 2026-07-30 ruling; ``--no-obligations`` opts out. It
-    costs a task-index listing, a review listing and a roles listing on an empty
-    wake, which is a real bill — but only on the empty read, and only where the
-    wrong inference was otherwise free. A cost-sensitive caller can still decline
-    it explicitly, which is different from never being offered it.
+    A queue read establishes what EVENTS arrived in the window. It does not
+    establish what is owed — that is the r2 spec item-3 distinction, and the
+    fold is the only thing that closes it. That gap does not close just
+    because the window happened to deliver something, which is why the flag is
+    no longer gated on an empty read (round-2 findings 1/2): a flag accepted
+    and then quietly dropped hands the caller silence they cannot tell apart
+    from a real verdict.
 
-    Returns the rc the caller should use: the fold's UNKNOWN/INVALID states must
-    reach the exit code, or an agent scripting `queue` learns nothing from them.
+    OPT-IN since the 2026-08-02 promise plan (T3(b)), reversing the 2026-07-30
+    default-ON ruling. It costs a task-index listing, a review listing and a
+    roles listing per wake; the measured evidence is that at the default
+    budget it reaches no component and can only answer UNKNOWN, so every
+    default wake paid that bill for no information. The DEFAULT path performs
+    zero fold ops on any window — that is the cost contract, and it is
+    untouched. Pass ``--obligations`` to buy the answer when it is worth
+    buying; when it is skipped the envelope says ``{"state": "not-checked"}``
+    rather than nothing, so the skip stays visible to automation.
+
+    The fragment reports fold UNKNOWN/INVALID inside a successful queue result.
+    rc 3 is reserved for a degraded event window; the standalone ``obligations``
+    verb retains its own nonzero UNKNOWN/INVALID contract.
     """
     if not getattr(args, "obligations", False):
-        return 0, None
+        return None
     result = obligations_mod.fold(
         _obligation_probes(transport, args.team, agent, now=_iso(_now())),
         expected=obligations_mod.OBLIGATION_COMPONENTS)
@@ -4203,11 +4251,7 @@ def _reconcile_after_empty_read(
     if not getattr(args, "json", False):
         print(f"queue: obligations {result.state.value} — {result.reason()}",
               file=sys.stderr)
-    if result.state is obligations_mod.ObligationState.UNKNOWN:
-        return 3, fragment
-    if result.state is obligations_mod.ObligationState.INVALID:
-        return 4, fragment
-    return 0, fragment
+    return fragment
 
 
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
@@ -7359,6 +7403,10 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
+    if getattr(args, "self", False):
+        return _doctor_self(args, transport)
+    if getattr(args, "delivery", False):
+        return _doctor_delivery(args, transport)
     import shutil
     ok = True
     from .transport import _split_command
@@ -7476,6 +7524,129 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
                       f"{adoption['unknown']} unmeasurable)")
     print("doctor: healthy" if ok else "doctor: PROBLEMS FOUND")
     return 0 if ok else 1
+
+
+def _doctor_self(args: argparse.Namespace, transport: Any) -> int:
+    """Am I the engine the fleet expects? rc 0 current, 3 stale, 2 unknown.
+
+    The one-command replacement for the unconditional restore-and-adopt
+    preamble: a wake runs this and only pays for repair when it is nonzero.
+    Tri-state on purpose — rc 0 is claimed ONLY when the pin exists, parses
+    and this engine meets it. An unreadable config, an authority with no pin,
+    and a malformed pin are all rc 2 with the reason named, because
+    "comparison impossible" reported as "current" is the failure mode a
+    self-check exists to prevent.
+    """
+    from . import __version__ as engine_version
+    if not args.team:
+        print("doctor --self: team is required (the authority lives per team)",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        detail = {
+            "error": "the records config could not be READ (transport "
+                     "failure) — retry when the store is reachable",
+            "invalid": "the records config is malformed — human-fixable, the "
+                       "bytes are the evidence",
+        }.get(cfg_status,
+              f"no bus-v3 records config for team {args.team}")
+        print(f"self: UNKNOWN — {detail}", file=sys.stderr)
+        return 2
+    state, detail = records.authority_currency_state(
+        cfg, engine_version=engine_version)
+    if state == "current":
+        print(f"self: CURRENT — {detail}")
+        return 0
+    if state == "stale":
+        print(f"self: STALE — {detail}", file=sys.stderr)
+        print("  run the store's adopt-latest.sh, then re-run "
+              "`coord-engine doctor <team> --self`", file=sys.stderr)
+        return 3
+    print(f"self: UNKNOWN — {detail}", file=sys.stderr)
+    return 2
+
+
+def _doctor_delivery(args: argparse.Namespace, transport: Any) -> int:
+    """Write and read one probe through the production typed-record seams."""
+    agent = args.agent or os.environ.get("FULCRA_COORD_AGENT")
+    if not args.team:
+        print("doctor --delivery: team is required", file=sys.stderr)
+        return 2
+    if not agent:
+        print("doctor --delivery: no agent identity", file=sys.stderr)
+        return 2
+    cfg = records.load_config(transport, args.team)
+    if cfg is None:
+        print("doctor --delivery: no records config — cannot write",
+              file=sys.stderr)
+        return 2
+
+    nonce = uuid.uuid4().hex[:8]
+    slug = f"delivery-probe-{nonce}"
+    # Build once through the public probe helper as a local contract check;
+    # emit_event below is the normal event path used by reminders/directives.
+    payload = records.roundtrip_probe_payload(agent, nonce)
+    if records.parse_payload(payload) is None:  # pragma: no cover - invariant
+        print("doctor --delivery: probe payload is not parseable",
+              file=sys.stderr)
+        return 2
+    started = _now()
+    written = records.emit_event(
+        transport, cfg, sender=agent, to=f"{agent}-probe", kind="claim",
+        priority="P3", slug=slug)
+    if not written:
+        print("doctor --delivery: probe write REFUSED", file=sys.stderr)
+        return 2
+
+    deadline = time.monotonic() + args.deadline
+    while True:
+        now = _now()
+        window = transport.records(
+            cfg["data_type"], _iso(started - timedelta(minutes=2)), _iso(now))
+        if window is not None:
+            for rec in window:
+                if not isinstance(rec, dict):
+                    continue
+                parsed = records.parse_payload(rec.get("note"))
+                if parsed is None or parsed.get("slug") != slug:
+                    continue
+                stamp = parsed.get("writer") or {}
+                from . import __version__
+                if stamp.get("engine_version") != __version__:
+                    print(
+                        "delivery: probe readable but writer stamp is "
+                        f"{stamp.get('engine_version')!r}, engine is "
+                        f"{__version__} — TWO engines are writing as this "
+                        "identity",
+                        file=sys.stderr,
+                    )
+                    return 3
+                lag = max(0.0, (now - started).total_seconds())
+                print("delivery: PROVEN — probe written, ingested and parsed "
+                      f"in {lag:.0f}s (payload v1, stamped {__version__})")
+                return 0
+            for rec in window:
+                if not isinstance(rec, dict):
+                    continue
+                note = rec.get("note")
+                if (isinstance(note, str) and slug in note
+                        and records.parse_payload(note) is None):
+                    print(
+                        "delivery: probe written but NOT readable — this "
+                        "engine wrote a non-v1 note (legacy/rolled-back "
+                        "writer). Run adopt-latest and retry.",
+                        file=sys.stderr,
+                    )
+                    return 3
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(5.0, remaining))
+    print("delivery: UNKNOWN — probe not readable within "
+          f"{args.deadline:.0f}s (ingest lag or store failure); NOT proof of "
+          "delivery", file=sys.stderr)
+    return 3
 
 
 # --- digest + escalate (fulcra-agent-health, A5b) ---
@@ -7976,17 +8147,25 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show events without advancing the cursor (safe diagnostic read)")
     qu.add_argument("--consume", action="store_true",
                     help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
-    # DEFAULT ON (coord-boss ruling, 2026-07-30). The false inference — "no
-    # events, so nothing owed" — exists only on the empty read, and the agents
-    # most at risk are the terse-wake ones who would never pass an opt-in flag.
-    # --no-obligations stays for cost-sensitive callers: three listings per empty
-    # wake is a real cost, just not one that should be the default silence.
+    # DEFAULT OFF — OPT-IN (promise plan T3(b), 2026-08-02), openly reversing
+    # the 2026-07-30 default-ON ruling on measured grounds: at the default
+    # budget the fold reaches 0/7 components in production, so the default
+    # could only ever answer UNKNOWN while charging 3+ listings on every empty
+    # wake fleet-wide — a signal with no information at a positive price.
+    # The skip is never silent: EVERY machine-readable success envelope carries
+    # "obligations": {"state": "not-checked"}. --no-obligations is retained as
+    # an accepted no-op alias so existing callers keep parsing. Default-ON
+    # returns if an aggregate-fold rewrite ever makes CLEAR reachable.
+    # Passing it explicitly ALWAYS folds (round-2 findings 1/2) — an eventful
+    # window is not a reason to drop a flag the caller paid for.
     qu.add_argument("--obligations", action=argparse.BooleanOptionalAction,
-                    default=True,
-                    help="after an EMPTY read, reconcile durable obligations "
+                    default=False,
+                    help="reconcile durable obligations alongside the read "
                          "(an empty queue is not proof nothing is owed); "
-                         "rc 3 = UNKNOWN, rc 4 = INVALID. "
-                         "--no-obligations skips it")
+                         "OFF by default, and a default read folds nothing — "
+                         "the verdict rides the success envelope, it never "
+                         "changes the exit code. --no-obligations is the "
+                         "(default) no-op alias")
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
@@ -8086,6 +8265,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
+    dr.add_argument(
+        "--self", action="store_true",
+        help="engine currency only: rc 0 current, 3 stale (adopt latest), "
+             "2 unknown (no config, or no/malformed authority pin)")
+    dr.add_argument(
+        "--delivery", action="store_true",
+        help="write/read a probe event and prove fleet-readable delivery")
+    dr.add_argument("--agent", help="identity for --delivery (or $FULCRA_COORD_AGENT)")
+    dr.add_argument(
+        "--deadline", type=float, default=90.0,
+        help="seconds to wait for the delivery probe (default 90)")
     dr.set_defaults(func=cmd_doctor)
 
     ak = sub.add_parser("asks", help="waiting-for-operator asks, oldest first (orchestrator pull)")

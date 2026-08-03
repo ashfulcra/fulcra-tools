@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from coord_engine import cli, records
+import pytest
+
+from coord_engine import cli, obligations as obligations_mod, records
 from coord_engine_test_helpers import FakeTransport
 
 
@@ -83,6 +85,168 @@ def _stage(monkeypatch, capsys, t):
     rows = _json_lines(capsys)
     assert rows[-1]["type"] == "queue-delivery"
     return rows[-1]["token"], rows
+
+
+class FoldSpy:
+    """A counting fake for the fold and its probes.
+
+    Counting rather than booby-trapping, because the DEFAULT contract is a
+    NUMBER — zero probe calls — not merely "did not crash". A fold that ran
+    and happened to be cheap would still be a per-wake cost regression, and
+    only a count catches that.
+    """
+
+    def __init__(self, monkeypatch, state="CLEAR"):
+        self.probe_calls = 0
+        self.fold_calls = 0
+        self._state = state
+        monkeypatch.setattr(cli, "_obligation_probes", self._probes)
+        monkeypatch.setattr(obligations_mod, "fold", self._fold)
+
+    def _probes(self, *args, **kwargs):
+        self.probe_calls += 1
+        return []
+
+    def _fold(self, *args, **kwargs):
+        self.fold_calls += 1
+        return obligations_mod.ObligationResult(
+            state=obligations_mod.ObligationState[self._state],
+            consulted=["tasks", "reviews"])
+
+
+@pytest.mark.parametrize("argv", [[], ["--no-obligations"]])
+def test_default_v2_stage_never_pays_for_the_fold_and_says_so(
+        monkeypatch, capsys, argv):
+    """A DEFAULT cursor-v2 read folds nothing and states the skip.
+
+    REVERSED 2026-08-03 (promise plan T3(b)). The previous pair of tests here
+    pinned the opposite contract: one asserted the fold RAN on an empty v2
+    stage, the other asserted that skipping it left the envelope SILENT
+    (``"obligations" not in row``). Both are wrong under the plan — its
+    headline is a NEGATIVE per-wake transport delta, so the v2 read path must
+    not gain a DEFAULT fold call, and the reviewer's round-2 requirement is
+    that the ``not-checked`` marker be universal on machine-readable skipped
+    paths, so a consumer can never read a delivery envelope as "nothing owed".
+
+    NARROWED 2026-08-03 (round-2 finding 2): ``--obligations`` used to be
+    parametrized in here, which is exactly how the v2 path came to accept the
+    flag and ignore it. The explicit case now has its own tests below.
+    """
+    t = _setup(CasTransport([]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    spy = FoldSpy(monkeypatch)
+
+    rc = cli.main(
+        ["queue", "r", "--agent", "amy", "--json", *argv], transport=t)
+    row = _json_lines(capsys)[-1]
+
+    assert rc == 0
+    assert row["type"] == "queue-delivery"
+    assert row["event_count"] == 0
+    assert row["obligations"] == {"state": "not-checked"}
+    assert (spy.probe_calls, spy.fold_calls) == (0, 0), (
+        "a default v2 wake paid for the fold; the per-wake-cost revert stands"
+    )
+
+
+# --- round-2 finding 2: an accepted flag that does nothing is a lie ---------
+#
+# `_cmd_queue_v2` took `--obligations` from the shared `queue` parser and never
+# looked at it: both peek envelopes were built without a fold, and every staged
+# or replayed delivery hard-coded `not-checked`. A caller who asked for the
+# answer, and paid attention to the envelope, was told the fold had not run
+# when what actually happened is that nobody had wired it. These pin the fix on
+# each of the four v2 success envelopes.
+
+def _v2_argv(*extra):
+    return ["queue", "r", "--agent", "amy", "--json", *extra]
+
+
+def test_v2_stage_honors_an_explicit_obligations_flag(monkeypatch, capsys):
+    """The staged-delivery envelope carries the real verdict, not the marker."""
+    t = _setup(CasTransport([_event("r1")]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    spy = FoldSpy(monkeypatch, state="DATA")
+
+    rc = cli.main(_v2_argv("--obligations"), transport=t)
+    row = _json_lines(capsys)[-1]
+
+    assert rc == 0
+    assert row["type"] == "queue-delivery"
+    assert row["outcome"] == "staged"
+    assert row["obligations"]["state"] == "DATA"
+    assert row["obligations"]["consulted"] == ["tasks", "reviews"]
+    assert (spy.probe_calls, spy.fold_calls) == (1, 1)
+
+
+def test_v2_replayed_delivery_honors_an_explicit_obligations_flag(
+        monkeypatch, capsys):
+    """A replay of an already-staged batch is a success envelope too."""
+    t = _setup(CasTransport([_event("r1")]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    assert cli.main(_v2_argv(), transport=t) == 0
+    assert _json_lines(capsys)[-1]["obligations"] == {"state": "not-checked"}
+
+    spy = FoldSpy(monkeypatch, state="UNKNOWN")
+    rc = cli.main(_v2_argv("--obligations"), transport=t)
+    row = _json_lines(capsys)[-1]
+
+    assert rc == 0
+    assert row["outcome"] == "replayed"
+    assert row["obligations"]["state"] == "UNKNOWN"
+    assert spy.fold_calls == 1
+
+
+def test_v2_fresh_peek_honors_an_explicit_obligations_flag(monkeypatch, capsys):
+    """`--peek` with nothing staged yet: the queue-result envelope folds."""
+    t = _setup(CasTransport([_event("r1")]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    spy = FoldSpy(monkeypatch, state="DATA")
+
+    rc = cli.main(_v2_argv("--peek", "--obligations"), transport=t)
+    row = _json_lines(capsys)[-1]
+
+    assert rc == 0
+    assert row["type"] == "queue-result"
+    assert row["cursor"]["advanced"] is False
+    assert row["obligations"]["state"] == "DATA"
+    assert spy.fold_calls == 1
+    assert t.cas_calls == [], "a peek must still write nothing"
+
+
+def test_v2_pending_peek_honors_an_explicit_obligations_flag(
+        monkeypatch, capsys):
+    """`--peek` over an already-staged batch takes the other peek branch."""
+    t = _setup(CasTransport([_event("r1")]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    assert cli.main(_v2_argv(), transport=t) == 0
+    capsys.readouterr()
+
+    spy = FoldSpy(monkeypatch, state="CLEAR")
+    rc = cli.main(_v2_argv("--peek", "--obligations"), transport=t)
+    row = _json_lines(capsys)[-1]
+
+    assert rc == 0
+    assert row["type"] == "queue-result"
+    assert row["count"] == 1
+    assert row["obligations"]["state"] == "CLEAR"
+    assert spy.fold_calls == 1
+
+
+@pytest.mark.parametrize("extra", [(), ("--peek",)])
+def test_v2_default_peek_and_read_stay_not_checked_at_zero_cost(
+        monkeypatch, capsys, extra):
+    """The other half of the contract: without the flag, still zero ops."""
+    t = _setup(CasTransport([_event("r1")]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    spy = FoldSpy(monkeypatch)
+
+    rc = cli.main(_v2_argv(*extra), transport=t)
+    row = _json_lines(capsys)[-1]
+
+    assert rc == 0
+    assert row["obligations"] == {"state": "not-checked"}
+    assert (spy.probe_calls, spy.fold_calls) == (0, 0)
 
 
 def _commit(capsys, t, token, *, include_results=True):
