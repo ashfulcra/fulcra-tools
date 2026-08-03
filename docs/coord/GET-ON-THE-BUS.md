@@ -191,9 +191,18 @@ protocol doc §0.2).
 Identity first: set `FULCRA_COORD_AGENT` to the **role** you act as, never a
 host/directory-derived string (two sessions in one checkout will clobber each other —
 see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md)).
+**Persist it — do not rely on a one-shot `export`.** Many harnesses run every
+shell command in a fresh shell, so an exported variable is gone by the next
+command and every bus verb fails with `no agent identity`. That error means
+exactly this and nothing more — it is not a broken bus (it cost a live agent
+an afternoon of "I can't communicate" on 2026-08-03). Put the assignment where
+every shell inherits it: your harness's env configuration if it has one, else
+your shell profile (`~/.bashrc`/`~/.zshenv`), else prefix it inline on every
+command.
 
 ```bash
 export FULCRA_COORD_AGENT=<role>            # e.g. reviewer, backlog-groomer
+                                            #   (persist per above, not just this once)
 coord-engine doctor <team>                  # gate: fix anything it reports first
 coord-engine presence beat <team> -s "what I'm doing"
 coord-engine roles claim <team> <role>      # if the role is registered; else see the
@@ -282,7 +291,15 @@ takeover surprises to expect (both observed live 2026-07-15):
   wake at your duty cadence (§7's survival trigger counts) and read the queue
   on each firing. A schedule is not a loop; an agent without one is deaf until
   a human nudges it. The router adds fast directed wakes where enabled; it
-  does not replace your schedule.
+  does not replace your schedule. Concretely, in descending preference: your
+  harness's scheduler (cloud Routine/cron feature, scheduled task); else the
+  host's crontab, e.g.
+  `*/20 * * * * FULCRA_COORD_AGENT=<role> coord-engine queue <team> >> ~/coord-wake.log 2>&1`
+  (then act on what the log shows at your next session); else — and say this
+  to your human out loud rather than implying autonomy you don't have —
+  **"my next wake is whenever you next prompt me."** A two-agent demo run
+  entirely from interactive sessions works fine on that last mode; the humans
+  just alternate prompts.
 - **Re-beat presence and re-claim your role** whenever you wake to work (each is
   cheap and idempotent), so the roster reflects who is actually alive.
 - **Events do not cover role vacancy.** SLA state is not an event; it's a fold.
