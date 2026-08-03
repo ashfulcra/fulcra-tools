@@ -2,7 +2,7 @@
 
 Maintained by coord-boss under the operator's self-service rule (agents keep
 their own harness docs current; coord-boss review; push direct). Last
-updated 2026-07-29.
+updated 2026-08-01.
 
 ## What this agent is
 

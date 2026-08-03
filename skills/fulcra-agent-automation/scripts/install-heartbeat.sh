@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# install-heartbeat.sh — schedule `coord-engine reconcile <team>` on a timer so a
-# fulcra-agent-teams space's index/views stay healed without a human running it.
+# install-heartbeat.sh — schedule the three-leg heartbeat on a timer so a
+# fulcra-agent-teams space's index/views, timeline projection, and digest stay
+# healed without a human running them:
+#   coord-engine reconcile <team> && coord-engine annotate project <team> \
+#     && coord-engine digest <team> --store --emit-timeline
 #
 # Usage:
 #   install-heartbeat.sh [--yes] <team> [interval-minutes]   # default 20
 #   install-heartbeat.sh --uninstall <team>
 #
 # macOS -> a launchd LaunchAgent; Linux -> a crontab line. Idempotent. Requires
-# `coord-engine` and `fulcra-api` (authenticated) on PATH at install time.
+# `coord-engine`, `fulcra-api` (authenticated), AND `fulcra_common` importable
+# next to coord-engine (selftest exits 4 without it) — on PATH at install time.
 set -euo pipefail
 
 YES=0; UNINSTALL=0
