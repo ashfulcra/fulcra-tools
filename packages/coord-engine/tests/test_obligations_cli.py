@@ -181,9 +181,16 @@ def _queue_transport():
 
 
 def _queue_args(**kw):
+    """A queue Namespace whose defaults MIRROR the parser's.
+
+    ``obligations`` defaults False here because that is what argparse hands the
+    command; it used to default True, which quietly turned every "default read"
+    test in this file into an opt-in read and hid the cost contract behind a
+    flag nobody passed (found while fixing round-2 finding 1).
+    """
     import argparse
     base = dict(team=TEAM, agent=AGENT, json=False, peek=False, consume=False,
-                all=False, obligations=True)
+                all=False, obligations=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -200,17 +207,51 @@ def test_opt_out_restores_the_pre_ruling_cost(capsys):
     assert "obligations" not in capsys.readouterr().err
 
 
-def test_empty_read_reconciles_by_default(capsys):
-    """Default ON: a plain empty wake now reconciles without being asked."""
+def test_empty_read_does_not_reconcile_unless_asked(capsys, monkeypatch):
+    """OPT-IN since 2026-08-02 (promise plan T3(b)): the default wake pays nothing.
+
+    Flipped from ``test_empty_read_reconciles_by_default``. The measured
+    grounds are in the plan: at the default budget the fold answers UNKNOWN in
+    production every time, so default-ON bought no information at the price of
+    3+ listings on every empty wake fleet-wide. The fold, its verb and its
+    rc3/rc4 contract are untouched — only the subscription changed.
+    """
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    monkeypatch.setattr(
+        obligations_mod, "fold",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("the default read must not fold")))
     transport = _queue_transport()
-    rc = cli.cmd_queue(_queue_args(), transport)
+    rc = cli.main(["queue", TEAM, "--agent", AGENT], transport=transport)
     err = capsys.readouterr().err
-    assert "obligations CLEAR" in err
     assert rc == 0
+    assert "obligations" not in err
 
 
-def test_flag_surfaces_unknown_in_the_exit_code(capsys):
-    """A degraded fold must reach rc, or a scripted wake learns nothing from it."""
+def test_no_obligations_stays_an_accepted_no_op_alias(capsys, monkeypatch):
+    """Callers already passing --no-obligations keep working, unchanged."""
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    transport = _queue_transport()
+    rc = cli.main(
+        ["queue", TEAM, "--agent", AGENT, "--no-obligations"],
+        transport=transport)
+    assert rc == 0
+    assert "obligations" not in capsys.readouterr().err
+
+
+def test_obligations_flag_opts_the_empty_read_back_in(capsys, monkeypatch):
+    """The opt-in half: asking for the fold still runs it on an empty read."""
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    transport = _queue_transport()
+    rc = cli.main(
+        ["queue", TEAM, "--agent", AGENT, "--obligations"], transport=transport)
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "obligations CLEAR" in err
+
+
+def test_flag_reports_unknown_without_saturating_window_rc(capsys):
+    """Fold UNKNOWN is reported, while rc 3 stays reserved for window doubt."""
     from coord_engine.transport import TransportError
 
     transport = _queue_transport()
@@ -222,26 +263,72 @@ def test_flag_surfaces_unknown_in_the_exit_code(capsys):
         return original(prefix) if original else []
 
     transport.list_dir = dark
-    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
-    err = capsys.readouterr().err
-    assert rc == 3, "UNKNOWN must be a distinct nonzero rc, not a printed aside"
-    assert "obligations UNKNOWN" in err
-    assert "reviews" in err
+    rc = cli.cmd_queue(_queue_args(obligations=True, json=True), transport)
+    captured = capsys.readouterr()
+    row = json.loads(captured.out)
+    # 2026-08-01 rc split: fold degradation is a report, not a failure.
+    assert rc == 0
+    assert row["type"] == "queue-result"
+    assert row["obligations"]["state"] == "UNKNOWN"
+    assert row["obligations"]["degraded"]
 
 
-def test_flag_does_nothing_when_events_were_delivered(capsys):
-    """Reconciliation is for the empty case; a delivered batch is already work."""
+def _eventful_queue_transport():
     from test_records_write import QueueTransport, _event_rec
 
     transport = QueueTransport(window=[_event_rec("r1", "job", to=AGENT)])
     transport.put(f"team/{TEAM}/_coord/bus-v3/records.json",
                   json.dumps({"data_type": "MomentAnnotation/x",
                               "api_version": "v1alpha1"}))
+    return transport
+
+
+def test_flag_is_honored_even_when_events_were_delivered(capsys):
+    """An explicit --obligations always folds — events are not an excuse.
+
+    REVERSED 2026-08-03 (reviewer round-2, findings 1/2). This test used to be
+    ``test_flag_does_nothing_when_events_were_delivered`` and pinned the
+    opposite: a delivered batch suppressed the fold even when the caller asked
+    for it. That is the same defect as finding 2 (a flag accepted and then
+    ignored), one path over — the caller who paid for the answer got silence,
+    and could not tell that from a genuine CLEAR. The DEFAULT read still folds
+    nothing on any window, which is the cost contract that actually matters.
+    """
+    transport = _eventful_queue_transport()
     rc = cli.cmd_queue(_queue_args(obligations=True), transport)
     captured = capsys.readouterr()
     assert rc == 0
     assert "job" in captured.out
-    assert "obligations" not in captured.err
+    assert "obligations" in captured.err
+
+
+def test_delivered_batch_carries_the_real_fold_verdict_under_the_flag(capsys):
+    """The machine-readable half: DATA + opt-in reports the fold, not a marker."""
+    transport = _eventful_queue_transport()
+    rc = cli.cmd_queue(_queue_args(obligations=True, json=True), transport)
+    row = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert (row["type"], row["state"], row["count"]) == ("queue-result", "DATA", 1)
+    assert row["obligations"]["state"] != "not-checked"
+    assert "consulted" in row["obligations"] and "reason" in row["obligations"]
+
+
+def test_peek_honors_the_flag_and_stays_not_checked_by_default(capsys):
+    """`--peek` is a success envelope too, so it obeys the same one rule."""
+    transport = _eventful_queue_transport()
+    rc = cli.cmd_queue(
+        _queue_args(obligations=True, json=True, peek=True), transport)
+    row = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert row["cursor"]["advanced"] is False
+    assert row["obligations"]["state"] != "not-checked"
+
+    transport = _eventful_queue_transport()
+    rc = cli.cmd_queue(
+        _queue_args(obligations=False, json=True, peek=True), transport)
+    row = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert row["obligations"] == {"state": "not-checked"}
 
 
 # --- codex-reviewer PR 501: the compositions the focused suite missed --------
@@ -319,18 +406,10 @@ def test_owed_forge_feedback_is_data_not_clear(monkeypatch):
     assert any(r.get("pr_slug") == "pr-501" for r in result.owed)
 
 
-@pytest.mark.parametrize("state,error_code", [
-    ("UNKNOWN", "obligations-unknown"),
-    ("INVALID", "obligations-invalid"),
-])
-def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
-        monkeypatch, capsys, state, error_code):
-    """A degraded fold is a FAILED queue exit — one queue-error, queue's rc 3.
-
-    The bug: queue printed the SUCCESS envelope (`queue-result`, state CLEAR) and
-    merely returned nonzero, so automation switching on `type` read a clean CLEAR
-    while the process signalled failure.
-    """
+@pytest.mark.parametrize("state", ["UNKNOWN", "INVALID"])
+def test_queue_json_nests_degraded_fold_in_success_envelope(
+        monkeypatch, capsys, state):
+    """A clean event window stays successful while naming fold degradation."""
     transport = _queue_transport()
 
     def fake_fold(*a, **kw):
@@ -340,20 +419,16 @@ def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
             malformed=[] if state == "UNKNOWN" else ["tasks"])
 
     monkeypatch.setattr(obligations_mod, "fold", fake_fold)
-    rc = cli.cmd_queue(_queue_args(json=True), transport)
+    rc = cli.cmd_queue(_queue_args(obligations=True, json=True), transport)
     out = capsys.readouterr().out
 
     rows = [json.loads(line) for line in out.splitlines() if line.strip()]
     assert len(rows) == 1, f"--json must emit exactly one object, got {rows}"
     row = rows[0]
-    assert row["type"] == "queue-error", (
-        "a degraded fold emitted the success envelope; slice 4's contract is that "
-        "every nonzero queue exit is one queue-error object"
-    )
-    assert row["state"] == state
-    assert row["error_code"] == error_code
-    assert row["rc"] == 3
-    assert rc == 3, "queue keeps rc 3 for both UNKNOWN and INVALID"
+    # 2026-08-01 rc split: fold degradation is a report, not a failure.
+    assert row["type"] == "queue-result"
+    assert row["state"] == "CLEAR"
+    assert rc == 0
     assert row["obligations"]["state"] == state, (
         "the diagnosis must survive as a nested field, not be dropped"
     )
@@ -493,11 +568,21 @@ def test_the_budget_is_actually_bound_to_the_fold():
     )
 
 
-def test_eventful_wake_pays_nothing_for_the_fold(capsys):
-    """A wake WITH events must not touch review or forge surfaces at all."""
+@pytest.mark.parametrize("window_events", [0, 1])
+def test_default_wake_pays_nothing_for_the_fold(capsys, window_events):
+    """A DEFAULT wake must not touch review or forge surfaces — ever.
+
+    Widened 2026-08-03 (round-2 finding 1): this was
+    ``test_eventful_wake_pays_nothing_for_the_fold`` and passed
+    ``_queue_args()`` back when that helper defaulted ``obligations=True``, so
+    it was really asserting "an OPT-IN eventful wake pays nothing" — the flag
+    being ignored, which is the defect finding 2 names. The cost contract the
+    plan actually bought is the default one, and it holds on both windows.
+    """
     from test_records_write import QueueTransport, _event_rec
 
-    inner = QueueTransport(window=[_event_rec("r1", "job", to=AGENT)])
+    window = [_event_rec("r1", "job", to=AGENT)] * window_events
+    inner = QueueTransport(window=window)
     inner.put(f"team/{TEAM}/_coord/bus-v3/records.json",
               json.dumps({"data_type": "MomentAnnotation/x",
                           "api_version": "v1alpha1"}))
@@ -507,8 +592,7 @@ def test_eventful_wake_pays_nothing_for_the_fold(capsys):
     touched = [op for op in transport.listed
                if "/review/" in op or "/forge/" in op]
     assert touched == [], (
-        f"an eventful wake paid for the fold: {touched}. Reconciliation is for "
-        "the empty read only."
+        f"a default wake paid for the fold: {touched}. The fold is opt-in."
     )
 
 

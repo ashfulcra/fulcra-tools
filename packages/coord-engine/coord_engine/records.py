@@ -115,6 +115,21 @@ def parse_payload(note: Any) -> Optional[dict[str, Any]]:
     }
 
 
+def roundtrip_probe_payload(agent: str, nonce: str) -> str:
+    """Build the delivery-proof payload consumed by ``doctor --delivery``.
+
+    The synthetic recipient is owned by the caller, so proving the write/read
+    path never consumes or pollutes another agent's queue. Claims are
+    envelope-only and therefore owe no document pointer.
+    """
+    return build_payload(
+        to=f"{agent}-probe",
+        kind="claim",
+        priority="P3",
+        slug=f"delivery-probe-{nonce}",
+    )
+
+
 def sender_of(record: dict[str, Any]) -> Optional[str]:
     """The authoring agent from ``sources``, or None if unattributed.
 
@@ -163,6 +178,55 @@ def observed_version_warnings(rows: Optional[list[Any]]) -> list[str]:
             f"engine={v[0]}/protocol={v[1]}/cursor={v[2]}"
             for v in sorted(versions, key=str))
         warnings.append(f"mixed writer versions observed: {rendered}")
+    return warnings
+
+
+_LEGACY_NOTE_PREFIXES = (
+    "create:", "update:", "done:", "block:", "REVIEW REQUEST", "assignee:",
+)
+
+# Cap the per-read census so a flooded window cannot bloat a wake: three named
+# senders are enough to act on, the rest are counted in one tail line.
+_CENSUS_SENDER_CAP = 3
+
+
+def invisible_writer_census(window: Optional[list[Any]]) -> list[str]:
+    """Name senders whose control-looking notes modern readers cannot parse.
+
+    Ordinary free text remains silent. A missing/unreadable window is also
+    silent here because the queue's window-level UNKNOWN path owns that
+    diagnosis; absence of evidence must never become evidence of a clean
+    writer fleet.
+
+    At most ``_CENSUS_SENDER_CAP`` senders are named, lowest sender id first
+    (deterministic), with a ``+ N more sender(s)`` tail when the window holds
+    more — this runs on every queue read, so its worst case has to stay small.
+    """
+    if not window:
+        return []
+    offenders: dict[str, int] = {}
+    for rec in window:
+        if not isinstance(rec, dict):
+            continue
+        note = rec.get("note")
+        if not isinstance(note, str) or parse_payload(note) is not None:
+            continue
+        if not any(prefix in note for prefix in _LEGACY_NOTE_PREFIXES):
+            continue
+        sender = sender_of(rec)
+        if sender:
+            offenders[sender] = offenders.get(sender, 0) + 1
+    ranked = sorted(offenders.items())
+    warnings = [
+        f"{count} note(s) from {sender} look like control traffic but are "
+        "not parseable (v1) — that agent's engine predates bus-v3; its "
+        "messages are invisible to the fleet. It must run adopt-latest."
+        for sender, count in ranked[:_CENSUS_SENDER_CAP]
+    ]
+    hidden = len(ranked) - _CENSUS_SENDER_CAP
+    if hidden > 0:
+        warnings.append(
+            f"+ {hidden} more sender(s) writing unparseable control notes")
     return warnings
 
 
@@ -339,6 +403,11 @@ _AUTHORITY_FIELDS = (
     "minimum_reader_version", "minimum_writer_version",
     "cursor_generation", "cursor_activated_at",
 )
+#: The fleet's current engine pin. ADDITIVE and independent of the versioned
+#: authority block: it is carried through verbatim (any type) so the currency
+#: check can tell "absent" from "malformed", and its absence never makes an
+#: otherwise-valid config partial.
+CURRENT_ENGINE_FIELD = "current_engine_version"
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 _ADOPTION_SLUG = re.compile(
     r"^adopted-v(?P<version>\d+\.\d+\.\d+)-"
@@ -367,6 +436,8 @@ def _parse_config(raw: Any) -> Optional[dict[str, Any]]:
         "data_type": data_type.strip(),
         "api_version": (api_version or DEFAULT_API_VERSION).strip(),
     }
+    if CURRENT_ENGINE_FIELD in doc:
+        out[CURRENT_ENGINE_FIELD] = doc[CURRENT_ENGINE_FIELD]
     supplied = [name for name in _AUTHORITY_FIELDS if name in doc]
     if not supplied:
         return out
@@ -521,6 +592,70 @@ def compatibility(config: dict[str, Any], *, engine_version: str,
             f"mixed cursor semantics: authority v{schema}, this engine "
             f"stamps v{CURSOR_SCHEMA_VERSION}")
     return {"ok": True, "warnings": warnings}
+
+
+def authority_currency(config: Optional[dict], *,
+                       engine_version: str) -> Optional[str]:
+    """One warning line when this engine is OLDER than the authority's
+    current pin, else None. Rides the already-loaded config: zero transport.
+
+    Why: a machine replacement restores a stale environment snapshot whose
+    adopt-latest reinstalls an old engine (proven 2026-08-02, boot 30051b81);
+    that engine then writes events modern readers skip. This makes the very
+    first read loud instead. Absent field/config stays silent — an authority
+    that has not adopted the field must not nag, and a DEV engine ahead of
+    the pin is fine.
+    """
+    if not isinstance(config, dict):
+        return None
+    current = config.get(CURRENT_ENGINE_FIELD)
+    own, cur = _version_tuple(engine_version), (
+        _version_tuple(current) if isinstance(current, str) else None)
+    if own is None or cur is None or own >= cur:
+        return None
+    return (f"this engine is v{engine_version} but the fleet authority is "
+            f"v{current} — a stale snapshot likely restored it; run the "
+            f"store adopt-latest.sh before writing anything")
+
+
+def authority_currency_state(config: Optional[dict], *,
+                             engine_version: str) -> tuple[str, str]:
+    """Tri-state currency verdict for ``doctor --self``: (state, detail).
+
+    ``current`` is claimed ONLY when the pin exists, parses, and this engine
+    is at or above it. Everything else that prevents the comparison is
+    ``unknown`` and names WHY — an absent pin, a malformed one and an
+    unreadable config all mean "could not compare", which is emphatically not
+    "current" (reviewer correction 2026-08-03). ``stale`` carries the same
+    actionable sentence the queue read prints.
+
+    The queue-read path keeps silence on an absent field on purpose: that is
+    the pre-activation compatibility phase, and it ends when the authority
+    adopts the field. A deliberate health check has no such excuse.
+    """
+    if not isinstance(config, dict):
+        return "unknown", (
+            "the bus-v3 records config is absent or unreadable, so this "
+            "engine cannot be compared with the fleet pin")
+    current = config.get(CURRENT_ENGINE_FIELD)
+    if current is None:
+        return "unknown", (
+            f"the fleet authority declares no {CURRENT_ENGINE_FIELD}; "
+            "comparison is impossible, which is not the same as current")
+    if not isinstance(current, str) or _version_tuple(current) is None:
+        return "unknown", (
+            f"the fleet authority's {CURRENT_ENGINE_FIELD} is {current!r}, "
+            "which is not a parseable version; comparison is impossible")
+    if _version_tuple(engine_version) is None:
+        return "unknown", (
+            f"this engine reports version {engine_version!r}, which is not a "
+            "parseable version; comparison is impossible")
+    warning = authority_currency(config, engine_version=engine_version)
+    if warning:
+        return "stale", warning
+    return "current", (
+        f"this engine is v{engine_version}; the fleet authority pin is "
+        f"v{current}")
 
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,

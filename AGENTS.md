@@ -330,6 +330,33 @@ it (not on PyPI).
   cheap enough to ride every wake you already have — **do
   not run a polling loop or resident listener for it.** Keep `fulcra-api`
   current whenever you touch coord tooling (same pass, standing rule).
+  The durable-obligation fold is **opt-in** (`--obligations`) and reports
+  through an additive `obligations` field on that successful envelope: fold
+  UNKNOWN/INVALID is a report at rc 0 when the event window itself read
+  cleanly; **rc 3 is reserved for event-window doubt**. A skip is never
+  silent — every machine-readable success envelope that did not fold carries
+  `"obligations": {"state": "not-checked"}`, which no caller may map to CLEAR.
+  `--no-obligations` stays accepted as a no-op alias for the default; the
+  standalone `obligations` verb keeps its own rc 3/4 contract. Queue reads
+  also emit `DELIVERY WARNING` lines naming attributed legacy writers whose
+  control-looking prose cannot parse as bus-v3 events — those writers believe
+  they sent messages that are invisible to the fleet and must adopt latest.
+  Prove the write path after any install/upgrade, and whenever a recipient says
+  it did not hear you, with `coord-engine doctor <team> --delivery --agent
+  <you>`; rc 0 means the stamped probe was written, ingested, and parsed, rc 2
+  means the write was refused, and rc 3 means it was written but not proven
+  fleet-readable before the deadline.
+  Every queue read also compares this engine against the authority's
+  `current_engine_version` pin, for free (the config was already loaded), and
+  prints `queue: ENGINE STALE` when the runtime is older — a restored
+  environment snapshot reinstalls old engines whose writes modern readers
+  skip. `coord-engine doctor <team> --self` is the same check on demand and
+  is TRI-STATE: rc 0 `current` only when the pin exists, parses, and this
+  engine meets it; rc 3 `stale` (run the store's adopt-latest, then re-run);
+  rc 2 `unknown` when the config is unreadable or the pin is absent or
+  malformed — comparison impossible is not current, so never read rc 2 as
+  green. Prefer it to an unconditional restore-and-adopt preamble: repair
+  only when it exits nonzero.
   `coord-engine briefing <team> --agent <you>` remains the fold over durable
   state — identity, role inboxes, reviews owed — for when you need the full
   board; honor every degraded row it prints as UNKNOWN.
