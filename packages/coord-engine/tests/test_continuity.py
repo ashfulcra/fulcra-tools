@@ -4,7 +4,7 @@ NOW = "2026-07-01T18:00:00Z"
 
 # clock-pin support (see #378):
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from coord_engine import cli
 PINNED_NOW = datetime(2026, 7, 1, 18, 30, tzinfo=timezone.utc)
 
@@ -66,6 +66,17 @@ def test_render_resume_includes_fields():
     assert "objective: ship it" in out
     assert "land PR" in out and "naming?" in out
     assert "42%" in out
+
+
+def test_checkpoint_age_and_duration_helpers():
+    snapshot = {"created_at": NOW}
+    assert continuity.checkpoint_age_seconds(snapshot, now=PINNED_NOW) == 1800
+    assert continuity.checkpoint_age_seconds({"created_at": "bad"}, now=PINNED_NOW) is None
+    assert continuity.checkpoint_age_seconds(snapshot, now=PINNED_NOW - timedelta(hours=1)) == 0
+    assert continuity.parse_duration_seconds("30m") == 1800
+    assert continuity.parse_duration_seconds("1.5h") == 5400
+    assert continuity.parse_duration_seconds("bad") is None
+    assert continuity.format_age(1800) == "30m (1800s)"
 
 
 def test_latest_tiebreak_deterministic():

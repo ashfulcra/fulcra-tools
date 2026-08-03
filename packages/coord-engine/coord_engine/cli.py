@@ -2632,10 +2632,28 @@ def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
             snap = None
     else:
         snap = continuity.latest(_agent_snapshots(transport, args.team, args.agent))
+    age_seconds = continuity.checkpoint_age_seconds(snap, now=_now())
     if args.json:
-        jsonutil.print_json(snap)
+        out = dict(snap) if snap else {"snapshot": None}
+        out["checkpoint_age_seconds"] = age_seconds
+        jsonutil.print_json(out)
     else:
         print(continuity.render_resume(snap))
+        print(f"  checkpoint age: {continuity.format_age(age_seconds)}")
+    if args.max_age is not None:
+        max_age_seconds = continuity.parse_duration_seconds(args.max_age)
+        if max_age_seconds is None:
+            print(f"resume: invalid --max-age duration {args.max_age!r}; use s, m, h, or d",
+                  file=sys.stderr)
+            return 2
+        if age_seconds is None:
+            print("resume: checkpoint age is unknown; freshness requirement failed",
+                  file=sys.stderr)
+            return 2
+        if age_seconds > max_age_seconds:
+            print(f"resume: checkpoint is {continuity.format_age(age_seconds)} old, "
+                  f"exceeding --max-age {args.max_age}", file=sys.stderr)
+            return 2
     return 0
 
 
@@ -5270,8 +5288,10 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
               f"the session.", file=sys.stderr)
         return 1
     if not held:
-        print(f"park: {agent} holds no fresh roles in team/{args.team} — nothing to park")
-        return 0
+        print(f"park: {agent} holds no fresh roles in team/{args.team} — "
+              f"CHECKPOINT NOT WRITTEN because there was nothing to park",
+              file=sys.stderr)
+        return 2
     for role in held:
         task_slug = f"role-{tasks.slugify(role)}"
         snap = continuity.build_snapshot(
@@ -8491,6 +8511,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ctr = ctsub.add_parser("resume", help="print a resume brief from the latest snapshot")
     ctr.add_argument("team"); ctr.add_argument("agent"); ctr.add_argument("task", nargs="?")
+    ctr.add_argument("--max-age", metavar="DURATION",
+                     help="exit 2 unless checkpoint age is at most DURATION (for example 30m, 12h, 2d)")
     ctr.add_argument("--json", action="store_true")
     ctr.set_defaults(func=cmd_continuity_resume)
 

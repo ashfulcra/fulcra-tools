@@ -250,6 +250,52 @@ def test_cli_continuity_snapshot_and_resume(capsys):
     assert cli.main(["continuity", "resume", "r", "ash", "build-l6"], transport=t) == 0
     out = capsys.readouterr().out
     assert "objective: ship it" in out and "land PR" in out
+    assert "checkpoint age:" in out
+
+
+def test_cli_continuity_resume_reports_age_in_human_and_json(capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    created = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "_now", lambda: created)
+    cli.main(["continuity", "snapshot", "r", "ash", "work", "--objective", "ship"],
+             transport=t)
+    capsys.readouterr()
+
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 8, 3, 12, 30,
+                                                       tzinfo=timezone.utc))
+    assert cli.main(["continuity", "resume", "r", "ash"], transport=t) == 0
+    assert "checkpoint age: 30m (1800s)" in capsys.readouterr().out
+
+    assert cli.main(["continuity", "resume", "r", "ash", "--json"], transport=t) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["checkpoint_age_seconds"] == 1800
+    assert out["objective"] == "ship"
+
+
+def test_cli_continuity_resume_max_age_passes_and_fails(capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    created = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "_now", lambda: created)
+    cli.main(["continuity", "snapshot", "r", "ash", "work", "--objective", "ship"],
+             transport=t)
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 8, 3, 12, 30,
+                                                       tzinfo=timezone.utc))
+
+    assert cli.main(["continuity", "resume", "r", "ash", "--max-age", "30m"],
+                    transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["continuity", "resume", "r", "ash", "--max-age", "29m"],
+                    transport=t) == 2
+    assert "exceeding --max-age 29m" in capsys.readouterr().err
+
+    assert cli.main(["continuity", "resume", "r", "nobody", "--max-age", "1h"],
+                    transport=t) == 2
+    assert "checkpoint age is unknown" in capsys.readouterr().err
 
 
 def test_cli_continuity_resume_picks_latest_across_tasks(capsys):
@@ -1451,8 +1497,9 @@ def test_cli_park_snapshots_held_roles_only(capsys):
     fm = okf.parse_frontmatter(t.store["team/r/roles/reviewer.md"])
     snap = _j.loads(t.store[fm["checkpoint_ref"]])
     assert snap["objective"] == "eod" and snap["agent"] == "amy"
-    # parking with no held roles is a clean no-op
-    assert cli.main(["continuity", "park", "r", "-a", "nobody"], transport=t) == 0
+    # A successful park must prove it wrote at least one checkpoint.
+    assert cli.main(["continuity", "park", "r", "-a", "nobody"], transport=t) == 2
+    assert "CHECKPOINT NOT WRITTEN" in capsys.readouterr().err
 
 
 def test_cli_briefing_full_and_empty_store(capsys):
@@ -1529,8 +1576,8 @@ def test_park_respects_per_role_sla(capsys):
     t.put("team/r/roles/tight.md", "---\ntype: Role\nsla_hours: 0.001\n---\n")  # ~4s SLA
     t.put("team/r/roles/tight/leases/amy-" + __import__("hashlib").sha1(b"amy").hexdigest()[:6] + ".md",
           "---\ntype: Lease\nagent: amy\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
-    cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
-    assert "nothing to park" in capsys.readouterr().out    # stale vs the role's OWN sla
+    assert cli.main(["continuity", "park", "r", "-a", "amy"], transport=t) == 2
+    assert "nothing to park" in capsys.readouterr().err    # stale vs the role's OWN sla
 
 
 def test_park_refuses_to_claim_nothing_when_role_state_is_unknown(capsys):
@@ -1581,18 +1628,15 @@ def test_park_unreadable_role_doc_is_unknown_not_no_roles(capsys):
     assert "nothing to park" not in cap.out
 
 
-def test_park_genuinely_no_roles_still_exits_zero(capsys):
-    """The over-correction guard: holding nothing is a real, knowable answer.
-
-    Passes with AND without the fix, by design — it exists to catch a fix that
-    turns every park into UNKNOWN, not to catch the regression.
-    """
+def test_park_genuinely_no_roles_fails_loud(capsys):
+    """A clean rc must certify that park wrote at least one checkpoint."""
     t = FakeTransport()
     rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
     cap = capsys.readouterr()
-    assert rc == 0, f"no roles is a knowable answer, not a failure: rc={rc}"
-    assert "nothing to park" in cap.out
-    assert "CHECKPOINT NOT WRITTEN" not in cap.err
+    assert rc == 2, f"empty park must be nonzero: rc={rc}"
+    assert "nothing to park" in cap.err
+    assert "CHECKPOINT NOT WRITTEN" in cap.err
+    assert not [p for p in t.store if "/continuity/" in p]
 
 
 def test_park_failed_snapshot_write_leaves_ref_unchanged(capsys):
