@@ -337,13 +337,24 @@ def test_json_clear_envelope_is_one_object_not_silence(monkeypatch, capsys):
     assert row["cursor"] == {"path": CURSOR, "advanced": True}
 
 
-def test_no_obligations_keeps_success_envelope_legacy_shape(monkeypatch, capsys):
+@pytest.mark.parametrize("argv", [[], ["--no-obligations"]])
+def test_skipped_fold_is_declared_never_silent(monkeypatch, capsys, argv):
+    """A skipped fold is stated, not omitted.
+
+    REVERSED 2026-08-03 (promise plan T3(b), reviewer round-2). This test used
+    to assert ``"obligations" not in row`` — it codified SILENT skipping. With
+    the fold now opt-in, silence would let automation read CLEAR as "nothing
+    owed", which is the exact false inference the fold exists to prevent; the
+    round-2 requirement is that the marker be universal on every
+    machine-readable skipped path. ``--no-obligations`` remains an accepted
+    no-op alias, so both spellings of "do not fold" carry the marker.
+    """
     t = _transport(window=[])
-    rc, out, _err = _run(
-        monkeypatch, capsys, t, ["--json", "--no-obligations"])
+    rc, out, _err = _run(monkeypatch, capsys, t, ["--json", *argv])
     row = _single_json_object(out)
     assert rc == 0
-    assert "obligations" not in row
+    assert row["state"] == "CLEAR"
+    assert row["obligations"] == {"state": "not-checked"}
 
 
 def test_json_envelope_reports_versioned_authority_protocol(monkeypatch, capsys):
@@ -436,33 +447,49 @@ def test_plain_data_output_byte_identical_to_pre_slice(monkeypatch, capsys):
 
 
 def test_plain_clear_output_byte_identical_to_pre_slice(monkeypatch, capsys):
-    """CLEAR stdout stays byte-identical; stderr gains the obligation verdict.
+    """CLEAR stays byte-identical on BOTH streams again.
 
-    Updated for the 2026-07-30 slice-3 ruling, which made fold-on-empty the
-    DEFAULT. That necessarily changes what an empty read says, so this golden is
-    re-pinned rather than worked around — and re-pinned narrowly: **stdout is
-    still exactly ""**, which is the half the contract exists for (shell consumers
-    pipe stdout). The verdict lands on stderr, where a pipeline never sees it.
-
-    An agent that wants the old cost and the old silence passes
-    ``--no-obligations``; that path is pinned below.
+    Flipped 2026-08-03 (promise plan T3(b)): fold-on-empty is opt-in, which
+    reverses the 2026-07-30 slice-3 default and restores the pre-ruling bytes
+    on the default read — stdout "" and stderr exactly the version warning.
+    The measured grounds are in the plan: at the default budget the fold could
+    only ever answer UNKNOWN in production, so every default wake paid for a
+    signal with no information. The verdict is still available on demand
+    (pinned below), and the machine-readable envelope always states that the
+    fold was not checked.
     """
     t = _transport(window=[])
     rc, out, err = _run(monkeypatch, capsys, t, [])
     assert rc == 0
     assert out == "", "the stdout half of the golden contract is unchanged"
-    assert err.startswith(GOLDEN_WARNING)
-    assert "obligations CLEAR" in err
+    assert err == GOLDEN_WARNING
+    assert "obligations" not in err
 
 
+@pytest.mark.parametrize("argv", [[], ["--no-obligations"]])
 def test_plain_clear_with_no_obligations_is_byte_identical_to_pre_slice(
-        monkeypatch, capsys):
-    """The opt-out restores the pre-ruling bytes exactly — stdout AND stderr."""
+        monkeypatch, capsys, argv):
+    """Opting out explicitly is now identical to the default — a no-op alias.
+
+    ``--no-obligations`` is retained for compatibility with every caller
+    already passing it (promise plan T3(b)); it must keep parsing and keep
+    producing the same bytes as the plain read.
+    """
     t = _transport(window=[])
-    rc, out, err = _run(monkeypatch, capsys, t, ["--no-obligations"])
+    rc, out, err = _run(monkeypatch, capsys, t, argv)
     assert rc == 0
     assert out == ""
     assert err == GOLDEN_WARNING
+
+
+def test_obligations_opt_in_still_reconciles_the_empty_read(
+        monkeypatch, capsys):
+    """The fold is not deleted, only unsubscribed from the default wake."""
+    t = _transport(window=[])
+    rc, out, err = _run(monkeypatch, capsys, t, ["--obligations"])
+    assert rc == 0
+    assert out == ""
+    assert "obligations" in err
 
 
 def test_plain_peek_output_byte_identical_to_pre_slice(monkeypatch, capsys):

@@ -323,11 +323,14 @@ it (not on PyPI).
   cheap enough to ride every wake you already have — **do
   not run a polling loop or resident listener for it.** Keep `fulcra-api`
   current whenever you touch coord tooling (same pass, standing rule).
-  The default durable-obligation fold is an additive `obligations` field on
-  that successful envelope: fold UNKNOWN/INVALID is a report at rc 0 when the
-  event window itself read cleanly; **rc 3 is reserved for event-window doubt**.
-  `--no-obligations` omits the field and preserves the legacy envelope shape;
-  the standalone `obligations` verb keeps its own rc 3/4 contract. Queue reads
+  The durable-obligation fold is **opt-in** (`--obligations`) and reports
+  through an additive `obligations` field on that successful envelope: fold
+  UNKNOWN/INVALID is a report at rc 0 when the event window itself read
+  cleanly; **rc 3 is reserved for event-window doubt**. A skip is never
+  silent — every machine-readable success envelope that did not fold carries
+  `"obligations": {"state": "not-checked"}`, which no caller may map to CLEAR.
+  `--no-obligations` stays accepted as a no-op alias for the default; the
+  standalone `obligations` verb keeps its own rc 3/4 contract. Queue reads
   also emit `DELIVERY WARNING` lines naming attributed legacy writers whose
   control-looking prose cannot parse as bus-v3 events — those writers believe
   they sent messages that are invisible to the fleet and must adopt latest.

@@ -87,49 +87,36 @@ def _stage(monkeypatch, capsys, t):
     return rows[-1]["token"], rows
 
 
-@pytest.mark.parametrize("state", ["UNKNOWN", "INVALID"])
-def test_empty_v2_stage_reports_obligation_fold_without_changing_rc(
-        monkeypatch, capsys, state):
-    t = _setup(CasTransport([]))
-    monkeypatch.setattr(cli, "_now", lambda: NOW)
+@pytest.mark.parametrize("argv", [[], ["--obligations"], ["--no-obligations"]])
+def test_empty_v2_stage_never_pays_for_the_fold_and_says_so(
+        monkeypatch, capsys, argv):
+    """The cursor-v2 read path folds nothing, on any flag combination.
 
-    def fake_fold(*args, **kwargs):
-        return obligations_mod.ObligationResult(
-            state=obligations_mod.ObligationState[state],
-            degraded=["reviews"] if state == "UNKNOWN" else [],
-            malformed=[] if state == "UNKNOWN" else ["tasks"],
-        )
-
-    monkeypatch.setattr(obligations_mod, "fold", fake_fold)
-    rc = cli.main(
-        ["queue", "r", "--agent", "amy", "--json"], transport=t)
-    row = _json_lines(capsys)[-1]
-
-    # 2026-08-01 rc split: fold degradation is a report, not a failure.
-    assert rc == 0
-    assert row["type"] == "queue-delivery"
-    assert row["event_count"] == 0
-    assert row["obligations"]["state"] == state
-
-
-def test_empty_v2_stage_no_obligations_skips_fold_and_keeps_shape(
-        monkeypatch, capsys):
+    REVERSED 2026-08-03 (promise plan T3(b)). The previous pair of tests here
+    pinned the opposite contract: one asserted the fold RAN on an empty v2
+    stage, the other asserted that skipping it left the envelope SILENT
+    (``"obligations" not in row``). Both are wrong under the plan — its
+    headline is a NEGATIVE per-wake transport delta, so the v2 read path must
+    not gain a fold call, and the reviewer's round-2 requirement is that the
+    ``not-checked`` marker be universal on machine-readable skipped paths, so
+    a consumer can never read a delivery envelope as "nothing owed".
+    """
     t = _setup(CasTransport([]))
     monkeypatch.setattr(cli, "_now", lambda: NOW)
     monkeypatch.setattr(
         obligations_mod, "fold",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("--no-obligations must skip the fold")),
+            AssertionError("the v2 read path must never run the fold")),
     )
 
-    rc = cli.main([
-        "queue", "r", "--agent", "amy", "--json", "--no-obligations",
-    ], transport=t)
+    rc = cli.main(
+        ["queue", "r", "--agent", "amy", "--json", *argv], transport=t)
     row = _json_lines(capsys)[-1]
 
     assert rc == 0
     assert row["type"] == "queue-delivery"
-    assert "obligations" not in row
+    assert row["event_count"] == 0
+    assert row["obligations"] == {"state": "not-checked"}
 
 
 def _commit(capsys, t, token, *, include_results=True):

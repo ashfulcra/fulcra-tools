@@ -200,13 +200,47 @@ def test_opt_out_restores_the_pre_ruling_cost(capsys):
     assert "obligations" not in capsys.readouterr().err
 
 
-def test_empty_read_reconciles_by_default(capsys):
-    """Default ON: a plain empty wake now reconciles without being asked."""
+def test_empty_read_does_not_reconcile_unless_asked(capsys, monkeypatch):
+    """OPT-IN since 2026-08-02 (promise plan T3(b)): the default wake pays nothing.
+
+    Flipped from ``test_empty_read_reconciles_by_default``. The measured
+    grounds are in the plan: at the default budget the fold answers UNKNOWN in
+    production every time, so default-ON bought no information at the price of
+    3+ listings on every empty wake fleet-wide. The fold, its verb and its
+    rc3/rc4 contract are untouched — only the subscription changed.
+    """
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    monkeypatch.setattr(
+        obligations_mod, "fold",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("the default read must not fold")))
     transport = _queue_transport()
-    rc = cli.cmd_queue(_queue_args(), transport)
+    rc = cli.main(["queue", TEAM, "--agent", AGENT], transport=transport)
     err = capsys.readouterr().err
-    assert "obligations CLEAR" in err
     assert rc == 0
+    assert "obligations" not in err
+
+
+def test_no_obligations_stays_an_accepted_no_op_alias(capsys, monkeypatch):
+    """Callers already passing --no-obligations keep working, unchanged."""
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    transport = _queue_transport()
+    rc = cli.main(
+        ["queue", TEAM, "--agent", AGENT, "--no-obligations"],
+        transport=transport)
+    assert rc == 0
+    assert "obligations" not in capsys.readouterr().err
+
+
+def test_obligations_flag_opts_the_empty_read_back_in(capsys, monkeypatch):
+    """The opt-in half: asking for the fold still runs it on an empty read."""
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    transport = _queue_transport()
+    rc = cli.main(
+        ["queue", TEAM, "--agent", AGENT, "--obligations"], transport=transport)
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "obligations CLEAR" in err
 
 
 def test_flag_reports_unknown_without_saturating_window_rc(capsys):
