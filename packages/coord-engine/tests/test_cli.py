@@ -1947,7 +1947,13 @@ def test_briefing_includes_pending_reviews(capsys):
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
     out = _j.loads(capsys.readouterr().out)
-    assert [r["name"] for r in out.get("pending_reviews", [])] == ["pr-5"]
+    pend = out.get("pending_reviews", [])
+    assert [r["name"] for r in pend
+            if r.get("type") == "review-pending"] == ["pr-5"]
+    # reconcile just wrote a fresh projection: the fold must disclose it served
+    # from it (the annotation read side's no-silent-staleness contract).
+    src = [r for r in pend if r.get("type") == "review-source"]
+    assert src and src[0]["source"] == "projection"
 
 
 def test_briefing_text_includes_pending_reviews(capsys):
@@ -2171,6 +2177,13 @@ def test_briefing_forge_degraded_exits_zero_other_sections_intact(capsys, monkey
     _seed_forge(t, agent="bob")
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     cli.main(["reconcile", "r"], transport=t)
+    # Pin the fold onto the RAW scan by dropping the reconcile-built forge
+    # projection (a team never projected behaves exactly as before): this test
+    # is about the raw fan-out's degraded handling, which a fresh projection
+    # deliberately bypasses.
+    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    agg.pop("forge", None)
+    t.store["team/r/_coord/summaries.json"] = json.dumps(agg)
     capsys.readouterr()
 
     assert cli.main(["briefing", "r", "--agent", "bob"], transport=t) == 0

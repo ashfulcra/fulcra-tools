@@ -30,7 +30,8 @@ from typing import Any, Optional
 from . import (
     aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
-    health as health_mod, jsonutil, okf, presence, query, records, review,
+    health as health_mod, jsonutil, okf, presence, projection as projection_mod,
+    query, records, review,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
@@ -364,6 +365,7 @@ def _load_rows_status(
     transport: Any, team: str, *, deadline: "Optional[Deadline]" = None,
     feed_changes: "Optional[list[dict[str, Any]]]" = None,
     feed_attempted: bool = False,
+    doc_sink: "Optional[list[Any]]" = None,
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
     was not, a short ``reason`` for the degraded surface to print (attribution: a
@@ -379,8 +381,16 @@ def _load_rows_status(
     so a None is disambiguated with one parent listing: ``list_dir`` RAISES on a
     transport failure and its entry names distinguish missing from present-but-
     unreadable (the #343 discipline). This is what lets `listen` surface a summaries
-    failure instead of folding it to a silent [] indistinguishable from empty."""
+    failure instead of folding it to a silent [] indistinguishable from empty.
+
+    ``doc_sink`` (sink idiom, like ``degraded_sink``): when given, exactly one
+    element is appended — the PARSED aggregate document, or None when it could
+    not be read/parsed. Callers hand it to the review/forge folds so they can
+    consume the projection sections (``projection.py``) from the summaries read
+    this load already paid for, never a second ~MiB read."""
     path = rec.summaries_path(team)
+    if doc_sink is not None:
+        doc_sink.append(None)
     try:
         raw = transport.read(path)
     except Exception:
@@ -397,6 +407,8 @@ def _load_rows_status(
         except Exception:
             # index present but corrupt -> unreadable, surface it
             return [], False, "summaries index unreadable"
+        if doc_sink is not None:
+            doc_sink[-1] = aggregate_doc
         # E2 primary path: one authoritative feed call since the aggregate cursor,
         # then direct reads of only changed task shards.  No task-dir listing is
         # consulted, so listing lag cannot hide a verified feed entry.
@@ -608,7 +620,10 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
-    rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
+    doc_sink: list[Any] = []
+    rows, rows_ok, rows_reason = _load_rows_status(
+        transport, args.team, doc_sink=doc_sink)
+    agg_doc = doc_sink[0] if doc_sink else None
     # Role routing: work addressed to a role this agent holds IS work that needs
     # this agent (see _held_roles_for_rows). An unresolved role is UNKNOWN and gets
     # its own marker below — never folded into "no role work".
@@ -628,8 +643,10 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # own independent, already-shipped budget.
     add_on = Deadline.open(_briefing_budget())
     got += _pending_reviews_for(
-        transport, args.team, args.agent, rows=rows, deadline=add_on.instant)
-    got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
+        transport, args.team, args.agent, rows=rows, deadline=add_on.instant,
+        aggregate_doc=agg_doc)
+    got += _forge_feedback_for(transport, args.team, args.agent,
+                               deadline=add_on.instant, aggregate_doc=agg_doc)
     # Blocked-on-human is the reserved FIRST section — prepended AFTER every other
     # section is built so it lands at index 0, and derived PURELY from ``rows``
     # (zero transport, un-starvable). It surfaces decisions parked on a human that
@@ -660,6 +677,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_forge_feedback_line(r))
             elif r.get("type") == "forge-degraded":
                 print(_forge_degraded_line(r))
+            elif r.get("type") == "forge-source":
+                print(_source_line("forge", r))
             else:
                 print(_line(r))
     return 0
@@ -1690,6 +1709,216 @@ def _pending_reviews_for(
     rows: "Optional[list[dict[str, Any]]]" = None,
     deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
     degraded_sink: "Optional[list[str]]" = None,
+    aggregate_doc: Any = None,
+) -> list[dict[str, Any]]:
+    """The pending-review fold, projection-first (the annotation read side).
+
+    With ``aggregate_doc`` (the parsed summaries document — callers get it for
+    free via ``_load_rows_status``'s ``doc_sink``), the fold consumes the
+    reconcile-built ``reviews`` projection section in ZERO extra transport ops
+    when it is FRESH (see ``projection.fresh_section``), and SAYS SO with a
+    trailing ``{"type": "review-source", "source": "projection", "as_of": T}``
+    row. A projection that exists but cannot be served (stale / incomplete /
+    unrecognized) falls back to the raw scan LOUDLY — same row shape,
+    ``"source": "raw-scan"`` plus the ``reason`` — never silently serving old
+    state as current. A team whose aggregate carries no projection at all (or a
+    caller that passes no ``aggregate_doc``) takes the raw scan with no source
+    row: byte-identical to the pre-projection behavior."""
+    if aggregate_doc is not None:
+        section, reason = projection_mod.fresh_section(
+            aggregate_doc, projection_mod.REVIEWS_KEY,
+            projection_mod.REVIEWS_SCHEMA, now=_iso(_now()))
+        if section is not None:
+            served = _pending_reviews_from_projection(
+                transport, team, agent, section, rows=rows,
+                degraded_sink=degraded_sink)
+            if served is not None:
+                return served
+            reason = "reviews projection malformed"
+        if reason:
+            out = _pending_reviews_raw(
+                transport, team, agent, rows=rows,
+                deadline_seconds=deadline_seconds, deadline=deadline,
+                degraded_sink=degraded_sink)
+            out.append({"type": "review-source", "source": "raw-scan",
+                        "reason": reason})
+            return out
+    return _pending_reviews_raw(
+        transport, team, agent, rows=rows, deadline_seconds=deadline_seconds,
+        deadline=deadline, degraded_sink=degraded_sink)
+
+
+#: The only ``state`` values a review projection row may carry — exactly what
+#: ``review.tally`` emits. Anything else is not a recognizable tally and must
+#: fail validation (never be served, never derive coverage).
+_REVIEW_PROJECTION_STATES = (review.PENDING, review.APPROVED, review.CHANGES)
+
+
+def _validated_review_projection(
+    section: dict[str, Any],
+) -> "Optional[tuple[dict[str, dict[str, Any]], list[str], list[str], list[str]]]":
+    """POSITIVELY validate a ``reviews`` projection section's nested data.
+
+    Returns ``(rows_by_name, orphans, orphans_unknown, tombstones)`` only when
+    EVERY served row and slug list matches the schema exactly: ``name`` a
+    non-empty str, ``state`` one of ``review.tally``'s states, ``settled`` a real
+    bool (a truthy ``"false"`` string must never suppress a pending row), and
+    ``pending_required`` a list of non-empty strs; the three slug lists are lists
+    of non-empty strs (absent -> empty). Producer INVARIANTS are enforced too
+    (round-3 P1b) — reconcile can produce neither a duplicate ``name`` (rows key
+    on the listing) nor ``settled: true`` outside a terminal
+    APPROVED-with-nothing-pending tally — so a duplicate row (last-write-wins
+    would let a later settled row silently replace a pending one) or an
+    impossible settled combination is malformed, never served. ANY violation
+    returns None — the caller then emits "projection malformed" and raw-scans,
+    loudly. Validation runs BEFORE any coverage or row is derived (round-2 P1: a
+    consumer that tolerates malformed nested values serves them silently, which
+    contradicts the loud-fallback contract)."""
+    proj_rows = section.get("rows")
+    if not isinstance(proj_rows, list):
+        return None
+    by_name: dict[str, dict[str, Any]] = {}
+    for r in proj_rows:
+        if not isinstance(r, dict):
+            return None
+        name = r.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        if r.get("state") not in _REVIEW_PROJECTION_STATES:
+            return None
+        if not isinstance(r.get("settled"), bool):
+            return None
+        pending = r.get("pending_required")
+        if not isinstance(pending, list) or not all(
+                isinstance(x, str) and x for x in pending):
+            return None
+        if r["settled"] and (r["state"] != review.APPROVED or pending):
+            return None  # settled is ONLY a terminal APPROVED-nothing-pending
+        if name in by_name:
+            return None  # duplicate name: last-write-wins could hide work
+        by_name[name] = r
+    slug_lists: list[list[str]] = []
+    for key in ("orphans", "orphans_unknown", "tombstones"):
+        val = section.get(key)
+        if val is None:
+            val = []
+        if not isinstance(val, list) or not all(
+                isinstance(s, str) and s for s in val):
+            return None
+        slug_lists.append(val)
+    return by_name, slug_lists[0], slug_lists[1], slug_lists[2]
+
+
+def _pending_reviews_from_projection(
+    transport: Any, team: str, agent: str, section: dict[str, Any], *,
+    rows: "Optional[list[dict[str, Any]]]" = None,
+    degraded_sink: "Optional[list[str]]" = None,
+) -> "Optional[list[dict[str, Any]]]":
+    """Serve the pending-review fold from a FRESH ``reviews`` projection section.
+
+    One in-memory pass over the projection rows replaces the whole raw fan-out:
+    settled rows skip, PENDING rows with a non-empty ``pending_required`` resolve
+    role holders exactly as the raw scan does (role leases stay a live read —
+    they are cheap and per-agent-relevant), and orphan/tombstone knowledge comes
+    pre-classified. Every nested row/list is positively validated FIRST
+    (``_validated_review_projection``); any shape doubt returns None and the
+    caller falls back to the raw scan, loudly.
+
+    HEAD COVERAGE (round-2 P0): EVERY open caller-owned review-request slug is
+    authoritative head coverage and is raw-tallied per slug — even when the
+    projection carries a row for it. A projection row for a head slug can be a
+    reconcile/write race artifact (reconcile carried an old settled row, then
+    the head advanced, the doc was rewritten and the caller's directive landed —
+    all before the stamp), so a "covered" head slug served from the projection
+    could hide the caller's OWN open obligation until the next rebuild. The head
+    set is small by construction (the agent's own open review queue), the same
+    reasoning that gives the raw fold its dedicated head budget; an unresolvable
+    head slug stays UNKNOWN-loud (``review-head-degraded``), same as the raw
+    fold. The projection still answers the whole non-head tail in zero ops."""
+    validated = _validated_review_projection(section)
+    if validated is None:
+        return None
+    by_name, orphans, orphans_unknown, tombstones = validated
+    now = _iso(_now())
+    out: list[dict[str, Any]] = []
+    role_holders: dict[str, list[str]] = {}
+    degraded_roles: set[str] = set()
+    roles_listing_cache: dict[str, Any] = {}
+
+    def _match_pending(pending: list[str]) -> bool:
+        if agent not in pending:
+            for role in pending:
+                if role not in role_holders:
+                    holders, ok = _role_fresh_holders(
+                        transport, team, role, now=now,
+                        listing_cache=roles_listing_cache)
+                    role_holders[role] = holders
+                    if not ok:
+                        degraded_roles.add(role)
+        return review.is_pending_for(pending, agent, role_holders)
+
+    # The caller's OWN open review-request slugs are answered by the raw tally
+    # below, NEVER by a projected row — see HEAD COVERAGE in the docstring.
+    head_slugs = sorted(_caller_review_head_slugs(rows, agent))
+    head_set = set(head_slugs)
+
+    for slug in sorted(by_name):
+        if slug in head_set:
+            continue  # authoritative head coverage: raw-tallied below
+        r = by_name[slug]
+        if r["settled"]:
+            continue
+        pending = r["pending_required"]
+        if r["state"] != review.PENDING or not pending:
+            continue
+        if _match_pending(pending):
+            out.append({"type": "review-pending", "name": slug,
+                        "state": "PENDING", "pending_required": list(pending)})
+
+    head_scanned = head_skipped = 0
+    for slug in head_slugs:
+        # Same per-slug fail-closed guard the raw fold's _scan_one carries: a
+        # transient transport failure on ONE verdict read (which escapes
+        # _review_tally — its inner read loop has no TransportError guard) must
+        # degrade THIS slug to UNKNOWN-loud, never crash the whole
+        # projection-backed fold (round-3 P1a).
+        try:
+            tally, doc_ok, vok, listing_ok = _review_tally(transport, team, slug)
+        except TransportError:
+            tally, doc_ok, vok, listing_ok = {}, False, False, False
+        head_scanned += 1
+        if not (doc_ok and vok and listing_ok):
+            head_skipped += 1
+            if degraded_sink is not None:
+                degraded_sink.append(f"review-verdicts:{slug}")
+            continue
+        pending = tally.get("pending_required") or []
+        if tally.get("state") == review.PENDING and pending and _match_pending(
+                [str(x) for x in pending if str(x)]):
+            out.append({"type": "review-pending", "name": slug,
+                        "state": "PENDING",
+                        "pending_required": [str(x) for x in pending]})
+    if head_skipped:
+        out.append(budget_mod.degraded_row(
+            "review-head-degraded", head_scanned, len(head_slugs), head_skipped))
+
+    for slug in orphans:
+        out.append({"type": "review-orphan", "name": slug})
+    for slug in orphans_unknown:
+        out.append({"type": "review-orphan-degraded", "name": slug})
+    if degraded_roles:
+        out.append({"type": "review-role-degraded",
+                    "roles": sorted(degraded_roles)})
+    out.append({"type": "review-source", "source": "projection",
+                "as_of": section.get("generated_at")})
+    return out
+
+
+def _pending_reviews_raw(
+    transport: Any, team: str, agent: str, *,
+    rows: "Optional[list[dict[str, Any]]]" = None,
+    deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
+    degraded_sink: "Optional[list[str]]" = None,
 ) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: the top listing failing yields []
@@ -2038,7 +2267,18 @@ def _review_row_line(r: dict[str, Any]) -> Optional[str]:
     if t == "review-role-degraded":
         return (f"  review role resolution degraded: "
                 f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
+    if t == "review-source":
+        return _source_line("review", r)
     return None
+
+
+def _source_line(label: str, r: dict[str, Any]) -> str:
+    """Render a fold's source row — the no-silent-staleness disclosure: every
+    projection-aware fold SAYS whether it served the reconcile-built projection
+    (and as of when) or fell back to the raw scan (and why)."""
+    if r.get("source") == "projection":
+        return f"  {label} fold: projection (as of {r.get('as_of')})"
+    return f"  {label} fold: raw scan — {r.get('reason') or 'projection unusable'}"
 
 
 def _forge_responsible(
@@ -2150,6 +2390,138 @@ def _forge_slug_feedback(
 
 
 def _forge_feedback_for(
+    transport: Any, team: str, agent: str, *, deadline: Optional[float] = None,
+    aggregate_doc: Any = None,
+) -> list[dict[str, Any]]:
+    """The forge-feedback fold, projection-first (the annotation read side).
+
+    Same contract as ``_pending_reviews_for``: with ``aggregate_doc``, a FRESH
+    ``forge`` projection section replaces the team-global responsibility +
+    feedback fan-out — the only remaining transport work is one ack read per
+    feedback item for THIS agent (ack state is per-agent and stays live) — and
+    the fold appends ``{"type": "forge-source", "source": "projection",
+    "as_of": T}``. A projection present but unservable falls back to the raw
+    scan loudly (``"source": "raw-scan"`` + reason); no projection / no
+    ``aggregate_doc`` is the pre-projection raw scan, byte-identical."""
+    if aggregate_doc is not None:
+        section, reason = projection_mod.fresh_section(
+            aggregate_doc, projection_mod.FORGE_KEY,
+            projection_mod.FORGE_SCHEMA, now=_iso(_now()))
+        if section is not None:
+            served = _forge_feedback_from_projection(
+                transport, team, agent, section, deadline=deadline)
+            if served is not None:
+                return served
+            reason = "forge projection malformed"
+        if reason:
+            out = _forge_feedback_raw(transport, team, agent, deadline=deadline)
+            out.append({"type": "forge-source", "source": "raw-scan",
+                        "reason": reason})
+            return out
+    return _forge_feedback_raw(transport, team, agent, deadline=deadline)
+
+
+def _validated_forge_projection(
+    section: dict[str, Any],
+) -> "Optional[tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]]":
+    """POSITIVELY validate a ``forge`` projection section's nested data.
+
+    Returns ``(responsible, feedback)`` only when EVERY nested collection
+    matches the schema exactly: every ``responsible`` value a list of non-empty
+    strs (a non-list entry must not be silently excluded — it could hide a real
+    responsibility), every ``feedback`` value a list of dicts each carrying a
+    non-empty str ``id`` (the ack key — an id-less item must not silently
+    vanish) and an ``author`` that is a str or None. ANY other nested type/value
+    returns None — the caller then emits "projection malformed" and raw-scans,
+    loudly (round-2 P1)."""
+    resp = section.get("responsible")
+    fb = section.get("feedback")
+    if not isinstance(resp, dict) or not isinstance(fb, dict):
+        return None
+    for agents in resp.values():
+        if not isinstance(agents, list) or not all(
+                isinstance(a, str) and a for a in agents):
+            return None
+    for items in fb.values():
+        if not isinstance(items, list):
+            return None
+        for it in items:
+            if not isinstance(it, dict):
+                return None
+            if not isinstance(it.get("id"), str) or not it["id"]:
+                return None
+            author = it.get("author")
+            if author is not None and not isinstance(author, str):
+                return None
+    return resp, fb
+
+
+def _forge_feedback_from_projection(
+    transport: Any, team: str, agent: str, section: dict[str, Any], *,
+    deadline: Optional[float] = None,
+) -> "Optional[list[dict[str, Any]]]":
+    """Serve the forge-feedback fold from a FRESH ``forge`` projection section.
+
+    Responsibility and the feedback item ids/authors come from the section; the
+    fold reads only THIS agent's ack shard per item (acked items hide, exactly
+    as the raw fold hides them). Bounded by the caller's shared ``deadline``; a
+    breach truncates with the same ``forge-degraded`` marker discipline. Every
+    nested collection is positively validated FIRST
+    (``_validated_forge_projection``); any shape doubt returns None (caller
+    raw-scans, loud)."""
+    validated = _validated_forge_projection(section)
+    if validated is None:
+        return None
+    resp, fb = validated
+    mine = sorted(slug for slug, agents in resp.items() if agent in agents)
+    out: list[dict[str, Any]] = []
+    dl = Deadline(deadline)
+    total = len(mine)
+    scanned = 0
+    skipped = 0
+    degraded = False
+    for slug in mine:
+        if dl.expired():
+            degraded = True
+            break
+        scanned += 1
+        items = fb.get(slug) or []
+        unacked: list[str] = []
+        authors: list[str] = []
+        cut = False
+        for it in items:  # shapes proven by _validated_forge_projection
+            stem = it["id"]
+            if dl.expired():
+                cut = True
+                break
+            acked = transport.read(_ack_path(team, stem, agent))
+            if dl.expired():
+                cut = True
+                break
+            if acked is not None:
+                continue  # acked by this agent — hidden
+            unacked.append(stem)
+            author = it.get("author")
+            if author and author not in authors:
+                authors.append(author)
+        if cut:
+            # Budget expired mid-PR: the partial row is untrusted — discard it,
+            # count the PR skipped, stop (the raw fold's discipline).
+            skipped += 1
+            degraded = True
+            break
+        if unacked:
+            out.append({"type": "forge-feedback", "pr_slug": slug,
+                        "count": len(unacked), "authors": sorted(authors),
+                        "items": sorted(unacked)})
+    if degraded:
+        out.append(budget_mod.degraded_row("forge-degraded", scanned, total, skipped))
+    out.append({"type": "forge-source", "source": "projection",
+                "as_of": section.get("generated_at")})
+    return out
+
+
+def _forge_feedback_raw(
     transport: Any, team: str, agent: str, *, deadline: Optional[float] = None
 ) -> list[dict[str, Any]]:
     """Unacked forge-feedback shards on PRs the agent is responsible for, one
@@ -3174,7 +3546,10 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # deadline also means an expensive earlier probe shrinks what the next gets,
     # rather than each one starting the clock fresh.
     fold_dl = Deadline.open(_obligation_budget())
-    rows, rows_ok, rows_reason = _load_rows_status(transport, team)
+    doc_sink: list[Any] = []
+    rows, rows_ok, rows_reason = _load_rows_status(
+        transport, team, doc_sink=doc_sink)
+    agg_doc = doc_sink[0] if doc_sink else None
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, team, agent, rows, now=now)
 
@@ -3217,9 +3592,12 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         markers = [r.get("type") for r in found
                    if isinstance(r.get("type"), str)
                    and r["type"].endswith("-degraded")]
+        # ``*-source`` rows are the folds' provenance disclosure (projection vs
+        # raw scan) — informational, never owed work and never degradation.
         real = [r for r in found
                 if not (isinstance(r.get("type"), str)
-                        and r["type"].endswith("-degraded"))]
+                        and (r["type"].endswith("-degraded")
+                             or r["type"].endswith("-source")))]
         return real, markers
 
     def _reviews_probe():
@@ -3232,7 +3610,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         sink: list[str] = []
         found = _pending_reviews_for(transport, team, agent, rows=rows,
                                      deadline=fold_dl.instant,
-                                     degraded_sink=sink)
+                                     degraded_sink=sink,
+                                     aggregate_doc=agg_doc)
         real, markers = _split_markers(found)
         if sink or markers:
             # Degraded, but the pending rows that WERE read stay available: the
@@ -3248,7 +3627,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         if fold_dl.expired():
             return P(state=S.UNREADABLE, detail="obligation budget exhausted")
         found = _forge_feedback_for(transport, team, agent,
-                                    deadline=fold_dl.instant)
+                                    deadline=fold_dl.instant,
+                                    aggregate_doc=agg_doc)
         real, markers = _split_markers(found)
         if markers:
             return P(state=S.UNREADABLE, owed=real,
@@ -5328,7 +5708,10 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # not an add-on — an UNKNOWN summaries index must surface as the shared marker,
     # never a silently-empty board/inbox/needs-me that reads as "all clear". The
     # bundle stays tolerant (rc 0); the marker + stderr notice make it loud.
-    rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
+    doc_sink: list[Any] = []
+    rows, rows_ok, rows_reason = _load_rows_status(
+        transport, args.team, doc_sink=doc_sink)
+    agg_doc = doc_sink[0] if doc_sink else None
     if not rows_ok:
         out["read_degraded"] = _read_degraded_row(rows_reason)
     # One shared add-on deadline (see _briefing_budget), opened HERE — before the
@@ -5399,13 +5782,15 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # tighter, already-shipped budget (whichever bound is sooner).
     try:
         out["pending_reviews"] = _pending_reviews_for(
-            transport, args.team, agent, rows=rows, deadline=add_on.instant)
+            transport, args.team, agent, rows=rows, deadline=add_on.instant,
+            aggregate_doc=agg_doc)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
     try:
         out["forge_feedback"] = _forge_feedback_for(
-            transport, args.team, agent, deadline=add_on.instant)
+            transport, args.team, agent, deadline=add_on.instant,
+            aggregate_doc=agg_doc)
     except Exception as e:
         print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
         out["forge_feedback"] = []
@@ -5473,7 +5858,7 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # split out and dispatched, never tallied; only real review rows count.
     _review_degraded_markers = (
         "review-fold-degraded", "review-head-degraded",
-        "review-orphan-degraded", "review-role-degraded")
+        "review-orphan-degraded", "review-role-degraded", "review-source")
     pend_rows = [r for r in out["pending_reviews"]
                  if r.get("type") not in _review_degraded_markers]
     degraded_rows = [r for r in out["pending_reviews"]
@@ -5484,13 +5869,17 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in degraded_rows:  # always shown — a degraded/UNKNOWN fold must never hide
         print(_review_row_line(r) or _line(r))
     forge_rows = out.get("forge_feedback") or []
-    forge_fb = [r for r in forge_rows if r.get("type") != "forge-degraded"]
+    forge_fb = [r for r in forge_rows
+                if r.get("type") not in ("forge-degraded", "forge-source")]
     forge_deg = [r for r in forge_rows if r.get("type") == "forge-degraded"]
+    forge_src = [r for r in forge_rows if r.get("type") == "forge-source"]
     print(f"  forge feedback: {len(forge_fb)} PR(s)")
     for r in forge_fb[:5]:
         print(_forge_feedback_line(r))
     for r in forge_deg:  # always shown — a degraded fold must never hide
         print(_forge_degraded_line(r))
+    for r in forge_src:  # the fold's source disclosure (projection vs raw scan)
+        print(_source_line("forge", r))
     # A budget cut means UNKNOWN/stale, not ABSENT. The stderr line above already
     # gives the remedy; do not contradict it with continuity's absence rendering.
     if not resume_cut:

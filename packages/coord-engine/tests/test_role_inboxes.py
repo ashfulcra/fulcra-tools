@@ -89,17 +89,25 @@ def test_role_directive_absent_for_non_holder(capsys):
     assert "role_degraded" not in b
 
 
+def _work_rows(rows):
+    """Filter the folds' provenance disclosure rows (``*-source`` — projection
+    vs raw scan, always present after a reconcile) down to the work rows the
+    assertions are about."""
+    return [r for r in rows
+            if not str(r.get("type") or "").endswith("-source")]
+
+
 def test_role_directive_surfaces_in_inbox_and_needs_me_verbs(capsys):
     t = _team_with_role_directive()
     assert cli.main(["inbox", TEAM, "-a", "bob", "--json"], transport=t) == 0
     assert [r["name"] for r in json.loads(capsys.readouterr().out)] == ["role-do-1"]
     assert cli.main(["needs-me", TEAM, "--agent", "bob", "--json"], transport=t) == 0
-    assert [r["name"] for r in json.loads(capsys.readouterr().out)] == ["role-do-1"]
+    assert [r["name"] for r in _work_rows(json.loads(capsys.readouterr().out))] == ["role-do-1"]
     # non-holder sees neither
     assert cli.main(["inbox", TEAM, "-a", "carol", "--json"], transport=t) == 0
     assert json.loads(capsys.readouterr().out) == []
     assert cli.main(["needs-me", TEAM, "--agent", "carol", "--json"], transport=t) == 0
-    assert json.loads(capsys.readouterr().out) == []
+    assert _work_rows(json.loads(capsys.readouterr().out)) == []
 
 
 def test_stale_lease_hides_role_directive(capsys):

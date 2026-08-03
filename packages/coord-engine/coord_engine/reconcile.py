@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
 from . import aggregate, config, health as health_mod, jsonutil, model, okf
+from . import projection as projection_mod
+from .budget import Deadline
 from .log import get_logger
 from .roles import age_hours
 from .tasks import agent_key
@@ -146,7 +148,12 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
     if age is None or age < 0 or age > MAX_FAST_PATH_HOURS:
         return False
     period = f"{int(age * 3600) + FAST_PATH_SKEW_MARGIN_SECONDS} seconds"
-    relevant = (f"/team/{team}/task/", f"/team/{team}/_coord/acks/")
+    # review/ + _coord/forge/ are fold-relevant since the read-side projection
+    # (projection.py): a verdict or feedback shard written between passes must
+    # decline the fast path, or the reviews/forge sections would keep their old
+    # stamp while claiming to cover state that has since moved.
+    relevant = (f"/team/{team}/task/", f"/team/{team}/_coord/acks/",
+                f"/team/{team}/review/", f"/team/{team}/_coord/forge/")
     # Derived artifacts are OUTPUTS of reconcile, not inputs — a prior pass's own
     # index/log writes must not poison the next pass's no-change evidence. (Cost:
     # hand-corruption of index/log self-heals within MAX_FAST_PATH_HOURS instead
@@ -1331,6 +1338,41 @@ def reconcile(
     if fold.gc:
         warnings.append(f"shard-GC: pruned {fold.gc} orphaned ack shard(s)")
 
+    # --- read-side projection sections (reviews + forge) ---
+    # The read half of the annotation modernization: fold review verdict state
+    # and forge responsibility/feedback into summaries.json so wake folds answer
+    # from ONE read instead of a budget-bounded raw scan (projection.py has the
+    # schema + freshness contract). Best-effort: a build failure carries the
+    # prior sections unchanged (their old stamp ages them out honestly) and can
+    # never fail the pass.
+    proj_state: dict[str, Any] = {}
+    try:
+        proj_dl = Deadline.open(projection_mod.build_budget())
+        reviews_section = projection_mod.build_review_projection(
+            transport, team, now=now,
+            prior=(prior_agg or {}).get(projection_mod.REVIEWS_KEY),
+            settled_index=_load_settled_index(transport, team),
+            deadline=proj_dl, log=log)
+        forge_section = projection_mod.build_forge_projection(
+            transport, team, now=now,
+            review_rows=reviews_section.get("rows") or [],
+            reviews_complete=bool(reviews_section.get("complete")),
+            prior=(prior_agg or {}).get(projection_mod.FORGE_KEY),
+            deadline=proj_dl, log=log)
+        proj_state[projection_mod.REVIEWS_KEY] = reviews_section
+        proj_state[projection_mod.FORGE_KEY] = forge_section
+        if not reviews_section.get("complete"):
+            warnings.append(
+                "review-projection incomplete: scanned "
+                f"{reviews_section.get('scanned')}/{reviews_section.get('total')}"
+                " — review folds stay on the raw scan until a pass completes")
+    except Exception as e:  # never fail the pass; prior sections carry
+        log.warn("projection build failed; prior sections carried",
+                 team=team, error=str(e))
+        for key in (projection_mod.REVIEWS_KEY, projection_mod.FORGE_KEY):
+            if isinstance((prior_agg or {}).get(key), dict):
+                proj_state[key] = (prior_agg or {})[key]
+
     # --- heal engine-owned derived artifacts ---
     if not transport.write(index_path(team), okf.render_index(rows)):
         warnings.append("index.md write failed")
@@ -1385,6 +1427,10 @@ def reconcile(
     # passthrough below and rewritten in full every pass, so a stale value can never
     # resurrect. The fast path advances it in its own verified write above.
     ack_state[RECONCILE_CURSOR_KEY] = new_cursor
+    # The projection sections this pass built (or carried on failure) — owned by
+    # this build the same way the ack keys are, so they are cut from the
+    # passthrough below and written fresh, never resurrected stale.
+    ack_state.update(proj_state)
     # `prior` carries any top-level key a NEWER host wrote that this build does not
     # know about — see build_aggregate's invariant: rebuilding from a fixed key set
     # is what killed v1.6.8's anchor on the live mixed fleet. The ack keys are cut
@@ -1394,7 +1440,9 @@ def reconcile(
     # through would resurrect a value this pass decided not to keep.
     prior_unknown = {k: v for k, v in (prior_agg or {}).items()
                      if k not in (ACKS_ANCHOR_KEY, ACKS_STREAK_KEY,
-                                  RECONCILE_CURSOR_KEY)}
+                                  RECONCILE_CURSOR_KEY,
+                                  projection_mod.REVIEWS_KEY,
+                                  projection_mod.FORGE_KEY)}
     agg = aggregate.build_aggregate(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
