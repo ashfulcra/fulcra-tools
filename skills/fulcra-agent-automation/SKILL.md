@@ -102,9 +102,13 @@ standing rule ([`AGENTS.md` → Fulcra platform surface](../../AGENTS.md)) alrea
 Projection is the sanctioned replacement; do not switch the legacy writer back on to get timeline
 annotations — turn projection on instead.
 
-## 2. Listener — await new directives, responses, and verdicts (the reply leg)
-Every agent that sends an ask (`tell`/`broadcast`/`remind`/`review request`) should **arm a listener**:
-the send verbs now print the exact `listen` line to run for replies. `listen` is the engine-owned await
+## 2. Listener — await new directives, responses, and verdicts (RETIRED — reference only)
+**Do not arm a listener.** Since bus v3 you await replies to an ask
+(`tell`/`broadcast`/`remind`/`review request`) by reading your event queue
+(`coord-engine queue <team> --agent <you>`) on your next scheduled wake. The send verbs still
+print a `listen` line — that echo predates v3 and is a breadcrumb, not an instruction.
+The rest of this section documents the retired mechanism for whoever reads the engine code.
+`listen` is the engine-owned await
 leg — one implementation of the diff/notify logic that the launchd tick, live sessions, Codex, and
 headless all delegate to. Each tick id-diffs three sources against a per-agent state file: **new inbox
 directives** for the agent — including directives routed to a **role you hold a fresh lease on** (the
@@ -129,8 +133,9 @@ affirmative delivery or the configured horizon exits the loop. One-shot adapters
 nonzero so their scheduler can apply that backoff, but degradation is never interpreted as a clean
 queue or as permission to retire the listener.
 
-`listen` is the reply-leg watcher; the load-bearing **wake** read is the composite `briefing` path.
-When a scheduled tick's `briefing`/`inbox` degrades, quiet is NOT clear — apply the raw-bus fallback
+`listen` was the reply-leg watcher; the load-bearing **wake** read is now the bus v3 queue read
+(`coord-engine queue <team> --agent <you>`), with `briefing` as the durable-state fold you run after it.
+When a scheduled tick's `queue`/`briefing`/`inbox` degrades, quiet is NOT clear — apply the raw-bus fallback
 in §3 (**Degraded briefing → fail-closed raw-bus fallback**): raw-list + direct-read the unacked
 directives before reporting, never conclude "no work" off a degraded read.
 
@@ -219,11 +224,13 @@ first-generation entries are left inert unless an installer's documented
 migration path explicitly recognizes them. All installers are idempotent
 (reinstall replaces, never duplicates) and ship an `--uninstall` inverse.
 
-**Tick doctrine (shared by every adapter).** Every adapter keys off the same canonical, briefing-led
-tick — though claude-code's hook renders only steps 1–2 (`continuity resume` + `briefing`) as session
-context, leaving the verdict-before-ack duty steps to the review skill's reviewer procedure:
-`continuity resume` → `briefing` (THE entry fold — identity, role inboxes, needs-me incl. pending
-reviews) → for each review request, **slug-exact verdict-before-ack** (write the verdict file, verify
+**Tick doctrine (shared by every adapter).** Every adapter keys off the same canonical, **queue-led**
+tick — though claude-code's hook renders only the first steps (`continuity resume` + `briefing`) as session
+context, leaving the queue read and the verdict-before-ack duty steps to the waking agent:
+`continuity resume` → **`queue` (READ your events, process them, and — under cursor v2 — `queue commit`
+the staged token only after every event has a durable terminal classification; this is the wake surface,
+not `briefing`)** → `briefing` (the durable-state fold — identity, role inboxes, needs-me incl. pending
+reviews; it is what the events do NOT cover, never a substitute for the queue read) → for each review request, **slug-exact verdict-before-ack** (write the verdict file, verify
 `review status` clears you from `pending_required`, only then ack — never ack bare or against a different
 slug) → handle other work → `continuity snapshot` → `usage log` (ATC, when accounts are declared) →
 `continuity park` before session end → **report last**: the human-visible summary is the tick's final
@@ -338,13 +345,15 @@ When a cron/heartbeat wakes an agent to do team work, the wake payload should **
 (this is the structured version of `fulcra-agent-teams`' "read progress.md before acting" rule):
 ```bash
 coord-engine continuity resume <team> <agent>
+coord-engine queue <team> --agent <agent>      # the wake surface: read + process + commit
 ```
 Then process the team inbox and, before concluding, snapshot again
 (`coord-engine continuity snapshot …`) and let the next reconcile heal the views.
 
 ## 5. Recommended loop for a team
 1. **Heartbeat**: `install-heartbeat.sh <team>` — reconcile every ~20m (consent first).
-2. **On wake**: `continuity resume` → do work (`task …`, inbox) → `continuity snapshot` → `reconcile`.
+2. **On wake**: `continuity resume` → `queue` (read/process/commit) → do work (`task …`, inbox) →
+   `continuity snapshot` → `reconcile`.
 3. **Gate merges** with `fulcra-agent-review` (`review status`), and keep roles fresh with
    `fulcra-agent-roles` (`roles status`), escalating vacancies.
 

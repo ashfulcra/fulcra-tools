@@ -39,7 +39,9 @@ Rules for a GOOD ask (this is the part that makes the loop work):
   ("use vault A or B?"), the default you'd pick, and the consequence of waiting.
 - Put longer context in the task body *before* blocking.
 - Then **keep working other tasks** — blocking one task parks that workstream, not you.
-- Your listener will notify you when the answer arrives (the task returns to your inbox, unblocked).
+- The answer reaches you on your next wake: it returns to your inbox unblocked, and the delivery
+  record surfaces in your queue read (`coord-engine queue <team> --agent <you>`). Resident
+  listeners are retired — do not wait on one.
 
 ### 2. The orchestrator — never letting an ask rot (heartbeat/loop duty)
 ```bash
@@ -60,7 +62,8 @@ On every heartbeat: pull `asks --json`, diff against what you last surfaced, and
 coord-engine answer <team> <slug> --with "<the answer>"
 ```
 In ONE write: records the answer (`next_action: OPERATOR ANSWER: …` + body note), unblocks
-(`blocked → active`), hands the task back to its **owner** (their inbox + listener fire), and strips
+(`blocked → active`), hands the task back to its **owner** (their inbox, delivered on their next
+queue read), and strips
 `needs:human`. Refuses non-asks (a task that isn't needs:human-tagged or blocked ON THE OPERATOR — a task blocked on CI or another agent is not an ask) and asks with no owner —
 an answer can never land somewhere nobody is listening.
 
