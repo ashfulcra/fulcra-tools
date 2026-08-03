@@ -3370,12 +3370,13 @@ def _queue_result_envelope(
     read window with nothing new); the failure envelope owns INVALID and
     UNKNOWN, so CLEAR can never be a disguise for either.
 
-    Every CLEAR envelope carries an ``obligations`` key: the fold's report
-    when it ran, otherwise ``{"state": "not-checked"}``. CLEAR is the one
-    state a consumer might read as "nothing is owed", so the skip is stated
-    there rather than left to inference (promise plan T3(b)). A DATA envelope
-    delivers work and invites no such reading, and its shape stays exactly as
-    pinned by the golden.
+    EVERY envelope carries an ``obligations`` key: the fold's report when it
+    ran, otherwise ``{"state": "not-checked"}``. Not only CLEAR — round-2
+    finding 1. Scoping the marker to CLEAR made its PRESENCE a proxy for "the
+    window was empty" instead of for "the fold did not run", and left a
+    default DATA read — which performs exactly zero fold ops — silent about
+    coverage it never checked. A consumer must be able to test one key on one
+    shape, so the marker is universal and the golden gains the key.
     """
     from . import __version__ as engine_version
     protocol = None
@@ -3410,10 +3411,8 @@ def _queue_result_envelope(
         "engine_version": engine_version,
         "protocol": protocol,
     }
-    if obligations is not None:
-        envelope["obligations"] = obligations
-    elif not events:
-        envelope["obligations"] = _obligations_not_checked()
+    envelope["obligations"] = (
+        obligations if obligations is not None else _obligations_not_checked())
     return envelope
 
 
@@ -4160,11 +4159,12 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
     if peek:
+        obligations_fragment = _requested_obligations(args, transport, agent)
         if json_mode:
             jsonutil.print_json(_queue_result_envelope(
                 fresh, cfg=cfg,
                 cursor_path=records.cursor_path(args.team, agent),
-                advanced=False))
+                advanced=False, obligations=obligations_fragment))
         if fresh:
             print(f"queue: peek — {len(fresh)} event(s) shown, cursor NOT "
                   "advanced (the owning agent still receives them)",
@@ -4175,9 +4175,7 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     if not advanced:
         print("queue: cursor save failed — coverage unadvanced, next read "
               "re-covers this window", file=sys.stderr)
-    _, obligations_fragment = (
-        _reconcile_after_empty_read(args, transport, agent) if not fresh
-        else (0, None))
+    obligations_fragment = _requested_obligations(args, transport, agent)
     if json_mode:
         envelope = _queue_result_envelope(
             fresh, cfg=cfg,
@@ -4187,30 +4185,39 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
-def _reconcile_after_empty_read(
+def _requested_obligations(
         args: argparse.Namespace, transport: Any,
-        agent: str) -> "tuple[int, Optional[dict[str, Any]]]":
-    """Run the obligation fold after an empty queue read, on request.
+        agent: str) -> "Optional[dict[str, Any]]":
+    """Run the obligation fold for a queue read, IF the caller asked for it.
 
-    An empty queue read establishes that no EVENT arrived in the window. It does
-    not establish that nothing is owed — that is the r2 spec item-3 distinction,
-    and the fold is the only thing that closes it.
+    One rule, applied at every queue success envelope: an explicit
+    ``--obligations`` always folds; anything else never does. Returning None
+    is what makes the envelope say ``{"state": "not-checked"}``.
+
+    A queue read establishes what EVENTS arrived in the window. It does not
+    establish what is owed — that is the r2 spec item-3 distinction, and the
+    fold is the only thing that closes it. That gap does not close just
+    because the window happened to deliver something, which is why the flag is
+    no longer gated on an empty read (round-2 findings 1/2): a flag accepted
+    and then quietly dropped hands the caller silence they cannot tell apart
+    from a real verdict.
 
     OPT-IN since the 2026-08-02 promise plan (T3(b)), reversing the 2026-07-30
     default-ON ruling. It costs a task-index listing, a review listing and a
-    roles listing on an empty wake; the measured evidence is that at the
-    default budget it reaches no component and can only answer UNKNOWN, so
-    every default wake paid that bill for no information. Pass
-    ``--obligations`` to buy the answer when it is worth buying; when it is
-    skipped the envelope says ``{"state": "not-checked"}`` rather than nothing,
-    so the skip stays visible to automation.
+    roles listing per wake; the measured evidence is that at the default
+    budget it reaches no component and can only answer UNKNOWN, so every
+    default wake paid that bill for no information. The DEFAULT path performs
+    zero fold ops on any window — that is the cost contract, and it is
+    untouched. Pass ``--obligations`` to buy the answer when it is worth
+    buying; when it is skipped the envelope says ``{"state": "not-checked"}``
+    rather than nothing, so the skip stays visible to automation.
 
     The fragment reports fold UNKNOWN/INVALID inside a successful queue result.
     rc 3 is reserved for a degraded event window; the standalone ``obligations``
     verb retains its own nonzero UNKNOWN/INVALID contract.
     """
     if not getattr(args, "obligations", False):
-        return 0, None
+        return None
     result = obligations_mod.fold(
         _obligation_probes(transport, args.team, agent, now=_iso(_now())),
         expected=obligations_mod.OBLIGATION_COMPONENTS)
@@ -4225,7 +4232,7 @@ def _reconcile_after_empty_read(
     if not getattr(args, "json", False):
         print(f"queue: obligations {result.state.value} — {result.reason()}",
               file=sys.stderr)
-    return 0, fragment
+    return fragment
 
 
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
@@ -8126,17 +8133,20 @@ def build_parser() -> argparse.ArgumentParser:
     # budget the fold reaches 0/7 components in production, so the default
     # could only ever answer UNKNOWN while charging 3+ listings on every empty
     # wake fleet-wide — a signal with no information at a positive price.
-    # The skip is never silent: machine-readable success envelopes carry
+    # The skip is never silent: EVERY machine-readable success envelope carries
     # "obligations": {"state": "not-checked"}. --no-obligations is retained as
     # an accepted no-op alias so existing callers keep parsing. Default-ON
     # returns if an aggregate-fold rewrite ever makes CLEAR reachable.
+    # Passing it explicitly ALWAYS folds (round-2 findings 1/2) — an eventful
+    # window is not a reason to drop a flag the caller paid for.
     qu.add_argument("--obligations", action=argparse.BooleanOptionalAction,
                     default=False,
-                    help="after an EMPTY read, reconcile durable obligations "
+                    help="reconcile durable obligations alongside the read "
                          "(an empty queue is not proof nothing is owed); "
-                         "OFF by default — the verdict rides the success "
-                         "envelope, it never changes the exit code. "
-                         "--no-obligations is the (default) no-op alias")
+                         "OFF by default, and a default read folds nothing — "
+                         "the verdict rides the success envelope, it never "
+                         "changes the exit code. --no-obligations is the "
+                         "(default) no-op alias")
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")

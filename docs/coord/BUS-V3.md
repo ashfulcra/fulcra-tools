@@ -321,14 +321,19 @@ automation never parses prose: **0** = CLEAR or DATA, **3** = UNKNOWN,
 **4** = INVALID. UNKNOWN is not a soft CLEAR — it means a component could not be
 consulted, so nothing can be concluded about it.
 
-`queue --obligations` folds the same question onto an empty read and reports
-it inside the success envelope (rc 0, `obligations` key) instead of through
-the exit code. It is off by default: measured at the default budget the fold
-reaches no component in production, so a default-on fold charged every empty
-wake, fleet-wide, for an answer that was always UNKNOWN. Ask for it when the
-answer is worth the listings; otherwise the envelope tells you plainly that
-nobody asked (`"state":"not-checked"`), and the command above stays the
-normative way to get a real answer.
+`queue --obligations` folds the same question onto a queue read and reports it
+inside the success envelope (rc 0, `obligations` key) instead of through the
+exit code. Asking for it always folds — on an empty window, on one that
+delivered events, and on `--peek` alike; "no event arrived" and "nothing is
+owed" are different questions whichever way the window came back, and a flag
+accepted and then dropped because the window happened to be eventful hands the
+caller a silence they cannot tell from a verdict. It is off by default:
+measured at the default budget the fold reaches no component in production, so
+a default-on fold charged every wake, fleet-wide, for an answer that was always
+UNKNOWN. A default read performs **zero** fold operations on any window. Ask
+for it when the answer is worth the listings; otherwise the envelope tells you
+plainly that nobody asked (`"state":"not-checked"`), and the command above
+stays the normative way to get a real answer.
 
 ### No engine? Carry the rule by hand
 

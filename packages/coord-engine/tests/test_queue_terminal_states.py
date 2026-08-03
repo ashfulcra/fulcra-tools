@@ -322,6 +322,9 @@ def test_json_data_envelope_is_one_object_with_full_event_shape(
         "cursor": {"path": CURSOR, "advanced": True},
         "engine_version": records.engine_stamp()["engine_version"],
         "protocol": None,                 # legacy authority: no versions to report
+        # Round-2 finding 1: DATA skipped the fold too, so it says so. The
+        # golden gains one key rather than staying silent about zero fold ops.
+        "obligations": {"state": "not-checked"},
     }
 
 
@@ -338,8 +341,13 @@ def test_json_clear_envelope_is_one_object_not_silence(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("argv", [[], ["--no-obligations"]])
-def test_skipped_fold_is_declared_never_silent(monkeypatch, capsys, argv):
-    """A skipped fold is stated, not omitted.
+@pytest.mark.parametrize("window,state", [
+    ([], "CLEAR"),
+    ([_event_rec("r1", "job")], "DATA"),
+])
+def test_skipped_fold_is_declared_never_silent(
+        monkeypatch, capsys, argv, window, state):
+    """A skipped fold is stated, not omitted — on BOTH terminal states.
 
     REVERSED 2026-08-03 (promise plan T3(b), reviewer round-2). This test used
     to assert ``"obligations" not in row`` — it codified SILENT skipping. With
@@ -348,12 +356,40 @@ def test_skipped_fold_is_declared_never_silent(monkeypatch, capsys, argv):
     round-2 requirement is that the marker be universal on every
     machine-readable skipped path. ``--no-obligations`` remains an accepted
     no-op alias, so both spellings of "do not fold" carry the marker.
+
+    EXTENDED for round-2 finding 1: DATA carries it too. A DATA envelope from
+    a default read performed exactly zero fold ops, so omitting the key there
+    left the one state where the marker is cheapest to add reporting nothing
+    about coverage it never checked — and made the key's presence a proxy for
+    "the window was empty" rather than for "the fold did not run".
     """
-    t = _transport(window=[])
+    t = _transport(window=window)
     rc, out, _err = _run(monkeypatch, capsys, t, ["--json", *argv])
     row = _single_json_object(out)
     assert rc == 0
-    assert row["state"] == "CLEAR"
+    assert row["state"] == state
+    assert row["obligations"] == {"state": "not-checked"}
+
+
+@pytest.mark.parametrize("argv", [["--json"], ["--json", "--peek"]])
+def test_default_json_read_declares_not_checked_and_folds_nothing(
+        monkeypatch, capsys, argv):
+    """The marker is universal across default machine-readable success paths.
+
+    Non-vacuity for finding 1: the fold is booby-trapped, so a marker that
+    appeared because the fold ran (and happened to answer) would fail here.
+    """
+    from coord_engine import obligations as obligations_mod
+
+    monkeypatch.setattr(
+        obligations_mod, "fold",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("a default read must perform zero fold ops")))
+    t = _transport(window=[_event_rec("r1", "job")])
+    rc, out, _err = _run(monkeypatch, capsys, t, argv)
+    row = _single_json_object(out)
+    assert rc == 0
+    assert row["state"] == "DATA"
     assert row["obligations"] == {"state": "not-checked"}
 
 
