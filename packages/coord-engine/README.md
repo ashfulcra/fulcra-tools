@@ -108,7 +108,9 @@ disable a bound or make an op hang.
 | Variable | Default | Unit | Bounds |
 |---|---|---|---|
 | `COORD_TRANSPORT_TIMEOUT` | `30` | seconds | Hard per-op bound on every `fulcra-api file` subprocess. Constructor arg wins; run it TIGHT on a watcher (e.g. `8`) so the fold budgets buy real responsiveness. |
-| `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`). |
+| `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`) — the RAW-SCAN path; a fresh projection answers the tail in zero ops. |
+| `COORD_PROJECTION_MAX_AGE_HOURS` | `24` | hours | Freshness bound a `reviews`/`forge` projection section must meet before a fold may serve it. Beyond it the fold raw-scans and says `raw scan — <key> projection stale (Xh old, max Yh)`. |
+| `COORD_PROJECTION_BUILD_BUDGET` | `240` | seconds | Per-`reconcile`-pass budget for BUILDING those projection sections. On breach the section is stamped incomplete (and therefore unserved) rather than published partial; a large legacy corpus converges across passes. |
 | `COORD_BRIEFING_BUDGET` | `60` | seconds | Aggregate deadline for the `briefing`/`needs-me` transport-heavy add-on stack (chiefly the forge-feedback fan-out); opened once, spent cumulatively across sections. |
 | `COORD_FORGE_SWEEP_BUDGET` | `60` | seconds | Aggregate deadline for the direct `forge feedback` fallback: review/watch discovery plus its per-PR three-surface sweep. Breach is fail-visible and returns non-zero with a `forge-sweep-degraded` marker. |
 | `COORD_LISTEN_CLASSIFY_BUDGET` | `10` | seconds | Per-tick bound on the `listen` daemon's dir-only review-slug classification pass. |

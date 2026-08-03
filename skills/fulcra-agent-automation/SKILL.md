@@ -258,12 +258,19 @@ returned can silently drop a live unacked directive.
   (`fulcra-api file list`), read each `intent:`/`assignee`-shaped doc naming this agent or a role it
   holds, and act on anything open-and-unacked. Only report a genuinely clear inbox when a *non-degraded*
   read returns empty; a degraded read is reported **degraded**, never "no directives."
-- **Reviews — the specific case.** The `briefing`/`needs-me` pending-review fold is wall-clock bounded
+- **Reviews — the specific case.** The `briefing`/`needs-me` pending-review fold is **projection-first**:
+  it serves the reconcile-built `reviews` section of `_coord/summaries.json` when that section is fresh,
+  and discloses which source it used in a trailing `review-source` row — `review fold: projection (as of
+  T)` or `review fold: raw scan — <reason>` (stale / incomplete / malformed / unrecognized). A raw-scan
+  row is a **loud** fallback, never a silent one; read it as "a reconcile is behind", not as an error in
+  your own obligations. The caller's OWN head slugs are raw-tallied on every call either way.
+  The raw scan is wall-clock bounded
   (`COORD_REVIEW_FOLD_BUDGET`, default 45s): on a slow transport it stops early and emits a
   `review-fold-degraded` row (`{scanned, total}`, plus `skipped` when a slug's doc or verdict read
   failed) rather than a clean-looking partial. On that row, fall back to a per-slug `review status`
   sweep over the `review/` listing for the unscanned and skipped remainder, and clear those verdicts
-  before acking.
+  before acking. Full contract: [`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md) → "Where a fold's
+  answer came from".
 
 Codex's repaired watch prompt already does the review sweep; the **directive raw-bus fallback is the
 same discipline for the inbox side** — the installer-generated watcher (§2) and every adapter tick

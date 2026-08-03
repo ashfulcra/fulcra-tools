@@ -494,6 +494,17 @@ it (not on PyPI).
     messages can never share or clobber a slot: rc 0 `directive <slug> already delivered` is a *deduped
     identical resend*, and rc 1 `cannot verify delivery, retry` means the slot was unreadable — never
     overwritten, safe to retry.
+  - **The review/forge legs are projection-first, and they SAY so.** `briefing`/`needs-me` serve the
+    reconcile-built `reviews`/`forge` sections of `_coord/summaries.json` in zero extra ops when fresh,
+    and emit a trailing `review-source`/`forge-source` row disclosing it (`source: projection` + `as_of`,
+    or `source: raw-scan` + the `reason`: stale / incomplete / malformed — duplicate slug rows and
+    impossible `settled` combinations are malformed — / unrecognized). A projection that cannot be
+    served falls back to the full raw scan LOUDLY; it is never silently served as current. **The
+    caller's OWN head slugs are always raw-tallied** regardless of the projection (see the head-budget
+    rule below) — the projection answers the tail, never "does this agent still owe a verdict". No
+    source row at all means the aggregate carries no projection: the pre-projection raw scan.
+    Contract for readers: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) → "Where a fold's answer came
+    from". **Ship-gate: any new projection-served fold emits a source row through the shared renderer.**
   - **Honor every degraded row; never read a bounded fold as complete.** `briefing`/`needs-me` bound
     each section under `COORD_BRIEFING_BUDGET` (default 60s, opened once at the TOP of `briefing` and
     spent cumulatively across presence + forge + resume) and emit a `{scanned, total, skipped}`
@@ -596,7 +607,7 @@ it (not on PyPI).
     complete" a marker distinct from "tail truncated."**
   - **Every marker must RENDER, not just exist: `briefing` and `needs-me` type-dispatch every review row
     type they can receive (`review-pending`, `review-orphan(-degraded)`, `review-role-degraded`,
-    `review-fold-degraded`, `review-head-degraded`) through ONE shared helper (`_review_row_line`), so an
+    `review-fold-degraded`, `review-head-degraded`, `review-source`) through ONE shared helper (`_review_row_line`), so an
     identical row type can never diverge between the two verbs.** An unknown/typeless row must NEVER reach
     the generic task line (`_line`), whose `priority`/`status`/`title` lookups print `[ ?] ? None` on a
     marker shape; a degraded/UNKNOWN marker (head or tail) is always shown and NEVER counted as a pending

@@ -665,6 +665,48 @@ for. It is easy to forget precisely because it does not arrive as a directive �
 it was missing from the first cut of this procedure, and a fold without it can
 report CLEAR while a reviewer is waiting on you.
 
+### Where a fold's answer came from — the source row
+
+`briefing` and `needs-me` answer the review and forge legs **projection-first**:
+`reconcile` folds a `reviews` section (`coord.reviews.projection.v1`) and a
+`forge` section (`coord.forge.projection.v1`) into `_coord/summaries.json`, and a
+fresh section answers the whole non-head tail in **zero** extra transport ops
+instead of scanning hundreds of raw shards per wake.
+
+**No silent staleness.** Every projection-aware fold SAYS which source it served,
+as a trailing row rendered in text and carried in `--json`:
+
+```
+  review fold: projection (as of 2026-08-03T18:40:11Z)
+  review fold: raw scan — reviews projection stale (31.4h old, max 24h)
+```
+
+- `{"type":"review-source","source":"projection","as_of":T}` (and the
+  `forge-source` twin) — served from the projection, current as of `T`.
+- `{"type":"...-source","source":"raw-scan","reason":...}` — the projection
+  existed but could not be served, so the fold fell back to the full raw scan
+  **loudly**, naming the reason: `… projection stale (Xh old, max Yh)`
+  (bound: `COORD_PROJECTION_MAX_AGE_HOURS`, default 24h),
+  `… projection incomplete (scanned N/M)`, `… projection malformed` (a duplicate
+  slug row, or an impossible `settled` combination — `settled` with a state other
+  than APPROVED, or with a non-empty `pending_required`), `… projection
+  unrecognized`, `… projection stamp unreadable`, or `… projection stamped in the
+  future`. This is a degradation notice, not noise: it means a reconcile is behind
+  or the aggregate needs a rebuild.
+- **No source row at all** = the team's aggregate carries no projection (or the
+  caller passed none): the pre-projection raw scan, byte-identical.
+
+**Your own head is always raw-tallied.** The caller-owned review slugs — the ones
+`needs-me` derives from your review-request directives — are re-read per slug on
+every call regardless of the projection, under their own dedicated budget. The
+projection is never allowed to answer "does this agent still owe a verdict"; it
+answers the tail. A head that cannot complete is still UNKNOWN and still emits
+`review-head-degraded`.
+
+Rule for consumers: a `raw-scan` source row is information about the *store*, not
+about your obligations — never treat it as a failure of the fold, and never treat
+its absence as proof the projection was used.
+
 
 ## Send
 
