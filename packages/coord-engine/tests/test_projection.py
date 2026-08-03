@@ -337,6 +337,122 @@ def test_review_fold_head_slug_newer_than_projection_is_raw_scanned():
     assert [r["name"] for r in out if r.get("type") == "review-pending"] == ["fresh-pr"]
 
 
+def test_review_fold_head_slug_covered_by_stale_settled_row_still_surfaces():
+    # Round-2 P0 regression (reconcile/write race): reconcile carried a settled
+    # row, then — after the stamp — the head advanced (.settled cleared, the
+    # review doc rewritten head-keyed) and the caller's open review-request
+    # directive landed. The slug IS in the fresh complete:true section, but the
+    # caller-owned open directive is authoritative head coverage: the fold must
+    # raw-tally it and surface the pending review, never serve the stale
+    # "settled" row for the caller's own obligation.
+    t = FakeTransport()
+    _put_review(t, "pr-race", "alice", verdicts=[("alice", "approve")])
+    _reconcile(t)
+    agg = _agg(t)  # fresh, complete:true, pr-race carried as settled
+    assert [r["settled"] for r in agg[projection.REVIEWS_KEY]["rows"]] == [True]
+    head = "a" * 40
+    t.delete(f"team/{TEAM}/review/pr-race/verdicts/{projection.SETTLED_MARKER}")
+    t.put(f"team/{TEAM}/review/pr-race.md",
+          f"---\ntype: Review\nrequired: alice\nhead: {head}\n---\n")
+    rows = [{"id": "rr-race", "name": "rr-race",
+             "title": "REVIEW REQUEST: pr-race", "status": "proposed",
+             "assignee": "alice", "priority": "P2", "tags": []}]
+    out = cli._pending_reviews_for(t, TEAM, "alice", rows=rows,
+                                   aggregate_doc=agg)
+    assert [r["name"] for r in out
+            if r.get("type") == "review-pending"] == ["pr-race"]
+    # still a projection hit for the tail — only the head went to the raw tally
+    assert any(r.get("type") == "review-source"
+               and r["source"] == "projection" for r in out)
+
+
+def test_review_fold_head_slug_in_projection_not_double_emitted():
+    # a head slug the projection also carries as PENDING must surface exactly
+    # once (the raw head tally answers it; the projected row is skipped)
+    t = FakeTransport()
+    _put_review(t, "pr-mine", "alice")
+    _reconcile(t)
+    rows = [{"id": "rr-mine", "name": "rr-mine",
+             "title": "REVIEW REQUEST: pr-mine", "status": "proposed",
+             "assignee": "alice", "priority": "P2", "tags": []}]
+    out = cli._pending_reviews_for(t, TEAM, "alice", rows=rows,
+                                   aggregate_doc=_agg(t))
+    assert [r["name"] for r in out
+            if r.get("type") == "review-pending"] == ["pr-mine"]
+
+
+def test_review_fold_malformed_nested_row_falls_back_loud():
+    # Round-2 P1: nested values must be POSITIVELY validated before anything is
+    # served — e.g. settled:"false" is truthy and, served silently, would
+    # suppress a genuinely pending row while still claiming source:projection.
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+    good = {"name": "pr-1", "state": "PENDING",
+            "pending_required": ["alice"], "settled": False}
+    for bad_row in (
+        dict(good, settled="false"),          # bool field as a (truthy) string
+        dict(good, settled=0),                # bool field as an int
+        dict(good, state="WEIRD"),            # not a tally state
+        dict(good, state=None),
+        dict(good, pending_required="alice"),  # not a list
+        dict(good, pending_required=[1]),      # non-str reviewer
+        dict(good, pending_required=[""]),     # empty reviewer
+        dict(good, name=""),
+        "not-a-dict",
+    ):
+        agg = {projection.REVIEWS_KEY: _fresh_reviews_section(rows=[bad_row])}
+        out = cli._pending_reviews_for(t, TEAM, "alice", rows=[],
+                                       aggregate_doc=agg)
+        src = [r for r in out if r.get("type") == "review-source"]
+        assert len(src) == 1 and src[0]["source"] == "raw-scan", bad_row
+        assert src[0]["reason"] == "reviews projection malformed", bad_row
+        # the loud raw scan still surfaces the real pending review
+        assert [r["name"] for r in out
+                if r.get("type") == "review-pending"] == ["pr-1"], bad_row
+
+
+def test_review_fold_malformed_slug_lists_fall_back_loud():
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+    for key, val in (("orphans", "x"), ("orphans_unknown", [1]),
+                     ("tombstones", [""])):
+        agg = {projection.REVIEWS_KEY: _fresh_reviews_section(**{key: val})}
+        out = cli._pending_reviews_for(t, TEAM, "alice", rows=[],
+                                       aggregate_doc=agg)
+        src = [r for r in out if r.get("type") == "review-source"]
+        assert len(src) == 1 and src[0]["source"] == "raw-scan", key
+        assert src[0]["reason"] == "reviews projection malformed", key
+
+
+def test_forge_fold_malformed_nested_values_fall_back_loud():
+    # Round-2 P1, forge side: a non-list responsibility entry or an id-less
+    # feedback item must not be silently skipped — any invalid nested value is
+    # a loud raw-scan fallback.
+    t = FakeTransport()
+    _seed_forge_team(t)
+    fresh = {"schema": projection.FORGE_SCHEMA, "generated_at": _now_iso(),
+             "complete": True, "responsible": {"o-r-9": ["bob"]},
+             "feedback": {"o-r-9": [{"id": "review-1", "author": "rev"}]}}
+    for over in (
+        {"responsible": {"o-r-9": "bob"}},                       # not a list
+        {"responsible": {"o-r-9": [1]}},                         # non-str agent
+        {"responsible": {"o-r-9": [""]}},                        # empty agent
+        {"feedback": {"o-r-9": {"id": "review-1"}}},             # not a list
+        {"feedback": {"o-r-9": ["review-1"]}},                   # not a dict
+        {"feedback": {"o-r-9": [{"author": "rev"}]}},            # id-less item
+        {"feedback": {"o-r-9": [{"id": "", "author": "rev"}]}},  # empty id
+        {"feedback": {"o-r-9": [{"id": "review-1", "author": 7}]}},
+    ):
+        agg = {projection.FORGE_KEY: dict(fresh, **over)}
+        out = cli._forge_feedback_for(t, TEAM, "bob", aggregate_doc=agg)
+        src = [r for r in out if r.get("type") == "forge-source"]
+        assert len(src) == 1 and src[0]["source"] == "raw-scan", over
+        assert src[0]["reason"] == "forge projection malformed", over
+        # the loud raw scan still finds the real feedback
+        assert [r["pr_slug"] for r in out
+                if r.get("type") == "forge-feedback"] == ["o-r-9"], over
+
+
 def test_review_fold_unresolvable_head_slug_is_unknown_loud():
     class ReviewDocDown(FakeTransport):
         def read(self, path):

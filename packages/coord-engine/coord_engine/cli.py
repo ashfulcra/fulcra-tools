@@ -1748,6 +1748,58 @@ def _pending_reviews_for(
         deadline=deadline, degraded_sink=degraded_sink)
 
 
+#: The only ``state`` values a review projection row may carry — exactly what
+#: ``review.tally`` emits. Anything else is not a recognizable tally and must
+#: fail validation (never be served, never derive coverage).
+_REVIEW_PROJECTION_STATES = (review.PENDING, review.APPROVED, review.CHANGES)
+
+
+def _validated_review_projection(
+    section: dict[str, Any],
+) -> "Optional[tuple[dict[str, dict[str, Any]], list[str], list[str], list[str]]]":
+    """POSITIVELY validate a ``reviews`` projection section's nested data.
+
+    Returns ``(rows_by_name, orphans, orphans_unknown, tombstones)`` only when
+    EVERY served row and slug list matches the schema exactly: ``name`` a
+    non-empty str, ``state`` one of ``review.tally``'s states, ``settled`` a real
+    bool (a truthy ``"false"`` string must never suppress a pending row), and
+    ``pending_required`` a list of non-empty strs; the three slug lists are lists
+    of non-empty strs (absent -> empty). ANY other nested type/value returns
+    None — the caller then emits "projection malformed" and raw-scans, loudly.
+    Validation runs BEFORE any coverage or row is derived (round-2 P1: a
+    consumer that tolerates malformed nested values serves them silently, which
+    contradicts the loud-fallback contract)."""
+    proj_rows = section.get("rows")
+    if not isinstance(proj_rows, list):
+        return None
+    by_name: dict[str, dict[str, Any]] = {}
+    for r in proj_rows:
+        if not isinstance(r, dict):
+            return None
+        name = r.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        if r.get("state") not in _REVIEW_PROJECTION_STATES:
+            return None
+        if not isinstance(r.get("settled"), bool):
+            return None
+        pending = r.get("pending_required")
+        if not isinstance(pending, list) or not all(
+                isinstance(x, str) and x for x in pending):
+            return None
+        by_name[name] = r
+    slug_lists: list[list[str]] = []
+    for key in ("orphans", "orphans_unknown", "tombstones"):
+        val = section.get(key)
+        if val is None:
+            val = []
+        if not isinstance(val, list) or not all(
+                isinstance(s, str) and s for s in val):
+            return None
+        slug_lists.append(val)
+    return by_name, slug_lists[0], slug_lists[1], slug_lists[2]
+
+
 def _pending_reviews_from_projection(
     transport: Any, team: str, agent: str, section: dict[str, Any], *,
     rows: "Optional[list[dict[str, Any]]]" = None,
@@ -1759,23 +1811,25 @@ def _pending_reviews_from_projection(
     settled rows skip, PENDING rows with a non-empty ``pending_required`` resolve
     role holders exactly as the raw scan does (role leases stay a live read —
     they are cheap and per-agent-relevant), and orphan/tombstone knowledge comes
-    pre-classified. Returns None when the section's shape is not positively
-    parseable (the caller falls back to the raw scan, loudly).
+    pre-classified. Every nested row/list is positively validated FIRST
+    (``_validated_review_projection``); any shape doubt returns None and the
+    caller falls back to the raw scan, loudly.
 
-    HEAD COVERAGE: a review requested AFTER the projection was stamped is not in
-    it. The caller's OWN head slugs (from the review-request directive rows) that
-    the projection does not cover are raw-scanned per slug — small by
-    construction — so the agent's own obligations never wait on the next
-    reconcile; an unresolvable head slug stays UNKNOWN-loud
-    (``review-head-degraded``), same as the raw fold."""
-    proj_rows = section.get("rows")
-    if not isinstance(proj_rows, list):
+    HEAD COVERAGE (round-2 P0): EVERY open caller-owned review-request slug is
+    authoritative head coverage and is raw-tallied per slug — even when the
+    projection carries a row for it. A projection row for a head slug can be a
+    reconcile/write race artifact (reconcile carried an old settled row, then
+    the head advanced, the doc was rewritten and the caller's directive landed —
+    all before the stamp), so a "covered" head slug served from the projection
+    could hide the caller's OWN open obligation until the next rebuild. The head
+    set is small by construction (the agent's own open review queue), the same
+    reasoning that gives the raw fold its dedicated head budget; an unresolvable
+    head slug stays UNKNOWN-loud (``review-head-degraded``), same as the raw
+    fold. The projection still answers the whole non-head tail in zero ops."""
+    validated = _validated_review_projection(section)
+    if validated is None:
         return None
-    by_name: dict[str, dict[str, Any]] = {}
-    for r in proj_rows:
-        if not isinstance(r, dict) or not r.get("name"):
-            return None  # shape doubt -> the caller must raw-scan, loudly
-        by_name[str(r["name"])] = r
+    by_name, orphans, orphans_unknown, tombstones = validated
     now = _iso(_now())
     out: list[dict[str, Any]] = []
     role_holders: dict[str, list[str]] = {}
@@ -1794,26 +1848,26 @@ def _pending_reviews_from_projection(
                         degraded_roles.add(role)
         return review.is_pending_for(pending, agent, role_holders)
 
+    # The caller's OWN open review-request slugs are answered by the raw tally
+    # below, NEVER by a projected row — see HEAD COVERAGE in the docstring.
+    head_slugs = sorted(_caller_review_head_slugs(rows, agent))
+    head_set = set(head_slugs)
+
     for slug in sorted(by_name):
+        if slug in head_set:
+            continue  # authoritative head coverage: raw-tallied below
         r = by_name[slug]
-        if r.get("settled"):
+        if r["settled"]:
             continue
-        pending = [str(x) for x in (r.get("pending_required") or []) if str(x)]
-        if r.get("state") != review.PENDING or not pending:
+        pending = r["pending_required"]
+        if r["state"] != review.PENDING or not pending:
             continue
         if _match_pending(pending):
             out.append({"type": "review-pending", "name": slug,
-                        "state": "PENDING", "pending_required": pending})
+                        "state": "PENDING", "pending_required": list(pending)})
 
-    # Head slugs the projection does not cover: reviews newer than the stamp.
-    covered = (set(by_name)
-               | {str(s) for s in (section.get("orphans") or [])}
-               | {str(s) for s in (section.get("orphans_unknown") or [])}
-               | {str(s) for s in (section.get("tombstones") or [])})
-    missing = sorted(s for s in _caller_review_head_slugs(rows, agent)
-                     if s not in covered)
     head_scanned = head_skipped = 0
-    for slug in missing:
+    for slug in head_slugs:
         tally, doc_ok, vok, listing_ok = _review_tally(transport, team, slug)
         head_scanned += 1
         if not (doc_ok and vok and listing_ok):
@@ -1829,12 +1883,12 @@ def _pending_reviews_from_projection(
                         "pending_required": [str(x) for x in pending]})
     if head_skipped:
         out.append(budget_mod.degraded_row(
-            "review-head-degraded", head_scanned, len(missing), head_skipped))
+            "review-head-degraded", head_scanned, len(head_slugs), head_skipped))
 
-    for slug in section.get("orphans") or []:
-        out.append({"type": "review-orphan", "name": str(slug)})
-    for slug in section.get("orphans_unknown") or []:
-        out.append({"type": "review-orphan-degraded", "name": str(slug)})
+    for slug in orphans:
+        out.append({"type": "review-orphan", "name": slug})
+    for slug in orphans_unknown:
+        out.append({"type": "review-orphan-degraded", "name": slug})
     if degraded_roles:
         out.append({"type": "review-role-degraded",
                     "roles": sorted(degraded_roles)})
@@ -2350,6 +2404,41 @@ def _forge_feedback_for(
     return _forge_feedback_raw(transport, team, agent, deadline=deadline)
 
 
+def _validated_forge_projection(
+    section: dict[str, Any],
+) -> "Optional[tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]]":
+    """POSITIVELY validate a ``forge`` projection section's nested data.
+
+    Returns ``(responsible, feedback)`` only when EVERY nested collection
+    matches the schema exactly: every ``responsible`` value a list of non-empty
+    strs (a non-list entry must not be silently excluded — it could hide a real
+    responsibility), every ``feedback`` value a list of dicts each carrying a
+    non-empty str ``id`` (the ack key — an id-less item must not silently
+    vanish) and an ``author`` that is a str or None. ANY other nested type/value
+    returns None — the caller then emits "projection malformed" and raw-scans,
+    loudly (round-2 P1)."""
+    resp = section.get("responsible")
+    fb = section.get("feedback")
+    if not isinstance(resp, dict) or not isinstance(fb, dict):
+        return None
+    for agents in resp.values():
+        if not isinstance(agents, list) or not all(
+                isinstance(a, str) and a for a in agents):
+            return None
+    for items in fb.values():
+        if not isinstance(items, list):
+            return None
+        for it in items:
+            if not isinstance(it, dict):
+                return None
+            if not isinstance(it.get("id"), str) or not it["id"]:
+                return None
+            author = it.get("author")
+            if author is not None and not isinstance(author, str):
+                return None
+    return resp, fb
+
+
 def _forge_feedback_from_projection(
     transport: Any, team: str, agent: str, section: dict[str, Any], *,
     deadline: Optional[float] = None,
@@ -2359,14 +2448,15 @@ def _forge_feedback_from_projection(
     Responsibility and the feedback item ids/authors come from the section; the
     fold reads only THIS agent's ack shard per item (acked items hide, exactly
     as the raw fold hides them). Bounded by the caller's shared ``deadline``; a
-    breach truncates with the same ``forge-degraded`` marker discipline. Returns
-    None on a shape the fold cannot positively parse (caller raw-scans, loud)."""
-    resp = section.get("responsible")
-    fb = section.get("feedback")
-    if not isinstance(resp, dict) or not isinstance(fb, dict):
+    breach truncates with the same ``forge-degraded`` marker discipline. Every
+    nested collection is positively validated FIRST
+    (``_validated_forge_projection``); any shape doubt returns None (caller
+    raw-scans, loud)."""
+    validated = _validated_forge_projection(section)
+    if validated is None:
         return None
-    mine = sorted(slug for slug, agents in resp.items()
-                  if isinstance(agents, list) and agent in agents)
+    resp, fb = validated
+    mine = sorted(slug for slug, agents in resp.items() if agent in agents)
     out: list[dict[str, Any]] = []
     dl = Deadline(deadline)
     total = len(mine)
@@ -2379,28 +2469,24 @@ def _forge_feedback_from_projection(
             break
         scanned += 1
         items = fb.get(slug) or []
-        if not isinstance(items, list):
-            return None
         unacked: list[str] = []
         authors: list[str] = []
         cut = False
-        for it in items:
-            stem = (it or {}).get("id") if isinstance(it, dict) else None
-            if not stem:
-                continue
+        for it in items:  # shapes proven by _validated_forge_projection
+            stem = it["id"]
             if dl.expired():
                 cut = True
                 break
-            acked = transport.read(_ack_path(team, str(stem), agent))
+            acked = transport.read(_ack_path(team, stem, agent))
             if dl.expired():
                 cut = True
                 break
             if acked is not None:
                 continue  # acked by this agent — hidden
-            unacked.append(str(stem))
+            unacked.append(stem)
             author = it.get("author")
-            if author and str(author) not in authors:
-                authors.append(str(author))
+            if author and author not in authors:
+                authors.append(author)
         if cut:
             # Budget expired mid-PR: the partial row is untrusted — discard it,
             # count the PR skipped, stop (the raw fold's discipline).
