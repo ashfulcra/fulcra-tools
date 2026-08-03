@@ -5271,24 +5271,30 @@ def _held_roles(transport: Any, team: str, agent: str) -> tuple[list[str], bool]
 
 
 def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
-    """Session-exit checkpoint: snapshot every role the agent holds and point
-    each role's checkpoint_ref at it. The incumbent's `park`."""
+    """Session-exit checkpoint for every held role, or one selected role."""
     agent = args.agent or _host()
     now = _iso(_now())
-    held, ok = _held_roles(transport, args.team, agent)
+    if args.role:
+        holders, ok = _role_fresh_holders(
+            transport, args.team, args.role, now=now)
+        held = [args.role] if ok and agent in holders else []
+    else:
+        held, ok = _held_roles(transport, args.team, agent)
     if not ok:
         # UNKNOWN is not "nothing to park". Refusing here is the whole point: a
         # session runs park as it exits, so a silent no-op discards the checkpoint
         # the NEXT session resumes from, and nobody is watching to notice. Say the
         # checkpoint was not written, loudly and non-zero, while the operator can
         # still retry with the context still alive.
-        print(f"park: could not determine which roles {agent} holds in "
-              f"team/{args.team} (role state unreadable, not empty) — "
+        scope = f"role {args.role}" if args.role else f"which roles {agent} holds"
+        print(f"park: could not determine {scope} in team/{args.team} "
+              f"(role state unreadable, not empty) — "
               f"CHECKPOINT NOT WRITTEN. Nothing was parked; retry before ending "
               f"the session.", file=sys.stderr)
         return 1
     if not held:
-        print(f"park: {agent} holds no fresh roles in team/{args.team} — "
+        scope = f"fresh role {args.role}" if args.role else "no fresh roles"
+        print(f"park: {agent} holds {scope} in team/{args.team} — "
               f"CHECKPOINT NOT WRITTEN because there was nothing to park",
               file=sys.stderr)
         return 2
@@ -8298,6 +8304,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to wait for the delivery probe (default 90)")
     dr.set_defaults(func=cmd_doctor)
 
+    ac = sub.add_parser(
+        "acceptance", help="production acceptance probes across agent identities")
+    acsub = ac.add_subparsers(dest="acceptance_command", required=True)
+    acp = acsub.add_parser(
+        "pair", help="prove delivery, nonce round-trip, park/resume, and join")
+    acp.add_argument("team")
+    acp.add_argument("--agent", required=True, help="initiating identity A")
+    acp.add_argument("--peer", required=True, help="responding identity B")
+    acp.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="seconds allowed for each delivery/queue hop (default 90)")
+    acp.add_argument("--nonce", help=argparse.SUPPRESS)
+    acp.set_defaults(func=cmd_acceptance_pair)
+
     ak = sub.add_parser("asks", help="waiting-for-operator asks, oldest first (orchestrator pull)")
     ak.add_argument("team"); ak.add_argument("--human"); add_json(ak)
     ak.set_defaults(func=cmd_asks)
@@ -8504,8 +8524,9 @@ def build_parser() -> argparse.ArgumentParser:
     ctc = ctsub.add_parser("checkpoint", help="get/set a role's durable checkpoint_ref")
     ctc.add_argument("team"); ctc.add_argument("--role", required=True); ctc.add_argument("--ref")
     ctc.set_defaults(func=cmd_continuity_checkpoint)
-    ctp = ctsub.add_parser("park", help="session-exit: snapshot every held role + set checkpoint_refs")
+    ctp = ctsub.add_parser("park", help="session-exit: snapshot held roles + set checkpoint_refs")
     ctp.add_argument("team"); ctp.add_argument("--agent", "-a"); ctp.add_argument("--objective")
+    ctp.add_argument("--role", help="snapshot only this role (must have a fresh lease)")
     ctp.add_argument("--next", action="append"); ctp.add_argument("--open-question", action="append", dest="open_question")
     ctp.set_defaults(func=cmd_continuity_park)
 
@@ -8712,6 +8733,10 @@ _threads_blocked_signal = commands_threads._threads_blocked_signal
 _threads_ash_activity = commands_threads._threads_ash_activity
 _threads_candidate_rows = commands_threads._threads_candidate_rows
 cmd_threads = commands_threads.cmd_threads
+
+from . import commands_acceptance  # noqa: E402
+
+cmd_acceptance_pair = commands_acceptance.cmd_acceptance_pair
 
 
 if __name__ == "__main__":  # pragma: no cover
