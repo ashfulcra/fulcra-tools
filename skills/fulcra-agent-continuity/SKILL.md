@@ -174,11 +174,15 @@ coord-engine briefing <team> [--agent X] [--json]                  # session sta
 - `resume` prints checkpoint age on every read. JSON adds the derived
   `checkpoint_age_seconds` field without changing the stored snapshot. With no
   snapshot, JSON is the explicit object
-  `{"snapshot":null,"checkpoint_age_seconds":null}` (not bare `null`).
-  A future-dated `created_at` is invalid/unknown age and fails freshness just
+  `{"snapshot":null,"checkpoint_age_seconds":null,"error_code":null}` (not
+  bare `null`). A timestamp up to one second ahead is treated as zero-age clock
+  skew; farther-future `created_at` is invalid/unknown age and fails freshness
   like an unparseable timestamp. `--max-age DURATION` accepts
-  seconds/minutes/hours/days (`30s`, `15m`, `12h`, `2d`) and exits rc 2 when the checkpoint is absent,
-  has no valid age, or exceeds the bound.
+  seconds/minutes/hours/days (`30s`, `15m`, `12h`, `2d`) through
+  `999999999d`. It exits rc 2 when the duration is invalid, the age is unknown,
+  or the checkpoint exceeds the bound; JSON distinguishes those branches as
+  `invalid-max-age`, `checkpoint-age-unknown`, and `checkpoint-stale` in
+  `error_code` (successful reads carry `null`).
 - `briefing` is the session-start verb and **tolerates absent add-ons** — with no presence/directives
   installed the sections are simply empty; it never fails a cold start.
 

@@ -3003,24 +3003,34 @@ def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
     else:
         snap = continuity.latest(_agent_snapshots(transport, args.team, args.agent))
     age_seconds = continuity.checkpoint_age_seconds(snap, now=_now())
+    error_code = None
+    max_age_seconds = None
+    if args.max_age is not None:
+        max_age_seconds = continuity.parse_duration_seconds(args.max_age)
+        if max_age_seconds is None:
+            error_code = "invalid-max-age"
+        elif age_seconds is None:
+            error_code = "checkpoint-age-unknown"
+        elif age_seconds > max_age_seconds:
+            error_code = "checkpoint-stale"
     if args.json:
         out = dict(snap) if snap else {"snapshot": None}
         out["checkpoint_age_seconds"] = age_seconds
+        out["error_code"] = error_code
         jsonutil.print_json(out)
     else:
         print(continuity.render_resume(snap))
         print(f"  checkpoint age: {continuity.format_age(age_seconds)}")
     if args.max_age is not None:
-        max_age_seconds = continuity.parse_duration_seconds(args.max_age)
-        if max_age_seconds is None:
+        if error_code == "invalid-max-age":
             print(f"resume: invalid --max-age duration {args.max_age!r}; use s, m, h, or d",
                   file=sys.stderr)
             return 2
-        if age_seconds is None:
+        if error_code == "checkpoint-age-unknown":
             print("resume: checkpoint age is unknown; freshness requirement failed",
                   file=sys.stderr)
             return 2
-        if age_seconds > max_age_seconds:
+        if error_code == "checkpoint-stale":
             print(f"resume: checkpoint is {continuity.format_age(age_seconds)} old, "
                   f"exceeding --max-age {args.max_age}", file=sys.stderr)
             return 2
