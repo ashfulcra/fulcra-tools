@@ -44,12 +44,12 @@ ack step below):
 ```
 review <review-slug> requested (required: reviewer, security)
 reviewer reviewer -> file verdict at team/<team>/review/<review-slug>/verdicts/<head>--reviewer.md
-await verdicts: coord-engine listen <team> --agent <me>
+await verdicts: coord-engine queue <team> --agent <me>
 ```
 
-(The echoed `listen` line predates bus v3 — since 2026-07-27 you await verdicts
-by reading your event queue on your next wake, not by running the retired
-watcher. The verdict-file gate itself is unchanged.)
+(The `await verdicts:` line is the bus v3 reply leg: verdicts arrive as events on
+your queue read at your next wake — the retired `listen` watcher was removed from
+the engine entirely, 2026-08-03. The verdict-file gate itself is unchanged.)
 
 ### Recovery semantics (idempotent, fail-closed)
 - **New PR head** — re-run the SAME PR slug/URL/requester/required set with a new

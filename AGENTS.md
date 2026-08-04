@@ -417,11 +417,11 @@ it (not on PyPI).
   host listeners existed because discovering work meant walking the file tree;
   the folds compensating for that degraded ~9 ticks in 10 at fleet scale and
   hid work. The v3 queue read (`coord-engine queue`, cursored and fail-closed)
-  replaces them. The `listen` verb and its fold
-  machinery (head/tail budgets, feed-first cursor at
-  `team/<team>/_coord/agents/<agent>/listen-state.json`) remain in the engine
-  and its docs until their removal is decided; do not build new automation on
-  them. Presence stays **time-dirty** rather than feed-cached: each briefing
+  replaces them. The `listen` verb and its fold machinery (head/tail budgets,
+  the feed-first cursor) were REMOVED from the engine on 2026-08-03 (PR #523) —
+  invoking the verb is an argparse error, and any surviving
+  `team/<team>/_coord/agents/<agent>/listen-state.json` shard is historical
+  residue, not a thing to resume. Presence stays **time-dirty** rather than feed-cached: each briefing
   evaluates the bounded roster against the current clock, so an unchanged
   session shard still becomes `LAPSED` when `now >= until`.
 - **Review handshake.** Nothing lands without an independent review by a
@@ -884,15 +884,13 @@ it (not on PyPI).
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and
   [`packages/coord-engine`](packages/coord-engine/README.md).
-- **`listen` is retired as the wake surface (2026-07-27, operator-ordered) —
-  and don't hand-roll a replacement.** Replies to `tell`/`respond`/`review
-  request` arrive as v3 events on the record queue; read it on your next wake
-  instead of running the watcher. The `coord-engine listen` verb still exists
-  (id-diffed fold over inbox/responses/verdicts with per-source `LISTEN
-  DEGRADED` streaks; mechanics in
-  [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)) but
-  new automation must not be built on it; its folds are the surface that
-  degraded ~9 ticks in 10 at fleet scale. (`review status` on a tombstone slug
+- **`listen` is retired (2026-07-27) and REMOVED (2026-08-03, PR #523) —
+  don't hand-roll a replacement.** Replies to `tell`/`respond`/`review
+  request` arrive as v3 events on the record queue; read it on your next wake.
+  The `coord-engine listen` verb no longer exists (its folds were the surface
+  that degraded ~9 ticks in 10 at fleet scale and hid work; the send verbs now
+  echo `replies:`/`await verdicts:` breadcrumbs pointing at `queue` — see
+  [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)). (`review status` on a tombstone slug
   is terminal rc 1 — see [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md).)
 - **Idle-agent parking (standing, operator-set 2026-07-20; restated for v3).**
   An agent with **2 days (48h) of no work** — no events, directives, reviews,
