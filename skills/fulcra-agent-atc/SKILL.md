@@ -40,9 +40,14 @@ Three commands to a routable ledger. The engine is stdlib-only and installs on i
 
 ```bash
 uv tool install fulcra-api   # the `fulcra` CLI: auth + the Fulcra File Store (the bus)
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine"
 fulcra auth login            # browser sign-in; an account is created on first login
 ```
+
+The release tag is the **cold-install** path. The **fleet's runtime authority**
+is the store BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` +
+`BOOTSTRAP.md`, current pin scheme `pp-<sha>`), not this file — adopt from there
+once you are on the bus.
 
 Then seed your accounts. `atc init` writes `team/<team>/atc/accounts.json` (team
 defaults to `solo`) and is idempotent — re-running merges new accounts in by id and
@@ -164,7 +169,7 @@ Any agent runs this **before dispatching** work it can't or shouldn't do itself:
 
    | Harness | Pinned-model spawn | Wake surface for a resident dispatcher |
    |---|---|---|
-   | Claude Code CLI | `Agent` tool `model:` param; `claude -p --model <m>` | launchd listener (consent-gated wake), ScheduleWakeup |
+   | Claude Code CLI | `Agent` tool `model:` param; `claude -p --model <m>` | launchd scheduled wake running the queue read (consent-gated), ScheduleWakeup |
    | Claude desktop / Cowork | same CC core (Agent tool, hooks) | scheduled-tasks/routines opening a duty-cycle session |
    | Codex app | `codex exec -m <m>`; per-thread model | app automations (proven: coord-watch) |
    | OpenClaw | per-agent model config | HEARTBEAT.md managed block |
@@ -291,7 +296,7 @@ agent's spend is visible to the next. Two upgrades open up:
 
 **Cross-harness dispatch.** When the best candidate runs on a harness other than yours,
 post the work to that platform's dispatcher inbox with the chosen model/tier named in the
-task (tag it `route:`); the target's deployed listeners/heartbeats (the right column of
+task (tag it `route:`); the target's deployed scheduled wakes/heartbeats (the right column of
 the harness table) wake it. Same-harness work you still spawn locally.
 
 **Step up to a resident dispatcher (§B).** When one platform's routed work is heavy
@@ -300,10 +305,11 @@ enough to want a dedicated router, an agent steps up — no new engine surface:
 1. **Claim the role:** `coord-engine roles claim <team> dispatcher-<platform>` (e.g.
    `dispatcher-codex`) — a durable lease other agents can see.
 2. **Arm your native tick:** wire the platform's own wake surface (the harness table's
-   right column) — Codex app automation, Cowork scheduled task, CC launchd listener,
-   OpenClaw HEARTBEAT.md, Hermes loop.
-3. **Watch the queue:** each tick, `coord-engine inbox <team> --agent <id>` and pick up
-   tasks tagged `route:`.
+   right column) — Codex app automation, Cowork scheduled task, CC launchd scheduled
+   wake, OpenClaw HEARTBEAT.md, Hermes loop. A schedule, never a resident listener.
+3. **Watch the queue:** each tick, read the bus v3 queue
+   (`coord-engine queue <team> --agent <id>`), then `coord-engine inbox <team> --agent <id>`
+   for the durable fold, and pick up tasks tagged `route:`.
 4. **Route and spawn:** `coord-engine route <team> --needs …`, spawn the model-pinned
    subagent locally per the ranked pick.
 5. **Log every spend** with `coord-engine usage log … --model --task-class --outcome` so

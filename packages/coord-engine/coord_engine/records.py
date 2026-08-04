@@ -115,6 +115,21 @@ def parse_payload(note: Any) -> Optional[dict[str, Any]]:
     }
 
 
+def roundtrip_probe_payload(agent: str, nonce: str) -> str:
+    """Build the delivery-proof payload consumed by ``doctor --delivery``.
+
+    The synthetic recipient is owned by the caller, so proving the write/read
+    path never consumes or pollutes another agent's queue. Claims are
+    envelope-only and therefore owe no document pointer.
+    """
+    return build_payload(
+        to=f"{agent}-probe",
+        kind="claim",
+        priority="P3",
+        slug=f"delivery-probe-{nonce}",
+    )
+
+
 def sender_of(record: dict[str, Any]) -> Optional[str]:
     """The authoring agent from ``sources``, or None if unattributed.
 
@@ -163,6 +178,55 @@ def observed_version_warnings(rows: Optional[list[Any]]) -> list[str]:
             f"engine={v[0]}/protocol={v[1]}/cursor={v[2]}"
             for v in sorted(versions, key=str))
         warnings.append(f"mixed writer versions observed: {rendered}")
+    return warnings
+
+
+_LEGACY_NOTE_PREFIXES = (
+    "create:", "update:", "done:", "block:", "REVIEW REQUEST", "assignee:",
+)
+
+# Cap the per-read census so a flooded window cannot bloat a wake: three named
+# senders are enough to act on, the rest are counted in one tail line.
+_CENSUS_SENDER_CAP = 3
+
+
+def invisible_writer_census(window: Optional[list[Any]]) -> list[str]:
+    """Name senders whose control-looking notes modern readers cannot parse.
+
+    Ordinary free text remains silent. A missing/unreadable window is also
+    silent here because the queue's window-level UNKNOWN path owns that
+    diagnosis; absence of evidence must never become evidence of a clean
+    writer fleet.
+
+    At most ``_CENSUS_SENDER_CAP`` senders are named, lowest sender id first
+    (deterministic), with a ``+ N more sender(s)`` tail when the window holds
+    more — this runs on every queue read, so its worst case has to stay small.
+    """
+    if not window:
+        return []
+    offenders: dict[str, int] = {}
+    for rec in window:
+        if not isinstance(rec, dict):
+            continue
+        note = rec.get("note")
+        if not isinstance(note, str) or parse_payload(note) is not None:
+            continue
+        if not any(prefix in note for prefix in _LEGACY_NOTE_PREFIXES):
+            continue
+        sender = sender_of(rec)
+        if sender:
+            offenders[sender] = offenders.get(sender, 0) + 1
+    ranked = sorted(offenders.items())
+    warnings = [
+        f"{count} note(s) from {sender} look like control traffic but are "
+        "not parseable (v1) — that agent's engine predates bus-v3; its "
+        "messages are invisible to the fleet. It must run adopt-latest."
+        for sender, count in ranked[:_CENSUS_SENDER_CAP]
+    ]
+    hidden = len(ranked) - _CENSUS_SENDER_CAP
+    if hidden > 0:
+        warnings.append(
+            f"+ {hidden} more sender(s) writing unparseable control notes")
     return warnings
 
 
@@ -339,6 +403,12 @@ _AUTHORITY_FIELDS = (
     "minimum_reader_version", "minimum_writer_version",
     "cursor_generation", "cursor_activated_at",
 )
+#: The fleet's current engine pin. ADDITIVE and independent of the versioned
+#: authority block: it is carried through verbatim (any type) so the currency
+#: check can tell "absent" from "malformed", and its absence never makes an
+#: otherwise-valid config partial.
+CURRENT_ENGINE_FIELD = "current_engine_version"
+SCHEMA1_MINIMUM_ENGINE_VERSION = "1.8.0"
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 _ADOPTION_SLUG = re.compile(
     r"^adopted-v(?P<version>\d+\.\d+\.\d+)-"
@@ -347,6 +417,54 @@ _ADOPTION_SLUG = re.compile(
 
 def config_path(team: str) -> str:
     return f"team/{team}/{CONFIG_NAME}"
+
+
+def schema1_authority_migration_target(
+        raw: Any) -> tuple[Optional[dict[str, Any]], str]:
+    """Classify one authority and build the narrow s5 schema-v1 target.
+
+    Returns ``(target, readable-legacy|current)`` for the two safe states and
+    ``(None, malformed-blocks|unsupported-blocks)`` otherwise.  The target is
+    additive: transport fields and unknown sibling metadata are preserved,
+    while the complete authority block is installed in one document write.
+
+    This helper deliberately accepts raw store bytes instead of
+    :func:`load_config`: an environment override may select a local transport
+    stream, but it is not authority and must never be persisted by migration.
+    """
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, "malformed-blocks"
+    if not isinstance(doc, dict):
+        return None, "malformed-blocks"
+    parsed = _parse_config(raw)
+    if parsed is None:
+        return None, "malformed-blocks"
+    if parsed.get("authority_mode") == "versioned":
+        if (parsed.get("protocol_version") == 1
+                and parsed.get("cursor_schema_version") == 1):
+            return dict(doc), "current"
+        return None, "unsupported-blocks"
+
+    target = dict(doc)
+    target.update({
+        "protocol_version": 1,
+        "cursor_schema_version": 1,
+        "minimum_reader_version": SCHEMA1_MINIMUM_ENGINE_VERSION,
+        "minimum_writer_version": SCHEMA1_MINIMUM_ENGINE_VERSION,
+        "cursor_generation": 0,
+        "cursor_activated_at": None,
+    })
+    # Keep target construction honest if the schema changes later.
+    if _parse_config(json.dumps(target)) is None:
+        return None, "malformed-blocks"
+    return target, "readable-legacy"
+
+
+def render_authority_config(doc: dict[str, Any]) -> str:
+    """Stable store representation for a migrated authority document."""
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
 
 
 def _parse_config(raw: Any) -> Optional[dict[str, Any]]:
@@ -367,6 +485,8 @@ def _parse_config(raw: Any) -> Optional[dict[str, Any]]:
         "data_type": data_type.strip(),
         "api_version": (api_version or DEFAULT_API_VERSION).strip(),
     }
+    if CURRENT_ENGINE_FIELD in doc:
+        out[CURRENT_ENGINE_FIELD] = doc[CURRENT_ENGINE_FIELD]
     supplied = [name for name in _AUTHORITY_FIELDS if name in doc]
     if not supplied:
         return out
@@ -523,20 +643,97 @@ def compatibility(config: dict[str, Any], *, engine_version: str,
     return {"ok": True, "warnings": warnings}
 
 
+def authority_currency(config: Optional[dict], *,
+                       engine_version: str) -> Optional[str]:
+    """One warning line when this engine is OLDER than the authority's
+    current pin, else None. Rides the already-loaded config: zero transport.
+
+    Why: a machine replacement restores a stale environment snapshot whose
+    adopt-latest reinstalls an old engine (proven 2026-08-02, boot 30051b81);
+    that engine then writes events modern readers skip. This makes the very
+    first read loud instead. Absent field/config stays silent — an authority
+    that has not adopted the field must not nag, and a DEV engine ahead of
+    the pin is fine.
+    """
+    if not isinstance(config, dict):
+        return None
+    current = config.get(CURRENT_ENGINE_FIELD)
+    own, cur = _version_tuple(engine_version), (
+        _version_tuple(current) if isinstance(current, str) else None)
+    if own is None or cur is None or own >= cur:
+        return None
+    return (f"this engine is v{engine_version} but the fleet authority is "
+            f"v{current} — a stale snapshot likely restored it; run the "
+            f"store adopt-latest.sh before writing anything")
+
+
+def authority_currency_state(config: Optional[dict], *,
+                             engine_version: str) -> tuple[str, str]:
+    """Tri-state currency verdict for ``doctor --self``: (state, detail).
+
+    ``current`` is claimed ONLY when the pin exists, parses, and this engine
+    is at or above it. Everything else that prevents the comparison is
+    ``unknown`` and names WHY — an absent pin, a malformed one and an
+    unreadable config all mean "could not compare", which is emphatically not
+    "current" (reviewer correction 2026-08-03). ``stale`` carries the same
+    actionable sentence the queue read prints.
+
+    The queue-read path keeps silence on an absent field on purpose: that is
+    the pre-activation compatibility phase, and it ends when the authority
+    adopts the field. A deliberate health check has no such excuse.
+    """
+    if not isinstance(config, dict):
+        return "unknown", (
+            "the bus-v3 records config is absent or unreadable, so this "
+            "engine cannot be compared with the fleet pin")
+    current = config.get(CURRENT_ENGINE_FIELD)
+    if current is None:
+        return "unknown", (
+            f"the fleet authority declares no {CURRENT_ENGINE_FIELD}; "
+            "comparison is impossible, which is not the same as current")
+    if not isinstance(current, str) or _version_tuple(current) is None:
+        return "unknown", (
+            f"the fleet authority's {CURRENT_ENGINE_FIELD} is {current!r}, "
+            "which is not a parseable version; comparison is impossible")
+    if _version_tuple(engine_version) is None:
+        return "unknown", (
+            f"this engine reports version {engine_version!r}, which is not a "
+            "parseable version; comparison is impossible")
+    warning = authority_currency(config, engine_version=engine_version)
+    if warning:
+        return "stale", warning
+    return "current", (
+        f"this engine is v{engine_version}; the fleet authority pin is "
+        f"v{current}")
+
+
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
                kind: str, priority: str, slug: str, ptr: Optional[str] = None,
-               recorded_at: Optional[str] = None) -> bool:
+               recorded_at: Optional[str] = None,
+               team: Optional[str] = None) -> bool:
     """Emit one control-plane event; ``recorded_at`` in the future is a timer.
 
     ``build_payload`` raises on an unknown kind — a mistyped event class fails
     at the write. Returns the transport's verdict; False means the record did
     NOT land and the caller falls back to file-plane-only delivery (durable
     doc = truth, record = delivery).
+
+    THE ONE TAGGING CHOKEPOINT. Every bus write in the engine funnels through
+    here, so identity tags are attached here and nowhere else — no write verb
+    has to opt in and none can be missed. ``team`` names the tag registry
+    (:mod:`coord_engine.bus_tags`); omitting it writes untagged, which is what
+    a caller that has no team context should do. Tag resolution can never fail
+    the write: see the module docstring there for the absent/missing/invalid
+    contract.
     """
     note = build_payload(to=to, kind=kind, priority=priority, slug=slug, ptr=ptr)
+    from . import bus_tags
+    tags = bus_tags.tags_for_write(transport, team, sender)
+    kwargs: dict[str, Any] = {"recorded_at": recorded_at}
+    if tags:
+        kwargs["tags"] = tags
     return bool(transport.record_write(
-        config["data_type"], config["api_version"], note, sender,
-        recorded_at=recorded_at))
+        config["data_type"], config["api_version"], note, sender, **kwargs))
 
 
 # --- read side: the durable cursor (the window rule, 2026-07-27) --------------
@@ -950,3 +1147,128 @@ def commit_v2_delivery(
             return {"status": "idempotent", "cursor": observed}
         return {"status": "stale", "cursor": observed}
     return {"status": "committed", "cursor": next_doc}
+
+
+# --- supersession-adoption metric (respec s7) --------------------------------
+#
+# Deputy-corrected definition (2026-07-30 provisional ruling, slug respec-s7):
+# slug reuse is normally a THREAD, not a supersession — measured live, 11/11
+# repeated sender+slug pairs in 24h were threads. Candidates are therefore
+# directive→directive to the SAME recipient on the SAME slug only; an earlier
+# directive already terminally classified completed/blocked is follow-up, not
+# supersession; explicit `task supersede` evidence counts directly; anything
+# the stream cannot distinguish is UNKNOWN, never silently in the denominator.
+# The denominator is EXPECTED to be small.
+
+def supersession_adoption(
+    events: list[Any],
+    outcomes: Optional[dict[str, str]],
+) -> dict[str, Any]:
+    """Fold the supersession-adoption metric over a window of bus events.
+
+    ``events``: parsed v1 event dicts (need kind/to/slug/record_id, ordered or
+    orderable by recorded_at). ``outcomes``: record_id → DELIVERY_OUTCOMES
+    classification where durably known (v2 cursor ``handled`` rows);
+    ``None`` means NO classification evidence exists for this window (legacy
+    fleet) — the whole metric is then UNKNOWN, never 0% (absence of data is
+    not evidence of non-adoption).
+
+    Scope (narrowed, pr-503 round 1): the explicit signal this fold counts
+    directly is the record-level ``superseded`` classification
+    (``queue commit --result <id>=superseded``). The ``task supersede`` verb
+    (D3) writes its ``superseded_by`` evidence into TASK documents keyed by
+    task slug, and no identity mapping from task slugs to event record ids
+    exists in the data model — so that channel is out of scope here rather
+    than exposed as a parameter no production caller can fill. Wiring it
+    requires a schema-level task→record link first.
+
+    Returns ``{"status", "counted", "superseded", "unknown", "ratio"}``:
+    ratio is ``None`` when nothing was countable — an empty denominator must
+    read n/a, NEVER 100%.
+    """
+    if outcomes is None:
+        return {"status": "unknown", "counted": 0, "superseded": 0,
+                "unknown": 0, "ratio": None}
+
+    directives: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("kind") != "directive":
+            continue
+        rid, to, slug = (event.get("record_id"), event.get("to"),
+                         event.get("slug"))
+        if not (isinstance(rid, str) and isinstance(to, str)
+                and isinstance(slug, str)):
+            continue
+        directives.append(
+            {"record_id": rid, "to": to, "slug": slug,
+             "at": event.get("recorded_at") or ""})
+    directives.sort(key=lambda d: d["at"])
+
+    counted = superseded = unknown = 0
+    by_key: dict[tuple, dict[str, Any]] = {}
+    for d in directives:
+        key = (d["to"], d["slug"])
+        earlier = by_key.get(key)
+        if earlier is not None:
+            outcome = outcomes.get(earlier["record_id"])
+            if outcome == "superseded":
+                counted += 1
+                superseded += 1
+            elif outcome in ("completed", "blocked"):
+                pass  # terminally classified before re-issue: follow-up work
+            elif outcome == "ignored":
+                counted += 1  # implicit resolution of a re-issued directive
+            else:
+                unknown += 1  # unclassified/unmeasurable: NOT the denominator
+        by_key[key] = d
+
+    ratio = (superseded / counted) if counted else None
+    return {"status": "ok", "counted": counted, "superseded": superseded,
+            "unknown": unknown, "ratio": ratio}
+
+
+def outcome_mix(cursor: Optional[dict[str, Any]]) -> Optional[dict[str, int]]:
+    """Per-agent classification mix from a v2 cursor's ``handled`` rows —
+    the agent's own durable adoption signal (surfaced in ``queue --json``
+    under the cursor block). ``None`` when there is no v2 evidence."""
+    if not isinstance(cursor, dict):
+        return None
+    handled = (cursor.get("committed") or {}).get("handled")
+    if not isinstance(handled, list) or not handled:
+        return None
+    mix = {outcome: 0 for outcome in DELIVERY_OUTCOMES}
+    for row in handled:
+        outcome = row.get("outcome") if isinstance(row, dict) else None
+        if outcome in mix:
+            mix[outcome] += 1
+    return mix
+
+
+def fleet_events(records: Optional[list]) -> Optional[list[dict[str, Any]]]:
+    """All parsed v1 events regardless of recipient (fleet folds — the s7
+    metric needs directive pairs across every recipient). Same None-propagation
+    and id-dedupe rules as :func:`events_for`."""
+    if records is None:
+        return None
+    out: list[dict[str, Any]] = []
+    seen_ids: set = set()
+    for rec in records:
+        if not isinstance(rec, dict):
+            return None
+        payload = parse_payload(rec.get("note"))
+        if payload is None:
+            continue
+        rec_id = rec.get("id")
+        if rec_id is not None:
+            if rec_id in seen_ids:
+                continue
+            seen_ids.add(rec_id)
+        out.append({
+            "slug": payload["slug"], "kind": payload["kind"],
+            "priority": payload["pri"], "ptr": payload["ptr"],
+            "to": payload["to"], "from": sender_of(rec),
+            "recorded_at": rec.get("recorded_at"),
+            "record_id": rec.get("id"),
+        })
+    out.sort(key=lambda e: str(e.get("recorded_at") or ""))
+    return out

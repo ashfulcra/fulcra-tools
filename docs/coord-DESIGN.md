@@ -1,6 +1,6 @@
 # coord — deterministic coordination add-ons for fulcra-agent-teams
 
-Thirteen `fulcra-agent-*` skills that layer durable multi-agent coordination onto the official
+Fourteen `fulcra-agent-*` skills that layer durable multi-agent coordination onto the official
 `fulcra-agent-teams` OKF-markdown convention, backed by one shared stdlib-only CLI (`coord-engine`),
 invoked as the installed binary (`coord-engine …` — it is not on PyPI, so `uv tool run` will not
 resolve it; see the [quickstart](coord/GET-ON-THE-BUS.md) for the install).
@@ -36,6 +36,9 @@ disagreement heals nothing.
 | fulcra-agent-forge | GitHub PR state mirrored as review evidence; auto-approve on merge | 2 |
 | fulcra-agent-automation | launchd/cron heartbeat installers (hardened); listener half retired 2026-07-27 under bus v3 | 2 |
 | fulcra-agent-operator | waiting-on-operator asks fold; atomic answer verb; courier conventions | 2 |
+| fulcra-agent-atc | capability-matched model routing on subscription caps; cross-account cap ledger; outcome demotion | — |
+| fulcra-agent-durable-state | per-agent stash on the File Store; sha256 manifest; fail-closed secrets guard | — |
+| fulcra-agent-cloud-coordinator | the assembly pattern for a container-reset-proof cloud coordinator | — |
 
 \* reconcile is the one semantic conversation: it makes the task index engine-owned, so wave 2
 includes a small amendment to fulcra-agent-teams' SKILL.md ("if reconcile is installed, do not
@@ -55,10 +58,11 @@ blind spot leases cannot see. Session/host details are metadata, not address.
 - Python, stdlib-only, zero runtime deps; transport shells to `fulcra-api file` (swap-in point if
   folded into fulcra-api — that fold replaces the subprocess layer with internal API calls and
   should be sized WITH the API team, it is not mechanical).
-- Installs from a git tag via `uv tool install` (verified by live tag-builds at v0.4.0 and v1.0.1;
-  the current release is tagged v1.3.0).
+- Installs from a git tag via `uv tool install` (verified by live tag-builds at v0.4.0 and v1.0.1).
+  The release tag is the cold-install path; the fleet's runtime pin lives in the store BOOTSTRAP
+  (`team/fulcra/_coord/bus-v3/adopt-latest.sh`, pin scheme `pp-<sha>`) — this doc names no version.
 - Never-raise CLI discipline: advisory features degrade to stderr notes; exit codes are contracts.
-- 200 tests; every stateful fold has transport-injected tests.
+- 1600+ tests; every stateful fold has transport-injected tests.
 
 ## Evidence pack
 

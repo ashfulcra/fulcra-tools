@@ -1,8 +1,25 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from coord_engine import aggregate as aggregate_mod
 from coord_engine import annotate, reconcile
 from coord_engine.transport import TransportError
+
+#: Default listing mtime for `FakeTransport.put`, in the format
+#: `fulcra-api file list` emits. This MUST stay relative to now.
+#:
+#: It was a hardcoded `2026-07-01 04:00PM UTC` and went off on 2026-07-31: the
+#: retention tests assert that a fixture written at the default mtime is too
+#: RECENT to archive under `--retention-days 30`, and that stopped being true
+#: the day wall-clock crossed the thirty-day mark. Two tests turned red on
+#: main with no code change, which also reddens CI for every open PR.
+#:
+#: A fixture whose meaning is "recent" cannot be pinned to a calendar date.
+#: Yesterday is recent under every retention window the suite exercises, and
+#: unlike a future timestamp it cannot confuse freshness logic.
+RECENT_MTIME = (
+    datetime.now(timezone.utc) - timedelta(days=1)
+).strftime("%Y-%m-%d %I:%M%p UTC")
 
 
 class FakeTransport:
@@ -14,7 +31,8 @@ class FakeTransport:
         self.sizes: dict[str, str] = {}
         self.fail_list = False
 
-    def put(self, path, content, mtime="2026-07-01 04:00PM UTC", size=None):
+    def put(self, path, content, mtime=None, size=None):
+        mtime = RECENT_MTIME if mtime is None else mtime
         self.store[path] = content
         self.mtimes[path] = mtime
         # Mirror `fulcra-api file list`, which reports a byte size per entry. Size

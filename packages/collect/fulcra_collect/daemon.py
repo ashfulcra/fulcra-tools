@@ -849,9 +849,10 @@ class Daemon:
 
         IMPORTANT: this is a SOFT marker, not a hard delete. Fulcra's
         backend offers no per-event delete primitive (verified
-        2026-05-26 via packages/media-helpers/scripts/probe_soft_delete_3.py
-        — the matrix shows 405 / 404 across every {GET, POST, PUT,
-        PATCH, DELETE} attempt on /data/v1alpha1/event/...). The
+        2026-05-26 by a probe matrix showing 405 / 404 across every
+        {GET, POST, PUT, PATCH, DELETE} attempt on
+        /data/v1alpha1/event/...; the probe script itself is not in the
+        tree — see repo history around the #439-era cleanup). The
         original record stays in the user's timeline indefinitely.
 
         What we DO write is a separate annotation tagged with the

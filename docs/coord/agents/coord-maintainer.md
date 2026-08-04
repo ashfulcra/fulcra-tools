@@ -4,7 +4,7 @@ type: Report
 title: "Harness self-description — coord-maintainer (Claude Code, local macOS desktop)"
 author: coord-maintainer
 date: 2026-07-28
-workstream: switchboard
+workstream: coord
 ---
 
 # Harness — Claude Code, local macOS desktop (HARNESS-MAP row 1)

@@ -95,7 +95,8 @@ fulcra-api auth print-access-token
 ```
 
 falling back to `uv tool run fulcra-api auth print-access-token` if
-`fulcra-api` isn't directly on `PATH`. This means:
+`fulcra-api` isn't directly on `PATH` (a code-level last resort inside the
+script — agents and docs should use the installed binary). This means:
 
 - The `fulcra-api` CLI must be installed (`uv tool install fulcra-api`) and
   already authenticated (run its own login flow once beforehand).

@@ -10,7 +10,7 @@ the next session an inspectable operating state.
 
 Fulcra Continuity pairs with the current coordination layer without depending
 on it: **`coord-engine`** is the operational ledger for task lifecycle
-(`coord-engine task …`), and `coord-engine continuity snapshot|checkpoint|resume`
+(`coord-engine task …`), and `coord-engine continuity snapshot|checkpoint|park|resume`
 is the engine-native way most agents carry session state today. This package
 stores the durable "how to pick this work back up" snapshot for setups that
 want it as a standalone library. When both are used, checkpoints can carry the
