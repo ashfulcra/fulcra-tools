@@ -408,6 +408,7 @@ _AUTHORITY_FIELDS = (
 #: check can tell "absent" from "malformed", and its absence never makes an
 #: otherwise-valid config partial.
 CURRENT_ENGINE_FIELD = "current_engine_version"
+SCHEMA1_MINIMUM_ENGINE_VERSION = "1.8.0"
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 _ADOPTION_SLUG = re.compile(
     r"^adopted-v(?P<version>\d+\.\d+\.\d+)-"
@@ -416,6 +417,54 @@ _ADOPTION_SLUG = re.compile(
 
 def config_path(team: str) -> str:
     return f"team/{team}/{CONFIG_NAME}"
+
+
+def schema1_authority_migration_target(
+        raw: Any) -> tuple[Optional[dict[str, Any]], str]:
+    """Classify one authority and build the narrow s5 schema-v1 target.
+
+    Returns ``(target, readable-legacy|current)`` for the two safe states and
+    ``(None, malformed-blocks|unsupported-blocks)`` otherwise.  The target is
+    additive: transport fields and unknown sibling metadata are preserved,
+    while the complete authority block is installed in one document write.
+
+    This helper deliberately accepts raw store bytes instead of
+    :func:`load_config`: an environment override may select a local transport
+    stream, but it is not authority and must never be persisted by migration.
+    """
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, "malformed-blocks"
+    if not isinstance(doc, dict):
+        return None, "malformed-blocks"
+    parsed = _parse_config(raw)
+    if parsed is None:
+        return None, "malformed-blocks"
+    if parsed.get("authority_mode") == "versioned":
+        if (parsed.get("protocol_version") == 1
+                and parsed.get("cursor_schema_version") == 1):
+            return dict(doc), "current"
+        return None, "unsupported-blocks"
+
+    target = dict(doc)
+    target.update({
+        "protocol_version": 1,
+        "cursor_schema_version": 1,
+        "minimum_reader_version": SCHEMA1_MINIMUM_ENGINE_VERSION,
+        "minimum_writer_version": SCHEMA1_MINIMUM_ENGINE_VERSION,
+        "cursor_generation": 0,
+        "cursor_activated_at": None,
+    })
+    # Keep target construction honest if the schema changes later.
+    if _parse_config(json.dumps(target)) is None:
+        return None, "malformed-blocks"
+    return target, "readable-legacy"
+
+
+def render_authority_config(doc: dict[str, Any]) -> str:
+    """Stable store representation for a migrated authority document."""
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
 
 
 def _parse_config(raw: Any) -> Optional[dict[str, Any]]:
