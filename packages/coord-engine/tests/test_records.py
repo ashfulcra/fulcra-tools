@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from coord_engine import records
+from coord_engine import __version__, records
 
 
 def _rec(note, *, at="2026-07-27T00:00:00+00:00", sources=("coord-boss",), rid="r1"):
@@ -32,9 +32,11 @@ def test_payload_round_trips():
                       "slug": "fix-the-thing", "pri": "P0",
                       "ptr": "task/fix-the-thing.md",
                       "writer": {
-                              "engine_version": "1.10.0",
+                          # the RELEASE, not a frozen literal: a version bump is
+                          # release discipline, not a reason to edit this test
+                          "engine_version": __version__,
                           "protocol_version": 1,
-                              "cursor_schema_version": 2,
+                          "cursor_schema_version": 2,
                       }}
 
 

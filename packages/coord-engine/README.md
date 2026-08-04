@@ -16,15 +16,16 @@ and the agent conventions ([`AGENTS.md`](../../AGENTS.md)).
 ## Install
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine"
 coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 ```
 
 Not on PyPI yet — install from the git tag (or a checkout:
-`uv tool install ./packages/coord-engine`). The tag is the pin *form*; the
-authoritative current pin lives in the store BOOTSTRAP
-(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not in this
-README. The engine shells out to the
+`uv tool install ./packages/coord-engine`). The release tag is the
+**cold-install** path; the **fleet's runtime authority** is the store BOOTSTRAP
+(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
+`pp-<sha>`), not this README — once you are on the bus, adopt from there. The
+engine shells out to the
 [`fulcra-api` CLI](https://pypi.org/project/fulcra-api/) for storage
 (`uv tool install fulcra-api && fulcra auth login`); override the launcher via
 `$FULCRA_CLI_COMMAND`. Identity comes from `$FULCRA_COORD_AGENT` — set it to the **role**
@@ -37,7 +38,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Wake up / what needs me | `queue` — the bus v3 event delivery surface ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)): schema v1 is the legacy print-then-advance cursor; activated schema v2 CAS-stages a token and advances only through `queue commit TEAM --token TOKEN`; every nonzero exit is fail-closed and rc alone is NOT the state discriminator (rc 2 carries ABSENT/REFUSED branches, rc 3 carries UNKNOWN/INVALID/INCOMPATIBLE/REFUSED — read `state` + `error_code` from the `--json` envelope); the obligations fold never changes a successful read's rc — a clean window whose separate durable-obligation fold could not complete stays rc 0 and reports fold UNKNOWN/INVALID through the additive `obligations` key on the success envelope, while nonzero queue-family failures (read and `queue commit` alike — commit returns rc 3 for INCOMPATIBLE, stale-token REFUSED, and unsupported CAS) retain their documented `state`/`error_code` contract; that fold is opt-in (`--obligations`) and a skipped fold is stated, never implied, as `"obligations":{"state":"not-checked"}` on every machine-readable success envelope — a malformed config or cursor is INVALID (human-fixable, never auto-recreated over, `error_code=*-invalid`), distinct from UNKNOWN (`*-read-failed`/`window-unknown`, retry); under `--json` a successful read prints exactly one `{"type":"queue-result","state":"DATA"\|"CLEAR",events,count,cursor:{path,advanced},engine_version,protocol,obligations}` object and EVERY nonzero exit of `queue`/`queue commit` prints exactly one `queue-error` object (state `UNKNOWN`\|`INVALID`\|`INCOMPATIBLE`\|`ABSENT`\|`REFUSED` + per-branch `error_code`; sole exclusion: argparse's own usage exits) — text-mode success output is byte-stable for shell consumers; `queue --consume` (deliberate takeover of another agent's cursor) writes a durable audit doc to `_coord/audit/consume/<UTC-stamp>-<caller>-takes-<target>.md` before reading and is REFUSED if the audit write fails, while `--peek` writes nothing; `doctor` includes the adoption-claim + running-presence version census; `obligations` (the standalone do-I-owe-anything fold: rc 3 = UNKNOWN, rc 4 = INVALID; on queue reads the fold is opt-in via `--obligations`) · `briefing` · `needs-me` · `inbox` · `digest` fold the durable state |
 | Bus authority migration | `bus-v3 migrate TEAM --dry-run\|--apply` — classify discovered/explicit legacy cursor owners and idempotently add the complete schema-v1 authority block; malformed/unreadable state blocks, apply never writes cursor/task/role documents, and the JSON `state` + `error_code` contract (including `ISSUED-BUT-UNPROVEN`) is defined in [`BUS-V3.md`](../../docs/coord/BUS-V3.md) |
 | Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` (incl. `supersede` — close a re-dispatched copy with `superseded_by`; `block` requires `--unlock`) |
-| Directives & messaging | `tell` · `broadcast` · `remind` (schedules a future-dated bus-v3 record: the reminder delivers itself at WHEN via the assignee's queue read) · `respond` · `later` (backlog) · `intent` (spoken commitment) · `listen` (retired as the wake surface 2026-07-27; kept for reference until removal) |
+| Directives & messaging | `tell` · `broadcast` · `remind` (schedules a future-dated bus-v3 record: the reminder delivers itself at WHEN via the assignee's queue read) · `respond` · `later` (backlog) · `intent` (spoken commitment) — the retired `listen` watcher was removed 2026-08-03 (PR #523); replies ride the queue read |
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
@@ -51,8 +52,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. Sub-verb lists above are by concern, not exhaustive — the parser's help is the inventory. The
 [skills](../../skills) carry the procedures (when to run what, and why);
 per-verb command references live in each skill's `references/` directory.
-Machine JSON is emitted compactly: `listen` is line-oriented, while `threads`
-emits one JSON array. The hot `_coord/summaries.json` aggregate uses the same
+Machine JSON is emitted compactly: `threads` emits one JSON array. The hot `_coord/summaries.json` aggregate uses the same
 zero-whitespace serializer; parsed values and degradation markers are unchanged.
 
 ### Pairwise acceptance
@@ -84,7 +84,8 @@ transport bounds.
   scheduled drift check rebuilds from the full listing scan; orphaned index entries
   cannot recur, and role/review/presence status are computed, never inferred by a model.
 - **Fails loud, never silent.** Unverifiable writes are retried, cached locally, and
-  announced; a degraded read fold says so (`review-fold-degraded`, `LISTEN DEGRADED`)
+  announced; a degraded read fold says so (`review-fold-degraded`, `review-head-degraded`,
+  a `queue-error` envelope, or a `raw scan — <reason>` source row)
   instead of returning a clean-looking partial answer.
 - **Structured logs** to stderr (`$COORD_LOG_LEVEL`).
 
@@ -107,13 +108,12 @@ disable a bound or make an op hang.
 | Variable | Default | Unit | Bounds |
 |---|---|---|---|
 | `COORD_TRANSPORT_TIMEOUT` | `30` | seconds | Hard per-op bound on every `fulcra-api file` subprocess. Constructor arg wins; run it TIGHT on a watcher (e.g. `8`) so the fold budgets buy real responsiveness. |
-| `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`). |
+| `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`) — the RAW-SCAN path; a fresh projection answers the tail in zero ops. |
+| `COORD_PROJECTION_MAX_AGE_HOURS` | `24` | hours | Freshness bound a `reviews`/`forge` projection section must meet before a fold may serve it. Beyond it the fold raw-scans and says `raw scan — <key> projection stale (Xh old, max Yh)`. |
+| `COORD_PROJECTION_BUILD_BUDGET` | `240` | seconds | Per-`reconcile`-pass budget for BUILDING those projection sections. On breach the section is stamped incomplete (and therefore unserved) rather than published partial; a large legacy corpus converges across passes. |
 | `COORD_BRIEFING_BUDGET` | `60` | seconds | Aggregate deadline for the `briefing`/`needs-me` transport-heavy add-on stack (chiefly the forge-feedback fan-out); opened once, spent cumulatively across sections. |
 | `COORD_FORGE_SWEEP_BUDGET` | `60` | seconds | Aggregate deadline for the direct `forge feedback` fallback: review/watch discovery plus its per-PR three-surface sweep. Breach is fail-visible and returns non-zero with a `forge-sweep-degraded` marker. |
-| `COORD_LISTEN_CLASSIFY_BUDGET` | `10` | seconds | Per-tick bound on the `listen` daemon's dir-only review-slug classification pass. |
-| `COORD_LISTEN_HEAD_BUDGET` | `10` | seconds | Dedicated budget for caller-directed literal-agent and wildcard directives; shared tail work cannot spend it. |
-| `COORD_LISTEN_TAIL_BUDGET` | `20` | seconds | Shared aggregate budget for role routing and response/review history after the caller-directed head. |
-| `COORD_ROLE_FOLD_BUDGET` | `20` | seconds | Cumulative deadline for one role-resolution pass (`_held_roles_for_rows`), which `briefing`/`inbox`/`needs-me`/`listen` all run. Spent across the `roles/` listing, each role's doc + lease listing, and each lease shard read; a cut marks every unfinished candidate `unresolved` and emits `role-degraded`. |
+| `COORD_ROLE_FOLD_BUDGET` | `20` | seconds | Cumulative deadline for one role-resolution pass (`_held_roles_for_rows`), which `briefing`/`inbox`/`needs-me` all run. Spent across the `roles/` listing, each role's doc + lease listing, and each lease shard read; a cut marks every unfinished candidate `unresolved` and emits `role-degraded`. |
 | `COORD_OVERLAY_BUDGET` | `10` | seconds | Time bound on the listing-based freshness fallback's fresh-doc reads (the cap bounds read COUNT; this bounds TIME). Healthy folds use the team-filtered updates feed instead. |
 | `COORD_OVERLAY_CAP` | `16` | count | Max fresh (unsummarized) task docs the listing fallback reads per surface-read before truncating (visibly). |
 | `COORD_SUMMARY_TEXT_CAP` | `280` | chars | Per-field cap on `title`/`description` in a summaries row (ellipsis-marked). The index stays a *summary* — the full payload lives in the task doc; uncapped multi-KB directive payloads inflate `_coord/summaries.json` past what remote transports can read inside the fold budgets. |
@@ -131,10 +131,9 @@ disable a bound or make an op hang.
 | `FULCRA_COORD_AGENT` | `coord-reconcile:<host>` | Agent identity — set it to the **role** you act as (`--from` overrides per-command). Legacy prefix; still canonical for identity. |
 | `FULCRA_COORD_HUMAN` | `human` | Operator handle for `--on-user` / `asks`. |
 | `COORD_ENGINE_STATE_DIR` | `~/.local/state/coord-engine` | Local state root (write-verify nonce cache, etc.). |
-| `COORD_LISTENER_STATE` | *(under the state dir)* | Local cache for the `listen` watcher's seen-ids state and inclusive updates-feed cursor. Durable authority lives at `team/<team>/_coord/agents/<agent>/listen-state.json`; missing/corrupt store state falls back to this cache. A degraded tick does not advance the cursor. |
 | `COORD_LOG_LEVEL` | `info` | Structured-log level to stderr (`debug`/`info`/`warn`/`error`). |
 
-`listen` and the aggregate-backed task surfaces are feed-first: one
+The aggregate-backed task surfaces are feed-first: one
 team-filtered `data-updates` call identifies changed task, response, and verdict
 shards, which are read directly. A missing/corrupt/old cursor, unavailable or
 malformed feed, or doubtful shard read falls back to the existing bounded

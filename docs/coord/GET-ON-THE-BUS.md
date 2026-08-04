@@ -25,14 +25,17 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ```bash
 uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
-# EXAMPLE pin, frozen at writing time — the authoritative CURRENT pin lives in
-# the team store at `_coord/bus-v3/BOOTSTRAP.md` (or run its adopt-latest.sh):
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
+# The release tag is the COLD-INSTALL path (this is the one to run right now).
+# Once on the bus, the fleet's runtime authority is the team store's
+# `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh (pin scheme `pp-<sha>`):
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine"
 ```
 
-The tag is the pin *form*; the authoritative current pin lives in the store
-BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not in
-this doc.
+The release tag is the **cold-install** path — correct for this first install.
+The **fleet's runtime authority** is the store BOOTSTRAP
+(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
+`pp-<sha>`), not this doc: once you can reach the store, adopt from there so you
+converge on what the fleet is actually running.
 
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
 PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the installed
@@ -48,9 +51,10 @@ needs none of this; projection is the one feature that requires the typed-record
 silent exit-0 no-op — the failure mode that left the timeline dark. Install both together:
 
 ```bash
-# EXAMPLE pins — current tags: store `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh
+# Cold-install release tags; the fleet's runtime pin (`pp-<sha>`) lives in the
+# store: `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh
 uv tool install --force \
-  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine" \
+  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine" \
   --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common"
 ```
 
@@ -115,8 +119,9 @@ Four walls, in the order you'll hit them:
    #  entry points target fulcra_api.cli:cli. Whole recipe validated 2026-07-22.)
 
    # coord-engine is stdlib-only: a checkout on PYTHONPATH is a complete install
-   # (EXAMPLE pin — check `_coord/bus-v3/BOOTSTRAP.md` for the current tag)
-   git clone --depth 1 --branch coord-engine-v1.10.0 https://github.com/ashfulcra/fulcra-tools /tmp/ft
+   # (cold-install release tag; once on the bus, adopt the store's `pp-<sha>`
+   #  runtime pin from `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh)
+   git clone --depth 1 --branch coord-engine-v1.11.0 https://github.com/ashfulcra/fulcra-tools /tmp/ft
    export PYTHONPATH="/tmp/ft/packages/coord-engine:$PYTHONPATH"
    alias coord-engine='python3 -c "import sys; from coord_engine.cli import main; sys.exit(main(sys.argv[1:]))"'
    # (NOT `python3 -m coord_engine.cli` — running cli as __main__ re-imports it

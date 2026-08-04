@@ -481,15 +481,17 @@ exclusion: argparse's own usage exits (unknown flag, missing positional)
 happen before any queue code runs and carry no envelope. Text-mode success
 output is byte-stable across this change; shell consumers pipe it.
 
-Exit **3** is reserved for the event read path: the window itself could not be
-trusted, so the caller may be blind and must retry. The separate
-durable-obligation fold never reaches the exit code. When the window read
-cleanly, a fold that cannot complete is a REPORT — rc **0**, `queue-result`,
-with the verdict carried in the additive `obligations` key
+**The obligations fold never changes a successful read's rc.** rc 3 is not
+reserved for the read path — nonzero queue-family failures (read and `queue
+commit` alike; commit returns rc 3 for INCOMPATIBLE, stale-token REFUSED, and
+unsupported CAS) retain the `state`/`error_code` contract above, and rc alone is
+never the discriminator. What the fold must not do is *spend* an exit code: when
+the window read cleanly, a fold that cannot complete is a REPORT — rc **0**,
+`queue-result`, with the verdict carried in the additive `obligations` key
 (`state` UNKNOWN|INVALID plus `degraded`/`malformed`/`reason`). Two different
-conditions must not share one number: an unrunnable fold that spends rc 3
-trains every caller to ignore the blindness signal, which is the one signal
-that has to keep working.
+conditions must not share one number: an unrunnable fold that spends the read
+path's rc 3 trains every caller to ignore the blindness signal, which is the one
+signal that has to keep working.
 
 The fold is **opt-in** (`--obligations`); it is not run on a default read, on
 either cursor schema. The skip is stated, never implied: every machine-readable
@@ -662,6 +664,48 @@ unreadable index is known.
 for. It is easy to forget precisely because it does not arrive as a directive —
 it was missing from the first cut of this procedure, and a fold without it can
 report CLEAR while a reviewer is waiting on you.
+
+### Where a fold's answer came from — the source row
+
+`briefing` and `needs-me` answer the review and forge legs **projection-first**:
+`reconcile` folds a `reviews` section (`coord.reviews.projection.v1`) and a
+`forge` section (`coord.forge.projection.v1`) into `_coord/summaries.json`, and a
+fresh section answers the whole non-head tail in **zero** extra transport ops
+instead of scanning hundreds of raw shards per wake.
+
+**No silent staleness.** Every projection-aware fold SAYS which source it served,
+as a trailing row rendered in text and carried in `--json`:
+
+```
+  review fold: projection (as of 2026-08-03T18:40:11Z)
+  review fold: raw scan — reviews projection stale (31.4h old, max 24h)
+```
+
+- `{"type":"review-source","source":"projection","as_of":T}` (and the
+  `forge-source` twin) — served from the projection, current as of `T`.
+- `{"type":"...-source","source":"raw-scan","reason":...}` — the projection
+  existed but could not be served, so the fold fell back to the full raw scan
+  **loudly**, naming the reason: `… projection stale (Xh old, max Yh)`
+  (bound: `COORD_PROJECTION_MAX_AGE_HOURS`, default 24h),
+  `… projection incomplete (scanned N/M)`, `… projection malformed` (a duplicate
+  slug row, or an impossible `settled` combination — `settled` with a state other
+  than APPROVED, or with a non-empty `pending_required`), `… projection
+  unrecognized`, `… projection stamp unreadable`, or `… projection stamped in the
+  future`. This is a degradation notice, not noise: it means a reconcile is behind
+  or the aggregate needs a rebuild.
+- **No source row at all** = the team's aggregate carries no projection (or the
+  caller passed none): the pre-projection raw scan, byte-identical.
+
+**Your own head is always raw-tallied.** The caller-owned review slugs — the ones
+`needs-me` derives from your review-request directives — are re-read per slug on
+every call regardless of the projection, under their own dedicated budget. The
+projection is never allowed to answer "does this agent still owe a verdict"; it
+answers the tail. A head that cannot complete is still UNKNOWN and still emits
+`review-head-degraded`.
+
+Rule for consumers: a `raw-scan` source row is information about the *store*, not
+about your obligations — never treat it as a failure of the fold, and never treat
+its absence as proof the projection was used.
 
 
 ## Send

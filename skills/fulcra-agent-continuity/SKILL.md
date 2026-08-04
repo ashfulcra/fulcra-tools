@@ -35,8 +35,10 @@ allows; where it doesn't, follow them as prose:
    parks every held role with a checkpoint. Handing off to a successor session?
    The checkpoint's CONTENT has rules of its own — see
    [Parking for a successor](#parking-for-a-successor-handoff-doctrine).
-4. **Inbox cadence:** while live, poll your inbox at least every 30 minutes. If your
-   platform has a durable scheduler, install the listener instead of trusting yourself.
+4. **Inbox cadence:** while live, read your queue and inbox at least every 30 minutes. If your
+   platform has a durable scheduler, arm ONE scheduled wake that runs
+   `coord-engine queue <team> --agent <you>` instead of trusting yourself — a schedule, never a
+   resident listener (those are retired; see the pickup note below).
 
 An agent that beats presence but has no fresh snapshot is flagged `continuity-stale` by `coord-engine health`.
 
@@ -103,7 +105,7 @@ moment:` line as a failed park — the park's own rc and its
 | Claude web (claude.ai) | prose only — run rule 1 when the skill loads; rule 3 before ending | no background pickup; use cloud routines that open a duty-cycle session |
 | Codex | `~/.codex/hooks.json` + app-thread automation (`fulcra-agent-automation/scripts/codex/install_codex_watch.py`) — the automation prompt embeds rules 1–3 | the same automation ticks the inbox |
 | OpenClaw | managed block in `HEARTBEAT.md`/`BOOT.md` (`fulcra-agent-automation/scripts/openclaw/install_openclaw.py`) embeds rules 1–2; rule 3 (park) can't be automated from a prose block (no shutdown hook) — follow it as prose | HEARTBEAT tick |
-| Hermes (Daytona sandbox) | fhd provisioner installs the Claude Code adapter inside the sandbox at provision time (standalone hermes-daytona repo) | listener installed at provision time |
+| Hermes (Daytona sandbox) | fhd provisioner installs the Claude Code adapter inside the sandbox at provision time (standalone hermes-daytona repo) | queue read on the scheduled wake armed at provision time (the bundled listener retired with the stack) |
 
 ## Where to start — the re-entrancy probes
 
@@ -115,7 +117,7 @@ re-entry is always safe:
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
-| Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
+| Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the `No continuity snapshot found.` / `checkpoint age: unknown` pair | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
 | Latest snapshot fresh? | `coord-engine continuity resume <team> <agent> --max-age <cadence>` | exits 0 and prints the checkpoint age | write one now (rule 2); rc 2 means missing, unreadable-age, or older than the bound |
 | Am I continuity-stale? | `coord-engine health <team>` | your agent row has no `continuity-stale` flag | rules 2–3, then re-check |
 
@@ -155,13 +157,18 @@ coord-engine continuity resume <team> <agent> --max-age 1h  # fail rc 2 if missi
 ## Role checkpoints, park, and briefing (A6)
 ```bash
 coord-engine continuity checkpoint <team> --role <r> [--ref PATH]  # get/set the role's durable resume point
-coord-engine continuity park <team> [--agent X] [--objective "…"]  # session exit: snapshot EVERY held role + set its checkpoint_ref
+coord-engine continuity park <team> [--agent X] [--role R] [--objective "…"]  # session exit: snapshot every held role (or just R) + set its checkpoint_ref
 coord-engine briefing <team> [--agent X] [--json]                  # session start: presence + board + inbox + needs-me + pending reviews + latest snapshot in ONE call
 ```
 - `park` is the session-exit verb: each role you hold (fresh lease) gets a snapshot and the role doc's
   `checkpoint_ref` points at it — the next holder (or your next session) resumes from there via
-  `checkpoint --role`. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles;
-  success therefore proves at least one checkpoint was written. Each written checkpoint also emits
+  `checkpoint --role`. **`--role R` narrows it to exactly one role** (you must hold a fresh lease on
+  `R`); with no flag it parks **every** held role. Use `--role` to confine a park to a dedicated role
+  without touching your other roles' checkpoints — that is how `acceptance pair` parks safely against
+  a loaded team store. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles (or,
+  under `--role`, no fresh lease on that one), and rc 1 with the same `CHECKPOINT NOT WRITTEN` banner
+  when the role state was *unreadable* rather than empty — retry that one before ending the session.
+  Success therefore proves at least one checkpoint was written. Each written checkpoint also emits
   one timeline moment — see [the checkpoint channel](#timeline-visibility-the-checkpoint-channel);
   that emission can never change park's exit code.
 - `resume` prints checkpoint age on every read. JSON adds the derived

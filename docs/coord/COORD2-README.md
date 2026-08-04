@@ -94,7 +94,8 @@ same way.
 - `engine/` — **`coord-engine`**, the shared stdlib-only tool (OKF parse/render, transport, reconcile,
   role fold, queries). Tested. `cd engine && uv run --extra dev pytest`.
 - `skills/fulcra-agent-*/` — the pure-prose skills (`SKILL.md` + `references/`) that invoke `coord-engine`.
-- `docs/proposals/teams-convergence/` — the design set (start at its `README.md`).
+- `docs/coord/proposals/teams-convergence/` — the design set (start at its `README.md`).
+  (Path in THIS repo; in the original coord2 repo it was `docs/proposals/teams-convergence/`.)
 
 ## Conventions
 Python, **stdlib-only** in `coord-engine` (transport is a CLI-subprocess call to `fulcra-api`, so no heavy

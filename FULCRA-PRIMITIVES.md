@@ -42,7 +42,10 @@ so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-13 on
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
-> repo**. Two releases landed inside 24 hours to produce this stamp. The
+> repo**. Two releases landed inside 24 hours to produce this stamp. **This stamp
+> is 0.1.38 and has NOT been re-verified against 0.1.39, which is what is
+> installed on the fleet as of 2026-08-03** — treat any 0.1.39 delta below as
+> unknown rather than absent, and re-stamp when you next verify the surface. The
 > published OpenAPI is **not** a complete route list (`/ingest/v1/record/batch`
 > is live and unpublished), so absence from the spec is never evidence a route
 > is gone — probe it (404 gone, 401 exists) before concluding anything.

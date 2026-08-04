@@ -76,5 +76,10 @@ was lost.
 - One `latest.json` per task; re-snapshotting overwrites it (the File Store keeps prior versions).
 - `resume` with no `<task>` folds to the newest snapshot by `created_at` across the agent's tasks.
 - Schema id: `coord.teams.continuity.v1`.
-- `continuity park` exits 2 and states `CHECKPOINT NOT WRITTEN` when the agent holds no fresh roles;
-  rc 0 means at least one role checkpoint was written.
+- `continuity park <team> [--agent X] [--role R] [--objective "…"] [--next "…"] [--open-question "…"]`
+  snapshots **every** role the agent holds a fresh lease on and points each role doc's
+  `checkpoint_ref` at it. `--role R` narrows the pass to that single role (a fresh lease on `R` is
+  required) — the way to park one role without touching the checkpoints of the others.
+- `continuity park` exits 2 and states `CHECKPOINT NOT WRITTEN` when the agent holds no fresh roles
+  (under `--role`, no fresh lease on that role), and exits 1 with the same banner when the role state
+  is unreadable rather than empty; rc 0 means at least one role checkpoint was written.
