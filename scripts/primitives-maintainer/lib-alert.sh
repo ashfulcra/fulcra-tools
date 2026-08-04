@@ -131,7 +131,10 @@ prim_alert_path_ok() { [ ${#PRIM_PROBLEMS[@]} -eq 0 ]; }
 # This function used to accept HELD/CONTESTED + any fresh_holders as reachable,
 # and prim_notify then addressed the tell to the ROLE NAME. That is the same
 # silent-delivery bug this file exists to close, rebuilt one level up. Read the
-# engine (coord_engine/, verified 2026-07-16 at packages/coord-engine):
+# engine (coord_engine/, verified 2026-07-16 at packages/coord-engine; the
+# `listen` references below are HISTORICAL — that verb was retired as the wake
+# surface 2026-07-27 and its implementation removed, and role folding now runs
+# from `_held_roles_for_rows` on the surviving folds):
 #
 #   - directives.is_directed_at(row, agent, held_roles) expands a role assignee
 #     ONLY if the caller passes held_roles.
@@ -139,21 +142,22 @@ prim_alert_path_ok() { [ ${#PRIM_PROBLEMS[@]} -eq 0 ]; }
 #   - cmd_briefing -> directives.inbox(rows, acks, agent, now) — no held_roles.
 #   - query.needs_me() has no held_roles parameter AT ALL: it matches assignee ==
 #     agent or blocked_on naming the agent. Nothing else.
-#   - Only _run_listen_tick (cli.py ~2346) resolves holders and folds roles.
+#   - At the time of writing, only the (now removed) `listen` tick resolved
+#     holders and folded roles.
 #
 # So a directive addressed to a role is invisible to `inbox`, `needs-me` and
 # `briefing` — the folds a reviewer heartbeat actually runs — and is seen ONLY by
-# a live `listen`. A holder can keep a lease fresh forever without ever running
+# a live watcher. A holder can keep a lease fresh forever without ever running
 # one. Lease freshness proves someone HOLDS the role; it proves nothing consumes
 # it. Accepting it would clear the marker on a proxy for delivery.
 #
 # The fix is (a) from the two on offer: resolve the fresh holder to an IDENTITY
 # and address that. An agent-addressed directive is folded by inbox, needs-me,
-# briefing AND listen — every consumer path, not the one. That removes the
+# briefing AND the queue read — every consumer path, not the one. That removes the
 # dependence on the single fold role routing needs.
 #
 # Option (b) — a durable role-listener contract — was rejected on evidence, not
-# taste: `listen`'s state file is LOCAL (COORD_LISTENER_STATE, default
+# taste: the listener's state file was LOCAL (COORD_LISTENER_STATE, default
 # ~/.cache/coord-engine), and no listener heartbeat shard exists anywhere in the
 # store. There is nothing on the bus for another host to observe, so (b) means
 # new engine surface plus fleet-wide adoption before the contract holds — and

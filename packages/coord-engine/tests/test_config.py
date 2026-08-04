@@ -76,16 +76,12 @@ def test_env_int_policy(monkeypatch):
 
 def test_budget_wrappers_default_when_env_absent(monkeypatch):
     for name in ("COORD_REVIEW_FOLD_BUDGET", "COORD_BRIEFING_BUDGET",
-                 "COORD_LISTEN_CLASSIFY_BUDGET", "COORD_LISTEN_HEAD_BUDGET",
-                 "COORD_LISTEN_TAIL_BUDGET", "COORD_OVERLAY_BUDGET",
+                 "COORD_OVERLAY_BUDGET",
                  "COORD_THREADS_FOLD_BUDGET", "COORD_OVERLAY_CAP",
                  "COORD_TRANSPORT_TIMEOUT"):
         monkeypatch.delenv(name, raising=False)
     assert cli._review_fold_budget() == cli.DEFAULT_REVIEW_FOLD_BUDGET
     assert cli._briefing_budget() == cli.DEFAULT_BRIEFING_BUDGET
-    assert cli._listen_classify_budget() == cli.DEFAULT_LISTEN_CLASSIFY_BUDGET
-    assert cli._listen_head_budget() == cli.DEFAULT_LISTEN_HEAD_BUDGET
-    assert cli._listen_tail_budget() == cli.DEFAULT_LISTEN_TAIL_BUDGET
     assert cli._overlay_budget() == cli.DEFAULT_OVERLAY_BUDGET
     assert cli._threads_fold_budget() == cli.DEFAULT_THREADS_FOLD_BUDGET
     assert cli._overlay_cap() == cli.DEFAULT_OVERLAY_CAP
@@ -95,9 +91,6 @@ def test_budget_wrappers_default_when_env_absent(monkeypatch):
 @pytest.mark.parametrize("wrapper,env,default", [
     ("_review_fold_budget", "COORD_REVIEW_FOLD_BUDGET", "DEFAULT_REVIEW_FOLD_BUDGET"),
     ("_briefing_budget", "COORD_BRIEFING_BUDGET", "DEFAULT_BRIEFING_BUDGET"),
-    ("_listen_classify_budget", "COORD_LISTEN_CLASSIFY_BUDGET", "DEFAULT_LISTEN_CLASSIFY_BUDGET"),
-    ("_listen_head_budget", "COORD_LISTEN_HEAD_BUDGET", "DEFAULT_LISTEN_HEAD_BUDGET"),
-    ("_listen_tail_budget", "COORD_LISTEN_TAIL_BUDGET", "DEFAULT_LISTEN_TAIL_BUDGET"),
     ("_overlay_budget", "COORD_OVERLAY_BUDGET", "DEFAULT_OVERLAY_BUDGET"),
     ("_threads_fold_budget", "COORD_THREADS_FOLD_BUDGET", "DEFAULT_THREADS_FOLD_BUDGET"),
 ])
@@ -241,12 +234,39 @@ def _table_env_names() -> set[str]:
     return set(re.findall(r"`((?:FULCRA_)?COORD_[A-Z_]+)`", section))
 
 
+#: Knobs the ENGINE no longer reads, whose README rows are retired in a separate
+#: docs pass. The `listen` verb was retired as the wake surface 2026-07-27 and its
+#: implementation removed here; its four env knobs went with it, but this PR is
+#: code+tests only (a parallel docs branch owns README.md), so the rows outlive
+#: the code for one merge. DELETE this allowlist — and the test will then enforce
+#: it — once those rows are gone. It must never grow for any other reason: a name
+#: in here is a documented knob that does nothing.
+_RETIRED_UNDOCUMENTED_YET = {
+    "COORD_LISTEN_CLASSIFY_BUDGET",
+    "COORD_LISTEN_HEAD_BUDGET",
+    "COORD_LISTEN_TAIL_BUDGET",
+    "COORD_LISTENER_STATE",
+}
+
+
 def test_env_table_names_are_read_by_the_code():
     src = "\n".join(p.read_text() for p in _SRC.glob("*.py"))
     documented = _table_env_names()
     assert documented, "the README env table lists no COORD_* names — did it move?"
-    missing = sorted(n for n in documented if n not in src)
+    missing = sorted(n for n in documented
+                     if n not in src and n not in _RETIRED_UNDOCUMENTED_YET)
     assert not missing, f"README env table lists names the code never reads: {missing}"
+
+
+def test_retired_knob_allowlist_stays_retired():
+    """The allowlist above is a one-merge bridge, not a parking lot: every name in
+    it must be genuinely absent from the engine. A name that came BACK belongs in
+    the table, not the allowlist."""
+    src = "\n".join(p.read_text() for p in _SRC.glob("*.py"))
+    resurrected = sorted(n for n in _RETIRED_UNDOCUMENTED_YET if n in src)
+    assert not resurrected, (
+        f"these knobs are read by the code again — drop them from "
+        f"_RETIRED_UNDOCUMENTED_YET: {resurrected}")
 
 
 def test_tuning_knobs_are_documented():
@@ -254,8 +274,7 @@ def test_tuning_knobs_are_documented():
     (identity/state/log-level vars are covered by their own prose rows too)."""
     documented = _table_env_names()
     for knob in ("COORD_REVIEW_FOLD_BUDGET", "COORD_BRIEFING_BUDGET",
-                 "COORD_LISTEN_CLASSIFY_BUDGET", "COORD_LISTEN_HEAD_BUDGET",
-                 "COORD_LISTEN_TAIL_BUDGET", "COORD_OVERLAY_BUDGET",
+                 "COORD_OVERLAY_BUDGET",
                  "COORD_OVERLAY_CAP", "COORD_THREADS_FOLD_BUDGET",
                  "COORD_THREADS_SILENCE_DAYS", "COORD_THREADS_INTENT_GRACE_HOURS",
                  "COORD_TRANSPORT_TIMEOUT", "COORD_RETENTION_DAYS"):
