@@ -7139,6 +7139,47 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     return code
 
 
+def writer_present() -> bool:
+    """Is the ``fulcra_common`` annotation writer importable RIGHT HERE?
+
+    Deliberately imported in the running interpreter rather than probed from
+    outside. ``uv tool install`` gives the engine its own venv, so a
+    system-python import proves nothing in either direction — and when doctor
+    itself is the engine entry point, "here" is exactly the environment the
+    annotate/digest legs will run in.
+    """
+    try:
+        import fulcra_common  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _report_writer_presence() -> None:
+    """One doctor line for writer presence. WARN, never unhealthy.
+
+    A bare ``uv tool install coord-engine`` silently drops ``fulcra_common``,
+    and the legs that need it — ``annotate project``, ``digest
+    --emit-timeline`` — swallow the ImportError and exit 0 (see
+    commands_annotate._emit, whose contract is "returns False, never an
+    exception"). That combination is why the task digest went dark on
+    2026-08-04 with nothing failing anywhere.
+
+    Absence is a WARN and not a failure ON PURPOSE: most hosts never run those
+    legs, and flipping doctor to unhealthy fleet-wide for a capability they do
+    not use would train agents to ignore the exit code — which costs more than
+    it buys. The line carries the CONSEQUENCE, not just the state, so a reader
+    who does run those legs knows immediately what it means for them.
+    """
+    if writer_present():
+        print("  ✓ fulcra_common writer present (annotate/digest legs can emit)")
+    else:
+        print("  ! fulcra_common writer MISSING — annotate/digest legs will "
+              "SILENTLY NO-OP (they exit 0 without it). Re-run the store "
+              "adopt-latest.sh, or install with "
+              "--with 'git+…#subdirectory=packages/fulcra-common'")
+
+
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
     if getattr(args, "self", False):
@@ -7164,6 +7205,7 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
         ok = False
     from . import __version__ as _v
     print(f"  ✓ coord-engine v{_v}")
+    _report_writer_presence()
     if args.team:
         cfg, cfg_status = records.load_config_classified(transport, args.team)
         if cfg_status == "error":
