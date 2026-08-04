@@ -207,7 +207,20 @@ coord-engine doctor <team>                  # gate: fix anything it reports firs
 coord-engine presence beat <team> -s "what I'm doing"
 coord-engine roles claim <team> <role>      # if the role is registered; else see the
                                             #   roles skill to establish it (+ examples/)
+coord-engine bus-v3 tag-provision <team> --agent <role> \
+  --platform claude-code --harness ccr --model opus-5
 ```
+
+That last line makes your events **identity-tagged** — timeline visibility is
+part of the product, not a nicety. Declare all four dimensions and everything
+you send is filterable in the Fulcra visual explorer by agent, platform,
+harness, and model (see [bus v3 setup](BUS-V3.md#setup-once-per-account); until
+you run it your events carry the channel tag only, and every send says so).
+**`--model` is a declaration the engine cannot verify** — nothing lets it see
+which model is driving it — so a stale one silently mislabels everything you
+send. Treat that as a presence-integrity bug and fix it the cheap way: a model
+switch is a re-provision, `coord-engine bus-v3 tag-provision <team> --agent
+<role> --model <new>`, which rewrites only that dimension.
 
 Then read your event queue — `coord-engine queue <team> --agent <you>`, the
 delivery leg of the [bus v3 contract](BUS-V3.md) (durable cursor, dedupe,

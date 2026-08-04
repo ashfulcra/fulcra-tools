@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import (
-    aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
+    aggregate, atc, atc_dash, budget as budget_mod, bus_tags, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, projection as projection_mod,
     query, records, review,
@@ -3265,7 +3265,8 @@ def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
             sender=_known_sender(args) or _host(),
             to=args.assignee, kind="directive",
             priority=getattr(args, "priority", None) or "P2",
-            slug=slug, ptr=f"task/{slug}.md", recorded_at=when)
+            slug=slug, ptr=f"task/{slug}.md", recorded_at=when,
+            team=args.team)
     except ValueError as e:  # unknown kind cannot happen here; belt and braces
         print(f"record: not emitted ({e})", file=sys.stderr)
         return
@@ -7283,7 +7284,7 @@ def _doctor_delivery(args: argparse.Namespace, transport: Any) -> int:
     started = _now()
     written = records.emit_event(
         transport, cfg, sender=agent, to=f"{agent}-probe", kind="claim",
-        priority="P3", slug=slug)
+        priority="P3", slug=slug, team=args.team)
     if not written:
         print("doctor --delivery: probe write REFUSED", file=sys.stderr)
         return 2
@@ -7710,6 +7711,210 @@ def cmd_answer(args: argparse.Namespace, transport: Any) -> int:
         print("answer failed: write did not land", file=sys.stderr)
         return 1
     print(f"answered {args.name} -> handed back to {owner} (unblocked; will surface in their inbox)")
+    return 0
+
+
+# --- bus-v3 tag provisioning (timeline identity) ----------------------------
+
+
+def _tag_recipe(dimension: str, name: str) -> str:
+    """The exact commands a human runs when the engine cannot create a tag.
+
+    Printed, never guessed at: an agent that cannot provision must be able to
+    hand a person something that works verbatim, and then record the result
+    with the matching ``--tag-id-<dimension>``.
+    """
+    return "\n".join([
+        f"  # {dimension}: create the tag "
+        "(409 means it already exists — list and reuse):",
+        "  TOKEN=$(fulcra-api auth print-access-token)",
+        "  curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/tag \\",
+        "    -H \"Authorization: Bearer $TOKEN\" -H 'Content-Type: application/json' \\",
+        f"    -d '{{\"name\": \"{name}\"}}'",
+        "  # (list them all: curl -sS "
+        "https://api.fulcradynamics.com/user/v1alpha1/tag \\",
+        "  #    -H \"Authorization: Bearer $TOKEN\")",
+        "  # then record the uuid it returns:",
+        "  coord-engine bus-v3 tag-provision <team> --agent <name> "
+        f"--tag-id-{dimension} <uuid>",
+    ])
+
+
+def _tag_declarations(args: argparse.Namespace, agent: str,
+                      entry: dict) -> "list[tuple[str, Optional[str], Optional[str]]]":
+    """Which dimensions this invocation is provisioning.
+
+    Each item is ``(dimension, declared_value, explicit_uuid)``. ``agent`` is
+    always in play (it is the identity); the other three appear only when the
+    caller declares them or supplies a uuid for them. That is what makes a
+    model switch ``--model <new>`` and nothing else: undeclared dimensions are
+    left exactly as the registry already has them, never blanked.
+    """
+    out = []
+    for dim in bus_tags.DIMENSIONS:
+        explicit = getattr(args, f"tag_id_{dim}", None)
+        declared = agent if dim == "agent" else getattr(args, dim, None)
+        if dim == "agent" and not explicit and entry.get("agent"):
+            continue  # already recorded; re-resolving would just cost a call
+        if explicit or (declared and (dim != "agent" or not entry.get("agent"))):
+            out.append((dim, declared, explicit))
+    return out
+
+
+def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
+    """Register an identity's timeline tags — agent, platform, harness, model.
+
+    rc 0 when every requested dimension is recorded (or already was), 2
+    otherwise. Partial progress is still WRITTEN before a nonzero exit: a tag
+    that exists but is unrecorded is the one state that leads to a duplicate
+    tag on the retry, so recording what resolved is strictly safer than
+    discarding it.
+
+    The registry itself is NEVER created or repaired here: an absent one means
+    the team has not adopted tagging (a cutover decision, made once by a human,
+    documented in docs/coord/BUS-V3.md), and a malformed one is evidence a
+    person must read. Both print what to do and refuse — an engine that writes
+    over durable bytes it could not parse destroys the only copy of the
+    mistake.
+
+    MODEL IS A DECLARATION. The engine cannot see which model drives it, so
+    ``--model`` is taken on trust; a wrong one is a presence-integrity bug and
+    the fix is to re-provision, which is cheap and rewrites only that
+    dimension.
+    """
+    agent = args.agent or os.environ.get("FULCRA_COORD_AGENT")
+    if not agent:
+        print("tag-provision: no agent identity (--agent or "
+              "FULCRA_COORD_AGENT)", file=sys.stderr)
+        return 2
+    path = bus_tags.tags_path(args.team)
+    registry, status = bus_tags.load_registry(transport, args.team,
+                                              use_cache=False)
+    if status == "error":
+        print(f"tag-provision: UNKNOWN — {path} could not be read; retry when "
+              "the store is reachable", file=sys.stderr)
+        return 2
+    if status == "absent":
+        print(f"tag-provision: ABSENT — {path} does not exist. This team has "
+              "not adopted identity tagging; seed the registry first (see "
+              "docs/coord/BUS-V3.md, \"Setup (once per account)\"), then "
+              "re-run.", file=sys.stderr)
+        return 2
+    if status != "ok" or registry is None:
+        print(f"tag-provision: INVALID — {path} exists but does not parse as "
+              f"{bus_tags.SCHEMA}. A human must fix the bytes; this verb will "
+              "not recreate them.", file=sys.stderr)
+        return 2
+
+    agents = {name: dict(entry) for name, entry in registry["agents"].items()}
+    entry = agents.get(agent, {})
+    wanted = _tag_declarations(args, agent, entry)
+    if not wanted:
+        have = ", ".join(f"{d}={entry[d]}" for d in bus_tags.DIMENSIONS
+                         if d in entry)
+        print(f"tag-provision: {agent} already registered ({have}); declare "
+              "--platform/--harness/--model to add or update a dimension")
+        return 0
+
+    # VALIDATE EVERY EXPLICIT UUID BEFORE CREATING ANYTHING. Rejecting a bad
+    # --tag-id mid-loop would abandon tags that earlier iterations had already
+    # created on the account: they exist, nothing records them, and the retry
+    # mints duplicates. An argument error is knowable with zero side effects,
+    # so it is settled before the first side effect.
+    for dim, _declared, explicit in wanted:
+        if explicit and not bus_tags.is_uuid(explicit):
+            print(f"tag-provision: --tag-id-{dim} {explicit!r} is not a uuid "
+                  "(record tags are uuids, never names); nothing was created",
+                  file=sys.stderr)
+            return 2
+
+    ensure = getattr(transport, "tag_ensure", None)
+    resolved: dict[str, str] = {}
+    failures: list[str] = []
+    for dim, declared, explicit in wanted:
+        if explicit:
+            resolved[dim] = explicit.strip()
+            continue
+        name = bus_tags.tag_name(dim, declared)
+        tag_id = ensure(name) if callable(ensure) else None
+        if not tag_id or not bus_tags.is_uuid(tag_id):
+            failures.append(dim)
+            print(f"tag-provision: cannot create the tag {name!r} from here. "
+                  "Run this, then record the uuid:", file=sys.stderr)
+            print(_tag_recipe(dim, name), file=sys.stderr)
+            continue
+        resolved[dim] = tag_id.strip()
+
+    if resolved:
+        entry.update(resolved)
+        agents[agent] = entry
+        if not transport.write(
+                path, bus_tags.render_registry(registry["base"], agents)):
+            hint = " ".join(f"--tag-id-{d} {t}" for d, t in resolved.items())
+            print(f"tag-provision: the registry write to {path} did not land "
+                  f"— the tags exist but are NOT recorded; re-run with {hint}",
+                  file=sys.stderr)
+            return 2
+        bus_tags.cache_clear()
+        print(f"tag-provision: {agent} -> "
+              + ", ".join(f"{d}={resolved[d]}" for d in bus_tags.DIMENSIONS
+                          if d in resolved)
+              + f" (channel tag {registry['base']} rides every event)")
+
+    missing = [d for d in bus_tags.DIMENSIONS if d not in entry]
+    if missing and not failures:
+        print(f"tag-provision: {agent} has no {'/'.join(missing)} tag — its "
+              "events stay filterable by the dimensions it does have; declare "
+              "the rest whenever you like")
+    return 2 if failures else 0
+
+
+def cmd_bus_v3_send(args: argparse.Namespace, transport: Any) -> int:
+    """Write ONE bus event — the supported hand-send, tagged like every other.
+
+    WHY THIS VERB EXISTS. ``tell``/``respond``/``remind`` cover the directive
+    workflow, but the bus also carries bare events (a `claim` announcing you
+    are on the bus, a `verdict`, a demo `directive`), and the documentation
+    taught those as a raw ``fulcra-api record`` pipe. A raw pipe cannot read
+    ``tags.json``, so every hand-sent event stayed untagged no matter how
+    carefully its sender had provisioned — the documented path defeated the
+    feature. This is that same write, through ``records.emit_event``, which is
+    where tagging lives.
+
+    Fail-closed on the stream: no records config means the event has nowhere
+    to go that is certainly right, and guessing a stream is worse than not
+    writing. rc 0 written, 2 otherwise.
+    """
+    sender = args.sender or os.environ.get("FULCRA_COORD_AGENT")
+    if not sender:
+        print("send: no agent identity (--from or FULCRA_COORD_AGENT)",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        detail = {
+            "error": "the records config could not be READ (transport "
+                     "failure) — retry when the store is reachable",
+            "invalid": "the records config is malformed — a human fixes the "
+                       "bytes; retrying will not",
+        }.get(cfg_status,
+              f"no bus-v3 records config for team {args.team} "
+              f"(team/{args.team}/{records.CONFIG_NAME})")
+        print(f"send: {detail}", file=sys.stderr)
+        return 2
+    try:
+        written = records.emit_event(
+            transport, cfg, sender=sender, to=args.to, kind=args.kind,
+            priority=args.priority, slug=args.slug, ptr=args.ptr,
+            team=args.team)
+    except ValueError as e:   # unknown kind/priority — fails AT the write
+        print(f"send: {e}", file=sys.stderr)
+        return 2
+    if not written:
+        print("send: the record did NOT land", file=sys.stderr)
+        return 2
+    print(f"send: {args.kind} {args.slug} -> {args.to} "
+          f"(from {sender}; readable in their queue in ~20s)")
     return 0
 
 
@@ -8225,6 +8430,45 @@ def build_parser() -> argparse.ArgumentParser:
                            help="fold reconcile's fresh transitions onto the timeline (model-free)")
     anp.add_argument("team")
     anp.set_defaults(func=cmd_annotate_project)
+
+    bv = sub.add_parser("bus-v3", help="bus v3 administration (tag registry)")
+    bvsub = bv.add_subparsers(dest="bus_v3_command", required=True)
+    bvt = bvsub.add_parser(
+        "tag-provision",
+        help="register an identity's timeline tags (agent/platform/harness/"
+             "model) in _coord/bus-v3/tags.json")
+    bvt.add_argument("team")
+    bvt.add_argument("--agent", "-a",
+                     help="identity to provision (default FULCRA_COORD_AGENT)")
+    bvt.add_argument("--platform",
+                     help="platform declaration, e.g. claude-code")
+    bvt.add_argument("--harness", help="harness declaration, e.g. ccr")
+    bvt.add_argument("--model",
+                     help="model declaration, e.g. opus-5 — DECLARED, not "
+                          "detectable; re-provision when it changes")
+    for _dim in ("agent", "platform", "harness", "model"):
+        bvt.add_argument(f"--tag-id-{_dim}", dest=f"tag_id_{_dim}",
+                         help=f"record an EXTERNALLY created {_dim} tag uuid "
+                              "instead of creating one")
+    bvt.set_defaults(func=cmd_bus_v3_tag_provision)
+    bvs = bvsub.add_parser(
+        "send",
+        help="write ONE bus event (the supported hand-send — identity-tagged, "
+             "unlike a raw `fulcra-api record` pipe)")
+    bvs.add_argument("team")
+    bvs.add_argument("--to", required=True,
+                     help="recipient agent name, or `all`")
+    bvs.add_argument("--kind", required=True, choices=list(records.KINDS))
+    bvs.add_argument("--slug", required=True,
+                     help="short kebab-case identity for the exchange")
+    bvs.add_argument("--priority", "-p", default="P2",
+                     choices=["P0", "P1", "P2", "P3"])
+    bvs.add_argument("--ptr",
+                     help="team-relative File Store path of the document, "
+                          "when there is a body worth reading")
+    bvs.add_argument("--from", dest="sender",
+                     help="sending identity (default FULCRA_COORD_AGENT)")
+    bvs.set_defaults(func=cmd_bus_v3_send)
     return p
 
 

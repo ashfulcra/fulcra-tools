@@ -17,6 +17,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Optional
@@ -295,7 +296,8 @@ class FulcraFileTransport:
             return None
 
     def record_write(self, data_type: str, api_version: str, note: str,
-                     source: str, recorded_at: Optional[str] = None) -> bool:
+                     source: str, recorded_at: Optional[str] = None,
+                     tags: Optional[list[str]] = None) -> bool:
         """Write ONE typed record — the coord v3 write path.
 
         ``recorded_at`` may be in the FUTURE: the platform accepts it and the
@@ -310,11 +312,18 @@ class FulcraFileTransport:
         what that means (the convention: the durable file doc is the truth and
         the record is delivery, so a failed write degrades latency, never
         loses work). Never raises.
+
+        ``tags`` are tag **UUIDs** (the ingest endpoint validates them as
+        uuids and rejects names). They ride the same stdin document; an empty
+        or absent list omits the key entirely, so an untagged write is
+        byte-identical to what this method sent before tagging existed.
         """
         try:
             doc: dict[str, Any] = {"note": note}
             if recorded_at:
                 doc["recorded_at"] = recorded_at
+            if tags:
+                doc["tags"] = list(tags)
             rc, _out, _err = run_bounded(
                 [*self.command, "record", data_type,
                  "--api-version", api_version, "--source", source],
@@ -376,6 +385,76 @@ class FulcraFileTransport:
             return None
         files = data.get("files") if isinstance(data, dict) else None
         return files if isinstance(files, list) else None
+
+    def tag_ensure(self, name: str) -> Optional[str]:
+        """Ensure a tag named ``name`` exists; return its UUID, or None.
+
+        The provisioning verb's raw capability. Like :meth:`recent_changes`
+        this is REST rather than CLI (``fulcra-api`` carries no tag verb) with
+        auth borrowed from the CLI, and like it, ANY doubt returns None so the
+        caller falls back to printing a recipe a human can run.
+
+        Idempotent by construction: list first and reuse an existing tag of the
+        same name, then create. Creating a second tag with the same name would
+        be worse than failing — two ids for one label splits its timeline in
+        half.
+
+        THE RACE IS THE NORMAL CASE, not an edge. Dimension tags are SHARED:
+        ``platform:claude-code`` is created once and reused by every agent that
+        declares it, so a fleet cutover has many agents provisioning the same
+        names at the same time. Losers of that race get the documented benign
+        **409** — which means "it exists now", the very thing we wanted — so a
+        409 re-lists and returns the winner's uuid instead of reporting
+        failure. Any other error is still None.
+        """
+        wanted = (name or "").strip()
+        if not wanted:
+            return None
+        token = self._access_token()
+        if token is None:
+            return None
+        base = os.environ.get("FULCRA_API_BASE", DEFAULT_API_BASE).rstrip("/")
+        headers = {"Authorization": f"Bearer {token}",
+                   "Accept": "application/json"}
+
+        def _lookup() -> Optional[str]:
+            try:
+                req = urllib.request.Request(f"{base}/user/v1alpha1/tag",
+                                             headers=headers)
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    rows = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                return None
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                if isinstance(row, dict) and row.get("name") == wanted:
+                    found = row.get("id")
+                    if isinstance(found, str) and found:
+                        return found
+            return None
+
+        found = _lookup()
+        if found:
+            return found
+        try:
+            body = json.dumps({"name": wanted}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base}/user/v1alpha1/tag", data=body, method="POST",
+                headers={**headers, "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                created = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # 409: someone else created it between our list and our POST. That
+            # is success with a different author — go read who won.
+            return _lookup() if exc.code == 409 else None
+        except Exception:
+            return None
+        if isinstance(created, dict):
+            new_id = created.get("id")
+            if isinstance(new_id, str) and new_id:
+                return new_id
+        return None
 
     def _run(self, args: list[str], **kw: Any) -> subprocess.CompletedProcess:
         """Invoke ``fulcra-api file <args>``, HARD-bounded by ``self.timeout``.

@@ -136,17 +136,177 @@ SHA-256 pinned so CI runs the actual old implementation without network access.
 
 ## Setup (once per account)
 
-Events ride a **moment annotation** — a user-defined typed-record stream. Pick
-or create one for coordination (ours is named "Agent Tasks"); every agent on
-the account uses the same one. Find its id:
+Events ride a **moment annotation** — a user-defined typed-record stream. One
+channel per account; every agent uses the same one. If the account already has
+one, find its id and skip to step 4:
 
 ```bash
 fulcra-api catalog | grep -A2 '"categories": \["annotations"'   # or search by name
 ```
 
 The data type id has the form `MomentAnnotation/<uuid>`. Below, `$COORD_TYPE`
-means that full id. Record writes need `--api-version v1alpha1` when the name
-is ambiguous.
+means that full id and `$TOKEN` means `$(fulcra-api auth print-access-token)`.
+Record writes need `--api-version v1alpha1` when the name is ambiguous.
+
+Creating a channel is four steps, and **skipping any of the last three leaves a
+bus that works but cannot be seen**. Verified live 2026-08-04 while replacing a
+spec-less channel that was invisible in the Fulcra timeline visual explorer.
+
+### 1. Create the definition
+
+Any of the three surfaces works — the Fulcra app, the MCP `create_data_type`
+tool, or `POST /user/v1alpha1/annotation`. Give it a **fresh, human name** you
+have not used before (ours: "Agent Coordination Bus"); the explorer lists
+channels by name, and reusing a retired one invites reading old traffic as new.
+
+```bash
+curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/annotation \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "Agent Coordination Bus", "annotation_type": "moment"}'
+```
+
+The response carries the definition `id`; `$COORD_TYPE` is
+`MomentAnnotation/<that id>`.
+
+### 2. Set the spec — the PUT-303 dance
+
+**A definition created over the API comes back with `spec: null`, and the
+creation call will not accept one.** A spec-less definition may not list in the
+visual explorer at all: it exists, records land in it, reads work, and a human
+looking at their timeline sees nothing. That is the whole reason this section
+was rewritten. Set the spec as a second call — GET the definition, add `spec`,
+PUT it back:
+
+```bash
+ID=<definition uuid>
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  https://api.fulcradynamics.com/user/v1alpha1/annotation/$ID > /tmp/def.json
+python3 - <<'PY'
+import json
+d = json.load(open("/tmp/def.json"))
+d["spec"] = {"default_note": "Agent coordination event"}
+json.dump(d, open("/tmp/def.json", "w"))
+PY
+curl -sS -X PUT -o /dev/null -w '%{http_code}\n' \
+  https://api.fulcradynamics.com/user/v1alpha1/annotation/$ID \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data @/tmp/def.json
+```
+
+**A `303` is SUCCESS**, not a redirect you must chase and not an error. Do not
+trust the status code either way — **verify by re-GET** and confirm `spec` is no
+longer null. Nothing else in this setup is allowed to proceed on an unverified
+spec.
+
+The rule underneath: the explorer wants an **app-shaped** definition — spec,
+tags, and a fresh name. An API-born definition is only app-shaped after step 2.
+
+### 3. Create the tags — the four-dimension taxonomy
+
+Tags are the facet the timeline explorer groups by, and "who sent this" is only
+the first question a person asks of a fleet. **Every event carries the channel's
+base tag plus each dimension its sender has registered**, so each of these is a
+one-click timeline filter:
+
+| dimension | tag name | answers |
+| --- | --- | --- |
+| *(base)* | `agent-coordination-bus` | everything on the bus |
+| `agent` | `agent:coord-boss` | one identity's traffic |
+| `platform` | `platform:claude-code` | everything from one platform |
+| `harness` | `harness:ccr` | everything under one harness |
+| `model` | `model:opus-5` | everything a given model produced |
+
+Create the base tag once per account, and the dimension tags as agents join —
+the same name is reused by every agent that shares it, so `platform:claude-code`
+is created once no matter how many agents declare it:
+
+```bash
+curl -sS https://api.fulcradynamics.com/user/v1alpha1/tag \
+  -H "Authorization: Bearer $TOKEN"                              # list: [{name,id}]
+curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/tag \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "agent-coordination-bus"}'                        # 409 = exists
+```
+
+Keep the uuids the responses return. **Record tags are uuids, never names** —
+the ingest endpoint validates them as uuids and rejects a name outright.
+
+### 4. Seed the tag registry
+
+The engine will not call the tag API on the write path (a round trip per event,
+to answer a question that changes only when a human provisions). It reads one
+durable document instead:
+
+`team/<team>/_coord/bus-v3/tags.json`
+
+```json
+{
+  "schema": "coord.bus-tags.v2",
+  "base": "cb951ecb-f21c-4aee-826e-2cb0b12517d6",
+  "agents": {
+    "coord-boss": {
+      "agent": "0913d5df-830c-458e-b40a-0a04eafaa5cd",
+      "platform": "<uuid>", "harness": "<uuid>", "model": "<uuid>"
+    }
+  }
+}
+```
+
+A copy lives at
+[`docs/coord/examples/bus-v3-tags.json`](examples/bus-v3-tags.json) with the
+field-by-field table. Upload it once (with `"agents": {}` is fine); after that
+each agent registers itself, declaring all four dimensions:
+
+```bash
+coord-engine bus-v3 tag-provision <team> --agent coord-boss \
+  --platform claude-code --harness ccr --model opus-5
+# no raw tag capability here? it prints a per-dimension curl recipe; create the
+# tags by hand (step 3), then record the uuids it hands back:
+coord-engine bus-v3 tag-provision <team> --agent coord-boss \
+  --tag-id-platform <uuid> --tag-id-model <uuid>
+```
+
+`agent` is required in an entry; the rest are optional and can be filled in
+later. A **partial** entry is legitimate — its events carry what it has.
+
+**`model` is DECLARED, not detected.** The engine cannot see which model is
+driving it, so `--model` is taken on trust and a stale declaration silently
+mislabels every event that agent sends. Treat a wrong one as a
+presence-integrity bug: **a model switch is a re-provision**, and it is cheap —
+
+```bash
+coord-engine bus-v3 tag-provision <team> --agent coord-boss --model sonnet-5
+```
+
+rewrites only `model` and leaves the other three dimensions alone.
+
+The registry states, none of which may ever cost a write:
+
+| state | write | noise |
+| --- | --- | --- |
+| absent | untagged | silent — the team has not adopted tagging |
+| sender not in `agents` | base tag only | one-line warning naming `tag-provision` |
+| sender partial | the dimensions it has, plus base | silent — a partial entry is deliberate |
+| malformed *(incl. a `coord.bus-tags.v1` registry)* | untagged | LOUD every time; **never auto-recreated** — a human fixes the bytes |
+
+### Cutover from an existing channel
+
+Moving a live team to a new channel is a two-line change and one broadcast:
+
+1. Edit `team/<team>/_coord/bus-v3/records.json` — swap `data_type` to the new
+   `MomentAnnotation/<uuid>`. Leave every other field alone; the protocol,
+   cursor schema, generation, and version floors are unchanged by a channel
+   move. (A cursor is timestamp-based, so it carries across without a reset;
+   the first read after the swap sees the new stream from the cursor's
+   position, and the default lookback bounds a cold one.)
+2. Upload `tags.json` (step 4).
+3. Broadcast the swap so every agent re-reads the authority and runs
+   `tag-provision` with its four declarations.
+
+**Keep the old channel.** Do not archive or delete it: its records are the
+team's history, still readable by id, and deleting a definition to tidy up
+would destroy the only copy of every event ever sent. It simply stops receiving
+writes.
 
 ## The event payload
 
@@ -410,13 +570,43 @@ report CLEAR while a reviewer is waiting on you.
 ## Send
 
 ```bash
-echo '{"note":"{\"v\":1,\"to\":\"<recipient|all>\",\"kind\":\"response\",\"pri\":\"P2\",\"slug\":\"my-slug\"}"}' | \
+coord-engine bus-v3 send <team> --to <recipient|all> --kind response \
+  --priority P2 --slug my-slug [--ptr task/my-slug.md] [--from <you>]
+```
+
+That is the supported hand-send for a bare event — a `claim` announcing you are
+on the bus, a `verdict`, a one-off `directive`. The directive *workflow* has its
+own verbs (`tell`, `respond`, `remind`), which write the durable doc as well;
+use those when there is a document. If the message needs a body, upload it first
+(`fulcra file upload ./doc.md /team/<team>/<path>`) and pass `--ptr`.
+
+**Use the verb, not a raw `record` pipe.** The verb resolves the stream from the
+records authority (never a guessed one) and — the reason this section changed —
+attaches your identity tags. A raw pipe cannot read `tags.json`, so it writes an
+event that is invisible to every timeline filter no matter how carefully you
+provisioned. That gap silently untagged the documented send path, the
+cloud-coordinator onboarding, and the demo itself.
+
+### TAGGED RAW SEND — the shell-less / MCP-only fallback
+
+If you genuinely cannot run the engine (an MCP-only agent, a container with no
+`coord-engine`), the raw ingest write is still available, but **you must resolve
+and attach the tags yourself** — that is the whole cost of skipping the verb:
+
+1. Read the registry: `fulcra file download team/<team>/_coord/bus-v3/tags.json -`
+2. Take your entry's dimension uuids plus the top-level `base` uuid.
+3. Put them in the record's `tags` array (uuids only — the ingest endpoint
+   validates them as uuids and rejects names):
+
+```bash
+echo '{"note":"{\"v\":1,\"to\":\"<recipient|all>\",\"kind\":\"response\",\"pri\":\"P2\",\"slug\":\"my-slug\"}",
+      "tags":["<agent uuid>","<platform uuid>","<harness uuid>","<model uuid>","<base uuid>"]}' | \
   fulcra-api record "$COORD_TYPE" --api-version v1alpha1 --source=<your-agent-name>
 ```
 
 Pipe the JSON via stdin: in a non-TTY shell a flag-only invocation fails with
-"Error: No input provided". If the message needs a body, upload the document
-first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
+"Error: No input provided". Omit `tags` and the event is invisible in the
+explorer — that is a bug in your send, not a cosmetic detail.
 
 ## Timers: future-dated records (verified 2026-07-27)
 

@@ -45,7 +45,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
 | Wake routing | `wake` (queue-file/consume — local SessionStart nudges) · `router` (`run` — feed-first policy plane, direct cloud-adapter execution, host-local queue; `execute` — thin host-local executor; [plan](../../docs/coord/wake-router-PLAN.md)) |
-| Fleet ops | `health` · `doctor` · `acceptance pair` · `forge` · `annotate` |
+| Fleet ops | `health` · `doctor` · `acceptance pair` · `forge` · `annotate` · `bus-v3 tag-provision` (register an identity's four timeline-tag dimensions — agent/platform/harness/model — in `_coord/bus-v3/tags.json`, so every event this agent writes is filterable in the Fulcra visual explorer; `model` is a declaration the engine cannot verify, and a switch is a cheap re-provision) · `bus-v3 send` (the supported hand-send for a bare event — resolves the stream from the records authority and attaches those tags, which a raw `fulcra-api record` pipe cannot do) |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. Sub-verb lists above are by concern, not exhaustive — the parser's help is the inventory. The

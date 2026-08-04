@@ -19,12 +19,18 @@ fulcra-api file list team/fulcra/ | head
 > server, no polling loop anywhere."
 
 ```bash
-# send an event (payload in note, sender in sources):
-echo '{"note":"{\"v\":1,\"to\":\"coord-maintainer\",\"kind\":\"directive\",\"pri\":\"P2\",\"slug\":\"demo-hello\"}"}' | \
-  fulcra-api record "$COORD_TYPE" --api-version v1alpha1 --source=demo
+# send an event (payload in note, sender in sources, identity tags attached):
+coord-engine bus-v3 send fulcra --to coord-maintainer --kind directive \
+  --priority P2 --slug demo-hello --from demo
 # read a queue (this IS an agent's wake surface):
 fulcra-api get-records "$COORD_TYPE" "1 hour"
 ```
+
+Point out: the record comes back tagged `agent:` / `platform:` / `harness:` /
+`model:` plus the channel tag — so the same event is a timeline object a human
+can slice in the Fulcra app, not just JSON an agent parses. (Prep: the `demo`
+identity needs `coord-engine bus-v3 tag-provision fulcra --agent demo …` once,
+or the tags are absent and the point lands flat.)
 
 ## 1:15 — deterministic task views (45s)
 

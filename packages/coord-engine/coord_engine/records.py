@@ -709,18 +709,31 @@ def authority_currency_state(config: Optional[dict], *,
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
                kind: str, priority: str, slug: str, ptr: Optional[str] = None,
-               recorded_at: Optional[str] = None) -> bool:
+               recorded_at: Optional[str] = None,
+               team: Optional[str] = None) -> bool:
     """Emit one control-plane event; ``recorded_at`` in the future is a timer.
 
     ``build_payload`` raises on an unknown kind — a mistyped event class fails
     at the write. Returns the transport's verdict; False means the record did
     NOT land and the caller falls back to file-plane-only delivery (durable
     doc = truth, record = delivery).
+
+    THE ONE TAGGING CHOKEPOINT. Every bus write in the engine funnels through
+    here, so identity tags are attached here and nowhere else — no write verb
+    has to opt in and none can be missed. ``team`` names the tag registry
+    (:mod:`coord_engine.bus_tags`); omitting it writes untagged, which is what
+    a caller that has no team context should do. Tag resolution can never fail
+    the write: see the module docstring there for the absent/missing/invalid
+    contract.
     """
     note = build_payload(to=to, kind=kind, priority=priority, slug=slug, ptr=ptr)
+    from . import bus_tags
+    tags = bus_tags.tags_for_write(transport, team, sender)
+    kwargs: dict[str, Any] = {"recorded_at": recorded_at}
+    if tags:
+        kwargs["tags"] = tags
     return bool(transport.record_write(
-        config["data_type"], config["api_version"], note, sender,
-        recorded_at=recorded_at))
+        config["data_type"], config["api_version"], note, sender, **kwargs))
 
 
 # --- read side: the durable cursor (the window rule, 2026-07-27) --------------
