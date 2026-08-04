@@ -27,7 +27,10 @@ DURABLE ON THE BUS, one small document per team:
                                "harness": "…", "model": "…"}}}
 
 It is read once per process and cached: the registry changes at provisioning
-time (a human act), never inside a run.
+time (a human act), never inside a run. That holds because every writer today
+is a short-lived CLI invocation; provisioning in the SAME process already
+invalidates. A future daemon or embedded writer would hold a stale registry for
+its whole lifetime and must call :func:`cache_clear` on its own schedule.
 
 MODEL IS DECLARED, NOT DETECTED. No engine can see which model is driving it.
 ``model`` is whatever the agent said at provisioning time, so a stale one is a

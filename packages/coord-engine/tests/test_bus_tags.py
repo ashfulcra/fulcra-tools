@@ -10,6 +10,9 @@ of them still lands the record.
 from __future__ import annotations
 
 import json
+import pathlib
+import re
+import urllib.error
 from datetime import datetime, timezone
 
 import pytest
@@ -288,6 +291,21 @@ def test_tag_provision_rejects_a_tag_id_that_is_not_a_uuid(capsys):
     assert "not a uuid" in capsys.readouterr().err
 
 
+def test_a_late_bad_tag_id_is_caught_before_anything_is_created(capsys):
+    """Round-1 P1-2. ``model`` is validated LAST in dimension order, but a bad
+    uuid there must not first mint agent/platform tags that nothing records —
+    they would exist, be unrecorded, and the retry would mint duplicates."""
+    t = ProvisioningTransport({"agent:coord-boss": AGENT,
+                               "platform:claude-code": PLATFORM})
+    t.put(bus_tags.tags_path(TEAM), _registry({}))
+    assert _provision(t, "--platform", "claude-code",
+                      "--tag-id-model", "not-a-uuid") == 2
+    assert t.ensured == []                  # NOTHING was created
+    assert _entry(t) is None
+    err = capsys.readouterr().err
+    assert "--tag-id-model" in err and "nothing was created" in err
+
+
 def test_tag_provision_prints_a_recipe_per_unresolvable_dimension(capsys):
     t = ProvisioningTransport({"agent:coord-boss": AGENT})   # only agent works
     t.put(bus_tags.tags_path(TEAM), _registry({}))
@@ -369,3 +387,183 @@ def test_provisioning_makes_the_next_write_tagged():
     assert _emit(t) is True
     assert t.records_written[1]["tags"] == [AGENT, PLATFORM, HARNESS, MODEL,
                                            BASE]
+
+
+def test_tag_ensure_reuses_the_winner_of_a_409_create_race(monkeypatch):
+    """Round-1 P2. Dimension tags are SHARED — `platform:claude-code` is
+    created once and reused — so during a fleet cutover the 409 loser is the
+    common case, and it means "it exists now", not "provisioning failed"."""
+    from coord_engine import transport as transport_mod
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "t0ken")
+    calls = []
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = json.dumps(payload).encode()
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.get_method())
+        if req.get_method() == "POST":
+            raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {},
+                                         None)
+        # first GET: the tag isn't there yet; after the race: it is
+        return FakeResp([] if calls.count("GET") == 1
+                        else [{"name": "platform:claude-code",
+                               "id": PLATFORM}])
+
+    monkeypatch.setattr(transport_mod.urllib.request, "urlopen", fake_urlopen)
+    t = transport_mod.FulcraFileTransport(command=["fulcra-api"], timeout=5)
+    assert t.tag_ensure("platform:claude-code") == PLATFORM
+    assert calls == ["GET", "POST", "GET"]
+
+
+def test_tag_ensure_still_fails_closed_on_a_non_409_error(monkeypatch):
+    from coord_engine import transport as transport_mod
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "t0ken")
+
+    class FakeResp:
+        def read(self):
+            return b"[]"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "POST":
+            raise urllib.error.HTTPError(req.full_url, 500, "Server Error",
+                                         {}, None)
+        return FakeResp()
+
+    monkeypatch.setattr(transport_mod.urllib.request, "urlopen", fake_urlopen)
+    t = transport_mod.FulcraFileTransport(command=["fulcra-api"], timeout=5)
+    assert t.tag_ensure("platform:claude-code") is None
+
+
+# --- the DOCUMENTED send path ------------------------------------------------
+#
+# Round-1 P1-1: `records.emit_event` was the only tagging chokepoint, but it was
+# NOT the only documented way to write a bus event — BUS-V3's "Send", the
+# cloud-coordinator onboarding and the demo script all taught a raw
+# `fulcra-api record` pipe, which cannot read tags.json. A doc-following agent
+# (and the demo itself) therefore wrote untagged no matter how well it had
+# provisioned. `bus-v3 send` is that same write, through the chokepoint.
+
+def _send(t, *extra):
+    return cli.main(["bus-v3", "send", TEAM, "--to", "coord-maintainer",
+                     "--kind", "claim", "--slug", "on-bus-v3-coord-boss",
+                     "--from", "coord-boss", *extra], transport=t)
+
+
+def test_documented_send_writes_a_tagged_record(capsys):
+    t = TaggingTransport()
+    _bus(t, tags=_registry({"coord-boss": FULL}))
+    assert _send(t) == 0
+    (rec,) = t.records_written
+    assert rec["tags"] == [AGENT, PLATFORM, HARNESS, MODEL, BASE]
+    payload = records.parse_payload(rec["note"])
+    assert payload["to"] == "coord-maintainer" and payload["kind"] == "claim"
+    assert payload["slug"] == "on-bus-v3-coord-boss"
+    assert rec["source"] == "coord-boss"
+    assert "on-bus-v3-coord-boss" in capsys.readouterr().out
+
+
+def test_documented_send_carries_a_ptr_and_priority():
+    t = TaggingTransport()
+    _bus(t, tags=_registry({"coord-boss": FULL}))
+    assert _send(t, "--priority", "P0", "--ptr", "task/x.md") == 0
+    payload = records.parse_payload(t.records_written[0]["note"])
+    assert payload["pri"] == "P0" and payload["ptr"] == "task/x.md"
+
+
+def test_documented_send_warns_when_the_sender_is_unprovisioned(capsys):
+    """Same contract as every other write: base tag only, and say so."""
+    t = TaggingTransport()
+    _bus(t, tags=_registry({}))
+    assert _send(t) == 0
+    assert t.records_written[0]["tags"] == [BASE]
+    assert "tag-provision" in capsys.readouterr().err
+
+
+def test_documented_send_fails_closed_without_a_records_config(capsys):
+    t = TaggingTransport()
+    assert _send(t) == 2
+    assert t.records_written == []
+    assert "no bus-v3 records config" in capsys.readouterr().err
+
+
+def test_documented_send_reports_a_write_that_did_not_land(capsys):
+    t = TaggingTransport(record_ok=False)
+    _bus(t, tags=_registry({"coord-boss": FULL}))
+    assert _send(t) == 2
+    assert "did NOT land" in capsys.readouterr().err
+
+
+def test_documented_send_requires_an_identity(monkeypatch, capsys):
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    t = TaggingTransport()
+    _bus(t, tags=_registry({}))
+    assert cli.main(["bus-v3", "send", TEAM, "--to", "all", "--kind", "claim",
+                     "--slug", "s"], transport=t) == 2
+    assert "no agent identity" in capsys.readouterr().err
+
+
+# --- the docs may not teach an untagged send ---------------------------------
+
+REPO = pathlib.Path(__file__).resolve().parents[3]
+
+#: Every doc that teaches an agent how to SEND a bus event. A raw
+#: `fulcra-api record`/`fulcra record` pipe here is the P1-1 regression: it
+#: cannot resolve tags.json, so it writes untagged and silently contradicts
+#: "every event carries the channel and identity dimensions".
+SEND_DOCS = (
+    "docs/coord/BUS-V3.md",
+    "docs/coord/GET-ON-THE-BUS.md",
+    "docs/coord/pitch/demo-script.md",
+    "skills/fulcra-agent-cloud-coordinator/SKILL.md",
+)
+
+_RAW_SEND = re.compile(r"fulcra(?:-api)?\s+record\s")
+
+#: Marks the one sanctioned raw-send recipe: the shell-less/MCP-only fallback
+#: that resolves tags.json by hand and puts the uuids in the record body.
+TAGGED_FALLBACK_SENTINEL = "TAGGED RAW SEND"
+
+
+def test_no_doc_teaches_an_untagged_raw_send():
+    """A raw record pipe is allowed ONLY inside the explicitly-tagged fallback
+    recipe, which is marked with the sentinel below so this test can tell the
+    two apart."""
+    offenders = []
+    for rel in SEND_DOCS:
+        text = (REPO / rel).read_text(encoding="utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if not _RAW_SEND.search(line):
+                continue
+            # the tagged fallback block declares itself; everything else is a
+            # doc teaching an untagged write
+            window = "\n".join(text.splitlines()[max(0, n - 25):n])
+            if TAGGED_FALLBACK_SENTINEL not in window:
+                offenders.append(f"{rel}:{n}")
+    assert not offenders, (
+        "these docs teach a raw, untagged bus send: " + ", ".join(offenders)
+        + " — use `coord-engine bus-v3 send`, or mark an explicitly-tagged "
+        f"fallback with {TAGGED_FALLBACK_SENTINEL!r}")
+
+
+def test_the_send_docs_name_the_engine_verb():
+    for rel in SEND_DOCS:
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert "bus-v3 send" in text or "tag-provision" in text, (
+            f"{rel} documents the bus but never names the tagged send verb")

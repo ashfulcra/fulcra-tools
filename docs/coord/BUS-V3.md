@@ -543,13 +543,43 @@ report CLEAR while a reviewer is waiting on you.
 ## Send
 
 ```bash
-echo '{"note":"{\"v\":1,\"to\":\"<recipient|all>\",\"kind\":\"response\",\"pri\":\"P2\",\"slug\":\"my-slug\"}"}' | \
+coord-engine bus-v3 send <team> --to <recipient|all> --kind response \
+  --priority P2 --slug my-slug [--ptr task/my-slug.md] [--from <you>]
+```
+
+That is the supported hand-send for a bare event — a `claim` announcing you are
+on the bus, a `verdict`, a one-off `directive`. The directive *workflow* has its
+own verbs (`tell`, `respond`, `remind`), which write the durable doc as well;
+use those when there is a document. If the message needs a body, upload it first
+(`fulcra file upload ./doc.md /team/<team>/<path>`) and pass `--ptr`.
+
+**Use the verb, not a raw `record` pipe.** The verb resolves the stream from the
+records authority (never a guessed one) and — the reason this section changed —
+attaches your identity tags. A raw pipe cannot read `tags.json`, so it writes an
+event that is invisible to every timeline filter no matter how carefully you
+provisioned. That gap silently untagged the documented send path, the
+cloud-coordinator onboarding, and the demo itself.
+
+### TAGGED RAW SEND — the shell-less / MCP-only fallback
+
+If you genuinely cannot run the engine (an MCP-only agent, a container with no
+`coord-engine`), the raw ingest write is still available, but **you must resolve
+and attach the tags yourself** — that is the whole cost of skipping the verb:
+
+1. Read the registry: `fulcra file download team/<team>/_coord/bus-v3/tags.json -`
+2. Take your entry's dimension uuids plus the top-level `base` uuid.
+3. Put them in the record's `tags` array (uuids only — the ingest endpoint
+   validates them as uuids and rejects names):
+
+```bash
+echo '{"note":"{\"v\":1,\"to\":\"<recipient|all>\",\"kind\":\"response\",\"pri\":\"P2\",\"slug\":\"my-slug\"}",
+      "tags":["<agent uuid>","<platform uuid>","<harness uuid>","<model uuid>","<base uuid>"]}' | \
   fulcra-api record "$COORD_TYPE" --api-version v1alpha1 --source=<your-agent-name>
 ```
 
 Pipe the JSON via stdin: in a non-TTY shell a flag-only invocation fails with
-"Error: No input provided". If the message needs a body, upload the document
-first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
+"Error: No input provided". Omit `tags` and the event is invisible in the
+explorer — that is a bug in your send, not a cosmetic detail.
 
 ## Timers: future-dated records (verified 2026-07-27)
 

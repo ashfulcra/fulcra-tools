@@ -7656,16 +7656,23 @@ def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
               "--platform/--harness/--model to add or update a dimension")
         return 0
 
+    # VALIDATE EVERY EXPLICIT UUID BEFORE CREATING ANYTHING. Rejecting a bad
+    # --tag-id mid-loop would abandon tags that earlier iterations had already
+    # created on the account: they exist, nothing records them, and the retry
+    # mints duplicates. An argument error is knowable with zero side effects,
+    # so it is settled before the first side effect.
+    for dim, _declared, explicit in wanted:
+        if explicit and not bus_tags.is_uuid(explicit):
+            print(f"tag-provision: --tag-id-{dim} {explicit!r} is not a uuid "
+                  "(record tags are uuids, never names); nothing was created",
+                  file=sys.stderr)
+            return 2
+
     ensure = getattr(transport, "tag_ensure", None)
     resolved: dict[str, str] = {}
     failures: list[str] = []
     for dim, declared, explicit in wanted:
         if explicit:
-            if not bus_tags.is_uuid(explicit):
-                print(f"tag-provision: --tag-id-{dim} {explicit!r} is not a "
-                      "uuid (record tags are uuids, never names)",
-                      file=sys.stderr)
-                return 2
             resolved[dim] = explicit.strip()
             continue
         name = bus_tags.tag_name(dim, declared)
@@ -7700,6 +7707,55 @@ def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
               "events stay filterable by the dimensions it does have; declare "
               "the rest whenever you like")
     return 2 if failures else 0
+
+
+def cmd_bus_v3_send(args: argparse.Namespace, transport: Any) -> int:
+    """Write ONE bus event — the supported hand-send, tagged like every other.
+
+    WHY THIS VERB EXISTS. ``tell``/``respond``/``remind`` cover the directive
+    workflow, but the bus also carries bare events (a `claim` announcing you
+    are on the bus, a `verdict`, a demo `directive`), and the documentation
+    taught those as a raw ``fulcra-api record`` pipe. A raw pipe cannot read
+    ``tags.json``, so every hand-sent event stayed untagged no matter how
+    carefully its sender had provisioned — the documented path defeated the
+    feature. This is that same write, through ``records.emit_event``, which is
+    where tagging lives.
+
+    Fail-closed on the stream: no records config means the event has nowhere
+    to go that is certainly right, and guessing a stream is worse than not
+    writing. rc 0 written, 2 otherwise.
+    """
+    sender = args.sender or os.environ.get("FULCRA_COORD_AGENT")
+    if not sender:
+        print("send: no agent identity (--from or FULCRA_COORD_AGENT)",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        detail = {
+            "error": "the records config could not be READ (transport "
+                     "failure) — retry when the store is reachable",
+            "invalid": "the records config is malformed — a human fixes the "
+                       "bytes; retrying will not",
+        }.get(cfg_status,
+              f"no bus-v3 records config for team {args.team} "
+              f"(team/{args.team}/{records.CONFIG_NAME})")
+        print(f"send: {detail}", file=sys.stderr)
+        return 2
+    try:
+        written = records.emit_event(
+            transport, cfg, sender=sender, to=args.to, kind=args.kind,
+            priority=args.priority, slug=args.slug, ptr=args.ptr,
+            team=args.team)
+    except ValueError as e:   # unknown kind/priority — fails AT the write
+        print(f"send: {e}", file=sys.stderr)
+        return 2
+    if not written:
+        print("send: the record did NOT land", file=sys.stderr)
+        return 2
+    print(f"send: {args.kind} {args.slug} -> {args.to} "
+          f"(from {sender}; readable in their queue in ~20s)")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -8216,6 +8272,24 @@ def build_parser() -> argparse.ArgumentParser:
                          help=f"record an EXTERNALLY created {_dim} tag uuid "
                               "instead of creating one")
     bvt.set_defaults(func=cmd_bus_v3_tag_provision)
+    bvs = bvsub.add_parser(
+        "send",
+        help="write ONE bus event (the supported hand-send — identity-tagged, "
+             "unlike a raw `fulcra-api record` pipe)")
+    bvs.add_argument("team")
+    bvs.add_argument("--to", required=True,
+                     help="recipient agent name, or `all`")
+    bvs.add_argument("--kind", required=True, choices=list(records.KINDS))
+    bvs.add_argument("--slug", required=True,
+                     help="short kebab-case identity for the exchange")
+    bvs.add_argument("--priority", "-p", default="P2",
+                     choices=["P0", "P1", "P2", "P3"])
+    bvs.add_argument("--ptr",
+                     help="team-relative File Store path of the document, "
+                          "when there is a body worth reading")
+    bvs.add_argument("--from", dest="sender",
+                     help="sending identity (default FULCRA_COORD_AGENT)")
+    bvs.set_defaults(func=cmd_bus_v3_send)
     return p
 
 

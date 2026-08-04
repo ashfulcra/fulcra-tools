@@ -17,6 +17,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Optional
@@ -394,9 +395,17 @@ class FulcraFileTransport:
         caller falls back to printing a recipe a human can run.
 
         Idempotent by construction: list first and reuse an existing tag of the
-        same name (the server answers 409 on a duplicate create), then create.
-        Creating a second tag with the same name would be worse than failing —
-        two ids for one identity splits an agent's timeline in half.
+        same name, then create. Creating a second tag with the same name would
+        be worse than failing — two ids for one label splits its timeline in
+        half.
+
+        THE RACE IS THE NORMAL CASE, not an edge. Dimension tags are SHARED:
+        ``platform:claude-code`` is created once and reused by every agent that
+        declares it, so a fleet cutover has many agents provisioning the same
+        names at the same time. Losers of that race get the documented benign
+        **409** — which means "it exists now", the very thing we wanted — so a
+        409 re-lists and returns the winner's uuid instead of reporting
+        failure. Any other error is still None.
         """
         wanted = (name or "").strip()
         if not wanted:
@@ -407,18 +416,27 @@ class FulcraFileTransport:
         base = os.environ.get("FULCRA_API_BASE", DEFAULT_API_BASE).rstrip("/")
         headers = {"Authorization": f"Bearer {token}",
                    "Accept": "application/json"}
-        try:
-            req = urllib.request.Request(f"{base}/user/v1alpha1/tag",
-                                         headers=headers)
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                existing = json.loads(resp.read().decode("utf-8"))
-        except Exception:
-            return None
-        if isinstance(existing, list):
-            for row in existing:
+
+        def _lookup() -> Optional[str]:
+            try:
+                req = urllib.request.Request(f"{base}/user/v1alpha1/tag",
+                                             headers=headers)
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    rows = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                return None
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
                 if isinstance(row, dict) and row.get("name") == wanted:
                     found = row.get("id")
-                    return found if isinstance(found, str) and found else None
+                    if isinstance(found, str) and found:
+                        return found
+            return None
+
+        found = _lookup()
+        if found:
+            return found
         try:
             body = json.dumps({"name": wanted}).encode("utf-8")
             req = urllib.request.Request(
@@ -426,6 +444,10 @@ class FulcraFileTransport:
                 headers={**headers, "Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 created = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # 409: someone else created it between our list and our POST. That
+            # is success with a different author — go read who won.
+            return _lookup() if exc.code == 409 else None
         except Exception:
             return None
         if isinstance(created, dict):

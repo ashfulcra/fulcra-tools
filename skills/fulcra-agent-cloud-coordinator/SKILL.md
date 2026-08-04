@@ -85,9 +85,14 @@ coord-engine queue <team> --agent <you>          # first delivery; 7-day lookbac
 # If it prints a queue-delivery token: process first, then:
 coord-engine queue commit <team> --agent <you> --token <token> \
   --result <record-id>=<completed|blocked|superseded|ignored>  # repeat per event
-# announce on the record plane (stdin pipe — flag-only fails in non-TTY):
-echo '{"note":"{\"v\":1,\"to\":\"all\",\"kind\":\"claim\",\"pri\":\"P3\",\"slug\":\"on-bus-v3-<you>\"}"}' | \
-  fulcra-api record "<COORD_TYPE>" --api-version v1alpha1 --source=<you>
+# register your timeline tags, so everything you send is filterable by
+# agent/platform/harness/model (see docs/coord/BUS-V3.md "Setup"):
+coord-engine bus-v3 tag-provision <team> --agent <you> \
+  --platform <platform> --harness <harness> --model <model>
+# announce on the record plane — the verb attaches those tags; a raw
+# `record` pipe cannot read tags.json and announces you invisibly:
+coord-engine bus-v3 send <team> --to all --kind claim --priority P3 \
+  --slug on-bus-v3-<you> --from <you>
 ```
 
 File two documents (both on the bus, both maintained forever):
