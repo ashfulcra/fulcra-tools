@@ -650,8 +650,10 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # Role routing: work addressed to a role this agent holds IS work that needs
     # this agent (see _held_roles_for_rows). An unresolved role is UNKNOWN and gets
     # its own marker below — never folded into "no role work".
+    role_resolution: dict[str, tuple[list[str], bool]] = {}
     held_roles, unresolved_roles = _held_roles_for_rows(
-        transport, args.team, args.agent, rows, now=now)
+        transport, args.team, args.agent, rows, now=now,
+        resolution_sink=role_resolution)
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
                          held_roles=held_roles, include_history=args.all,
                          aggregate_doc=agg_doc, feed_evidence=feed_evidence)
@@ -668,9 +670,11 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     add_on = Deadline.open(_briefing_budget())
     got += _pending_reviews_for(
         transport, args.team, args.agent, rows=rows, deadline=add_on.instant,
-        aggregate_doc=agg_doc)
+        aggregate_doc=agg_doc, feed_evidence=feed_evidence,
+        role_resolution=role_resolution)
     got += _forge_feedback_for(transport, args.team, args.agent,
-                               deadline=add_on.instant, aggregate_doc=agg_doc)
+                               deadline=add_on.instant, aggregate_doc=agg_doc,
+                               feed_evidence=feed_evidence)
     # Blocked-on-human is the reserved FIRST section — prepended AFTER every other
     # section is built so it lands at index 0, and derived PURELY from ``rows``
     # (zero transport, un-starvable). It surfaces decisions parked on a human that
@@ -1549,6 +1553,7 @@ def _role_degraded_line(r: dict[str, Any]) -> str:
 def _held_roles_for_rows(
     transport: Any, team: str, agent: str, rows: list[dict[str, Any]], *,
     now: str, deadline_seconds: Optional[float] = None,
+    resolution_sink: "Optional[dict[str, tuple[list[str], bool]]]" = None,
 ) -> tuple[set[str], set[str]]:
     """Roles ``agent`` holds a FRESH lease on, among the role-shaped assignees the
     given rows actually reference. Returns ``(held, unresolved)``.
@@ -1648,10 +1653,19 @@ def _held_roles_for_rows(
             # (it shares this deadline) and comes back ok=False, so it lands in
             # `unresolved` through the branch below — no candidate can be dropped
             # by the clock without being reported.
-            unresolved.update(ordered[i:])
+            tail = ordered[i:]
+            unresolved.update(tail)
+            if resolution_sink is not None:
+                # UNKNOWN is reusable evidence within this ONE wake: a later
+                # review fold must surface the same degraded roles, not spend a
+                # second network budget retrying the exact tail immediately.
+                for pending_role in tail:
+                    resolution_sink[pending_role] = ([], False)
             break
         holders, ok = _role_fresh_holders(transport, team, role, now=now,
                                           listing_cache=listing_cache, deadline=dl)
+        if resolution_sink is not None:
+            resolution_sink[role] = (holders, ok)
         if not ok:
             unresolved.add(role)
             continue
@@ -1698,6 +1712,8 @@ def _pending_reviews_for(
     deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
     degraded_sink: "Optional[list[str]]" = None,
     aggregate_doc: Any = None,
+    feed_evidence: Any = None,
+    role_resolution: "Optional[dict[str, tuple[list[str], bool]]]" = None,
 ) -> list[dict[str, Any]]:
     """The pending-review fold, projection-first (the annotation read side).
 
@@ -1713,13 +1729,30 @@ def _pending_reviews_for(
     caller that passes no ``aggregate_doc``) takes the raw scan with no source
     row: byte-identical to the pre-projection behavior."""
     if aggregate_doc is not None:
-        section, reason = projection_mod.fresh_section(
-            aggregate_doc, projection_mod.REVIEWS_KEY,
-            projection_mod.REVIEWS_SCHEMA, now=_iso(_now()))
+        feed_supplied = feed_evidence is not None
+        feed_ok = isinstance(feed_evidence, dict) and feed_evidence.get("ok") is True
+        if feed_supplied and feed_ok:
+            section, reason = projection_mod.feed_fresh_section(
+                aggregate_doc, projection_mod.REVIEWS_KEY,
+                projection_mod.REVIEWS_SCHEMA, now=_iso(_now()))
+        elif feed_supplied:
+            section = None
+            _unused, age_reason = projection_mod.fresh_section(
+                aggregate_doc, projection_mod.REVIEWS_KEY,
+                projection_mod.REVIEWS_SCHEMA, now=_iso(_now()))
+            reason = (age_reason or (feed_evidence or {}).get("reason")
+                      or "data-updates feed unreadable")
+        else:
+            section, reason = projection_mod.fresh_section(
+                aggregate_doc, projection_mod.REVIEWS_KEY,
+                projection_mod.REVIEWS_SCHEMA, now=_iso(_now()))
         if section is not None:
+            changed = (projection_mod.review_changed_slugs(
+                team, feed_evidence.get("changes") or []) if feed_ok else None)
             served = _pending_reviews_from_projection(
                 transport, team, agent, section, rows=rows,
-                degraded_sink=degraded_sink)
+                degraded_sink=degraded_sink, changed_slugs=changed,
+                role_resolution=role_resolution)
             if served is not None:
                 return served
             reason = "reviews projection malformed"
@@ -1801,6 +1834,8 @@ def _pending_reviews_from_projection(
     transport: Any, team: str, agent: str, section: dict[str, Any], *,
     rows: "Optional[list[dict[str, Any]]]" = None,
     degraded_sink: "Optional[list[str]]" = None,
+    changed_slugs: "Optional[set[str]]" = None,
+    role_resolution: "Optional[dict[str, tuple[list[str], bool]]]" = None,
 ) -> "Optional[list[dict[str, Any]]]":
     """Serve the pending-review fold from a FRESH ``reviews`` projection section.
 
@@ -1812,17 +1847,13 @@ def _pending_reviews_from_projection(
     (``_validated_review_projection``); any shape doubt returns None and the
     caller falls back to the raw scan, loudly.
 
-    HEAD COVERAGE (round-2 P0): EVERY open caller-owned review-request slug is
-    authoritative head coverage and is raw-tallied per slug — even when the
-    projection carries a row for it. A projection row for a head slug can be a
-    reconcile/write race artifact (reconcile carried an old settled row, then
-    the head advanced, the doc was rewritten and the caller's directive landed —
-    all before the stamp), so a "covered" head slug served from the projection
-    could hide the caller's OWN open obligation until the next rebuild. The head
-    set is small by construction (the agent's own open review queue), the same
-    reasoning that gives the raw fold its dedicated head budget; an unresolvable
-    head slug stays UNKNOWN-loud (``review-head-degraded``), same as the raw
-    fold. The projection still answers the whole non-head tail in zero ops."""
+    HEAD COVERAGE (round-2 P0): without positive feed evidence, every open
+    caller-owned review-request slug is authoritative head coverage and is
+    raw-tallied per slug, guarding the reconcile/write race where a projected
+    settled row predates a rewritten head. With a clean update feed, that race is
+    observable: only feed-changed slugs require raw head coverage, while unchanged
+    caller heads are safely served from the projected tail. An unresolvable head
+    slug stays UNKNOWN-loud (``review-head-degraded``), same as the raw fold."""
     validated = _validated_review_projection(section)
     if validated is None:
         return None
@@ -1837,17 +1868,25 @@ def _pending_reviews_from_projection(
         if agent not in pending:
             for role in pending:
                 if role not in role_holders:
-                    holders, ok = _role_fresh_holders(
-                        transport, team, role, now=now,
-                        listing_cache=roles_listing_cache)
+                    cached = (role_resolution or {}).get(role)
+                    if cached is None:
+                        holders, ok = _role_fresh_holders(
+                            transport, team, role, now=now,
+                            listing_cache=roles_listing_cache)
+                    else:
+                        holders, ok = cached
                     role_holders[role] = holders
                     if not ok:
                         degraded_roles.add(role)
         return review.is_pending_for(pending, agent, role_holders)
 
-    # The caller's OWN open review-request slugs are answered by the raw tally
-    # below, NEVER by a projected row — see HEAD COVERAGE in the docstring.
-    head_slugs = sorted(_caller_review_head_slugs(rows, agent))
+    # Without feed proof, caller-owned heads are raw-tallied for race safety.
+    # A clean feed narrows that authoritative head to changed slugs only.
+    feed_proven = changed_slugs is not None
+    changed_slugs = changed_slugs or set()
+    caller_heads = _caller_review_head_slugs(rows, agent)
+    head_slugs = sorted(changed_slugs if feed_proven
+                        else caller_heads | changed_slugs)
     head_set = set(head_slugs)
 
     for slug in sorted(by_name):
@@ -1890,9 +1929,9 @@ def _pending_reviews_from_projection(
         out.append(budget_mod.degraded_row(
             "review-head-degraded", head_scanned, len(head_slugs), head_skipped))
 
-    for slug in orphans:
+    for slug in (s for s in orphans if s not in changed_slugs):
         out.append({"type": "review-orphan", "name": slug})
-    for slug in orphans_unknown:
+    for slug in (s for s in orphans_unknown if s not in changed_slugs):
         out.append({"type": "review-orphan-degraded", "name": slug})
     if degraded_roles:
         out.append({"type": "review-role-degraded",
@@ -2380,6 +2419,7 @@ def _forge_slug_feedback(
 def _forge_feedback_for(
     transport: Any, team: str, agent: str, *, deadline: Optional[float] = None,
     aggregate_doc: Any = None,
+    feed_evidence: Any = None,
 ) -> list[dict[str, Any]]:
     """The forge-feedback fold, projection-first (the annotation read side).
 
@@ -2392,21 +2432,62 @@ def _forge_feedback_for(
     scan loudly (``"source": "raw-scan"`` + reason); no projection / no
     ``aggregate_doc`` is the pre-projection raw scan, byte-identical."""
     if aggregate_doc is not None:
-        section, reason = projection_mod.fresh_section(
-            aggregate_doc, projection_mod.FORGE_KEY,
-            projection_mod.FORGE_SCHEMA, now=_iso(_now()))
+        feed_supplied = feed_evidence is not None
+        feed_ok = isinstance(feed_evidence, dict) and feed_evidence.get("ok") is True
+        if feed_supplied and feed_ok:
+            section, reason = projection_mod.feed_fresh_section(
+                aggregate_doc, projection_mod.FORGE_KEY,
+                projection_mod.FORGE_SCHEMA, now=_iso(_now()))
+        elif feed_supplied:
+            section = None
+            _unused, age_reason = projection_mod.fresh_section(
+                aggregate_doc, projection_mod.FORGE_KEY,
+                projection_mod.FORGE_SCHEMA, now=_iso(_now()))
+            reason = (age_reason or (feed_evidence or {}).get("reason")
+                      or "data-updates feed unreadable")
+        else:
+            section, reason = projection_mod.fresh_section(
+                aggregate_doc, projection_mod.FORGE_KEY,
+                projection_mod.FORGE_SCHEMA, now=_iso(_now()))
         if section is not None:
-            served = _forge_feedback_from_projection(
-                transport, team, agent, section, deadline=deadline)
-            if served is not None:
-                return served
-            reason = "forge projection malformed"
+            changed, responsibility_changed = _forge_feed_delta(
+                team, feed_evidence.get("changes") or []) if feed_ok else (set(), False)
+            if responsibility_changed:
+                section = None
+                reason = "forge responsibility changed since projection"
+            else:
+                served = _forge_feedback_from_projection(
+                    transport, team, agent, section, deadline=deadline,
+                    changed_slugs=changed)
+                if served is not None:
+                    return served
+                reason = "forge projection malformed"
         if reason:
             out = _forge_feedback_raw(transport, team, agent, deadline=deadline)
             out.append({"type": "forge-source", "source": "raw-scan",
                         "reason": reason})
             return out
     return _forge_feedback_raw(transport, team, agent, deadline=deadline)
+
+
+def _forge_feed_delta(team: str, changes: list[Any]) -> tuple[set[str], bool]:
+    """Changed feedback PR slugs and whether responsibility itself moved."""
+    feedback_pfx = f"team/{team}/_coord/forge/feedback/"
+    watch_pfx = f"team/{team}/_coord/forge/watch/"
+    review_pfx = f"team/{team}/review/"
+    changed: set[str] = set()
+    responsibility_changed = False
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        path = str(change.get("path") or change.get("full_name") or "").lstrip("/")
+        if path.startswith(feedback_pfx):
+            rest = path[len(feedback_pfx):]
+            if "/" in rest and rest.split("/", 1)[0]:
+                changed.add(rest.split("/", 1)[0])
+        elif path.startswith(watch_pfx) or path.startswith(review_pfx):
+            responsibility_changed = True
+    return changed, responsibility_changed
 
 
 def _validated_forge_projection(
@@ -2447,6 +2528,7 @@ def _validated_forge_projection(
 def _forge_feedback_from_projection(
     transport: Any, team: str, agent: str, section: dict[str, Any], *,
     deadline: Optional[float] = None,
+    changed_slugs: "Optional[set[str]]" = None,
 ) -> "Optional[list[dict[str, Any]]]":
     """Serve the forge-feedback fold from a FRESH ``forge`` projection section.
 
@@ -2461,6 +2543,7 @@ def _forge_feedback_from_projection(
     if validated is None:
         return None
     resp, fb = validated
+    changed_slugs = changed_slugs or set()
     mine = sorted(slug for slug, agents in resp.items() if agent in agents)
     out: list[dict[str, Any]] = []
     dl = Deadline(deadline)
@@ -2473,6 +2556,23 @@ def _forge_feedback_from_projection(
             degraded = True
             break
         scanned += 1
+        if slug in changed_slugs:
+            prefix = f"team/{team}/_coord/forge/feedback/{slug}/"
+            try:
+                entries = transport.list_dir(prefix)
+            except TransportError:
+                skipped += 1
+                degraded = True
+                continue
+            row, ok = _forge_slug_feedback(
+                transport, team, agent, slug, entries, prefix, deadline)
+            if not ok:
+                skipped += 1
+                degraded = True
+                break
+            if row is not None:
+                out.append(row)
+            continue
         items = fb.get(slug) or []
         unacked: list[str] = []
         authors: list[str] = []
@@ -3704,8 +3804,10 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         feed_section_key=projection_mod.NEEDS_ME_KEY)
     agg_doc = doc_sink[0] if doc_sink else None
     feed_evidence = feed_sink[0] if feed_sink else None
+    role_resolution: dict[str, tuple[list[str], bool]] = {}
     held_roles, unresolved_roles = _held_roles_for_rows(
-        transport, team, agent, rows, now=now)
+        transport, team, agent, rows, now=now,
+        resolution_sink=role_resolution)
 
     def _rows_probe(kinds: "tuple[str, ...]"):
         def probe():
@@ -3768,7 +3870,9 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         found = _pending_reviews_for(transport, team, agent, rows=rows,
                                      deadline=fold_dl.instant,
                                      degraded_sink=sink,
-                                     aggregate_doc=agg_doc)
+                                     aggregate_doc=agg_doc,
+                                     feed_evidence=feed_evidence,
+                                     role_resolution=role_resolution)
         real, markers = _split_markers(found)
         if sink or markers:
             # Degraded, but the pending rows that WERE read stay available: the
@@ -3785,7 +3889,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             return P(state=S.UNREADABLE, detail="obligation budget exhausted")
         found = _forge_feedback_for(transport, team, agent,
                                     deadline=fold_dl.instant,
-                                    aggregate_doc=agg_doc)
+                                    aggregate_doc=agg_doc,
+                                    feed_evidence=feed_evidence)
         real, markers = _split_markers(found)
         if markers:
             return P(state=S.UNREADABLE, owed=real,
@@ -5155,9 +5260,12 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # never a silently-empty board/inbox/needs-me that reads as "all clear". The
     # bundle stays tolerant (rc 0); the marker + stderr notice make it loud.
     doc_sink: list[Any] = []
+    feed_sink: list[Any] = []
     rows, rows_ok, rows_reason = _load_rows_status(
-        transport, args.team, doc_sink=doc_sink)
+        transport, args.team, doc_sink=doc_sink, feed_sink=feed_sink,
+        feed_section_key=projection_mod.NEEDS_ME_KEY)
     agg_doc = doc_sink[0] if doc_sink else None
+    feed_evidence = feed_sink[0] if feed_sink else None
     if not rows_ok:
         out["read_degraded"] = _read_degraded_row(rows_reason)
     # One shared add-on deadline (see _briefing_budget), opened HERE — before the
@@ -5190,9 +5298,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # same held set, so they can never disagree about a lease, and the lease read
     # is paid once per briefing rather than once per section. Unresolved roles are
     # UNKNOWN — surfaced below as `role_degraded`, never folded to "no roles".
+    role_resolution: dict[str, tuple[list[str], bool]] = {}
     try:
         held_roles, unresolved_roles = _held_roles_for_rows(
-            transport, args.team, agent, rows, now=now)
+            transport, args.team, agent, rows, now=now,
+            resolution_sink=role_resolution)
     except Exception as e:
         # The resolver never raises by contract; if it somehow does, the role set is
         # UNKNOWN for EVERY role-shaped assignee in the bundle — say so, don't
@@ -5229,14 +5339,15 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     try:
         out["pending_reviews"] = _pending_reviews_for(
             transport, args.team, agent, rows=rows, deadline=add_on.instant,
-            aggregate_doc=agg_doc)
+            aggregate_doc=agg_doc, feed_evidence=feed_evidence,
+            role_resolution=role_resolution)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
     try:
         out["forge_feedback"] = _forge_feedback_for(
             transport, args.team, agent, deadline=add_on.instant,
-            aggregate_doc=agg_doc)
+            aggregate_doc=agg_doc, feed_evidence=feed_evidence)
     except Exception as e:
         print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
         out["forge_feedback"] = []

@@ -2003,10 +2003,11 @@ def test_briefing_includes_pending_reviews(capsys):
     pend = out.get("pending_reviews", [])
     assert [r["name"] for r in pend
             if r.get("type") == "review-pending"] == ["pr-5"]
-    # reconcile just wrote a fresh projection: the fold must disclose it served
-    # from it (the annotation read side's no-silent-staleness contract).
+    # This legacy fake has no data-updates feed. Feed-gated projection serving
+    # must therefore fall back loudly rather than treat wall-clock age as proof.
     src = [r for r in pend if r.get("type") == "review-source"]
-    assert src and src[0]["source"] == "projection"
+    assert src and src[0]["source"] == "raw-scan"
+    assert "feed unreadable" in src[0]["reason"]
 
 
 def test_briefing_text_includes_pending_reviews(capsys):

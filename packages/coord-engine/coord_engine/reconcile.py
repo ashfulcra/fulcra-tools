@@ -946,13 +946,15 @@ def _collapse_feed_changes(
 
 def _feed_task_delta(
     transport: Any, team: str, *, cursor: dict[str, Any], now: str, log: Any
-) -> Optional[tuple[dict[str, str], set, dict[str, str]]]:
+) -> Optional[tuple[dict[str, str], set, dict[str, str], list[dict[str, Any]]]]:
     """What changed under ``task/`` since the cursor, via the data-updates feed.
 
-    Returns ``(changed, deleted, new_processed)`` or **None for UNKNOWN** (=> the
-    caller full-scans, fail-closed). ``changed`` maps slug -> the parity mtime for
-    each ``uploaded`` task shard; ``deleted`` is the set of removed slugs;
-    ``new_processed`` is the pruned processed-ledger to carry into the next pass.
+    Returns ``(changed, deleted, new_processed, changes)`` or **None for
+    UNKNOWN** (=> the caller full-scans, fail-closed). ``changed`` maps slug ->
+    the parity mtime for each ``uploaded`` task shard; ``deleted`` is the set of
+    removed slugs; ``new_processed`` is the pruned processed-ledger to carry
+    into the next pass; ``changes`` is the positively read feed window shared
+    with projection builders.
 
     W4 pattern: the window is INCLUSIVE (``watermark`` back one skew margin) and a
     processed ledger keyed ``<path>:<state>:<uploaded_at>`` suppresses re-folding
@@ -1040,7 +1042,7 @@ def _feed_task_delta(
             changed[slug] = instant.strftime("%Y-%m-%d %I:%M%p UTC")
         else:  # archived | deleted -> the row goes away
             deleted.add(slug)
-    return changed, deleted, new_processed
+    return changed, deleted, new_processed, changes
 
 
 def _project_task_row(
@@ -1225,7 +1227,7 @@ def reconcile(
         fast_delta = _feed_task_delta(
             transport, team, cursor=prior_cursor, now=now, log=log)
         if fast_delta is not None:
-            fast_changed, fast_deleted, fast_processed = fast_delta
+            fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
             if not fast_changed and not fast_deleted:
                 fast_agg = dict(prior_agg or {})
                 fast_agg[RECONCILE_CURSOR_KEY] = {
@@ -1261,10 +1263,11 @@ def reconcile(
 
     # Try the feed-delta fold when a cursor is usable; None at any step is doubt.
     inc: Optional[tuple] = None
+    projection_changes: Optional[list[dict[str, Any]]] = None
     if prior_cursor is not None:
         delta = _feed_task_delta(transport, team, cursor=prior_cursor, now=now, log=log)
         if delta is not None:
-            changed, deleted, new_processed = delta
+            changed, deleted, new_processed, projection_changes = delta
             folded = _incremental_reconcile_rows(
                 transport, team, prior_by_name,
                 changed=changed, deleted=deleted, log=log)
@@ -1364,7 +1367,7 @@ def reconcile(
             transport, team, now=now,
             prior=(prior_agg or {}).get(projection_mod.REVIEWS_KEY),
             settled_index=_load_settled_index(transport, team),
-            deadline=proj_dl, log=log)
+            deadline=proj_dl, log=log, feed_changes=projection_changes)
         forge_section = projection_mod.build_forge_projection(
             transport, team, now=now,
             review_rows=reviews_section.get("rows") or [],

@@ -53,16 +53,16 @@ scan; a section that simply does not exist (a team whose reconcile predates this
 module) is a silent fallback, so such a team behaves exactly as before.
 
 BUILD COST + CONVERGENCE: the build pays one ``review/`` listing per pass, then
-per-slug work ONLY for unsettled or changed reviews. A settled round is
-immutable by the review contract (re-opening a slug rewrites the review doc, so
-the doc's listed mtime/size move), which makes a prior settled row safe to carry
-at ZERO ops when the doc's mtime+size are unchanged — the same listing-only
-reuse discipline reconcile's task rows use, same-minute guard included. The
-build also drops the ``.settled`` marker on any tally it proves settleable, so
-a large legacy corpus converges: each budgeted pass settles more slugs, and the
-carried majority costs nothing on the next. Until the build completes inside
-its budget the section says ``complete: false`` and readers keep raw-scanning
-(loud) — an incomplete projection is never served as coverage.
+per-slug work ONLY for rows the update feed says changed or not yet scanned.
+Positive feed evidence makes every unchanged prior row a durable scan frontier,
+including rows accumulated by an incomplete budget-cut pass; scanned counts
+therefore move monotonically toward ``total`` instead of restarting at zero.
+Without feed evidence the conservative legacy rule carries only settled rows
+whose doc mtime+size still match (including the same-minute guard). The build
+also drops the ``.settled`` marker on any tally it proves settleable. Until the
+build completes inside its budget the section says ``complete: false`` and
+readers keep raw-scanning (loud) — an incomplete projection is never served as
+coverage.
 
 Stdlib-only; transport duck-typed (``list_dir``/``read``/``write``); build
 functions never raise (reconcile wraps them best-effort anyway).
@@ -303,6 +303,47 @@ def _settled_carry_safe(prior_row: Any, entry: dict[str, Any],
     return rec._same_minute_reuse_safe(entry_mtime, prior_generated_at) is not False
 
 
+def review_changed_slugs(team: str, changes: list[Any]) -> set[str]:
+    """Review slugs touched by a positively read team updates window."""
+    prefix = _review_prefix(team)
+    out: set[str] = set()
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        path = str(change.get("path") or change.get("full_name") or "").lstrip("/")
+        if not path.startswith(prefix):
+            continue
+        rest = path[len(prefix):]
+        if not rest:
+            continue
+        first = rest.split("/", 1)[0]
+        slug = first[:-3] if first.endswith(".md") else first
+        if slug and slug != "index":
+            out.add(slug)
+    return out
+
+
+def _feed_carry_safe(prior_row: Any, entry: dict[str, Any], *,
+                     slug: str, changed_slugs: Optional[set[str]],
+                     prior_generated_at: Any) -> bool:
+    """Carry any unchanged row when the feed proves its slug did not move.
+
+    This is primarily the durable convergence cursor for incomplete builds:
+    rows scanned before a budget cut survive the next pass, while any review
+    doc or verdict-shard update puts the slug back in the raw head.  Without
+    positive feed evidence we retain the older settled-only carry rule.
+    """
+    if changed_slugs is None:
+        return _settled_carry_safe(prior_row, entry, prior_generated_at)
+    if slug in changed_slugs or not isinstance(prior_row, dict):
+        return False
+    if prior_row.get("mtime") != entry.get("mtime"):
+        return False
+    if prior_row.get("size") is None or prior_row.get("size") != entry.get("size"):
+        return False
+    return True
+
+
 def _scan_review_slug(
     transport: Any, team: str, slug: str, entry: dict[str, Any], *,
     now: str, deadline: Deadline,
@@ -377,11 +418,13 @@ def _scan_review_slug(
 def build_review_projection(
     transport: Any, team: str, *, now: str, prior: Any,
     settled_index: "set[str]", deadline: Deadline, log: Any = None,
+    feed_changes: Optional[list[Any]] = None,
 ) -> dict[str, Any]:
     """Build the ``reviews`` section for this reconcile pass. Never raises.
 
-    Carries prior SETTLED rows whose doc mtime+size are unchanged at zero ops;
-    fresh-scans everything else under ``deadline``. A slug that could not be
+    With positive feed evidence, carries every unchanged prior row at zero ops;
+    without it, carries only prior SETTLED rows whose doc mtime+size are safe.
+    Fresh-scans everything else under ``deadline``. A slug that could not be
     resolved (budget cut or transport doubt) keeps its prior row for the NEXT
     pass's carry check but marks the section ``complete: false`` — readers then
     keep raw-scanning until a pass resolves every slug. On an unlistable review
@@ -393,6 +436,8 @@ def build_review_projection(
                   if isinstance(r, dict) and r.get("name")}
     prior_generated_at = prior.get("generated_at")
     prior_tombstones = {str(s) for s in (prior.get("tombstones") or []) if s}
+    changed_slugs = (review_changed_slugs(team, feed_changes)
+                     if isinstance(feed_changes, list) else None)
     try:
         entries = transport.list_dir(_review_prefix(team))
     except TransportError as e:
@@ -415,7 +460,9 @@ def build_review_projection(
     # lands on the scan frontier and each pass converges further than the last.
     fresh: list[tuple[str, dict[str, Any]]] = []
     for slug, e in doc_entries:
-        if _settled_carry_safe(prior_rows.get(slug), e, prior_generated_at):
+        if _feed_carry_safe(prior_rows.get(slug), e, slug=slug,
+                            changed_slugs=changed_slugs,
+                            prior_generated_at=prior_generated_at):
             rows.append(prior_rows[slug])
         else:
             fresh.append((slug, e))
