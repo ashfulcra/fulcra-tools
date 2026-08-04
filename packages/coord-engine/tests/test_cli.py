@@ -1729,6 +1729,23 @@ def test_park_genuinely_no_roles_fails_loud(capsys):
     assert not [p for p in t.store if "/continuity/" in p]
 
 
+def test_park_selected_unheld_role_does_not_invert_error_message(capsys):
+    """The rc-2 message must not claim the absent lease is held."""
+    t = FakeTransport()
+    t.put("team/r/roles/gamma.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+
+    rc = cli.main([
+        "continuity", "park", "r", "-a", "amy", "--role", "gamma"],
+        transport=t)
+    cap = capsys.readouterr()
+
+    assert rc == 2
+    assert "does not hold fresh role gamma" in cap.err
+    assert "holds fresh role gamma" not in cap.err
+    assert "CHECKPOINT NOT WRITTEN" in cap.err
+    assert not [p for p in t.store if "/continuity/" in p]
+
+
 def test_park_failed_snapshot_write_leaves_ref_unchanged(capsys):
     from coord_engine import okf
     t = FakeTransport()

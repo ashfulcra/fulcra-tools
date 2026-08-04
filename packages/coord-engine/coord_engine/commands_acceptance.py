@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import time
@@ -45,8 +46,11 @@ class _AcceptancePairAdapter:
         self.next_action = next_action
         payload = cli._directive_payload(title, summary, next_action, self.peer)
         self.slug = f"{tasks.slugify(title)}-{cli._payload_hash(payload)}"
-        self.role = f"acceptance-peer-{tasks.agent_key(self.peer)}"
+        nonce_key = hashlib.sha256(self.nonce.encode("utf-8")).hexdigest()[:12]
+        self.role = f"acceptance-peer-{tasks.agent_key(self.peer)}-{nonce_key}"
+        self.role_path = self.cli._role_doc_path(self.team, self.role)
         self.response_path: str | None = None
+        self.checkpoint_ref: str | None = None
 
     def _run(self, argv: list[str]) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -119,8 +123,14 @@ class _AcceptancePairAdapter:
                 kind="directive", priority="P0", slug=self.slug,
                 ptr=f"task/{self.slug}.md", team=self.team,
             )
-        return acceptance_pair.HopResult(ok, f"directive {self.slug} verified" if ok
-                                         else f"tell rc={rc}, read-back, or event emission failed", raw)
+        task_path = self.cli._task_path(self.team, self.slug)
+        evidence = body or raw
+        return acceptance_pair.HopResult(
+            ok,
+            f"directive {self.slug} verified at {task_path}" if ok
+            else f"tell rc={rc}, read-back, or event emission failed",
+            evidence,
+        )
 
     def peer_reads_directive(self) -> acceptance_pair.HopResult:
         return self._poll_queue(self.peer, "directive")
@@ -159,13 +169,12 @@ class _AcceptancePairAdapter:
         return self._poll_queue(self.agent, "response")
 
     def peer_parks(self) -> acceptance_pair.HopResult:
-        role_path = self.cli._role_doc_path(self.team, self.role)
-        if self.transport.read(role_path) is None:
+        if self.transport.read(self.role_path) is None:
             role_doc = okf.render_frontmatter({
                 "type": "Role", "policy": "shared", "sla_hours": 24,
                 "maintainer": self.agent,
             }) + "\nEphemeral role used by pairwise acceptance.\n"
-            if not self.transport.write(role_path, role_doc):
+            if not self.transport.write(self.role_path, role_doc):
                 return acceptance_pair.HopResult(False, "acceptance role write failed")
         rc1, raw1 = self._run([
             "roles", "claim", self.team, self.role, "--agent", self.peer,
@@ -178,8 +187,9 @@ class _AcceptancePairAdapter:
             "--objective", objective, "--next", "GET-ON-THE-BUS final join",
         ])
         raw = raw1 + raw2
-        role_doc = okf.parse_frontmatter(self.transport.read(role_path)) or {}
+        role_doc = okf.parse_frontmatter(self.transport.read(self.role_path)) or {}
         ref = role_doc.get("checkpoint_ref")
+        self.checkpoint_ref = str(ref) if ref else None
         snap_raw = self.transport.read(str(ref)) if ref else None
         try:
             snap = json.loads(snap_raw) if snap_raw else None
@@ -219,7 +229,22 @@ class _AcceptancePairAdapter:
             if rc != 0 or body is None or self.nonce not in body:
                 return acceptance_pair.HopResult(
                     False, f"presence join failed for {identity}", "".join(raw_parts))
-        return acceptance_pair.HopResult(True, "both identities joined with verified presence")
+        rc, raw = self._run([
+            "roles", "release", self.team, self.role, "--agent", self.peer,
+        ])
+        raw_parts.append(raw)
+        if rc != 0:
+            return acceptance_pair.HopResult(
+                False, "acceptance lease cleanup failed", "".join(raw_parts))
+        residue = [self.role_path]
+        if self.checkpoint_ref:
+            residue.append(self.checkpoint_ref)
+        for path in residue:
+            if not self.transport.delete_idempotent(path):
+                return acceptance_pair.HopResult(
+                    False, f"acceptance cleanup failed for {path}", "".join(raw_parts))
+        return acceptance_pair.HopResult(
+            True, "both identities joined; nonce role/checkpoint/lease cleaned up")
 
 
 def cmd_acceptance_pair(args: argparse.Namespace, transport: Any) -> int:

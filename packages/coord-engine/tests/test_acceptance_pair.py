@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import datetime, timezone
 
@@ -138,6 +139,51 @@ class PairTransport(FakeTransport):
         return list(self.window)
 
 
+def _production_adapter(t: PairTransport, *, nonce: str = "fixed"):
+    return commands_acceptance._AcceptancePairAdapter(argparse.Namespace(
+        team="r", agent="a", peer="b", timeout=0.01, nonce=nonce,
+    ), t)
+
+
+def test_production_adapter_rejects_bad_directive_nonce(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("COORD_ENGINE_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    t = PairTransport()
+    t.put(records.config_path("r"), json.dumps({
+        "data_type": "MomentAnnotation/x", "api_version": "v1alpha1",
+    }))
+    adapter = _production_adapter(t, nonce="expected-nonce")
+    assert adapter.tell().ok
+    task_path = cli._task_path("r", adapter.slug)
+    t.store[task_path] = t.store[task_path].replace("expected-nonce", "wrong-nonce")
+
+    result = adapter.peer_reads_directive()
+
+    assert not result.ok
+    assert "BAD NONCE" in result.detail
+    assert "wrong-nonce" in result.raw
+
+
+def test_production_adapter_fails_when_checkpoint_write_is_missing(
+        monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("COORD_ENGINE_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+
+    class MissingCheckpointTransport(PairTransport):
+        def write(self, path, content):
+            if "/continuity/" in path and path.endswith(".json"):
+                return False
+            return super().write(path, content)
+
+    t = MissingCheckpointTransport()
+    adapter = _production_adapter(t)
+
+    result = adapter.peer_parks()
+
+    assert not result.ok
+    assert "CHECKPOINT NOT WRITTEN" in result.detail
+
+
 @pytest.mark.parametrize("loaded", [False, True], ids=["fresh-store", "loaded-store"])
 def test_production_pair_adapter_passes_fresh_and_loaded_store(
         monkeypatch, tmp_path, capsys, loaded: bool) -> None:
@@ -174,6 +220,7 @@ def test_production_pair_adapter_passes_fresh_and_loaded_store(
     assert rc == 0, output
     assert "HOP 9 PASS" in output
     assert "PASS pair a<->b" in output
+    assert not any("acceptance-peer-" in path for path in t.store)
     if loaded:
         real_role = cli.okf.parse_frontmatter(t.store["team/r/roles/real.md"])
         assert real_role["checkpoint_ref"] == real_ref

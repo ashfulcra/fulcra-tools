@@ -277,10 +277,11 @@ through both queue views, a write-verified B checkpoint, an A-side resume with
 `--max-age 5m`, and verified presence for both identities. It is safe on an empty
 or loaded team store because the continuity park is explicitly confined to its
 dedicated `acceptance-peer-*` role; checkpoints for the peer's real roles are not
-touched. The exchanged directive/response and checkpoint objective carry a unique
-nonce, but task, role, checkpoint, and presence paths are scoped per pair or
-identity rather than per nonce, so repeated or concurrent probes may replace prior
-acceptance residue. Do not accept partial output—success is the final `PASS pair
+touched. The directive task, response, acceptance role, and checkpoint are
+nonce-scoped; a successful final hop removes the acceptance lease, role, and
+checkpoint while retaining the task/response evidence. Presence is identity-scoped,
+so hop 9 overwrites both identities' real presence summaries with the acceptance
+summary. Do not accept partial output—success is the final `PASS pair
 A<->B`; failures name the exact hop and include its raw evidence.
 
 For a versioned Bus-v3 authority, `doctor` also reports which engine versions
