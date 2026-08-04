@@ -36,10 +36,12 @@ engine's `stash` verb:
 |---|---|---|---|
 | Auth usable? | `fulcra-api auth print-access-token >/dev/null && echo AUTH-OK` | prints `AUTH-OK` (exit 0) | `fulcra-api auth login` — browser sign-in; a headless agent that can't complete it should surface to its operator, not improvise |
 | Stash exists? | `coord-engine stash list <team> --agent <agent>` | lists at least one file (not `empty`) | **First adoption** — nothing durable yet: push your bundle now (see *On change* below) |
-| Local cache complete? | `test -x <local-path>` for each tool the stash lists | every tool you depend on exists locally and is executable | **Restore** — `coord-engine stash pull <team> --agent <agent> --dest <dir>` (see *On wake* below) |
+| Local cache current? | For every manifest entry, compare `shasum -a 256 <local-path>` (or `sha256sum`) with `.files[<name>].sha256`, and compare the executable bit with `.files[<name>].exec` | the manifest is readable and every required local tool is present, byte-current, and has the declared executable state | **Restore** — `coord-engine stash pull <team> --agent <agent> --dest <dir>` (see *On wake* below) |
 
-All probes pass → your tooling is durable and current; work normally and push on change. A
-freshly rolled-back container typically fails the third probe and enters at Restore.
+An absent or unreadable manifest is **UNKNOWN**, never current. All probes pass → your
+tooling is durable and current; work normally and push on change. A freshly rolled-back
+container can fail the third probe even when every expected file still exists: digest
+currency, not presence, is the gate.
 
 ## The stash convention
 
@@ -55,8 +57,9 @@ team/<team>/_coord/agents/<agent>/stash/
 
 Three behaviors, mirroring the continuity lifecycle contract:
 
-1. **On wake** (fresh session, cron fire, post-rollback): if a tool you expect is
-   missing from local disk, restore before improvising:
+1. **On wake** (fresh session, cron fire, post-rollback): restore from the stash
+   unconditionally, or run the manifest currency probe above and restore on any
+   mismatch or UNKNOWN result. Never branch only on whether a file exists:
    ```bash
    coord-engine stash pull <team> --agent <agent> --dest <dir>
    ```
@@ -71,10 +74,11 @@ Three behaviors, mirroring the continuity lifecycle contract:
    ```
    One step uploads the file and refreshes `manifest.json`; the push runs the
    fail-closed secrets guard below.
-3. **Self-heal first.** Keep a `restore-tooling.sh` in the stash that downloads the
-   rest of the bundle, and make it the first line of any scheduled job's
-   missing-file branch. A scheduled task's prompt should say "restore from the
-   stash", not "rebuild from memory" — session memory compacts; the store doesn't.
+3. **Self-heal first.** Keep a `restore-tooling.sh` in the stash that downloads and
+   manifest-verifies the rest of the bundle, and run it first on every scheduled
+   wake—not only from a missing-file branch. A scheduled task's prompt should say
+   "restore from the stash", not "restore if missing" or "rebuild from memory" —
+   session memory compacts and local files roll back; the store doesn't.
 
 ## The secrets rule (this is most of the lesson)
 
