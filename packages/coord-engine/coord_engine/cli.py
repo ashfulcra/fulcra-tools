@@ -1176,13 +1176,6 @@ def _briefing_budget() -> float:
 #: schedule. Env ``COORD_OBLIGATION_BUDGET``.
 DEFAULT_OBLIGATION_BUDGET = 20.0
 
-#: Marker distinguishing "we ran out of time" from "the store could not be read".
-#: Both are UNKNOWN — CLEAR is unsayable either way — but the remedies are
-#: opposite: one is a knob, the other is an outage. Reporting them with the same
-#: sentence is the UNKNOWN/INVALID conflation this slice exists to end, pointed
-#: inward.
-_BUDGET_EXHAUSTED = "obligation budget exhausted before this component was read"
-
 
 def _obligation_budget() -> float:
     return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
@@ -3172,7 +3165,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
             if fold_dl.expired():
-                return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
+                return P(state=S.UNREADABLE, detail="obligation budget exhausted")
             mine = _needs_me_rows(transport, team, agent, rows, now=now,
                                   held_roles=held_roles, include_history=False)
             owed = [r for r in mine
@@ -3184,7 +3177,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         if not rows_ok:
             return P(state=S.UNREADABLE, detail=rows_reason)
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
         if unresolved_roles:
             # A role whose lease could not be read might route work here. Doubt.
             return P(state=S.UNREADABLE,
@@ -3217,7 +3210,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             # already-dead deadline can legitimately return [] without ever
             # attempting a read — and [] here would be a false CLEAR caused by
             # our own cost control, which is the worst possible source for one.
-            return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
         sink: list[str] = []
         found = _pending_reviews_for(transport, team, agent, rows=rows,
                                      deadline=fold_dl.instant,
@@ -3235,7 +3228,7 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         """Unacknowledged forge feedback — a durable obligation surfaced by
         needs-me and briefing, and absent from the first cut of this registry."""
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail=_BUDGET_EXHAUSTED)
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
         found = _forge_feedback_for(transport, team, agent,
                                     deadline=fold_dl.instant)
         real, markers = _split_markers(found)
@@ -3477,17 +3470,7 @@ def _cmd_queue_v2(
         args: argparse.Namespace, transport: Any, cfg: dict[str, Any],
         agent: str, *, peek: bool, engine_version: str
 ) -> int:
-    """Transactional v2 read: stage first, advance only on explicit commit.
-
-    NO OBLIGATION RECONCILIATION HAPPENS HERE. Every return below exits before
-    ``_reconcile_after_empty_read``, so a v2 wake never runs the fold even with
-    ``--obligations``. That is deliberate for now and it is a BINDING
-    v2-activation precondition (docs/coord/BUS-V3.md, gate 3): activating v2
-    without porting the hook would silently stop reconciliation for whoever
-    switches first, and a fold that never runs is indistinguishable from a fold
-    that found nothing. Said here, at the code that would cause it, rather than
-    only in the doc somebody activating v2 might not re-read.
-    """
+    """Transactional v2 read: stage first, advance only on explicit commit."""
     generation = cfg["cursor_generation"]
     cursor, raw, status = records.load_v2_cursor_classified(
         transport, args.team, agent, generation)
@@ -4141,23 +4124,25 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     obligations_rc, obligations_fragment = (
         _reconcile_after_empty_read(args, transport, agent) if not fresh
         else (0, None))
-    # RC SEPARATION (codex-coder ruling 2026-07-31, codex-reviewer concurring).
-    # `queue`'s exit status describes ONE thing: the record-window transaction and
-    # the cursor result. An advisory obligation verdict must never rewrite that.
-    #
-    # The earlier version returned rc 3 when the fold was UNKNOWN — after the
-    # cursor had already been saved. That made a successful, coverage-advancing
-    # read exit with the code BOOTSTRAP defines as "window UNKNOWN, cursor
-    # untouched": two different facts sharing one exit code, which is the exact
-    # conflation this slice exists to end.
-    #
-    # Deferring the cursor save behind the fold would be the other wrong fix: a
-    # slow or dark obligation surface would then block durable delivery progress
-    # and replay windows forever. Delivery is primary; obligations are advisory.
-    # So the verdict travels in the envelope and the diagnostic, never in the rc.
-    # Shell gating on obligations uses the standalone `obligations` verb, which
-    # owns its own rc contract (3 = UNKNOWN, 4 = INVALID).
-    del obligations_rc
+    if obligations_rc != 0:
+        # A degraded fold is a FAILED queue exit, so it takes the queue family's
+        # failure path — one `queue-error` object, queue's rc 3 for both UNKNOWN
+        # and INVALID (codex-reviewer, PR 501). The earlier version printed the
+        # SUCCESS envelope (`queue-result`, state CLEAR) and merely returned a
+        # nonzero rc, which broke slice 4's contract that every nonzero queue exit
+        # emits exactly one queue-error: automation switching on `type` would have
+        # read a clean CLEAR while the process signalled failure.
+        # rc 4 stays on the standalone `obligations` verb, where UNKNOWN and
+        # INVALID have different remedies and nothing else owns the exit code.
+        state = obligations_fragment["state"] if obligations_fragment else "UNKNOWN"
+        return _queue_failure(
+            args, state=state,
+            error_code=("obligations-invalid" if state == "INVALID"
+                        else "obligations-unknown"),
+            message=("queue: obligations "
+                     f"{state} — {obligations_fragment['reason']}"
+                     if obligations_fragment else "queue: obligations UNKNOWN"),
+            rc=3, extra={"obligations": obligations_fragment})
     if json_mode:
         envelope = _queue_result_envelope(
             fresh, cfg=cfg,
@@ -4167,9 +4152,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             # NESTED, not a second object. Slice 4's contract is that --json
             # success is exactly one object so a consumer switches on one field;
             # emitting the fold as a sibling row would break every reader that
-            # relies on it. Carries EVERY obligation state now, including
-            # UNKNOWN/INVALID — the read itself succeeded, so the envelope is a
-            # success envelope that reports an advisory verdict inside it.
+            # relies on it. Correct for DATA/CLEAR only — a degraded fold takes
+            # the failure path above.
             envelope["obligations"] = obligations_fragment
         jsonutil.print_json(envelope)
     return 0
@@ -4184,25 +4168,14 @@ def _reconcile_after_empty_read(
     not establish that nothing is owed — that is the r2 spec item-3 distinction,
     and the fold is the only thing that closes it.
 
-    OPT-IN (``--obligations``). It shipped default-on under the 2026-07-30
-    ruling and was reverted on 2026-07-31: measured setup alone was ~35.8s
-    against a 20s budget on a live board, so every probe failed closed and the
-    default fold returned UNKNOWN on every component, every wake. Default-on
-    returns when the aggregate path lands and the measured profile fits the
-    budget with margin.
+    DEFAULT ON since the 2026-07-30 ruling; ``--no-obligations`` opts out. It
+    costs a task-index listing, a review listing and a roles listing on an empty
+    wake, which is a real bill — but only on the empty read, and only where the
+    wrong inference was otherwise free. A cost-sensitive caller can still decline
+    it explicitly, which is different from never being offered it.
 
-    The returned rc is the FOLD's own verdict (3 UNKNOWN / 4 INVALID) and the
-    caller deliberately does NOT adopt it: `queue`'s exit status describes the
-    record-window transaction and the cursor result, nothing else. An earlier
-    version did adopt it, which made a successful, cursor-advancing read exit
-    with the code BOOTSTRAP defines as "cursor untouched". The rc survives here
-    only because the standalone ``obligations`` verb — which owns that contract —
-    shares this fold.
-
-    LEGACY-CURSOR ONLY. Transactional cursor-v2 reads return from
-    ``_cmd_queue_v2`` before this runs, so v2 wakes get no reconciliation. That
-    is a known, documented gap and a binding v2-activation precondition (see
-    docs/coord/BUS-V3.md, gate 3), not an oversight to discover later.
+    Returns the rc the caller should use: the fold's UNKNOWN/INVALID states must
+    reach the exit code, or an agent scripting `queue` learns nothing from them.
     """
     if not getattr(args, "obligations", False):
         return 0, None
@@ -4218,9 +4191,6 @@ def _reconcile_after_empty_read(
         "reason": result.reason(),
     }
     if not getattr(args, "json", False):
-        # Every state announces itself here, and ONLY here: the obligation
-        # verdict no longer routes through `_queue_failure`, so this is the one
-        # place it is printed.
         print(f"queue: obligations {result.state.value} — {result.reason()}",
               file=sys.stderr)
     if result.state is obligations_mod.ObligationState.UNKNOWN:
@@ -7962,22 +7932,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show events without advancing the cursor (safe diagnostic read)")
     qu.add_argument("--consume", action="store_true",
                     help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
-    # DEFAULT OFF (provisional, coord-opus-worker as deputy 2026-07-31; awaiting
-    # coord-boss ratification). It shipped default-ON per the s3 ruling, and two
-    # live findings overturned that:
-    #   1. rc CONTRACT. `save_cursor` runs BEFORE this fold's rc is returned, so
-    #      a quiet wake advanced coverage and then exited rc 3 — while BOOTSTRAP
-    #      tells every agent rc 3 means "window UNKNOWN, cursor untouched". Two
-    #      different facts wearing one exit code is the exact conflation this
-    #      slice exists to end.
-    #   2. COST. Measured on team fulcra: setup alone is ~35.8s against a 20s
-    #      budget, so every probe fails closed and the default fold returns
-    #      UNKNOWN on every component, every wake — paying 6+N ops for an answer
-    #      nobody can act on. codex-coder withdrew the cost ack on that evidence.
-    # Default-ON returns when the aggregate path lands and the measured profile
-    # fits the budget (codex-coder's gate), not before.
+    # DEFAULT ON (coord-boss ruling, 2026-07-30). The false inference — "no
+    # events, so nothing owed" — exists only on the empty read, and the agents
+    # most at risk are the terse-wake ones who would never pass an opt-in flag.
+    # --no-obligations stays for cost-sensitive callers: three listings per empty
+    # wake is a real cost, just not one that should be the default silence.
     qu.add_argument("--obligations", action=argparse.BooleanOptionalAction,
-                    default=False,
+                    default=True,
                     help="after an EMPTY read, reconcile durable obligations "
                          "(an empty queue is not proof nothing is owed); "
                          "rc 3 = UNKNOWN, rc 4 = INVALID. "

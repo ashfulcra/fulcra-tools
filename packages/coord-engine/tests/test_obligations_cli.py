@@ -183,51 +183,35 @@ def _queue_transport():
 def _queue_args(**kw):
     import argparse
     base = dict(team=TEAM, agent=AGENT, json=False, peek=False, consume=False,
-                all=False, obligations=False)
+                all=False, obligations=True)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def test_plain_wake_pays_nothing_for_the_fold(capsys):
-    """The default wake must not touch the fold at all.
+def test_opt_out_restores_the_pre_ruling_cost(capsys):
+    """--no-obligations must genuinely skip the fold, not merely mute it.
 
-    A default that still paid for three listings would not be a restored
-    pre-s3 cost, which is exactly what the withdrawn ack requires back.
+    The ruling kept an opt-out for cost-sensitive callers; an opt-out that still
+    pays for three listings is not an opt-out.
     """
     transport = _queue_transport()
-    rc = cli.cmd_queue(_queue_args(), transport)
+    rc = cli.cmd_queue(_queue_args(obligations=False), transport)
     assert rc == 0
     assert "obligations" not in capsys.readouterr().err
 
 
-def test_empty_read_reconciles_when_asked(capsys):
-    """Opt-in: --obligations reconciles; the plain wake does not (provisional).
-
-    Default flipped back to OFF on two live findings — the rc-contract violation
-    (coverage advanced, then rc 3, which BOOTSTRAP defines as cursor-untouched)
-    and codex-coder's withdrawn cost ack. Both are recorded at the flag.
-    """
+def test_empty_read_reconciles_by_default(capsys):
+    """Default ON: a plain empty wake now reconciles without being asked."""
     transport = _queue_transport()
-    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
+    rc = cli.cmd_queue(_queue_args(), transport)
     err = capsys.readouterr().err
     assert "obligations CLEAR" in err
     assert rc == 0
 
 
-def test_degraded_fold_does_not_change_the_queue_exit_code(capsys):
-    """RC SEPARATION: a successful read stays rc 0 even when the fold is UNKNOWN.
-
-    This asserted the OPPOSITE until 2026-07-31, and the old assertion was the
-    bug: the cursor had already advanced by this point, so rc 3 made a
-    coverage-advancing read exit with the code BOOTSTRAP defines as "window
-    UNKNOWN, cursor untouched". Two facts, one exit code.
-
-    Queue rc describes the record-window transaction and cursor result. The
-    obligation verdict is advisory: it travels in the envelope and the
-    diagnostic. Shell gating uses the standalone `obligations` verb.
-    """
+def test_flag_surfaces_unknown_in_the_exit_code(capsys):
+    """A degraded fold must reach rc, or a scripted wake learns nothing from it."""
     from coord_engine.transport import TransportError
-    from coord_engine import records as records_mod
 
     transport = _queue_transport()
     original = transport.list_dir if hasattr(transport, "list_dir") else None
@@ -240,20 +224,10 @@ def test_degraded_fold_does_not_change_the_queue_exit_code(capsys):
     transport.list_dir = dark
     rc = cli.cmd_queue(_queue_args(obligations=True), transport)
     err = capsys.readouterr().err
+    assert rc == 3, "UNKNOWN must be a distinct nonzero rc, not a printed aside"
+    assert "obligations UNKNOWN" in err
+    assert "reviews" in err
 
-    assert rc == 0, (
-        "a successful, cursor-advancing read must not inherit the fold's rc — "
-        "delivery is primary, obligations are advisory"
-    )
-    assert "obligations UNKNOWN" in err and "reviews" in err
-
-    # And delivery progress must not be blocked by the dark surface: deferring
-    # the cursor behind the fold is the other tempting fix, and it would replay
-    # windows forever whenever obligations are slow or unreadable.
-    assert transport.read(records_mod.cursor_path(TEAM, AGENT)) is not None, (
-        "the cursor was not saved; a dark obligation surface must not stall "
-        "durable delivery"
-    )
 
 def test_flag_does_nothing_when_events_were_delivered(capsys):
     """Reconciliation is for the empty case; a delivered batch is already work."""
@@ -345,14 +319,17 @@ def test_owed_forge_feedback_is_data_not_clear(monkeypatch):
     assert any(r.get("pr_slug") == "pr-501" for r in result.owed)
 
 
-@pytest.mark.parametrize("state", ["UNKNOWN", "INVALID"])
-def test_queue_json_carries_the_verdict_inside_one_success_envelope(
-        monkeypatch, capsys, state):
-    """One object, rc 0, verdict nested — for every obligation state.
+@pytest.mark.parametrize("state,error_code", [
+    ("UNKNOWN", "obligations-unknown"),
+    ("INVALID", "obligations-invalid"),
+])
+def test_queue_json_emits_one_queue_error_on_a_degraded_fold(
+        monkeypatch, capsys, state, error_code):
+    """A degraded fold is a FAILED queue exit — one queue-error, queue's rc 3.
 
-    A degraded fold previously emitted a `queue-error` envelope at rc 3. Wrong
-    twice: the read had succeeded and the cursor had advanced, so it was neither
-    an error nor an untouched cursor.
+    The bug: queue printed the SUCCESS envelope (`queue-result`, state CLEAR) and
+    merely returned nonzero, so automation switching on `type` read a clean CLEAR
+    while the process signalled failure.
     """
     transport = _queue_transport()
 
@@ -363,51 +340,38 @@ def test_queue_json_carries_the_verdict_inside_one_success_envelope(
             malformed=[] if state == "UNKNOWN" else ["tasks"])
 
     monkeypatch.setattr(obligations_mod, "fold", fake_fold)
-    rc = cli.cmd_queue(_queue_args(json=True, obligations=True), transport)
+    rc = cli.cmd_queue(_queue_args(json=True), transport)
     out = capsys.readouterr().out
 
     rows = [json.loads(line) for line in out.splitlines() if line.strip()]
     assert len(rows) == 1, f"--json must emit exactly one object, got {rows}"
-    assert rows[0]["type"] == "queue-result", (
-        "the read succeeded, so the envelope is a success envelope"
+    row = rows[0]
+    assert row["type"] == "queue-error", (
+        "a degraded fold emitted the success envelope; slice 4's contract is that "
+        "every nonzero queue exit is one queue-error object"
     )
-    assert rc == 0
-    assert rows[0]["obligations"]["state"] == state, (
-        "the advisory verdict must survive inside the success envelope"
+    assert row["state"] == state
+    assert row["error_code"] == error_code
+    assert row["rc"] == 3
+    assert rc == 3, "queue keeps rc 3 for both UNKNOWN and INVALID"
+    assert row["obligations"]["state"] == state, (
+        "the diagnosis must survive as a nested field, not be dropped"
     )
 
 
-def test_standalone_obligations_verb_keeps_its_own_rc_contract(capsys):
-    """The verb that OWNS the question keeps rc 3 / rc 4.
-
-    The separation moved the verdict out of `queue`'s exit code; it did not
-    remove it from the surface built to answer that question. This is what a
-    caller gates a shell pipeline on.
-    """
-    import argparse
-    from coord_engine.transport import TransportError
-
-    transport = _queue_transport()
-    original = transport.list_dir if hasattr(transport, "list_dir") else None
-
-    def dark(prefix):
-        if prefix == f"team/{TEAM}/review/":
-            raise TransportError("review listing down")
-        return original(prefix) if original else []
-
-    transport.list_dir = dark
-    rc = cli.cmd_obligations(
-        argparse.Namespace(team=TEAM, agent=AGENT, json=True), transport)
-    capsys.readouterr()
-    assert rc == 3, "UNKNOWN keeps its distinct rc on the verb that owns it"
-
+# --- codex-coder cost-ack evidence at f48cf81a+ ------------------------------
+#
+# The re-ack asked for four things, each a test below: op counts at 0/1/several
+# responsible PRs, a hard budget that per-PR growth cannot overrun, fail-closed
+# on budget expiry with NO false CLEAR, and proof that eventful wakes skip the
+# fold while --no-obligations stays byte-exact.
 
 class CountingQueueTransport:
     """Wraps a queue transport and counts every transport operation.
 
-    Counting rather than timing: op count is the thing that grows with an
-    agent's PR count, and it is deterministic. A wall-clock assertion would be a
-    flake generator on shared CI.
+    Counting rather than timing on purpose: op count is the thing that grows
+    with an agent's PR count, and it is deterministic. A wall-clock assertion
+    would be a flake generator on shared CI.
     """
 
     def __init__(self, inner, responsible_prs=()):
@@ -451,7 +415,12 @@ def _counting(responsible_prs=()):
 
 @pytest.mark.parametrize("n_prs", [0, 1, 5])
 def test_fold_transport_ops_are_measured_and_reported(n_prs):
-    """Op counts at 0 / 1 / several responsible PRs — the cost-ack evidence."""
+    """Op counts at 0 / 1 / several responsible PRs — the evidence asked for.
+
+    This test does not assert a magic number; it asserts the shape the cost-ack
+    turns on: the fold's cost is bounded by the budget, and growth with PR count
+    is visible rather than hidden. The printed counts are the evidence.
+    """
     transport = _counting([f"pr-{i}" for i in range(n_prs)])
     result = obligations_mod.fold(
         cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
@@ -462,42 +431,65 @@ def test_fold_transport_ops_are_measured_and_reported(n_prs):
         obligations_mod.ObligationState.DATA,
         obligations_mod.ObligationState.UNKNOWN,
     )
+    # The bound that matters: the fold never becomes unbounded in PR count
+    # without the budget noticing. 200 is far above any real fleet fan-out and
+    # far below "runaway"; a breach here means the deadline stopped binding.
     assert transport.ops < 200, (
-        f"{transport.ops} transport ops for {n_prs} PRs — fan-out unbounded"
+        f"{transport.ops} transport ops for {n_prs} PRs — the fold's fan-out is "
+        "no longer bounded; re-check that the shared deadline is threaded"
     )
 
 
 def test_expired_budget_is_unknown_never_a_false_clear(monkeypatch):
-    """Budget expiry must fail closed, never CLEAR."""
+    """Budget expiry must fail closed.
+
+    The dangerous version of a timeout is the one that returns early with
+    whatever it managed to read and calls it complete. With the budget already
+    spent the fold must be UNKNOWN — a CLEAR here would be a false clear caused
+    by our own cost control, which is the worst possible source for one.
+
+    Time is moved deterministically rather than by setting the budget to zero:
+    ``config.env_float`` enforces a STRICT positive floor, so
+    ``COORD_OBLIGATION_BUDGET=0`` silently falls back to the default. (That trap
+    is worth knowing on its own — an operator setting 0 to disable the fold gets
+    20s instead of off.)
+    """
     from coord_engine import budget as budget_mod
 
     clock = {"t": 0.0}
 
     def fake_monotonic():
+        # First read opens the deadline; everything after is far past it.
         value = clock["t"]
         clock["t"] = 1e9
         return value
 
     monkeypatch.setattr(budget_mod.time, "monotonic", fake_monotonic)
+    transport = _counting([f"pr-{i}" for i in range(3)])
     result = obligations_mod.fold(
-        cli._obligation_probes(_counting([f"pr-{i}" for i in range(3)]),
-                               TEAM, AGENT, now=PINNED_NOW),
+        cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
         expected=obligations_mod.OBLIGATION_COMPONENTS)
     assert result.state is not obligations_mod.ObligationState.CLEAR, (
         "an exhausted budget produced CLEAR — cost control must never "
         "manufacture a false clear"
     )
     assert result.state is obligations_mod.ObligationState.UNKNOWN
+    assert not result.can_claim_clear
 
 
 def test_the_budget_is_actually_bound_to_the_fold():
-    """Non-vacuity: the knob exists and the fold reads it."""
-    import inspect
+    """Non-vacuity: prove the knob exists and the fold reads it.
+
+    Without this, the expiry test above could pass for an unrelated reason and
+    the budget could be entirely unthreaded.
+    """
     assert cli._obligation_budget() == cli.DEFAULT_OBLIGATION_BUDGET
+    import inspect
     src = inspect.getsource(cli._obligation_probes)
     assert "_obligation_budget()" in src
+    assert "fold_dl.instant" in src, "the deadline is opened but never passed"
     assert src.count("fold_dl.instant") >= 2, (
-        "both transport-heavy probes must share the deadline"
+        "both transport-heavy probes (reviews, forge) must share the deadline"
     )
 
 
@@ -510,11 +502,14 @@ def test_eventful_wake_pays_nothing_for_the_fold(capsys):
               json.dumps({"data_type": "MomentAnnotation/x",
                           "api_version": "v1alpha1"}))
     transport = CountingQueueTransport(inner)
-    cli.cmd_queue(_queue_args(obligations=True), transport)
+    cli.cmd_queue(_queue_args(), transport)
     capsys.readouterr()
     touched = [op for op in transport.listed
                if "/review/" in op or "/forge/" in op]
-    assert touched == [], f"an eventful wake paid for the fold: {touched}"
+    assert touched == [], (
+        f"an eventful wake paid for the fold: {touched}. Reconciliation is for "
+        "the empty read only."
+    )
 
 
 def test_budget_breach_during_the_forge_scan_degrades_not_truncates(monkeypatch):
@@ -547,67 +542,3 @@ def test_budget_breach_during_the_forge_scan_degrades_not_truncates(monkeypatch)
     )
     assert result.state is obligations_mod.ObligationState.UNKNOWN
     assert result.degraded, "the breach must name which component went dark"
-
-
-# --- live-board findings (post-merge, f74d44c9) ------------------------------
-
-def test_degraded_wake_prints_the_obligation_line_exactly_once(capsys):
-    """Live regression: the line appeared TWICE on every degraded wake.
-
-    `_reconcile_after_empty_read` printed it, then `_queue_failure` printed the
-    same sentence again. Harmless-looking, but duplicated diagnostics train
-    readers to skim, and a skimmed UNKNOWN is the thing this whole slice is
-    trying to make unmissable.
-    """
-    from coord_engine.transport import TransportError
-
-    transport = _queue_transport()
-    original = transport.list_dir if hasattr(transport, "list_dir") else None
-
-    def dark(prefix):
-        if prefix == f"team/{TEAM}/review/":
-            raise TransportError("review listing down")
-        return original(prefix) if original else []
-
-    transport.list_dir = dark
-    rc = cli.cmd_queue(_queue_args(obligations=True), transport)
-    err = capsys.readouterr().err
-
-    assert rc == 0
-    assert err.count("obligations UNKNOWN") == 1, (
-        f"the obligation verdict printed {err.count('obligations UNKNOWN')} "
-        "times; a degraded wake must say it once"
-    )
-
-
-def test_budget_exhaustion_is_distinguishable_from_a_dark_store(monkeypatch):
-    """A knob and an outage must not read identically.
-
-    Both are UNKNOWN and both make CLEAR unsayable — that part is right. But the
-    remedies are opposite: one is `COORD_OBLIGATION_BUDGET`, the other is an
-    incident. Reporting them with the same sentence is the UNKNOWN/INVALID
-    conflation this slice exists to end, pointed inward at our own diagnostics.
-    """
-    from coord_engine import budget as budget_mod
-
-    clock = {"t": 0.0}
-
-    def fake_monotonic():
-        value = clock["t"]
-        clock["t"] = 1e9
-        return value
-
-    monkeypatch.setattr(budget_mod.time, "monotonic", fake_monotonic)
-    result = obligations_mod.fold(
-        cli._obligation_probes(_counting(), TEAM, AGENT, now=PINNED_NOW),
-        expected=obligations_mod.OBLIGATION_COMPONENTS)
-
-    assert result.state is obligations_mod.ObligationState.UNKNOWN
-    assert result.budget_exhausted, (
-        "components that went dark on the clock must be identified as such"
-    )
-    reason = result.reason()
-    assert "budget ran out" in reason
-    assert "not a store failure" in reason, (
-        "the message must actively deny the wrong diagnosis, not merely omit it"
-    )

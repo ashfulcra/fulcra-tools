@@ -124,11 +124,6 @@ class ObligationResult:
     #: Components successfully consulted, sorted. Present so a caller can prove
     #: coverage rather than infer it from the absence of complaints.
     consulted: list[str] = field(default_factory=list)
-    #: Subset of ``degraded`` that went dark because the fold ran out of budget
-    #: rather than because the store failed. Same terminal state, different
-    #: remedy — and an operator who cannot tell them apart will tune the wrong
-    #: thing or page the wrong person.
-    budget_exhausted: list[str] = field(default_factory=list)
 
     @property
     def can_claim_clear(self) -> bool:
@@ -138,15 +133,8 @@ class ObligationResult:
     def reason(self) -> str:
         """One line a human or a log can act on."""
         if self.state is ObligationState.UNKNOWN:
-            head = ("cannot prove anything about: "
+            return ("cannot prove anything about: "
                     + ", ".join(self.degraded or ["(unnamed component)"]))
-            if self.budget_exhausted:
-                # A reader must be able to tell a knob from an outage.
-                head += (" — the obligation budget ran out before "
-                         f"{len(self.budget_exhausted)} of them were read "
-                         "(raise COORD_OBLIGATION_BUDGET); this is a time "
-                         "limit, not a store failure")
-            return head
         if self.state is ObligationState.INVALID:
             return "malformed component data: " + ", ".join(self.malformed)
         if self.state is ObligationState.DATA:
@@ -177,7 +165,6 @@ def fold(components: list[Component], *,
     """
     consulted: list[str] = []
     degraded: list[str] = []
-    budget_exhausted: list[str] = []
     malformed: list[str] = []
     owed: list[dict[str, Any]] = []
 
@@ -190,8 +177,6 @@ def fold(components: list[Component], *,
             continue
         if result.state is ProbeState.UNREADABLE:
             degraded.append(component.name)
-            if "budget exhausted" in (result.detail or ""):
-                budget_exhausted.append(component.name)
         elif result.state is ProbeState.MALFORMED:
             malformed.append(component.name)
         else:
@@ -217,5 +202,4 @@ def fold(components: list[Component], *,
         state = ObligationState.CLEAR
 
     return ObligationResult(state=state, owed=owed, degraded=degraded,
-                            malformed=malformed, consulted=sorted(consulted),
-                            budget_exhausted=sorted(budget_exhausted))
+                            malformed=malformed, consulted=sorted(consulted))
