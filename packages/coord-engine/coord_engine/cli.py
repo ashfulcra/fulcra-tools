@@ -4964,8 +4964,9 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
               f"the session.", file=sys.stderr)
         return 1
     if not held:
-        scope = f"fresh role {args.role}" if args.role else "no fresh roles"
-        print(f"park: {agent} holds {scope} in team/{args.team} — "
+        holding = (f"does not hold fresh role {args.role}"
+                   if args.role else "holds no fresh roles")
+        print(f"park: {agent} {holding} in team/{args.team} — "
               f"CHECKPOINT NOT WRITTEN because there was nothing to park",
               file=sys.stderr)
         return 2

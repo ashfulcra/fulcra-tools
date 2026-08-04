@@ -66,8 +66,9 @@ coord-engine acceptance pair <team> --agent <A> --peer <B>
 
 It runs `doctor --delivery` as both identities, sends a nonce directive A→B,
 queue-reads it as B, returns a nonce response B→A, queue-reads it as A, then parks
-and resumes B through a dedicated `acceptance-peer-*` role with a checkpoint-age
-limit of five minutes. The final hop refreshes and verifies both presence shards.
+and resumes B through a nonce-scoped `acceptance-peer-*` role with a checkpoint-age
+limit of five minutes. The final hop refreshes and verifies both presence shards,
+then removes the acceptance lease, role, and checkpoint.
 Each successful hop prints `HOP N PASS` with elapsed time; the first failure exits
 nonzero as `FAILED AT HOP N` followed by the raw evidence. `--timeout` (90 seconds
 by default) bounds the delivery probes and the two queue polls (hops 1, 2, 4, and
