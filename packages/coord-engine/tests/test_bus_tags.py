@@ -567,3 +567,15 @@ def test_the_send_docs_name_the_engine_verb():
         text = (REPO / rel).read_text(encoding="utf-8")
         assert "bus-v3 send" in text or "tag-provision" in text, (
             f"{rel} documents the bus but never names the tagged send verb")
+
+
+def test_build_parser_constructs_with_all_bus_v3_subverbs():
+    """PRs 515 and 524 each added their own add_parser("bus-v3") — green in
+    isolation, argparse.ArgumentError on their union, breaking EVERY engine
+    invocation. Pin: the parser builds and all three subverbs parse."""
+    from coord_engine import cli
+    parser = cli.build_parser()
+    parser.parse_args(["bus-v3", "migrate", "t", "--dry-run"])
+    parser.parse_args(["bus-v3", "tag-provision", "t", "--agent", "a"])
+    parser.parse_args(
+        ["bus-v3", "send", "t", "--to", "x", "--kind", "claim", "--slug", "s"])

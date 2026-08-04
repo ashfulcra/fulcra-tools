@@ -8063,7 +8063,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_json(qu)
     qu.set_defaults(func=cmd_queue)
     bv = sub.add_parser(
-        "bus-v3", help="Bus V3 authority and cursor administration")
+        "bus-v3",
+        help="Bus V3 administration: authority migration, tag registry, tagged send")
     bvsub = bv.add_subparsers(dest="bus_v3_command", required=True)
     bvm = bvsub.add_parser(
         "migrate",
@@ -8431,8 +8432,9 @@ def build_parser() -> argparse.ArgumentParser:
     anp.add_argument("team")
     anp.set_defaults(func=cmd_annotate_project)
 
-    bv = sub.add_parser("bus-v3", help="bus v3 administration (tag registry)")
-    bvsub = bv.add_subparsers(dest="bus_v3_command", required=True)
+    # tag-provision/send attach to the bus-v3 subparser created above (a second
+    # add_parser("bus-v3") is an argparse ArgumentError — PRs 515+524 each
+    # created one green in isolation and broke build_parser on their union)
     bvt = bvsub.add_parser(
         "tag-provision",
         help="register an identity's timeline tags (agent/platform/harness/"
