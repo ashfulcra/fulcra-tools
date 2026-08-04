@@ -659,6 +659,65 @@ def test_needs_me_end_to_end_serves_projection(capsys):
     assert not [p for p in t.listed if "/review/" in p or "/forge/" in p]
 
 
+def _put_directive(t, slug="mine"):
+    t.put(f"team/{TEAM}/task/{slug}.md",
+          "---\ntype: Task\ntitle: Mine\nstatus: active\npriority: P1\n"
+          "assignee: alice\ntags: [kind:directive]\n---\n")
+
+
+def test_needs_me_task_projection_hit_skips_ack_fanout(capsys):
+    t = CountingTransport()
+    _put_directive(t)
+    _reconcile(t)
+    agg = _agg(t)
+    assert agg[projection.NEEDS_ME_KEY]["complete"] is True
+    t.reset_counts()
+
+    assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
+                    transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert [r["name"] for r in got if r.get("name") == "mine"] == ["mine"]
+    assert {"type": "needs-me-source", "source": "projection",
+            "as_of": agg[projection.NEEDS_ME_KEY]["generated_at"]} in got
+    assert not [p for p in t.reads if "/_coord/acks/" in p]
+
+
+def test_needs_me_task_projection_stale_falls_back_loudly(capsys):
+    t = CountingTransport()
+    _put_directive(t)
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=48))
+    _reconcile(t, now=old)
+    t.reset_counts()
+
+    assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
+                    transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    src = [r for r in got if r.get("type") == "needs-me-source"]
+    assert len(src) == 1 and src[0]["source"] == "raw-scan"
+    assert "stale" in src[0]["reason"]
+    assert [p for p in t.reads if "/_coord/acks/mine/" in p]
+
+
+def test_needs_me_task_projection_malformed_falls_back_loudly(capsys):
+    t = CountingTransport()
+    _put_directive(t)
+    _reconcile(t)
+    agg = _agg(t)
+    agg[projection.NEEDS_ME_KEY]["rows"] = [{"name": "mine",
+                                               "mtime": 17,
+                                               "acked_by": []}]
+    t.store[f"team/{TEAM}/_coord/summaries.json"] = json.dumps(agg)
+    t.reset_counts()
+
+    assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
+                    transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    src = [r for r in got if r.get("type") == "needs-me-source"]
+    assert src == [{"type": "needs-me-source", "source": "raw-scan",
+                    "reason": "needs-me projection malformed"}]
+    assert [p for p in t.reads if "/_coord/acks/mine/" in p]
+
+
 def test_needs_me_text_discloses_fold_source(capsys):
     t = FakeTransport()
     _put_review(t, "pr-txt", "alice")

@@ -1,4 +1,4 @@
-"""Read-side projection sections of ``_coord/summaries.json`` (reviews + forge).
+"""Read-side projection sections of ``_coord/summaries.json``.
 
 The write side of "the annotation thing" already keeps ``summaries.json`` fresh
 on every reconcile (typed transitions, the E1 cursor, the ack fold state). This
@@ -25,6 +25,16 @@ to the raw scan — fail-closed, never wrong):
     {"schema", "generated_at", "complete",
      "responsible": {pr_slug: [agent, ...]},
      "feedback": {pr_slug: [{"id": shard-stem, "author": str|None}, ...]}}
+
+``needs_me`` — ``coord.needs-me.projection.v1``::
+
+    {"schema", "generated_at", "complete", "scanned", "total",
+     "rows": [{"name", "mtime", "acked_by": [agent, ...]}]}
+
+The needs-me section binds reconciled acknowledgment state to name + mtime.  A
+matching row is projection-covered; a new or modified caller row is the live
+head and is raw-tallied immediately.  Thus a large stable tail costs no
+per-directive reads without hiding work that arrived after the projection.
 
 THE FRESHNESS DOCTRINE (no silent staleness): a fold may consume a section only
 when it is FRESH — stamped by reconcile within ``COORD_PROJECTION_MAX_AGE_HOURS``
@@ -62,9 +72,11 @@ from .transport import TransportError
 #: Top-level summaries.json keys the projection sections live under.
 REVIEWS_KEY = "reviews"
 FORGE_KEY = "forge"
+NEEDS_ME_KEY = "needs_me"
 
 REVIEWS_SCHEMA = "coord.reviews.projection.v1"
 FORGE_SCHEMA = "coord.forge.projection.v1"
+NEEDS_ME_SCHEMA = "coord.needs-me.projection.v1"
 
 #: Maximum age (hours) a projection section may have and still be served by a
 #: fold (env ``COORD_PROJECTION_MAX_AGE_HOURS``). Generous by design: reconcile
@@ -138,6 +150,44 @@ def fresh_section(
                   if isinstance(scanned, int) and isinstance(total, int) else "")
         return None, f"{key} projection incomplete{detail}"
     return section, ""
+
+
+def build_needs_me_projection(
+    rows: list[dict[str, Any]], *, now: str, complete: bool,
+) -> dict[str, Any]:
+    """Snapshot the ack-dependent part of the task fold.
+
+    The aggregate's task rows already contain every field used by
+    :func:`query.needs_me`; the only expensive live fan-out is the per-directive
+    acknowledgment check.  This compact sibling section positively binds the
+    ack list to the task row's name + store mtime.  A reader may therefore use a
+    row only while that pair still matches.  A newly written or changed
+    caller-owned row is outside coverage and is raw-tallied immediately, the
+    same head/tail split used by the review projection.
+
+    ``complete`` is the ack fold's conclusiveness bit.  An inconclusive fold is
+    still persisted for diagnosis/convergence, but ``fresh_section`` will never
+    serve it as truth.
+    """
+    projected = []
+    for row in rows:
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        projected.append({
+            "name": name,
+            "mtime": row.get("mtime"),
+            "acked_by": sorted({str(a) for a in (row.get("acked_by") or [])
+                                if str(a)}),
+        })
+    return {
+        "schema": NEEDS_ME_SCHEMA,
+        "generated_at": now,
+        "complete": bool(complete),
+        "scanned": len(projected) if complete else 0,
+        "total": len(projected),
+        "rows": projected,
+    }
 
 
 # ---------------------------------------------------------------------------

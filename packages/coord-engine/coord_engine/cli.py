@@ -635,7 +635,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, args.team, args.agent, rows, now=now)
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
-                         held_roles=held_roles, include_history=args.all)
+                         held_roles=held_roles, include_history=args.all,
+                         aggregate_doc=agg_doc)
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
@@ -684,6 +685,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_forge_degraded_line(r))
             elif r.get("type") == "forge-source":
                 print(_source_line("forge", r))
+            elif r.get("type") == "needs-me-source":
+                print(_source_line("needs-me", r))
             else:
                 print(_line(r))
     return 0
@@ -3483,13 +3486,86 @@ def _directed_inbox(transport: Any, team: str, agent: str,
 def _needs_me_rows(transport: Any, team: str, agent: str,
                    rows: list[dict[str, Any]], *, now: str,
                    held_roles: "Optional[set[str]]" = None,
-                   include_history: bool = False) -> list[dict[str, Any]]:
-    """Needs-me with directive satisfaction and read-your-write semantics.
+                   include_history: bool = False,
+                   aggregate_doc: Any = None) -> list[dict[str, Any]]:
+    """Needs-me, projection-first, with a raw-tallied live head.
 
-    Reconciled ``acked_by`` hides old acknowledgements without transport work.
-    Only the remaining directive candidates pay one shard read so a fresh ack
-    disappears immediately instead of waiting for the next reconcile.
+    A fresh, complete ``needs_me`` section proves the ack state for every task
+    whose name + mtime still match.  Those covered rows are a pure in-memory
+    fold.  New or modified caller-owned rows are deliberately raw-tallied so
+    work at the live head never waits for the next reconcile (the PR519 review
+    head/tail precedent).  Stale, incomplete, or malformed sections fall back
+    to the legacy raw fold loudly; an absent section preserves legacy output.
     """
+    if aggregate_doc is not None and not include_history:
+        section, reason = projection_mod.fresh_section(
+            aggregate_doc, projection_mod.NEEDS_ME_KEY,
+            projection_mod.NEEDS_ME_SCHEMA, now=now)
+        if section is not None:
+            validated = _validated_needs_me_projection(section)
+            if validated is not None:
+                covered: list[dict[str, Any]] = []
+                live_head: list[dict[str, Any]] = []
+                for row in rows:
+                    snap = validated.get(str(row.get("name") or ""))
+                    if snap is None or snap[0] != row.get("mtime"):
+                        live_head.append(row)
+                        continue
+                    current = dict(row)
+                    current["acked_by"] = list(snap[1])
+                    covered.append(current)
+                got = query.needs_me(
+                    covered, agent, now=now, held_roles=held_roles)
+                got += _needs_me_rows_raw(
+                    transport, team, agent, live_head, now=now,
+                    held_roles=held_roles, include_history=False)
+                from . import model as model_mod
+                got = model_mod.sort_rows(got)
+                got.append({"type": "needs-me-source", "source": "projection",
+                            "as_of": section.get("generated_at")})
+                return got
+            reason = "needs-me projection malformed"
+        if reason:
+            got = _needs_me_rows_raw(
+                transport, team, agent, rows, now=now,
+                held_roles=held_roles, include_history=include_history)
+            got.append({"type": "needs-me-source", "source": "raw-scan",
+                        "reason": reason})
+            return got
+    return _needs_me_rows_raw(
+        transport, team, agent, rows, now=now, held_roles=held_roles,
+        include_history=include_history)
+
+
+def _validated_needs_me_projection(
+    section: dict[str, Any],
+) -> "Optional[dict[str, tuple[Any, list[str]]]]":
+    """Positively validate every nested value before deriving coverage."""
+    projected = section.get("rows")
+    if not isinstance(projected, list):
+        return None
+    out: dict[str, tuple[Any, list[str]]] = {}
+    for item in projected:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        mtime = item.get("mtime")
+        acked = item.get("acked_by")
+        if (not isinstance(name, str) or not name or name in out
+                or (mtime is not None and not isinstance(mtime, str))
+                or not isinstance(acked, list)
+                or not all(isinstance(a, str) and a for a in acked)
+                or len(set(acked)) != len(acked)):
+            return None
+        out[name] = (mtime, list(acked))
+    return out
+
+
+def _needs_me_rows_raw(transport: Any, team: str, agent: str,
+                       rows: list[dict[str, Any]], *, now: str,
+                       held_roles: "Optional[set[str]]" = None,
+                       include_history: bool = False) -> list[dict[str, Any]]:
+    """Legacy authoritative tally for uncovered rows and fallback paths."""
     got = query.needs_me(rows, agent, now=now, held_roles=held_roles,
                          include_history=include_history)
     if include_history:

@@ -1345,7 +1345,14 @@ def reconcile(
     # schema + freshness contract). Best-effort: a build failure carries the
     # prior sections unchanged (their old stamp ages them out honestly) and can
     # never fail the pass.
-    proj_state: dict[str, Any] = {}
+    # The task projection depends only on the ack fold + rows already completed
+    # above.  Build it independently so a review/forge transport failure cannot
+    # prevent a current needs-me section from being published.
+    proj_state: dict[str, Any] = {
+        projection_mod.NEEDS_ME_KEY:
+            projection_mod.build_needs_me_projection(
+                rows, now=now, complete=fold.conclusive),
+    }
     try:
         proj_dl = Deadline.open(projection_mod.build_budget())
         reviews_section = projection_mod.build_review_projection(
@@ -1442,7 +1449,8 @@ def reconcile(
                      if k not in (ACKS_ANCHOR_KEY, ACKS_STREAK_KEY,
                                   RECONCILE_CURSOR_KEY,
                                   projection_mod.REVIEWS_KEY,
-                                  projection_mod.FORGE_KEY)}
+                                  projection_mod.FORGE_KEY,
+                                  projection_mod.NEEDS_ME_KEY)}
     agg = aggregate.build_aggregate(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
