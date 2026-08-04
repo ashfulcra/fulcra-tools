@@ -1,4 +1,13 @@
-"""Read-side projection sections of ``_coord/summaries.json`` (reviews + forge).
+"""Read-side projection sections of ``_coord/summaries.json``.
+
+ARCHITECTURE: annotations are the events and files are their bodies. Reconcile
+is the single incremental materializer: it consumes ``data-updates`` once and
+publishes engine-owned views. Read verbs never re-derive the stable corpus.
+They read ``summaries.json`` once, gate its projection with the same change feed,
+and fold only the bounded changed-slug head. A clean feed makes the unchanged
+tail CURRENT independent of elapsed wall time; an unreadable feed is UNKNOWN
+and forces a loud raw fallback. ``COORD_PROJECTION_MAX_AGE_HOURS`` remains an
+outer diagnostic bound for that failure path, never a substitute for feed proof.
 
 The write side of "the annotation thing" already keeps ``summaries.json`` fresh
 on every reconcile (typed transitions, the E1 cursor, the ack fold state). This
@@ -25,6 +34,16 @@ to the raw scan — fail-closed, never wrong):
     {"schema", "generated_at", "complete",
      "responsible": {pr_slug: [agent, ...]},
      "feedback": {pr_slug: [{"id": shard-stem, "author": str|None}, ...]}}
+
+``needs_me`` — ``coord.needs-me.projection.v1``::
+
+    {"schema", "generated_at", "complete", "scanned", "total",
+     "rows": [{"name", "mtime", "acked_by": [agent, ...]}]}
+
+The needs-me section binds reconciled acknowledgment state to name + mtime.  A
+matching row is projection-covered; a new or modified caller row is the live
+head and is raw-tallied immediately.  Thus a large stable tail costs no
+per-directive reads without hiding work that arrived after the projection.
 
 THE FRESHNESS DOCTRINE (no silent staleness): a fold may consume a section only
 when it is FRESH — stamped by reconcile within ``COORD_PROJECTION_MAX_AGE_HOURS``
@@ -62,9 +81,17 @@ from .transport import TransportError
 #: Top-level summaries.json keys the projection sections live under.
 REVIEWS_KEY = "reviews"
 FORGE_KEY = "forge"
+NEEDS_ME_KEY = "needs_me"
 
 REVIEWS_SCHEMA = "coord.reviews.projection.v1"
 FORGE_SCHEMA = "coord.forge.projection.v1"
+NEEDS_ME_SCHEMA = "coord.needs-me.projection.v1"
+
+REQUIRED_SECTIONS = (
+    (REVIEWS_KEY, REVIEWS_SCHEMA),
+    (FORGE_KEY, FORGE_SCHEMA),
+    (NEEDS_ME_KEY, NEEDS_ME_SCHEMA),
+)
 
 #: Maximum age (hours) a projection section may have and still be served by a
 #: fold (env ``COORD_PROJECTION_MAX_AGE_HOURS``). Generous by design: reconcile
@@ -138,6 +165,100 @@ def fresh_section(
                   if isinstance(scanned, int) and isinstance(total, int) else "")
         return None, f"{key} projection incomplete{detail}"
     return section, ""
+
+
+def feed_fresh_section(
+    aggregate_doc: Any, key: str, schema: str, *, now: str,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """A section structurally eligible for CHANGE-FEED-gated serving.
+
+    The caller must already hold positive evidence from ``data-updates`` for the
+    window beginning at this section's ``generated_at``.  Consequently elapsed
+    wall time is not freshness evidence here: the feed proves the stable tail,
+    while changed slugs are overlaid separately.  We still reject unreadable or
+    future stamps and incomplete/unrecognized sections.  If the feed is
+    unavailable callers use :func:`fresh_section` only to enrich the loud raw
+    fallback reason; UNKNOWN is never promoted to fresh.
+    """
+    if not isinstance(aggregate_doc, dict) or key not in aggregate_doc:
+        return None, ""
+    section = aggregate_doc.get(key)
+    if not isinstance(section, dict) or section.get("schema") != schema:
+        return None, f"{key} projection unrecognized"
+    age = age_hours(section.get("generated_at"), now)
+    if age == float("inf"):
+        return None, f"{key} projection stamp unreadable"
+    if age < -_FUTURE_SKEW_HOURS:
+        return None, f"{key} projection stamped in the future"
+    if section.get("complete") is not True:
+        scanned, total = section.get("scanned"), section.get("total")
+        detail = (f" (scanned {scanned}/{total})"
+                  if isinstance(scanned, int) and isinstance(total, int) else "")
+        return None, f"{key} projection incomplete{detail}"
+    return section, ""
+
+
+def sections_owing_pass(aggregate_doc: Any) -> list[str]:
+    """Required projections that do not prove a completed CURRENT build.
+
+    Reconcile's no-change fast path is licensed to skip materialization only
+    when every required section exists, has the recognized schema, completed,
+    and was built in the same pass as its aggregate container. A missing section
+    is an upgrade/mixed-fleet rebuild debt; ``complete: false`` is explicit
+    convergence debt; and a stamp older than the container means a failed build
+    carried prior state. All three must decline the fast path even on a quiet
+    store, or an unusable projection can persist forever.
+    """
+    if not isinstance(aggregate_doc, dict):
+        return [key for key, _schema in REQUIRED_SECTIONS]
+    generated_at = aggregate_doc.get("generated_at")
+    owed: list[str] = []
+    for key, schema in REQUIRED_SECTIONS:
+        section = aggregate_doc.get(key)
+        if (not isinstance(section, dict)
+                or section.get("schema") != schema
+                or section.get("complete") is not True
+                or section.get("generated_at") != generated_at):
+            owed.append(key)
+    return owed
+
+
+def build_needs_me_projection(
+    rows: list[dict[str, Any]], *, now: str, complete: bool,
+) -> dict[str, Any]:
+    """Snapshot the ack-dependent part of the task fold.
+
+    The aggregate's task rows already contain every field used by
+    :func:`query.needs_me`; the only expensive live fan-out is the per-directive
+    acknowledgment check.  This compact sibling section positively binds the
+    ack list to the task row's name + store mtime.  A reader may therefore use a
+    row only while that pair still matches.  A newly written or changed
+    caller-owned row is outside coverage and is raw-tallied immediately, the
+    same head/tail split used by the review projection.
+
+    ``complete`` is the ack fold's conclusiveness bit.  An inconclusive fold is
+    still persisted for diagnosis/convergence, but ``fresh_section`` will never
+    serve it as truth.
+    """
+    projected = []
+    for row in rows:
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        projected.append({
+            "name": name,
+            "mtime": row.get("mtime"),
+            "acked_by": sorted({str(a) for a in (row.get("acked_by") or [])
+                                if str(a)}),
+        })
+    return {
+        "schema": NEEDS_ME_SCHEMA,
+        "generated_at": now,
+        "complete": bool(complete),
+        "scanned": len(projected) if complete else 0,
+        "total": len(projected),
+        "rows": projected,
+    }
 
 
 # ---------------------------------------------------------------------------
