@@ -7979,7 +7979,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     r.add_argument("team")
     r.add_argument("--retention-days", dest="retention_days",
-                   help="archive quiet terminal/proposed tasks and settled-single orphan reviews older than N days (or env COORD_RETENTION_DAYS)")
+                   help="archive quiet terminal/proposed tasks and settled-single orphan reviews older than N days (env COORD_RETENTION_DAYS; tune a drain with COORD_RETENTION_CAP and COORD_RETENTION_FORCE=1)")
     r.set_defaults(func=cmd_reconcile)
 
     s = sub.add_parser("status", help="counts by status")

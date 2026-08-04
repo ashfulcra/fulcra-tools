@@ -1,6 +1,6 @@
 import json
 
-from coord_engine import cli, tasks
+from coord_engine import cli, reconcile, tasks
 from coord_engine_test_helpers import FakeTransport, _task
 
 
@@ -1051,6 +1051,63 @@ def test_retention_on_by_default_and_daily_throttle(capsys):
     t.put("team/r/task/olddone2.md", _old_done_task("Olddone2"))
     cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
     assert "team/r/task/olddone2.md" in t.store                    # throttled today
+
+
+def test_retention_cap_env_is_respected(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_RETENTION_CAP", "2")
+    monkeypatch.delenv("COORD_RETENTION_FORCE", raising=False)
+    t = FakeTransport()
+    for i in range(3):
+        t.put(f"team/r/task/old{i}.md", _old_done_task(f"Old{i}"))
+
+    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    archived = [p for p in t.store if p.startswith("team/r/task/archive/")]
+    assert len(archived) == 2
+    assert sum(f"team/r/task/old{i}.md" in t.store for i in range(3)) == 1
+
+
+def test_retention_cap_bad_values_fall_back_to_default(capsys, monkeypatch):
+    monkeypatch.delenv("COORD_RETENTION_FORCE", raising=False)
+    for bad in ("nope", "0", "-4"):
+        monkeypatch.setenv("COORD_RETENTION_CAP", bad)
+        t = FakeTransport()
+        for i in range(reconcile.RETENTION_CAP_PER_PASS + 1):
+            t.put(f"team/r/task/old{i}.md", _old_done_task(f"Old{i}"))
+        cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+        archived = [p for p in t.store if p.startswith("team/r/task/archive/")]
+        assert len(archived) == reconcile.RETENTION_CAP_PER_PASS, bad
+
+
+def test_retention_default_env_unset_preserves_cap_and_throttle(capsys, monkeypatch):
+    monkeypatch.delenv("COORD_RETENTION_CAP", raising=False)
+    monkeypatch.delenv("COORD_RETENTION_FORCE", raising=False)
+    t = FakeTransport()
+    for i in range(reconcile.RETENTION_CAP_PER_PASS + 1):
+        t.put(f"team/r/task/old{i}.md", _old_done_task(f"Old{i}"))
+    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    assert sum(p.startswith("team/r/task/archive/") for p in t.store) == 20
+    t.put("team/r/task/another.md", _old_done_task("Another"))
+    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    assert "team/r/task/another.md" in t.store
+
+
+def test_retention_force_bypasses_gate_and_rewrites_marker(capsys, monkeypatch):
+    import json as _j
+    monkeypatch.delenv("COORD_RETENTION_CAP", raising=False)
+    monkeypatch.delenv("COORD_RETENTION_FORCE", raising=False)
+    t = FakeTransport()
+    t.put("team/r/task/old1.md", _old_done_task("Old1"))
+    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    first = _j.loads(t.store["team/r/_coord/retention/last-run.json"])
+    assert first["archived"] == 1
+
+    t.put("team/r/task/old2.md", _old_done_task("Old2"))
+    monkeypatch.setenv("COORD_RETENTION_FORCE", "1")
+    cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
+    assert "team/r/task/old2.md" not in t.store
+    forced = _j.loads(t.store["team/r/_coord/retention/last-run.json"])
+    assert forced["last_run"] == first["last_run"]
+    assert forced["archived"] == 1
 
 
 def test_retention_throttles_zero_archive_days_after_prior_marker(capsys):

@@ -14,6 +14,7 @@ fully testable without the network.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
@@ -212,7 +213,9 @@ def _write_health_shard(transport: Any, team: str, *, host: str, now: str,
 
 #: Retention: terminal tasks older than this many days are archived during
 #: reconcile when retention is enabled (env COORD_RETENTION_DAYS or --retention-days).
-#: Enabled by default. Bounded per pass; throttled to once/day.
+#: Enabled by default. Bounded per pass; throttled to once/day. Operators may
+#: raise the per-pass safety cap with ``COORD_RETENTION_CAP`` and may bypass the
+#: daily marker for one invocation with ``COORD_RETENTION_FORCE=1``.
 RETENTION_CAP_PER_PASS = 20
 DEFAULT_RETENTION_DAYS = 14.0
 REVIEW_RETENTION_DAYS = 7.0
@@ -637,8 +640,10 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
     """
     notes: list[str] = []
     archived_map: dict = {}  # slug -> (month, title), for the log's Archived bullets
+    cap = config.env_int("COORD_RETENTION_CAP", RETENTION_CAP_PER_PASS)
+    force = os.environ.get("COORD_RETENTION_FORCE") == "1"
     marker = transport.read(_retention_marker_path(team))
-    if marker is not None and today in marker:
+    if not force and marker is not None and today in marker:
         return rows, notes, archived_map  # already ran today
     keep: list = []
     archived = 0
@@ -654,7 +659,7 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             # that forgot to refresh frontmatter must keep the task hot.
             eligible_status = _quiet_mtime_old_enough(
                 r.get("mtime"), now=now, days=days)
-        if (archived < RETENTION_CAP_PER_PASS and old_enough
+        if (archived < cap and old_enough
                 and eligible_status and ts):
             slug = str(r.get("name"))
             month = str(ts)[:7]  # YYYY-MM
@@ -718,7 +723,7 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
         } - doc_slugs)
         settled_index = _load_settled_index(transport, team)
         for slug in sorted(doc_slugs):
-            if archived >= RETENTION_CAP_PER_PASS:
+            if archived >= cap:
                 break
             verdict_prefix = f"{review_prefix}{slug}/verdicts/"
             try:
@@ -756,7 +761,7 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             "schema": "coord.settled-reviews.v1", "reviews": sorted(settled_index)
         }, separators=(",", ":")))
         for slug in dir_slugs:
-            if archived >= RETENTION_CAP_PER_PASS:
+            if archived >= cap:
                 break
             verdict_prefix = f"{review_prefix}{slug}/verdicts/"
             try:
@@ -824,9 +829,10 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             transport, f"team/{team}/artifact/", f"team/{team}/artifacts/"):
         notes.append(
             "retention: artifact namespace move UNKNOWN or FAILED; sources kept")
-    if marker is None or today not in marker:
-        transport.write(_retention_marker_path(team),
-                        json.dumps({"last_run": today, "archived": archived}))
+    # A forced pass still refreshes the marker; force bypasses the gate for this
+    # invocation, it does not disable the normal once-daily throttle afterward.
+    transport.write(_retention_marker_path(team),
+                    json.dumps({"last_run": today, "archived": archived}))
     if archived:
         log.info("retention", team=team, archived=archived,
                  review_archived=review_archived)

@@ -140,7 +140,9 @@ under `skills/`, each package with its own README, build, and tests.
   after 14 days, settled review families after 7 days, and dead presence shards
   are pruned after 7 days. `COORD_RETENTION_DAYS=0` or
   `reconcile --retention-days 0` is the explicit kill switch; invalid values
-  fail safe to the enabled default. Hot review folds consult a compact settled
+  fail safe to the enabled default. One-time drains may raise the safe per-pass
+  cap with `COORD_RETENTION_CAP` and bypass that pass's daily gate with
+  `COORD_RETENTION_FORCE=1`; the marker is still written. Hot review folds consult a compact settled
   index instead of repeatedly classifying historical tombstones, and the legacy
   `artifact/` namespace is consolidated into `artifacts/`. UNKNOWN listings stay
   hot, moves are copy-verified rather than destructive-only, and archived work
