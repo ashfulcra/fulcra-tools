@@ -2,7 +2,7 @@
 
 A "row" is the structured projection of an OKF ``type: Task`` concept doc, used to
 build indexes, the aggregate, and query results. See
-``docs/proposals/teams-convergence/02-L1-coord-reconcile.md`` §1–§4.
+``docs/coord/proposals/teams-convergence/02-L1-coord-reconcile.md`` §1–§4.
 """
 
 from __future__ import annotations

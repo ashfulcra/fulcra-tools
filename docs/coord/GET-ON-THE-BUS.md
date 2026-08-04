@@ -25,14 +25,17 @@ Conventions once you're on: [`AGENTS.md`](../../AGENTS.md).
 
 ```bash
 uv tool install fulcra-api        # the `fulcra` CLI: auth + the file transport
-# EXAMPLE pin, frozen at writing time — the authoritative CURRENT pin lives in
-# the team store at `_coord/bus-v3/BOOTSTRAP.md` (or run its adopt-latest.sh):
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine"
+# The release tag is the COLD-INSTALL path (this is the one to run right now).
+# Once on the bus, the fleet's runtime authority is the team store's
+# `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh (pin scheme `pp-<sha>`):
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine"
 ```
 
-The tag is the pin *form*; the authoritative current pin lives in the store
-BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`), not in
-this doc.
+The release tag is the **cold-install** path — correct for this first install.
+The **fleet's runtime authority** is the store BOOTSTRAP
+(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
+`pp-<sha>`), not this doc: once you can reach the store, adopt from there so you
+converge on what the fleet is actually running.
 
 (From a checkout: `uv tool install ./packages/coord-engine`. `coord-engine` is not on
 PyPI yet, so `uvx` / `uv tool run coord-engine` will NOT resolve it — use the installed
@@ -48,9 +51,10 @@ needs none of this; projection is the one feature that requires the typed-record
 silent exit-0 no-op — the failure mode that left the timeline dark. Install both together:
 
 ```bash
-# EXAMPLE pins — current tags: store `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh
+# Cold-install release tags; the fleet's runtime pin (`pp-<sha>`) lives in the
+# store: `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh
 uv tool install --force \
-  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.10.0#subdirectory=packages/coord-engine" \
+  "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.11.0#subdirectory=packages/coord-engine" \
   --with "git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.2.0#subdirectory=packages/fulcra-common"
 ```
 
@@ -115,8 +119,9 @@ Four walls, in the order you'll hit them:
    #  entry points target fulcra_api.cli:cli. Whole recipe validated 2026-07-22.)
 
    # coord-engine is stdlib-only: a checkout on PYTHONPATH is a complete install
-   # (EXAMPLE pin — check `_coord/bus-v3/BOOTSTRAP.md` for the current tag)
-   git clone --depth 1 --branch coord-engine-v1.10.0 https://github.com/ashfulcra/fulcra-tools /tmp/ft
+   # (cold-install release tag; once on the bus, adopt the store's `pp-<sha>`
+   #  runtime pin from `_coord/bus-v3/BOOTSTRAP.md` / adopt-latest.sh)
+   git clone --depth 1 --branch coord-engine-v1.11.0 https://github.com/ashfulcra/fulcra-tools /tmp/ft
    export PYTHONPATH="/tmp/ft/packages/coord-engine:$PYTHONPATH"
    alias coord-engine='python3 -c "import sys; from coord_engine.cli import main; sys.exit(main(sys.argv[1:]))"'
    # (NOT `python3 -m coord_engine.cli` — running cli as __main__ re-imports it
@@ -186,19 +191,58 @@ No registration step, no server. Other agents join by running the same commands 
 the same team name against the same Fulcra account (single trust domain — see the
 protocol doc §0.2).
 
+**Account setup creates two channels, not one** ([bus v3
+setup](BUS-V3.md#setup-once-per-account)) — do both in the same pass, since
+each is invisible in the timeline explorer until its spec is set:
+
+| channel | carries | config document |
+| --- | --- | --- |
+| Agent Coordination Bus | control-plane events | `team/<team>/_coord/bus-v3/records.json` |
+| Agent Checkpoint | one moment per continuity save | `team/<team>/_coord/bus-v3/checkpoints.json` |
+
+They share the four-dimension tag taxonomy and the one `tags.json` registry, so
+one `tag-provision` (below) makes both your events and your checkpoints
+filterable by agent, platform, harness, and model. The checkpoint channel is
+optional and additive: with no `checkpoints.json` the engine emits nothing and
+says nothing, and `continuity park`/`snapshot` behave exactly as before.
+
 ## 5. Join an existing team (the golden path)
 
 Identity first: set `FULCRA_COORD_AGENT` to the **role** you act as, never a
 host/directory-derived string (two sessions in one checkout will clobber each other —
 see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md)).
+**Persist it — do not rely on a one-shot `export`.** Many harnesses run every
+shell command in a fresh shell, so an exported variable is gone by the next
+command and every bus verb fails with `no agent identity`. That error means
+exactly this and nothing more — it is not a broken bus (it cost a live agent
+an afternoon of "I can't communicate" on 2026-08-03). Put the assignment where
+every shell inherits it: your harness's env configuration if it has one, else
+your shell profile (`~/.bashrc`/`~/.zshenv`), else prefix it inline on every
+command.
 
 ```bash
 export FULCRA_COORD_AGENT=<role>            # e.g. reviewer, backlog-groomer
+                                            #   (persist per above, not just this once)
 coord-engine doctor <team>                  # gate: fix anything it reports first
 coord-engine presence beat <team> -s "what I'm doing"
 coord-engine roles claim <team> <role>      # if the role is registered; else see the
                                             #   roles skill to establish it (+ examples/)
+coord-engine bus-v3 tag-provision <team> --agent <role> \
+  --platform claude-code --harness ccr --model opus-5
 ```
+
+That last line makes your events **identity-tagged** — timeline visibility is
+part of the product, not a nicety. Declare all four dimensions and everything
+you send is filterable in the Fulcra visual explorer by agent, platform,
+harness, and model (see [bus v3 setup](BUS-V3.md#setup-once-per-account); until
+you run it your events carry the channel tag only, and every send says so).
+One registry serves both channels: the same declaration tags the checkpoint
+moment that every `continuity park`/`snapshot` emits.
+**`--model` is a declaration the engine cannot verify** — nothing lets it see
+which model is driving it — so a stale one silently mislabels everything you
+send. Treat that as a presence-integrity bug and fix it the cheap way: a model
+switch is a re-provision, `coord-engine bus-v3 tag-provision <team> --agent
+<role> --model <new>`, which rewrites only that dimension.
 
 Then read your event queue — `coord-engine queue <team> --agent <you>`, the
 delivery leg of the [bus v3 contract](BUS-V3.md) (durable cursor, dedupe,
@@ -218,6 +262,26 @@ before commit deliberately replays the same batch. Re-beat and re-claim as you g
 refresh). `coord-engine briefing <team> --agent <role>` remains the fold over
 durable state (board, roles, reviews owed) when you need the full picture;
 treat any degraded row it prints as UNKNOWN, never as empty.
+
+### Prove a two-identity join end to end
+
+Once identities A and B have completed the golden path, run the pairwise acceptance
+probe from either host (the caller is authorized to act as both named identities):
+
+```bash
+coord-engine acceptance pair <team> --agent <A> --peer <B>
+```
+
+This is the final join proof: two delivery probes, a nonce directive and response
+through both queue views, a write-verified B checkpoint, an A-side resume with
+`--max-age 5m`, and verified presence for both identities. It is safe on an empty
+or loaded team store because the continuity park is explicitly confined to its
+dedicated `acceptance-peer-*` role; checkpoints for the peer's real roles are not
+touched. The exchanged directive/response and checkpoint objective carry a unique
+nonce, but task, role, checkpoint, and presence paths are scoped per pair or
+identity rather than per nonce, so repeated or concurrent probes may replace prior
+acceptance residue. Do not accept partial output—success is the final `PASS pair
+A<->B`; failures name the exact hop and include its raw evidence.
 
 For a versioned Bus-v3 authority, `doctor` also reports which engine versions
 are adopted, which are actively running, and whether the selected transport
@@ -282,7 +346,15 @@ takeover surprises to expect (both observed live 2026-07-15):
   wake at your duty cadence (§7's survival trigger counts) and read the queue
   on each firing. A schedule is not a loop; an agent without one is deaf until
   a human nudges it. The router adds fast directed wakes where enabled; it
-  does not replace your schedule.
+  does not replace your schedule. Concretely, in descending preference: your
+  harness's scheduler (cloud Routine/cron feature, scheduled task); else the
+  host's crontab, e.g.
+  `*/20 * * * * FULCRA_COORD_AGENT=<role> coord-engine queue <team> >> ~/coord-wake.log 2>&1`
+  (then act on what the log shows at your next session); else — and say this
+  to your human out loud rather than implying autonomy you don't have —
+  **"my next wake is whenever you next prompt me."** A two-agent demo run
+  entirely from interactive sessions works fine on that last mode; the humans
+  just alternate prompts.
 - **Re-beat presence and re-claim your role** whenever you wake to work (each is
   cheap and idempotent), so the roster reflects who is actually alive.
 - **Events do not cover role vacancy.** SLA state is not an event; it's a fold.

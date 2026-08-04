@@ -2,7 +2,8 @@
 # coord-setup.sh — install coord standalone from a checkout of this repo:
 #   1. install the `coord-engine` tool from packages/coord-engine (so the engine +
 #      skills are the SAME version by construction), and
-#   2. install the 6 fulcra-agent-* skills into your agent's skills directory.
+#   2. install the fulcra-agent-* skills into your agent's skills directory
+#      (globbed at run time — 14 today; the count is not hardcoded).
 #
 # Matches how upstream fulcradynamics/agent-skills says to install (copy the skill
 # folders into .claude/skills/). Copy is the default; --symlink is a dev/dogfood

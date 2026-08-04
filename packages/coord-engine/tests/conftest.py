@@ -2,6 +2,21 @@
 
 import pytest
 
+from coord_engine import bus_tags, checkpoint_channel
+
+
+@pytest.fixture(autouse=True)
+def _clean_bus_tag_cache():
+    """The bus tag registry and the checkpoint-channel config are both memoized
+    per PROCESS (each changes only when a human provisions), which in a
+    single-process suite would leak one module's team config into the next.
+    Clear both around every test."""
+    bus_tags.cache_clear()
+    checkpoint_channel.cache_clear()
+    yield
+    bus_tags.cache_clear()
+    checkpoint_channel.cache_clear()
+
 
 @pytest.fixture(autouse=True)
 def _isolated_state_dir(tmp_path, monkeypatch):

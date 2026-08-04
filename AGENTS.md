@@ -30,6 +30,7 @@ touching. First failing probe is where your setup gap is.
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 — tooling present, store reachable | never installed / `command not found` / no team yet → [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md) (install → auth → bootstrap → join). Otherwise fix the reported gap (auth: `fulcra auth login`; missing/old `coord-engine`: reinstall) |
 | On the bus? | `coord-engine queue <team> --agent <you>` ([bus v3](docs/coord/BUS-V3.md); raw `get-records` if the engine predates v1.7.0), then `coord-engine briefing <team> --agent <you>` for the durable board | queue read completes — and if it stages a `queue-delivery` token (cursor schema v2), the probe passes only after every record is classified and `queue commit` succeeds; briefing prints your identity, role inboxes, reviews owed | [Coordinate on the bus](#coordinate-on-the-bus) — events are the wake surface, the fold is the full picture |
+| Two identities joined end to end? | `coord-engine acceptance pair <team> --agent <A> --peer <B>` | every timed hop prints `HOP N PASS` and the command ends `PASS pair A<->B`; any bad nonce, missing checkpoint, stale resume, degraded queue, or failed write exits at `FAILED AT HOP N` with raw evidence | [`GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md#prove-a-two-identity-join-end-to-end) |
 | Own worktree? | `git worktree list` | your cwd is a dedicated worktree, not a shared checkout (no conflict markers or foreign staged files) | [Working tree](#working-tree) — carve your own before committing |
 | Touching Collect / the daemon? | — | — | [The daemon (Collect)](#the-daemon-collect) |
 | Touching coord conventions? | — | — | [Coordinate on the bus](#coordinate-on-the-bus) |
@@ -333,7 +334,10 @@ it (not on PyPI).
   The durable-obligation fold is **opt-in** (`--obligations`) and reports
   through an additive `obligations` field on that successful envelope: fold
   UNKNOWN/INVALID is a report at rc 0 when the event window itself read
-  cleanly; **rc 3 is reserved for event-window doubt**. A skip is never
+  cleanly; **the fold never changes a successful read's rc**. rc 3 is NOT
+  reserved for the read path — nonzero queue-family failures (read and `queue
+  commit` alike; commit returns rc 3 for INCOMPATIBLE, stale-token REFUSED, and
+  unsupported CAS) keep their own `state`/`error_code` contract. A skip is never
   silent — every machine-readable success envelope that did not fold carries
   `"obligations": {"state": "not-checked"}`, which no caller may map to CLEAR.
   `--no-obligations` stays accepted as a no-op alias for the default; the
@@ -373,6 +377,17 @@ it (not on PyPI).
   can never mutate v2. After activation, legacy activity is a loud health
   signal and never authoritative coverage. Full authority and activation
   contract: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md).
+- **Legacy Bus-v3 migration is authority/cursor-only.** Run
+  `coord-engine bus-v3 migrate <team> --dry-run` first, then `--apply` only
+  after every cursor is `readable-legacy` or `absent`; use repeatable
+  `--agent` flags to include known identities with no cursor document.
+  Malformed or unreadable state blocks. Apply is idempotent, writes only the
+  complete schema-v1 authority, and never rewrites legacy cursors. Task and
+  role documents remain intentionally backward-compatible and are not a
+  migration target. Its JSON contract is documented in BUS-V3.md: never branch
+  on rc alone; read `state` + `error_code`, and treat
+  `writes.authority: "ISSUED-BUT-UNPROVEN"` as a write whose read-back did not
+  prove the resulting store state.
 - **Cursor v2 is transactional: read → process → commit.** Under an activated
   schema-v2 authority, `queue` CAS-stages one pending batch and prints a
   `queue-delivery` token; it does **not** advance coverage. Process every
@@ -402,11 +417,11 @@ it (not on PyPI).
   host listeners existed because discovering work meant walking the file tree;
   the folds compensating for that degraded ~9 ticks in 10 at fleet scale and
   hid work. The v3 queue read (`coord-engine queue`, cursored and fail-closed)
-  replaces them. The `listen` verb and its fold
-  machinery (head/tail budgets, feed-first cursor at
-  `team/<team>/_coord/agents/<agent>/listen-state.json`) remain in the engine
-  and its docs until their removal is decided; do not build new automation on
-  them. Presence stays **time-dirty** rather than feed-cached: each briefing
+  replaces them. The `listen` verb and its fold machinery (head/tail budgets,
+  the feed-first cursor) were REMOVED from the engine on 2026-08-03 (PR #523) —
+  invoking the verb is an argparse error, and any surviving
+  `team/<team>/_coord/agents/<agent>/listen-state.json` shard is historical
+  residue, not a thing to resume. Presence stays **time-dirty** rather than feed-cached: each briefing
   evaluates the bounded roster against the current clock, so an unchanged
   session shard still becomes `LAPSED` when `now >= until`.
 - **Review handshake.** Nothing lands without an independent review by a
@@ -479,6 +494,17 @@ it (not on PyPI).
     messages can never share or clobber a slot: rc 0 `directive <slug> already delivered` is a *deduped
     identical resend*, and rc 1 `cannot verify delivery, retry` means the slot was unreadable — never
     overwritten, safe to retry.
+  - **The review/forge legs are projection-first, and they SAY so.** `briefing`/`needs-me` serve the
+    reconcile-built `reviews`/`forge` sections of `_coord/summaries.json` in zero extra ops when fresh,
+    and emit a trailing `review-source`/`forge-source` row disclosing it (`source: projection` + `as_of`,
+    or `source: raw-scan` + the `reason`: stale / incomplete / malformed — duplicate slug rows and
+    impossible `settled` combinations are malformed — / unrecognized). A projection that cannot be
+    served falls back to the full raw scan LOUDLY; it is never silently served as current. **The
+    caller's OWN head slugs are always raw-tallied** regardless of the projection (see the head-budget
+    rule below) — the projection answers the tail, never "does this agent still owe a verdict". No
+    source row at all means the aggregate carries no projection: the pre-projection raw scan.
+    Contract for readers: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) → "Where a fold's answer came
+    from". **Ship-gate: any new projection-served fold emits a source row through the shared renderer.**
   - **Honor every degraded row; never read a bounded fold as complete.** `briefing`/`needs-me` bound
     each section under `COORD_BRIEFING_BUDGET` (default 60s, opened once at the TOP of `briefing` and
     spent cumulatively across presence + forge + resume) and emit a `{scanned, total, skipped}`
@@ -581,7 +607,7 @@ it (not on PyPI).
     complete" a marker distinct from "tail truncated."**
   - **Every marker must RENDER, not just exist: `briefing` and `needs-me` type-dispatch every review row
     type they can receive (`review-pending`, `review-orphan(-degraded)`, `review-role-degraded`,
-    `review-fold-degraded`, `review-head-degraded`) through ONE shared helper (`_review_row_line`), so an
+    `review-fold-degraded`, `review-head-degraded`, `review-source`) through ONE shared helper (`_review_row_line`), so an
     identical row type can never diverge between the two verbs.** An unknown/typeless row must NEVER reach
     the generic task line (`_line`), whose `priority`/`status`/`title` lookups print `[ ?] ? None` on a
     marker shape; a degraded/UNKNOWN marker (head or tail) is always shown and NEVER counted as a pending
@@ -858,15 +884,13 @@ it (not on PyPI).
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and
   [`packages/coord-engine`](packages/coord-engine/README.md).
-- **`listen` is retired as the wake surface (2026-07-27, operator-ordered) —
-  and don't hand-roll a replacement.** Replies to `tell`/`respond`/`review
-  request` arrive as v3 events on the record queue; read it on your next wake
-  instead of running the watcher. The `coord-engine listen` verb still exists
-  (id-diffed fold over inbox/responses/verdicts with per-source `LISTEN
-  DEGRADED` streaks; mechanics in
-  [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)) but
-  new automation must not be built on it; its folds are the surface that
-  degraded ~9 ticks in 10 at fleet scale. (`review status` on a tombstone slug
+- **`listen` is retired (2026-07-27) and REMOVED (2026-08-03, PR #523) —
+  don't hand-roll a replacement.** Replies to `tell`/`respond`/`review
+  request` arrive as v3 events on the record queue; read it on your next wake.
+  The `coord-engine listen` verb no longer exists (its folds were the surface
+  that degraded ~9 ticks in 10 at fleet scale and hid work; the send verbs now
+  echo `replies:`/`await verdicts:` breadcrumbs pointing at `queue` — see
+  [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)). (`review status` on a tombstone slug
   is terminal rc 1 — see [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md).)
 - **Idle-agent parking (standing, operator-set 2026-07-20; restated for v3).**
   An agent with **2 days (48h) of no work** — no events, directives, reviews,
@@ -1027,7 +1051,6 @@ lives in two places and **both must be rotated together**:
 |---|---|---|
 | **PRIMARY** | `FLEET_GH_TOKEN` + `FLEET_BOT_NAME` in the **CCR env config** | the four cloud agents: `coord-boss`, `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer` |
 | Mac host | macOS keychain, service `FLEET_GH_PAT` (account = host user) | host-local jobs on the resident Mac |
-| VPS | per the deploy package | added at the VPS migration |
 
 Cloud agents read `FLEET_GH_TOKEN` from their environment; on the Mac host, read
 the keychain only at the moment of use:
@@ -1110,7 +1133,7 @@ and working until the candidate has passed verification.
    2–6 rotate the Mac keychain only; the four cloud agents (`coord-boss`,
    `coord-fable-worker`, `coord-opus-worker`, `coord-maintainer`) still hold the
    **old** token in `FLEET_GH_TOKEN`. Update `FLEET_GH_TOKEN` in each of their CCR
-   env configs (and the VPS deploy package once migrated), then **confirm one real
+   env configs, then **confirm one real
    cloud push or PR operation succeeds** with the new value. Revoking before this
    step strands the entire cloud fleet on a dead credential — the whole reason
    custody is documented as two homes.

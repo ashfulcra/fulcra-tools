@@ -78,6 +78,7 @@ def test_checkpoint_age_and_duration_helpers():
     assert continuity.checkpoint_age_seconds(
         snapshot, now=datetime.fromisoformat(NOW.replace("Z", "+00:00"))
         - timedelta(seconds=2)) is None
+    assert continuity.checkpoint_age_seconds(snapshot, now=PINNED_NOW - timedelta(hours=1)) is None
     assert continuity.parse_duration_seconds("30m") == 1800
     assert continuity.parse_duration_seconds("1.5h") == 5400
     assert continuity.parse_duration_seconds("bad") is None

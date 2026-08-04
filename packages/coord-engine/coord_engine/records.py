@@ -408,6 +408,7 @@ _AUTHORITY_FIELDS = (
 #: check can tell "absent" from "malformed", and its absence never makes an
 #: otherwise-valid config partial.
 CURRENT_ENGINE_FIELD = "current_engine_version"
+SCHEMA1_MINIMUM_ENGINE_VERSION = "1.8.0"
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 _ADOPTION_SLUG = re.compile(
     r"^adopted-v(?P<version>\d+\.\d+\.\d+)-"
@@ -416,6 +417,54 @@ _ADOPTION_SLUG = re.compile(
 
 def config_path(team: str) -> str:
     return f"team/{team}/{CONFIG_NAME}"
+
+
+def schema1_authority_migration_target(
+        raw: Any) -> tuple[Optional[dict[str, Any]], str]:
+    """Classify one authority and build the narrow s5 schema-v1 target.
+
+    Returns ``(target, readable-legacy|current)`` for the two safe states and
+    ``(None, malformed-blocks|unsupported-blocks)`` otherwise.  The target is
+    additive: transport fields and unknown sibling metadata are preserved,
+    while the complete authority block is installed in one document write.
+
+    This helper deliberately accepts raw store bytes instead of
+    :func:`load_config`: an environment override may select a local transport
+    stream, but it is not authority and must never be persisted by migration.
+    """
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, "malformed-blocks"
+    if not isinstance(doc, dict):
+        return None, "malformed-blocks"
+    parsed = _parse_config(raw)
+    if parsed is None:
+        return None, "malformed-blocks"
+    if parsed.get("authority_mode") == "versioned":
+        if (parsed.get("protocol_version") == 1
+                and parsed.get("cursor_schema_version") == 1):
+            return dict(doc), "current"
+        return None, "unsupported-blocks"
+
+    target = dict(doc)
+    target.update({
+        "protocol_version": 1,
+        "cursor_schema_version": 1,
+        "minimum_reader_version": SCHEMA1_MINIMUM_ENGINE_VERSION,
+        "minimum_writer_version": SCHEMA1_MINIMUM_ENGINE_VERSION,
+        "cursor_generation": 0,
+        "cursor_activated_at": None,
+    })
+    # Keep target construction honest if the schema changes later.
+    if _parse_config(json.dumps(target)) is None:
+        return None, "malformed-blocks"
+    return target, "readable-legacy"
+
+
+def render_authority_config(doc: dict[str, Any]) -> str:
+    """Stable store representation for a migrated authority document."""
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
 
 
 def _parse_config(raw: Any) -> Optional[dict[str, Any]]:
@@ -660,18 +709,31 @@ def authority_currency_state(config: Optional[dict], *,
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
                kind: str, priority: str, slug: str, ptr: Optional[str] = None,
-               recorded_at: Optional[str] = None) -> bool:
+               recorded_at: Optional[str] = None,
+               team: Optional[str] = None) -> bool:
     """Emit one control-plane event; ``recorded_at`` in the future is a timer.
 
     ``build_payload`` raises on an unknown kind — a mistyped event class fails
     at the write. Returns the transport's verdict; False means the record did
     NOT land and the caller falls back to file-plane-only delivery (durable
     doc = truth, record = delivery).
+
+    THE ONE TAGGING CHOKEPOINT. Every bus write in the engine funnels through
+    here, so identity tags are attached here and nowhere else — no write verb
+    has to opt in and none can be missed. ``team`` names the tag registry
+    (:mod:`coord_engine.bus_tags`); omitting it writes untagged, which is what
+    a caller that has no team context should do. Tag resolution can never fail
+    the write: see the module docstring there for the absent/missing/invalid
+    contract.
     """
     note = build_payload(to=to, kind=kind, priority=priority, slug=slug, ptr=ptr)
+    from . import bus_tags
+    tags = bus_tags.tags_for_write(transport, team, sender)
+    kwargs: dict[str, Any] = {"recorded_at": recorded_at}
+    if tags:
+        kwargs["tags"] = tags
     return bool(transport.record_write(
-        config["data_type"], config["api_version"], note, sender,
-        recorded_at=recorded_at))
+        config["data_type"], config["api_version"], note, sender, **kwargs))
 
 
 # --- read side: the durable cursor (the window rule, 2026-07-27) --------------

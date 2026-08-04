@@ -22,7 +22,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'packages/fulcra-menubar/**'
+      - 'packages/menubar/**'
       - 'packages/coord-engine/**'
       - 'skills/fulcra-agent-automation/**'
       - '.github/workflows/macos.yml'
@@ -31,7 +31,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'packages/fulcra-menubar/**'
+      - 'packages/menubar/**'
       - 'packages/coord-engine/**'
       - 'skills/fulcra-agent-automation/**'
       - '.github/workflows/macos.yml'

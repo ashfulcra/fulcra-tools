@@ -618,7 +618,7 @@ def test_cli_respond_closes_and_records(capsys):
     assert cli.main(["respond", "r", slug, "-o", "answered", "-a", "amy"], transport=t) == 0
     out = capsys.readouterr().out
     assert "closed" in out
-    assert "response recorded — the owner's listen surfaces it" in out  # reply-leg breadcrumb
+    assert "response recorded — the owner's queue surfaces it" in out  # reply-leg breadcrumb
     assert okf.parse_frontmatter(t.store[f"team/r/task/{slug}.md"])["status"] == "done"
     assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
@@ -653,38 +653,45 @@ def test_cli_respond_response_paths_do_not_collide(monkeypatch, capsys):
     assert len(paths) == 2
 
 
-# --- listen breadcrumbs: every ask points at the reply/verdict leg -----------
+# --- reply breadcrumbs: every ask points at the reply/verdict leg -------------
+#
+# Bus v3 (2026-07-27) retired `listen` as the wake surface and this PR removed the
+# verb, so the breadcrumb every send verb prints must name `queue` — the bounded
+# per-wake event read that actually delivers the reply. These tests pin the exact
+# string BECAUSE it is copy-pasteable operator output: a breadcrumb naming a verb
+# the engine no longer has is worse than none (it fails at the shell, after the
+# ask already went out).
 
 def test_tell_prints_replies_breadcrumb_when_sender_known(capsys):
     t = FakeTransport()
     assert cli.main(["tell", "r", "amy", "Do it", "--from", "boss"], transport=t) == 0
     out = capsys.readouterr().out
-    assert "replies: coord-engine listen r --agent boss" in out
+    assert "replies: coord-engine queue r --agent boss" in out
 
 
 def test_broadcast_prints_replies_breadcrumb_when_sender_known(capsys):
     t = FakeTransport()
     assert cli.main(["broadcast", "r", "All hands", "--from", "boss"], transport=t) == 0
-    assert "replies: coord-engine listen r --agent boss" in capsys.readouterr().out
+    assert "replies: coord-engine queue r --agent boss" in capsys.readouterr().out
 
 
 def test_remind_prints_replies_breadcrumb_when_sender_known(capsys):
     t = FakeTransport()
     assert cli.main(["remind", "r", "amy", "2h", "Soon", "--from", "boss"], transport=t) == 0
-    assert "replies: coord-engine listen r --agent boss" in capsys.readouterr().out
+    assert "replies: coord-engine queue r --agent boss" in capsys.readouterr().out
 
 
 def test_tell_sender_from_env_when_no_from_flag(capsys, monkeypatch):
     monkeypatch.setenv("FULCRA_COORD_AGENT", "envboss")
     t = FakeTransport()
     assert cli.main(["tell", "r", "amy", "Env sender"], transport=t) == 0
-    assert "replies: coord-engine listen r --agent envboss" in capsys.readouterr().out
+    assert "replies: coord-engine queue r --agent envboss" in capsys.readouterr().out
 
 
 def test_tell_no_breadcrumb_when_sender_anonymous(capsys, monkeypatch):
     # No --from and no FULCRA_COORD_AGENT: only the host fallback exists, which is
-    # not an identity anyone listens as -> print NO breadcrumb (a hostname would
-    # mislead the reader into `listen --agent coord-reconcile:...`).
+    # not an identity anyone reads a queue as -> print NO breadcrumb (a hostname
+    # would mislead the reader into `queue --agent coord-reconcile:...`).
     monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
     t = FakeTransport()
     assert cli.main(["tell", "r", "amy", "Anon"], transport=t) == 0
@@ -702,7 +709,7 @@ def test_review_request_prints_await_verdicts_breadcrumb(capsys):
     t = FakeTransport()
     assert cli.main(["review", "request", "r", "pr-9", "--of", "url",
                      "--reviewer", "alice", "--from", "boss"], transport=t) == 0
-    assert "await verdicts: coord-engine listen r --agent boss" in capsys.readouterr().out
+    assert "await verdicts: coord-engine queue r --agent boss" in capsys.readouterr().out
 
 
 def test_reconcile_gcs_orphaned_ack_shards(capsys):
@@ -1556,6 +1563,35 @@ def test_cli_park_snapshots_held_roles_only(capsys):
     assert "CHECKPOINT NOT WRITTEN" in capsys.readouterr().err
 
 
+def test_cli_park_role_filter_preserves_other_held_role_checkpoint(capsys):
+    import json as _j
+    from coord_engine import okf
+
+    t = FakeTransport()
+    old_ref = "team/r/member/amy/continuity/role-real/latest.json"
+    t.put("team/r/roles/real.md",
+          f"---\ntype: Role\nsla_hours: 24\ncheckpoint_ref: {old_ref}\n---\n")
+    t.put("team/r/roles/acceptance.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    t.put(old_ref, _j.dumps({"objective": "real work"}))
+    cli.main(["roles", "claim", "r", "real", "-a", "amy"], transport=t)
+    cli.main(["roles", "claim", "r", "acceptance", "-a", "amy"], transport=t)
+    capsys.readouterr()
+
+    assert cli.main([
+        "continuity", "park", "r", "-a", "amy", "--role", "acceptance",
+        "--objective", "acceptance nonce",
+    ], transport=t) == 0
+
+    assert okf.parse_frontmatter(t.store["team/r/roles/real.md"])["checkpoint_ref"] == old_ref
+    acceptance = okf.parse_frontmatter(t.store["team/r/roles/acceptance.md"])
+    assert acceptance["checkpoint_ref"] != old_ref
+    assert _j.loads(t.store[acceptance["checkpoint_ref"]])["objective"] == "acceptance nonce"
+    assert cli.main([
+        "continuity", "park", "r", "-a", "nobody", "--role", "acceptance",
+    ], transport=t) == 2
+    assert "CHECKPOINT NOT WRITTEN" in capsys.readouterr().err
+
+
 def test_cli_briefing_full_and_empty_store(capsys):
     import json as _j
     t = FakeTransport()
@@ -1947,7 +1983,13 @@ def test_briefing_includes_pending_reviews(capsys):
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
     out = _j.loads(capsys.readouterr().out)
-    assert [r["name"] for r in out.get("pending_reviews", [])] == ["pr-5"]
+    pend = out.get("pending_reviews", [])
+    assert [r["name"] for r in pend
+            if r.get("type") == "review-pending"] == ["pr-5"]
+    # reconcile just wrote a fresh projection: the fold must disclose it served
+    # from it (the annotation read side's no-silent-staleness contract).
+    src = [r for r in pend if r.get("type") == "review-source"]
+    assert src and src[0]["source"] == "projection"
 
 
 def test_briefing_text_includes_pending_reviews(capsys):
@@ -2171,6 +2213,13 @@ def test_briefing_forge_degraded_exits_zero_other_sections_intact(capsys, monkey
     _seed_forge(t, agent="bob")
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     cli.main(["reconcile", "r"], transport=t)
+    # Pin the fold onto the RAW scan by dropping the reconcile-built forge
+    # projection (a team never projected behaves exactly as before): this test
+    # is about the raw fan-out's degraded handling, which a fresh projection
+    # deliberately bypasses.
+    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    agg.pop("forge", None)
+    t.store["team/r/_coord/summaries.json"] = json.dumps(agg)
     capsys.readouterr()
 
     assert cli.main(["briefing", "r", "--agent", "bob"], transport=t) == 0
@@ -2772,34 +2821,6 @@ def test_public_reads_healthy_no_degraded_marker(capsys):
     cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
     assert not any(r.get("type") == "read-degraded"
                    for r in json.loads(capsys.readouterr().out))
-
-
-# --- ENG-1-5: listen daemon per-tick guard ---------------------------------
-
-def test_listen_daemon_survives_tick_exception(monkeypatch, capsys):
-    """A:25 — the load-bearing `listen` daemon (`while True: tick()`) must survive
-    an UNMODELED tick exception: it degrades that tick and continues, never lets
-    the fault kill the watcher."""
-    import coord_engine.cli as _cli
-    t = FakeTransport()
-    _cli.main(["reconcile", "r"], transport=t)
-    calls = {"n": 0}
-
-    def boom(*a, **k):
-        calls["n"] += 1
-        raise RuntimeError("unmodeled tick fault")
-
-    monkeypatch.setattr(_cli, "_run_listen_tick", boom)
-
-    def stop_after_first_sleep(_):
-        raise KeyboardInterrupt  # break out of the daemon loop cleanly
-
-    monkeypatch.setattr(_cli.time, "sleep", stop_after_first_sleep)
-    capsys.readouterr()
-    rc = _cli.main(["listen", "r", "--agent", "amy", "--interval", "1"], transport=t)
-    assert rc == 0, "daemon must exit cleanly, not propagate the tick RuntimeError"
-    assert calls["n"] == 1
-    assert "LISTEN DEGRADED" in capsys.readouterr().err
 
 
 # --- ENG-1-6: registered top-level error envelope --------------------------

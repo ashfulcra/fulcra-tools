@@ -18,7 +18,8 @@ gh token is expired — Ash renews or pushes).*
    `fulcra-agent-review`, `fulcra-agent-directives`, `fulcra-agent-health`.
 4. Per-skill polish AT COPY TIME (not before — coord remains the working repo until acceptance):
    - `homepage:` → `https://github.com/fulcradynamics/agent-skills`
-   - Engine install line → pinned current release tag (v1.3.0 or later).
+   - Engine install line → the current release tag (see packages/coord-engine/README.md; the store
+     BOOTSTRAP's `pp-<sha>` pin is the fleet's runtime authority).
    - Verify cross-skill links only reference wave-1 siblings or fulcra-agent-teams; links to
      wave-2 skills (reconcile/tasks/operator) get "(optional companion, not yet upstream)" or drop.
 5. PII scan the copied tree (standing rule). Reference-command verification: DONE 2026-07-04 —

@@ -21,6 +21,12 @@ A bundled stdlib-only tool (`coord-engine`) that, for a given team:
 - **Heals** `task/index.md` (OKF §6, grouped by status) and appends `task/log.md` (OKF §7, status
   transitions), with a periodic full-scan drift check that loudly rebuilds any divergence.
 - **Emits** `team/<team>/_coord/summaries.json` — a fast-path aggregate so reads are one download, not N.
+  Alongside the task rows it builds two read-side **projections**: `reviews`
+  (`coord.reviews.projection.v1` — per-slug verdict state) and `forge`
+  (`coord.forge.projection.v1` — PR responsibility + feedback item ids), which `briefing`/`needs-me`
+  serve instead of scanning hundreds of raw shards per wake. The projection build is budgeted
+  (`COORD_PROJECTION_BUILD_BUDGET`, default 240s) and converges across passes on a large legacy corpus;
+  an incomplete build is marked and left unserved rather than served as current.
 - **Answers** `status` / `board` / `needs-me` / `search` from that aggregate.
 
 Properties: **orphan-proof** (scheduled full-scan drift checks rebuild from ground truth),
@@ -57,8 +63,11 @@ backfilled (`proposed`/`P2`).
 
 ## Ownership rule
 Once you use this skill, `task/index.md` and `task/log.md` are **engine-owned** — let the tool regenerate
-them; edit task *content* docs, not the indexes. `_coord/summaries.json` is a cache (delete + re-run
-reproduces it). Recoverable archival is **move-not-delete** (Fulcra `file delete` isn't CLI-undoable).
+them; edit task *content* docs, not the indexes. `_coord/summaries.json` is a cache — deleting it is safe,
+but re-running does not always reproduce it in ONE pass: the review/forge projection sections are
+budget-bounded and converge over several passes on a large corpus (until then the folds say
+`raw scan — reviews projection incomplete (scanned N/M)` and answer correctly the slow way).
+Recoverable archival is **move-not-delete** (Fulcra `file delete` isn't CLI-undoable).
 
 ## Retention (optional add-on)
 With `--retention-days N` (or env `COORD_RETENTION_DAYS`), reconcile archives terminal tasks older than N

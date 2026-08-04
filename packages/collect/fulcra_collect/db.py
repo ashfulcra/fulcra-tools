@@ -324,9 +324,11 @@ def _migration_004_forwarded_events(conn: sqlite3.Connection) -> None:
     already forwarded by a pre-#004 daemon is still recognised as a
     duplicate after upgrade — no attention claim is lost. The
     ``forwarded_attention`` table is intentionally left in place for schema
-    compatibility (it backed ``claim_attention_source_id``, itself retained
-    as historical/compatibility-only alongside the retired route); the copy
-    means both tables agree on the historical rows."""
+    compatibility: migrations are append-only, and 004 below copies out of it.
+    (It backed ``claim_attention_source_id``, which was removed once nothing
+    called it — the route it served is gone and ``claim_dedup_keys`` is the
+    only claim path now.) The copy means both tables agree on the historical
+    rows."""
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS forwarded_events (
@@ -426,33 +428,6 @@ def upsert_plugin_state(conn: sqlite3.Connection, *, plugin_id: str,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
-
-
-def claim_attention_source_id(conn: sqlite3.Connection,
-                              source_id: str) -> bool:
-    """Atomically claim an attention ``source_id`` for forwarding
-    (HISTORICAL/compatibility-only — its caller, the retired
-    ``POST /api/extension/attention`` route, is removed and nothing in
-    production calls this; retained alongside the ``forwarded_attention``
-    table it backs. New dedup consumers use ``claim_dedup_keys``).
-
-    Returned ``True`` if THIS call inserted the row (the source_id had not
-    been forwarded before → the caller forwarded to Fulcra), or ``False``
-    if the row already existed (a duplicate → the caller skipped).
-
-    ``INSERT OR IGNORE`` against the ``source_id`` PRIMARY KEY made the
-    check-and-record a single atomic statement, so the extension's flush
-    storm (many identical source_ids POSTed near-simultaneously) resulted
-    in exactly one ``True`` and the rest ``False`` — SQLite serialises the
-    inserts and the unique constraint does the dedup, no application-level
-    lock. ``cursor.rowcount`` is 1 when a row was actually inserted and 0
-    when the IGNORE swallowed a constraint violation."""
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO forwarded_attention (source_id, forwarded_at) "
-        "VALUES (?, ?)",
-        (source_id, datetime.now(timezone.utc).isoformat()),
-    )
-    return cur.rowcount == 1
 
 
 def claim_dedup_keys(conn: sqlite3.Connection, keys: Iterable[str]) -> bool:

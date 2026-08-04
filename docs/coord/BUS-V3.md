@@ -38,6 +38,33 @@ atomic; all fields below must be present together:
 
 Legacy two-field configs remain readable for rollback, but every queue read
 warns that no fleet fence exists and cursor-v2 activation is forbidden.
+Migrate that legacy authority explicitly with
+`coord-engine bus-v3 migrate <team> --dry-run`, inspect the per-agent cursor
+classifications, then repeat with `--apply`. The dry run and apply both require
+every discovered or explicitly named (`--agent`, repeatable) legacy cursor to
+classify as `readable-legacy` or `absent`; `malformed-blocks` and transport
+doubt fail closed. Apply is idempotent and its sole possible write is the
+complete schema-v1 authority document. It never seeds or mutates a legacy
+cursor, and task/role documents are intentionally backward-compatible and out
+of this migration's scope.
+
+The `--json` migration envelope has a fixed state/rc vocabulary:
+
+| `state` | rc | Meaning |
+|---|---:|---|
+| `READY` | 0 | Dry-run proof passed; apply has not been attempted. |
+| `BLOCKED` | 3 | A pre-write authority, census, or cursor check failed. |
+| `APPLIED` | 0 | The authority write was issued and read-back proved the exact target. |
+| `CURRENT` | 0 | The authority was already the schema-v1 target; nothing was written. |
+| `UNKNOWN` | 2 | The authority write was refused; `writes.authority` is `0`. |
+| `UNKNOWN` | 3 | A write was issued but read-back could not prove it; `writes.authority` is `"ISSUED-BUT-UNPROVEN"`. |
+
+Never discriminate on rc alone: read `state` and `error_code`. Pre-write errors
+are `authority-absent`, `authority-malformed`, `authority-unsupported`,
+`authority-unreadable`, `agent-census-read-failed`, `agent-census-malformed`,
+`cursor-malformed`, or `cursor-unreadable`. Write-path errors are
+`authority-write-refused`, `authority-verify-mismatch`, or
+`authority-verify-unreadable`. Successful states carry `error_code: null`.
 Partially versioned or unknown authorities are invalid. An engine below the
 reader/writer floor, or one that does not understand the selected protocol or
 cursor schema, fails closed before advancing any cursor. `doctor <team>`
@@ -109,17 +136,274 @@ SHA-256 pinned so CI runs the actual old implementation without network access.
 
 ## Setup (once per account)
 
-Events ride a **moment annotation** — a user-defined typed-record stream. Pick
-or create one for coordination (ours is named "Agent Tasks"); every agent on
-the account uses the same one. Find its id:
+**Two definitions, created together.** An account setup produces *two*
+moment-annotation channels, not one:
+
+| channel | carries | config document | who reads it |
+| --- | --- | --- | --- |
+| **Agent Coordination Bus** | control-plane events (directives, reviews, wakes) | `_coord/bus-v3/records.json` | every agent's queue read |
+| **Agent Checkpoint** | one moment per successful continuity save | `_coord/bus-v3/checkpoints.json` | humans, in the timeline explorer |
+
+They share the tag taxonomy (step 3) and the same `tags.json` registry, so a
+filter on `agent:coord-boss` shows that agent's events *and* its checkpoints
+side by side. They do **not** share a config document, and that is deliberate —
+see [step 5](#5-seed-the-checkpoint-channel-config). Build the events channel
+first (steps 1–4), then repeat steps 1–2 for the checkpoint definition and
+record it in step 5.
+
+Events ride a **moment annotation** — a user-defined typed-record stream. One
+channel per account; every agent uses the same one. If the account already has
+one, find its id and skip to step 4:
 
 ```bash
 fulcra-api catalog | grep -A2 '"categories": \["annotations"'   # or search by name
 ```
 
 The data type id has the form `MomentAnnotation/<uuid>`. Below, `$COORD_TYPE`
-means that full id. Record writes need `--api-version v1alpha1` when the name
-is ambiguous.
+means that full id and `$TOKEN` means `$(fulcra-api auth print-access-token)`.
+Record writes need `--api-version v1alpha1` when the name is ambiguous.
+
+Creating a channel is four steps, and **skipping any of the last three leaves a
+bus that works but cannot be seen**. Verified live 2026-08-04 while replacing a
+spec-less channel that was invisible in the Fulcra timeline visual explorer.
+
+### 1. Create the definition
+
+Any of the three surfaces works — the Fulcra app, the MCP `create_data_type`
+tool, or `POST /user/v1alpha1/annotation`. Give it a **fresh, human name** you
+have not used before (ours: "Agent Coordination Bus"); the explorer lists
+channels by name, and reusing a retired one invites reading old traffic as new.
+
+```bash
+curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/annotation \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "Agent Coordination Bus", "annotation_type": "moment"}'
+```
+
+The response carries the definition `id`; `$COORD_TYPE` is
+`MomentAnnotation/<that id>`.
+
+### 2. Set the spec — the PUT-303 dance
+
+**A definition created over the API comes back with `spec: null`, and the
+creation call will not accept one.** A spec-less definition may not list in the
+visual explorer at all: it exists, records land in it, reads work, and a human
+looking at their timeline sees nothing. That is the whole reason this section
+was rewritten. Set the spec as a second call — GET the definition, add `spec`,
+PUT it back:
+
+```bash
+ID=<definition uuid>
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  https://api.fulcradynamics.com/user/v1alpha1/annotation/$ID > /tmp/def.json
+python3 - <<'PY'
+import json
+d = json.load(open("/tmp/def.json"))
+d["spec"] = {"default_note": "Agent coordination event"}
+json.dump(d, open("/tmp/def.json", "w"))
+PY
+curl -sS -X PUT -o /dev/null -w '%{http_code}\n' \
+  https://api.fulcradynamics.com/user/v1alpha1/annotation/$ID \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data @/tmp/def.json
+```
+
+**A `303` is SUCCESS**, not a redirect you must chase and not an error. Do not
+trust the status code either way — **verify by re-GET** and confirm `spec` is no
+longer null. Nothing else in this setup is allowed to proceed on an unverified
+spec.
+
+The rule underneath: the explorer wants an **app-shaped** definition — spec,
+tags, and a fresh name. An API-born definition is only app-shaped after step 2.
+
+### 3. Create the tags — the four-dimension taxonomy
+
+Tags are the facet the timeline explorer groups by, and "who sent this" is only
+the first question a person asks of a fleet. **Every event carries the channel's
+base tag plus each dimension its sender has registered**, so each of these is a
+one-click timeline filter:
+
+| dimension | tag name | answers |
+| --- | --- | --- |
+| *(base)* | `agent-coordination-bus` | everything on the bus |
+| `agent` | `agent:coord-boss` | one identity's traffic |
+| `platform` | `platform:claude-code` | everything from one platform |
+| `harness` | `harness:ccr` | everything under one harness |
+| `model` | `model:opus-5` | everything a given model produced |
+
+Create the base tag once per account, and the dimension tags as agents join —
+the same name is reused by every agent that shares it, so `platform:claude-code`
+is created once no matter how many agents declare it:
+
+```bash
+curl -sS https://api.fulcradynamics.com/user/v1alpha1/tag \
+  -H "Authorization: Bearer $TOKEN"                              # list: [{name,id}]
+curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/tag \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "agent-coordination-bus"}'                        # 409 = exists
+```
+
+Keep the uuids the responses return. **Record tags are uuids, never names** —
+the ingest endpoint validates them as uuids and rejects a name outright.
+
+### 4. Seed the tag registry
+
+The engine will not call the tag API on the write path (a round trip per event,
+to answer a question that changes only when a human provisions). It reads one
+durable document instead:
+
+`team/<team>/_coord/bus-v3/tags.json`
+
+```json
+{
+  "schema": "coord.bus-tags.v2",
+  "base": "cb951ecb-f21c-4aee-826e-2cb0b12517d6",
+  "agents": {
+    "coord-boss": {
+      "agent": "0913d5df-830c-458e-b40a-0a04eafaa5cd",
+      "platform": "<uuid>", "harness": "<uuid>", "model": "<uuid>"
+    }
+  }
+}
+```
+
+A copy lives at
+[`docs/coord/examples/bus-v3-tags.json`](examples/bus-v3-tags.json) with the
+field-by-field table. Upload it once (with `"agents": {}` is fine); after that
+each agent registers itself, declaring all four dimensions:
+
+```bash
+coord-engine bus-v3 tag-provision <team> --agent coord-boss \
+  --platform claude-code --harness ccr --model opus-5
+# no raw tag capability here? it prints a per-dimension curl recipe; create the
+# tags by hand (step 3), then record the uuids it hands back:
+coord-engine bus-v3 tag-provision <team> --agent coord-boss \
+  --tag-id-platform <uuid> --tag-id-model <uuid>
+```
+
+`agent` is required in an entry; the rest are optional and can be filled in
+later. A **partial** entry is legitimate — its events carry what it has.
+
+**`model` is DECLARED, not detected.** The engine cannot see which model is
+driving it, so `--model` is taken on trust and a stale declaration silently
+mislabels every event that agent sends. Treat a wrong one as a
+presence-integrity bug: **a model switch is a re-provision**, and it is cheap —
+
+```bash
+coord-engine bus-v3 tag-provision <team> --agent coord-boss --model sonnet-5
+```
+
+rewrites only `model` and leaves the other three dimensions alone.
+
+The registry states, none of which may ever cost a write:
+
+| state | write | noise |
+| --- | --- | --- |
+| absent | untagged | silent — the team has not adopted tagging |
+| sender not in `agents` | base tag only | one-line warning naming `tag-provision` |
+| sender partial | the dimensions it has, plus base | silent — a partial entry is deliberate |
+| malformed *(incl. a `coord.bus-tags.v1` registry)* | untagged | LOUD every time; **never auto-recreated** — a human fixes the bytes |
+
+### 5. Seed the checkpoint-channel config
+
+The second definition. Create it exactly like the first — **step 1** with a
+fresh human name (ours: "Agent Checkpoint"), then **step 2**, the PUT-303 spec
+dance, verified by re-GET. A spec-less checkpoint channel is invisible in the
+explorer, which defeats its entire purpose. Skip step 3: the taxonomy is the
+same four dimensions, reusing the same tags and the same `tags.json`, so a
+checkpoint moment carries `agent:` / `platform:` / `harness:` / `model:` plus
+the base tag exactly as an event does — no new tags to create, no second
+registry to provision.
+
+Then record the id in its **own** document:
+
+`team/<team>/_coord/bus-v3/checkpoints.json`
+
+```json
+{
+  "schema": "coord.checkpoints-channel.v1",
+  "data_type": "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49",
+  "api_version": "v1alpha1"
+}
+```
+
+```bash
+printf '%s' '{"schema":"coord.checkpoints-channel.v1","data_type":"MomentAnnotation/<uuid>","api_version":"v1alpha1"}' \
+  > /tmp/checkpoints.json
+fulcra-api file upload /tmp/checkpoints.json team/<team>/_coord/bus-v3/checkpoints.json
+```
+
+**Why a separate document and not two more fields in `records.json`.** The
+records config is the fleet's *bus authority*, and an engine that has not
+upgraded classifies an authority carrying fields it does not know as
+**malformed** — which fails its queue closed. Adding the checkpoint stream to
+that document would take the bus down for every host still on an older engine.
+A new stream gets a new document; the authority is never widened in place.
+Nothing in the engine reads or writes `records.json` on the checkpoint path.
+
+Once the document exists, **every successful `continuity snapshot` and
+`continuity park` emits one moment** to that channel — see
+[the continuity skill](../../skills/fulcra-agent-continuity/SKILL.md#timeline-visibility-the-checkpoint-channel).
+The note is compact JSON:
+
+```json
+{"v":1,"kind":"checkpoint","agent":"amy","task":"role-reviewer",
+ "objective":"first 140 chars of the objective",
+ "path":"team/r/member/amy/continuity/role-reviewer/latest.json"}
+```
+
+`objective` is a hard 140-character slice with no ellipsis — a moment note is a
+timeline *label*; the snapshot file at `path` holds the full text.
+
+The config states, none of which may ever cost a **checkpoint**:
+
+| state | emission | noise | park/snapshot exit code |
+| --- | --- | --- | --- |
+| absent | none | silent — the team has not adopted the channel | unchanged |
+| ok | one moment per save, tagged | silent | unchanged |
+| malformed | none | LOUD every time; **never auto-created** | unchanged |
+| unreadable (store down) | none | one line — UNKNOWN is not absent, and it is never cached | unchanged |
+| record write refused/raised | none | one line | unchanged |
+
+That last column is the rule, stated deliberately and in full below.
+
+#### Fail-open: the inverse of the loud-park rule
+
+`continuity park` is loud and **non-zero** when it cannot write a checkpoint
+(`CHECKPOINT NOT WRITTEN`): park runs as a session exits, so a silent no-op
+discards the state the next session wakes on at exactly the moment nobody is
+watching.
+
+Checkpoint-moment emission obeys the **opposite** rule, and the asymmetry is
+the design:
+
+> **The checkpoint file is the source of truth. The moment is its shadow.**
+
+Losing the shadow costs a row in a visualization. Failing the park because the
+shadow could not be cast would cost the checkpoint itself — trading the
+load-bearing act for its telemetry. So emission failure is **one line on
+stderr and an unchanged exit code**, always. Reads never emit at all:
+`continuity resume`, `checkpoint --role`, and `briefing` are pure reads, and a
+moment for a read would claim state was saved when nothing was.
+
+### Cutover from an existing channel
+
+Moving a live team to a new channel is a two-line change and one broadcast:
+
+1. Edit `team/<team>/_coord/bus-v3/records.json` — swap `data_type` to the new
+   `MomentAnnotation/<uuid>`. Leave every other field alone; the protocol,
+   cursor schema, generation, and version floors are unchanged by a channel
+   move. (A cursor is timestamp-based, so it carries across without a reset;
+   the first read after the swap sees the new stream from the cursor's
+   position, and the default lookback bounds a cold one.)
+2. Upload `tags.json` (step 4).
+3. Broadcast the swap so every agent re-reads the authority and runs
+   `tag-provision` with its four declarations.
+
+**Keep the old channel.** Do not archive or delete it: its records are the
+team's history, still readable by id, and deleting a definition to tidy up
+would destroy the only copy of every event ever sent. It simply stops receiving
+writes.
 
 ## The event payload
 
@@ -197,15 +481,17 @@ exclusion: argparse's own usage exits (unknown flag, missing positional)
 happen before any queue code runs and carry no envelope. Text-mode success
 output is byte-stable across this change; shell consumers pipe it.
 
-Exit **3** is reserved for the event read path: the window itself could not be
-trusted, so the caller may be blind and must retry. The separate
-durable-obligation fold never reaches the exit code. When the window read
-cleanly, a fold that cannot complete is a REPORT — rc **0**, `queue-result`,
-with the verdict carried in the additive `obligations` key
+**The obligations fold never changes a successful read's rc.** rc 3 is not
+reserved for the read path — nonzero queue-family failures (read and `queue
+commit` alike; commit returns rc 3 for INCOMPATIBLE, stale-token REFUSED, and
+unsupported CAS) retain the `state`/`error_code` contract above, and rc alone is
+never the discriminator. What the fold must not do is *spend* an exit code: when
+the window read cleanly, a fold that cannot complete is a REPORT — rc **0**,
+`queue-result`, with the verdict carried in the additive `obligations` key
 (`state` UNKNOWN|INVALID plus `degraded`/`malformed`/`reason`). Two different
-conditions must not share one number: an unrunnable fold that spends rc 3
-trains every caller to ignore the blindness signal, which is the one signal
-that has to keep working.
+conditions must not share one number: an unrunnable fold that spends the read
+path's rc 3 trains every caller to ignore the blindness signal, which is the one
+signal that has to keep working.
 
 The fold is **opt-in** (`--obligations`); it is not run on a default read, on
 either cursor schema. The skip is stated, never implied: every machine-readable
@@ -379,17 +665,89 @@ for. It is easy to forget precisely because it does not arrive as a directive �
 it was missing from the first cut of this procedure, and a fold without it can
 report CLEAR while a reviewer is waiting on you.
 
+### Where a fold's answer came from — the source row
+
+`briefing` and `needs-me` answer the review and forge legs **projection-first**:
+`reconcile` folds a `reviews` section (`coord.reviews.projection.v1`) and a
+`forge` section (`coord.forge.projection.v1`) into `_coord/summaries.json`, and a
+fresh section answers the whole non-head tail in **zero** extra transport ops
+instead of scanning hundreds of raw shards per wake.
+
+**No silent staleness.** Every projection-aware fold SAYS which source it served,
+as a trailing row rendered in text and carried in `--json`:
+
+```
+  review fold: projection (as of 2026-08-03T18:40:11Z)
+  review fold: raw scan — reviews projection stale (31.4h old, max 24h)
+```
+
+- `{"type":"review-source","source":"projection","as_of":T}` (and the
+  `forge-source` twin) — served from the projection, current as of `T`.
+- `{"type":"...-source","source":"raw-scan","reason":...}` — the projection
+  existed but could not be served, so the fold fell back to the full raw scan
+  **loudly**, naming the reason: `… projection stale (Xh old, max Yh)`
+  (bound: `COORD_PROJECTION_MAX_AGE_HOURS`, default 24h),
+  `… projection incomplete (scanned N/M)`, `… projection malformed` (a duplicate
+  slug row, or an impossible `settled` combination — `settled` with a state other
+  than APPROVED, or with a non-empty `pending_required`), `… projection
+  unrecognized`, `… projection stamp unreadable`, or `… projection stamped in the
+  future`. This is a degradation notice, not noise: it means a reconcile is behind
+  or the aggregate needs a rebuild.
+- **No source row at all** = the team's aggregate carries no projection (or the
+  caller passed none): the pre-projection raw scan, byte-identical.
+
+**Your own head is always raw-tallied.** The caller-owned review slugs — the ones
+`needs-me` derives from your review-request directives — are re-read per slug on
+every call regardless of the projection, under their own dedicated budget. The
+projection is never allowed to answer "does this agent still owe a verdict"; it
+answers the tail. A head that cannot complete is still UNKNOWN and still emits
+`review-head-degraded`.
+
+Rule for consumers: a `raw-scan` source row is information about the *store*, not
+about your obligations — never treat it as a failure of the fold, and never treat
+its absence as proof the projection was used.
+
 
 ## Send
 
 ```bash
-echo '{"note":"{\"v\":1,\"to\":\"<recipient|all>\",\"kind\":\"response\",\"pri\":\"P2\",\"slug\":\"my-slug\"}"}' | \
+coord-engine bus-v3 send <team> --to <recipient|all> --kind response \
+  --priority P2 --slug my-slug [--ptr task/my-slug.md] [--from <you>]
+```
+
+That is the supported hand-send for a bare event — a `claim` announcing you are
+on the bus, a `verdict`, a one-off `directive`. The directive *workflow* has its
+own verbs (`tell`, `respond`, `remind`), which write the durable doc as well;
+use those when there is a document. If the message needs a body, upload it first
+(`fulcra file upload ./doc.md /team/<team>/<path>`) and pass `--ptr`.
+
+**Use the verb, not a raw `record` pipe.** The verb resolves the stream from the
+records authority (never a guessed one) and — the reason this section changed —
+attaches your identity tags. A raw pipe cannot read `tags.json`, so it writes an
+event that is invisible to every timeline filter no matter how carefully you
+provisioned. That gap silently untagged the documented send path, the
+cloud-coordinator onboarding, and the demo itself.
+
+### TAGGED RAW SEND — the shell-less / MCP-only fallback
+
+If you genuinely cannot run the engine (an MCP-only agent, a container with no
+`coord-engine`), the raw ingest write is still available, but **you must resolve
+and attach the tags yourself** — that is the whole cost of skipping the verb:
+
+1. Read the registry: `fulcra file download team/<team>/_coord/bus-v3/tags.json -`
+2. Take your entry's dimension uuids plus the top-level `base` uuid.
+3. Put them in the record's `tags` array (uuids only — the ingest endpoint
+   validates them as uuids and rejects names):
+
+```bash
+echo '{"note":"{\"v\":1,\"to\":\"<recipient|all>\",\"kind\":\"response\",\"pri\":\"P2\",\"slug\":\"my-slug\"}",
+      "tags":["<agent uuid>","<platform uuid>","<harness uuid>","<model uuid>","<base uuid>"]}' | \
   fulcra-api record "$COORD_TYPE" --api-version v1alpha1 --source=<your-agent-name>
 ```
 
 Pipe the JSON via stdin: in a non-TTY shell a flag-only invocation fails with
-"Error: No input provided". If the message needs a body, upload the document
-first (`fulcra file upload ./doc.md /team/<team>/<path>`) and set `ptr`.
+"Error: No input provided". Omit `tags` and the event is invisible in the
+explorer — that is a bug in your send, not a cosmetic detail.
 
 ## Timers: future-dated records (verified 2026-07-27)
 

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from coord_engine import cli, okf, presence, tasks
+from coord_engine import __version__, cli, okf, presence, tasks
 from coord_engine_test_helpers import FakeTransport
 
 PINNED_NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
@@ -104,9 +104,11 @@ def test_beat_without_engagement_keeps_engagement_inert_and_stamps_engine():
         "workstreams": ["web"], "summary": "shipping",
         "timestamp": PINNED_NOW.isoformat().replace("+00:00", "Z"),
         "engine": {
-                "engine_version": "1.10.0",
+            # the RELEASE, not a frozen literal: a version bump is release
+            # discipline, not a reason to edit this test
+            "engine_version": __version__,
             "protocol_version": 1,
-                "cursor_schema_version": 2,
+            "cursor_schema_version": 2,
         },
     }
     expected = okf.render_frontmatter(legacy_fm) + "\n# Presence: amy\n"

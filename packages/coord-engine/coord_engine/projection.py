@@ -1,0 +1,456 @@
+"""Read-side projection sections of ``_coord/summaries.json`` (reviews + forge).
+
+The write side of "the annotation thing" already keeps ``summaries.json`` fresh
+on every reconcile (typed transitions, the E1 cursor, the ack fold state). This
+module finishes the READ side's contract: reconcile also folds the review and
+forge state the wake folds need into the SAME document, so a wake can answer
+"what reviews/forge feedback need me?" from ONE summaries read instead of a
+budget-bounded scan of hundreds of raw store files (the live
+``review-fold-degraded: scanned 19 of 327`` class).
+
+Two top-level sections ride the aggregate (``build_aggregate``'s unknown-key
+passthrough carries them across mixed-fleet hosts; a host too old to preserve
+them merely wipes them, which readers treat as "projection absent" and fall back
+to the raw scan — fail-closed, never wrong):
+
+``reviews`` — ``coord.reviews.projection.v1``::
+
+    {"schema", "generated_at", "complete", "scanned", "total",
+     "rows": [{"name", "state", "pending_required", "required",
+               "requested_by", "artifact", "settled", "mtime", "size"}],
+     "orphans": [slug], "orphans_unknown": [slug], "tombstones": [slug]}
+
+``forge`` — ``coord.forge.projection.v1``::
+
+    {"schema", "generated_at", "complete",
+     "responsible": {pr_slug: [agent, ...]},
+     "feedback": {pr_slug: [{"id": shard-stem, "author": str|None}, ...]}}
+
+THE FRESHNESS DOCTRINE (no silent staleness): a fold may consume a section only
+when it is FRESH — stamped by reconcile within ``COORD_PROJECTION_MAX_AGE_HOURS``
+(default 24h) AND ``complete`` — and must SAY it did ("projection (as of T)").
+Anything else (stale, incomplete, unparseable) is a LOUD fallback to the raw
+scan; a section that simply does not exist (a team whose reconcile predates this
+module) is a silent fallback, so such a team behaves exactly as before.
+
+BUILD COST + CONVERGENCE: the build pays one ``review/`` listing per pass, then
+per-slug work ONLY for unsettled or changed reviews. A settled round is
+immutable by the review contract (re-opening a slug rewrites the review doc, so
+the doc's listed mtime/size move), which makes a prior settled row safe to carry
+at ZERO ops when the doc's mtime+size are unchanged — the same listing-only
+reuse discipline reconcile's task rows use, same-minute guard included. The
+build also drops the ``.settled`` marker on any tally it proves settleable, so
+a large legacy corpus converges: each budgeted pass settles more slugs, and the
+carried majority costs nothing on the next. Until the build completes inside
+its budget the section says ``complete: false`` and readers keep raw-scanning
+(loud) — an incomplete projection is never served as coverage.
+
+Stdlib-only; transport duck-typed (``list_dir``/``read``/``write``); build
+functions never raise (reconcile wraps them best-effort anyway).
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from . import config, forge, okf, review
+from .budget import Deadline
+from .log import get_logger
+from .roles import age_hours
+from .transport import TransportError
+
+#: Top-level summaries.json keys the projection sections live under.
+REVIEWS_KEY = "reviews"
+FORGE_KEY = "forge"
+
+REVIEWS_SCHEMA = "coord.reviews.projection.v1"
+FORGE_SCHEMA = "coord.forge.projection.v1"
+
+#: Maximum age (hours) a projection section may have and still be served by a
+#: fold (env ``COORD_PROJECTION_MAX_AGE_HOURS``). Generous by design: reconcile
+#: heartbeats run far more often than daily, so a section older than this means
+#: the heartbeat is broken and the raw scan is the honest path.
+DEFAULT_MAX_AGE_HOURS = 24.0
+
+#: Wall-clock budget (seconds) for ONE projection build inside a reconcile pass
+#: (env ``COORD_PROJECTION_BUILD_BUDGET``). On breach the section is stamped
+#: ``complete: false`` (readers keep raw-scanning, loudly) and the next pass
+#: resumes converging — carried rows cost nothing, so each pass reaches further.
+DEFAULT_BUILD_BUDGET = 240.0
+
+#: Skew tolerance (hours) for a section stamped slightly in the FUTURE of the
+#: reading host's clock — the same 900s budget reconcile's fast path trusts
+#: between hosts (``reconcile.FAST_PATH_SKEW_MARGIN_SECONDS``; not imported to
+#: keep this module import-cycle-free under ``reconcile -> projection``).
+_FUTURE_SKEW_HOURS = 0.25
+
+#: The review fold's settled-cache marker filename (mirrors ``cli.SETTLED_MARKER``
+#: — defined there first; duplicated here because ``cli`` imports this module).
+SETTLED_MARKER = ".settled"
+
+
+def max_age_hours() -> float:
+    """Serve-threshold for projection sections, hours. Env
+    ``COORD_PROJECTION_MAX_AGE_HOURS`` (see DEFAULT_MAX_AGE_HOURS)."""
+    return config.env_float("COORD_PROJECTION_MAX_AGE_HOURS", DEFAULT_MAX_AGE_HOURS)
+
+
+def build_budget() -> float:
+    """Per-pass projection build budget, seconds. Env
+    ``COORD_PROJECTION_BUILD_BUDGET`` (see DEFAULT_BUILD_BUDGET)."""
+    return config.env_float("COORD_PROJECTION_BUILD_BUDGET", DEFAULT_BUILD_BUDGET)
+
+
+def fresh_section(
+    aggregate_doc: Any, key: str, schema: str, *, now: str
+) -> tuple[Optional[dict[str, Any]], str]:
+    """The projection section a fold may consume, or why it must raw-scan.
+
+    Returns ``(section, "")`` when the section is present, schema-recognized,
+    stamped within ``COORD_PROJECTION_MAX_AGE_HOURS`` and ``complete`` — the ONLY
+    state a fold may serve from. Otherwise ``(None, reason)``:
+
+    * ``reason == ""`` — the aggregate carries NO such section (a team whose
+      reconcile has never written it). The fold falls back SILENTLY, so such a
+      team behaves exactly as before this module existed.
+    * a non-empty ``reason`` — the section exists but must not be served
+      (stale/incomplete/unrecognized). The fold falls back LOUDLY, naming the
+      reason (the no-silent-staleness doctrine: old state is never presented as
+      current, and a projection that stopped refreshing is made visible).
+    """
+    if not isinstance(aggregate_doc, dict) or key not in aggregate_doc:
+        return None, ""
+    section = aggregate_doc.get(key)
+    if not isinstance(section, dict) or section.get("schema") != schema:
+        return None, f"{key} projection unrecognized"
+    age = age_hours(section.get("generated_at"), now)
+    if age == float("inf"):
+        return None, f"{key} projection stamp unreadable"
+    if age < -_FUTURE_SKEW_HOURS:
+        return None, f"{key} projection stamped in the future"
+    limit = max_age_hours()
+    if age > limit:
+        return None, (f"{key} projection stale "
+                      f"({age:.1f}h old, max {limit:g}h)")
+    if section.get("complete") is not True:
+        scanned, total = section.get("scanned"), section.get("total")
+        detail = (f" (scanned {scanned}/{total})"
+                  if isinstance(scanned, int) and isinstance(total, int) else "")
+        return None, f"{key} projection incomplete{detail}"
+    return section, ""
+
+
+# ---------------------------------------------------------------------------
+# Review projection build (runs inside reconcile)
+# ---------------------------------------------------------------------------
+
+def _review_prefix(team: str) -> str:
+    return f"team/{team}/review/"
+
+
+def _verdicts_prefix(team: str, slug: str) -> str:
+    return f"{_review_prefix(team)}{slug}/verdicts/"
+
+
+def _normalize_required(required: Any) -> list[str]:
+    """Coerce a review doc's ``required:`` field (list or legacy comma-string)
+    into a clean reviewer-name list (mirrors ``cli._normalize_required``)."""
+    if isinstance(required, str):
+        return [r.strip() for r in required.split(",") if r.strip()]
+    if isinstance(required, list):
+        return [str(r).strip() for r in required if str(r).strip()]
+    return []
+
+
+def _settled_carry_safe(prior_row: Any, entry: dict[str, Any],
+                        prior_generated_at: Any) -> bool:
+    """True iff ``prior_row`` may be carried WITHOUT re-reading its review.
+
+    Only a SETTLED prior row qualifies: a settled round is immutable, and
+    re-opening the slug rewrites the review doc — so an unchanged listed
+    mtime+size proves the carried tally still holds. Unsettled rows never carry
+    (their verdict shards can change without touching the doc). The same-minute
+    guard is reconcile's (imported lazily; ``reconcile`` imports this module)."""
+    if not isinstance(prior_row, dict) or prior_row.get("settled") is not True:
+        return False
+    entry_mtime = entry.get("mtime")
+    if not entry_mtime or prior_row.get("mtime") != entry_mtime:
+        return False
+    if prior_row.get("size") is None or prior_row.get("size") != entry.get("size"):
+        return False
+    from . import reconcile as rec  # lazy: reconcile imports projection
+    return rec._same_minute_reuse_safe(entry_mtime, prior_generated_at) is not False
+
+
+def _scan_review_slug(
+    transport: Any, team: str, slug: str, entry: dict[str, Any], *,
+    now: str, deadline: Deadline,
+) -> tuple[Optional[dict[str, Any]], bool]:
+    """Fresh-scan ONE review slug into a projection row.
+
+    Returns ``(row, True)`` on a trustworthy scan, ``(None, False)`` when the
+    slug is UNKNOWN (unlistable verdicts, unreadable doc, an unreadable verdict
+    shard, or the budget expired mid-slug). UNKNOWN never yields a row — a
+    partial tally is a floor a projection must not freeze (a lost CHANGES
+    verdict would read APPROVED, durably)."""
+    try:
+        ventries = transport.list_dir(_verdicts_prefix(team, slug))
+    except TransportError:
+        return None, False
+    doc_raw = transport.read(f"{_review_prefix(team)}{slug}.md")
+    if doc_raw is None or deadline.expired():
+        return None, False
+    fm = okf.parse_frontmatter(doc_raw) or {}
+    requested_by = fm.get("requested_by")
+    base: dict[str, Any] = {
+        "name": slug,
+        "required": _normalize_required(fm.get("required")),
+        "requested_by": str(requested_by) if requested_by else None,
+        "artifact": forge.pr_slug(forge.review_artifact(fm)),
+        "mtime": entry.get("mtime"),
+        "size": entry.get("size"),
+    }
+    if any((v.get("name") or "") == SETTLED_MARKER for v in ventries):
+        # Settled-cache hit: the round is terminal-APPROVED and immutable — the
+        # doc read above already gave us the forge-relevant identity fields.
+        return {**base, "state": review.APPROVED, "pending_required": [],
+                "settled": True}, True
+    head = review.normalize_head(fm.get("head"))
+    verdicts: list[dict[str, Any]] = []
+    for v in ventries:
+        n = v.get("name") or ""
+        if v.get("is_dir") or not n.endswith(".md"):
+            continue
+        reviewer = review.reviewer_from_filename(n, head=head)
+        if reviewer is None:
+            continue  # superseded head / foreign filename: zero reads
+        if deadline.expired():
+            return None, False
+        raw_v = transport.read(_verdicts_prefix(team, slug) + n)
+        if deadline.expired():
+            return None, False
+        if raw_v is None:
+            return None, False  # listed shard unreadable -> the tally is a floor
+        vfm = okf.parse_frontmatter(raw_v) or {}
+        if head and review.normalize_head(vfm.get("head")) != head:
+            continue  # the verdict must independently attest the exact head
+        verdicts.append({"reviewer": reviewer, "verdict": vfm.get("verdict")})
+    tally = review.tally(verdicts, required=base["required"])
+    settled = (tally["state"] == review.APPROVED
+               and not tally["pending_required"] and bool(base["required"]))
+    if settled:
+        # Same proven-settle cache the read fold writes — accelerates BOTH the
+        # raw fold's settled-skip and this build's own convergence. Best-effort.
+        try:
+            transport.write(
+                _verdicts_prefix(team, slug) + SETTLED_MARKER,
+                okf.render_frontmatter({"schema": "review-settled/v1",
+                                        "state": review.APPROVED, "ts": now}))
+        except Exception:
+            pass
+    return {**base, "state": tally["state"],
+            "pending_required": tally["pending_required"],
+            "settled": settled}, True
+
+
+def build_review_projection(
+    transport: Any, team: str, *, now: str, prior: Any,
+    settled_index: "set[str]", deadline: Deadline, log: Any = None,
+) -> dict[str, Any]:
+    """Build the ``reviews`` section for this reconcile pass. Never raises.
+
+    Carries prior SETTLED rows whose doc mtime+size are unchanged at zero ops;
+    fresh-scans everything else under ``deadline``. A slug that could not be
+    resolved (budget cut or transport doubt) keeps its prior row for the NEXT
+    pass's carry check but marks the section ``complete: false`` — readers then
+    keep raw-scanning until a pass resolves every slug. On an unlistable review
+    root the PRIOR section is returned untouched (its old stamp ages it out
+    honestly rather than re-stamping unknown state as current)."""
+    log = log or get_logger("projection")
+    prior = prior if isinstance(prior, dict) else {}
+    prior_rows = {str(r.get("name")): r for r in (prior.get("rows") or [])
+                  if isinstance(r, dict) and r.get("name")}
+    prior_generated_at = prior.get("generated_at")
+    prior_tombstones = {str(s) for s in (prior.get("tombstones") or []) if s}
+    try:
+        entries = transport.list_dir(_review_prefix(team))
+    except TransportError as e:
+        if prior:
+            log.warn("review projection: root listing failed; prior carried",
+                     team=team, error=str(e))
+            return prior
+        return {"schema": REVIEWS_SCHEMA, "generated_at": now, "complete": False,
+                "scanned": 0, "total": 0, "rows": [], "orphans": [],
+                "orphans_unknown": [], "tombstones": []}
+
+    doc_entries = sorted(
+        ((e.get("name") or "")[:-3], e) for e in entries
+        if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
+        and (e.get("name") or "") != "index.md")
+    rows: list[dict[str, Any]] = []
+    unknown = 0
+    budget_cut = False
+    # Zero-op carries first, budgeted fresh scans second — so a budget cut always
+    # lands on the scan frontier and each pass converges further than the last.
+    fresh: list[tuple[str, dict[str, Any]]] = []
+    for slug, e in doc_entries:
+        if _settled_carry_safe(prior_rows.get(slug), e, prior_generated_at):
+            rows.append(prior_rows[slug])
+        else:
+            fresh.append((slug, e))
+    for slug, e in fresh:
+        if budget_cut or deadline.expired():
+            budget_cut = True
+            unknown += 1
+            if slug in prior_rows:
+                rows.append(prior_rows[slug])  # kept for next pass's carry check
+            continue
+        row, ok = _scan_review_slug(transport, team, slug, e, now=now,
+                                    deadline=deadline)
+        if not ok:
+            unknown += 1
+            if slug in prior_rows:
+                rows.append(prior_rows[slug])
+            continue
+        rows.append(row)
+    rows.sort(key=lambda r: str(r.get("name")))
+
+    # Dir-only slugs (a `<slug>/` with no doc): classify orphan / tombstone /
+    # unknown via one verdicts listing each. Tombstones are permanent ghost dirs
+    # (soft deletes) — cached from the prior section so they cost one listing
+    # EVER, not one per pass. Unknowns stay visibly degraded (never assumed
+    # tombstone) but do not un-complete the section: the raw fold treats an
+    # unclassifiable dir as a per-dir degraded row, not wholesale failure.
+    doc_slugs = {slug for slug, _ in doc_entries}
+    orphans: list[str] = []
+    orphans_unknown: list[str] = []
+    tombstones: list[str] = []
+    dir_slugs = sorted({
+        (e.get("name") or "").rstrip("/") for e in entries if e.get("is_dir")
+    } - doc_slugs - settled_index - {""})
+    for slug in dir_slugs:
+        if slug in prior_tombstones:
+            tombstones.append(slug)
+            continue
+        if deadline.expired():
+            orphans_unknown.append(slug)
+            continue
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError:
+            orphans_unknown.append(slug)
+            continue
+        if any(not v.get("is_dir") and (v.get("name") or "").endswith(".md")
+               for v in ventries):
+            orphans.append(slug)
+        else:
+            tombstones.append(slug)
+
+    section = {
+        "schema": REVIEWS_SCHEMA,
+        "generated_at": now,
+        "complete": unknown == 0,
+        "scanned": len(doc_entries) - unknown,
+        "total": len(doc_entries),
+        "rows": rows,
+        "orphans": orphans,
+        "orphans_unknown": orphans_unknown,
+        "tombstones": tombstones,
+    }
+    if unknown:
+        log.warn("review projection incomplete", team=team,
+                 scanned=section["scanned"], total=section["total"],
+                 budget_cut=budget_cut)
+    return section
+
+
+# ---------------------------------------------------------------------------
+# Forge projection build (runs inside reconcile, after the review build)
+# ---------------------------------------------------------------------------
+
+def build_forge_projection(
+    transport: Any, team: str, *, now: str, review_rows: list[dict[str, Any]],
+    reviews_complete: bool, prior: Any, deadline: Deadline, log: Any = None,
+) -> dict[str, Any]:
+    """Build the ``forge`` section: PR responsibility (watch registry union the
+    review docs' ``requested_by``, keyed by PR slug) plus each responsible PR's
+    feedback shard ids/authors. Ack state stays a READ-side concern (it is
+    per-agent), so a fold consuming this section pays only one ack read per
+    feedback item for its own agent. Never raises.
+
+    ``reviews_complete`` gates completeness: half the responsibility map derives
+    from the review projection rows, so an incomplete review scan makes this
+    section a floor — marked ``complete: false``, never served as coverage.
+    ``prior`` is accepted for signature symmetry / future carry use."""
+    log = log or get_logger("projection")
+    del prior  # feedback dirs are small; a carry optimization is not worth state
+    complete = bool(reviews_complete)
+    resp: dict[str, set] = {}
+    watch_prefix = f"team/{team}/_coord/forge/watch/"
+    try:
+        watch_entries = transport.list_dir(watch_prefix)
+    except TransportError:
+        watch_entries = []
+        complete = False
+    for e in watch_entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        if deadline.expired():
+            complete = False
+            break
+        raw = transport.read(watch_prefix + n)
+        if raw is None:
+            complete = False  # a registered watch we cannot attribute: floor
+            continue
+        fm = okf.parse_frontmatter(raw) or {}
+        slug = forge.pr_slug(fm.get("url")) or n[:-3]
+        agent = fm.get("agent")
+        if agent:
+            resp.setdefault(slug, set()).add(str(agent))
+    for r in review_rows:
+        if not isinstance(r, dict):
+            continue
+        slug, who = r.get("artifact"), r.get("requested_by")
+        if slug and who:
+            resp.setdefault(str(slug), set()).add(str(who))
+
+    feedback: dict[str, list[dict[str, Any]]] = {}
+    for slug in sorted(resp):
+        if deadline.expired():
+            complete = False
+            break
+        fb_prefix = f"team/{team}/_coord/forge/feedback/{slug}/"
+        try:
+            fentries = transport.list_dir(fb_prefix)
+        except TransportError:
+            complete = False  # this PR's feedback is UNKNOWN
+            continue
+        items: list[dict[str, Any]] = []
+        for e in fentries:
+            n = e.get("name") or ""
+            if e.get("is_dir") or not n.endswith(".md"):
+                continue
+            if deadline.expired():
+                complete = False
+                break
+            raw = transport.read(fb_prefix + n)
+            author = (okf.parse_frontmatter(raw) or {}).get("author") if raw else None
+            # An unreadable shard keeps its item (the id — the ack key — came
+            # from the listing; only the author is cosmetic), mirroring the raw
+            # fold, which lists the item regardless of shard readability.
+            items.append({"id": n[:-3], "author": str(author) if author else None})
+        if items:
+            feedback[slug] = items
+
+    section = {
+        "schema": FORGE_SCHEMA,
+        "generated_at": now,
+        "complete": complete,
+        "responsible": {k: sorted(v) for k, v in sorted(resp.items())},
+        "feedback": feedback,
+    }
+    if not complete:
+        log.warn("forge projection incomplete", team=team,
+                 responsible=len(resp))
+    return section
