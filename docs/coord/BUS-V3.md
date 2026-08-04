@@ -47,6 +47,24 @@ doubt fail closed. Apply is idempotent and its sole possible write is the
 complete schema-v1 authority document. It never seeds or mutates a legacy
 cursor, and task/role documents are intentionally backward-compatible and out
 of this migration's scope.
+
+The `--json` migration envelope has a fixed state/rc vocabulary:
+
+| `state` | rc | Meaning |
+|---|---:|---|
+| `READY` | 0 | Dry-run proof passed; apply has not been attempted. |
+| `BLOCKED` | 3 | A pre-write authority, census, or cursor check failed. |
+| `APPLIED` | 0 | The authority write was issued and read-back proved the exact target. |
+| `CURRENT` | 0 | The authority was already the schema-v1 target; nothing was written. |
+| `UNKNOWN` | 2 | The authority write was refused; `writes.authority` is `0`. |
+| `UNKNOWN` | 3 | A write was issued but read-back could not prove it; `writes.authority` is `"ISSUED-BUT-UNPROVEN"`. |
+
+Never discriminate on rc alone: read `state` and `error_code`. Pre-write errors
+are `authority-absent`, `authority-malformed`, `authority-unsupported`,
+`authority-unreadable`, `agent-census-read-failed`, `agent-census-malformed`,
+`cursor-malformed`, or `cursor-unreadable`. Write-path errors are
+`authority-write-refused`, `authority-verify-mismatch`, or
+`authority-verify-unreadable`. Successful states carry `error_code: null`.
 Partially versioned or unknown authorities are invalid. An engine below the
 reader/writer floor, or one that does not understand the selected protocol or
 cursor schema, fails closed before advancing any cursor. `doctor <team>`

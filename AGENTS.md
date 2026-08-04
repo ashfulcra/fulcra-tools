@@ -380,7 +380,10 @@ it (not on PyPI).
   Malformed or unreadable state blocks. Apply is idempotent, writes only the
   complete schema-v1 authority, and never rewrites legacy cursors. Task and
   role documents remain intentionally backward-compatible and are not a
-  migration target.
+  migration target. Its JSON contract is documented in BUS-V3.md: never branch
+  on rc alone; read `state` + `error_code`, and treat
+  `writes.authority: "ISSUED-BUT-UNPROVEN"` as a write whose read-back did not
+  prove the resulting store state.
 - **Cursor v2 is transactional: read → process → commit.** Under an activated
   schema-v2 authority, `queue` CAS-stages one pending batch and prints a
   `queue-delivery` token; it does **not** advance coverage. Process every

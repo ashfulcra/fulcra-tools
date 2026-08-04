@@ -27,6 +27,32 @@ class ClassifiedTransport(FakeTransport):
         return super().write(path, content)
 
 
+class WriteRefusedTransport(ClassifiedTransport):
+    def write(self, path, content):
+        self.writes.append(path)
+        return False
+
+
+class VerifyFaultTransport(ClassifiedTransport):
+    def __init__(self, verify_fault):
+        super().__init__()
+        self.verify_fault = verify_fault
+        self.authority_written = False
+
+    def read_classified(self, path):
+        if path == records.config_path(TEAM) and self.authority_written:
+            if self.verify_fault == "unreadable":
+                return None, "error"
+            if self.verify_fault == "mismatch":
+                return _legacy_authority(), "ok"
+        return super().read_classified(path)
+
+    def write(self, path, content):
+        result = super().write(path, content)
+        self.authority_written = True
+        return result
+
+
 def _legacy_authority():
     return json.dumps({
         "data_type": "MomentAnnotation/x",
@@ -39,8 +65,8 @@ def _legacy_cursor(last="2026-08-01T00:00:00Z"):
     return json.dumps({"v": 1, "last_read": last, "seen_ids": ["old"]})
 
 
-def _setup():
-    t = ClassifiedTransport()
+def _setup(t=None):
+    t = t or ClassifiedTransport()
     t.put(records.config_path(TEAM), _legacy_authority())
     # A nested file makes alice discoverable; bob is explicitly supplied and
     # proves the absent branch without inventing another state source.
@@ -64,6 +90,7 @@ def test_dry_run_proves_readable_and_absent_and_writes_nothing(capsys):
     row = _row(capsys)
 
     assert row["state"] == "READY"
+    assert row["error_code"] is None
     assert row["authority"]["classification"] == "readable-legacy"
     assert {item["agent"]: item["classification"] for item in row["cursors"]} == {
         "alice": "readable-legacy", "bob": "absent"}
@@ -86,6 +113,7 @@ def test_malformed_cursor_blocks_apply_and_preserves_every_document(capsys):
     row = _row(capsys)
 
     assert row["state"] == "BLOCKED"
+    assert row["error_code"] == "cursor-malformed"
     assert row["cursors"][0]["classification"] == "malformed-blocks"
     assert t.store == before
     assert t.writes == []
@@ -103,6 +131,7 @@ def test_apply_is_idempotent_and_never_mutates_legacy_or_task_role_docs(capsys):
     assert _run(t, "--apply") == 0
     first = _row(capsys)
     assert first["state"] == "APPLIED"
+    assert first["error_code"] is None
     assert first["writes"]["authority"] == 1
     config = json.loads(t.read(records.config_path(TEAM)))
     assert config["protocol_version"] == 1
@@ -116,6 +145,7 @@ def test_apply_is_idempotent_and_never_mutates_legacy_or_task_role_docs(capsys):
     assert _run(t, "--apply") == 0
     second = _row(capsys)
     assert second["state"] == "CURRENT"
+    assert second["error_code"] is None
     assert second["writes"]["authority"] == 0
     assert t.writes == [records.config_path(TEAM)]
     assert t.read(cursor_path) == cursor_raw
@@ -130,6 +160,7 @@ def test_unreadable_cursor_blocks_without_guessing_absence(capsys):
     row = _row(capsys)
 
     assert row["cursors"][0]["classification"] == "unreadable-blocks"
+    assert row["error_code"] == "cursor-unreadable"
     assert t.writes == []
 
 
@@ -142,4 +173,42 @@ def test_malformed_authority_blocks_before_any_write(capsys):
 
     assert row["authority"]["classification"] == "malformed-blocks"
     assert row["state"] == "BLOCKED"
+    assert row["error_code"] == "authority-malformed"
     assert t.writes == []
+
+
+def test_refused_write_is_rc2_and_reports_no_mutation(capsys):
+    t = _setup(WriteRefusedTransport())
+    before = dict(t.store)
+
+    assert _run(t, "--apply") == 2
+    row = _row(capsys)
+
+    assert row["state"] == "UNKNOWN"
+    assert row["error_code"] == "authority-write-refused"
+    assert row["writes"]["authority"] == 0
+    assert t.store == before
+
+
+def test_verify_mismatch_reports_issued_but_unproven(capsys):
+    t = _setup(VerifyFaultTransport("mismatch"))
+
+    assert _run(t, "--apply") == 3
+    row = _row(capsys)
+
+    assert row["state"] == "UNKNOWN"
+    assert row["error_code"] == "authority-verify-mismatch"
+    assert row["writes"]["authority"] == "ISSUED-BUT-UNPROVEN"
+    assert t.read(records.config_path(TEAM)) != _legacy_authority()
+
+
+def test_unreadable_verify_reports_issued_but_unproven(capsys):
+    t = _setup(VerifyFaultTransport("unreadable"))
+
+    assert _run(t, "--apply") == 3
+    row = _row(capsys)
+
+    assert row["state"] == "UNKNOWN"
+    assert row["error_code"] == "authority-verify-unreadable"
+    assert row["writes"]["authority"] == "ISSUED-BUT-UNPROVEN"
+    assert t.read(records.config_path(TEAM)) != _legacy_authority()

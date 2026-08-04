@@ -3437,6 +3437,31 @@ def _bus_v3_migration_agents(
     return sorted(agents), None
 
 
+def _bus_v3_migration_block_error(
+        authority_class: str, cursor_rows: list[dict[str, Any]],
+        census_error: Optional[str]) -> Optional[str]:
+    """Return the stable machine reason for a pre-write migration block."""
+    authority_errors = {
+        "absent-blocks": "authority-absent",
+        "malformed-blocks": "authority-malformed",
+        "unsupported-blocks": "authority-unsupported",
+        "unreadable-blocks": "authority-unreadable",
+    }
+    if authority_class in authority_errors:
+        return authority_errors[authority_class]
+    if census_error is not None:
+        return census_error.split(":", 1)[0]
+    cursor_errors = {
+        "malformed-blocks": "cursor-malformed",
+        "unreadable-blocks": "cursor-unreadable",
+    }
+    for row in cursor_rows:
+        classification = row["classification"]
+        if classification in cursor_errors:
+            return cursor_errors[classification]
+    return None
+
+
 def cmd_bus_v3_migrate(args: argparse.Namespace, transport: Any) -> int:
     """Dry-run/apply the ruled s5 authority/cursor-only migration.
 
@@ -3483,33 +3508,44 @@ def cmd_bus_v3_migrate(args: argparse.Namespace, transport: Any) -> int:
     if census_error is not None:
         blocked = True
 
-    wrote_authority = False
+    authority_write: Any = 0
     state = "BLOCKED" if blocked else "READY"
     rc = 3 if blocked else 0
+    error_code = _bus_v3_migration_block_error(
+        authority_class, cursor_rows, census_error)
     if args.apply and not blocked:
         if authority_class == "current":
             state = "CURRENT"
         else:
             rendered = records.render_authority_config(target or {})
             if not transport.write(authority_path, rendered):
-                state, rc = "UNKNOWN", 3
+                state, rc = "UNKNOWN", 2
+                error_code = "authority-write-refused"
             else:
+                # The write reached the transport. Until read-back proves the
+                # target, report that fact without claiming either zero writes
+                # or a verified mutation.
+                authority_write = "ISSUED-BUT-UNPROVEN"
                 verify_raw, verify_status = reader(authority_path)
-                verified, verified_class = (
-                    records.schema1_authority_migration_target(verify_raw)
-                    if verify_status == "ok" and verify_raw is not None
-                    else (None, "unreadable-blocks")
-                )
-                if verified_class != "current" or verified != target:
+                if verify_status != "ok" or verify_raw is None:
                     state, rc = "UNKNOWN", 3
+                    error_code = "authority-verify-unreadable"
                 else:
-                    wrote_authority = True
-                    state = "APPLIED"
+                    verified, verified_class = (
+                        records.schema1_authority_migration_target(verify_raw))
+                    if verified_class != "current" or verified != target:
+                        state, rc = "UNKNOWN", 3
+                        error_code = "authority-verify-mismatch"
+                    else:
+                        authority_write = 1
+                        state = "APPLIED"
+                        error_code = None
 
     envelope = {
         "type": "bus-v3-migration",
         "mode": mode,
         "state": state,
+        "error_code": error_code,
         "authority": {
             "path": authority_path,
             "classification": authority_class,
@@ -3518,7 +3554,7 @@ def cmd_bus_v3_migrate(args: argparse.Namespace, transport: Any) -> int:
         "cursors": cursor_rows,
         "agent_census_error": census_error,
         "writes": {
-            "authority": 1 if wrote_authority else 0,
+            "authority": authority_write,
             "legacy_cursors": 0,
             "tasks": 0,
             "roles": 0,
