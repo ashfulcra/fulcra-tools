@@ -1,5 +1,14 @@
 """Read-side projection sections of ``_coord/summaries.json``.
 
+ARCHITECTURE: annotations are the events and files are their bodies. Reconcile
+is the single incremental materializer: it consumes ``data-updates`` once and
+publishes engine-owned views. Read verbs never re-derive the stable corpus.
+They read ``summaries.json`` once, gate its projection with the same change feed,
+and fold only the bounded changed-slug head. A clean feed makes the unchanged
+tail CURRENT independent of elapsed wall time; an unreadable feed is UNKNOWN
+and forces a loud raw fallback. ``COORD_PROJECTION_MAX_AGE_HOURS`` remains an
+outer diagnostic bound for that failure path, never a substitute for feed proof.
+
 The write side of "the annotation thing" already keeps ``summaries.json`` fresh
 on every reconcile (typed transitions, the E1 cursor, the ack fold state). This
 module finishes the READ side's contract: reconcile also folds the review and
@@ -144,6 +153,37 @@ def fresh_section(
     if age > limit:
         return None, (f"{key} projection stale "
                       f"({age:.1f}h old, max {limit:g}h)")
+    if section.get("complete") is not True:
+        scanned, total = section.get("scanned"), section.get("total")
+        detail = (f" (scanned {scanned}/{total})"
+                  if isinstance(scanned, int) and isinstance(total, int) else "")
+        return None, f"{key} projection incomplete{detail}"
+    return section, ""
+
+
+def feed_fresh_section(
+    aggregate_doc: Any, key: str, schema: str, *, now: str,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """A section structurally eligible for CHANGE-FEED-gated serving.
+
+    The caller must already hold positive evidence from ``data-updates`` for the
+    window beginning at this section's ``generated_at``.  Consequently elapsed
+    wall time is not freshness evidence here: the feed proves the stable tail,
+    while changed slugs are overlaid separately.  We still reject unreadable or
+    future stamps and incomplete/unrecognized sections.  If the feed is
+    unavailable callers use :func:`fresh_section` only to enrich the loud raw
+    fallback reason; UNKNOWN is never promoted to fresh.
+    """
+    if not isinstance(aggregate_doc, dict) or key not in aggregate_doc:
+        return None, ""
+    section = aggregate_doc.get(key)
+    if not isinstance(section, dict) or section.get("schema") != schema:
+        return None, f"{key} projection unrecognized"
+    age = age_hours(section.get("generated_at"), now)
+    if age == float("inf"):
+        return None, f"{key} projection stamp unreadable"
+    if age < -_FUTURE_SKEW_HOURS:
+        return None, f"{key} projection stamped in the future"
     if section.get("complete") is not True:
         scanned, total = section.get("scanned"), section.get("total")
         detail = (f" (scanned {scanned}/{total})"

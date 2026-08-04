@@ -371,6 +371,8 @@ def _load_rows_status(
     feed_changes: "Optional[list[dict[str, Any]]]" = None,
     feed_attempted: bool = False,
     doc_sink: "Optional[list[Any]]" = None,
+    feed_sink: "Optional[list[Any]]" = None,
+    feed_section_key: "Optional[str]" = None,
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
     was not, a short ``reason`` for the degraded surface to print (attribution: a
@@ -396,6 +398,8 @@ def _load_rows_status(
     path = rec.summaries_path(team)
     if doc_sink is not None:
         doc_sink.append(None)
+    if feed_sink is not None:
+        feed_sink.append({"ok": False, "reason": "data-updates feed not attempted"})
     try:
         raw = transport.read(path)
     except Exception:
@@ -417,25 +421,36 @@ def _load_rows_status(
         # E2 primary path: one authoritative feed call since the aggregate cursor,
         # then direct reads of only changed task shards.  No task-dir listing is
         # consulted, so listing lag cannot hide a verified feed entry.
-        aggregate_cursor = (
-            aggregate_doc.get("generated_at")
-            if isinstance(aggregate_doc, dict)
-            else None
-        )
+        aggregate_cursor = None
+        if isinstance(aggregate_doc, dict):
+            aggregate_cursor = aggregate_doc.get("generated_at")
+            # A mixed-fleet host can refresh the aggregate while carrying an
+            # engine-owned section unchanged. Projection consumers must query
+            # from THAT section's anchor, never the newer container stamp.
+            section = aggregate_doc.get(feed_section_key) if feed_section_key else None
+            if isinstance(section, dict):
+                aggregate_cursor = section.get("generated_at")
         feed = (feed_changes if feed_attempted else _team_updates(
             transport, team, since=aggregate_cursor, now=_iso(_now())))
         if feed is not None:
             delta_rows, delta_ok, _delta_reason = _feed_task_rows(
                 transport, team, rows, feed)
             if delta_ok:
+                if feed_sink is not None:
+                    feed_sink[-1] = {"ok": True, "changes": feed}
                 if deadline is not None and deadline.expired():
                     return [], False, "caller row-load budget exhausted during feed delta"
                 return delta_rows, True, ""
+            if feed_sink is not None:
+                feed_sink[-1] = {"ok": False, "reason": _delta_reason}
             # Any feed/read doubt takes the byte-for-byte legacy listing overlay
             # below.  A healthy fallback is not a degraded public read.
         # Live-freshness overlay: union in task docs written since the last
         # reconcile (absent from this index). Any overlay problem flips ``ok`` so
         # the inbox source degrades visibly; the index rows are still served.
+        if feed is None and feed_sink is not None:
+            feed_sink[-1] = {"ok": False,
+                             "reason": "data-updates feed unreadable"}
         overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(
             transport, team, rows, deadline=deadline)
         if deadline is not None and deadline.expired():
@@ -626,9 +641,12 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
     doc_sink: list[Any] = []
+    feed_sink: list[Any] = []
     rows, rows_ok, rows_reason = _load_rows_status(
-        transport, args.team, doc_sink=doc_sink)
+        transport, args.team, doc_sink=doc_sink, feed_sink=feed_sink,
+        feed_section_key=projection_mod.NEEDS_ME_KEY)
     agg_doc = doc_sink[0] if doc_sink else None
+    feed_evidence = feed_sink[0] if feed_sink else None
     # Role routing: work addressed to a role this agent holds IS work that needs
     # this agent (see _held_roles_for_rows). An unresolved role is UNKNOWN and gets
     # its own marker below — never folded into "no role work".
@@ -636,7 +654,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         transport, args.team, args.agent, rows, now=now)
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
                          held_roles=held_roles, include_history=args.all,
-                         aggregate_doc=agg_doc)
+                         aggregate_doc=agg_doc, feed_evidence=feed_evidence)
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
@@ -3487,7 +3505,8 @@ def _needs_me_rows(transport: Any, team: str, agent: str,
                    rows: list[dict[str, Any]], *, now: str,
                    held_roles: "Optional[set[str]]" = None,
                    include_history: bool = False,
-                   aggregate_doc: Any = None) -> list[dict[str, Any]]:
+                   aggregate_doc: Any = None,
+                   feed_evidence: Any = None) -> list[dict[str, Any]]:
     """Needs-me, projection-first, with a raw-tallied live head.
 
     A fresh, complete ``needs_me`` section proves the ack state for every task
@@ -3498,17 +3517,36 @@ def _needs_me_rows(transport: Any, team: str, agent: str,
     to the legacy raw fold loudly; an absent section preserves legacy output.
     """
     if aggregate_doc is not None and not include_history:
-        section, reason = projection_mod.fresh_section(
-            aggregate_doc, projection_mod.NEEDS_ME_KEY,
-            projection_mod.NEEDS_ME_SCHEMA, now=now)
+        has_section = (isinstance(aggregate_doc, dict)
+                       and projection_mod.NEEDS_ME_KEY in aggregate_doc)
+        feed_ok = isinstance(feed_evidence, dict) and feed_evidence.get("ok") is True
+        if not has_section:
+            section, reason = None, ""  # mixed-fleet legacy behavior
+        elif feed_ok:
+            section, reason = projection_mod.feed_fresh_section(
+                aggregate_doc, projection_mod.NEEDS_ME_KEY,
+                projection_mod.NEEDS_ME_SCHEMA, now=now)
+        else:
+            # The wall-clock policy is only an OUTER diagnostic bound when the
+            # feed is unavailable. UNKNOWN is not fresh even inside that bound.
+            section = None
+            _unused, age_reason = projection_mod.fresh_section(
+                aggregate_doc, projection_mod.NEEDS_ME_KEY,
+                projection_mod.NEEDS_ME_SCHEMA, now=now)
+            feed_reason = (feed_evidence or {}).get("reason") if isinstance(
+                feed_evidence, dict) else None
+            reason = age_reason or feed_reason or "data-updates feed unreadable"
         if section is not None:
             validated = _validated_needs_me_projection(section)
             if validated is not None:
+                changed = _needs_me_changed_slugs(
+                    team, feed_evidence.get("changes") or [])
                 covered: list[dict[str, Any]] = []
                 live_head: list[dict[str, Any]] = []
                 for row in rows:
-                    snap = validated.get(str(row.get("name") or ""))
-                    if snap is None or snap[0] != row.get("mtime"):
+                    name = str(row.get("name") or "")
+                    snap = validated.get(name)
+                    if name in changed or snap is None or snap[0] != row.get("mtime"):
                         live_head.append(row)
                         continue
                     current = dict(row)
@@ -3535,6 +3573,34 @@ def _needs_me_rows(transport: Any, team: str, agent: str,
     return _needs_me_rows_raw(
         transport, team, agent, rows, now=now, held_roles=held_roles,
         include_history=include_history)
+
+
+def _needs_me_changed_slugs(team: str, changes: list[Any]) -> set[str]:
+    """Task/ack slugs named by the already-paid team updates call.
+
+    These are the projection's bounded live head. Direct task changes were
+    already overlaid by ``_load_rows_status``; ack changes keep the row mtime but
+    still require the authoritative shard read, so both namespaces land here.
+    """
+    task_pfx = rec.task_prefix(team)
+    ack_pfx = f"team/{team}/_coord/acks/"
+    out: set[str] = set()
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        path = str(change.get("path") or "").lstrip("/")
+        if path.startswith(task_pfx):
+            rest = path[len(task_pfx):]
+            if "/" not in rest and rest.endswith(".md") and rest not in (
+                    "index.md", "log.md"):
+                out.add(rest[:-3])
+        elif path.startswith(ack_pfx):
+            rest = path[len(ack_pfx):]
+            if "/" in rest:
+                slug = rest.split("/", 1)[0]
+                if slug:
+                    out.add(slug)
+    return out
 
 
 def _validated_needs_me_projection(
@@ -3632,9 +3698,12 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # rather than each one starting the clock fresh.
     fold_dl = Deadline.open(_obligation_budget())
     doc_sink: list[Any] = []
+    feed_sink: list[Any] = []
     rows, rows_ok, rows_reason = _load_rows_status(
-        transport, team, doc_sink=doc_sink)
+        transport, team, doc_sink=doc_sink, feed_sink=feed_sink,
+        feed_section_key=projection_mod.NEEDS_ME_KEY)
     agg_doc = doc_sink[0] if doc_sink else None
+    feed_evidence = feed_sink[0] if feed_sink else None
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, team, agent, rows, now=now)
 
@@ -3645,9 +3714,12 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             if fold_dl.expired():
                 return P(state=S.UNREADABLE, detail="obligation budget exhausted")
             mine = _needs_me_rows(transport, team, agent, rows, now=now,
-                                  held_roles=held_roles, include_history=False)
+                                  held_roles=held_roles, include_history=False,
+                                  aggregate_doc=agg_doc,
+                                  feed_evidence=feed_evidence)
             owed = [r for r in mine
-                    if not kinds or (r.get("kind") or "task") in kinds]
+                    if not str(r.get("type") or "").endswith("-source")
+                    and (not kinds or (r.get("kind") or "task") in kinds)]
             return P(state=S.OK, owed=owed)
         return probe
 

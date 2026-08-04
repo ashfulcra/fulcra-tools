@@ -55,6 +55,8 @@ class CountingTransport(FakeTransport):
         super().__init__()
         self.listed: list[str] = []
         self.reads: list[str] = []
+        self.updates_result = []
+        self.updates_calls: list[tuple[str, str | None]] = []
 
     def list_dir(self, prefix):
         self.listed.append(prefix)
@@ -64,8 +66,12 @@ class CountingTransport(FakeTransport):
         self.reads.append(path)
         return super().read(path)
 
+    def updates(self, since, *, team=None):
+        self.updates_calls.append((since, team))
+        return self.updates_result
+
     def reset_counts(self):
-        self.listed, self.reads = [], []
+        self.listed, self.reads, self.updates_calls = [], [], []
 
 
 # --- write side: reconcile builds the sections -------------------------------
@@ -680,6 +686,7 @@ def test_needs_me_task_projection_hit_skips_ack_fanout(capsys):
     assert {"type": "needs-me-source", "source": "projection",
             "as_of": agg[projection.NEEDS_ME_KEY]["generated_at"]} in got
     assert not [p for p in t.reads if "/_coord/acks/" in p]
+    assert len(t.updates_calls) == 1
 
 
 def test_needs_me_task_projection_stale_falls_back_loudly(capsys):
@@ -687,6 +694,7 @@ def test_needs_me_task_projection_stale_falls_back_loudly(capsys):
     _put_directive(t)
     old = _iso(datetime.now(timezone.utc) - timedelta(hours=48))
     _reconcile(t, now=old)
+    t.updates_result = None
     t.reset_counts()
 
     assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
@@ -696,6 +704,53 @@ def test_needs_me_task_projection_stale_falls_back_loudly(capsys):
     assert len(src) == 1 and src[0]["source"] == "raw-scan"
     assert "stale" in src[0]["reason"]
     assert [p for p in t.reads if "/_coord/acks/mine/" in p]
+
+
+def test_needs_me_task_projection_stale_but_feed_clean_is_current(
+        capsys, monkeypatch):
+    t = CountingTransport()
+    _put_directive(t)
+    monkeypatch.setenv("COORD_PROJECTION_MAX_AGE_HOURS", "1")
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=2))
+    _reconcile(t, now=old)
+    # Mixed-fleet carry: the container was refreshed without rebuilding this
+    # section. The feed window must use the section's older anchor.
+    agg = _agg(t)
+    agg["generated_at"] = _now_iso()
+    t.store[f"team/{TEAM}/_coord/summaries.json"] = json.dumps(agg)
+    t.reset_counts()
+
+    assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
+                    transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    src = [r for r in got if r.get("type") == "needs-me-source"]
+    assert len(src) == 1 and src[0]["source"] == "projection"
+    assert not [p for p in t.reads if "/_coord/acks/" in p]
+    assert len(t.updates_calls) == 1
+    assert int(t.updates_calls[0][0].split()[0]) > 3600
+
+
+def test_needs_me_feed_delta_raw_tallies_only_changed_ack_slug(capsys):
+    t = CountingTransport()
+    _put_directive(t, "changed")
+    _put_directive(t, "stable")
+    _reconcile(t)
+    t.updates_result = [{
+        "path": f"team/{TEAM}/_coord/acks/changed/alice.md",
+        "state": "uploaded", "uploaded_at": _now_iso(),
+        "archived_at": None, "deleted_at": None,
+    }]
+    t.reset_counts()
+    # reset_counts deliberately leaves the configured feed result intact
+
+    assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
+                    transport=t) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert {r["name"] for r in got if r.get("name") in {"changed", "stable"}} == {
+        "changed", "stable"}
+    ack_reads = [p for p in t.reads if "/_coord/acks/" in p]
+    assert ack_reads == [cli._ack_path(TEAM, "changed", "alice")]
+    assert len(t.updates_calls) == 1
 
 
 def test_needs_me_task_projection_malformed_falls_back_loudly(capsys):
