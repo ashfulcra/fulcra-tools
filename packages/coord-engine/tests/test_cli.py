@@ -271,6 +271,7 @@ def test_cli_continuity_resume_reports_age_in_human_and_json(capsys, monkeypatch
     assert cli.main(["continuity", "resume", "r", "ash", "--json"], transport=t) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["checkpoint_age_seconds"] == 1800
+    assert out["error_code"] is None
     assert out["objective"] == "ship"
 
 
@@ -306,7 +307,7 @@ def test_cli_continuity_resume_rejects_huge_duration_and_future_checkpoint(
     monkeypatch.setattr(cli, "_now", lambda: datetime(
         2026, 7, 1, tzinfo=timezone.utc))
     t.put(cli._continuity_path("r", "ash", "future"), json.dumps({
-        "created_at": "2026-07-01T00:00:01Z", "task": "future",
+        "created_at": "2026-07-01T00:00:02Z", "task": "future",
         "agent": "ash", "objective": "impossible future checkpoint",
     }))
 
@@ -321,6 +322,34 @@ def test_cli_continuity_resume_rejects_huge_duration_and_future_checkpoint(
         "--max-age", "1s",
     ], transport=t) == 2
     assert "checkpoint age is unknown" in capsys.readouterr().err
+
+
+def test_cli_continuity_resume_json_separates_rc2_reasons(capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    monkeypatch.setattr(cli, "_now", lambda: datetime(
+        2026, 7, 1, tzinfo=timezone.utc))
+    t.put(cli._continuity_path("r", "ash", "old"), json.dumps({
+        "created_at": "2026-06-30T23:00:00Z", "task": "old",
+        "agent": "ash", "objective": "old checkpoint",
+    }))
+    t.put(cli._continuity_path("r", "ash", "future"), json.dumps({
+        "created_at": "2026-07-01T00:00:02Z", "task": "future",
+        "agent": "ash", "objective": "future checkpoint",
+    }))
+
+    cases = [
+        (["old", "--max-age", "1000000000d"], "invalid-max-age"),
+        (["future", "--max-age", "1s"], "checkpoint-age-unknown"),
+        (["old", "--max-age", "59m"], "checkpoint-stale"),
+    ]
+    for argv, error_code in cases:
+        assert cli.main([
+            "continuity", "resume", "r", "ash", *argv, "--json"],
+            transport=t) == 2
+        row = json.loads(capsys.readouterr().out)
+        assert row["error_code"] == error_code
 
 
 def test_cli_continuity_resume_picks_latest_across_tasks(capsys):

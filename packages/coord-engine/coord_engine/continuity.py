@@ -16,6 +16,7 @@ from typing import Any, Optional
 SCHEMA = "coord.teams.continuity.v1"
 _DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?|\.\d+)([smhd])$", re.IGNORECASE)
 _MAX_DURATION_SECONDS = 999_999_999 * 86400
+CHECKPOINT_CLOCK_SKEW_SECONDS = 1.0
 
 
 def _as_list(v: Any) -> list[str]:
@@ -100,9 +101,9 @@ def checkpoint_age_seconds(snapshot: Optional[dict[str, Any]], *, now: datetime)
         return None
     current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     age = (current.astimezone(timezone.utc) - created_at).total_seconds()
-    if age < 0:
+    if age < -CHECKPOINT_CLOCK_SKEW_SECONDS:
         return None
-    return round(age, 3)
+    return round(max(age, 0.0), 3)
 
 
 def parse_duration_seconds(value: str) -> Optional[float]:
@@ -127,9 +128,13 @@ def format_age(seconds: Optional[float]) -> str:
         days = int(seconds // 86400)
         hours = int((seconds % 86400) // 3600)
         return f"{days}d {hours}h ({exact})"
-    for unit, scale in (("h", 3600), ("m", 60)):
-        if seconds >= scale and seconds % scale == 0:
-            return f"{seconds / scale:g}{unit} ({exact})"
+    if seconds >= 3600:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m ({exact})"
+    if seconds >= 60:
+        minutes = int(seconds // 60)
+        return f"{minutes}m ({exact})"
     return exact
 
 
