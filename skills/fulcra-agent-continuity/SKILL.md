@@ -40,6 +40,54 @@ allows; where it doesn't, follow them as prose:
 
 An agent that beats presence but has no fresh snapshot is flagged `continuity-stale` by `coord-engine health`.
 
+## Timeline visibility: the checkpoint channel
+
+Every **successful** `continuity snapshot` and `continuity park` also emits one
+moment to the account's **Agent Checkpoint** channel, so a human watching the
+Fulcra timeline sees the fleet checkpointing instead of inferring it from files
+nobody opens. The moment carries the same four-dimension identity tags a bus
+event does (`agent:` / `platform:` / `harness:` / `model:` plus the base tag),
+from the same `tags.json` registry — one `bus-v3 tag-provision` covers both.
+Its note is compact JSON:
+
+```json
+{"v":1,"kind":"checkpoint","agent":"amy","task":"role-reviewer",
+ "objective":"first 140 chars of the objective",
+ "path":"team/r/member/amy/continuity/role-reviewer/latest.json"}
+```
+
+`objective` is a hard 140-character slice (no ellipsis) — the note is a
+timeline label and the snapshot at `path` holds the full text.
+
+**Reads never emit.** `resume`, `checkpoint --role`, and `briefing` are pure
+reads; a moment for a read would claim state was saved when nothing was.
+
+Emission is driven by one document, `team/<team>/_coord/bus-v3/checkpoints.json`
+(**separate from `records.json` on purpose** — old engines fail their queue
+closed on a bus authority carrying fields they do not know; see
+[bus v3 setup step 5](../../docs/coord/BUS-V3.md#5-seed-the-checkpoint-channel-config)).
+With no such document the engine emits nothing and says nothing, so
+pre-adoption teams see no change at all. Malformed bytes are loud every time
+and are never auto-repaired.
+
+### The fail-open rule (deliberately the inverse of park's)
+
+`park` is loud and **non-zero** when it cannot write a checkpoint
+(`CHECKPOINT NOT WRITTEN`) — park runs as a session exits, so a silent no-op
+discards the state the next session wakes on while nobody is watching.
+
+Emission is the opposite:
+
+> **The checkpoint file is the source of truth. The moment is its shadow.**
+
+Absent config, malformed config, an unreadable store, a refused or raising
+record write — every one of them still writes the checkpoint, prints **one
+line** on stderr (silence in the absent case), and leaves the exit code
+**unchanged**. Losing the shadow costs a row in a visualization; failing the
+park over it would cost the checkpoint itself. Never read a `checkpoint
+moment:` line as a failed park — the park's own rc and its
+`parked <role> -> <path>` lines are what say whether state was saved.
+
 ## Which adapter automates this for you
 
 > **Pickup column note (bus v3, 2026-07-27):** resident listeners are retired —
@@ -113,7 +161,9 @@ coord-engine briefing <team> [--agent X] [--json]                  # session sta
 - `park` is the session-exit verb: each role you hold (fresh lease) gets a snapshot and the role doc's
   `checkpoint_ref` points at it — the next holder (or your next session) resumes from there via
   `checkpoint --role`. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles;
-  success therefore proves at least one checkpoint was written.
+  success therefore proves at least one checkpoint was written. Each written checkpoint also emits
+  one timeline moment — see [the checkpoint channel](#timeline-visibility-the-checkpoint-channel);
+  that emission can never change park's exit code.
 - `resume` prints checkpoint age on every read. JSON adds the derived
   `checkpoint_age_seconds` field without changing the stored snapshot. With no
   snapshot, JSON is the explicit object

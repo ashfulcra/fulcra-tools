@@ -28,7 +28,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import (
-    aggregate, atc, atc_dash, budget as budget_mod, bus_tags, config, continuity,
+    aggregate, atc, atc_dash, budget as budget_mod, bus_tags,
+    checkpoint_channel, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, projection as projection_mod,
     query, records, review,
@@ -2925,6 +2926,31 @@ def _continuity_prefix(team: str, agent: str) -> str:
     return f"team/{team}/member/{agent}/continuity/"
 
 
+def _checkpoint_moment(transport: Any, team: str, snap: dict[str, Any],
+                       path: str) -> None:
+    """Cast a checkpoint's shadow on the timeline. NEVER fails the caller.
+
+    THE FAIL-OPEN RULE, deliberately the inverse of park's loud one. ``park``
+    exits non-zero and shouts ``CHECKPOINT NOT WRITTEN`` when it cannot save,
+    because a silently-skipped park discards the state the next session wakes
+    on. Emission is the opposite: **the checkpoint file is the source of truth
+    and the moment is its shadow**, so a failure here costs a row in a
+    visualization, while failing the park over it would cost the checkpoint
+    itself. One line on stderr, exit code untouched, always.
+
+    The snapshot is read for every field so the moment can never disagree with
+    the bytes on disk — same agent, same task, same objective.
+    """
+    try:
+        checkpoint_channel.emit(
+            transport, team, agent=str(snap.get("agent") or ""),
+            task=str(snap.get("task") or ""), objective=snap.get("objective"),
+            path=path)
+    except Exception as exc:  # unreachable by contract; the rule is absolute
+        print(f"checkpoint moment: emission failed ({exc!r}) — the checkpoint "
+              f"file at {path} was written and is unaffected", file=sys.stderr)
+
+
 def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
     task = tasks.slugify(args.task)  # single path segment; a slash breaks the no-task fold
     snap = continuity.build_snapshot(
@@ -2933,8 +2959,13 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
         artifacts=args.artifact, context_used_percent=args.context_percent,
         transcript_path=args.transcript,
     )
-    transport.write(_continuity_path(args.team, args.agent, task), json.dumps(snap, indent=2))
+    path = _continuity_path(args.team, args.agent, task)
+    wrote = transport.write(path, json.dumps(snap, indent=2))
     print(f"snapshot {snap['checkpoint_id']}")
+    # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
+    # not in the store would be a visualization of work that does not exist.
+    if wrote is not False:
+        _checkpoint_moment(transport, args.team, snap, path)
     return 0
 
 
@@ -4941,6 +4972,12 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
             print(f"park: snapshot write FAILED for {role}; checkpoint_ref left unchanged",
                   file=sys.stderr)
             continue
+        # The save landed, so the moment is owed — emitted BEFORE the
+        # checkpoint_ref update because the two answer different questions. The
+        # ref is role bookkeeping; the moment records that this agent saved
+        # state at this instant, which is true whether or not the role doc
+        # accepts a pointer to it.
+        _checkpoint_moment(transport, args.team, snap, path)
         if not _set_role_field(transport, args.team, role, "checkpoint_ref", path):
             print(f"park: checkpoint_ref update FAILED for {role}", file=sys.stderr)
             continue

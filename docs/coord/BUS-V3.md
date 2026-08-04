@@ -136,6 +136,21 @@ SHA-256 pinned so CI runs the actual old implementation without network access.
 
 ## Setup (once per account)
 
+**Two definitions, created together.** An account setup produces *two*
+moment-annotation channels, not one:
+
+| channel | carries | config document | who reads it |
+| --- | --- | --- | --- |
+| **Agent Coordination Bus** | control-plane events (directives, reviews, wakes) | `_coord/bus-v3/records.json` | every agent's queue read |
+| **Agent Checkpoint** | one moment per successful continuity save | `_coord/bus-v3/checkpoints.json` | humans, in the timeline explorer |
+
+They share the tag taxonomy (step 3) and the same `tags.json` registry, so a
+filter on `agent:coord-boss` shows that agent's events *and* its checkpoints
+side by side. They do **not** share a config document, and that is deliberate —
+see [step 5](#5-seed-the-checkpoint-channel-config). Build the events channel
+first (steps 1–4), then repeat steps 1–2 for the checkpoint definition and
+record it in step 5.
+
 Events ride a **moment annotation** — a user-defined typed-record stream. One
 channel per account; every agent uses the same one. If the account already has
 one, find its id and skip to step 4:
@@ -288,6 +303,88 @@ The registry states, none of which may ever cost a write:
 | sender not in `agents` | base tag only | one-line warning naming `tag-provision` |
 | sender partial | the dimensions it has, plus base | silent — a partial entry is deliberate |
 | malformed *(incl. a `coord.bus-tags.v1` registry)* | untagged | LOUD every time; **never auto-recreated** — a human fixes the bytes |
+
+### 5. Seed the checkpoint-channel config
+
+The second definition. Create it exactly like the first — **step 1** with a
+fresh human name (ours: "Agent Checkpoint"), then **step 2**, the PUT-303 spec
+dance, verified by re-GET. A spec-less checkpoint channel is invisible in the
+explorer, which defeats its entire purpose. Skip step 3: the taxonomy is the
+same four dimensions, reusing the same tags and the same `tags.json`, so a
+checkpoint moment carries `agent:` / `platform:` / `harness:` / `model:` plus
+the base tag exactly as an event does — no new tags to create, no second
+registry to provision.
+
+Then record the id in its **own** document:
+
+`team/<team>/_coord/bus-v3/checkpoints.json`
+
+```json
+{
+  "schema": "coord.checkpoints-channel.v1",
+  "data_type": "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49",
+  "api_version": "v1alpha1"
+}
+```
+
+```bash
+printf '%s' '{"schema":"coord.checkpoints-channel.v1","data_type":"MomentAnnotation/<uuid>","api_version":"v1alpha1"}' \
+  > /tmp/checkpoints.json
+fulcra-api file upload /tmp/checkpoints.json team/<team>/_coord/bus-v3/checkpoints.json
+```
+
+**Why a separate document and not two more fields in `records.json`.** The
+records config is the fleet's *bus authority*, and an engine that has not
+upgraded classifies an authority carrying fields it does not know as
+**malformed** — which fails its queue closed. Adding the checkpoint stream to
+that document would take the bus down for every host still on an older engine.
+A new stream gets a new document; the authority is never widened in place.
+Nothing in the engine reads or writes `records.json` on the checkpoint path.
+
+Once the document exists, **every successful `continuity snapshot` and
+`continuity park` emits one moment** to that channel — see
+[the continuity skill](../../skills/fulcra-agent-continuity/SKILL.md#timeline-visibility-the-checkpoint-channel).
+The note is compact JSON:
+
+```json
+{"v":1,"kind":"checkpoint","agent":"amy","task":"role-reviewer",
+ "objective":"first 140 chars of the objective",
+ "path":"team/r/member/amy/continuity/role-reviewer/latest.json"}
+```
+
+`objective` is a hard 140-character slice with no ellipsis — a moment note is a
+timeline *label*; the snapshot file at `path` holds the full text.
+
+The config states, none of which may ever cost a **checkpoint**:
+
+| state | emission | noise | park/snapshot exit code |
+| --- | --- | --- | --- |
+| absent | none | silent — the team has not adopted the channel | unchanged |
+| ok | one moment per save, tagged | silent | unchanged |
+| malformed | none | LOUD every time; **never auto-created** | unchanged |
+| unreadable (store down) | none | one line — UNKNOWN is not absent, and it is never cached | unchanged |
+| record write refused/raised | none | one line | unchanged |
+
+That last column is the rule, stated deliberately and in full below.
+
+#### Fail-open: the inverse of the loud-park rule
+
+`continuity park` is loud and **non-zero** when it cannot write a checkpoint
+(`CHECKPOINT NOT WRITTEN`): park runs as a session exits, so a silent no-op
+discards the state the next session wakes on at exactly the moment nobody is
+watching.
+
+Checkpoint-moment emission obeys the **opposite** rule, and the asymmetry is
+the design:
+
+> **The checkpoint file is the source of truth. The moment is its shadow.**
+
+Losing the shadow costs a row in a visualization. Failing the park because the
+shadow could not be cast would cost the checkpoint itself — trading the
+load-bearing act for its telemetry. So emission failure is **one line on
+stderr and an unchanged exit code**, always. Reads never emit at all:
+`continuity resume`, `checkpoint --role`, and `briefing` are pure reads, and a
+moment for a read would claim state was saved when nothing was.
 
 ### Cutover from an existing channel
 

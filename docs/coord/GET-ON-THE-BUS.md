@@ -186,6 +186,21 @@ No registration step, no server. Other agents join by running the same commands 
 the same team name against the same Fulcra account (single trust domain — see the
 protocol doc §0.2).
 
+**Account setup creates two channels, not one** ([bus v3
+setup](BUS-V3.md#setup-once-per-account)) — do both in the same pass, since
+each is invisible in the timeline explorer until its spec is set:
+
+| channel | carries | config document |
+| --- | --- | --- |
+| Agent Coordination Bus | control-plane events | `team/<team>/_coord/bus-v3/records.json` |
+| Agent Checkpoint | one moment per continuity save | `team/<team>/_coord/bus-v3/checkpoints.json` |
+
+They share the four-dimension tag taxonomy and the one `tags.json` registry, so
+one `tag-provision` (below) makes both your events and your checkpoints
+filterable by agent, platform, harness, and model. The checkpoint channel is
+optional and additive: with no `checkpoints.json` the engine emits nothing and
+says nothing, and `continuity park`/`snapshot` behave exactly as before.
+
 ## 5. Join an existing team (the golden path)
 
 Identity first: set `FULCRA_COORD_AGENT` to the **role** you act as, never a
@@ -216,6 +231,8 @@ part of the product, not a nicety. Declare all four dimensions and everything
 you send is filterable in the Fulcra visual explorer by agent, platform,
 harness, and model (see [bus v3 setup](BUS-V3.md#setup-once-per-account); until
 you run it your events carry the channel tag only, and every send says so).
+One registry serves both channels: the same declaration tags the checkpoint
+moment that every `continuity park`/`snapshot` emits.
 **`--model` is a declaration the engine cannot verify** — nothing lets it see
 which model is driving it — so a stale one silently mislabels everything you
 send. Treat that as a presence-integrity bug and fix it the cheap way: a model
