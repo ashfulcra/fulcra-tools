@@ -87,6 +87,12 @@ REVIEWS_SCHEMA = "coord.reviews.projection.v1"
 FORGE_SCHEMA = "coord.forge.projection.v1"
 NEEDS_ME_SCHEMA = "coord.needs-me.projection.v1"
 
+REQUIRED_SECTIONS = (
+    (REVIEWS_KEY, REVIEWS_SCHEMA),
+    (FORGE_KEY, FORGE_SCHEMA),
+    (NEEDS_ME_KEY, NEEDS_ME_SCHEMA),
+)
+
 #: Maximum age (hours) a projection section may have and still be served by a
 #: fold (env ``COORD_PROJECTION_MAX_AGE_HOURS``). Generous by design: reconcile
 #: heartbeats run far more often than daily, so a section older than this means
@@ -190,6 +196,31 @@ def feed_fresh_section(
                   if isinstance(scanned, int) and isinstance(total, int) else "")
         return None, f"{key} projection incomplete{detail}"
     return section, ""
+
+
+def sections_owing_pass(aggregate_doc: Any) -> list[str]:
+    """Required projections that do not prove a completed CURRENT build.
+
+    Reconcile's no-change fast path is licensed to skip materialization only
+    when every required section exists, has the recognized schema, completed,
+    and was built in the same pass as its aggregate container. A missing section
+    is an upgrade/mixed-fleet rebuild debt; ``complete: false`` is explicit
+    convergence debt; and a stamp older than the container means a failed build
+    carried prior state. All three must decline the fast path even on a quiet
+    store, or an unusable projection can persist forever.
+    """
+    if not isinstance(aggregate_doc, dict):
+        return [key for key, _schema in REQUIRED_SECTIONS]
+    generated_at = aggregate_doc.get("generated_at")
+    owed: list[str] = []
+    for key, schema in REQUIRED_SECTIONS:
+        section = aggregate_doc.get(key)
+        if (not isinstance(section, dict)
+                or section.get("schema") != schema
+                or section.get("complete") is not True
+                or section.get("generated_at") != generated_at):
+            owed.append(key)
+    return owed
 
 
 def build_needs_me_projection(

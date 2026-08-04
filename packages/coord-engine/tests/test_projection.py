@@ -194,6 +194,49 @@ def test_fast_path_declines_on_review_change():
     assert not res.get("fast_path")
 
 
+def test_fast_path_declines_while_projection_incomplete_on_quiet_feed():
+    t = FakeTransport()
+    t.put(f"team/{TEAM}/task/a.md",
+          "---\ntype: Task\ntitle: A\nstatus: active\n---\n")
+    first = _now_iso()
+    _reconcile(t, now=first)
+    agg = _agg(t)
+    agg[projection.REVIEWS_KEY]["complete"] = False
+    agg[projection.REVIEWS_KEY]["scanned"] = 0
+    t.store[f"team/{TEAM}/_coord/summaries.json"] = json.dumps(agg)
+    t.updates = lambda period, team=None: []  # store is positively quiet
+
+    second = _iso(datetime.now(timezone.utc) + timedelta(minutes=5))
+    res = _reconcile(t, now=second)
+    assert not res.get("fast_path")
+    healed = _agg(t)
+    assert healed[projection.REVIEWS_KEY]["complete"] is True
+    assert healed[projection.REVIEWS_KEY]["generated_at"] == second
+
+
+def test_fast_path_declines_when_required_projection_missing_or_carried():
+    for mode in ("missing", "carried"):
+        t = FakeTransport()
+        t.put(f"team/{TEAM}/task/a.md",
+              "---\ntype: Task\ntitle: A\nstatus: active\n---\n")
+        first = _now_iso()
+        _reconcile(t, now=first)
+        agg = _agg(t)
+        if mode == "missing":
+            agg.pop(projection.NEEDS_ME_KEY)
+        else:
+            agg[projection.FORGE_KEY]["generated_at"] = _iso(
+                datetime.now(timezone.utc) - timedelta(hours=1))
+        t.store[f"team/{TEAM}/_coord/summaries.json"] = json.dumps(agg)
+        t.updates = lambda period, team=None: []
+
+        second = _iso(datetime.now(timezone.utc) + timedelta(minutes=5))
+        res = _reconcile(t, now=second)
+        assert not res.get("fast_path"), mode
+        healed = _agg(t)
+        assert projection.sections_owing_pass(healed) == [], mode
+
+
 # --- freshness gate ----------------------------------------------------------
 
 def _fresh_reviews_section(**over):

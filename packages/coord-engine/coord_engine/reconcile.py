@@ -144,6 +144,11 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
                  team=team, ack_anchor=(prior_agg or {}).get(ACKS_ANCHOR_KEY),
                  generated_at=gen)
         return False
+    owed = projection_mod.sections_owing_pass(prior_agg)
+    if owed:
+        log.info("fast path declined: projection owes a pass",
+                 team=team, sections=owed)
+        return False
     age = age_hours(gen, now)
     if age is None or age < 0 or age > MAX_FAST_PATH_HOURS:
         return False
