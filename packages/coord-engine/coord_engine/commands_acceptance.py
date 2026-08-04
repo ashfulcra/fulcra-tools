@@ -117,7 +117,7 @@ class _AcceptancePairAdapter:
             ok = cfg is not None and records.emit_event(
                 self.transport, cfg, sender=self.agent, to=self.peer,
                 kind="directive", priority="P0", slug=self.slug,
-                ptr=f"task/{self.slug}.md",
+                ptr=f"task/{self.slug}.md", team=self.team,
             )
         return acceptance_pair.HopResult(ok, f"directive {self.slug} verified" if ok
                                          else f"tell rc={rc}, read-back, or event emission failed", raw)
@@ -149,6 +149,7 @@ class _AcceptancePairAdapter:
                 if cfg is None or not records.emit_event(
                     self.transport, cfg, sender=self.peer, to=self.agent,
                     kind="response", priority="P0", slug=self.slug, ptr=path,
+                    team=self.team,
                 ):
                     return acceptance_pair.HopResult(False, "response event emission failed", raw)
                 return acceptance_pair.HopResult(True, f"response {path} and event verified")

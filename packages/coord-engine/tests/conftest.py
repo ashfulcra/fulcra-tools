@@ -2,6 +2,18 @@
 
 import pytest
 
+from coord_engine import bus_tags
+
+
+@pytest.fixture(autouse=True)
+def _clean_bus_tag_cache():
+    """The bus tag registry is memoized per PROCESS (it changes only when a
+    human provisions), which in a single-process suite would leak one module's
+    team registry into the next. Clear it around every test."""
+    bus_tags.cache_clear()
+    yield
+    bus_tags.cache_clear()
+
 
 @pytest.fixture(autouse=True)
 def _isolated_state_dir(tmp_path, monkeypatch):
