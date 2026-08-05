@@ -573,3 +573,58 @@ def test_host_probe_evidence_is_canonical_under_state_prefix_override():
     assert sib_ev == {}
     # the delivered RECORD, by contrast, DID move to the sibling (namespaced state)
     assert any(p.startswith(RP_X + "delivered/") for p in t.store)
+
+
+class ReadFailTransport(FlakyTransport):
+    """FlakyTransport whose per-entry READS can be made to raise."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_read_containing: set = set()
+
+    def read(self, path):
+        if any(s in path for s in self.fail_read_containing):
+            raise TransportError("read boom")
+        return super().read(path)
+
+
+def test_prefetch_read_failure_is_degraded_not_silent_empty():
+    """The concurrent queue prefetch must FAIL CLOSED exactly as the serial
+    reads did: a raising entry read is UNKNOWN, so the pass reports degraded and
+    executes nothing, leaving wakes visibly queued. A pool that swallowed the
+    exception would turn a blind executor into a clean '0 delivered' — the
+    silent-success failure this codebase keeps rediscovering."""
+    t = ReadFailTransport()
+    _hbase(t)
+    entry = _host_entry(source="s-40")
+    key = router.idempotency_key(entry["source_shard"], entry["agent"])
+    t.put(RP + "queue/" + router.queue_filename(entry["agent"], key),
+          json.dumps(entry))
+    t.fail_read_containing.add("queue/")
+
+    counts = cli._router_execute_host(_args(), t, invoke=_invoke("delivered"))
+    assert counts["degraded"] == 1, "a raising entry read must be degraded"
+    assert counts["delivered"] == 0, "nothing may execute on an UNKNOWN read"
+    # the wake is still queued: nothing was moved to delivered/
+    assert not any(p.startswith(RP + "delivered/") for p in t.store)
+
+
+def test_prefetch_reads_every_candidate_entry_once():
+    """Parallel prefetch must cover every .json candidate exactly once — same
+    set the serial loop would have read, no more (no duplicate round trips) and
+    no fewer (a missed entry is a lost wake)."""
+    t = ReadFailTransport()
+    _hbase(t)
+    names = []
+    for i in range(5):
+        e = _host_entry(source=f"s-5{i}")
+        k = router.idempotency_key(e["source_shard"], e["agent"])
+        n = router.queue_filename(e["agent"], k)
+        t.put(RP + "queue/" + n, json.dumps(e))
+        names.append(RP + "queue/" + n)
+    t.put(RP + "queue/not-json.txt", "ignored")
+
+    q = t.list_dir(RP + "queue/")
+    bodies = cli._read_queue_entries(t, RP, q)
+    assert set(bodies) == set(names), "must read exactly the .json candidates"
+    assert all(bodies[n] for n in names), "every candidate body must be present"
