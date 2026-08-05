@@ -6009,13 +6009,20 @@ def _router_state_prefix(
     canonical default (byte-identical to today). A bad-charset name from EITHER
     source returns ``(None, message)`` so the command can exit 2 — the flag and
     the env are validated the same way, and an invalid name can never compose a
-    path (it never reaches `router.router_prefix`)."""
+    path (it never reaches `router.router_prefix`).
+
+    An explicitly EMPTY value from either source is invalid, not canonical: a
+    launch script expanding an unset variable (``--state-prefix "$P"``, or a
+    plist setting the env to "") must fail rc 2 rather than silently run a
+    shadow pass against the live ``router/`` cursor — the exact cursor-sharing
+    wake-loss class this override exists to prevent. Canonical requires the
+    flag ABSENT and the env UNSET."""
     name = getattr(args, "state_prefix", None)
     source = "--state-prefix"
     if name is None:
-        name = os.environ.get("COORD_ROUTER_STATE_PREFIX") or None
+        name = os.environ.get("COORD_ROUTER_STATE_PREFIX")
         source = "COORD_ROUTER_STATE_PREFIX"
-    if not name:
+    if name is None:
         return None, None
     if not router.STATE_PREFIX_RE.match(name):
         return None, (f"{source} {name!r} is not a valid router state prefix "

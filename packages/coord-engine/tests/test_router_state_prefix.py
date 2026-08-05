@@ -277,6 +277,26 @@ def test_bad_env_charset_rc2(monkeypatch, capsys):
     assert "COORD_ROUTER_STATE_PREFIX" in capsys.readouterr().err
 
 
+def test_empty_flag_rc2_never_silently_canonical(capsys):
+    # `--state-prefix "$P"` with P unset expands to an explicit empty value.
+    # Falling back to the canonical prefix here would run a shadow pass against
+    # the live router/ cursor — the wake-loss class this override prevents.
+    t = FakeTransport()
+    assert cli.cmd_router_run(_args(state_prefix=""), t) == 2
+    assert "state" in capsys.readouterr().err.lower()
+    assert not [p for p in t.store if "/_coord/router" in p]
+
+
+def test_empty_env_rc2_never_silently_canonical(monkeypatch, capsys):
+    # A plist/env file setting COORD_ROUTER_STATE_PREFIX="" is misconfiguration,
+    # not a request for the canonical namespace: fail rc 2. Canonical requires
+    # the flag ABSENT and the env UNSET.
+    monkeypatch.setenv("COORD_ROUTER_STATE_PREFIX", "")
+    t = FakeTransport()
+    assert cli.cmd_router_run(_args(), t) == 2
+    assert "COORD_ROUTER_STATE_PREFIX" in capsys.readouterr().err
+
+
 def test_execute_honors_override():
     # a namespaced live run enqueues to the sibling queue; a namespaced execute
     # must drain THAT queue (round-trip consistency for the run/execute pair).
