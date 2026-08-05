@@ -925,7 +925,30 @@ it (not on PyPI).
   the parked checkpoint loses nothing. Applies to every agent, coord-boss
   included. `continuity park` exits rc 2 when the agent holds no fresh roles and
   therefore writes no checkpoint; treat that as "not parked", never as a clean
-  no-op. `continuity resume` always reports the checkpoint age (human output and
+  no-op.
+- **`snapshot` is the routine save; `park` means you are LEAVING.** Both write a
+  checkpoint, so it is easy to treat them as interchangeable and reach for the
+  one a rule happens to name. They are not interchangeable:
+  - `continuity snapshot <team> <agent> <slug>` — a PROGRESS save. This is the
+    form for `checkpoint-on-every-wake`: you did material work, you are still
+    here, here is the state you left.
+  - `continuity park <team> --agent <self>` — a SESSION-EXIT save (its own help
+    says so): you are going away, so snapshot every held role at once and set
+    the `checkpoint_ref`s. Use it at genuine handoff, at dormancy (above), and
+    on the wake you `roles claim` so the new role starts with a checkpoint.
+    **Do not park on every wake** — it announces a handoff you are not making,
+    repeatedly, and drains the meaning from the one signal that should mean
+    "this agent has stepped away".
+- **park's rc 2 is a statement about your LEASE, not about your nature.** It
+  means *the role lease you should hold has lapsed or was never claimed* — the
+  fix is `roles claim`, not "I must be role-less, I will use snapshot instead".
+  Read literally in the other direction it silently converts a lapsed exclusive
+  role into a permanent workaround: the role sits VACANT past its SLA, work
+  routed to the ROLE (rather than to the agent name) reaches no holder, and an
+  escalation-due marker accumulates that nobody owns. Observed live on
+  2026-08-05 — coord-maintainer ran for a day past SLA on a vacant role after
+  misreading exactly this rc. Check `roles status <team> <role>` before
+  concluding you hold nothing. `continuity resume` always reports the checkpoint age (human output and
   JSON `checkpoint_age_seconds`); use `--max-age 1h` (durations accept `s`, `m`,
   `h`, or `d` through `999999999d`) when a wake or acceptance run must fail rc
   2 on stale state. JSON `error_code` separates invalid duration, unknown age,
