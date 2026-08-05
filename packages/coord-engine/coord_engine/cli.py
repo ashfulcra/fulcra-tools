@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import concurrent.futures
 import json
 import math
 import os
@@ -6905,6 +6906,55 @@ def _claim_owner(executor_id: str) -> str:
     return f"{executor_id}#pid{os.getpid()}"
 
 
+#: Bounded fan-out for queue-entry prefetch. Small on purpose: enough to hide
+#: per-request latency, low enough not to hammer the store or burn file handles.
+QUEUE_PREFETCH_WORKERS = 8
+
+
+def _read_queue_entries(transport: Any, prefix: str,
+                        q_entries: "list[dict]") -> "dict[str, Optional[str]]":
+    """Prefetch every candidate queue entry body CONCURRENTLY.
+
+    Why: the executor read each entry SERIALLY, one network round trip apiece,
+    on every pass — including the entries belonging to other executors, which it
+    then skipped. Measured 2026-08-05 against the live store: 112 queue entries
+    at ~0.7-0.96s per read = 78-107s for a pass on a 60s cadence, which is
+    exactly the `cadence overrun by ~22s — skipped 1 tick(s)` the VPS executor
+    logged continuously. The cost scaled with FLEET-WIDE queue depth, not with
+    this host's share of it, so a busy fleet silently halved every executor's
+    delivery rate.
+
+    These reads are independent and side-effect-free, so only the READ phase is
+    parallel; claim/invoke/write stays strictly serial and in listing order, and
+    the per-entry semantics are unchanged — a read returning None still means
+    UNKNOWN and is skipped by the caller, never executed on.
+    """
+    paths = [prefix + "queue/" + (e.get("name") or "")
+             for e in q_entries
+             if not e.get("is_dir") and (e.get("name") or "").endswith(".json")]
+    if not paths:
+        return {}
+    out: "dict[str, Optional[str]]" = {}
+    first_error: "list[BaseException]" = []
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(QUEUE_PREFETCH_WORKERS, len(paths))) as pool:
+        futures = {pool.submit(transport.read, p): p for p in paths}
+        for fut in concurrent.futures.as_completed(futures):
+            path = futures[fut]
+            try:
+                out[path] = fut.result()
+            except BaseException as e:            # noqa: BLE001
+                # Preserve serial behaviour: a raising read is not swallowed
+                # into a false "nothing here". Record it and re-raise after the
+                # pool drains so the caller's degraded path still fires.
+                out[path] = None
+                if not first_error:
+                    first_error.append(e)
+    if first_error:
+        raise first_error[0]
+    return out
+
+
 def _router_execute_host(args: argparse.Namespace, transport: Any,
                          invoke: Any = None,
                          claim_owner: Optional[str] = None, *,
@@ -6981,11 +7031,23 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
     agents_cfg, _executors, _errs = router.validate_config(
         transport.read(canon_prefix + "config.json"))
 
+    # Prefetch bodies concurrently; the pass then walks them in listing order.
+    # Serial reads made pass time scale with FLEET-WIDE queue depth and pushed
+    # the resident executor past its own cadence (see _read_queue_entries).
+    try:
+        bodies = _read_queue_entries(transport, prefix, q_entries)
+    except TransportError as e:
+        print(f"router execute [{executor_id}]: queue entry prefetch degraded "
+              f"({e}) — UNKNOWN, no execution this pass; wakes stay visibly "
+              f"queued", file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
+
     for e in q_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
             continue
-        raw = transport.read(prefix + "queue/" + name)
+        raw = bodies.get(prefix + "queue/" + name)
         try:
             entry = json.loads(raw) if raw else None
         except ValueError:

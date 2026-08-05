@@ -254,6 +254,17 @@ it (not on PyPI).
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.
+- **Executor queue reads are CONCURRENT (bounded).** A pass prefetches candidate
+  queue-entry bodies through `_read_queue_entries` with a bounded pool
+  (`QUEUE_PREFETCH_WORKERS`, 8); only the READ phase is parallel, and
+  claim/invoke/write stay strictly serial in listing order. This is not a
+  micro-optimisation: serial reads made pass time scale with FLEET-WIDE queue
+  depth, not with this host's share of it, so the resident executor overran its
+  own 60s cadence and skipped every other tick — measured on the VPS as
+  `cadence overrun by ~22s — skipped 1 tick(s)`, and against the live store as
+  112 entries × ~0.9s = 103.5s serial vs 14.3s prefetched. A raising entry read
+  still fails closed (degraded, nothing executed, wakes stay visibly queued);
+  the pool must never swallow it into a clean "0 delivered".
 - **Thin host executor (W5.5).** `coord-engine router execute <team> [--host
   <id>] [--once] [--dry-run]` is the SOLE executor for host-local adapters
   (`codex-exec-resume`, `openclaw-post`, `macos-notify`, `queued-wake-file`). It
