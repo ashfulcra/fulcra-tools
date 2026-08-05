@@ -696,12 +696,13 @@ as a trailing row rendered in text and carried in `--json`:
 - **No source row at all** = the team's aggregate carries no projection (or the
   caller passed none): the pre-projection raw scan, byte-identical.
 
-**Your own head is always raw-tallied.** The caller-owned review slugs — the ones
-`needs-me` derives from your review-request directives — are re-read per slug on
-every call regardless of the projection, under their own dedicated budget. The
-projection is never allowed to answer "does this agent still owe a verdict"; it
-answers the tail. A head that cannot complete is still UNKNOWN and still emits
-`review-head-degraded`.
+**Your own head is feed-gated too.** The caller-owned review slugs — the ones
+`needs-me` derives from your review-request directives — are raw-tallied only
+when a clean `data-updates` window names them changed since the projection
+anchor. An unchanged caller-owned tail is served directly from the projection.
+If feed evidence is absent or doubtful, every caller-owned head slug is re-read
+per slug under its own dedicated budget (fail closed). Any selected head slug
+that cannot complete is still UNKNOWN and still emits `review-head-degraded`.
 
 Rule for consumers: a `raw-scan` source row is information about the *store*, not
 about your obligations — never treat it as a failure of the fold, and never treat

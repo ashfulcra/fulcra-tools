@@ -500,9 +500,11 @@ it (not on PyPI).
     or `source: raw-scan` + the `reason`: stale / incomplete / malformed — duplicate slug rows and
     impossible `settled` combinations are malformed — / unrecognized). A projection that cannot be
     served falls back to the full raw scan LOUDLY; it is never silently served as current. **The
-    caller's OWN head slugs are always raw-tallied** regardless of the projection (see the head-budget
-    rule below) — the projection answers the tail, never "does this agent still owe a verdict". No
-    source row at all means the aggregate carries no projection: the pre-projection raw scan.
+    caller's OWN head is feed-gated too:** with a clean `data-updates` window, only caller-owned slugs
+    named changed since the projection anchor are raw-tallied; unchanged caller-owned slugs are served
+    from the projection. Without positive feed proof, every caller-owned head slug is raw-tallied
+    fail-closed (see the head-budget rule below). No source row at all means the aggregate carries no
+    projection: the pre-projection raw scan.
     Contract for readers: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) → "Where a fold's answer came
     from". **Ship-gate: any new projection-served fold emits a source row through the shared renderer.**
   - **Honor every degraded row; never read a bounded fold as complete.** `briefing`/`needs-me` bound
