@@ -228,7 +228,29 @@ it (not on PyPI).
   key over a ≥48h window (duty-cycle gated). Resident router loops use an
   anchored fixed-rate cadence; externally scheduling per-tick `--once` runs
   inherits that scheduler's throttle semantics and is not the duty-gate
-  deployment. Contract:
+  deployment. **Router state-prefix override.**
+  `router run`/`router execute`/`router shadow report` accept `--state-prefix
+  <name>` (env `COORD_ROUTER_STATE_PREFIX` is the launchd-friendly fallback; the
+  flag wins). Absent both it is BYTE-IDENTICAL to today — the router's own state
+  stays at the canonical `team/<team>/_coord/router/`. With an override, the
+  router's own cursor-tracked state moves to the SIBLING
+  `team/<team>/_coord/router-<name>/` (cursor.json, queue/, delivered/,
+  delivered.json, dead-letter/, shadow-decisions/, shadow-marks/) while
+  `config.json` (shared enablement policy) and `shadow-evidence/` +
+  `shadow-window.json` (the live delivery paths' shared correlation surface, and
+  directed-item reads under `task/`) stay CANONICAL. This is what lets one host
+  run live delivery at the default prefix and a W7 shadow measurement at an
+  override prefix in parallel without a shared-cursor collision (whichever pass
+  marks a directed item `processed` first would otherwise starve the other — a
+  dropped live wake or a blind measurement). A shadow pass under an override
+  reads delivered recency and writes W7 evidence at the CANONICAL prefix (it
+  maintains no namespaced delivered view of its own); topology A — shadow on the
+  canonical prefix with no override, the running W7 window — is unaffected by
+  either the namespaced-evidence or namespaced-delivered concern, since both only
+  ever arise in the namespaced live+shadow pairing. Every router path composes
+  through the single `router.router_prefix(team, state=…)` resolver; the name is
+  charset-validated (`[A-Za-z0-9_.-]+`, rc 2 on violation) so it cannot escape
+  the namespace. Contract:
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md) §2/§2.5 +
   [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) §4 +
   [`wake-router-ADDENDUM-1-event-substrate.md`](docs/coord/wake-router-ADDENDUM-1-event-substrate.md) §3.3.

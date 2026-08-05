@@ -5999,15 +5999,66 @@ def _router_presence(transport: Any, team: str, agent: str,
     return memo[agent]
 
 
+def _router_state_prefix(
+    args: argparse.Namespace,
+) -> "tuple[Optional[str], Optional[str]]":
+    """Resolve the router state-prefix override → ``(name, error)``.
+
+    Precedence: the ``--state-prefix`` flag beats the ``COORD_ROUTER_STATE_PREFIX``
+    env fallback (launchd-friendly); absent both ⇒ ``(None, None)`` = the
+    canonical default (byte-identical to today). A bad-charset name from EITHER
+    source returns ``(None, message)`` so the command can exit 2 — the flag and
+    the env are validated the same way, and an invalid name can never compose a
+    path (it never reaches `router.router_prefix`).
+
+    An explicitly EMPTY value from either source is invalid, not canonical: a
+    launch script expanding an unset variable (``--state-prefix "$P"``, or a
+    plist setting the env to "") must fail rc 2 rather than silently run a
+    shadow pass against the live ``router/`` cursor — the exact cursor-sharing
+    wake-loss class this override exists to prevent. Canonical requires the
+    flag ABSENT and the env UNSET."""
+    name = getattr(args, "state_prefix", None)
+    source = "--state-prefix"
+    if name is None:
+        name = os.environ.get("COORD_ROUTER_STATE_PREFIX")
+        source = "COORD_ROUTER_STATE_PREFIX"
+    if name is None:
+        return None, None
+    if not router.STATE_PREFIX_RE.match(name):
+        return None, (f"{source} {name!r} is not a valid router state prefix "
+                      f"(must match {router.STATE_PREFIX_RE.pattern})")
+    return name, None
+
+
 def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     team = args.team
-    prefix = router.router_prefix(team)
+    state, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"router: {state_err}", file=sys.stderr)
+        return 2
+    prefix = router.router_prefix(team, state=state)
+    # config.json is SHARED enablement policy — always read from the canonical
+    # prefix so a namespaced pass decides against the same config the live
+    # router uses (the override moves only the router's OWN cursor-tracked state).
+    config_prefix = router.router_prefix(team)
     task_prefix = f"team/{team}/task/"
     now = _now()
 
     cursor, cursor_reason = router.parse_cursor(transport.read(prefix + "cursor.json"))
     observe = cursor is None
     shadow = bool(getattr(args, "shadow", False))
+    # Blocking (c): a SHADOW pass under a --state-prefix override reads the
+    # delivered view from the CANONICAL prefix. The shadow plane never delivers,
+    # so its own namespaced delivered/ is eternally empty; reading it would feed
+    # empty last_delivered_at into decide() and inflate policy-divergent forever
+    # (debounce/lapsed-checkin never see live delivery recency). The read is safe
+    # by construction — shadow writes nothing to the canonical plane — and the
+    # pass SKIPS the delivered.json refold (it maintains no view it will reuse).
+    # Predicate is exactly (shadow AND override active); default and the
+    # live-namespaced pair (run --state-prefix X, no shadow) keep today's
+    # namespaced delivered/ behavior, where it is correct.
+    shadow_override = shadow and state is not None
+    delivered_prefix = config_prefix if shadow_override else prefix
     if observe:
         print(f"router: OBSERVE-ONLY pass — {cursor_reason}; decisions are "
               f"logged, nothing is enqueued, and a fresh cursor is written at "
@@ -6021,7 +6072,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
               "enqueued or executed", file=sys.stderr)
 
     agents_cfg, _executors, cfg_errors = router.validate_config(
-        transport.read(prefix + "config.json"))
+        transport.read(config_prefix + "config.json"))
     measurement_failed = bool(shadow and cfg_errors)
     if "_config" in cfg_errors:
         print(f"router: {cfg_errors['_config']} — every agent reads "
@@ -6035,7 +6086,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     delivered_shards: list[dict] = []
     delivered_listing_ok = True
     try:
-        dl_entries = transport.list_dir(prefix + "delivered/")
+        dl_entries = transport.list_dir(delivered_prefix + "delivered/")
     except TransportError as e:
         # codex #460 fix: a listing ERROR is NOT "genuinely empty". Fold no
         # shards this pass, but do NOT refold delivered.json (that would
@@ -6051,7 +6102,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
             continue
-        raw = transport.read(prefix + "delivered/" + name)
+        raw = transport.read(delivered_prefix + "delivered/" + name)
         if raw:
             try:
                 delivered_shards.append(json.loads(raw))
@@ -6070,7 +6121,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         # recreates the premature-checkin/weakened-debounce bug). Retries next
         # pass once either read recovers.
         delivered_view = None
-        prior_raw = transport.read(prefix + "delivered.json")
+        prior_raw = transport.read(delivered_prefix + "delivered.json")
         if prior_raw is not None:
             try:
                 loaded = json.loads(prior_raw)
@@ -6271,7 +6322,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             enqueued += 1
         processed[key] = router.iso(now)
 
-    if not observe and delivered_listing_ok:
+    if not observe and delivered_listing_ok and not shadow_override:
         if not transport.write(prefix + "delivered.json",
                                json.dumps(delivered_view, sort_keys=True) + "\n"):
             # observability bookkeeping only — dedup authority is the ledger
@@ -6356,10 +6407,20 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
     adapter content rule (`router.adapter_invocation`)."""
     invoke = invoke or _default_adapter_invoke
     team = args.team
-    prefix = router.router_prefix(team)
-    now = _now()
+    state, state_err = _router_state_prefix(args)
     counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
               "unconfigured": 0, "skipped": 0, "deferred": 0}
+    if state_err is not None:
+        # defensive: the command entry (cmd_router_run) validates first, so this
+        # is unreachable in normal flow — never compose a path from a bad name.
+        print(f"router: {state_err}", file=sys.stderr)
+        return counts
+    prefix = router.router_prefix(team, state=state)
+    # config.json (SHARED policy) and shadow-evidence/ (the LIVE delivery paths'
+    # canonical correlation surface) stay at the canonical prefix; only the
+    # router's own queue/delivered/dead-letter state moves under an override.
+    canon_prefix = router.router_prefix(team)
+    now = _now()
 
     try:
         q_entries = transport.list_dir(prefix + "queue/")
@@ -6369,7 +6430,7 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
         return counts
 
     agents_cfg, _executors, _errs = router.validate_config(
-        transport.read(prefix + "config.json"))
+        transport.read(canon_prefix + "config.json"))
 
     for e in q_entries:
         name = e.get("name") or ""
@@ -6437,7 +6498,7 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
                 try:
                     if _shadow_window_active(transport, team):
                         transport.write(
-                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            canon_prefix + router.SHADOW_EVIDENCE_SUBPATH
                             + router.shadow_evidence_filename(
                                 str(entry.get("agent")), key),
                             json.dumps(router.shadow_evidence_record(
@@ -6499,6 +6560,10 @@ def _run_fixed_rate(pass_fn: Any, *, label: str,
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
     # W7 shadow mode is READ-ONLY: log + persist decisions, never enqueue OR
     # execute (the pass suppresses the enqueue; the executor is skipped here).
+    _, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"router run: {state_err}", file=sys.stderr)
+        return 2
     shadow = bool(getattr(args, "shadow", False))
     json_mode = bool(getattr(args, "json", False))
     if json_mode and not getattr(args, "once", False):
@@ -6594,15 +6659,29 @@ def cmd_router_shadow_status(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
-    """Fold the armed W7 window into one fail-closed acceptance report."""
-    prefix = router.router_prefix(args.team)
+    """Fold the armed W7 window into one fail-closed acceptance report.
+
+    Under a ``--state-prefix`` override the router's own decision state
+    (shadow-decisions/, shadow-marks/) is read from the sibling namespace, while
+    the window marker and the delivery evidence stay CANONICAL: evidence is
+    produced by the live delivery paths (the `listen` tick and cloud-adapter
+    execution), which carry no override, so a namespaced shadow measurement
+    correlates its own decisions against the fleet's canonical evidence."""
+    state, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"shadow report: {state_err}", file=sys.stderr)
+        return 2
+    prefix = router.router_prefix(args.team, state=state)      # own decision state
+    canon_prefix = router.router_prefix(args.team)             # shared window + evidence
     unknown: list[str] = []
 
     def _rows(subpath: str, *, timestamp: Optional[str],
-              required: tuple[str, ...]) -> list[dict[str, Any]]:
+              required: tuple[str, ...],
+              base: Optional[str] = None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
+        root = base if base is not None else prefix
         try:
-            entries = transport.list_dir(prefix + subpath)
+            entries = transport.list_dir(root + subpath)
         except TransportError as e:
             unknown.append(f"{subpath} listing unreadable: {e}")
             return rows
@@ -6611,7 +6690,7 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
             if entry.get("is_dir") or not name.endswith(".json"):
                 continue
             try:
-                raw = transport.read(prefix + subpath + name)
+                raw = transport.read(root + subpath + name)
                 doc = json.loads(raw) if raw else None
             except (TransportError, ValueError) as e:
                 unknown.append(f"{subpath}{name} unreadable: {e}")
@@ -6626,7 +6705,7 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
         return rows
 
     try:
-        raw = transport.read(prefix + "shadow-window.json")
+        raw = transport.read(canon_prefix + "shadow-window.json")
         window = json.loads(raw) if raw else None
     except (TransportError, ValueError) as e:
         window = None
@@ -6645,7 +6724,8 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
         required=("key", "agent", "decision", "decided_at"))
     evidence = _rows(
         router.SHADOW_EVIDENCE_SUBPATH, timestamp="delivered_at",
-        required=("key", "agent", "path", "delivered_at"))
+        required=("key", "agent", "path", "delivered_at"),
+        base=canon_prefix)
     for row in decisions:
         if (not isinstance(row.get("key"), str)
                 or not isinstance(row.get("agent"), str)
@@ -6856,12 +6936,21 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
     executor_id = getattr(args, "host", None) or _host()
     claim_owner = claim_owner or _claim_owner(executor_id)
     dry_run = getattr(args, "dry_run", False)
-    prefix = router.router_prefix(args.team)
-    now = _now()
     counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
               "unconfigured": 0, "skipped": 0, "deferred": 0,
               "already_delivered": 0, "would_execute": 0,
               "claim_unpersisted": 0, "degraded": 0}
+    state, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        # defensive: cmd_router_execute validates first (clean rc 2).
+        print(f"router execute [{executor_id}]: {state_err}", file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
+    prefix = router.router_prefix(args.team, state=state)
+    # config.json (SHARED) is read for the host-resolved adapter_args target only
+    # — always canonical; the queue/delivered state moves under an override.
+    canon_prefix = router.router_prefix(args.team)
+    now = _now()
 
     try:
         q_entries = transport.list_dir(prefix + "queue/")
@@ -6890,7 +6979,7 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
     # config.json is read ONLY for the host-resolved adapter_args routing target
     # (thread_id/endpoint_name) — not for policy. No config authority here.
     agents_cfg, _executors, _errs = router.validate_config(
-        transport.read(prefix + "config.json"))
+        transport.read(canon_prefix + "config.json"))
 
     for e in q_entries:
         name = e.get("name") or ""
@@ -7006,8 +7095,13 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
                 # failure never affects execution.
                 try:
                     if _shadow_window_active(transport, args.team):
+                        # W7 evidence is CANONICAL by design (like the cloud
+                        # executor): only cursor/queue/delivered/dead-letter/marks
+                        # move under a --state-prefix override. Writing evidence to
+                        # the namespaced sibling would hide it from the canonical
+                        # shadow report → the delivery reads no-probe-evidence/missed.
                         transport.write(
-                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            canon_prefix + router.SHADOW_EVIDENCE_SUBPATH
                             + router.shadow_evidence_filename(
                                 str(entry.get("agent")), key),
                             json.dumps(router.shadow_evidence_record(
@@ -7050,6 +7144,10 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
 
 
 def cmd_router_execute(args: argparse.Namespace, transport: Any) -> int:
+    _, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"router execute: {state_err}", file=sys.stderr)
+        return 2
     json_mode = bool(getattr(args, "json", False))
     if json_mode and not (
             getattr(args, "once", False) or getattr(args, "dry_run", False)):
@@ -8572,6 +8670,7 @@ def build_parser() -> argparse.ArgumentParser:
              "cadence compatible with the duty gate, while externally "
              "scheduled --once inherits that scheduler's throttle semantics")
     ror.add_argument("--shadow", action="store_true", help="W7 read-only shadow mode: log + persist a decision per directed item, enqueue and execute NOTHING (the >=48h acceptance measurement)")
+    ror.add_argument("--state-prefix", default=None, metavar="NAME", help="relocate the router's own cursor-tracked state to the sibling team/<team>/_coord/router-<NAME>/ (default: canonical router/; env COORD_ROUTER_STATE_PREFIX is the fallback). Lets one host run live delivery and a shadow measurement in parallel without a shared-cursor collision. Config stays shared/canonical. Charset [A-Za-z0-9_.-]+.")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)
     rosh = rosub.add_parser("shadow", help="W7 shadow-window control (arm/status the >=48h read-only acceptance window)")
@@ -8587,6 +8686,7 @@ def build_parser() -> argparse.ArgumentParser:
         "report",
         help="fold the armed W7 window into a fail-closed acceptance verdict")
     roshr.add_argument("team")
+    roshr.add_argument("--state-prefix", default=None, metavar="NAME", help="read the router's own decision state (shadow-decisions/, shadow-marks/) from the sibling router-<NAME>/ namespace; the window marker and delivery evidence stay canonical (env COORD_ROUTER_STATE_PREFIX is the fallback)")
     add_json(roshr)
     roshr.set_defaults(func=cmd_router_shadow_report)
     roe = rosub.add_parser("execute", help="W5.5 thin host executor: fire host-local adapters for queue entries resolved to THIS host (policy-free; --once for one pass)")
@@ -8594,6 +8694,7 @@ def build_parser() -> argparse.ArgumentParser:
     roe.add_argument("--host", default=None, help="executor id to drain (default: this host's own id)")
     roe.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
     roe.add_argument("--dry-run", action="store_true", help="select + report only; invoke nothing, write nothing")
+    roe.add_argument("--state-prefix", default=None, metavar="NAME", help="drain the queue from the sibling router-<NAME>/ namespace (pairs with a namespaced `router run`; env COORD_ROUTER_STATE_PREFIX is the fallback). Config stays shared/canonical.")
     add_json(roe)
     roe.set_defaults(func=cmd_router_execute)
 

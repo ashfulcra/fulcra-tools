@@ -83,8 +83,31 @@ DECISIONS = ("interrupt", "batch", "defer", "checkin", "debounce",
 _EXECUTOR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
-def router_prefix(team: str) -> str:
-    return f"team/{team}/_coord/router/"
+#: Router state-prefix override charset. Constrained so an override name cannot
+#: traverse out of the team namespace (no ``/``, no ``..`` escape via a
+#: separator) — the resolver validates against this before composing a path.
+STATE_PREFIX_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def router_prefix(team: str, *, state: Optional[str] = None) -> str:
+    """The router's own state namespace for ``team``.
+
+    Default (``state`` is None) → the canonical ``team/<team>/_coord/router/`` —
+    BYTE-IDENTICAL to every prior release, so absent an override nothing moves.
+    An override name resolves to the SIBLING ``team/<team>/_coord/router-<name>/``
+    (same team, one level, a peer of the canonical dir): only the router's own
+    cursor-tracked state moves, while directed-item reads (``team/<team>/task/``)
+    and the shared config are addressed at the canonical prefix and are
+    unaffected. Separating the cursor is what lets a live delivery pass and a
+    shadow measurement pass coexist on one host without starving each other's
+    processed ledger. The name is charset-validated so it cannot escape the
+    namespace."""
+    if state is None:
+        return f"team/{team}/_coord/router/"
+    if not STATE_PREFIX_RE.match(state):
+        raise ValueError(
+            f"router state prefix {state!r} must match {STATE_PREFIX_RE.pattern}")
+    return f"team/{team}/_coord/router-{state}/"
 
 
 def parse_store_mtime(mtime: Any) -> Optional[datetime]:

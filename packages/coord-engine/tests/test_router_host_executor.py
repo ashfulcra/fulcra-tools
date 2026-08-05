@@ -539,3 +539,37 @@ def test_host_probe_not_written_on_failed_delivery():
     t2.fail_write_containing.add("delivered/")
     cli._router_execute_host(_args(), t2, invoke=_invoke("delivered"))
     assert _shards_under(t2, "shadow-evidence/") == {}
+
+
+def test_host_probe_evidence_is_canonical_under_state_prefix_override():
+    """Blocking (b): under a namespaced live pair (`run` + `execute
+    --state-prefix X`) the host executor moves its cursor/queue/delivered state to
+    the sibling `router-X/`, but the W7 evidence shard MUST stay at the CANONICAL
+    prefix. The canonical shadow report reads only the canonical shadow-evidence/
+    dir, so an evidence shard written under `router-X/` would leave the delivery
+    classified no-probe-evidence/missed. Mirrors the cloud executor, which already
+    writes evidence at `canon_prefix`."""
+    t = FlakyTransport()
+    _hbase(t)                                    # config is canonical (shared)
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    # queue/cursor/delivered move under the sibling; seed the wake there.
+    RP_X = f"team/{TEAM}/_coord/router-x/"
+    entry = _host_entry(source="s-30")
+    key = router.idempotency_key(entry["source_shard"], entry["agent"])
+    t.put(RP_X + "queue/" + router.queue_filename(entry["agent"], key),
+          json.dumps(entry))
+
+    counts = cli._router_execute_host(_args(state_prefix="x"), t,
+                                      invoke=_invoke("delivered"))
+    assert counts["delivered"] == 1
+    # evidence lands under the CANONICAL prefix, never under the sibling namespace
+    canon_ev = _shards_under(t, "shadow-evidence/")
+    assert len(canon_ev) == 1
+    (s,) = canon_ev.values()
+    assert (s["path"], s["agent"], s["key"]) == ("adapter", AGENT, key)
+    sib_ev = {p: c for p, c in t.store.items()
+              if p.startswith(RP_X + "shadow-evidence/")}
+    assert sib_ev == {}
+    # the delivered RECORD, by contrast, DID move to the sibling (namespaced state)
+    assert any(p.startswith(RP_X + "delivered/") for p in t.store)
