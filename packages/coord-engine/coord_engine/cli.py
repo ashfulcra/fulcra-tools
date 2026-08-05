@@ -32,7 +32,7 @@ from . import (
     checkpoint_channel, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, projection as projection_mod,
-    query, records, review,
+    pin_currency, query, read_retry, records, review,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
@@ -401,7 +401,7 @@ def _load_rows_status(
     if feed_sink is not None:
         feed_sink.append({"ok": False, "reason": "data-updates feed not attempted"})
     try:
-        raw = transport.read(path)
+        raw = read_retry.read_retrying(transport, path)
     except Exception:
         return [], False, "summaries index unreadable"
     if deadline is not None and deadline.expired():
@@ -7426,6 +7426,21 @@ def _report_writer_presence() -> None:
               "--with 'git+…#subdirectory=packages/fulcra-common'")
 
 
+def _report_pin_currency(transport: Any, team: Optional[str]) -> None:
+    """One doctor line for engine-vs-fleet-pin currency. WARN, never unhealthy.
+
+    See :mod:`coord_engine.pin_currency` for why this exists and why an
+    unprovable answer must print as a warning rather than a tick. Wrapped
+    defensively: a preflight that CRASHES teaches even less than one that lied,
+    and no currency question is worth taking doctor down over.
+    """
+    try:
+        print(pin_currency.report(transport, team))
+    except Exception as e:  # pragma: no cover - defense in depth
+        print(f"  ! fleet pin currency check failed to run "
+              f"({type(e).__name__}) — currency unknown")
+
+
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
     if getattr(args, "self", False):
@@ -7452,6 +7467,7 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     from . import __version__ as _v
     print(f"  ✓ coord-engine v{_v}")
     _report_writer_presence()
+    _report_pin_currency(transport, args.team)
     if args.team:
         cfg, cfg_status = records.load_config_classified(transport, args.team)
         if cfg_status == "error":
