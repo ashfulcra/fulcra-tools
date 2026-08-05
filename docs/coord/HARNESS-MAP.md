@@ -20,6 +20,39 @@ fleet or a new wall is hit, add it here in the same PR as the fix.
 | 7 | ChatGPT facade (HTTP) | find-or-create / status endpoints | Per-request process economics (see the loop-2 perf audit) |
 | 8 | Claude mobile/desktop remote control | operator-driven sessions | Unreliable delivery (the reason coord-boss exists); treat as best-effort transport, never a dependency |
 
+## The wake mechanism, per harness — what actually RE-ENTERS the agent
+
+A harness row is not complete until it names the thing that runs the model again.
+Everything else — schedules, notifications, files on disk — is plumbing *around*
+that mechanism, and plumbing that does not end in the model running is not a wake.
+
+| # | Harness | THE WAKE (runs the model) | Router adapter | Notes / what does NOT wake it |
+|---|---------|---------------------------|----------------|-------------------------------|
+| 1 | Claude Code, local desktop | **session-level recurring prompt** (the harness's own scheduled-prompt tool) | `queued-wake-file` collected by that loop; `macos-notify` = escalation only | **`launchd` cannot wake this harness** — it runs shell, not the model. `claude -p` invokes headlessly ONLY where the CLI is authenticated; unauthenticated it fails after minutes and reads as a hang. Session loop dies with the session — this harness has NO overnight autonomy without headless auth or relocation. |
+| 2 | Claude Code, remote/CCR | **CCR Routine** (cron, 24/7) | `managed-agents-message` | Durable: survives the operator closing their machine. The reason cloud agents out-produce desktop ones. |
+| 3 | Codex CLI | **codex thread heartbeat** | `codex-exec-resume` (`thread_id`) | Tightest cadence in the fleet (1–15 min); pull-based, so directed wakes are an optimisation, not a dependency. |
+| 4 | OpenClaw | **OpenClaw heartbeat** | `openclaw-post` (`endpoint_name`) | Needs a named webhook endpoint configured, or the route is inert. |
+| 5 | GitHub Actions CI | n/a — event-triggered, no resident agent | none | Nothing to wake. |
+| 6 | Headless heartbeats (launchd/cron) | **the schedule IS the agent** | none | No model to re-enter; a notifying adapter is meaningless here. |
+| 7 | ChatGPT facade | **the inbound request** | none | Per-request; no standing agent. |
+| 8 | Claude mobile/desktop remote control | **the operator** | none | Best-effort transport, never a dependency. |
+
+**Two rules that fall out of this table.**
+
+1. **A notify-only route is not a wake.** `macos-notify` terminates in a human's
+   eyeballs; every other adapter terminates in something that runs an agent. An
+   agent whose only route is notifying is **un-wakeable by construction**, and the
+   router will report clean deliveries forever while it never runs. Declare a
+   notifier *alongside* an invoking mechanism, never instead of one.
+2. **Never retire a wake without naming and proving its replacement.**
+   coord-maintainer — the maintainer of this system — deleted its standing session
+   loop on 2026-07-24 to save budget, and replaced it over two weeks with a
+   notifier that woke a human, a headless invoke that could not authenticate, and
+   a `--peek` read that never consumed. Three replacements, none of which ran the
+   agent, each reporting success. It went unnoticed for two weeks because every
+   layer's own evidence looked healthy. Prove the replacement RUNS THE AGENT
+   before removing what worked.
+
 ## The walls (verified incidents × harness)
 
 Each of these was hit live, diagnosed, and closed. The harness column says where

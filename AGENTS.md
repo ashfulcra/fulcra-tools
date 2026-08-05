@@ -265,6 +265,52 @@ it (not on PyPI).
   112 entries × ~0.9s = 103.5s serial vs 14.3s prefetched. A raising entry read
   still fails closed (degraded, nothing executed, wakes stay visibly queued);
   the pool must never swallow it into a clean "0 delivered".
+- **ADAPTERS ARE INVOKING OR NOTIFYING, and only invoking ones are a wake.** The
+  router calls an adapter, the adapter exits 0, and the pass records `delivered`.
+  That measures *the adapter ran*, never *the agent ran* — and for one adapter
+  those are not the same event:
+
+  | adapter | terminates in | wake? |
+  |---|---|---|
+  | `codex-exec-resume` | resumes a codex thread | INVOKING |
+  | `managed-agents-message` | resumes a cloud session | INVOKING |
+  | `routine-align` | aligns a Routine that runs the agent | INVOKING |
+  | `queued-wake-file` | a file the agent's own schedule collects | INVOKING (via that schedule) |
+  | `macos-notify` | **a human's eyeballs** | **NOTIFYING — not a wake** |
+
+  An agent whose ONLY route is a notifying adapter is **un-wakeable by
+  construction**: the router will report clean deliveries forever while the agent
+  never runs. Observed live — coord-maintainer, the maintainer of this system,
+  sat on `macos-notify` as its sole route and was the one agent the wake router
+  could not wake; every P0 addressed to it waited for a human to notice a desktop
+  banner. `validate_config` accepts this today. It should not: a notify-only
+  route is an ESCALATION channel and must be declared alongside an invoking one,
+  never instead of it.
+- **EVERY HARNESS MUST NAME THE THING THAT RE-ENTERS THE AGENT.** Per
+  [`docs/coord/HARNESS-MAP.md`](docs/coord/HARNESS-MAP.md), each harness row owns
+  a wake mechanism, and it is always the mechanism that *runs the model* — not a
+  script that runs beside it:
+  - **Claude Code, local desktop** — the wake is a **session-level recurring
+    prompt** (the harness's own scheduled-prompt tool). A `launchd` job CANNOT
+    wake this harness: it runs shell, not the model, so at best it posts a
+    notification or drops a `queued-wake-file` for the session loop to collect.
+    `claude -p` can invoke headlessly ONLY where the CLI is authenticated —
+    verify with a real `claude -p` before designing on it; unauthenticated it
+    fails after minutes, which reads as a hang, not a refusal.
+  - **Claude Code, remote/CCR** — a CCR **Routine** on cron; `managed-agents-message`
+    resumes the session. Durable across the operator's machine being closed.
+  - **Codex CLI** — the codex **thread heartbeat**; `codex-exec-resume`.
+  - **OpenClaw** — the OpenClaw **heartbeat**; `openclaw-post`.
+  - **Headless launchd/cron hosts** — the schedule IS the agent; there is no
+    model to re-enter, so a notifying adapter is meaningless here.
+
+  Doctrine, learned the expensive way: **deleting a working wake to save budget
+  costs more than it saves.** coord-maintainer removed its standing session loop
+  on 2026-07-24 and replaced it over two weeks with a notifier that woke a human,
+  a headless invoke that could not authenticate, and a `--peek` read that never
+  consumed — three mechanisms, none of which ran the agent, while every layer
+  reported success. Before retiring a wake, name its replacement and prove the
+  replacement RUNS THE AGENT.
 - **Thin host executor (W5.5).** `coord-engine router execute <team> [--host
   <id>] [--once] [--dry-run]` is the SOLE executor for host-local adapters
   (`codex-exec-resume`, `openclaw-post`, `macos-notify`, `queued-wake-file`). It
