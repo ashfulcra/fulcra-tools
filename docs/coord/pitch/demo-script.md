@@ -1,7 +1,7 @@
 # 5-minute live demo script — coord on team/fulcra
 
 *Run on real production data. No slides. Every command is copy-pasteable from this file.*
-*Prep (once, before the meeting): `export FULCRA_COORD_AGENT=coord-maintainer`; confirm `coord-engine doctor fulcra` is green; have this file open.*
+*Prep (once, before the meeting): **persist** `FULCRA_COORD_AGENT=coord-maintainer` — in your harness env config or shell profile, NOT a one-shot `export`, which dies with the shell and makes every verb fail `no agent identity` (see [`../GET-ON-THE-BUS.md`](../GET-ON-THE-BUS.md) §5); set `COORD_TYPE` to the team's coordination annotation id (see [`../BUS-V3.md`](../BUS-V3.md)); confirm `coord-engine doctor fulcra` is green; have this file open.*
 
 ## 0:00 — the space is just teams (30s)
 
@@ -12,12 +12,32 @@
 fulcra-api file list team/fulcra/ | head
 ```
 
-## 0:30 — deterministic task views (60s)
+## 0:30 — the bus is a range query (45s)
 
-> "The task index is engine-owned: any agent, any host, same answer."
+> "Events move as typed records on the timeline — bus v3. Sending is one write; an agent's
+> whole work queue is one bounded query, readable ~20 seconds after write. No broker, no
+> server, no polling loop anywhere."
 
 ```bash
-coord-engine briefing fulcra          # one-read morning brief
+# send an event (payload in note, sender in sources, identity tags attached):
+coord-engine bus-v3 send fulcra --to coord-maintainer --kind directive \
+  --priority P2 --slug demo-hello --from demo
+# read a queue (this IS an agent's wake surface):
+fulcra-api get-records "$COORD_TYPE" "1 hour"
+```
+
+Point out: the record comes back tagged `agent:` / `platform:` / `harness:` /
+`model:` plus the channel tag — so the same event is a timeline object a human
+can slice in the Fulcra app, not just JSON an agent parses. (Prep: the `demo`
+identity needs `coord-engine bus-v3 tag-provision fulcra --agent demo …` once,
+or the tags are absent and the point lands flat.)
+
+## 1:15 — deterministic task views (45s)
+
+> "Durable state — tasks, roles, reviews — folds the same for any agent on any host."
+
+```bash
+coord-engine briefing fulcra          # the durable-state fold
 coord-engine board fulcra             # status-grouped board
 coord-engine needs-me fulcra --agent coord-maintainer
 ```
@@ -25,7 +45,7 @@ coord-engine needs-me fulcra --agent coord-maintainer
 Point out: typed statuses, done-requires-evidence, the state machine (`proposed→active→done`)
 enforced in code — an illegal transition is an error, not a style violation.
 
-## 1:30 — presence + roles: who's alive, who's responsible (60s)
+## 2:00 — presence + roles: who's alive, who's responsible (60s)
 
 ```bash
 coord-engine agents fulcra            # live/idle/stale fold + what each agent is on
@@ -40,7 +60,7 @@ coord-engine roles status fulcra coord-maintainer --json
 coord-engine roles claim fulcra coord-maintainer    # note the shard echo; re-run = refresh
 ```
 
-## 2:30 — the operator loop: nothing waits silently (90s)
+## 3:00 — the operator loop: nothing waits silently (60s)
 
 > "The one that paid for itself on day one. Agents that hit a wall file a structured ask; the
 > orchestrator pulls this fold on every heartbeat; the operator's answer flows back as ONE atomic
@@ -64,12 +84,12 @@ coord-engine health fulcra            # which hosts heal the team; who went dark
 
 ## 4:45 — close (15s)
 
-> "Twelve skills, one stdlib-only engine, 800+ tests, dual AI review on every PR. Wave 1 is six
+> "Seventeen skills, one stdlib-only engine, 1600+ engine tests, dual AI review on every PR. Wave 1 is six
 > purely-additive skills. The engine's natural first home is a small Fulcra-owned repo — folding
 > into fulcra-api stays on the table as the long-term convergence, sized with your team. Evidence
-> pack is one page in DESIGN.md."
+> pack is one page in [`docs/coord-DESIGN.md`](../../coord-DESIGN.md) (§Evidence pack)."
 
 ## Fallbacks
 
 - No live ask at demo time → stage one 10 min before: `coord-engine task start fulcra "Demo: pick deploy window" --status active && coord-engine task block fulcra demo-pick-deploy-window --on-user "window A (tonight) or B (weekend)?"`
-- Network hiccup → screenshots of each command output, captured at prep time, in `docs/pitch/demo-fallback/`.
+- Network hiccup → capture screenshots of each command's output at prep time and keep them with your demo notes; the design story stands on its own in [`docs/coord-DESIGN.md`](../../coord-DESIGN.md).

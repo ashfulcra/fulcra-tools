@@ -27,10 +27,10 @@ marked provisional until the prototype validates them.
 - **Bind to real Fulcra data before writing feature code — never simulate.**
   1. Discover what the user already has: `fulcra catalog` (each returned type
      carries a `related_cli_commands` field naming how to query it) and
-     `fulcra data-updates "<range>"` (what's actually flowing). Standard
-     streams — HRV, heart rate, steps, location/visits, workouts, sleep,
-     calendar — already exist; **read them** with `fulcra get-records` / the
-     metric & event helpers. Do not reinvent them as local fixtures.
+     `fulcra data-updates "<range>"` (what's actually flowing). The standard
+     real-world streams the catalog lists for this user already exist;
+     **read them** with `fulcra get-records` / the metric & event helpers.
+     Do not reinvent them as local fixtures.
   2. For anything Fulcra genuinely doesn't carry, **create the custom data
      type** (`fulcra data-type create …`) and write real records via **REST
      ingest** (there's no `fulcra` CLI write verb). Watch the custom-type

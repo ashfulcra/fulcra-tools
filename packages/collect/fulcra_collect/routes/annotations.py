@@ -75,9 +75,9 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         in its data payload — the menubar uses it for the "Undo"
         affordance on the Recently-recorded list. The original record
         remains visible on the user's Fulcra timeline.
-        See ``daemon._delete_annotation`` for the full rationale and
-        ``packages/media-helpers/scripts/probe_soft_delete_3.py`` for
-        the survey of why this is the best we can do.
+        See ``daemon._delete_annotation`` for the full rationale and the
+        probe evidence it cites (repo history, #439-era cleanup) for the
+        survey of why this is the best we can do.
         """
         return daemon.handle_request({
             "cmd": "delete_annotation",

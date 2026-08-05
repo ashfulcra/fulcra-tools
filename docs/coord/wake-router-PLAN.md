@@ -1,5 +1,13 @@
 # Wake Router + Engagement Model — stage-2 implementation plan
 
+> **STATUS (2026-07-27): EXECUTED through W8 + E-track + W5.5/W6/W7; W7.6 cadence fix
+> approved; W9 in progress; W10 pending.** Every task below except W9/W10 is merged and
+> live; the router left shadow 2026-07-27 ~00:02Z. This plan is the build's contract
+> record — per-task detail below is historical; do not re-dispatch from it. Note one
+> superseded assumption: §"priority_floor" as written (P1|P2|P3) caused the live P0
+> demotion bug (fixed via PR 483's coerce-with-note path); and under bus v3 the router
+> complements the queue read — it is the waker, agents run no listeners.
+
 **Parent spec:** [`wake-router-SPEC.md`](wake-router-SPEC.md) (merged `8211776`, Part C resolution
 `5d44b68`). **Owner:** Tycho (`coord-boss`). **Gate:** dual-green (codex-reviewer + owner) on this
 plan before any task below is dispatched; then per-task dual-green during execution.
@@ -59,7 +67,7 @@ fail-closed fallback).
   overwrite) after each batch; on missing/corrupt cursor the router restarts in observe-only and
   reports.
 - **Router config** (`_coord/router/config.json`): per-agent
-  `{priority_floor: "P1"|"P2"|"P3", debounce_min: <int, minutes>, adapter: <enum — exactly one of
+  `{priority_floor: "P0"|"P1"|"P2"|"P3", debounce_min: <int, minutes>, adapter: <enum — exactly one of
   the §W5/W6 allowlist: "codex-exec-resume"|"openclaw-post"|"managed-agents-message"|
   "macos-notify"|"queued-wake-file"|"routine-align">, adapter_args: <per-adapter allowlisted keys
   ONLY — e.g. codex-exec-resume: {thread_id}; openclaw-post: {endpoint_name} (resolved from local

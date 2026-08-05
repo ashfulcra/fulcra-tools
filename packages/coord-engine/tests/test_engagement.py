@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from coord_engine import cli, okf, presence, tasks
+from coord_engine import __version__, cli, okf, presence, tasks
 from coord_engine_test_helpers import FakeTransport
 
 PINNED_NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
@@ -91,17 +91,25 @@ def test_beat_engagement_resident_has_null_until():
     assert eng["until"] is None
 
 
-def test_beat_without_engagement_writes_byte_identical_legacy_shard():
+def test_beat_without_engagement_keeps_engagement_inert_and_stamps_engine():
     t = FakeTransport()
     assert cli.main(["presence", "beat", "r", "-a", "amy", "-w", "web",
                      "-s", "shipping"], transport=t) == 0
     content = t.store[_shard_path("amy")]
-    # No engagement field at all — inert step means today's exact bytes.
+    # No engagement field at all — the liveness schema remains inert. Version
+    # evidence is independent and proves which engine is actively running.
     assert "engagement" not in content
     legacy_fm = {
         "type": "Presence", "title": "presence — amy", "agent": "amy",
         "workstreams": ["web"], "summary": "shipping",
         "timestamp": PINNED_NOW.isoformat().replace("+00:00", "Z"),
+        "engine": {
+            # the RELEASE, not a frozen literal: a version bump is release
+            # discipline, not a reason to edit this test
+            "engine_version": __version__,
+            "protocol_version": 1,
+            "cursor_schema_version": 2,
+        },
     }
     expected = okf.render_frontmatter(legacy_fm) + "\n# Presence: amy\n"
     assert content == expected

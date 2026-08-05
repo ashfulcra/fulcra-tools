@@ -16,10 +16,15 @@ cd "$(dirname "$0")/../../.."                 # repo root
 REPO="$PWD"
 WHEELHOUSE="$REPO/wheelhouse"
 
+MANIFEST="$REPO/packages/menubar/scripts/bundle_manifest.py"
+
 echo "=== 1/3  build workspace wheels into wheelhouse/ ==="
+# Derived from Briefcase `requires` (see bundle_manifest.py) — never hand-listed.
+# A hand-maintained list here silently drifts from the app's real requirements:
+# fulcra-purpleair was added to `requires` but not to this loop, so the release
+# build could not resolve it (PR #455 review).
 rm -rf "$WHEELHOUSE"; mkdir -p "$WHEELHOUSE"
-for pkg in fulcra-common fulcra-collect fulcra-media-helpers \
-           fulcra-dayone fulcra-attention fulcra-csv-importer fulcra-gmail; do
+for pkg in $(python3 "$MANIFEST" --dists); do
   uv build --package "$pkg" --wheel --out-dir "$WHEELHOUSE" >/dev/null
 done
 
@@ -38,8 +43,10 @@ APP="$REPO/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
 PKGS="$APP/Contents/Resources/app_packages"
 # Briefcase can exit 0 even when `briefcase create`'s pip install fails a
 # dependency resolution, leaving app_packages EMPTY and the app non-functional.
-# Guard explicitly: the bundle MUST contain the collect core and the gmail plugin.
-for need in fulcra_collect fulcra_gmail fulcra_common; do
+# Guard explicitly: EVERY monorepo package the app requires must be present —
+# derived from the same manifest as the wheel build, so a newly bundled plugin
+# is proven rather than assumed.
+for need in $(python3 "$MANIFEST" --imports); do
   if [ ! -d "$PKGS/$need" ]; then
     echo "ERROR: $need is missing from the bundle ($PKGS)." >&2
     echo "       The briefcase install likely failed a dependency resolution;" >&2

@@ -237,12 +237,12 @@ Claude-specific instructions:
 
 ## Codex
 
-Codex should install coord-backed hooks and the adaptive durable listener with
-the automation skill's Codex installer and listener installer:
+Codex should install coord-backed hooks with the automation skill's Codex
+installer (the separate listener installer was removed with the retired
+listener stack — pickup is the bus v3 queue read on each automation tick):
 
 ```bash
 python skills/fulcra-agent-automation/scripts/codex/install_codex_watch.py <team> <agent>
-skills/fulcra-agent-automation/scripts/install-listener.sh <team> <agent>
 ```
 
 The Codex installer wires:
@@ -272,26 +272,21 @@ Codex-specific instructions:
 
 ## OpenClaw / Arc
 
-OpenClaw should install the automation skill's managed BOOT/HEARTBEAT block,
-then pair its per-agent listener with the bundled OpenClaw wake adapter. Exact
-setup is documented in `skills/fulcra-agent-automation/SKILL.md`:
+OpenClaw should install the automation skill's managed BOOT/HEARTBEAT block.
+Exact setup is documented in `skills/fulcra-agent-automation/SKILL.md`:
 
 ```bash
 python3 skills/fulcra-agent-automation/scripts/openclaw/install_openclaw.py <team> <agent>
 ```
 
-To make a fresh OpenClaw agent actually hear directed bus work while idle, bundle
-the durable pickup path at install time:
+Directed pickup while idle is the bus v3 queue read on each HEARTBEAT tick;
+fast directed wakes, where enabled, come from the wake router's host-local
+OpenClaw adapter (the bundled per-agent listener and `wake/openclaw.sh` were
+removed with the retired listener stack).
 
-```bash
-skills/fulcra-agent-automation/scripts/install-listener.sh <team> \
-  openclaw:<surface>:<workstream> 1 \
-  --wake-cmd "skills/fulcra-agent-automation/scripts/wake/openclaw.sh"
-```
-
-The heartbeat is machine-global; the listener is per-agent, so the agent value
-must be the identity whose inbox should be polled. Install the team heartbeat
-separately with
+The heartbeat is machine-global; the queue read is per-agent, so each OpenClaw
+identity reads its own queue (`coord-engine queue <team> --agent <identity>`)
+on the HEARTBEAT tick. Install the team heartbeat separately with
 `skills/fulcra-agent-automation/scripts/install-heartbeat.sh <team>` when the
 host does not already have one.
 

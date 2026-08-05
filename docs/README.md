@@ -17,10 +17,16 @@ kept for provenance, not written for you.
 - [`coord/GET-ON-THE-BUS.md`](coord/GET-ON-THE-BUS.md) — the from-zero
   quickstart for joining the coord bus (install → auth → team bootstrap →
   join), including remote/sandboxed hosts.
+- [`coord/BUS-V3.md`](coord/BUS-V3.md) — the bus v3 contract (adopted
+  2026-07-27): events as typed records, documents as files, one queue read
+  per wake, no resident listeners.
 - [`coord/wake-router-SPEC.md`](coord/wake-router-SPEC.md) and
   [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
-  implementation plan for the wake router + engagement model build (stage 3 in
-  execution): one fleet wake policy instead of N listeners, cloud-first hosting.
+  implementation plan for the wake router + engagement model build
+  (status **as of 2026-07-24**: implemented, shadow window running, drawdown
+  pending acceptance — the spec's own banner is the dated source, and the engine
+  is the operational truth): one fleet wake policy instead of N resident
+  listeners, cloud-first hosting.
 - [`coord/wake-router-ADDENDUM-1-event-substrate.md`](coord/wake-router-ADDENDUM-1-event-substrate.md)
   — normative addendum (tasks E1–E3): the `data-updates` feed as the authoritative
   change ledger and feed-driven delta folds (incremental reconcile, listen/briefing,

@@ -250,6 +250,106 @@ def test_cli_continuity_snapshot_and_resume(capsys):
     assert cli.main(["continuity", "resume", "r", "ash", "build-l6"], transport=t) == 0
     out = capsys.readouterr().out
     assert "objective: ship it" in out and "land PR" in out
+    assert "checkpoint age:" in out
+
+
+def test_cli_continuity_resume_reports_age_in_human_and_json(capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    created = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "_now", lambda: created)
+    cli.main(["continuity", "snapshot", "r", "ash", "work", "--objective", "ship"],
+             transport=t)
+    capsys.readouterr()
+
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 8, 3, 12, 30,
+                                                       tzinfo=timezone.utc))
+    assert cli.main(["continuity", "resume", "r", "ash"], transport=t) == 0
+    assert "checkpoint age: 30m (1800s)" in capsys.readouterr().out
+
+    assert cli.main(["continuity", "resume", "r", "ash", "--json"], transport=t) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["checkpoint_age_seconds"] == 1800
+    assert out["error_code"] is None
+    assert out["objective"] == "ship"
+
+
+def test_cli_continuity_resume_max_age_passes_and_fails(capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    created = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "_now", lambda: created)
+    cli.main(["continuity", "snapshot", "r", "ash", "work", "--objective", "ship"],
+             transport=t)
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 8, 3, 12, 30,
+                                                       tzinfo=timezone.utc))
+
+    assert cli.main(["continuity", "resume", "r", "ash", "--max-age", "30m"],
+                    transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["continuity", "resume", "r", "ash", "--max-age", "29m"],
+                    transport=t) == 2
+    assert "exceeding --max-age 29m" in capsys.readouterr().err
+
+    assert cli.main(["continuity", "resume", "r", "nobody", "--max-age", "1h"],
+                    transport=t) == 2
+    assert "checkpoint age is unknown" in capsys.readouterr().err
+
+
+def test_cli_continuity_resume_rejects_huge_duration_and_future_checkpoint(
+        capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    monkeypatch.setattr(cli, "_now", lambda: datetime(
+        2026, 7, 1, tzinfo=timezone.utc))
+    t.put(cli._continuity_path("r", "ash", "future"), json.dumps({
+        "created_at": "2026-07-01T00:00:02Z", "task": "future",
+        "agent": "ash", "objective": "impossible future checkpoint",
+    }))
+
+    assert cli.main([
+        "continuity", "resume", "r", "ash", "future",
+        "--max-age", "1000000000d",
+    ], transport=t) == 2
+    assert "invalid --max-age duration" in capsys.readouterr().err
+
+    assert cli.main([
+        "continuity", "resume", "r", "ash", "future",
+        "--max-age", "1s",
+    ], transport=t) == 2
+    assert "checkpoint age is unknown" in capsys.readouterr().err
+
+
+def test_cli_continuity_resume_json_separates_rc2_reasons(capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    t = FakeTransport()
+    monkeypatch.setattr(cli, "_now", lambda: datetime(
+        2026, 7, 1, tzinfo=timezone.utc))
+    t.put(cli._continuity_path("r", "ash", "old"), json.dumps({
+        "created_at": "2026-06-30T23:00:00Z", "task": "old",
+        "agent": "ash", "objective": "old checkpoint",
+    }))
+    t.put(cli._continuity_path("r", "ash", "future"), json.dumps({
+        "created_at": "2026-07-01T00:00:02Z", "task": "future",
+        "agent": "ash", "objective": "future checkpoint",
+    }))
+
+    cases = [
+        (["old", "--max-age", "1000000000d"], "invalid-max-age"),
+        (["future", "--max-age", "1s"], "checkpoint-age-unknown"),
+        (["old", "--max-age", "59m"], "checkpoint-stale"),
+    ]
+    for argv, error_code in cases:
+        assert cli.main([
+            "continuity", "resume", "r", "ash", *argv, "--json"],
+            transport=t) == 2
+        row = json.loads(capsys.readouterr().out)
+        assert row["error_code"] == error_code
 
 
 def test_cli_continuity_resume_picks_latest_across_tasks(capsys):
@@ -518,7 +618,7 @@ def test_cli_respond_closes_and_records(capsys):
     assert cli.main(["respond", "r", slug, "-o", "answered", "-a", "amy"], transport=t) == 0
     out = capsys.readouterr().out
     assert "closed" in out
-    assert "response recorded — the owner's listen surfaces it" in out  # reply-leg breadcrumb
+    assert "response recorded — the owner's queue surfaces it" in out  # reply-leg breadcrumb
     assert okf.parse_frontmatter(t.store[f"team/r/task/{slug}.md"])["status"] == "done"
     assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
@@ -553,38 +653,45 @@ def test_cli_respond_response_paths_do_not_collide(monkeypatch, capsys):
     assert len(paths) == 2
 
 
-# --- listen breadcrumbs: every ask points at the reply/verdict leg -----------
+# --- reply breadcrumbs: every ask points at the reply/verdict leg -------------
+#
+# Bus v3 (2026-07-27) retired `listen` as the wake surface and this PR removed the
+# verb, so the breadcrumb every send verb prints must name `queue` — the bounded
+# per-wake event read that actually delivers the reply. These tests pin the exact
+# string BECAUSE it is copy-pasteable operator output: a breadcrumb naming a verb
+# the engine no longer has is worse than none (it fails at the shell, after the
+# ask already went out).
 
 def test_tell_prints_replies_breadcrumb_when_sender_known(capsys):
     t = FakeTransport()
     assert cli.main(["tell", "r", "amy", "Do it", "--from", "boss"], transport=t) == 0
     out = capsys.readouterr().out
-    assert "replies: coord-engine listen r --agent boss" in out
+    assert "replies: coord-engine queue r --agent boss" in out
 
 
 def test_broadcast_prints_replies_breadcrumb_when_sender_known(capsys):
     t = FakeTransport()
     assert cli.main(["broadcast", "r", "All hands", "--from", "boss"], transport=t) == 0
-    assert "replies: coord-engine listen r --agent boss" in capsys.readouterr().out
+    assert "replies: coord-engine queue r --agent boss" in capsys.readouterr().out
 
 
 def test_remind_prints_replies_breadcrumb_when_sender_known(capsys):
     t = FakeTransport()
     assert cli.main(["remind", "r", "amy", "2h", "Soon", "--from", "boss"], transport=t) == 0
-    assert "replies: coord-engine listen r --agent boss" in capsys.readouterr().out
+    assert "replies: coord-engine queue r --agent boss" in capsys.readouterr().out
 
 
 def test_tell_sender_from_env_when_no_from_flag(capsys, monkeypatch):
     monkeypatch.setenv("FULCRA_COORD_AGENT", "envboss")
     t = FakeTransport()
     assert cli.main(["tell", "r", "amy", "Env sender"], transport=t) == 0
-    assert "replies: coord-engine listen r --agent envboss" in capsys.readouterr().out
+    assert "replies: coord-engine queue r --agent envboss" in capsys.readouterr().out
 
 
 def test_tell_no_breadcrumb_when_sender_anonymous(capsys, monkeypatch):
     # No --from and no FULCRA_COORD_AGENT: only the host fallback exists, which is
-    # not an identity anyone listens as -> print NO breadcrumb (a hostname would
-    # mislead the reader into `listen --agent coord-reconcile:...`).
+    # not an identity anyone reads a queue as -> print NO breadcrumb (a hostname
+    # would mislead the reader into `queue --agent coord-reconcile:...`).
     monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
     t = FakeTransport()
     assert cli.main(["tell", "r", "amy", "Anon"], transport=t) == 0
@@ -602,7 +709,7 @@ def test_review_request_prints_await_verdicts_breadcrumb(capsys):
     t = FakeTransport()
     assert cli.main(["review", "request", "r", "pr-9", "--of", "url",
                      "--reviewer", "alice", "--from", "boss"], transport=t) == 0
-    assert "await verdicts: coord-engine listen r --agent boss" in capsys.readouterr().out
+    assert "await verdicts: coord-engine queue r --agent boss" in capsys.readouterr().out
 
 
 def test_reconcile_gcs_orphaned_ack_shards(capsys):
@@ -1451,8 +1558,38 @@ def test_cli_park_snapshots_held_roles_only(capsys):
     fm = okf.parse_frontmatter(t.store["team/r/roles/reviewer.md"])
     snap = _j.loads(t.store[fm["checkpoint_ref"]])
     assert snap["objective"] == "eod" and snap["agent"] == "amy"
-    # parking with no held roles is a clean no-op
-    assert cli.main(["continuity", "park", "r", "-a", "nobody"], transport=t) == 0
+    # A successful park must prove it wrote at least one checkpoint.
+    assert cli.main(["continuity", "park", "r", "-a", "nobody"], transport=t) == 2
+    assert "CHECKPOINT NOT WRITTEN" in capsys.readouterr().err
+
+
+def test_cli_park_role_filter_preserves_other_held_role_checkpoint(capsys):
+    import json as _j
+    from coord_engine import okf
+
+    t = FakeTransport()
+    old_ref = "team/r/member/amy/continuity/role-real/latest.json"
+    t.put("team/r/roles/real.md",
+          f"---\ntype: Role\nsla_hours: 24\ncheckpoint_ref: {old_ref}\n---\n")
+    t.put("team/r/roles/acceptance.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    t.put(old_ref, _j.dumps({"objective": "real work"}))
+    cli.main(["roles", "claim", "r", "real", "-a", "amy"], transport=t)
+    cli.main(["roles", "claim", "r", "acceptance", "-a", "amy"], transport=t)
+    capsys.readouterr()
+
+    assert cli.main([
+        "continuity", "park", "r", "-a", "amy", "--role", "acceptance",
+        "--objective", "acceptance nonce",
+    ], transport=t) == 0
+
+    assert okf.parse_frontmatter(t.store["team/r/roles/real.md"])["checkpoint_ref"] == old_ref
+    acceptance = okf.parse_frontmatter(t.store["team/r/roles/acceptance.md"])
+    assert acceptance["checkpoint_ref"] != old_ref
+    assert _j.loads(t.store[acceptance["checkpoint_ref"]])["objective"] == "acceptance nonce"
+    assert cli.main([
+        "continuity", "park", "r", "-a", "nobody", "--role", "acceptance",
+    ], transport=t) == 2
+    assert "CHECKPOINT NOT WRITTEN" in capsys.readouterr().err
 
 
 def test_cli_briefing_full_and_empty_store(capsys):
@@ -1529,8 +1666,8 @@ def test_park_respects_per_role_sla(capsys):
     t.put("team/r/roles/tight.md", "---\ntype: Role\nsla_hours: 0.001\n---\n")  # ~4s SLA
     t.put("team/r/roles/tight/leases/amy-" + __import__("hashlib").sha1(b"amy").hexdigest()[:6] + ".md",
           "---\ntype: Lease\nagent: amy\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
-    cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
-    assert "nothing to park" in capsys.readouterr().out    # stale vs the role's OWN sla
+    assert cli.main(["continuity", "park", "r", "-a", "amy"], transport=t) == 2
+    assert "nothing to park" in capsys.readouterr().err    # stale vs the role's OWN sla
 
 
 def test_park_refuses_to_claim_nothing_when_role_state_is_unknown(capsys):
@@ -1581,18 +1718,32 @@ def test_park_unreadable_role_doc_is_unknown_not_no_roles(capsys):
     assert "nothing to park" not in cap.out
 
 
-def test_park_genuinely_no_roles_still_exits_zero(capsys):
-    """The over-correction guard: holding nothing is a real, knowable answer.
-
-    Passes with AND without the fix, by design — it exists to catch a fix that
-    turns every park into UNKNOWN, not to catch the regression.
-    """
+def test_park_genuinely_no_roles_fails_loud(capsys):
+    """A clean rc must certify that park wrote at least one checkpoint."""
     t = FakeTransport()
     rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
     cap = capsys.readouterr()
-    assert rc == 0, f"no roles is a knowable answer, not a failure: rc={rc}"
-    assert "nothing to park" in cap.out
-    assert "CHECKPOINT NOT WRITTEN" not in cap.err
+    assert rc == 2, f"empty park must be nonzero: rc={rc}"
+    assert "nothing to park" in cap.err
+    assert "CHECKPOINT NOT WRITTEN" in cap.err
+    assert not [p for p in t.store if "/continuity/" in p]
+
+
+def test_park_selected_unheld_role_does_not_invert_error_message(capsys):
+    """The rc-2 message must not claim the absent lease is held."""
+    t = FakeTransport()
+    t.put("team/r/roles/gamma.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+
+    rc = cli.main([
+        "continuity", "park", "r", "-a", "amy", "--role", "gamma"],
+        transport=t)
+    cap = capsys.readouterr()
+
+    assert rc == 2
+    assert "does not hold fresh role gamma" in cap.err
+    assert "holds fresh role gamma" not in cap.err
+    assert "CHECKPOINT NOT WRITTEN" in cap.err
+    assert not [p for p in t.store if "/continuity/" in p]
 
 
 def test_park_failed_snapshot_write_leaves_ref_unchanged(capsys):
@@ -1849,7 +2000,13 @@ def test_briefing_includes_pending_reviews(capsys):
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
     out = _j.loads(capsys.readouterr().out)
-    assert [r["name"] for r in out.get("pending_reviews", [])] == ["pr-5"]
+    pend = out.get("pending_reviews", [])
+    assert [r["name"] for r in pend
+            if r.get("type") == "review-pending"] == ["pr-5"]
+    # reconcile just wrote a fresh projection: the fold must disclose it served
+    # from it (the annotation read side's no-silent-staleness contract).
+    src = [r for r in pend if r.get("type") == "review-source"]
+    assert src and src[0]["source"] == "projection"
 
 
 def test_briefing_text_includes_pending_reviews(capsys):
@@ -2073,6 +2230,13 @@ def test_briefing_forge_degraded_exits_zero_other_sections_intact(capsys, monkey
     _seed_forge(t, agent="bob")
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     cli.main(["reconcile", "r"], transport=t)
+    # Pin the fold onto the RAW scan by dropping the reconcile-built forge
+    # projection (a team never projected behaves exactly as before): this test
+    # is about the raw fan-out's degraded handling, which a fresh projection
+    # deliberately bypasses.
+    agg = json.loads(t.store["team/r/_coord/summaries.json"])
+    agg.pop("forge", None)
+    t.store["team/r/_coord/summaries.json"] = json.dumps(agg)
     capsys.readouterr()
 
     assert cli.main(["briefing", "r", "--agent", "bob"], transport=t) == 0
@@ -2674,34 +2838,6 @@ def test_public_reads_healthy_no_degraded_marker(capsys):
     cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
     assert not any(r.get("type") == "read-degraded"
                    for r in json.loads(capsys.readouterr().out))
-
-
-# --- ENG-1-5: listen daemon per-tick guard ---------------------------------
-
-def test_listen_daemon_survives_tick_exception(monkeypatch, capsys):
-    """A:25 — the load-bearing `listen` daemon (`while True: tick()`) must survive
-    an UNMODELED tick exception: it degrades that tick and continues, never lets
-    the fault kill the watcher."""
-    import coord_engine.cli as _cli
-    t = FakeTransport()
-    _cli.main(["reconcile", "r"], transport=t)
-    calls = {"n": 0}
-
-    def boom(*a, **k):
-        calls["n"] += 1
-        raise RuntimeError("unmodeled tick fault")
-
-    monkeypatch.setattr(_cli, "_run_listen_tick", boom)
-
-    def stop_after_first_sleep(_):
-        raise KeyboardInterrupt  # break out of the daemon loop cleanly
-
-    monkeypatch.setattr(_cli.time, "sleep", stop_after_first_sleep)
-    capsys.readouterr()
-    rc = _cli.main(["listen", "r", "--agent", "amy", "--interval", "1"], transport=t)
-    assert rc == 0, "daemon must exit cleanly, not propagate the tick RuntimeError"
-    assert calls["n"] == 1
-    assert "LISTEN DEGRADED" in capsys.readouterr().err
 
 
 # --- ENG-1-6: registered top-level error envelope --------------------------

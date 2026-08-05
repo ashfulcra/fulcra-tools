@@ -35,21 +35,77 @@ allows; where it doesn't, follow them as prose:
    parks every held role with a checkpoint. Handing off to a successor session?
    The checkpoint's CONTENT has rules of its own — see
    [Parking for a successor](#parking-for-a-successor-handoff-doctrine).
-4. **Inbox cadence:** while live, poll your inbox at least every 30 minutes. If your
-   platform has a durable scheduler, install the listener instead of trusting yourself.
+4. **Inbox cadence:** while live, read your queue and inbox at least every 30 minutes. If your
+   platform has a durable scheduler, arm ONE scheduled wake that runs
+   `coord-engine queue <team> --agent <you>` instead of trusting yourself — a schedule, never a
+   resident listener (those are retired; see the pickup note below).
 
 An agent that beats presence but has no fresh snapshot is flagged `continuity-stale` by `coord-engine health`.
 
+## Timeline visibility: the checkpoint channel
+
+Every **successful** `continuity snapshot` and `continuity park` also emits one
+moment to the account's **Agent Checkpoint** channel, so a human watching the
+Fulcra timeline sees the fleet checkpointing instead of inferring it from files
+nobody opens. The moment carries the same four-dimension identity tags a bus
+event does (`agent:` / `platform:` / `harness:` / `model:` plus the base tag),
+from the same `tags.json` registry — one `bus-v3 tag-provision` covers both.
+Its note is compact JSON:
+
+```json
+{"v":1,"kind":"checkpoint","agent":"amy","task":"role-reviewer",
+ "objective":"first 140 chars of the objective",
+ "path":"team/r/member/amy/continuity/role-reviewer/latest.json"}
+```
+
+`objective` is a hard 140-character slice (no ellipsis) — the note is a
+timeline label and the snapshot at `path` holds the full text.
+
+**Reads never emit.** `resume`, `checkpoint --role`, and `briefing` are pure
+reads; a moment for a read would claim state was saved when nothing was.
+
+Emission is driven by one document, `team/<team>/_coord/bus-v3/checkpoints.json`
+(**separate from `records.json` on purpose** — old engines fail their queue
+closed on a bus authority carrying fields they do not know; see
+[bus v3 setup step 5](../../docs/coord/BUS-V3.md#5-seed-the-checkpoint-channel-config)).
+With no such document the engine emits nothing and says nothing, so
+pre-adoption teams see no change at all. Malformed bytes are loud every time
+and are never auto-repaired.
+
+### The fail-open rule (deliberately the inverse of park's)
+
+`park` is loud and **non-zero** when it cannot write a checkpoint
+(`CHECKPOINT NOT WRITTEN`) — park runs as a session exits, so a silent no-op
+discards the state the next session wakes on while nobody is watching.
+
+Emission is the opposite:
+
+> **The checkpoint file is the source of truth. The moment is its shadow.**
+
+Absent config, malformed config, an unreadable store, a refused or raising
+record write — every one of them still writes the checkpoint, prints **one
+line** on stderr (silence in the absent case), and leaves the exit code
+**unchanged**. Losing the shadow costs a row in a visualization; failing the
+park over it would cost the checkpoint itself. Never read a `checkpoint
+moment:` line as a failed park — the park's own rc and its
+`parked <role> -> <path>` lines are what say whether state was saved.
+
 ## Which adapter automates this for you
+
+> **Pickup column note (bus v3, 2026-07-27):** resident listeners are retired —
+> pickup is now the v3 queue read (`coord-engine queue <team> --agent <you>`) on
+> each scheduled wake ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)).
+> Listener entries below describe the pre-v3 mechanism; keep the *schedule*,
+> replace the listener tick with a queue-reading wake.
 
 | Harness | Lifecycle (rules 1–3) | Pickup (rule 4) |
 |---|---|---|
-| Claude Code (CLI/desktop) | hooks: SessionStart→resume+briefing, PreCompact/SessionEnd→park (`fulcra-agent-automation/scripts/claude-code/install-claude-code.sh`) | launchd/cron listener (`scripts/install-listener.sh`) |
-| Claude Cowork (desktop) | same as Claude Code (same core; same settings.json) | same listener |
+| Claude Code (CLI/desktop) | hooks: SessionStart→resume+briefing, PreCompact/SessionEnd→park (`fulcra-agent-automation/scripts/claude-code/install-claude-code.sh`) | queue read on each scheduled wake (listener + its installer removed, cleanup slice 1) |
+| Claude Cowork (desktop) | same as Claude Code (same core; same settings.json) | same queue-read wake |
 | Claude web (claude.ai) | prose only — run rule 1 when the skill loads; rule 3 before ending | no background pickup; use cloud routines that open a duty-cycle session |
-| Codex | `~/.codex/hooks.json` + app-thread automation (`scripts/codex/install_codex_watch.py`) — the automation prompt embeds rules 1–3 | the same automation ticks the inbox |
-| OpenClaw | managed block in `HEARTBEAT.md`/`BOOT.md` (`scripts/openclaw/install_openclaw.py`) embeds rules 1–2; rule 3 (park) can't be automated from a prose block (no shutdown hook) — follow it as prose | HEARTBEAT tick |
-| Hermes (Daytona sandbox) | fhd provisioner installs the Claude Code adapter inside the sandbox at provision time (standalone hermes-daytona repo) | listener installed at provision time |
+| Codex | `~/.codex/hooks.json` + app-thread automation (`fulcra-agent-automation/scripts/codex/install_codex_watch.py`) — the automation prompt embeds rules 1–3 | the same automation ticks the inbox |
+| OpenClaw | managed block in `HEARTBEAT.md`/`BOOT.md` (`fulcra-agent-automation/scripts/openclaw/install_openclaw.py`) embeds rules 1–2; rule 3 (park) can't be automated from a prose block (no shutdown hook) — follow it as prose | HEARTBEAT tick |
+| Hermes (Daytona sandbox) | fhd provisioner installs the Claude Code adapter inside the sandbox at provision time (standalone hermes-daytona repo) | queue read on the scheduled wake armed at provision time (the bundled listener retired with the stack) |
 
 ## Where to start — the re-entrancy probes
 
@@ -61,8 +117,8 @@ re-entry is always safe:
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Engine + auth usable? | `coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
-| Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
-| Latest snapshot fresh? | `coord-engine continuity resume <team> <agent>` | header timestamp < your work cadence | write one now (rule 2) |
+| Resumable snapshot for me? | `coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the `No continuity snapshot found.` / `checkpoint age: unknown` pair | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
+| Latest snapshot fresh? | `coord-engine continuity resume <team> <agent> --max-age <cadence>` | exits 0 and prints the checkpoint age | write one now (rule 2); rc 2 means missing, unreadable-age, or older than the bound |
 | Am I continuity-stale? | `coord-engine health <team>` | your agent row has no `continuity-stale` flag | rules 2–3, then re-check |
 
 Snapshot present → read the printed brief (objective / next actions / open questions / decisions) and
@@ -95,17 +151,38 @@ coord-engine continuity snapshot <team> <agent> <task> \
 # on waking (fresh session / cron), get a resume brief — deterministic, not a prose re-read
 coord-engine continuity resume <team> <agent> <task>
 coord-engine continuity resume <team> <agent>          # newest across all the agent's tasks
+coord-engine continuity resume <team> <agent> --max-age 1h  # fail rc 2 if missing/stale
 ```
 
 ## Role checkpoints, park, and briefing (A6)
 ```bash
 coord-engine continuity checkpoint <team> --role <r> [--ref PATH]  # get/set the role's durable resume point
-coord-engine continuity park <team> [--agent X] [--objective "…"]  # session exit: snapshot EVERY held role + set its checkpoint_ref
+coord-engine continuity park <team> [--agent X] [--role R] [--objective "…"]  # session exit: snapshot every held role (or just R) + set its checkpoint_ref
 coord-engine briefing <team> [--agent X] [--json]                  # session start: presence + board + inbox + needs-me + pending reviews + latest snapshot in ONE call
 ```
 - `park` is the session-exit verb: each role you hold (fresh lease) gets a snapshot and the role doc's
   `checkpoint_ref` points at it — the next holder (or your next session) resumes from there via
-  `checkpoint --role`.
+  `checkpoint --role`. **`--role R` narrows it to exactly one role** (you must hold a fresh lease on
+  `R`); with no flag it parks **every** held role. Use `--role` to confine a park to a dedicated role
+  without touching your other roles' checkpoints — that is how `acceptance pair` parks safely against
+  a loaded team store. It exits rc 2 with `CHECKPOINT NOT WRITTEN` when you hold no fresh roles (or,
+  under `--role`, no fresh lease on that one), and rc 1 with the same `CHECKPOINT NOT WRITTEN` banner
+  when the role state was *unreadable* rather than empty — retry that one before ending the session.
+  Success therefore proves at least one checkpoint was written. Each written checkpoint also emits
+  one timeline moment — see [the checkpoint channel](#timeline-visibility-the-checkpoint-channel);
+  that emission can never change park's exit code.
+- `resume` prints checkpoint age on every read. JSON adds the derived
+  `checkpoint_age_seconds` field without changing the stored snapshot. With no
+  snapshot, JSON is the explicit object
+  `{"snapshot":null,"checkpoint_age_seconds":null,"error_code":null}` (not
+  bare `null`). A timestamp up to one second ahead is treated as zero-age clock
+  skew; farther-future `created_at` is invalid/unknown age and fails freshness
+  like an unparseable timestamp. `--max-age DURATION` accepts
+  seconds/minutes/hours/days (`30s`, `15m`, `12h`, `2d`) through
+  `999999999d`. It exits rc 2 when the duration is invalid, the age is unknown,
+  or the checkpoint exceeds the bound; JSON distinguishes those branches as
+  `invalid-max-age`, `checkpoint-age-unknown`, and `checkpoint-stale` in
+  `error_code` (successful reads carry `null`).
 - `briefing` is the session-start verb and **tolerates absent add-ons** — with no presence/directives
   installed the sections are simply empty; it never fails a cold start.
 

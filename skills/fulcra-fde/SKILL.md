@@ -15,9 +15,9 @@ improvise engagement state.
 
 - **Use real Fulcra data — never simulate.** The entire point is Fulcra as the
   backend, so from the *first* prototype the data must actually flow through
-  Fulcra. Read the user's **existing** data types wherever they fit (HRV, heart
-  rate, steps, location, workouts, sleep, calendar — whatever the platform
-  already collects), and for anything Fulcra doesn't already carry, **create
+  Fulcra. Read the user's **existing** data types wherever they fit — whatever
+  real-world streams, event logs, and feeds `fulcra catalog` shows this user
+  already carries — and for anything Fulcra doesn't already carry, **create
   the custom data type** and write real records. Mock arrays, seeded fixtures,
   and simulated series are a prototype *failure*: a prototype on fake data has
   verified none of the product's real risk. If you can't yet get real data

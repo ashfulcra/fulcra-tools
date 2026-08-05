@@ -42,7 +42,10 @@ so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-13 on
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
-> repo**. Two releases landed inside 24 hours to produce this stamp. The
+> repo**. Two releases landed inside 24 hours to produce this stamp. **This stamp
+> is 0.1.38 and has NOT been re-verified against 0.1.39, which is what is
+> installed on the fleet as of 2026-08-03** — treat any 0.1.39 delta below as
+> unknown rather than absent, and re-stamp when you next verify the surface. The
 > published OpenAPI is **not** a complete route list (`/ingest/v1/record/batch`
 > is live and unpublished), so absence from the spec is never evidence a route
 > is gone — probe it (404 gone, 401 exists) before concluding anything.
@@ -134,6 +137,20 @@ is battle-tested at load.
 - Tier 2: `POST|GET|PUT|DELETE /user/v1alpha1/annotation[/{id}]`, soft-delete
   with `POST /{id}/cancel_deletion` to restore. JSON-schema discovery:
   `GET /user/v1alpha1/schema/annotation`.
+- **Setting `spec` is a SECOND call, and `PUT` answers 303 (verified live
+  2026-08-04).** A definition created over the API comes back with
+  `spec: null` — the create call will not take one. Set it afterwards: `GET
+  /user/v1alpha1/annotation/{id}`, add e.g. `{"spec": {"default_note": "…"}}`
+  to the document, `PUT` the whole thing back. **The `303` that PUT returns IS
+  success** — not a redirect to chase, not an error. Do not trust the status
+  code either way: **verify by re-GET** and confirm `spec` is no longer null.
+  This matters beyond tidiness. The timeline **visual explorer wants an
+  app-shaped definition — spec, tags, and a fresh name — and a spec-less,
+  API-born definition may not list at all.** It exists, records land in it,
+  reads work, and the human sees nothing. That failure mode cost a live
+  channel: coord's own bus was invisible until it was recreated app-shaped
+  (see [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md), "Setup (once per
+  account)").
 
 **Records** (instances on the timeline) became **CLI-writable as of 0.1.37**,
 with a `delete` verb that appends a tombstone rather than erasing anything
@@ -263,6 +280,33 @@ Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list
 `tags`). Tier 2: `GET|POST /user/v1alpha1/tag`; lookup
 `GET /user/v1alpha1/tag/id/{id}` or `GET /user/v1alpha1/tag/name/{name}`; delete
 `DELETE /user/v1alpha1/tag/id/{id}`.
+
+Live-verified surface (2026-08-04), and the one gotcha:
+
+```bash
+TOKEN=$(fulcra-api auth print-access-token)
+curl -sS https://api.fulcradynamics.com/user/v1alpha1/tag \
+  -H "Authorization: Bearer $TOKEN"                       # -> [{"name":…,"id":…}, …]
+curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/tag \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "agent-coordination-bus"}'                 # 409 = already exists
+```
+
+- `GET` lists **`[{name, id}]`** for the whole account — that is how you turn a
+  name you know into the id you need. `POST {"name": …}` creates; a **409 means
+  the tag already exists**, which is a benign outcome for any
+  provision-if-absent flow (list first, reuse, and never create a second tag
+  with the same name — two ids for one label splits its timeline in half).
+- **A record's `tags` must be tag UUIDs, never names.** The ingest endpoint
+  validates them as uuids and rejects the whole write otherwise, so anything
+  that tags records at volume resolves names to uuids **once**, out of band,
+  and caches — coord keeps that mapping in a durable per-team registry
+  (`_coord/bus-v3/tags.json`, see
+  [`docs/coord/examples/README.md`](docs/coord/examples/README.md)) precisely so
+  the write path spends no round trip on it.
+- Tags are the facet the **timeline visual explorer** groups by. A record's
+  `sources` is queryable but is not that facet — if you want a human to be able
+  to slice your records in the app, they need tags.
 
 ## Data queries (read-side, tiers 1 & 2)
 

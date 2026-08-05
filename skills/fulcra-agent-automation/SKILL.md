@@ -9,6 +9,16 @@ metadata: { "openclaw": { "emoji": "⏱️" } }
 
 # Fulcra Agent Automation
 
+> **BUS V3 (2026-07-27, operator-ordered): the listener half of this skill is RETIRED.**
+> Agents read their event queue on every wake — one bounded `get-records` query
+> ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)) — and run **no resident
+> listener**. Do not install new listeners (§2) or listener-tick automation; hosts still
+> running one should stand it down. The **heartbeat** (§1: scheduled `reconcile` +
+> projection + digest) and the **wake-on-schedule adapters** (§3, repurposed to trigger
+> a queue-reading wake rather than a listen tick) remain current. The `listen` verb
+> itself was REMOVED from the engine on 2026-08-03 (PR #523); invoking it is now an
+> argparse error.
+
 Ties the coord skills together for **unattended** operation. `fulcra-agent-reconcile` heals a team's
 index/views, but someone has to run it; this skill **schedules** it, and makes wake-ups
 (cron/heartbeat) **resume structured continuity** first. Scheduling is a single, platform-specific action
@@ -26,15 +36,15 @@ fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`):
 | Engine usable? | `coord-engine doctor <team>` | exits 0 and last line is `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT install jobs on a broken engine |
 | Heartbeat installed? | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.heartbeat.<team>.plist` (macOS) or `crontab -l \| grep coord-engine.heartbeat.<team>` (Linux) | file/line exists | §1 (install the heartbeat) |
 | Heartbeat loaded? | `launchctl list \| grep coord-engine.heartbeat.<team>` (macOS only) | a line appears | reinstall via §1 (plist exists but is not loaded — a reboot-era failure mode) |
-| Listener installed + loaded? | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.listener.<team>.*.plist` and `launchctl list \| grep coord-engine.listener.<team>.` | file matches AND a launchctl line appears — then confirm the plist's `ProgramArguments` names the intended `<agent>` (the suffix is sanitized-agent+checksum; a wildcard can match a DIFFERENT agent's listener; never grep the raw id — colons sanitize to dashes) | §2 (install the listener) |
+| Listener installed + loaded? (RETIRED — see banner) | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.listener.<team>.*.plist` and `launchctl list \| grep coord-engine.listener.<team>.` | **inverted since bus v3**: this probe passing means a retired listener is still running — stand it down: `launchctl bootout gui/$(id -u)/<label> && rm ~/Library/LaunchAgents/<label>.plist` (macOS) or delete its crontab line (Linux); the installer script was removed with the listener stack | nothing — a missing listener is now the healthy state; do NOT enter §2 |
 | Views actually fresh? | `coord-engine health <team>` | this host's row shows a recent `last reconcile` | jobs exist but are not ticking — check `log show` / cron mail, then reinstall |
 | Claude Code hooks installed? | `ls ~/.claude/fulcra-agent-hooks/` | 3 scripts | §3 (install-claude-code.sh) |
 | Codex watch coord-first? | `grep -l "coord watch" ~/.codex/hooks.json` | file matches | §3 (install_codex_watch.py) |
 | OpenClaw block present? | `grep "fulcra-agent:begin" <workspace>/HEARTBEAT.md` | one match | §3 (install_openclaw.py) |
 
 All probes pass → nothing to install; re-running any installer is safe anyway (reinstall replaces the
-job, never duplicates — CI-tested for both the launchd and cron paths in
-`packages/coord-engine/tests/test_installers.py`). Re-running after this upgrade also MIGRATES any
+job, never duplicates — CI-tested for the heartbeat's launchd and cron paths; the listener installer
+and its test suite were removed with the retired stack). Re-running after this upgrade also MIGRATES any
 coord2-era artifacts (old `fulcra-coord2-hooks/` dir, `coord2-watch-<agent>` automation, `coord2 watch`
 hooks marker, `fulcra-coord2:begin` fence) to the new names in place — old artifacts removed, zero
 orphans (host-simulation-tested in `packages/coord-engine/tests/test_adapter_installers.py`).
@@ -93,117 +103,88 @@ standing rule ([`AGENTS.md` → Fulcra platform surface](../../AGENTS.md)) alrea
 Projection is the sanctioned replacement; do not switch the legacy writer back on to get timeline
 annotations — turn projection on instead.
 
-## 2. Listener — await new directives, responses, and verdicts (the reply leg)
-Every agent that sends an ask (`tell`/`broadcast`/`remind`/`review request`) should **arm a listener**:
-the send verbs now print the exact `listen` line to run for replies. `listen` is the engine-owned await
-leg — one implementation of the diff/notify logic that the launchd tick, live sessions, Codex, and
-headless all delegate to. Each tick id-diffs three sources against a per-agent state file: **new inbox
-directives** for the agent — including directives routed to a **role you hold a fresh lease on** (the
-same fold `inbox`/`briefing` show), excluding unscheduled self-authored rows (self-tells and your own
-broadcasts do not wake you; `remind` yourself does, at WHEN); **responses to directives you own** (the return of
-`respond`); and **new verdicts on reviews you requested** (the await leg of `review request`, including
-the terminal `SETTLED <slug>` line when a review closes). It also surfaces **orphan review dirs** (a
-`<slug>/` verdicts dir with no `<slug>.md` doc) as a one-time `ORPHAN` event — visibility only, repair
-stays a maintainer action. One line per new item — `DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`,
-or one JSON object per line under `--json`. Quiet ticks print nothing. A transport failure prints
-`LISTEN DEGRADED: <what>` to stderr **once per source per streak** across six independent sources —
-`inbox`, `responses`, `orphans`, `verdicts`, `roles` (an unreadable role-lease listing while
-resolving role-routed directives; independent so a chronic role failure can't mask a fresh inbox
-outage), and `tail` (the shared non-head budget). Literal-agent and wildcard directives form a
-protected head: they scan first under `COORD_LISTEN_HEAD_BUDGET`; role/response/review history shares
-`COORD_LISTEN_TAIL_BUDGET`. `listen-head-degraded` means the caller's own head is UNKNOWN;
-`listen-tail-degraded` means only the history/role tail truncated. A degraded read never advances
-state, so the pending event re-surfaces on recovery.
+## 2. Awaiting replies — the reply leg is the queue read (listener REMOVED)
 
-**A listener loop must never die on degradation.** Degraded folds back off and keep beating; only
-affirmative delivery or the configured horizon exits the loop. One-shot adapters return degradation
-nonzero so their scheduler can apply that backoff, but degradation is never interpreted as a clean
-queue or as permission to retire the listener.
+**There is no listener.** Replies to an ask (`tell`/`broadcast`/`remind`/`review request`)
+arrive as bus v3 events; you await them by reading your event queue on your next
+scheduled wake:
 
-`listen` is the reply-leg watcher; the load-bearing **wake** read is the composite `briefing` path.
-When a scheduled tick's `briefing`/`inbox` degrades, quiet is NOT clear — apply the raw-bus fallback
+```
+coord-engine queue <team> --agent <you>
+```
+
+The send verbs print exactly that as their breadcrumb — `tell`/`broadcast` echo
+`replies: coord-engine queue <team> --agent <you>` and `review request` echoes
+`await verdicts: coord-engine queue <team> --agent <me>`.
+
+The `coord-engine listen` verb — the resident diff/notify watcher this section used
+to document (inbox/response/verdict id-diffing, `LISTEN DEGRADED` streaks, the
+head/tail budgets) — was retired as the wake surface on 2026-07-27 and **removed from
+the engine entirely on 2026-08-03 (PR #523)**: running it is an argparse usage error,
+its env knobs (`COORD_LISTEN_*`, `COORD_LISTENER_STATE`) are gone, and its durable
+`listen-state.json` shards are historical residue (see the takeover note in
+GET-ON-THE-BUS §5). The mechanics live in git history, not here.
+
+**A scheduled wake must never die on degradation** (the doctrine outlives the
+watcher): a degraded queue read or fold backs off and re-fires on the next tick;
+only affirmative delivery ends the wait. Degradation is never interpreted as a
+clean queue, and never as permission to stop waking.
+
+The load-bearing **wake** read is the bus v3 queue read
+(`coord-engine queue <team> --agent <you>`), with `briefing` as the durable-state fold you run after it.
+When a scheduled tick's `queue`/`briefing`/`inbox` degrades, quiet is NOT clear — apply the raw-bus fallback
 in §3 (**Degraded briefing → fail-closed raw-bus fallback**): raw-list + direct-read the unacked
 directives before reporting, never conclude "no work" off a degraded read.
 
-```
-coord-engine listen <team> --agent <agent> [--interval N=60] [--once] [--json] [--verbose]
-```
-`--once` runs exactly one tick and exits **0** on a clean tick (including "nothing new") or **3** when
-the tick itself captured degradation (transport failure, unreadable source) — so a scheduler treats no
-output as "nothing new", while a monitoring wrapper can distinguish a degraded tick from a quiet one
-without parsing stderr. Long-running mode loops at `--interval` seconds and exits cleanly on SIGINT.
-
 ### Per-platform — pick the leg that matches how the agent runs
-- **launchd / cron (unattended host):** the bundled installer — unchanged UX. The scheduled job's tick
-  delegates to `listen --once` and keeps the notification + consent-gated wake around it.
-  ```bash
-  ./scripts/install-listener.sh <team> <agent> [active-minutes]            # adaptive: default 1m/30m tail/30m idle
-  ./scripts/install-listener.sh <team> <agent> 1 --tail-minutes 30 --idle-minutes 60
-  ./scripts/install-listener.sh <team> <agent> 1 --wake-cmd "…headless…"    # + consent-gated wake
-  ./scripts/install-listener.sh <team> <agent> 10 --fixed                  # legacy fixed cadence
-  ./scripts/install-listener.sh --uninstall <team> <agent>
-  ```
-  On NEW events it posts a macOS notification (or a log line) and, only if you consented to `--wake-cmd`
-  at install, runs your wake command. A healthy quiet tick emits nothing by default
-  (`COORD_LISTENER_VERBOSE=1` restores diagnostic quiet lines). Listener stderr is never discarded:
-  a newly emitted `LISTEN DEGRADED` diagnostic is forwarded and also wakes the consented adapter so
-  the session can run the targeted fallback. Wake adapters receive fixed advisory environment fields
-  (`COORD_LISTENER_TEAM`, `COORD_LISTENER_AGENT`, `COORD_LISTENER_DEGRADED`,
-  `COORD_LISTENER_RETRY`, `COORD_LISTENER_EVENT_REFS`) plus the legacy advisory
-  `COORD_LISTENER_OUTPUT`, and must still fetch the authoritative briefing.
-  `COORD_LISTENER_EVENT_REFS` contains only validated `KIND:canonical-slug` pairs;
-  adapters may use it for targeted orientation but must never evaluate it as code.
-  Raw titles, outcomes, authors, and bodies remain excluded from bundled wake
-  prompts. `--yes` skips BOTH the schedule prompt and the wake-command
-  acknowledgement — only use it when that consent was already given. By default the scheduler ticks
-  every active minute, but the model-free tick uses a local due-time gate: affirmative events keep
-  the work tail hot, healthy quiet polling backs off to `--idle-minutes`, and degradation follows a
-  separate exponential retry backoff capped at that idle cadence. A failed wake is durably retried on
-  later ticks even though `listen` has already advanced its event cursor; wake
-  delivery has its own exponential backoff capped at the idle cadence, so a
-  persistently unavailable harness cannot spawn a model attempt every hot minute. The idle
-  interval is the maximum added pickup latency until Fulcra exposes push; `--fixed` preserves the old
-  behavior. `COORD_LISTENER_FORCE=1` bypasses only the due gate, while
-  `COORD_LISTENER_MARK_ACTIVE=1` also restarts the hot tail for trusted lifecycle adapters. Hardened like the heartbeat:
-  validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent project's wake
-  silently 401'd on exactly this), `plutil` lint, install-time self-test.
-- **Claude Code live session:** THE one command is `coord-engine listen` wrapped in the harness's
-  background monitor — no hand-rolled watcher. The monitor surfaces each event line
-  (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`/`ORPHAN`) into the session as it arrives, closing the
-  live-session gap where an agent waiting on a reply used to poll by hand:
-  ```bash
-  coord-engine listen <team> --agent <agent> --interval 60
-  ```
-- **Codex:** one automation-prompt line, ticked once per automation run:
-  ```bash
-  coord-engine listen <team> --agent <agent> --once
-  ```
-- **headless / any foreground process:** run the loop in the foreground and stream its output:
-  ```bash
-  coord-engine listen <team> --agent <agent>
-  ```
+- **launchd / cron (unattended host): REMOVED with the retired stack (cleanup slice 1,
+  2026-07-28)** — do not install; stand down any survivor per the probe table. The
+  bundled installer's scheduled tick, notification/consent-gated wake chain, adaptive
+  due-time gate, and `COORD_LISTENER_*` advisory env fields all went with it (git
+  history has the details). What replaces it on an unattended host is a plain
+  scheduled wake (launchd/cron) running the queue read — see
+  [`docs/coord/GET-ON-THE-BUS.md`](../../docs/coord/GET-ON-THE-BUS.md) §6 for the
+  crontab recipe, and keep the heartbeat (§1) for reconcile.
+- **Every platform (Claude Code live, Codex, headless): the queue read.** These platforms
+  once ran resident `listen` variants; the verb no longer exists. The pickup on every
+  platform is the bus v3 queue delivery (`coord-engine queue <team> --agent
+  <agent>`) on the wake the platform already has (automation tick, scheduled
+  job, session start). Under cursor v2, the harness must leave the token
+  uncommitted while the agent works and run `queue commit` only after every
+  event in the staged batch has a durable terminal classification, supplied as
+  one `--result <record-id>=<outcome>` per event. A harness consuming
+  `queue --json` parses the single stdout object and switches on `type`:
+  `queue-result` (state `DATA`|`CLEAR`) is the whole success surface, and
+  every nonzero exit yields one `queue-error` that must be reported with its
+  `state` and `error_code` verbatim — the states are not interchangeable:
+  `INVALID` (`*-invalid`, `event-id-missing`) is corrupt human-fixable data
+  that no retry will clear (surface it to the operator; never delete or
+  recreate the named file to "unstick" the read); `UNKNOWN` (`*-read-failed`,
+  `window-unknown`, `consume-audit-failed`, `stage-race-unverified`) is a
+  transport doubt that backoff-and-retry handles; `INCOMPATIBLE`
+  (`engine-incompatible`, `cas-unsupported`, `authority-not-v2`) means
+  upgrade or reconfigure, not retry; `ABSENT` (`config-absent`) means the
+  bus is not set up; `REFUSED` (`usage`, `results-incomplete`,
+  `stale-token`) means the invocation itself was wrong.
 
 For push-capable harnesses and the fleet security contract, see
-[`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). OpenClaw can use the
-bundled fixed adapter at `scripts/wake/openclaw.sh`; Codex Desktop and Claude Code UI sessions retain
-the documented safety nets appropriate to their harness. Codex's stable exact-thread adapter is
-`scripts/wake/codex.sh`; it uses `codex exec resume` without bypassing approvals or sandboxing:
-```bash
-COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<repo> \
-  ./scripts/install-listener.sh <team> <agent> 1 \
-  --wake-cmd "COORD_CODEX_THREAD_ID=<thread-id> COORD_CODEX_CWD=<repo> /absolute/path/to/scripts/wake/codex.sh"
-```
+[`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). The bundled
+`wake/openclaw.sh` and `wake/codex.sh` adapters were removed with the listener stack (cleanup
+slice 1); directed wakes are now the wake router's job — its adapters are **host-local**
+(`$COORD_WAKE_ADAPTER_DIR/<adapter>.sh` on the executor host, e.g. `codex-exec-resume` still using
+`codex exec resume <thread-id>` without bypassing approvals or sandboxing), registered per agent in
+`_coord/router/config.json`. `wake/macos-notify.sh` remains in-repo as a live router adapter.
 
-**Single-flight — one watcher identity per agent.** Run exactly one listener per `<agent>` on a host:
-the per-agent state file is not a concurrency lock, so two listeners for the same agent (or a canonical
-listener running alongside a legacy alias listener for the same identity) race the state and double-fire
-or drop events. Serialize ticks (`--once` on a scheduler, or a single long-running `--interval` loop —
-never both), coalesce overlapping schedules onto one cadence rather than stacking timers, and retire any
-legacy alias listener before arming the canonical one (the scheduling-overlap P1). Distinct agents get
-distinct state files and run independently; the constraint is per-identity.
+**Single-flight remains an efficiency rule, not a correctness assumption.**
+The listener-era cursor could lose work when two same-agent wakes overlapped.
+Cursor v2 CAS-stages one pending batch: a losing wake reloads and replays the
+winner, stale commit tokens cannot advance coverage, and successful commit
+retries are idempotent. Still keep one scheduled wake per agent identity and
+coalesce overlaps—the second wake adds cost and may duplicate processing even
+though it cannot corrupt coverage.
 
 ## 3. Harness adapters — lifecycle wiring
-The listener (§2) delivers inbox notifications, but the **lifecycle contract** — resume-on-wake,
+Bus v3 queue reads (on each wake) deliver events, but the **lifecycle contract** — resume-on-wake,
 snapshot-on-change, park-before-context-loss — is owned by a per-harness adapter that hooks the
 platform's own session events. The contract itself (rules 1–4) lives in
 [`fulcra-agent-continuity` §The lifecycle contract](../fulcra-agent-continuity/SKILL.md); the adapters
@@ -212,11 +193,13 @@ first-generation entries are left inert unless an installer's documented
 migration path explicitly recognizes them. All installers are idempotent
 (reinstall replaces, never duplicates) and ship an `--uninstall` inverse.
 
-**Tick doctrine (shared by every adapter).** Every adapter keys off the same canonical, briefing-led
-tick — though claude-code's hook renders only steps 1–2 (`continuity resume` + `briefing`) as session
-context, leaving the verdict-before-ack duty steps to the review skill's reviewer procedure:
-`continuity resume` → `briefing` (THE entry fold — identity, role inboxes, needs-me incl. pending
-reviews) → for each review request, **slug-exact verdict-before-ack** (write the verdict file, verify
+**Tick doctrine (shared by every adapter).** Every adapter keys off the same canonical, **queue-led**
+tick — though claude-code's hook renders only the first steps (`continuity resume` + `briefing`) as session
+context, leaving the queue read and the verdict-before-ack duty steps to the waking agent:
+`continuity resume` → **`queue` (READ your events, process them, and — under cursor v2 — `queue commit`
+the staged token only after every event has a durable terminal classification; this is the wake surface,
+not `briefing`)** → `briefing` (the durable-state fold — identity, role inboxes, needs-me incl. pending
+reviews; it is what the events do NOT cover, never a substitute for the queue read) → for each review request, **slug-exact verdict-before-ack** (write the verdict file, verify
 `review status` clears you from `pending_required`, only then ack — never ack bare or against a different
 slug) → handle other work → `continuity snapshot` → `usage log` (ATC, when accounts are declared) →
 `continuity park` before session end → **report last**: the human-visible summary is the tick's final
@@ -244,12 +227,19 @@ returned can silently drop a live unacked directive.
   (`fulcra-api file list`), read each `intent:`/`assignee`-shaped doc naming this agent or a role it
   holds, and act on anything open-and-unacked. Only report a genuinely clear inbox when a *non-degraded*
   read returns empty; a degraded read is reported **degraded**, never "no directives."
-- **Reviews — the specific case.** The `briefing`/`needs-me` pending-review fold is wall-clock bounded
+- **Reviews — the specific case.** The `briefing`/`needs-me` pending-review fold is **projection-first**:
+  it serves the reconcile-built `reviews` section of `_coord/summaries.json` when that section is fresh,
+  and discloses which source it used in a trailing `review-source` row — `review fold: projection (as of
+  T)` or `review fold: raw scan — <reason>` (stale / incomplete / malformed / unrecognized). A raw-scan
+  row is a **loud** fallback, never a silent one; read it as "a reconcile is behind", not as an error in
+  your own obligations. The caller's OWN head slugs are raw-tallied on every call either way.
+  The raw scan is wall-clock bounded
   (`COORD_REVIEW_FOLD_BUDGET`, default 45s): on a slow transport it stops early and emits a
   `review-fold-degraded` row (`{scanned, total}`, plus `skipped` when a slug's doc or verdict read
   failed) rather than a clean-looking partial. On that row, fall back to a per-slug `review status`
   sweep over the `review/` listing for the unscanned and skipped remainder, and clear those verdicts
-  before acking.
+  before acking. Full contract: [`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md) → "Where a fold's
+  answer came from".
 
 Codex's repaired watch prompt already does the review sweep; the **directive raw-bus fallback is the
 same discipline for the inbox side** — the installer-generated watcher (§2) and every adapter tick
@@ -282,8 +272,8 @@ Merges SessionStart (matcher `startup|resume|clear|compact`) + PreCompact entrie
 `~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord-first app-thread automation
 under `~/.codex/automations/coord-watch-<agent>/` whose prompt embeds contract rules 1–3 and ticks the
 inbox. The default safety-net cadence is 30 minutes (override with `--interval-minutes`), replacing the
-old 5-minute model-backed poll. For event-driven wake, pair its exact thread id with
-`scripts/wake/codex.sh` through the consent-gated listener command above. The adapter uses the stable
+old 5-minute model-backed poll. For event-driven wake, register its exact thread id with the wake
+router (host-local `codex-exec-resume` adapter in `_coord/router/config.json`). The adapter uses the stable
 `codex exec resume <SESSION_ID>` interface, never passes
 `--dangerously-bypass-approvals-and-sandbox`, and never places raw bus event text in the prompt; the
 resumed agent fetches authoritative briefing state. Deployment precondition: on the first real host, verify the SessionStart hook actually fires
@@ -331,13 +321,15 @@ When a cron/heartbeat wakes an agent to do team work, the wake payload should **
 (this is the structured version of `fulcra-agent-teams`' "read progress.md before acting" rule):
 ```bash
 coord-engine continuity resume <team> <agent>
+coord-engine queue <team> --agent <agent>      # the wake surface: read + process + commit
 ```
 Then process the team inbox and, before concluding, snapshot again
 (`coord-engine continuity snapshot …`) and let the next reconcile heal the views.
 
 ## 5. Recommended loop for a team
 1. **Heartbeat**: `install-heartbeat.sh <team>` — reconcile every ~20m (consent first).
-2. **On wake**: `continuity resume` → do work (`task …`, inbox) → `continuity snapshot` → `reconcile`.
+2. **On wake**: `continuity resume` → `queue` (read/process/commit) → do work (`task …`, inbox) →
+   `continuity snapshot` → `reconcile`.
 3. **Gate merges** with `fulcra-agent-review` (`review status`), and keep roles fresh with
    `fulcra-agent-roles` (`roles status`), escalating vacancies.
 

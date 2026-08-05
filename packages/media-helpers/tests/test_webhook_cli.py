@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
 
 import pytest
 from click.testing import CliRunner
@@ -159,7 +160,7 @@ def test_webhook_starts_emits_ready_and_shuts_down_on_sigterm(
 
 
 def test_webhook_starts_and_shuts_down_on_sigint(tmp_path):
-    """Same as above but with SIGINT (Ctrl-C) — same clean exit path."""
+    """Ready is serve-loop readiness; immediate SIGINT exits cleanly."""
     state_path = tmp_path / "state.json"
     from fulcra_media import state as state_mod
     state_mod.save(
@@ -182,12 +183,23 @@ def test_webhook_starts_and_shuts_down_on_sigint(tmp_path):
     try:
         ready = _ready_line(proc)
         assert ready["stage"] == "ready"
+        # The ready line is a synchronization contract, not just evidence that
+        # bind/listen completed.  A request must succeed immediately; only then
+        # is BaseServer.shutdown safe from the pre-serve_forever race.
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{ready['port']}/health", timeout=1.0,
+        ) as response:
+            assert response.status == 200
+            assert json.loads(response.read())["ok"] is True
         proc.send_signal(signal.SIGINT)
         try:
             rc = proc.wait(timeout=10.0)
         except subprocess.TimeoutExpired:
             proc.kill()
             raise
+        remaining = proc.stdout.read().decode("utf-8").splitlines()
+        assert remaining, "no shutdown line"
+        assert json.loads(remaining[-1])["stage"] == "shutdown"
         assert rc == 0
     finally:
         if proc.poll() is None:

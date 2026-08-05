@@ -15,15 +15,15 @@ v1: agent-fleet operators on subscriptions — concretely, this fleet (Claude Co
 
 1. **Policy (prose, the skill):** `skills/fulcra-agent-atc/SKILL.md` — how any agent classifies a task into a tier and picks a target. Judgment stays prose per coord doctrine.
 2. **Ledger (code, the engine):** stdlib-only cap ledger in `coord-engine` — usage shards written after spend, folded deterministically into per-account **headroom** (the presence-fold pattern). The genuinely novel piece: cross-subscription headroom as shared fleet state.
-3. **Dispatch (native, per harness):** no new execution machinery in v1. The agent that has work is already awake ("edge routing"); it consults policy + headroom, then dispatches via its own harness's native mechanism. Cross-harness work posts to the target's inbox; the already-deployed listeners/automations/heartbeats wake it.
+3. **Dispatch (native, per harness):** no new execution machinery in v1. The agent that has work is already awake ("edge routing"); it consults policy + headroom, then dispatches via its own harness's native mechanism. Cross-harness work posts to the target's inbox; the already-deployed scheduled wakes/automations/heartbeats pick it up on their next queue read.
 
-**Step-up to B (shipped as prose in the same skill):** a `dispatcher-<platform>` role any agent can claim — arm your platform's native tick (Codex automation / Cowork scheduled task / CC listener wake / OpenClaw heartbeat / Hermes loop), watch the shared queue, spawn model-pinned subagents locally. B emerges from A; no new engine surface required.
+**Step-up to B (shipped as prose in the same skill):** a `dispatcher-<platform>` role any agent can claim — arm your platform's native tick (Codex automation / Cowork scheduled task / CC launchd scheduled wake / OpenClaw heartbeat / Hermes loop), watch the shared queue, spawn model-pinned subagents locally. B emerges from A; no new engine surface required.
 
 ## Native dispatch + wake inventory (verified per the cross-harness continuity work)
 
 | Harness | Pinned-model spawn | Wake surface for a resident dispatcher |
 |---|---|---|
-| Claude Code CLI | `Agent` tool `model:` param; `claude -p --model <m>` | launchd listener (consent-gated wake), ScheduleWakeup |
+| Claude Code CLI | `Agent` tool `model:` param; `claude -p --model <m>` | launchd scheduled wake running the queue read (consent-gated), ScheduleWakeup |
 | Claude desktop / Cowork | same CC core (Agent tool, hooks) | scheduled-tasks/routines opening a duty-cycle session |
 | Codex app | `codex exec -m <m>`; per-thread model | app automations (proven: coord-watch) |
 | OpenClaw | per-agent model config | HEARTBEAT.md managed block |

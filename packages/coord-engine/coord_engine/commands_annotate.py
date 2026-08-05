@@ -20,6 +20,23 @@ from . import cli
 
 # --- annotate (activity-annotation projection) ---
 
+#: Set once the missing-writer warning has been emitted. A projection pass
+#: calls the emit path per spec; warning per spec would bury the signal under
+#: its own repetition on exactly the runs that matter most (large batches).
+_WRITER_WARNED = False
+
+
+def _warn_writer_missing_once() -> None:
+    global _WRITER_WARNED
+    if _WRITER_WARNED:
+        return
+    _WRITER_WARNED = True
+    print("annotate: fulcra_common writer MISSING — projection emitted "
+          "NOTHING and this command will still exit 0. Run "
+          "`coord-engine doctor` to confirm, then re-run the store "
+          "adopt-latest.sh.", file=sys.stderr)
+
+
 def _emit_projection_spec(spec: Any, *, agent: str) -> bool:
     """Hand ONE projected AnnotationSpec to the hardened fulcra_common writer.
 
@@ -27,10 +44,18 @@ def _emit_projection_spec(spec: Any, *, agent: str) -> bool:
     fulcra-api CLI / token it needs) may be entirely absent — that degrades to
     False, never an exception, so `annotate project` still exits 0 on a host
     without the writer. Reuses the writer's typed-record POST path; never opens a
-    second one."""
+    second one.
+
+    The exit code stays 0 — agents depend on it and this batch does not change
+    it — but the no-op is no longer SILENT. A missing writer used to produce
+    zero output on any stream, which is how the 2026-08-04 digest outage ran
+    unnoticed: every leg reported success while emitting nothing. Warning once
+    per process on stderr keeps stdout contracts byte-identical for machine
+    consumers while giving a human or a log something to find."""
     try:
         from fulcra_common import annotations as _ann
     except Exception:
+        _warn_writer_missing_once()
         return False
     try:
         return bool(_ann.emit_projection_annotation(

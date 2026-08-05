@@ -409,24 +409,6 @@ def _persisted_mode() -> Optional[str]:
     return _normalize_mode(raw)
 
 
-def set_persisted_mode(mode: str) -> Path:
-    """Persist ``mode`` (normalized to ``"on"``/``"off"``) so every agent emits."""
-    normalized = _normalize_mode(mode) or "off"
-    path = _annotations_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(normalized + "\n")
-    return path
-
-
-def clear_persisted_mode() -> bool:
-    """Remove the persisted mode file. Returns True if a file was removed."""
-    path = _annotations_config_path()
-    if path.exists():
-        path.unlink()
-        return True
-    return False
-
-
 def resolve_mode_source() -> tuple[str, str]:
     """Resolve the annotation mode AND report its source
     (``env`` | ``config`` | ``default``). Env always wins."""
@@ -711,6 +693,10 @@ def _cached_definition_id() -> Optional[str]:
         if path.exists():
             data = json.loads(path.read_text())
             did = data.get("id")
+            # `pinned` = never expires. It is set by hand in the cache file (an
+            # operator pin); the `pin_definition_id` helper that also wrote it was
+            # removed as dead — zero callers, zero tests — but ALREADY-PINNED
+            # caches on disk must keep working, so this branch stays.
             if did and (data.get("pinned") or _is_fresh(data.get("written_at"))):
                 return did
     except (OSError, json.JSONDecodeError):
@@ -725,16 +711,6 @@ def _store_definition_id(def_id: str) -> None:
             json.dumps({"id": def_id, "written_at": _cache_now_iso()}))
     except OSError:
         pass
-
-
-def pin_definition_id(def_id: str, *, digest: bool = False) -> str:
-    """Operator-explicit pin: write a never-expiring cache entry for the
-    (Agent Tasks | Digest) definition id. Returns the cache path written."""
-    annotations_dir().mkdir(parents=True, exist_ok=True)
-    path = _digest_definition_cache_path() if digest else _definition_cache_path()
-    path.write_text(json.dumps(
-        {"id": def_id, "written_at": _cache_now_iso(), "pinned": True}))
-    return str(path)
 
 
 #: In-run memo: definition-name -> resolved uuid. Populated ONLY on a verified
@@ -921,6 +897,10 @@ def _cached_digest_definition_id() -> Optional[str]:
         if path.exists():
             data = json.loads(path.read_text())
             did = data.get("id")
+            # `pinned` = never expires. It is set by hand in the cache file (an
+            # operator pin); the `pin_definition_id` helper that also wrote it was
+            # removed as dead — zero callers, zero tests — but ALREADY-PINNED
+            # caches on disk must keep working, so this branch stays.
             if did and (data.get("pinned") or _is_fresh(data.get("written_at"))):
                 return did
     except (OSError, json.JSONDecodeError):

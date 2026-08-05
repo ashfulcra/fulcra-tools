@@ -1,7 +1,7 @@
 """Dropped-threads classification — the PURE fold (no transport).
 
-Design: ``docs/superpowers/specs/2026-07-11-dropped-threads-design.md`` (codex-
-APPROVED). Answers "what work-in-progress has Ash dropped?" over a NEUTRAL row
+Design: the 2026-07-11 dropped-threads design (codex-APPROVED; the spec was
+never committed to this repo — it lives in the review thread, not under docs/). Answers "what work-in-progress has Ash dropped?" over a NEUTRAL row
 shape a single bus adapter (in cli.py) produces — so adding a GitHub/fulcra-pm
 source later is a new adapter emitting the same rows, never a rewrite.
 

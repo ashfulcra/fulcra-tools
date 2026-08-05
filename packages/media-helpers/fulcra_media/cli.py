@@ -1185,6 +1185,45 @@ def import_goodreads(
     emit_result(envelope, json_mode=json_mode)
 
 
+def _wait_for_webhook_health(server, server_thread, *, timeout: float = 5.0
+                             ) -> bool:
+    """Return once ``server`` has actually served its local health endpoint.
+
+    A bound/listening socket is not sufficient readiness evidence because
+    ``BaseServer.shutdown`` may race with ``serve_forever`` initialization.
+    This probe stays loopback-local and bounds every attempt.
+    """
+    import http.client
+    import time
+
+    host, port = server.server_address[:2]
+    connect_host = host
+    if host in ("", "0.0.0.0"):
+        connect_host = "127.0.0.1"
+    elif host == "::":
+        connect_host = "::1"
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not server_thread.is_alive():
+            return False
+        remaining = deadline - time.monotonic()
+        conn = http.client.HTTPConnection(
+            connect_host, port, timeout=max(0.05, min(0.25, remaining))
+        )
+        try:
+            conn.request("GET", "/health")
+            response = conn.getresponse()
+            response.read()
+            if response.status == 200:
+                return True
+        except (OSError, TimeoutError, http.client.HTTPException):
+            time.sleep(0.01)
+        finally:
+            conn.close()
+    return False
+
+
 @cli.command("webhook", help="Long-running HTTP server for Plex/Jellyfin webhooks.")
 @click.option("--host", default="127.0.0.1", show_default=True,
               help="Bind address. Default loopback only.")
@@ -1262,9 +1301,47 @@ def webhook_serve(host: str, port: int, bearer_token: str | None,
 
     bound_host, bound_port = server.server_address[:2]
 
-    # Emit the "ready" line so callers (especially tests + parent agents)
-    # can stop waiting on stdout and start sending webhooks. JSON mode
-    # writes one line; human mode prints a friendly banner.
+    # Install handlers before advertising readiness. A caller may signal the
+    # process immediately after reading the ready line; advertising first left
+    # a narrow race where SIGTERM used its default action and skipped the clean
+    # shutdown path.
+    import threading
+    stop_event = threading.Event()
+
+    def _handle(signum, _frame):
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+
+    # Graceful shutdown on SIGTERM/SIGINT. server.shutdown() must run on
+    # a different thread than serve_forever — signal handlers run on the
+    # main thread, but they only set a flag; we then call shutdown after
+    # serve_forever returns from the handler-induced exception. Simpler:
+    # run serve_forever on a background thread and block on a stop event.
+    server_thread = threading.Thread(
+        target=lambda: server.serve_forever(poll_interval=0.1),
+        name="fulcra-webhook", daemon=True,
+    )
+    server_thread.start()
+
+    # `HTTPServer` starts listening in its constructor, before
+    # `serve_forever()` enters its loop.  Advertising readiness before the
+    # loop served one request therefore left a shutdown race: a parent could
+    # read "ready", send SIGINT immediately, and call `server.shutdown()`
+    # before `serve_forever()` initialized its shutdown event.  Under load
+    # that wedges until CI kills the process.  A successful health request is
+    # positive evidence that the serve loop is running, not merely that the
+    # socket is listening.
+    if not _wait_for_webhook_health(server, server_thread):
+        server.server_close()
+        raise click.ClickException(
+            "webhook server thread exited before becoming ready"
+        )
+
+    # Emit the "ready" line only after the server has handled a request, so
+    # callers may safely signal it immediately. JSON mode writes one line;
+    # human mode prints a friendly banner.
     ready_payload = {
         "ok": True,
         "stage": "ready",
@@ -1292,26 +1369,6 @@ def webhook_serve(host: str, port: int, bearer_token: str | None,
 
     # Flush so the ready-line lands immediately even when stdout is a pipe.
     sys.stdout.flush()
-
-    # Graceful shutdown on SIGTERM/SIGINT. server.shutdown() must run on
-    # a different thread than serve_forever — signal handlers run on the
-    # main thread, but they only set a flag; we then call shutdown after
-    # serve_forever returns from the handler-induced exception. Simpler:
-    # run serve_forever on a background thread and block on a stop event.
-    import threading
-    stop_event = threading.Event()
-
-    def _handle(signum, _frame):
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, _handle)
-    signal.signal(signal.SIGINT, _handle)
-
-    server_thread = threading.Thread(
-        target=lambda: server.serve_forever(poll_interval=0.1),
-        name="fulcra-webhook", daemon=True,
-    )
-    server_thread.start()
     try:
         stop_event.wait()
     finally:

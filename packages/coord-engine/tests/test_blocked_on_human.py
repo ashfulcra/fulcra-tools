@@ -122,9 +122,11 @@ def test_plain_blocked_on_unchanged(capsys):
     t = FakeTransport()
     cli.main(["task", "start", "r", "Ship it", "--status", "active"], transport=t)
     capsys.readouterr()
-    cli.main(["task", "block", "r", "ship-it", "--blocked-on", "bob"], transport=t)
+    cli.main(["task", "block", "r", "ship-it", "--blocked-on", "bob",
+              "--unlock", "bob finishes the upstream fix"], transport=t)
     fm = okf.parse_frontmatter(t.store["team/r/task/ship-it.md"])
     assert fm["blocked_on"] == "bob"
+    assert fm["unlock"] == "bob finishes the upstream fix"
 
 
 # --- section FIRST + free, integrated through briefing / needs-me ------------

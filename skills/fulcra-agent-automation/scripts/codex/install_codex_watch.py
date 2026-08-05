@@ -22,11 +22,9 @@ adapter mechanics onto the coord engine, in three layers:
     stolen by a later (possibly headless) session.
 
 EVENT WAKE: the legacy ``wake.json`` layer remains omitted because it bypassed
-approvals and sandboxing. The separate consent-gated listener now ships a safe
-fixed adapter at ``scripts/wake/codex.sh`` using the stable
-``codex exec resume <SESSION_ID>`` interface with the resumed thread's ordinary
-policy. This installer retains the coarse automation as a safety net; fleet
-deployment pairs its exact thread id with that adapter.
+approvals and sandboxing. The listener-era fixed adapter has also been retired;
+host-local wake delivery is owned by the router executor's provisioned adapter
+directory. This installer retains the coarse automation as a safety net.
 
 COEXISTENCE + MIGRATION: this installer keys everything on the marker
 ``fulcra-agent-hooks`` and automation id prefix ``coord-watch-``. Two other
@@ -74,9 +72,9 @@ AUTOMATION_ID_PREFIX = "coord-watch-"
 # coord2-era names of THIS installer, recognized for in-place migration only.
 LEGACY_MANAGED_DIRNAME = "fulcra-coord2-hooks"
 LEGACY_AUTOMATION_ID_PREFIX = "coord2-watch-"
-# Keep a low-frequency safety net. Exact-thread event wake is separately
-# consent-gated through scripts/wake/codex.sh; the automation remains useful
-# for missed-event recovery and hosts where the listener is not installed.
+# Keep a low-frequency safety net. Exact-thread event wake is owned by the
+# separately provisioned router executor; the automation remains useful for
+# missed-event recovery and hosts where that executor is not installed.
 WATCH_INTERVAL_MIN = 30
 # Marker carried once in hooks.json (as a trailing shell comment on the
 # SessionStart command — inert under sh -c) and as the automation prompt's
@@ -93,11 +91,12 @@ _EVENTS: "dict[str, tuple[str, str | None]]" = {
 COORD_WATCH_PROMPT = """\
 [coord watch — managed by fulcra-agent-automation/scripts/codex; do not hand-edit]
 You are {agent} on coord team {team}. Apply the fulcra-agent-automation tick contract:
-resume continuity, run `coord-engine briefing {team} --agent {agent}` once, and handle every
-surfaced item end-to-end. A degraded section is not clear: use its documented targeted
-fallback. For reviews, write and verify the exact required verdict before acking. Snapshot
-material work, refresh presence/held-role leases, then report last. If nothing is actionable,
-the final output is exactly WATCH_OK.
+resume continuity, run `coord-engine inbox {team} --agent {agent} --json` once, then run
+`coord-engine briefing {team} --agent {agent}` once. Do not rely on briefing's inbox section:
+if either read is degraded, use its documented direct-listing fallback. Handle every surfaced
+item end-to-end. For reviews, write and verify the exact required verdict before acking.
+Snapshot material work, refresh presence/held-role leases, then report last. If nothing is
+actionable, the final output is exactly WATCH_OK.
 """
 
 SESSION_START_SH = """\

@@ -24,7 +24,7 @@ Cheap-beats-clever: stdlib-only, FakeTransport, pinned clock.
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -107,6 +107,131 @@ def test_poll_interval_is_the_fixed_plan_constant():
     assert router.ROUTER_POLL_SECONDS == 60  # plan §2.5: FIXED, not tunable
 
 
+@pytest.mark.parametrize("pass_duration", [5, 20, 59])
+def test_fixed_rate_scheduler_holds_sixty_second_cycle(pass_duration):
+    now = 0.0
+    starts = []
+    sleeps = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += pass_duration
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == [0.0, 60.0, 120.0]
+    assert sleeps == [60 - pass_duration] * 3
+
+
+def test_fixed_rate_scheduler_skips_overrun_without_burst(capsys):
+    now = 0.0
+    starts = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += 70
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == [0.0, 120.0, 240.0]
+    error = capsys.readouterr().err
+    assert "cadence overrun" in error
+    assert "no burst catch-up" in error
+
+
+@pytest.mark.parametrize(
+    ("pass_duration", "expected_starts"),
+    [
+        (60, [0.0, 60.0, 120.0]),
+        (120, [0.0, 120.0, 240.0]),
+        (70, [0.0, 120.0, 240.0]),
+    ],
+)
+def test_fixed_rate_scheduler_preserves_on_time_boundary(
+        pass_duration, expected_starts):
+    now = 0.0
+    starts = []
+
+    class StopLoop(Exception):
+        pass
+
+    def clock():
+        return now
+
+    def sleeper(delay):
+        nonlocal now
+        now += delay
+
+    def run_pass():
+        nonlocal now
+        if len(starts) == 3:
+            raise StopLoop
+        starts.append(now)
+        now += pass_duration
+
+    with pytest.raises(StopLoop):
+        cli._run_fixed_rate(
+            run_pass, label="router test", clock=clock, sleeper=sleeper)
+
+    assert starts == expected_starts
+
+
+def test_router_run_resident_mode_uses_fixed_rate_scheduler(monkeypatch):
+    labels = []
+    passes = []
+
+    class StopLoop(Exception):
+        pass
+
+    def scheduled(pass_fn, *, label):
+        labels.append(label)
+        pass_fn()
+        raise StopLoop
+
+    monkeypatch.setattr(cli, "_run_fixed_rate", scheduled)
+    monkeypatch.setattr(
+        cli, "_router_pass",
+        lambda args, transport: passes.append(args.team) or 0)
+
+    with pytest.raises(StopLoop):
+        cli.cmd_router_run(
+            _args(once=False, shadow=True), FakeTransport())
+
+    assert labels == ["router run"]
+    assert passes == [TEAM]
+
+
 def test_parse_store_mtime():
     dt = router.parse_store_mtime("2026-07-22 04:22PM UTC")
     assert dt == datetime(2026, 7, 22, 16, 22, tzinfo=timezone.utc)
@@ -142,6 +267,12 @@ def test_config_validation_unknown_adapter():
     agents, _, errors = router.validate_config(_config({
         AGENT: {**CLOUD_CFG, "adapter": "spawn-session"}}))
     assert AGENT not in agents and "adapter" in errors[AGENT]
+
+
+def test_config_validation_accepts_p0_priority_floor():
+    agents, _, errors = router.validate_config(_config({
+        AGENT: {**CLOUD_CFG, "priority_floor": "P0"}}))
+    assert AGENT in agents and not errors
 
 
 def test_delivered_fold():
@@ -223,6 +354,75 @@ def test_processed_ledger_suppresses_second_pass():
 
 
 # --- policy -----------------------------------------------------------------
+
+@pytest.mark.parametrize("floor", ["P0", "P1", "P2", "P3"])
+def test_p0_interrupts_at_every_floor(floor):
+    decision, not_before, reason = router.decide(
+        item_priority="P0",
+        agent_cfg={**CLOUD_CFG, "priority_floor": floor},
+        config_error=None,
+        presence_ts=None,
+        lapsed=False,
+        last_wake_at=None,
+        last_delivered_at=None,
+        now=PINNED_NOW,
+    )
+    assert decision == "interrupt"
+    assert not_before == PINNED_NOW
+    assert reason == "priority P0 at/above floor"
+
+
+def test_enablement_and_debounce_still_outrank_p0():
+    observed, _, observed_reason = router.decide(
+        item_priority="P0", agent_cfg=None, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    debounced, _, debounced_reason = router.decide(
+        item_priority="P0", agent_cfg={**CLOUD_CFG, "priority_floor": "P0"},
+        config_error=None, presence_ts=None, lapsed=False,
+        last_wake_at=PINNED_NOW - timedelta(minutes=1),
+        last_delivered_at=None, now=PINNED_NOW)
+
+    assert (observed, observed_reason) == (
+        "observe", "agent not enabled in router config")
+    assert debounced == "debounce"
+    assert "inside the debounce window" in debounced_reason
+
+
+def test_p0_floor_only_interrupts_p0():
+    cfg = {**CLOUD_CFG, "priority_floor": "P0"}
+    p0, _, _ = router.decide(
+        item_priority="P0", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    p1, _, _ = router.decide(
+        item_priority="P1", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    assert p0 == "interrupt"
+    assert p1 == "batch"
+
+
+def test_known_priority_floor_regression_and_unknown_priority_is_visible():
+    cfg = {**CLOUD_CFG, "priority_floor": "P1"}
+    p1, _, p1_reason = router.decide(
+        item_priority="P1", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    p2, _, p2_reason = router.decide(
+        item_priority="P2", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    unknown, _, unknown_reason = router.decide(
+        item_priority="PX", agent_cfg=cfg, config_error=None,
+        presence_ts=None, lapsed=False, last_wake_at=None,
+        last_delivered_at=None, now=PINNED_NOW)
+    assert (p1, p1_reason) == ("interrupt", "priority P1 at/above floor")
+    assert (p2, p2_reason) == ("batch",
+                               "below interrupt floor — rides digest/next check-in")
+    assert unknown == "batch"
+    assert "unknown priority 'PX' treated as P2" in unknown_reason
+
 
 def test_interrupt_enqueued_with_cloud_executor():
     t = FakeTransport()
@@ -920,35 +1120,87 @@ def test_router_run_rejects_json_resident_mode(capsys):
     assert capsys.readouterr().out == ""
 
 
-def _listen_state():
-    return {"inbox_ids": set(), "response_keys": set(),
-            "verdict_keys": set(), "degraded": {}}
+# --- W7: the shadow window gate + the retired listener path ------------------
+#
+# The `listen` tick used to be a third live probe producer (path="listener"),
+# and these cases were driven through it. Bus v3 retired that verb and its
+# implementation is gone, so the gate is now exercised through the LIVE
+# cloud-adapter delivery path, and the listener PATH VALUE is pinned where it
+# still matters: `router.SHADOW_EVIDENCE_PATHS` keeps "listener" so evidence
+# written during the real shadow window stays readable by the report forever.
+# Deleting these would silently drop that read contract on the floor.
 
 
-def test_listener_probe_records_evidence_when_window_armed(monkeypatch):
-    """W7: a DIRECTIVE surfaced by a listen tick, while a window is armed, writes
-    a listener-path evidence shard keyed by (agent, source-shard:agent)."""
+def _listener_evidence(key, delivered_at=NOW_ISO):
+    """A path="listener" evidence shard exactly as the retired listen tick wrote
+    it — through the same `router` constructors, so this stays a real contract
+    test and not a hand-rolled dict that could drift from the producer."""
+    return router.shadow_evidence_record(
+        key=key, agent=AGENT, delivered_at=delivered_at, path="listener")
+
+
+def test_listener_path_evidence_is_still_accepted_by_the_report(
+    monkeypatch, capsys
+):
+    """W7 read contract: historical listener-path shards (written before the verb
+    was retired) must still correlate against router decisions. If "listener"
+    were dropped from SHADOW_EVIDENCE_PATHS, the reader's path check would flag
+    every one of them malformed and the window's verdict would go UNKNOWN."""
+    from datetime import timedelta
+    start = router.parse_iso(WS)
+    end = start + timedelta(hours=48)
+    monkeypatch.setattr(cli, "_now", lambda: end)
+    t = FeedTransport()
+    t.set_feed([])
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": WS, "min_hours": 48}))
+    key = f"done-item:{AGENT}"
+    t.put(RP + router.SHADOW_DECISIONS_SUBPATH + "d.json",
+          json.dumps(_dec(key, decided_at="2026-07-23T12:01:00Z")))
+    t.put(RP + router.SHADOW_EVIDENCE_SUBPATH + "e.json",
+          json.dumps(_listener_evidence(key, "2026-07-23T12:00:00Z")))
+    t.put(TASKP + "done-item.md",
+          _task("done-item", AGENT, "P1", status="done"))
+    _put_healthy_marks(t, start, 48)
+
+    assert cli.cmd_router_shadow_report(_args(json=True), t) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["classes"][key] == "matched"      # correlated, not malformed
+    assert report["verdict"] == "PASS"
+
+
+def test_listener_remains_a_valid_evidence_path():
+    """The producer-side constructor still accepts "listener" (and still refuses
+    an unknown path) — the invariant the reader above depends on."""
+    assert "listener" in router.SHADOW_EVIDENCE_PATHS
+    assert _listener_evidence(f"k:{AGENT}")["path"] == "listener"
+    with pytest.raises(ValueError):
+        router.shadow_evidence_record(key="k", agent=AGENT,
+                                      delivered_at=NOW_ISO, path="telepathy")
+
+
+@pytest.mark.parametrize("marker", [
+    None,                                   # no marker at all
+    "{not json",                            # unreadable
+    json.dumps({"started_at": "bogus"}),    # unparseable timestamp
+    json.dumps({"min_hours": 48}),          # no started_at
+    json.dumps(["not", "a", "dict"]),       # wrong container
+])
+def test_shadow_window_gate_is_off_on_any_doubt(marker):
+    """`_shadow_window_active` is the shared gate both live probe writers consult
+    (it outlived the listen tick it was born with). Every doubt case reads OFF, so
+    a probe never fires outside a genuinely armed window."""
+    t = FakeTransport()
+    if marker is not None:
+        t.put(RP + "shadow-window.json", marker)
+    assert cli._shadow_window_active(t, TEAM) is False
+
+
+def test_shadow_window_gate_is_on_for_a_well_formed_marker():
     t = FakeTransport()
     t.put(RP + "shadow-window.json",
           json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
-    ev = {"type": "directive", "slug": "urgent-1", "owner": "boss", "title": "x"}
-    monkeypatch.setattr(cli, "_listen_tick", lambda *a, **k: ([ev], {}))
-    cli._run_listen_tick(t, TEAM, AGENT, _listen_state(),
-                         json_mode=False, verbose=False)
-    shards = _shadow_evidence(t)
-    assert len(shards) == 1
-    (s,) = shards.values()
-    assert (s["path"], s["agent"], s["key"]) == (
-        "listener", AGENT, f"urgent-1:{AGENT}")
-
-
-def test_listener_probe_silent_when_window_not_armed(monkeypatch):
-    t = FakeTransport()                                  # no marker
-    ev = {"type": "directive", "slug": "urgent-1", "owner": "boss", "title": "x"}
-    monkeypatch.setattr(cli, "_listen_tick", lambda *a, **k: ([ev], {}))
-    cli._run_listen_tick(t, TEAM, AGENT, _listen_state(),
-                         json_mode=False, verbose=False)
-    assert _shadow_evidence(t) == {}
+    assert cli._shadow_window_active(t, TEAM) is True
 
 
 def test_adapter_probe_records_evidence_on_delivery_when_armed():
@@ -985,14 +1237,16 @@ def test_shadow_arm_rejects_sub_48_hour_windows(capsys):
     assert json.loads(t.store[RP + "shadow-window.json"])["min_hours"] == 48
 
 
-def test_malformed_started_at_does_not_activate_probes(monkeypatch):
-    """codex #470 P2: a marker with an unparseable started_at is doubt ⇒ off."""
+def test_malformed_started_at_does_not_activate_probes():
+    """codex #470 P2: a marker with an unparseable started_at is doubt ⇒ off.
+    Driven through the live cloud-adapter delivery (the listen tick that
+    originally drove this was retired with bus v3): a GENUINE delivery lands and
+    still writes no evidence, because the window does not count as armed."""
     t = FakeTransport()
+    _base(t)
     t.put(RP + "shadow-window.json", json.dumps({"started_at": "bogus"}))
-    ev = {"type": "directive", "slug": "urgent-1", "owner": "b", "title": "x"}
-    monkeypatch.setattr(cli, "_listen_tick", lambda *a, **k: ([ev], {}))
-    cli._run_listen_tick(t, TEAM, AGENT, _listen_state(),
-                         json_mode=False, verbose=False)
+    _seed_queue(t, _q_entry(source="s-1"))
+    cli._router_execute_cloud(_args(), t, invoke=_invoke("delivered"))
     assert _shadow_evidence(t) == {}
     assert cli.cmd_router_shadow_status(_args(), t) == 1   # status agrees: invalid
 

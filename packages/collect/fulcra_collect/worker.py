@@ -241,8 +241,13 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
                    for c in plugin.required_credentials if c.key == key)
             else credentials.set_secret(plugin.id, key, value)),
     )
+    # Only a *required* credential (the default) hard-blocks a run. An
+    # optional credential (required=False) is one that some operating modes
+    # need and others don't — e.g. PurpleAir's api_key: needed for the cloud
+    # source, but its absence must not block the LAN source. The plugin's
+    # run() validates whatever the selected mode actually requires.
     missing = sorted(c.key for c in plugin.required_credentials
-                     if not ctx.credentials.get(c.key))
+                     if getattr(c, "required", True) and not ctx.credentials.get(c.key))
     if missing:
         emit({"type": "result", "outcome": "error",
               "error": (f"missing required credential(s): {', '.join(missing)} — "

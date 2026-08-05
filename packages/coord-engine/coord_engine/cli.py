@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pathlib
 import secrets
@@ -27,10 +28,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import (
-    aggregate, atc, atc_dash, budget as budget_mod, config, continuity,
+    aggregate, atc, atc_dash, budget as budget_mod, bus_tags,
+    checkpoint_channel, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
-    health as health_mod, jsonutil, okf, presence, query, review, roles, router,
-    stash, tasks, wake_adapters,
+    health as health_mod, jsonutil, okf, presence, projection as projection_mod,
+    query, records, review,
+    obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
 from . import reconcile as rec
@@ -88,14 +91,17 @@ def _known_sender(args: argparse.Namespace) -> Optional[str]:
     """The sender identity a reply would be addressed to, or None when only the
     anonymous host fallback is available. `_create_directive` records ownership as
     ``--from`` or ``FULCRA_COORD_AGENT`` (else ``coord-reconcile:<host>``); the
-    breadcrumb points others at ``listen --agent <sender>``, so we print it only
-    when the sender is a real identity someone actually listens as — never the
-    bare host tag."""
+    breadcrumb points others at ``queue --agent <sender>``, so we print it only
+    when the sender is a real identity someone actually reads a queue as — never
+    the bare host tag."""
     return getattr(args, "sender", None) or os.environ.get("FULCRA_COORD_AGENT")
 
 
 def _replies_breadcrumb(team: str, sender: str) -> str:
-    return f"replies: coord-engine listen {team} --agent {sender}"
+    #: bus v3 (2026-07-27): the reply leg is the sender's own bounded queue read,
+    #: not a resident watcher — `listen` was retired as the wake surface and its
+    #: implementation removed, so the breadcrumb points at `queue`.
+    return f"replies: coord-engine queue {team} --agent {sender}"
 
 
 #: Read-cap for the freshness overlay: at most this many absent-from-index docs
@@ -116,7 +122,7 @@ def _overlay_cap() -> int:
 #: READ COUNT, not TIME: under partial degradation (listing succeeds, each doc
 #: read runs to the transport's subprocess timeout) 16 absent names could mean
 #: minutes of serial timeouts inside EVERY canonical surface read — inbox/
-#: needs-me/listen have no other budget on this path (the briefing budget opens
+#: needs-me/queue have no other budget on this path (the briefing budget opens
 #: only AFTER _load_rows). That latency is the hang class this branch kills;
 #: the overlay carries its own deadline so a watcher's tick can never starve on
 #: it. Fast failures (a doc deleted between list and read returns quickly) keep
@@ -253,7 +259,7 @@ def _fresh_overlay_rows(
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Freshness overlay (Task 2.5, the PR348 false-clear).
 
-    ``inbox``/``listen``/every canonical surface read the reconcile-built summaries
+    ``inbox``/every canonical surface read the reconcile-built summaries
     index, so a task/directive doc written BETWEEN reconciles is invisible to all of
     them until the next heartbeat rebuild (live-repro'd: delivered 14:05:29Z, raw-
     file-visible 14:07Z, inbox-visible 14:11Z — a watcher polling the canonical
@@ -286,9 +292,10 @@ def _fresh_overlay_rows(
     ``read`` per genuinely-new (unsummarized) slug, at most the cap, within the
     budget."""
     own_dl = Deadline.open(_overlay_budget())
-    # A caller may provide a stricter absolute phase deadline (listen's protected
-    # head). The overlay keeps its own cap/budget, but can never outlive that
-    # caller: whichever instant arrives first wins.
+    # A caller may provide a stricter absolute phase deadline (a caller's protected
+    # head; the retired `listen` tick was the original such caller). The overlay
+    # keeps its own cap/budget, but can never outlive that caller: whichever
+    # instant arrives first wins.
     if deadline is not None and deadline.instant is not None:
         instant = (deadline.instant if own_dl.instant is None else
                    min(deadline.instant, own_dl.instant))
@@ -363,6 +370,9 @@ def _load_rows_status(
     transport: Any, team: str, *, deadline: "Optional[Deadline]" = None,
     feed_changes: "Optional[list[dict[str, Any]]]" = None,
     feed_attempted: bool = False,
+    doc_sink: "Optional[list[Any]]" = None,
+    feed_sink: "Optional[list[Any]]" = None,
+    feed_section_key: "Optional[str]" = None,
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Summaries rows plus whether the fold was fully READABLE (``ok``) and, when it
     was not, a short ``reason`` for the degraded surface to print (attribution: a
@@ -377,9 +387,19 @@ def _load_rows_status(
     ``read`` returning None is ambiguous (absent vs transport-down — the T1 lesson),
     so a None is disambiguated with one parent listing: ``list_dir`` RAISES on a
     transport failure and its entry names distinguish missing from present-but-
-    unreadable (the #343 discipline). This is what lets `listen` surface a summaries
-    failure instead of folding it to a silent [] indistinguishable from empty."""
+    unreadable (the #343 discipline). This is what lets a fold surface a summaries
+    failure instead of folding it to a silent [] indistinguishable from empty.
+
+    ``doc_sink`` (sink idiom, like ``degraded_sink``): when given, exactly one
+    element is appended — the PARSED aggregate document, or None when it could
+    not be read/parsed. Callers hand it to the review/forge folds so they can
+    consume the projection sections (``projection.py``) from the summaries read
+    this load already paid for, never a second ~MiB read."""
     path = rec.summaries_path(team)
+    if doc_sink is not None:
+        doc_sink.append(None)
+    if feed_sink is not None:
+        feed_sink.append({"ok": False, "reason": "data-updates feed not attempted"})
     try:
         raw = transport.read(path)
     except Exception:
@@ -396,28 +416,41 @@ def _load_rows_status(
         except Exception:
             # index present but corrupt -> unreadable, surface it
             return [], False, "summaries index unreadable"
+        if doc_sink is not None:
+            doc_sink[-1] = aggregate_doc
         # E2 primary path: one authoritative feed call since the aggregate cursor,
         # then direct reads of only changed task shards.  No task-dir listing is
         # consulted, so listing lag cannot hide a verified feed entry.
-        aggregate_cursor = (
-            aggregate_doc.get("generated_at")
-            if isinstance(aggregate_doc, dict)
-            else None
-        )
+        aggregate_cursor = None
+        if isinstance(aggregate_doc, dict):
+            aggregate_cursor = aggregate_doc.get("generated_at")
+            # A mixed-fleet host can refresh the aggregate while carrying an
+            # engine-owned section unchanged. Projection consumers must query
+            # from THAT section's anchor, never the newer container stamp.
+            section = aggregate_doc.get(feed_section_key) if feed_section_key else None
+            if isinstance(section, dict):
+                aggregate_cursor = section.get("generated_at")
         feed = (feed_changes if feed_attempted else _team_updates(
             transport, team, since=aggregate_cursor, now=_iso(_now())))
         if feed is not None:
             delta_rows, delta_ok, _delta_reason = _feed_task_rows(
                 transport, team, rows, feed)
             if delta_ok:
+                if feed_sink is not None:
+                    feed_sink[-1] = {"ok": True, "changes": feed}
                 if deadline is not None and deadline.expired():
                     return [], False, "caller row-load budget exhausted during feed delta"
                 return delta_rows, True, ""
+            if feed_sink is not None:
+                feed_sink[-1] = {"ok": False, "reason": _delta_reason}
             # Any feed/read doubt takes the byte-for-byte legacy listing overlay
             # below.  A healthy fallback is not a degraded public read.
         # Live-freshness overlay: union in task docs written since the last
         # reconcile (absent from this index). Any overlay problem flips ``ok`` so
         # the inbox source degrades visibly; the index rows are still served.
+        if feed is None and feed_sink is not None:
+            feed_sink[-1] = {"ok": False,
+                             "reason": "data-updates feed unreadable"}
         overlay, overlay_ok, overlay_reason = _fresh_overlay_rows(
             transport, team, rows, deadline=deadline)
         if deadline is not None and deadline.expired():
@@ -607,14 +640,21 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
-    rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
+    doc_sink: list[Any] = []
+    feed_sink: list[Any] = []
+    rows, rows_ok, rows_reason = _load_rows_status(
+        transport, args.team, doc_sink=doc_sink, feed_sink=feed_sink,
+        feed_section_key=projection_mod.NEEDS_ME_KEY)
+    agg_doc = doc_sink[0] if doc_sink else None
+    feed_evidence = feed_sink[0] if feed_sink else None
     # Role routing: work addressed to a role this agent holds IS work that needs
     # this agent (see _held_roles_for_rows). An unresolved role is UNKNOWN and gets
     # its own marker below — never folded into "no role work".
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, args.team, args.agent, rows, now=now)
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
-                         held_roles=held_roles, include_history=args.all)
+                         held_roles=held_roles, include_history=args.all,
+                         aggregate_doc=agg_doc, feed_evidence=feed_evidence)
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
@@ -627,8 +667,10 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # own independent, already-shipped budget.
     add_on = Deadline.open(_briefing_budget())
     got += _pending_reviews_for(
-        transport, args.team, args.agent, rows=rows, deadline=add_on.instant)
-    got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
+        transport, args.team, args.agent, rows=rows, deadline=add_on.instant,
+        aggregate_doc=agg_doc)
+    got += _forge_feedback_for(transport, args.team, args.agent,
+                               deadline=add_on.instant, aggregate_doc=agg_doc)
     # Blocked-on-human is the reserved FIRST section — prepended AFTER every other
     # section is built so it lands at index 0, and derived PURELY from ``rows``
     # (zero transport, un-starvable). It surfaces decisions parked on a human that
@@ -659,6 +701,10 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_forge_feedback_line(r))
             elif r.get("type") == "forge-degraded":
                 print(_forge_degraded_line(r))
+            elif r.get("type") == "forge-source":
+                print(_source_line("forge", r))
+            elif r.get("type") == "needs-me-source":
+                print(_source_line("needs-me", r))
             else:
                 print(_line(r))
     return 0
@@ -892,17 +938,37 @@ def cmd_task_block(args: argparse.Namespace, transport: Any) -> int:
     if args.blocked_on and args.on_user:
         print("task block failed: pass --blocked-on OR --on-user, not both", file=sys.stderr)
         return 1
+    if not args.unlock and not args.on_user:
+        # D4 (respec 2026-07-28): an agent-blocked item without a named unlock
+        # is malformed — the sweep can chase "who" but not "what would clear
+        # it", and unlock-less blocks rot. Rejected at write time. `--on-user`
+        # asks are exempt: the ask itself is the unlock (auto-derived below).
+        print("task block failed: --unlock <what specifically unblocks this> "
+              "is required with --blocked-on (name the concrete unlock, not "
+              "just the blocker)", file=sys.stderr)
+        return 1
     # TYPE the human block: `--on-user <name>` writes `blocked_on: user:<name>` so
     # the blocked-on-human fold can classify it at ZERO transport cost (a plain
     # value would need an agent/role lookup to tell human from agent). Additive:
     # `--blocked-on <agent>` stays an untyped agent value, and legacy `user:`-less
     # rows still parse (the fold's legacy branch handles them).
     blocked_val = f"{query._USER_PREFIX}{args.on_user}" if args.on_user else args.blocked_on
-    kw = {"status": "blocked", "blocked_on": blocked_val}
+    unlock_val = args.unlock or (f"answer from {args.on_user}" if args.on_user else None)
+    kw = {"status": "blocked", "blocked_on": blocked_val, "unlock": unlock_val}
     if args.on_user:
         kw["assignee"] = _human()
         kw["add_tags"] = ["needs:human"]
     return _task_apply(args, transport, **kw)
+
+
+def cmd_task_supersede(args: argparse.Namespace, transport: Any) -> int:
+    """D3 (respec 2026-07-28): reassignment without closure is data loss with
+    extra steps. Supersession closes the origin copy from ANY live state and
+    names its successor — the dispatcher's duty made mechanical."""
+    reason = args.reason or f"work re-dispatched as {args.by}"
+    return _task_apply(args, transport, status="done",
+                       superseded_by=args.by,
+                       evidence=f"superseded by {args.by} ({reason})")
 
 
 def cmd_task_pause(args: argparse.Namespace, transport: Any) -> int:
@@ -1085,7 +1151,7 @@ DEFAULT_REVIEW_FOLD_BUDGET = 45.0
 #: pending-reviews keeps its own independent COORD_REVIEW_FOLD_BUDGET (sooner wins).
 DEFAULT_BRIEFING_BUDGET = 60.0
 #: Cumulative deadline (seconds) for ONE role-resolution pass (`_held_roles_for_rows`)
-#: — the fold `briefing` / `inbox` / `needs-me` / `listen` all run, i.e. every agent,
+#: — the fold `briefing` / `inbox` / `needs-me` all run, i.e. every agent,
 #: every tick. Its cost is 1 + sum(2 + lease_shards) over the roles the open work
 #: references (see `_held_roles_for_rows`), and lease shards accumulate per claiming
 #: agent forever (only `roles release` prunes one), so an unbudgeted pass could spend
@@ -1093,22 +1159,6 @@ DEFAULT_BRIEFING_BUDGET = 60.0
 #: path renders anything. 20s is a generous ~25 ops at the measured ~0.8s/op — far
 #: past the 4-7 a real team pays — while still bounding a degraded transport.
 DEFAULT_ROLE_FOLD_BUDGET = 20.0
-#: Per-tick bound (seconds) for the listener's dir-only review-slug classification
-#: pass. That set is PERMANENT and growing (soft deletes leave every review dir
-#: forever), so an unbudgeted pass could spend N x transport-timeout on a degraded
-#: tick, on the watcher whose tick latency is load-bearing. 10s is a bounded
-#: fraction of the default 60s poll interval.
-DEFAULT_LISTEN_CLASSIFY_BUDGET = 10.0
-#: Dedicated budget for the caller-directed inbox head.  It is deliberately
-#: independent of the listener tail budget: role expansion and the global
-#: responses/reviews history must never spend the clock before literal-agent and
-#: wildcard directives have been checked.
-DEFAULT_LISTEN_HEAD_BUDGET = 10.0
-#: Shared aggregate budget for every non-head listener leg (role routing,
-#: responses, verdicts, and orphan classification).  The deadline opens at tick
-#: start, so an expensive head can legitimately leave less history work; the head
-#: itself has the independent budget above and therefore cannot be starved by it.
-DEFAULT_LISTEN_TAIL_BUDGET = 20.0
 
 # The `threads` fold/window defaults (DEFAULT_THREADS_*) live with the threads
 # command in `commands_threads.py`; they are re-exported onto `cli` at module end.
@@ -1148,6 +1198,18 @@ def _briefing_budget() -> float:
     return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
 
 
+#: Aggregate deadline (seconds) for ONE obligation fold. The fold runs on every
+#: empty wake now, so its cost is fleet-wide per-wake cost — it needs a hard
+#: ceiling, not a per-component hope. Deliberately tighter than the briefing
+#: budget: a briefing is a human asking a question, a fold is a machine on a
+#: schedule. Env ``COORD_OBLIGATION_BUDGET``.
+DEFAULT_OBLIGATION_BUDGET = 20.0
+
+
+def _obligation_budget() -> float:
+    return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
+
+
 def _role_fold_budget() -> float:
     """Cumulative deadline (seconds) for one role-resolution pass. Env
     ``COORD_ROLE_FOLD_BUDGET`` (see the DEFAULT_ROLE_FOLD_BUDGET rationale). Its own
@@ -1155,25 +1217,6 @@ def _role_fold_budget() -> float:
     briefing/needs-me add-on stack opens its budget (the held set is an input to the
     inbox fold, not an add-on section), so it cannot spend that one."""
     return config.env_float("COORD_ROLE_FOLD_BUDGET", DEFAULT_ROLE_FOLD_BUDGET)
-
-
-def _listen_classify_budget() -> float:
-    """Per-tick bound (seconds) for the listener's dir-only review-slug
-    classification pass. Env ``COORD_LISTEN_CLASSIFY_BUDGET`` (see the
-    DEFAULT_LISTEN_CLASSIFY_BUDGET rationale)."""
-    return config.env_float("COORD_LISTEN_CLASSIFY_BUDGET", DEFAULT_LISTEN_CLASSIFY_BUDGET)
-
-
-def _listen_head_budget() -> float:
-    """Dedicated caller-directed head budget, seconds. Env
-    ``COORD_LISTEN_HEAD_BUDGET``."""
-    return config.env_float("COORD_LISTEN_HEAD_BUDGET", DEFAULT_LISTEN_HEAD_BUDGET)
-
-
-def _listen_tail_budget() -> float:
-    """Shared non-head listener budget, seconds. Env
-    ``COORD_LISTEN_TAIL_BUDGET``."""
-    return config.env_float("COORD_LISTEN_TAIL_BUDGET", DEFAULT_LISTEN_TAIL_BUDGET)
 
 
 def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
@@ -1477,7 +1520,8 @@ def _role_fresh_holders(
 # — the contract AGENTS.md states ("briefing prints your identity, role inboxes,
 # and everything that needs you") and the reason role-based identity exists at
 # all: work addressed to a role must outlive the session that was holding it.
-# `listen` honoured it from the start; `briefing` / `inbox` / `needs-me` did not,
+# The retired `listen` tick honoured it from the start; `briefing` / `inbox` /
+# `needs-me` did not,
 # so a role-addressed `tell` returned 0 and silently landed in a fold nobody read.
 #
 # ONE resolver for every caller (`_held_roles_for_rows`). The alternative — each
@@ -1504,8 +1548,7 @@ def _role_degraded_line(r: dict[str, Any]) -> str:
 
 def _held_roles_for_rows(
     transport: Any, team: str, agent: str, rows: list[dict[str, Any]], *,
-    now: str, skip_slugs: "Optional[set[str]]" = None,
-    deadline_seconds: Optional[float] = None,
+    now: str, deadline_seconds: Optional[float] = None,
 ) -> tuple[set[str], set[str]]:
     """Roles ``agent`` holds a FRESH lease on, among the role-shaped assignees the
     given rows actually reference. Returns ``(held, unresolved)``.
@@ -1515,8 +1558,9 @@ def _held_roles_for_rows(
     which of them are roles at all — so the literal-agent-id majority costs ZERO
     reads, and only genuine roles pay. A team with no role-addressed open work pays
     nothing. Self / ``*`` / ``@backlog`` / path-shaped assignees are skipped without
-    a read. ``skip_slugs`` lets `listen` narrow further to UNSEEN directives (an
-    already-fired id needs no route).
+    a read. (A ``skip_slugs`` prefilter narrowing to UNSEEN directives lived here
+    for the retired `listen` tick's benefit; it went with that verb — every
+    surviving caller resolves the full open set.)
 
     **The honest op bound** (corrected 2026-07-16 — the docstring here previously
     claimed a tidy ``1 + 3R``, which was simply false, and the claim propagated to
@@ -1554,7 +1598,7 @@ def _held_roles_for_rows(
 
     The prefilter is PER PASS, never persistent: leases change, and a name later
     registered as a role must route on the very next fold (the staleness hole that
-    got a persistent negative cache rejected for `listen` — see there).
+    got a persistent negative cache rejected for the retired `listen` tick).
 
     ``unresolved`` is FAIL-CLOSED and load-bearing: a role whose lease state is
     UNKNOWN (see ``_role_fresh_holders``) is neither held nor not-held. Callers
@@ -1570,10 +1614,6 @@ def _held_roles_for_rows(
         a = str(r.get("assignee") or "")
         if not a or a in (agent, "*", directives.BACKLOG) or "/" in a:
             continue
-        if skip_slugs is not None:
-            slug = str(r.get("name") or "")
-            if not slug or slug in skip_slugs:
-                continue
         candidates.add(a)
     held: set[str] = set()
     unresolved: set[str] = set()
@@ -1656,6 +1696,217 @@ def _pending_reviews_for(
     transport: Any, team: str, agent: str, *,
     rows: "Optional[list[dict[str, Any]]]" = None,
     deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
+    degraded_sink: "Optional[list[str]]" = None,
+    aggregate_doc: Any = None,
+) -> list[dict[str, Any]]:
+    """The pending-review fold, projection-first (the annotation read side).
+
+    With ``aggregate_doc`` (the parsed summaries document — callers get it for
+    free via ``_load_rows_status``'s ``doc_sink``), the fold consumes the
+    reconcile-built ``reviews`` projection section in ZERO extra transport ops
+    when it is FRESH (see ``projection.fresh_section``), and SAYS SO with a
+    trailing ``{"type": "review-source", "source": "projection", "as_of": T}``
+    row. A projection that exists but cannot be served (stale / incomplete /
+    unrecognized) falls back to the raw scan LOUDLY — same row shape,
+    ``"source": "raw-scan"`` plus the ``reason`` — never silently serving old
+    state as current. A team whose aggregate carries no projection at all (or a
+    caller that passes no ``aggregate_doc``) takes the raw scan with no source
+    row: byte-identical to the pre-projection behavior."""
+    if aggregate_doc is not None:
+        section, reason = projection_mod.fresh_section(
+            aggregate_doc, projection_mod.REVIEWS_KEY,
+            projection_mod.REVIEWS_SCHEMA, now=_iso(_now()))
+        if section is not None:
+            served = _pending_reviews_from_projection(
+                transport, team, agent, section, rows=rows,
+                degraded_sink=degraded_sink)
+            if served is not None:
+                return served
+            reason = "reviews projection malformed"
+        if reason:
+            out = _pending_reviews_raw(
+                transport, team, agent, rows=rows,
+                deadline_seconds=deadline_seconds, deadline=deadline,
+                degraded_sink=degraded_sink)
+            out.append({"type": "review-source", "source": "raw-scan",
+                        "reason": reason})
+            return out
+    return _pending_reviews_raw(
+        transport, team, agent, rows=rows, deadline_seconds=deadline_seconds,
+        deadline=deadline, degraded_sink=degraded_sink)
+
+
+#: The only ``state`` values a review projection row may carry — exactly what
+#: ``review.tally`` emits. Anything else is not a recognizable tally and must
+#: fail validation (never be served, never derive coverage).
+_REVIEW_PROJECTION_STATES = (review.PENDING, review.APPROVED, review.CHANGES)
+
+
+def _validated_review_projection(
+    section: dict[str, Any],
+) -> "Optional[tuple[dict[str, dict[str, Any]], list[str], list[str], list[str]]]":
+    """POSITIVELY validate a ``reviews`` projection section's nested data.
+
+    Returns ``(rows_by_name, orphans, orphans_unknown, tombstones)`` only when
+    EVERY served row and slug list matches the schema exactly: ``name`` a
+    non-empty str, ``state`` one of ``review.tally``'s states, ``settled`` a real
+    bool (a truthy ``"false"`` string must never suppress a pending row), and
+    ``pending_required`` a list of non-empty strs; the three slug lists are lists
+    of non-empty strs (absent -> empty). Producer INVARIANTS are enforced too
+    (round-3 P1b) — reconcile can produce neither a duplicate ``name`` (rows key
+    on the listing) nor ``settled: true`` outside a terminal
+    APPROVED-with-nothing-pending tally — so a duplicate row (last-write-wins
+    would let a later settled row silently replace a pending one) or an
+    impossible settled combination is malformed, never served. ANY violation
+    returns None — the caller then emits "projection malformed" and raw-scans,
+    loudly. Validation runs BEFORE any coverage or row is derived (round-2 P1: a
+    consumer that tolerates malformed nested values serves them silently, which
+    contradicts the loud-fallback contract)."""
+    proj_rows = section.get("rows")
+    if not isinstance(proj_rows, list):
+        return None
+    by_name: dict[str, dict[str, Any]] = {}
+    for r in proj_rows:
+        if not isinstance(r, dict):
+            return None
+        name = r.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        if r.get("state") not in _REVIEW_PROJECTION_STATES:
+            return None
+        if not isinstance(r.get("settled"), bool):
+            return None
+        pending = r.get("pending_required")
+        if not isinstance(pending, list) or not all(
+                isinstance(x, str) and x for x in pending):
+            return None
+        if r["settled"] and (r["state"] != review.APPROVED or pending):
+            return None  # settled is ONLY a terminal APPROVED-nothing-pending
+        if name in by_name:
+            return None  # duplicate name: last-write-wins could hide work
+        by_name[name] = r
+    slug_lists: list[list[str]] = []
+    for key in ("orphans", "orphans_unknown", "tombstones"):
+        val = section.get(key)
+        if val is None:
+            val = []
+        if not isinstance(val, list) or not all(
+                isinstance(s, str) and s for s in val):
+            return None
+        slug_lists.append(val)
+    return by_name, slug_lists[0], slug_lists[1], slug_lists[2]
+
+
+def _pending_reviews_from_projection(
+    transport: Any, team: str, agent: str, section: dict[str, Any], *,
+    rows: "Optional[list[dict[str, Any]]]" = None,
+    degraded_sink: "Optional[list[str]]" = None,
+) -> "Optional[list[dict[str, Any]]]":
+    """Serve the pending-review fold from a FRESH ``reviews`` projection section.
+
+    One in-memory pass over the projection rows replaces the whole raw fan-out:
+    settled rows skip, PENDING rows with a non-empty ``pending_required`` resolve
+    role holders exactly as the raw scan does (role leases stay a live read —
+    they are cheap and per-agent-relevant), and orphan/tombstone knowledge comes
+    pre-classified. Every nested row/list is positively validated FIRST
+    (``_validated_review_projection``); any shape doubt returns None and the
+    caller falls back to the raw scan, loudly.
+
+    HEAD COVERAGE (round-2 P0): EVERY open caller-owned review-request slug is
+    authoritative head coverage and is raw-tallied per slug — even when the
+    projection carries a row for it. A projection row for a head slug can be a
+    reconcile/write race artifact (reconcile carried an old settled row, then
+    the head advanced, the doc was rewritten and the caller's directive landed —
+    all before the stamp), so a "covered" head slug served from the projection
+    could hide the caller's OWN open obligation until the next rebuild. The head
+    set is small by construction (the agent's own open review queue), the same
+    reasoning that gives the raw fold its dedicated head budget; an unresolvable
+    head slug stays UNKNOWN-loud (``review-head-degraded``), same as the raw
+    fold. The projection still answers the whole non-head tail in zero ops."""
+    validated = _validated_review_projection(section)
+    if validated is None:
+        return None
+    by_name, orphans, orphans_unknown, tombstones = validated
+    now = _iso(_now())
+    out: list[dict[str, Any]] = []
+    role_holders: dict[str, list[str]] = {}
+    degraded_roles: set[str] = set()
+    roles_listing_cache: dict[str, Any] = {}
+
+    def _match_pending(pending: list[str]) -> bool:
+        if agent not in pending:
+            for role in pending:
+                if role not in role_holders:
+                    holders, ok = _role_fresh_holders(
+                        transport, team, role, now=now,
+                        listing_cache=roles_listing_cache)
+                    role_holders[role] = holders
+                    if not ok:
+                        degraded_roles.add(role)
+        return review.is_pending_for(pending, agent, role_holders)
+
+    # The caller's OWN open review-request slugs are answered by the raw tally
+    # below, NEVER by a projected row — see HEAD COVERAGE in the docstring.
+    head_slugs = sorted(_caller_review_head_slugs(rows, agent))
+    head_set = set(head_slugs)
+
+    for slug in sorted(by_name):
+        if slug in head_set:
+            continue  # authoritative head coverage: raw-tallied below
+        r = by_name[slug]
+        if r["settled"]:
+            continue
+        pending = r["pending_required"]
+        if r["state"] != review.PENDING or not pending:
+            continue
+        if _match_pending(pending):
+            out.append({"type": "review-pending", "name": slug,
+                        "state": "PENDING", "pending_required": list(pending)})
+
+    head_scanned = head_skipped = 0
+    for slug in head_slugs:
+        # Same per-slug fail-closed guard the raw fold's _scan_one carries: a
+        # transient transport failure on ONE verdict read (which escapes
+        # _review_tally — its inner read loop has no TransportError guard) must
+        # degrade THIS slug to UNKNOWN-loud, never crash the whole
+        # projection-backed fold (round-3 P1a).
+        try:
+            tally, doc_ok, vok, listing_ok = _review_tally(transport, team, slug)
+        except TransportError:
+            tally, doc_ok, vok, listing_ok = {}, False, False, False
+        head_scanned += 1
+        if not (doc_ok and vok and listing_ok):
+            head_skipped += 1
+            if degraded_sink is not None:
+                degraded_sink.append(f"review-verdicts:{slug}")
+            continue
+        pending = tally.get("pending_required") or []
+        if tally.get("state") == review.PENDING and pending and _match_pending(
+                [str(x) for x in pending if str(x)]):
+            out.append({"type": "review-pending", "name": slug,
+                        "state": "PENDING",
+                        "pending_required": [str(x) for x in pending]})
+    if head_skipped:
+        out.append(budget_mod.degraded_row(
+            "review-head-degraded", head_scanned, len(head_slugs), head_skipped))
+
+    for slug in orphans:
+        out.append({"type": "review-orphan", "name": slug})
+    for slug in orphans_unknown:
+        out.append({"type": "review-orphan-degraded", "name": slug})
+    if degraded_roles:
+        out.append({"type": "review-role-degraded",
+                    "roles": sorted(degraded_roles)})
+    out.append({"type": "review-source", "source": "projection",
+                "as_of": section.get("generated_at")})
+    return out
+
+
+def _pending_reviews_raw(
+    transport: Any, team: str, agent: str, *,
+    rows: "Optional[list[dict[str, Any]]]" = None,
+    deadline_seconds: Optional[float] = None, deadline: Optional[float] = None,
+    degraded_sink: "Optional[list[str]]" = None,
 ) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: the top listing failing yields []
@@ -1719,6 +1970,12 @@ def _pending_reviews_for(
     try:
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
+        # Best-effort for needs-me/briefing (they must not fail because the review
+        # add-on is down), but the obligation fold MUST NOT read this [] as "no
+        # reviews pending" — that is a false CLEAR. A caller that needs the
+        # distinction passes ``degraded_sink`` and gets told.
+        if degraded_sink is not None:
+            degraded_sink.append("review-listing")
         return []
     slug_entries = [
         e for e in entries
@@ -1771,6 +2028,10 @@ def _pending_reviews_for(
         except TransportError:
             # A single slug's tally timed out: UNKNOWN. Skip it, keep scanning the
             # rest — but a HEAD slug that ends here still owes its loud marker.
+            # An unreadable verdict is an unknown obligation, so the fold hears
+            # about it too: partial coverage is not coverage.
+            if degraded_sink is not None:
+                degraded_sink.append(f"review-verdicts:{slug}")
             return "unknown"
         state = tally.get("state")
         pending = tally.get("pending_required") or []
@@ -1994,7 +2255,18 @@ def _review_row_line(r: dict[str, Any]) -> Optional[str]:
     if t == "review-role-degraded":
         return (f"  review role resolution degraded: "
                 f"{', '.join(r.get('roles') or [])} — holders unknown, retry")
+    if t == "review-source":
+        return _source_line("review", r)
     return None
+
+
+def _source_line(label: str, r: dict[str, Any]) -> str:
+    """Render a fold's source row — the no-silent-staleness disclosure: every
+    projection-aware fold SAYS whether it served the reconcile-built projection
+    (and as of when) or fell back to the raw scan (and why)."""
+    if r.get("source") == "projection":
+        return f"  {label} fold: projection (as of {r.get('as_of')})"
+    return f"  {label} fold: raw scan — {r.get('reason') or 'projection unusable'}"
 
 
 def _forge_responsible(
@@ -2106,6 +2378,138 @@ def _forge_slug_feedback(
 
 
 def _forge_feedback_for(
+    transport: Any, team: str, agent: str, *, deadline: Optional[float] = None,
+    aggregate_doc: Any = None,
+) -> list[dict[str, Any]]:
+    """The forge-feedback fold, projection-first (the annotation read side).
+
+    Same contract as ``_pending_reviews_for``: with ``aggregate_doc``, a FRESH
+    ``forge`` projection section replaces the team-global responsibility +
+    feedback fan-out — the only remaining transport work is one ack read per
+    feedback item for THIS agent (ack state is per-agent and stays live) — and
+    the fold appends ``{"type": "forge-source", "source": "projection",
+    "as_of": T}``. A projection present but unservable falls back to the raw
+    scan loudly (``"source": "raw-scan"`` + reason); no projection / no
+    ``aggregate_doc`` is the pre-projection raw scan, byte-identical."""
+    if aggregate_doc is not None:
+        section, reason = projection_mod.fresh_section(
+            aggregate_doc, projection_mod.FORGE_KEY,
+            projection_mod.FORGE_SCHEMA, now=_iso(_now()))
+        if section is not None:
+            served = _forge_feedback_from_projection(
+                transport, team, agent, section, deadline=deadline)
+            if served is not None:
+                return served
+            reason = "forge projection malformed"
+        if reason:
+            out = _forge_feedback_raw(transport, team, agent, deadline=deadline)
+            out.append({"type": "forge-source", "source": "raw-scan",
+                        "reason": reason})
+            return out
+    return _forge_feedback_raw(transport, team, agent, deadline=deadline)
+
+
+def _validated_forge_projection(
+    section: dict[str, Any],
+) -> "Optional[tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]]":
+    """POSITIVELY validate a ``forge`` projection section's nested data.
+
+    Returns ``(responsible, feedback)`` only when EVERY nested collection
+    matches the schema exactly: every ``responsible`` value a list of non-empty
+    strs (a non-list entry must not be silently excluded — it could hide a real
+    responsibility), every ``feedback`` value a list of dicts each carrying a
+    non-empty str ``id`` (the ack key — an id-less item must not silently
+    vanish) and an ``author`` that is a str or None. ANY other nested type/value
+    returns None — the caller then emits "projection malformed" and raw-scans,
+    loudly (round-2 P1)."""
+    resp = section.get("responsible")
+    fb = section.get("feedback")
+    if not isinstance(resp, dict) or not isinstance(fb, dict):
+        return None
+    for agents in resp.values():
+        if not isinstance(agents, list) or not all(
+                isinstance(a, str) and a for a in agents):
+            return None
+    for items in fb.values():
+        if not isinstance(items, list):
+            return None
+        for it in items:
+            if not isinstance(it, dict):
+                return None
+            if not isinstance(it.get("id"), str) or not it["id"]:
+                return None
+            author = it.get("author")
+            if author is not None and not isinstance(author, str):
+                return None
+    return resp, fb
+
+
+def _forge_feedback_from_projection(
+    transport: Any, team: str, agent: str, section: dict[str, Any], *,
+    deadline: Optional[float] = None,
+) -> "Optional[list[dict[str, Any]]]":
+    """Serve the forge-feedback fold from a FRESH ``forge`` projection section.
+
+    Responsibility and the feedback item ids/authors come from the section; the
+    fold reads only THIS agent's ack shard per item (acked items hide, exactly
+    as the raw fold hides them). Bounded by the caller's shared ``deadline``; a
+    breach truncates with the same ``forge-degraded`` marker discipline. Every
+    nested collection is positively validated FIRST
+    (``_validated_forge_projection``); any shape doubt returns None (caller
+    raw-scans, loud)."""
+    validated = _validated_forge_projection(section)
+    if validated is None:
+        return None
+    resp, fb = validated
+    mine = sorted(slug for slug, agents in resp.items() if agent in agents)
+    out: list[dict[str, Any]] = []
+    dl = Deadline(deadline)
+    total = len(mine)
+    scanned = 0
+    skipped = 0
+    degraded = False
+    for slug in mine:
+        if dl.expired():
+            degraded = True
+            break
+        scanned += 1
+        items = fb.get(slug) or []
+        unacked: list[str] = []
+        authors: list[str] = []
+        cut = False
+        for it in items:  # shapes proven by _validated_forge_projection
+            stem = it["id"]
+            if dl.expired():
+                cut = True
+                break
+            acked = transport.read(_ack_path(team, stem, agent))
+            if dl.expired():
+                cut = True
+                break
+            if acked is not None:
+                continue  # acked by this agent — hidden
+            unacked.append(stem)
+            author = it.get("author")
+            if author and author not in authors:
+                authors.append(author)
+        if cut:
+            # Budget expired mid-PR: the partial row is untrusted — discard it,
+            # count the PR skipped, stop (the raw fold's discipline).
+            skipped += 1
+            degraded = True
+            break
+        if unacked:
+            out.append({"type": "forge-feedback", "pr_slug": slug,
+                        "count": len(unacked), "authors": sorted(authors),
+                        "items": sorted(unacked)})
+    if degraded:
+        out.append(budget_mod.degraded_row("forge-degraded", scanned, total, skipped))
+    out.append({"type": "forge-source", "source": "projection",
+                "as_of": section.get("generated_at")})
+    return out
+
+
+def _forge_feedback_raw(
     transport: Any, team: str, agent: str, *, deadline: Optional[float] = None
 ) -> list[dict[str, Any]]:
     """Unacked forge-feedback shards on PRs the agent is responsible for, one
@@ -2259,10 +2663,11 @@ def _print_review_success(
         print(f"  reviewer {r} -> file verdict at "
               f"{_verdicts_prefix(team, slug)}{filename}")
     # Point the requester at the await primitive for the verdict wait (they poll
-    # `review status`; `listen` is the same arm-a-listener discipline every ask uses).
+    # `review status`; `queue` is the same read-your-events discipline every ask
+    # uses since bus v3 retired the resident listener).
     sender = _known_sender(args)
     if sender:
-        print(f"await verdicts: coord-engine listen {team} --agent {sender}")
+        print(f"await verdicts: coord-engine queue {team} --agent {sender}")
 
 
 def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
@@ -2438,9 +2843,9 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     transport.delete(_settled_marker_path(team, slug))
     # Atomic notification: with the doc durably landed, deliver ONE directive per
     # required reviewer through the canonical hash-slug directive path, so a
-    # verb-opened review FIRES the reviewer's inbox/listen — this is what removes
+    # verb-opened review FIRES the reviewer's inbox/queue — this is what removes
     # the reason agents hand-send review tells (the PR-344 orphan class) and makes
-    # the listener's `await verdicts` breadcrumb genuine. Same C1 write discipline
+    # the `await verdicts` breadcrumb genuine. Same C1 write discipline
     # as the doc: any reviewer-directive fail is reported LOUD naming exactly what
     # landed and what did not (partial is never silent), and the requester's retry
     # re-enters the idempotent-recovery path above to fill the gaps.
@@ -2542,6 +2947,31 @@ def _continuity_prefix(team: str, agent: str) -> str:
     return f"team/{team}/member/{agent}/continuity/"
 
 
+def _checkpoint_moment(transport: Any, team: str, snap: dict[str, Any],
+                       path: str) -> None:
+    """Cast a checkpoint's shadow on the timeline. NEVER fails the caller.
+
+    THE FAIL-OPEN RULE, deliberately the inverse of park's loud one. ``park``
+    exits non-zero and shouts ``CHECKPOINT NOT WRITTEN`` when it cannot save,
+    because a silently-skipped park discards the state the next session wakes
+    on. Emission is the opposite: **the checkpoint file is the source of truth
+    and the moment is its shadow**, so a failure here costs a row in a
+    visualization, while failing the park over it would cost the checkpoint
+    itself. One line on stderr, exit code untouched, always.
+
+    The snapshot is read for every field so the moment can never disagree with
+    the bytes on disk — same agent, same task, same objective.
+    """
+    try:
+        checkpoint_channel.emit(
+            transport, team, agent=str(snap.get("agent") or ""),
+            task=str(snap.get("task") or ""), objective=snap.get("objective"),
+            path=path)
+    except Exception as exc:  # unreachable by contract; the rule is absolute
+        print(f"checkpoint moment: emission failed ({exc!r}) — the checkpoint "
+              f"file at {path} was written and is unaffected", file=sys.stderr)
+
+
 def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
     task = tasks.slugify(args.task)  # single path segment; a slash breaks the no-task fold
     snap = continuity.build_snapshot(
@@ -2550,8 +2980,13 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
         artifacts=args.artifact, context_used_percent=args.context_percent,
         transcript_path=args.transcript,
     )
-    transport.write(_continuity_path(args.team, args.agent, task), json.dumps(snap, indent=2))
+    path = _continuity_path(args.team, args.agent, task)
+    wrote = transport.write(path, json.dumps(snap, indent=2))
     print(f"snapshot {snap['checkpoint_id']}")
+    # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
+    # not in the store would be a visualization of work that does not exist.
+    if wrote is not False:
+        _checkpoint_moment(transport, args.team, snap, path)
     return 0
 
 
@@ -2588,10 +3023,38 @@ def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
             snap = None
     else:
         snap = continuity.latest(_agent_snapshots(transport, args.team, args.agent))
+    age_seconds = continuity.checkpoint_age_seconds(snap, now=_now())
+    error_code = None
+    max_age_seconds = None
+    if args.max_age is not None:
+        max_age_seconds = continuity.parse_duration_seconds(args.max_age)
+        if max_age_seconds is None:
+            error_code = "invalid-max-age"
+        elif age_seconds is None:
+            error_code = "checkpoint-age-unknown"
+        elif age_seconds > max_age_seconds:
+            error_code = "checkpoint-stale"
     if args.json:
-        jsonutil.print_json(snap)
+        out = dict(snap) if snap else {"snapshot": None}
+        out["checkpoint_age_seconds"] = age_seconds
+        out["error_code"] = error_code
+        jsonutil.print_json(out)
     else:
         print(continuity.render_resume(snap))
+        print(f"  checkpoint age: {continuity.format_age(age_seconds)}")
+    if args.max_age is not None:
+        if error_code == "invalid-max-age":
+            print(f"resume: invalid --max-age duration {args.max_age!r}; use s, m, h, or d",
+                  file=sys.stderr)
+            return 2
+        if error_code == "checkpoint-age-unknown":
+            print("resume: checkpoint age is unknown; freshness requirement failed",
+                  file=sys.stderr)
+            return 2
+        if error_code == "checkpoint-stale":
+            print(f"resume: checkpoint is {continuity.format_age(age_seconds)} old, "
+                  f"exceeding --max-age {args.max_age}", file=sys.stderr)
+            return 2
     return 0
 
 
@@ -2682,6 +3145,11 @@ def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
         # The path is the payload identity, so an existing readable doc here IS
         # our message. Matching payload -> sanctioned dedup (already delivered).
         if _doc_payload(existing) == payload:
+            # Outcome signal for callers that act differently on dedupe vs
+            # fresh write (remind's timer emission): set ONLY at the two
+            # verified success exits, so "written" can never mean "unverified".
+            args._directive_outcome = "deduped"
+            args._directive_existing = existing
             print(f"directive {slug} already delivered")
             return 0
         # Present but NOT our payload: unparseable/corrupt content (or a hash
@@ -2722,6 +3190,7 @@ def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
         print(f"directive {slug}: write unverifiable (read-back mismatch, "
               f"transport corruption)", file=sys.stderr)
         return 1
+    args._directive_outcome = "written"
     print(f"directive {slug} -> {assignee}"
           + (f" (visible {not_before})" if not_before else ""))
     return 0
@@ -2748,7 +3217,7 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     rc = _write_directive(transport, args, slug=slug, content=content,
                           payload=payload, assignee=assignee, not_before=not_before)
     # On a delivered ask (not a backlog capture — @backlog awaits no reply), point
-    # the sender at the reply leg: the return of `respond` surfaces in their listen.
+    # the sender at the reply leg: the return of `respond` surfaces in their queue.
     if rc == 0 and assignee != directives.BACKLOG:
         sender = _known_sender(args)
         if sender:
@@ -2809,7 +3278,64 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
     if when is None:
         print(f"remind failed: cannot parse WHEN {args.when!r} (ISO or 5d/36h/10m)", file=sys.stderr)
         return 1
-    return _create_directive(args, transport, assignee=args.assignee, not_before=when)
+    # Identity excludes WHEN (same rule as intent): a repeated identical
+    # reminder dedupes onto the existing doc, which KEEPS its original
+    # not_before. The write path itself reports which outcome happened —
+    # a pre-read cannot distinguish absent from degraded (None is ambiguous),
+    # so only the verified "written" outcome may emit the timer record.
+    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
+    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    rc = _create_directive(args, transport, assignee=args.assignee, not_before=when)
+    if rc == 0:
+        outcome = getattr(args, "_directive_outcome", None)
+        if outcome == "written":
+            _emit_scheduled_record(args, transport, when=when, slug=slug)
+        elif outcome == "deduped":
+            fm = okf.parse_frontmatter(
+                getattr(args, "_directive_existing", "") or "") or {}
+            orig = fm.get("not_before") or "unknown"
+            print(f"record: reminder already scheduled (existing doc keeps "
+                  f"not_before {orig}); no second timer emitted")
+        else:
+            # No outcome set on a zero rc: an unexpected path. Emitting could
+            # double-deliver; not emitting only costs latency. Fail safe.
+            print("record: directive outcome unknown — no timer emitted "
+                  "(file-plane visibility stands)")
+    return rc
+
+
+def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
+                           when: str, slug: str) -> None:
+    """Best-effort bus-v3 timer for a reminder: a FUTURE-DATED record.
+
+    The platform hides a future ``recorded_at`` from every "what's new" window
+    until it comes due, then it surfaces in the assignee's ordinary queue read
+    (verified live 2026-07-27) — so the reminder DELIVERS itself at WHEN with
+    no timer service anywhere. Durable-first: the directive doc has already
+    landed and is the truth; this record is delivery. Absent config or a
+    failed write therefore degrades latency (file-plane visibility only),
+    never loses the reminder — say which, quietly, and move on.
+    """
+    cfg = records.load_config(transport, args.team)
+    if cfg is None:
+        print("record: no bus-v3 records config — reminder rides the file plane only")
+        return
+    ok = False
+    try:
+        ok = records.emit_event(
+            transport, cfg,
+            sender=_known_sender(args) or _host(),
+            to=args.assignee, kind="directive",
+            priority=getattr(args, "priority", None) or "P2",
+            slug=slug, ptr=f"task/{slug}.md", recorded_at=when,
+            team=args.team)
+    except ValueError as e:  # unknown kind cannot happen here; belt and braces
+        print(f"record: not emitted ({e})", file=sys.stderr)
+        return
+    if ok:
+        print(f"record: scheduled, due {when} (surfaces in {args.assignee}'s queue read)")
+    else:
+        print("record: emission failed — reminder rides the file plane only")
 
 
 def cmd_later(args: argparse.Namespace, transport: Any) -> int:
@@ -2950,9 +3476,9 @@ def _directed_inbox(transport: Any, team: str, agent: str,
     """The open-directive fold over ALREADY-LOADED ``rows`` — directives assigned
     to ``agent``, ``*``, or a role in ``held_roles`` (role routing), with the same
     ack + read-your-write gating `inbox` applies. Split out from
-    ``_inbox_rows_status`` so `listen` can resolve held roles from the rows FIRST
-    (bounding the lease reads to role-shaped assignees on unseen directives) and
-    then fold once, without re-reading the summaries index."""
+    ``_inbox_rows_status`` so a caller can resolve held roles from the rows FIRST
+    (bounding the lease reads to role-shaped assignees) and then fold once, without
+    re-reading the summaries index."""
     now = _iso(_now())
     acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
     stale_visible = directives.inbox(rows, acks, agent, now=now,
@@ -2978,13 +3504,134 @@ def _directed_inbox(transport: Any, team: str, agent: str,
 def _needs_me_rows(transport: Any, team: str, agent: str,
                    rows: list[dict[str, Any]], *, now: str,
                    held_roles: "Optional[set[str]]" = None,
-                   include_history: bool = False) -> list[dict[str, Any]]:
-    """Needs-me with directive satisfaction and read-your-write semantics.
+                   include_history: bool = False,
+                   aggregate_doc: Any = None,
+                   feed_evidence: Any = None) -> list[dict[str, Any]]:
+    """Needs-me, projection-first, with a raw-tallied live head.
 
-    Reconciled ``acked_by`` hides old acknowledgements without transport work.
-    Only the remaining directive candidates pay one shard read so a fresh ack
-    disappears immediately instead of waiting for the next reconcile.
+    A fresh, complete ``needs_me`` section proves the ack state for every task
+    whose name + mtime still match.  Those covered rows are a pure in-memory
+    fold.  New or modified caller-owned rows are deliberately raw-tallied so
+    work at the live head never waits for the next reconcile (the PR519 review
+    head/tail precedent).  Stale, incomplete, or malformed sections fall back
+    to the legacy raw fold loudly; an absent section preserves legacy output.
     """
+    if aggregate_doc is not None and not include_history:
+        has_section = (isinstance(aggregate_doc, dict)
+                       and projection_mod.NEEDS_ME_KEY in aggregate_doc)
+        feed_ok = isinstance(feed_evidence, dict) and feed_evidence.get("ok") is True
+        if not has_section:
+            section, reason = None, ""  # mixed-fleet legacy behavior
+        elif feed_ok:
+            section, reason = projection_mod.feed_fresh_section(
+                aggregate_doc, projection_mod.NEEDS_ME_KEY,
+                projection_mod.NEEDS_ME_SCHEMA, now=now)
+        else:
+            # The wall-clock policy is only an OUTER diagnostic bound when the
+            # feed is unavailable. UNKNOWN is not fresh even inside that bound.
+            section = None
+            _unused, age_reason = projection_mod.fresh_section(
+                aggregate_doc, projection_mod.NEEDS_ME_KEY,
+                projection_mod.NEEDS_ME_SCHEMA, now=now)
+            feed_reason = (feed_evidence or {}).get("reason") if isinstance(
+                feed_evidence, dict) else None
+            reason = age_reason or feed_reason or "data-updates feed unreadable"
+        if section is not None:
+            validated = _validated_needs_me_projection(section)
+            if validated is not None:
+                changed = _needs_me_changed_slugs(
+                    team, feed_evidence.get("changes") or [])
+                covered: list[dict[str, Any]] = []
+                live_head: list[dict[str, Any]] = []
+                for row in rows:
+                    name = str(row.get("name") or "")
+                    snap = validated.get(name)
+                    if name in changed or snap is None or snap[0] != row.get("mtime"):
+                        live_head.append(row)
+                        continue
+                    current = dict(row)
+                    current["acked_by"] = list(snap[1])
+                    covered.append(current)
+                got = query.needs_me(
+                    covered, agent, now=now, held_roles=held_roles)
+                got += _needs_me_rows_raw(
+                    transport, team, agent, live_head, now=now,
+                    held_roles=held_roles, include_history=False)
+                from . import model as model_mod
+                got = model_mod.sort_rows(got)
+                got.append({"type": "needs-me-source", "source": "projection",
+                            "as_of": section.get("generated_at")})
+                return got
+            reason = "needs-me projection malformed"
+        if reason:
+            got = _needs_me_rows_raw(
+                transport, team, agent, rows, now=now,
+                held_roles=held_roles, include_history=include_history)
+            got.append({"type": "needs-me-source", "source": "raw-scan",
+                        "reason": reason})
+            return got
+    return _needs_me_rows_raw(
+        transport, team, agent, rows, now=now, held_roles=held_roles,
+        include_history=include_history)
+
+
+def _needs_me_changed_slugs(team: str, changes: list[Any]) -> set[str]:
+    """Task/ack slugs named by the already-paid team updates call.
+
+    These are the projection's bounded live head. Direct task changes were
+    already overlaid by ``_load_rows_status``; ack changes keep the row mtime but
+    still require the authoritative shard read, so both namespaces land here.
+    """
+    task_pfx = rec.task_prefix(team)
+    ack_pfx = f"team/{team}/_coord/acks/"
+    out: set[str] = set()
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        path = str(change.get("path") or "").lstrip("/")
+        if path.startswith(task_pfx):
+            rest = path[len(task_pfx):]
+            if "/" not in rest and rest.endswith(".md") and rest not in (
+                    "index.md", "log.md"):
+                out.add(rest[:-3])
+        elif path.startswith(ack_pfx):
+            rest = path[len(ack_pfx):]
+            if "/" in rest:
+                slug = rest.split("/", 1)[0]
+                if slug:
+                    out.add(slug)
+    return out
+
+
+def _validated_needs_me_projection(
+    section: dict[str, Any],
+) -> "Optional[dict[str, tuple[Any, list[str]]]]":
+    """Positively validate every nested value before deriving coverage."""
+    projected = section.get("rows")
+    if not isinstance(projected, list):
+        return None
+    out: dict[str, tuple[Any, list[str]]] = {}
+    for item in projected:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        mtime = item.get("mtime")
+        acked = item.get("acked_by")
+        if (not isinstance(name, str) or not name or name in out
+                or (mtime is not None and not isinstance(mtime, str))
+                or not isinstance(acked, list)
+                or not all(isinstance(a, str) and a for a in acked)
+                or len(set(acked)) != len(acked)):
+            return None
+        out[name] = (mtime, list(acked))
+    return out
+
+
+def _needs_me_rows_raw(transport: Any, team: str, agent: str,
+                       rows: list[dict[str, Any]], *, now: str,
+                       held_roles: "Optional[set[str]]" = None,
+                       include_history: bool = False) -> list[dict[str, Any]]:
+    """Legacy authoritative tally for uncovered rows and fallback paths."""
     got = query.needs_me(rows, agent, now=now, held_roles=held_roles,
                          include_history=include_history)
     if include_history:
@@ -3006,11 +3653,11 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
     """The open-directive fold `inbox` surfaces for `agent` — role-routed
     directives included — plus the readability of the underlying summaries fold:
     ``ok`` False (with a ``reason``) when the index/listing is UNKNOWN — see the
-    public-read failure contract at ``_read_degraded_row``. Extracted so `listen`
-    awaits the SAME source `inbox` shows — one inbox computation, no second
-    implementation to drift. Never raises: an unreadable summaries read folds to
-    an empty list, but with ``ok=False`` and a ``reason`` so EVERY caller (inbox,
-    listen, briefing) surfaces the degradation as the loud marker rather than
+    public-read failure contract at ``_read_degraded_row``. Extracted so every
+    await surface reads the SAME source `inbox` shows — one inbox computation, no
+    second implementation to drift. Never raises: an unreadable summaries read folds
+    to an empty list, but with ``ok=False`` and a ``reason`` so EVERY caller (inbox,
+    needs-me, briefing) surfaces the degradation as the loud marker rather than
     mistaking UNKNOWN for an empty inbox — the codex-reproduced silent clean-``[]``
     that suppressed a live unacked directive.
 
@@ -3025,6 +3672,173 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
                             include_backlog=include_backlog,
                             include_history=include_history),
             ok, reason, unresolved)
+
+
+def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
+                       ) -> "list[obligations_mod.Component]":
+    """Bind the real coordination surface to obligation probes.
+
+    One task-index read serves the four row-derived components, so a single index
+    failure degrades all four — which is correct, not lazy: if the index is
+    unreadable then nothing derived from it is known, and reporting three of them
+    as CLEAR would be inventing coverage.
+
+    ``reviews`` uses the ``degraded_sink`` added to ``_pending_reviews_for``. That
+    helper is deliberately best-effort for needs-me and briefing (they must not
+    fail because a review add-on is down), and its ``[]`` on a failed listing is
+    exactly the false CLEAR this fold exists to refuse. The sink is how the fold
+    hears the difference.
+    """
+    P, S = obligations_mod.ProbeResult, obligations_mod.ProbeState
+    # ONE shared deadline for the whole fold, not one per component. The forge
+    # probe is a data-dependent fan-out (responsibility scan, then a listing per
+    # responsible PR), so an unbounded fold grows with the agent's PR count and
+    # can overrun the wake cadence it is supposed to ride inside. A shared
+    # deadline also means an expensive earlier probe shrinks what the next gets,
+    # rather than each one starting the clock fresh.
+    fold_dl = Deadline.open(_obligation_budget())
+    doc_sink: list[Any] = []
+    feed_sink: list[Any] = []
+    rows, rows_ok, rows_reason = _load_rows_status(
+        transport, team, doc_sink=doc_sink, feed_sink=feed_sink,
+        feed_section_key=projection_mod.NEEDS_ME_KEY)
+    agg_doc = doc_sink[0] if doc_sink else None
+    feed_evidence = feed_sink[0] if feed_sink else None
+    held_roles, unresolved_roles = _held_roles_for_rows(
+        transport, team, agent, rows, now=now)
+
+    def _rows_probe(kinds: "tuple[str, ...]"):
+        def probe():
+            if not rows_ok:
+                return P(state=S.UNREADABLE, detail=rows_reason)
+            if fold_dl.expired():
+                return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            mine = _needs_me_rows(transport, team, agent, rows, now=now,
+                                  held_roles=held_roles, include_history=False,
+                                  aggregate_doc=agg_doc,
+                                  feed_evidence=feed_evidence)
+            owed = [r for r in mine
+                    if not str(r.get("type") or "").endswith("-source")
+                    and (not kinds or (r.get("kind") or "task") in kinds)]
+            return P(state=S.OK, owed=owed)
+        return probe
+
+    def _roles_probe():
+        if not rows_ok:
+            return P(state=S.UNREADABLE, detail=rows_reason)
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+        if unresolved_roles:
+            # A role whose lease could not be read might route work here. Doubt.
+            return P(state=S.UNREADABLE,
+                     detail="unresolved roles: " + ", ".join(sorted(unresolved_roles)))
+        return P(state=S.OK)
+
+    def _split_markers(found):
+        """(real work, degradation marker types) from a best-effort fold's rows.
+
+        Detects ANY ``*-degraded`` row rather than an enumerated list. The review
+        and forge folds signal incomplete coverage with marker ROWS
+        (review-head/fold/orphan/role-degraded, forge-degraded), and only some
+        paths reach the degraded_sink — so a sink check alone let a marker ride
+        through as ordinary owed work and the fold reported DATA/rc 0 with
+        incomplete coverage (codex-reviewer, PR 501). Matching the suffix means a
+        marker added later degrades the fold automatically instead of silently
+        joining the work list.
+        """
+        markers = [r.get("type") for r in found
+                   if isinstance(r.get("type"), str)
+                   and r["type"].endswith("-degraded")]
+        # ``*-source`` rows are the folds' provenance disclosure (projection vs
+        # raw scan) — informational, never owed work and never degradation.
+        real = [r for r in found
+                if not (isinstance(r.get("type"), str)
+                        and (r["type"].endswith("-degraded")
+                             or r["type"].endswith("-source")))]
+        return real, markers
+
+    def _reviews_probe():
+        if fold_dl.expired():
+            # The budget was gone before this probe ran. A helper handed an
+            # already-dead deadline can legitimately return [] without ever
+            # attempting a read — and [] here would be a false CLEAR caused by
+            # our own cost control, which is the worst possible source for one.
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+        sink: list[str] = []
+        found = _pending_reviews_for(transport, team, agent, rows=rows,
+                                     deadline=fold_dl.instant,
+                                     degraded_sink=sink,
+                                     aggregate_doc=agg_doc)
+        real, markers = _split_markers(found)
+        if sink or markers:
+            # Degraded, but the pending rows that WERE read stay available: the
+            # fold's promise is that partial work survives while the terminal
+            # state stays honest.
+            detail = "; ".join(sorted(set(sink) | set(markers)))
+            return P(state=S.UNREADABLE, owed=real, detail=detail)
+        return P(state=S.OK, owed=real)
+
+    def _forge_probe():
+        """Unacknowledged forge feedback — a durable obligation surfaced by
+        needs-me and briefing, and absent from the first cut of this registry."""
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+        found = _forge_feedback_for(transport, team, agent,
+                                    deadline=fold_dl.instant,
+                                    aggregate_doc=agg_doc)
+        real, markers = _split_markers(found)
+        if markers:
+            return P(state=S.UNREADABLE, owed=real,
+                     detail="; ".join(sorted(set(markers))))
+        return P(state=S.OK, owed=real)
+
+    C = obligations_mod.Component
+    return [
+        C(name="blocks", probe=_rows_probe(("block",))),
+        C(name="directives", probe=_rows_probe(("directive",))),
+        C(name="forge_feedback", probe=_forge_probe),
+        C(name="reminders", probe=_rows_probe(("remind", "reminder"))),
+        C(name="reviews", probe=_reviews_probe),
+        C(name="role_duties", probe=_roles_probe),
+        C(name="tasks", probe=_rows_probe(())),
+    ]
+
+
+def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
+    """The normative "do I owe anything?" answer (r2 spec item 3).
+
+    Exit codes carry the terminal state so automation never has to parse prose:
+    0 = CLEAR, 0 = DATA (with rows), 3 = UNKNOWN, 4 = INVALID. A wake that reads
+    an empty queue has NOT established that nothing is owed; this has.
+    """
+    now = _iso(_now())
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, args.agent, now=now),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    state = result.state.value
+    if getattr(args, "json", False):
+        print(jsonutil.dumps({
+            "type": "obligations",
+            "state": state,
+            "owed_count": len(result.owed),
+            "consulted": result.consulted,
+            "degraded": result.degraded,
+            "malformed": result.malformed,
+            "reason": result.reason(),
+        }))
+    else:
+        print(f"obligations: {state} — {result.reason()}")
+        for row in result.owed:
+            print(f"  - {row.get('slug') or row.get('id') or row}")
+        for name in result.degraded:
+            print(f"  ! {name}: UNREADABLE — cannot claim clear", file=sys.stderr)
+        for name in result.malformed:
+            print(f"  ! {name}: INVALID — human fix needed", file=sys.stderr)
+    if result.state is obligations_mod.ObligationState.UNKNOWN:
+        return 3
+    if result.state is obligations_mod.ObligationState.INVALID:
+        return 4
+    return 0
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
@@ -3060,6 +3874,1101 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+#: PROPOSED, NOT WIRED. Emitting this on an empty read would violate slice 4's
+#: golden contract, which pins text-mode CLEAR stderr byte-for-byte
+#: (test_plain_clear_output_byte_identical_to_pre_slice). That contract belongs to
+#: another agent's just-merged surface, so re-pinning it is their call and not a
+#: constant bump I get to make quietly. Kept here so the proposal has an exact
+#: string attached to it; escalated to coord-boss with the golden-test implication.
+_QUEUE_EMPTY_IS_NOT_CLEAR = (
+    "queue: 0 events — this is NOT proof that nothing is owed. Events are "
+    "best-effort wake hints; a hint never written, or one older than this "
+    "window, leaves a durable obligation unmentioned. For the actual answer: "
+    "coord-engine obligations <team> --agent <you>  (rc 3 = UNKNOWN)"
+)
+
+
+def _obligations_not_checked() -> dict[str, Any]:
+    """The honest marker for a machine-readable envelope that did not fold.
+
+    Fold-on-empty is OPT-IN (promise plan T3(b), 2026-08-02). A skipped fold
+    must still be *stated*: an omitted key lets a consumer read CLEAR as
+    "nothing owed", which is the precise false inference the fold exists to
+    refuse. ``not-checked`` is deliberately not one of the fold's own states
+    (CLEAR/DATA/UNKNOWN/INVALID) so no caller can map it to any of them.
+    """
+    return {"state": "not-checked"}
+
+
+def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
+    if json_mode:
+        for event in events:
+            jsonutil.print_json(event)
+        return
+    for event in events:
+        print(f"{event.get('recorded_at','')[:19]} {event.get('from') or '?'} "
+              f"{event['kind']} {event.get('priority') or '-'} "
+              f"{event['slug']} {event.get('ptr') or '-'}")
+
+
+def _queue_result_envelope(
+        events: list[dict[str, Any]], *, cfg: dict[str, Any],
+        cursor_path: str, advanced: bool,
+        outcome_mix: Optional[dict[str, int]] = None,
+        obligations: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """The single-object ``--json`` success envelope for a queue read.
+
+    Shares the ``type`` discriminator convention with the ``queue-error``
+    failure envelope (:func:`_queue_failure`): automation switches on one
+    field and never has to guess whether a line is an event or a verdict.
+    ``state`` is terminal — DATA (events delivered) or CLEAR (a clean, fully
+    read window with nothing new); the failure envelope owns INVALID and
+    UNKNOWN, so CLEAR can never be a disguise for either.
+
+    EVERY envelope carries an ``obligations`` key: the fold's report when it
+    ran, otherwise ``{"state": "not-checked"}``. Not only CLEAR — round-2
+    finding 1. Scoping the marker to CLEAR made its PRESENCE a proxy for "the
+    window was empty" instead of for "the fold did not run", and left a
+    default DATA read — which performs exactly zero fold ops — silent about
+    coverage it never checked. A consumer must be able to test one key on one
+    shape, so the marker is universal and the golden gains the key.
+    """
+    from . import __version__ as engine_version
+    protocol = None
+    if cfg.get("authority_mode") == "versioned":
+        protocol = {
+            "protocol_version": cfg["protocol_version"],
+            "cursor_schema_version": cfg["cursor_schema_version"],
+            "cursor_generation": cfg["cursor_generation"],
+        }
+    envelope = {
+        "type": "queue-result",
+        "state": "DATA" if events else "CLEAR",
+        "events": [{
+            "id": event.get("record_id"),
+            "ts": event.get("recorded_at"),
+            "sender": event.get("from"),
+            "to": event.get("to"),
+            "kind": event["kind"],
+            "pri": event.get("priority"),
+            "slug": event["slug"],
+            "ptr": event.get("ptr"),
+        } for event in events],
+        "count": len(events),
+        # respec s7: outcome_mix is ADDITIVE under the cursor block (per the
+        # deputy ruling) — the agent's own durable classification mix from v2
+        # `handled` rows. Absent (legacy cursor / no rows) the key is omitted,
+        # keeping the legacy envelope byte-identical for golden tests.
+        "cursor": ({"path": cursor_path, "advanced": advanced,
+                    "outcome_mix": outcome_mix}
+                   if outcome_mix is not None
+                   else {"path": cursor_path, "advanced": advanced}),
+        "engine_version": engine_version,
+        "protocol": protocol,
+    }
+    envelope["obligations"] = (
+        obligations if obligations is not None else _obligations_not_checked())
+    return envelope
+
+
+def _bus_v3_migration_agents(
+        transport: Any, team: str, explicit: list[str]
+) -> tuple[list[str], Optional[str]]:
+    """Discover legacy cursor owners without reading task or role state."""
+    prefix = f"team/{team}/_coord/agents/"
+    try:
+        entries = transport.list_dir(prefix)
+    except (TransportError, OSError) as exc:
+        return [], f"agent-census-read-failed: {exc}"
+    agents = set(explicit)
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str):
+            return [], "agent-census-malformed"
+        if entry.get("is_dir") or name.endswith("/"):
+            agent = name.rstrip("/")
+            if agent and "/" not in agent:
+                agents.add(agent)
+    return sorted(agents), None
+
+
+def _bus_v3_migration_block_error(
+        authority_class: str, cursor_rows: list[dict[str, Any]],
+        census_error: Optional[str]) -> Optional[str]:
+    """Return the stable machine reason for a pre-write migration block."""
+    authority_errors = {
+        "absent-blocks": "authority-absent",
+        "malformed-blocks": "authority-malformed",
+        "unsupported-blocks": "authority-unsupported",
+        "unreadable-blocks": "authority-unreadable",
+    }
+    if authority_class in authority_errors:
+        return authority_errors[authority_class]
+    if census_error is not None:
+        return census_error.split(":", 1)[0]
+    cursor_errors = {
+        "malformed-blocks": "cursor-malformed",
+        "unreadable-blocks": "cursor-unreadable",
+    }
+    for row in cursor_rows:
+        classification = row["classification"]
+        if classification in cursor_errors:
+            return cursor_errors[classification]
+    return None
+
+
+def cmd_bus_v3_migrate(args: argparse.Namespace, transport: Any) -> int:
+    """Dry-run/apply the ruled s5 authority/cursor-only migration.
+
+    Apply has exactly one possible write: the Bus authority document. Legacy
+    cursors are classified but never seeded, repaired, or rewritten here;
+    task and role paths are neither listed nor read.
+    """
+    mode = "apply" if args.apply else "dry-run"
+    authority_path = records.config_path(args.team)
+    reader = getattr(transport, "read_classified", None)
+    if reader is None:
+        raw, authority_read = None, "error"
+    else:
+        raw, authority_read = reader(authority_path)
+
+    if authority_read == "error":
+        authority_class = "unreadable-blocks"
+        target = None
+    elif raw is None:
+        authority_class = "absent-blocks"
+        target = None
+    else:
+        target, authority_class = records.schema1_authority_migration_target(raw)
+
+    agents, census_error = _bus_v3_migration_agents(
+        transport, args.team, list(args.agents or []))
+    cursor_rows: list[dict[str, Any]] = []
+    blocked = authority_class not in ("readable-legacy", "current")
+    for agent in agents:
+        _cursor, status = records.load_legacy_cursor_classified(
+            transport, args.team, agent)
+        classification = {
+            "ok": "readable-legacy",
+            "absent": "absent",
+            "invalid": "malformed-blocks",
+            "error": "unreadable-blocks",
+        }[status]
+        blocked = blocked or classification.endswith("blocks")
+        cursor_rows.append({
+            "agent": agent,
+            "path": records.cursor_path(args.team, agent),
+            "classification": classification,
+        })
+    if census_error is not None:
+        blocked = True
+
+    authority_write: Any = 0
+    state = "BLOCKED" if blocked else "READY"
+    rc = 3 if blocked else 0
+    error_code = _bus_v3_migration_block_error(
+        authority_class, cursor_rows, census_error)
+    if args.apply and not blocked:
+        if authority_class == "current":
+            state = "CURRENT"
+        else:
+            rendered = records.render_authority_config(target or {})
+            if not transport.write(authority_path, rendered):
+                state, rc = "UNKNOWN", 2
+                error_code = "authority-write-refused"
+            else:
+                # The write reached the transport. Until read-back proves the
+                # target, report that fact without claiming either zero writes
+                # or a verified mutation.
+                authority_write = "ISSUED-BUT-UNPROVEN"
+                verify_raw, verify_status = reader(authority_path)
+                if verify_status != "ok" or verify_raw is None:
+                    state, rc = "UNKNOWN", 3
+                    error_code = "authority-verify-unreadable"
+                else:
+                    verified, verified_class = (
+                        records.schema1_authority_migration_target(verify_raw))
+                    if verified_class != "current" or verified != target:
+                        state, rc = "UNKNOWN", 3
+                        error_code = "authority-verify-mismatch"
+                    else:
+                        authority_write = 1
+                        state = "APPLIED"
+                        error_code = None
+
+    envelope = {
+        "type": "bus-v3-migration",
+        "mode": mode,
+        "state": state,
+        "error_code": error_code,
+        "authority": {
+            "path": authority_path,
+            "classification": authority_class,
+            "target_schema": 1,
+        },
+        "cursors": cursor_rows,
+        "agent_census_error": census_error,
+        "writes": {
+            "authority": authority_write,
+            "legacy_cursors": 0,
+            "tasks": 0,
+            "roles": 0,
+        },
+        "rc": rc,
+    }
+    if args.json:
+        jsonutil.print_json(envelope)
+    else:
+        print(f"bus-v3 migrate: {state} [{mode}] authority="
+              f"{authority_class} cursors={len(cursor_rows)}")
+        for row in cursor_rows:
+            print(f"  {row['agent']}: {row['classification']}")
+        if census_error:
+            print(f"  census: {census_error}", file=sys.stderr)
+        print("  writes: authority="
+              f"{envelope['writes']['authority']} legacy-cursors=0 "
+              "tasks=0 roles=0")
+    return rc
+
+
+def _write_consume_audit(transport: Any, team: str, *, caller: str,
+                         target: str, cursor_path: str, observed_prior: Any,
+                         intended_authority: dict[str, Any], ts: str) -> bool:
+    """Durably record a deliberate ``--consume`` takeover BEFORE it happens.
+
+    The consumption guard exists because a foreign-identity read silently ate
+    another agent's pending directives (live incident 2026-07-28); the audit
+    doc is what makes the deliberate override reconstructable after the fact.
+    The fields record OBSERVATIONS and INTENT, never predictions — under
+    concurrency this process cannot know what state its consuming read will
+    actually overtake, only what it saw and what it meant to do:
+
+    - ``observed_prior``: the target cursor's coverage claim as read at ``ts``
+      (v2: authority generation + per-agent revision; legacy schema 1: its
+      ``last_read``; or the bare classification ``absent``/``invalid``/
+      ``error`` when there was no readable claim). A concurrent writer may
+      advance the cursor between this observation and the consuming read.
+    - ``intended_authority``: the cursor schema (and, for v2, the authority
+      generation) the takeover intends to operate under. No predicted
+      revision or timestamp: a staged delivery may never commit, a CAS loser
+      adopts the winner's state, and the legacy save stamps its own clock.
+      The actual transition is evidenced by the cursor document afterward.
+
+    ORDERING INVARIANT: this audit document must land before any cursor
+    MUTATION or consuming READ — the window/records query and every cursor
+    write happen strictly after this returns True. Reading the target cursor
+    to capture ``observed_prior`` is deliberately allowed beforehand: it is
+    a plain observation read, not a mutation, and consumes nothing.
+
+    Returns False when the document did not verifiably land — the caller then
+    REFUSES the takeover, because an unauditable takeover is the silent
+    consumption incident with a flag on it.
+    """
+    safe_time = ts.replace(":", "").replace("-", "").replace(".", "")
+    path = records.consume_audit_path(
+        team, stamp=safe_time,
+        caller=tasks.agent_key(caller), target=tasks.agent_key(target))
+    fm = {
+        "type": "ConsumeAudit",
+        "ts": ts,
+        "caller": caller,
+        "target": target,
+        "cursor": cursor_path,
+        "observed_prior": observed_prior,
+        "intended_authority": intended_authority,
+        "reason": (f"caller '{caller}' read the queue as '{target}' with "
+                   "--consume — deliberate consumption-guard override"),
+    }
+    body = (okf.render_frontmatter(fm)
+            + f"\n{caller} takes over {target}'s queue cursor.\n")
+    return bool(transport.write(path, body))
+
+
+def _print_v2_delivery(
+        pending: dict[str, Any], *, cursor_revision: int, json_mode: bool,
+        replay: bool, obligations: Optional[dict[str, Any]] = None,
+) -> None:
+    events = pending["events"]
+    _print_queue_events(events, json_mode=json_mode)
+    envelope = {
+        "type": "queue-delivery",
+        "token": pending["token"],
+        "event_count": len(events),
+        "event_ids": [event.get("record_id") for event in events],
+        "window_start": pending["window_start"],
+        "window_end": pending["window_end"],
+        "cursor_revision": cursor_revision,
+        "outcome": "replayed" if replay else "staged",
+        # A DEFAULT transactional read folds nothing — it says so rather than
+        # staying silent, so a consumer cannot read a delivery envelope as
+        # "and nothing else is owed". An explicit ``--obligations`` is honored
+        # here like anywhere else and supplies the real verdict instead.
+        "obligations": (obligations if obligations is not None
+                        else _obligations_not_checked()),
+        "rc": 0,
+    }
+    if json_mode:
+        jsonutil.print_json(envelope)
+    else:
+        print("queue: DELIVERY "
+              f"token={pending['token']} events={len(events)} "
+              f"revision={cursor_revision}; process the batch, then run "
+              "`coord-engine queue commit <team> --agent <you> "
+              f"--token {pending['token']} --result "
+              "<record-id>=<outcome> ...`",
+              file=sys.stderr)
+
+
+def _cmd_queue_v2(
+        args: argparse.Namespace, transport: Any, cfg: dict[str, Any],
+        agent: str, *, peek: bool, engine_version: str
+) -> int:
+    """Transactional v2 read: stage first, advance only on explicit commit.
+
+    ``--obligations`` is honored here on exactly the same terms as on the v1
+    path (round-2 finding 2): explicit means fold, default means zero fold
+    ops. It was previously accepted by the shared ``queue`` parser and then
+    never read by this function — every v2 envelope claimed ``not-checked``
+    even when the caller had asked for the fold, which is indistinguishable
+    from a fold that ran and could say nothing. The fold is run at the LAST
+    moment before each success envelope, never before the cursor work, so a
+    read that fails still fails at its own cost.
+    """
+    generation = cfg["cursor_generation"]
+    cursor, raw, status = records.load_v2_cursor_classified(
+        transport, args.team, agent, generation)
+    if status in ("error", "invalid"):
+        return _queue_failure(
+            args,
+            state="INVALID" if status == "invalid" else "UNKNOWN",
+            error_code=(
+                "cursor-invalid" if status == "invalid"
+                else "cursor-read-failed"
+            ),
+            message=(
+                f"queue: DEGRADED — transactional cursor {status}; "
+                "coverage untouched, retry"
+            ),
+            rc=3,
+        )
+    if cursor is None:
+        # One-time dual-read migration. After the first successful v2 CAS the
+        # isolated v2 document is authoritative forever.
+        legacy, legacy_status = records.load_legacy_cursor_classified(
+            transport, args.team, agent)
+        if legacy_status in ("error", "invalid"):
+            return _queue_failure(
+                args,
+                state="INVALID" if legacy_status == "invalid" else "UNKNOWN",
+                error_code=(
+                    "legacy-cursor-invalid"
+                    if legacy_status == "invalid"
+                    else "legacy-cursor-read-failed"
+                ),
+                message=(
+                    "queue: DEGRADED — cannot safely seed cursor v2 because "
+                    f"the legacy cursor is {legacy_status}; coverage untouched, "
+                    "retry"
+                ),
+                rc=3,
+            )
+        cursor = records.initial_v2_cursor(generation, legacy)
+        raw = None
+    pending = cursor.get("pending")
+    if isinstance(pending, dict):
+        if peek:
+            fragment = _requested_obligations(args, transport, agent)
+            if bool(getattr(args, "json", False)):
+                jsonutil.print_json(_queue_result_envelope(
+                    pending["events"], cfg=cfg,
+                    cursor_path=records.v2_cursor_path(
+                        args.team, agent, generation),
+                    advanced=False,
+                    outcome_mix=records.outcome_mix(cursor),
+                    obligations=fragment))
+            else:
+                _print_queue_events(pending["events"], json_mode=False)
+            if pending["events"]:
+                print("queue: peek — pending transactional batch shown; "
+                      "token withheld and cursor untouched", file=sys.stderr)
+            return 0
+        _print_v2_delivery(
+            pending, cursor_revision=cursor["revision"],
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_requested_obligations(args, transport, agent))
+        return 0
+
+    if not peek:
+        write_gate = records.compatibility(
+            cfg, engine_version=engine_version, write_cursor=True)
+        if not write_gate["ok"]:
+            return _queue_failure(
+                args,
+                state="INCOMPATIBLE",
+                error_code="engine-incompatible",
+                message=(
+                    f"queue: INCOMPATIBLE — {write_gate['reason']}; v2 cursor "
+                    "untouched"
+                ),
+                rc=3,
+            )
+        if not records.v2_transport_ready(transport):
+            return _queue_failure(
+                args,
+                state="INCOMPATIBLE",
+                error_code="cas-unsupported",
+                message=(
+                    "queue: DEGRADED — active cursor v2 requires a proven "
+                    "atomic compare-and-swap, but this transport does not "
+                    "provide one; coverage untouched"
+                ),
+                rc=3,
+            )
+
+    committed = cursor["committed"]
+    now = _now()
+    last_read = committed.get("last_read")
+    if last_read is None:
+        since_dt = now - timedelta(seconds=records.DEFAULT_LOOKBACK_SECONDS)
+    else:
+        try:
+            last = datetime.fromisoformat(last_read.replace("Z", "+00:00"))
+        except ValueError:
+            return _queue_failure(
+                args,
+                state="INVALID",
+                error_code="cursor-invalid",
+                message=(
+                    "queue: DEGRADED — transactional cursor has invalid "
+                    "committed time; coverage untouched, retry"
+                ),
+                rc=3,
+            )
+        since_dt = last - timedelta(seconds=records.CURSOR_SKEW_SECONDS)
+    window_start, window_end = _iso(since_dt), _iso(now)
+    window = transport.records(
+        cfg["data_type"], window_start, window_end)
+    events = records.events_for(window, agent)
+    if events is None:
+        return _queue_failure(
+            args,
+            state="UNKNOWN",
+            error_code="window-unknown",
+            message=(
+                "queue: DEGRADED — window UNKNOWN, transactional cursor NOT "
+                "staged or advanced"
+            ),
+            rc=3,
+        )
+    for warning in records.observed_version_warnings(window):
+        print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    for warning in records.invisible_writer_census(window):
+        print(f"queue: DELIVERY WARNING — {warning}", file=sys.stderr)
+    seen = set(committed["seen_ids"])
+    fresh = [event for event in events
+             if event.get("record_id") not in seen]
+    if any(not isinstance(event.get("record_id"), str)
+           or not event["record_id"] for event in fresh):
+        # Bus data, not transport doubt: a record without a stable id will
+        # not grow one on retry, so this is INVALID rather than UNKNOWN.
+        return _queue_failure(
+            args,
+            state="INVALID",
+            error_code="event-id-missing",
+            message=(
+                "queue: DEGRADED — recognized event lacks a stable record "
+                "id; transactional batch not staged"
+            ),
+            rc=3,
+        )
+    if peek:
+        fragment = _requested_obligations(args, transport, agent)
+        if bool(getattr(args, "json", False)):
+            jsonutil.print_json(_queue_result_envelope(
+                fresh, cfg=cfg,
+                cursor_path=records.v2_cursor_path(
+                    args.team, agent, generation),
+                advanced=False,
+                outcome_mix=records.outcome_mix(cursor),
+                obligations=fragment))
+        else:
+            _print_queue_events(fresh, json_mode=False)
+        if fresh:
+            print("queue: peek — transactional cursor NOT staged or advanced",
+                  file=sys.stderr)
+        return 0
+
+    staged = records.stage_v2_delivery(
+        transport, args.team, agent, generation,
+        cursor=cursor, expected_raw=raw, staged_at=_iso(now),
+        window_start=window_start, window_end=window_end, events=fresh)
+    if staged["status"] == "unsupported":
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="cas-unsupported",
+            message=(
+                "queue: DEGRADED — active cursor v2 requires a proven atomic "
+                "compare-and-swap, but this transport does not provide one; "
+                "coverage untouched"
+            ),
+            rc=3,
+        )
+    if staged["status"] == "lost":
+        winner, _winner_raw, winner_status = records.load_v2_cursor_classified(
+            transport, args.team, agent, generation)
+        if (winner_status != "ok" or winner is None
+                or not isinstance(winner.get("pending"), dict)):
+            return _queue_failure(
+                args,
+                state="UNKNOWN",
+                error_code="stage-race-unverified",
+                message=(
+                    "queue: DEGRADED — concurrent stage lost and winner "
+                    "could not be verified; coverage untouched, retry"
+                ),
+                rc=3,
+            )
+        _print_v2_delivery(
+            winner["pending"], cursor_revision=winner["revision"],
+            json_mode=bool(getattr(args, "json", False)), replay=True,
+            obligations=_requested_obligations(args, transport, agent))
+        return 0
+    staged_cursor = staged["cursor"]
+    _print_v2_delivery(
+        staged_cursor["pending"], cursor_revision=staged_cursor["revision"],
+        json_mode=bool(getattr(args, "json", False)), replay=False,
+        obligations=_requested_obligations(args, transport, agent))
+    return 0
+
+
+def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
+    team = getattr(args, "commit_team", None)
+    agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
+    token = getattr(args, "token", None)
+    if not team or not agent or not token:
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="usage",
+            message="queue commit: TEAM, --agent, and --token are required",
+            rc=2,
+        )
+    classifications: dict[str, str] = {}
+    for value in getattr(args, "results", None) or []:
+        record_id, separator, outcome = value.partition("=")
+        if (not separator or not record_id
+                or outcome not in records.DELIVERY_OUTCOMES
+                or record_id in classifications):
+            return _queue_failure(
+                args,
+                state="REFUSED",
+                error_code="usage",
+                message=(
+                    "queue commit: each --result must be a unique "
+                    "RECORD_ID=completed|blocked|superseded|ignored"
+                ),
+                rc=2,
+            )
+        classifications[record_id] = outcome
+    cfg, cfg_status = records.load_config_classified(transport, team)
+    if cfg is None or not records.v2_active(cfg):
+        # One stderr line, three machine states: an unreadable authority is
+        # retryable doubt, a malformed one is human-fixable, and a readable
+        # non-v2 authority means this engine/verb pairing is not usable.
+        state, error_code = {
+            "error": ("UNKNOWN", "config-read-failed"),
+            "invalid": ("INVALID", "config-invalid"),
+        }.get(cfg_status, ("INCOMPATIBLE", "authority-not-v2"))
+        return _queue_failure(
+            args,
+            state=state,
+            error_code=error_code,
+            message=(
+                f"queue commit: INCOMPATIBLE — active cursor-v2 authority "
+                f"required (config={cfg_status}); cursor untouched"
+            ),
+            rc=3,
+        )
+    from . import __version__ as engine_version
+    # Same zero-transport check as the read side: a commit is a WRITE, so a
+    # stale engine hears about itself before it stamps anything.
+    currency = records.authority_currency(cfg, engine_version=engine_version)
+    if currency:
+        print(f"queue: ENGINE STALE — {currency}", file=sys.stderr)
+    write_gate = records.compatibility(
+        cfg, engine_version=engine_version, write_cursor=True)
+    if not write_gate["ok"]:
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="engine-incompatible",
+            message=(
+                f"queue commit: INCOMPATIBLE — {write_gate['reason']}; "
+                "cursor untouched"
+            ),
+            rc=3,
+        )
+    outcome = records.commit_v2_delivery(
+        transport, team, agent, cfg["cursor_generation"], token=token,
+        classifications=classifications)
+    status = outcome["status"]
+    if status in ("committed", "idempotent"):
+        cursor = outcome["cursor"]
+        payload = {
+            "type": "queue-commit", "token": token, "outcome": status,
+            "cursor_revision": cursor["revision"], "rc": 0,
+        }
+        if getattr(args, "json", False):
+            jsonutil.print_json(payload)
+        else:
+            print(f"queue commit: {status} token={token} "
+                  f"revision={cursor['revision']}")
+        return 0
+    if status == "stale":
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="stale-token",
+            message=(
+                f"queue commit: STALE token rejected: {token}; cursor "
+                "untouched"
+            ),
+            rc=3,
+        )
+    if status == "unsupported":
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="cas-unsupported",
+            message=(
+                "queue commit: DEGRADED — transport cannot prove atomic CAS; "
+                "cursor untouched"
+            ),
+            rc=3,
+        )
+    if status == "unclassified":
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="results-incomplete",
+            message=(
+                "queue commit: REFUSED — every staged event requires exactly "
+                f"one --result; missing={outcome['missing']} "
+                f"unexpected={outcome['unexpected']}; cursor untouched"
+            ),
+            rc=2,
+        )
+    if status == "invalid-events":
+        return _queue_failure(
+            args,
+            state="INVALID",
+            error_code="event-id-missing",
+            message=(
+                "queue commit: DEGRADED — pending batch contains an event "
+                "without a stable record id; cursor untouched"
+            ),
+            rc=3,
+        )
+    # Remaining statuses come from the classified cursor read at commit time.
+    fallback_state, fallback_code = {
+        "invalid": ("INVALID", "cursor-invalid"),
+        "error": ("UNKNOWN", "cursor-read-failed"),
+    }.get(status, ("UNKNOWN", f"cursor-{status}"))
+    return _queue_failure(
+        args,
+        state=fallback_state,
+        error_code=fallback_code,
+        message=(
+            f"queue commit: DEGRADED — cursor {status}; cursor untouched, "
+            "retry"
+        ),
+        rc=3,
+    )
+
+
+def _queue_failure(
+        args: argparse.Namespace, *, state: str, error_code: str,
+        message: str, rc: int,
+        extra: "Optional[dict[str, Any]]" = None
+) -> int:
+    """Emit one stable queue failure for humans and JSONL automation.
+
+    Exit status alone cannot distinguish the failure classes: rc 3 covers
+    every fail-closed outcome and rc 2 every refusal.  In JSON mode stdout
+    therefore carries a terminal envelope while stderr retains the actionable
+    human diagnostic.  EVERY nonzero exit of the queue family (``queue`` and
+    ``queue commit``, legacy and v2-active) routes through here — enforced by
+    the AST completeness gate in tests/test_queue_terminal_states.py — so a
+    ``--json`` consumer never sees a nonzero rc with empty stdout.  States:
+
+    - ``UNKNOWN``       store/transport doubt; backoff and retry.
+    - ``INVALID``       durable bytes exist but are malformed; human-fixable,
+                        never auto-recreated over.
+    - ``INCOMPATIBLE``  version/capability gate: engine below a floor,
+                        unsupported schema, or no proven CAS transport.
+    - ``ABSENT``        the store affirmatively has no records config.
+    - ``REFUSED``       caller-side rejection: usage error, incomplete
+                        ``--result`` set, stale token, unauditable takeover
+                        is NOT here (that write failure is UNKNOWN — the doc
+                        may or may not have landed).
+    """
+    print(message, file=sys.stderr)
+    if bool(getattr(args, "json", False)):
+        envelope = {
+            "type": "queue-error",
+            "state": state,
+            "error_code": error_code,
+            "rc": rc,
+        }
+        if extra:
+            # Nested diagnosis, still ONE object: a caller switching on `type`
+            # sees queue-error and can drill into the cause without parsing a
+            # second row.
+            envelope.update(extra)
+        jsonutil.print_json(envelope)
+    return rc
+
+
+def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
+    """THE bus v3 read: cursored event queue for one agent.
+
+    Window = [cursor − skew, now]; no cursor ⇒ the default lookback. The
+    cursor advances ONLY after a clean window whose events have been printed
+    (delivery to stdout is the handoff); an UNKNOWN window (transport doubt,
+    malformed line — ``transport.records()`` collapses all of it to None)
+    prints DEGRADED, exits 3, and leaves coverage untouched, so the next read
+    re-covers it. This is the window rule made automatic: an agent can be
+    dark for a week and its next read covers the week.
+
+    CONSUMPTION GUARD (live incident 2026-07-28): the cursor belongs to the
+    agent's own duty loop — a read under another identity CONSUMED that
+    agent's queue (operator diagnostics ate pending directives). Reading as
+    an agent other than the caller's own ``$FULCRA_COORD_AGENT`` therefore
+    defaults to PEEK (no cursor advance); ``--consume`` restores the old
+    behavior for a deliberate takeover, and ``--peek`` forces a safe read
+    even as yourself. Every ``--consume`` takeover writes a durable audit
+    document under ``_coord/audit/consume/`` BEFORE the read proceeds; if
+    that write fails the takeover is refused (an unauditable takeover does
+    not happen). Under ``--json``, one ``queue-result`` object (state DATA
+    or CLEAR) is the entire success stdout; failures keep the ``queue-error``
+    envelope. Text-mode success output is unchanged.
+    """
+    if args.team == "commit":
+        return cmd_queue_commit(args, transport)
+    if getattr(args, "commit_team", None) is not None:
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="usage",
+            message="queue: unexpected second team argument",
+            rc=2,
+        )
+    agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
+    if not agent:
+        return _queue_failure(
+            args,
+            state="REFUSED",
+            error_code="usage",
+            message="queue: --agent or FULCRA_COORD_AGENT required",
+            rc=2,
+        )
+    own_identity = os.environ.get("FULCRA_COORD_AGENT")
+    peek = bool(getattr(args, "peek", False))
+    # Guard fires ONLY when the caller HAS a declared identity that differs:
+    # `--agent X` with no FULCRA_COORD_AGENT set is the normal automation
+    # pattern (the flag IS the identity declaration) and must keep consuming,
+    # or shipping this guard would silently freeze every fleet cursor.
+    takeover = False
+    if not peek and own_identity and agent != own_identity:
+        if getattr(args, "consume", False):
+            takeover = True  # deliberate override — audited before any read
+        else:
+            peek = True
+            print(f"queue: reading as '{agent}' but this caller is "
+                  f"'{own_identity}' — peek mode (cursor NOT advanced); pass "
+                  "--consume to take over their queue deliberately",
+                  file=sys.stderr)
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        if cfg_status == "error":
+            # Unreadable is NOT missing: an expired-auth/offline host must
+            # report DEGRADED (retryable), or its automation reads "config
+            # missing" as a durable state and goes quietly deaf (2026-07-28).
+            return _queue_failure(
+                args,
+                state="UNKNOWN",
+                error_code="config-read-failed",
+                message=(
+                    "queue: DEGRADED — records config could not be read "
+                    "(transport failure, not a missing config); window UNKNOWN, "
+                    "cursor untouched — check auth/network and retry"
+                ),
+                rc=3,
+            )
+        if cfg_status == "invalid":
+            return _queue_failure(
+                args,
+                state="INVALID",
+                error_code="config-invalid",
+                message=(
+                    "queue: INCOMPATIBLE — bus-v3 authority is malformed or "
+                    "partially versioned; cursor untouched"
+                ),
+                rc=3,
+            )
+        return _queue_failure(
+            args,
+            state="ABSENT",
+            error_code="config-absent",
+            message=(
+                "queue: no bus-v3 records config "
+                f"(team/{args.team}/{records.CONFIG_NAME} or "
+                f"{records.ENV_DATA_TYPE}) — cannot read the record queue"
+            ),
+            rc=2,
+        )
+    from . import __version__ as engine_version
+    # Zero transport: the currency check rides the config this read already
+    # loaded, so a snapshot-restored engine learns it is stale at its FIRST
+    # bus touch instead of writing events nobody can parse.
+    currency = records.authority_currency(cfg, engine_version=engine_version)
+    if currency:
+        print(f"queue: ENGINE STALE — {currency}", file=sys.stderr)
+    read_gate = records.compatibility(
+        cfg, engine_version=engine_version, write_cursor=False)
+    if not read_gate["ok"]:
+        return _queue_failure(
+            args,
+            state="INCOMPATIBLE",
+            error_code="engine-incompatible",
+            message=(
+                f"queue: INCOMPATIBLE — {read_gate['reason']}; cursor "
+                "untouched"
+            ),
+            rc=3,
+        )
+    for warning in read_gate["warnings"]:
+        print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    v2 = records.v2_active(cfg)
+    if takeover:
+        # The audit doc lands BEFORE the takeover read touches anything: an
+        # unauditable takeover does not happen (fail closed), and plain reads
+        # and --peek never reach this write. Capturing observed_prior below
+        # is a plain observation READ of the target cursor — allowed before
+        # the audit lands (it mutates and consumes nothing); the window/
+        # records query still runs only after the audit write succeeds. The
+        # audit records what THIS process observed and intended, never a
+        # prediction: a concurrent writer may move the cursor between the
+        # observation and the consuming read, so the actual transition is
+        # evidenced by the cursor document itself afterward.
+        audit_ts = _iso(_now())
+        if v2:
+            generation = cfg["cursor_generation"]
+            target_cursor = records.v2_cursor_path(args.team, agent, generation)
+            prior_cursor, _prior_raw, prior_status = (
+                records.load_v2_cursor_classified(
+                    transport, args.team, agent, generation))
+            if prior_status == "ok" and prior_cursor is not None:
+                observed_prior: Any = {
+                    "schema": 2, "generation": generation,
+                    "revision": prior_cursor["revision"]}
+            else:
+                observed_prior = prior_status
+            intended_authority = {"schema": 2, "generation": generation}
+        else:
+            target_cursor = records.cursor_path(args.team, agent)
+            prior_cursor_v1, prior_status = records.load_cursor_classified(
+                transport, args.team, agent)
+            if prior_status == "ok" and prior_cursor_v1 is not None:
+                observed_prior = {
+                    "schema": 1, "last_read": prior_cursor_v1["last_read"]}
+            else:
+                observed_prior = prior_status
+            intended_authority = {"schema": 1}
+        if not _write_consume_audit(
+                transport, args.team, caller=own_identity, target=agent,
+                cursor_path=target_cursor, observed_prior=observed_prior,
+                intended_authority=intended_authority, ts=audit_ts):
+            return _queue_failure(
+                args,
+                state="UNKNOWN",
+                error_code="consume-audit-failed",
+                message=(
+                    "queue: REFUSED — takeover audit record could not be "
+                    f"written; --consume of '{agent}' aborted, cursor "
+                    "untouched"
+                ),
+                rc=3,
+            )
+    if v2:
+        return _cmd_queue_v2(
+            args, transport, cfg, agent, peek=peek,
+            engine_version=engine_version)
+    if not peek:
+        write_gate = records.compatibility(
+            cfg, engine_version=engine_version, write_cursor=True)
+        if not write_gate["ok"]:
+            return _queue_failure(
+                args,
+                state="INCOMPATIBLE",
+                error_code="engine-incompatible",
+                message=(
+                    f"queue: INCOMPATIBLE — {write_gate['reason']}; "
+                    "refusing before cursor write"
+                ),
+                rc=3,
+            )
+        for warning in write_gate["warnings"]:
+            if warning not in read_gate["warnings"]:
+                print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    now = _now()
+    cursor, cursor_status = records.load_cursor_classified(
+        transport, args.team, agent)
+    if cursor_status in ("error", "invalid"):
+        # INVALID is terminal and human-fixable: the cursor document exists
+        # but does not parse, so guessing a lookback and then saving over the
+        # corrupt bytes would auto-recreate the cursor and destroy the only
+        # evidence of what went wrong. Same discrimination the v2 path makes.
+        return _queue_failure(
+            args,
+            state="INVALID" if cursor_status == "invalid" else "UNKNOWN",
+            error_code=(
+                "cursor-invalid" if cursor_status == "invalid"
+                else "cursor-read-failed"
+            ),
+            message=(
+                f"queue: DEGRADED — cursor {cursor_status}; coverage "
+                "untouched"
+                + (", fix or remove "
+                   f"{records.cursor_path(args.team, agent)} and retry"
+                   if cursor_status == "invalid" else ", retry")
+            ),
+            rc=3,
+        )
+    if cursor is None:
+        since_dt = now - timedelta(seconds=records.DEFAULT_LOOKBACK_SECONDS)
+        seen: list[str] = []
+    else:
+        try:
+            last = datetime.fromisoformat(cursor["last_read"].replace("Z", "+00:00"))
+        except ValueError:
+            return _queue_failure(
+                args,
+                state="INVALID",
+                error_code="cursor-invalid",
+                message=(
+                    "queue: DEGRADED — cursor has an invalid last_read time; "
+                    "coverage untouched, fix or remove "
+                    f"{records.cursor_path(args.team, agent)} and retry"
+                ),
+                rc=3,
+            )
+        since_dt = last - timedelta(seconds=records.CURSOR_SKEW_SECONDS)
+        seen = list(cursor["seen_ids"])
+    window = transport.records(cfg["data_type"], _iso(since_dt), _iso(now))
+    events = records.events_for(window, agent)
+    if events is None:
+        return _queue_failure(
+            args,
+            state="UNKNOWN",
+            error_code="window-unknown",
+            message=(
+                "queue: DEGRADED — window UNKNOWN, cursor NOT advanced "
+                "(re-covered next read)"
+            ),
+            rc=3,
+        )
+    for warning in records.observed_version_warnings(window):
+        print(f"queue: VERSION WARNING — {warning}", file=sys.stderr)
+    for warning in records.invisible_writer_census(window):
+        print(f"queue: DELIVERY WARNING — {warning}", file=sys.stderr)
+    seen_set = set(seen)
+    fresh = [e for e in events if e.get("record_id") not in seen_set]
+    json_mode = bool(getattr(args, "json", False))
+    if not json_mode:
+        # Text mode stays byte-identical for shell consumers; the JSON
+        # envelope is emitted once below, after the cursor outcome is known.
+        _print_queue_events(fresh, json_mode=False)
+    new_seen = seen + [e["record_id"] for e in fresh
+                       if isinstance(e.get("record_id"), str)]
+    if peek:
+        obligations_fragment = _requested_obligations(args, transport, agent)
+        if json_mode:
+            jsonutil.print_json(_queue_result_envelope(
+                fresh, cfg=cfg,
+                cursor_path=records.cursor_path(args.team, agent),
+                advanced=False, obligations=obligations_fragment))
+        if fresh:
+            print(f"queue: peek — {len(fresh)} event(s) shown, cursor NOT "
+                  "advanced (the owning agent still receives them)",
+                  file=sys.stderr)
+        return 0
+    advanced = records.save_cursor(transport, args.team, agent,
+                                   last_read=_iso(now), seen_ids=new_seen)
+    if not advanced:
+        print("queue: cursor save failed — coverage unadvanced, next read "
+              "re-covers this window", file=sys.stderr)
+    obligations_fragment = _requested_obligations(args, transport, agent)
+    if json_mode:
+        envelope = _queue_result_envelope(
+            fresh, cfg=cfg,
+            cursor_path=records.cursor_path(args.team, agent),
+            advanced=advanced, obligations=obligations_fragment)
+        jsonutil.print_json(envelope)
+    return 0
+
+
+def _requested_obligations(
+        args: argparse.Namespace, transport: Any,
+        agent: str) -> "Optional[dict[str, Any]]":
+    """Run the obligation fold for a queue read, IF the caller asked for it.
+
+    One rule, applied at every queue success envelope: an explicit
+    ``--obligations`` always folds; anything else never does. Returning None
+    is what makes the envelope say ``{"state": "not-checked"}``.
+
+    A queue read establishes what EVENTS arrived in the window. It does not
+    establish what is owed — that is the r2 spec item-3 distinction, and the
+    fold is the only thing that closes it. That gap does not close just
+    because the window happened to deliver something, which is why the flag is
+    no longer gated on an empty read (round-2 findings 1/2): a flag accepted
+    and then quietly dropped hands the caller silence they cannot tell apart
+    from a real verdict.
+
+    OPT-IN since the 2026-08-02 promise plan (T3(b)), reversing the 2026-07-30
+    default-ON ruling. It costs a task-index listing, a review listing and a
+    roles listing per wake; the measured evidence is that at the default
+    budget it reaches no component and can only answer UNKNOWN, so every
+    default wake paid that bill for no information. The DEFAULT path performs
+    zero fold ops on any window — that is the cost contract, and it is
+    untouched. Pass ``--obligations`` to buy the answer when it is worth
+    buying; when it is skipped the envelope says ``{"state": "not-checked"}``
+    rather than nothing, so the skip stays visible to automation.
+
+    The fragment reports fold UNKNOWN/INVALID inside a successful queue result.
+    rc 3 is reserved for a degraded event window; the standalone ``obligations``
+    verb retains its own nonzero UNKNOWN/INVALID contract.
+    """
+    if not getattr(args, "obligations", False):
+        return None
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, agent, now=_iso(_now())),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    fragment = {
+        "state": result.state.value,
+        "owed_count": len(result.owed),
+        "consulted": result.consulted,
+        "degraded": result.degraded,
+        "malformed": result.malformed,
+        "reason": result.reason(),
+    }
+    if not getattr(args, "json", False):
+        print(f"queue: obligations {result.state.value} — {result.reason()}",
+              file=sys.stderr)
+    return fragment
+
+
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     now = _iso(_now())
@@ -3089,887 +4998,9 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
         print(f"responded {args.name}: {args.outcome} (closed)")
     except tasks.TaskError as e:
         print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
-    # The reply leg: this shard is what the directive's owner sees on their listen.
-    print("response recorded — the owner's listen surfaces it")
+    # The reply leg: this shard is what the directive's owner sees on their queue.
+    print("response recorded — the owner's queue surfaces it")
     return 0
-
-
-# --- listen: the await leg of `tell` (this task) ---------------------------
-#
-# The bus had send verbs (tell/broadcast/remind) and `respond`, but nothing that
-# SURFACED either new inbox directives or the responses that come back to a
-# directive's owner — so `respond` wrote shards no fold delivered, and the reply
-# leg of `tell` did not exist. Three agents independently hand-rolled watchers
-# around `inbox --json`; `listen` ports that id-diff into the engine so the
-# lifecycle owns listening. Three event sources, each id-diff'd against a state
-# file, per tick:
-#   1. new inbox directives for the agent (the SAME fold `inbox` shows).
-#   2. new responses to directives the agent OWNS (the reply leg).
-#   3. new verdicts on reviews the agent REQUESTED (`requested_by == agent`) —
-#      the await leg of `review request`, now that a verb-opened review notifies
-#      its reviewers atomically (so the `await verdicts` breadcrumb is genuine).
-#
-# Six failure SOURCES are tracked independently — inbox (summaries index / the
-# protected caller head),
-# responses (the responses subtree transport), orphans (a response whose owning
-# directive doc won't resolve), verdicts (the review root / a review doc /
-# a verdict shard unreadable), roles (a role-lease listing unreadable while
-# resolving role-routed directives), and tail (the shared non-head budget).
-# Each is its own degraded streak.
-#
-# Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
-#   * No false advance — a failed/None read during a tick must NOT mark unknown
-#     ids as seen. State is a UNION of affirmatively-processed ids, so a degraded
-#     read contributes nothing and recovery re-surfaces the still-pending id.
-#   * Fail visible, no flooding — a transport failure emits `LISTEN DEGRADED:`
-#     ONCE per consecutive-failure streak, PER SOURCE (the streak flags persist IN
-#     the state file, so a scheduler re-running `--once` does not re-alarm every
-#     tick). Per-source is load-bearing: a single shared flag would let a chronic
-#     degradation on one source pin it TRUE forever and silence a NEW, distinct
-#     outage on another. Each source alerts once per ITS OWN streak and resets on
-#     ITS OWN recovery. It goes to STDERR so `--json` stdout stays a clean
-#     one-object-per-line event stream for filter-free streaming consumers.
-#     A permanently-absent owner/requester doc is handled a level BELOW the streak:
-#     it is emit-once-cached PER SLUG (`flagged_orphan_responses`/`_verdicts`, like
-#     the dir-only `orphan_slugs`) and skipped silently thereafter, so it never even
-#     reaches its source's streak — a fail-closed watcher (persistent DEGRADED ==
-#     fatal) is not murdered by a doc that will never return, while a genuine
-#     transport outage on that same source still fails loud.
-#   * Quiet ticks print NOTHING to stdout (the monitor-flood lesson) — only
-#     `--verbose` emits a heartbeat, and only to stderr.
-#   * Bounded cost — one list_dir of _coord/responses/ + per-slug work ONLY for
-#     slugs the agent owns; a slug's ownership is read once (from its task doc)
-#     and cached in state, so not-owned / broadcast slugs cost nothing after the
-#     first classification and the scan is never proportional to total history.
-
-
-# The independent degraded streaks. Each source alarms once per its own streak.
-# `roles` (role-lease resolution for role-routed directives) and `tail` (shared
-# non-head budget exhaustion) are their own sources:
-# folding it into `inbox` would let a chronic role degradation pin that streak
-# and mask a fresh summaries outage — the independent-streak invariant. Legacy
-# state files lack the key; _coerce_degraded defaults it False (free migration).
-_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts", "roles", "tail")
-
-
-def _coerce_degraded(value: Any) -> dict[str, bool]:
-    """Normalize the persisted ``degraded`` field to the per-source dict. A legacy
-    single bool (pre per-source schema) migrates to the same value on EVERY source:
-    an in-progress streak stays suppressed across the upgrade (no spurious re-alarm)
-    and a clean state stays clean — either way each source then alarms/resets on its
-    own going forward."""
-    if isinstance(value, dict):
-        return {s: bool(value.get(s)) for s in _LISTEN_SOURCES}
-    return {s: bool(value) for s in _LISTEN_SOURCES}
-
-
-def _listen_state_dir() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("COORD_LISTENER_STATE")
-                        or (pathlib.Path.home() / ".cache" / "coord-engine"))
-
-
-def _listen_state_path(team: str, agent: str) -> pathlib.Path:
-    # agent_key is injective (distinct agents never share a state file); team is
-    # slugified for a filesystem-safe name.
-    return _listen_state_dir() / f"listen-{tasks.slugify(team) or 'team'}-{tasks.agent_key(agent)}.json"
-
-
-def _listen_store_state_path(team: str, agent: str) -> str:
-    """Durable listener state in the agent's existing store namespace."""
-    return f"team/{team}/_coord/agents/{agent}/listen-state.json"
-
-
-def _coerce_listen_state_doc(data: Any) -> Optional[dict[str, Any]]:
-    """Normalize one decoded state document, or None when its shape is corrupt."""
-    if not isinstance(data, dict):
-        return None
-    try:
-        return {
-            "inbox_ids": list(data.get("inbox_ids") or []),
-            "response_keys": list(data.get("response_keys") or []),
-            "slug_owned": dict(data.get("slug_owned") or {}),
-            # Source 3 (verdicts) bookkeeping — legacy state files lack these keys;
-            # they default empty, so an upgrade re-surfaces nothing spuriously.
-            "verdict_keys": list(data.get("verdict_keys") or []),
-            "review_requested": dict(data.get("review_requested") or {}),
-            "settled_reviews": list(data.get("settled_reviews") or []),
-            # Orphan review dirs already reported (verdicts dir, no doc) — cached so
-            # each is surfaced ONCE; legacy files lack the key and default empty.
-            "orphan_slugs": list(data.get("orphan_slugs") or []),
-            # Emit-once caches for a PERMANENTLY-absent owner/requester doc at the
-            # responses / verdicts sources — a slug whose directive|review doc reads
-            # None has its degrade emitted ONCE, then is skipped silently (a
-            # fail-closed watcher treats persistent DEGRADED as fatal). Distinct
-            # from orphan_slugs, which caches emitted-orphan EVENTS; these cache
-            # emitted-DEGRADE slugs. Legacy files default empty.
-            "flagged_orphan_responses": list(
-                data.get("flagged_orphan_responses") or []),
-            "flagged_orphan_verdicts": list(
-                data.get("flagged_orphan_verdicts") or []),
-            # E2 authoritative data-updates cursor. Missing/corrupt -> one legacy
-            # full-listing pass, which seeds it only after that tick is conclusive.
-            "feed_cursor": data.get("feed_cursor"),
-            "degraded": _coerce_degraded(data.get("degraded")),
-        }
-    except (TypeError, ValueError):
-        return None
-
-
-def _write_local_listen_cache(path: pathlib.Path, payload: str) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(payload, encoding="utf-8")
-    except OSError as e:
-        _log.warning("listen state write failed", path=str(path), error=str(e))
-
-
-def _load_listen_state(
-    path: pathlib.Path, *, transport: Any = None,
-    team: Optional[str] = None, agent: Optional[str] = None,
-) -> dict[str, Any]:
-    """Load durable store state, using the local file as a restart cache.
-
-    A valid store copy is authoritative and refreshes the local cache. Missing,
-    corrupt, or unreadable store state falls back to the legacy local file, then
-    to a fresh state. Never raises — bookkeeping cannot kill the listener.
-    """
-    if transport is not None and team is not None and agent is not None:
-        try:
-            raw = transport.read(_listen_store_state_path(team, agent))
-            decoded = json.loads(raw) if raw else None
-        except Exception:
-            decoded = None
-        state = _coerce_listen_state_doc(decoded)
-        if state is not None:
-            _write_local_listen_cache(path, json.dumps(state, sort_keys=True))
-            return state
-    try:
-        decoded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        decoded = None
-    return (_coerce_listen_state_doc(decoded)
-            or _coerce_listen_state_doc({})
-            or {})  # the empty schema is statically valid
-
-
-def _save_listen_state(
-    path: pathlib.Path, state: dict[str, Any], *, transport: Any = None,
-    team: Optional[str] = None, agent: Optional[str] = None,
-) -> None:
-    """Write through to local cache and durable store, both best-effort.
-
-    A lost write may cause one re-notify after restart, never a missed event.
-    """
-    payload = json.dumps(state, sort_keys=True)
-    _write_local_listen_cache(path, payload)
-    if transport is None or team is None or agent is None:
-        return
-    store_path = _listen_store_state_path(team, agent)
-    try:
-        if not transport.write(store_path, payload):
-            _log.warning("listen store state write failed", path=store_path)
-    except Exception as e:
-        _log.warning("listen store state write failed", path=store_path,
-                     error=str(e))
-
-
-def _listen_inbox_phase(
-    transport: Any, team: str, agent: str, rows: list[dict[str, Any]],
-    *, seen: set[str], deadline: Deadline,
-    held_roles: "Optional[set[str]]" = None,
-) -> tuple[list[dict[str, Any]], bool, int, int]:
-    """Fold one inbox phase under its supplied deadline.
-
-    The protected head calls this with no roles (literal-agent + wildcard); the
-    shared tail calls it with only held-role rows. The candidate set is pure over
-    the already-loaded rows. Only fresh ack-shard checks cost transport. Returns
-    ``(rows, complete, scanned, total)``; an incomplete head is UNKNOWN and the
-    caller emits the distinct ``listen-head-degraded`` marker.  Seen ids are
-    excluded before ack reads, which keeps quiet ticks cheap.
-    """
-    now = _iso(_now())
-    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
-    candidates = directives.inbox(rows, acks, agent, now=now,
-                                   held_roles=held_roles)
-    candidates = [r for r in candidates
-                  if str(r.get("name") or "") not in seen]
-    out: list[dict[str, Any]] = []
-    scanned = 0
-    for i, row in enumerate(candidates):
-        if i and deadline.expired():
-            return out, False, scanned, len(candidates)
-        slug = str(row.get("name") or "")
-        ack = transport.read(_ack_path(team, slug, agent))
-        scanned += 1
-        if ack is None:
-            out.append(row)
-        if deadline.expired() and scanned < len(candidates):
-            return out, False, scanned, len(candidates)
-    return out, True, scanned, len(candidates)
-
-
-def _listen_feed_history(
-    transport: Any, team: str, agent: str, changes: list[dict[str, Any]], *,
-    response_keys: set[str], slug_owned: dict[str, Any],
-    verdict_keys: set[str], review_requested: dict[str, Any],
-    settled_reviews: set[str],
-) -> Optional[dict[str, Any]]:
-    """Classify changed response/verdict shards without history-root listings.
-
-    The result is copy-on-success. Any unreadable owner/requester/shard returns
-    None so the caller discards the partial work and takes the unchanged
-    listing-based tail fallback.
-    """
-    next_response_keys = set(response_keys)
-    next_slug_owned = dict(slug_owned)
-    next_verdict_keys = set(verdict_keys)
-    next_review_requested = dict(review_requested)
-    next_settled_reviews = set(settled_reviews)
-    events: list[dict[str, Any]] = []
-    responses_prefix = _responses_prefix(team)
-    review_prefix = f"team/{team}/review/"
-
-    # A settling change must be observed after its verdict shards in the same
-    # inclusive feed window, regardless of endpoint ordering.
-    ordered = sorted(
-        changes,
-        key=lambda c: (
-            str(c.get("path") or "").endswith("/.settled"),
-            str(c.get("path") or ""),
-        ),
-    )
-    for change in ordered:
-        if change.get("state") != "uploaded":
-            continue
-        path = str(change.get("path") or "")
-        if path.startswith(responses_prefix):
-            rest = path[len(responses_prefix):]
-            parts = rest.split("/")
-            if len(parts) != 2 or not parts[0] or not parts[1].endswith(".md"):
-                continue
-            slug, filename = parts
-            key = f"{slug}/{filename[:-3]}"
-            if key in next_response_keys:
-                continue
-            owned = next_slug_owned.get(slug)
-            if owned is None:
-                doc = transport.read(_task_path(team, slug))
-                if doc is None:
-                    return None
-                fm = okf.parse_frontmatter(doc) or {}
-                owned = str(fm.get("owner") or "").strip() == agent
-                next_slug_owned[slug] = owned
-            if not owned:
-                continue
-            shard = transport.read(path)
-            if shard is None:
-                return None
-            fm = okf.parse_frontmatter(shard) or {}
-            events.append({
-                "type": "response",
-                "slug": slug,
-                "agent": str(fm.get("agent") or "?"),
-                "outcome": str(fm.get("outcome") or "?"),
-            })
-            next_response_keys.add(key)
-            continue
-
-        if not path.startswith(review_prefix):
-            continue
-        rest = path[len(review_prefix):]
-        parts = rest.split("/")
-        if len(parts) != 3 or parts[1] != "verdicts":
-            continue
-        slug, _verdicts, filename = parts
-        if not slug or slug in next_settled_reviews:
-            continue
-        requested = next_review_requested.get(slug)
-        if requested is None:
-            doc = transport.read(_review_doc_path(team, slug))
-            if doc is None:
-                return None
-            fm = okf.parse_frontmatter(doc) or {}
-            requested = str(fm.get("requested_by") or "").strip() == agent
-            next_review_requested[slug] = requested
-        if not requested:
-            continue
-        if filename == SETTLED_MARKER:
-            events.append({"type": "settled", "slug": slug,
-                           "state": review.APPROVED})
-            next_settled_reviews.add(slug)
-            continue
-        if not filename.endswith(".md"):
-            continue
-        key = f"{slug}/{filename[:-3]}"
-        if key in next_verdict_keys:
-            continue
-        shard = transport.read(path)
-        if shard is None:
-            return None
-        fm = okf.parse_frontmatter(shard) or {}
-        events.append({
-            "type": "verdict",
-            "slug": slug,
-            "reviewer": filename[:-3],
-            "verdict": str(fm.get("verdict") or "?"),
-        })
-        next_verdict_keys.add(key)
-
-    return {
-        "events": events,
-        "response_keys": next_response_keys,
-        "slug_owned": next_slug_owned,
-        "verdict_keys": next_verdict_keys,
-        "review_requested": next_review_requested,
-        "settled_reviews": next_settled_reviews,
-    }
-
-
-def _listen_tick(transport: Any, team: str, agent: str,
-                 state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
-    """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
-    degraded SOURCE (see ``_LISTEN_SOURCES``) to its messages, and
-    mutates ``state`` with ONLY affirmatively-processed ids (add-only — see the
-    section note): a failed read/list adds nothing, so it can never mark unknown
-    data as seen."""
-    events: list[dict[str, Any]] = []
-    failures: dict[str, list[str]] = {}
-
-    def _fail(source: str, msg: str) -> None:
-        failures.setdefault(source, []).append(msg)
-
-    # The tail clock opens at tick start and is shared by every history/role leg.
-    # The literal-agent/wildcard inbox head below gets a separate fresh clock, so
-    # a drained shared budget can truncate only the tail — never caller-directed
-    # work.  ``tail`` owns one distinct failure streak/marker.
-    tail_dl = Deadline.open(_listen_tail_budget())
-    tail_cut = False
-
-    def _tail_ready(phase: str) -> bool:
-        nonlocal tail_cut
-        if tail_cut:
-            return False
-        if tail_dl.expired():
-            tail_cut = True
-            _fail("tail", f"listen-tail-degraded: shared budget spent before {phase}; "
-                  "caller-directed head was still served")
-            return False
-        return True
-
-    inbox_ids = set(state["inbox_ids"])
-    response_keys = set(state["response_keys"])
-    slug_owned: dict[str, Any] = dict(state["slug_owned"])
-    verdict_keys = set(state.get("verdict_keys") or [])
-    review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
-    settled_reviews = set(state.get("settled_reviews") or [])
-    # Emit-once caches: slugs whose owner/requester doc read None and have already
-    # had their degrade emitted. Skipped SILENTLY thereafter so a fail-closed
-    # watcher (persistent DEGRADED == fatal) survives a permanently-missing doc;
-    # recovery (doc reads non-None) discards the slug to re-arm fail-loud. Mirrors
-    # the `orphan_slugs` emit-once cache the dir-only review scan uses below.
-    flagged_orphan_responses = set(state.get("flagged_orphan_responses") or [])
-    flagged_orphan_verdicts = set(state.get("flagged_orphan_verdicts") or [])
-
-    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces), PLUS
-    # directives routed to a fresh-lease ROLE this agent holds. An unreadable
-    # summaries index is degraded, NOT a legitimately-empty inbox.
-    now_iso = _iso(_now())
-    feed_attempted = bool(state.get("feed_cursor"))
-    feed_changes = (_team_updates(
-        transport, team, since=state.get("feed_cursor"), now=now_iso)
-        if feed_attempted else None)
-    head_dl = Deadline.open(_listen_head_budget())
-    rows, inbox_ok, inbox_reason = _load_rows_status(
-        transport, team, deadline=head_dl, feed_changes=feed_changes,
-        feed_attempted=feed_attempted)
-    if not inbox_ok:
-        # The reason attributes WHICH leg failed (summaries index vs the freshness
-        # overlay — different outages, same inbox source/streak).
-        _fail("inbox", "listen-head-degraded: " +
-              (inbox_reason or "summaries index unreadable"))
-    direct_head, head_complete, head_scanned, head_total = _listen_inbox_phase(
-        transport, team, agent, rows, seen=inbox_ids, deadline=head_dl)
-    if not head_complete:
-        _fail("inbox", "listen-head-degraded: caller-directed inbox budget spent "
-              f"after {head_scanned}/{head_total} items")
-    for r in direct_head:
-        slug = str(r.get("name") or "")
-        if not slug:
-            continue
-        owner = str(r.get("owner") or "?")
-        if owner == agent and not r.get("not_before"):
-            inbox_ids.add(slug)
-            continue
-        events.append({"type": "directive", "slug": slug,
-                       "owner": owner,
-                       "title": str(r.get("title") or slug)})
-        inbox_ids.add(slug)
-    # Role expansion — the shared resolver (`_held_roles_for_rows`, which owns the
-    # candidate bound and the fail-closed contract), narrowed HERE to UNSEEN
-    # directives: an already-fired id needs no route, so a steady-state tick pays
-    # zero role reads. Not persistent state — leases change, so the resolution is
-    # per tick. HONEST BOUND: a directive assigned to ANOTHER literal agent never
-    # enters this agent's inbox_ids, so its assignee is re-probed every tick — but
-    # the resolver's roles/ listing settles it for free, so the re-probe costs no
-    # reads. A persistent negative "not-a-role" cache was considered and REJECTED:
-    # read() can't distinguish absent from failed, and a name later registered as a
-    # role would be silently unroutable forever (a staleness hole worse than the
-    # read cost); the per-pass listing is that invalidation, done fresh every tick.
-    # id-diff is unchanged (the directive slug is the id regardless of
-    # the route), so a new role holder sees a directive iff its id is unseen in
-    # THEIR OWN state file (state is per-agent) — the holder-change semantics fall
-    # out.
-    held_roles: set[str] = set()
-    unresolved_roles: set[str] = set()
-    if _tail_ready("role routing"):
-        remaining = (None if tail_dl.instant is None else
-                     max(0.0, tail_dl.instant - time.monotonic()))
-        role_budget = _role_fold_budget()
-        if remaining is not None:
-            role_budget = min(role_budget, remaining)
-        held_roles, unresolved_roles = _held_roles_for_rows(
-            transport, team, agent, rows, now=now_iso, skip_slugs=inbox_ids,
-            deadline_seconds=role_budget)
-    for role in sorted(unresolved_roles):
-        # Fail-closed: the lease read is UNKNOWN. Degrade VISIBLY (the agent may
-        # miss role-routed work) on the DEDICATED `roles` source — never crash,
-        # never treat unknown as "not a holder" silently. Its own source is
-        # load-bearing: a chronic role degradation must not pin the inbox streak
-        # and mask a fresh summaries outage.
-        _fail("roles", f"role lease unknown for {role}")
-    # Direct rows were consumed by the protected head.  Restrict this shared-tail
-    # pass to actual held-role rows so it cannot repeat their ack reads.
-    role_rows = [r for r in rows if str(r.get("assignee") or "") in held_roles]
-    inbox: list[dict[str, Any]] = []
-    if held_roles and _tail_ready("role inbox"):
-        inbox, role_complete, _role_scanned, _role_total = _listen_inbox_phase(
-            transport, team, agent, role_rows, seen=inbox_ids, deadline=tail_dl,
-            held_roles=held_roles)
-        if not role_complete:
-            _tail_ready("role inbox completion")
-    for r in inbox:
-        slug = str(r.get("name") or "")
-        if not slug or slug in inbox_ids:
-            continue
-        owner = str(r.get("owner") or "?")
-        # A sender may be in its own audience: explicitly via a self-tell, or
-        # implicitly because every broadcast is addressed to ``*``.  Unscheduled
-        # rows are real inbox members (and must be consumed into id-diff state),
-        # but waking the author for its own send is pure self-echo.  A scheduled
-        # self-reminder is deliberately different: its future wake is the point,
-        # so a visible row carrying ``not_before`` must still fire.
-        # Suppress only the directive event; response/verdict sources below remain
-        # the reply legs for work the agent owns or requested.
-        if owner == agent and not r.get("not_before"):
-            inbox_ids.add(slug)
-            continue
-        events.append({"type": "directive", "slug": slug,
-                       "owner": owner,
-                       "title": str(r.get("title") or slug)})
-        inbox_ids.add(slug)
-
-    # Feed-first history tail.  This is copy-on-success: any changed shard whose
-    # ownership/requester/content cannot be read discards the partial result and
-    # falls through to the unchanged listing-based W8-budgeted tail.
-    history_feed = False
-    if feed_changes is not None and _tail_ready("feed history"):
-        targeted = _listen_feed_history(
-            transport, team, agent, feed_changes,
-            response_keys=response_keys, slug_owned=slug_owned,
-            verdict_keys=verdict_keys, review_requested=review_requested,
-            settled_reviews=settled_reviews)
-        if targeted is not None:
-            history_feed = True
-            events.extend(targeted["events"])
-            response_keys = targeted["response_keys"]
-            slug_owned = targeted["slug_owned"]
-            verdict_keys = targeted["verdict_keys"]
-            review_requested = targeted["review_requested"]
-            settled_reviews = targeted["settled_reviews"]
-
-    # Source 2 — new responses to directives THIS agent owns. One list_dir of the
-    # responses root; per-slug work only for owned slugs, ownership cached.
-    prefix = _responses_prefix(team)
-    entries = [] if history_feed else None
-    if not history_feed and _tail_ready("responses"):
-        try:
-            entries = transport.list_dir(prefix)
-        except TransportError as e:
-            _fail("responses", f"responses listing unreadable ({e})")
-    for e in entries or []:
-        if not _tail_ready("response classification"):
-            break
-        raw = e.get("name") or ""
-        if not (e.get("is_dir") or raw.endswith("/")):
-            continue  # only slug dirs live here
-        slug = raw.rstrip("/")
-        if not slug:
-            continue
-        owned = slug_owned.get(slug)
-        if owned is None:
-            doc = transport.read(_task_path(team, slug))
-            if doc is None:
-                # Ambiguous: a transient read failure OR a permanent orphan whose
-                # directive doc is gone (a settled/archived/tombstoned directive).
-                # Ownership is UNKNOWN either way, so we do NOT cache and do NOT
-                # advance — unknown != seen, retry next tick. EMIT-ONCE per slug:
-                # a fail-closed watcher treats persistent DEGRADED as fatal, so a
-                # permanently-missing doc must not re-degrade every tick and murder
-                # it. First occurrence fails loud on the `orphans` source; the slug
-                # is then skipped silently until it recovers, so it never pins the
-                # source either. Other sources still fail-loud on their own
-                # transport failures, so a genuine outage is never masked — first
-                # occurrence + recovery visibility is retained.
-                if slug not in flagged_orphan_responses:
-                    _fail("orphans", f"owner unresolved for {slug}")
-                    flagged_orphan_responses.add(slug)
-                continue
-            fm = okf.parse_frontmatter(doc) or {}
-            owner = str(fm.get("owner") or "").strip()
-            owned = owner == agent  # owner is the directive's SENDER; broadcast/absent -> not owned
-            slug_owned[slug] = owned  # definitive classification: cache it
-            flagged_orphan_responses.discard(slug)  # recovered -> re-arm fail-loud
-            if not _tail_ready("response ownership"):
-                break
-        if not owned:
-            continue  # responses to other-owner / broadcast directives are noise
-        try:
-            stamps = transport.list_dir(prefix + slug + "/")
-        except TransportError as ex:
-            _fail("responses", f"response dir {slug} unreadable ({ex})")
-            continue
-        for se in stamps:
-            if not _tail_ready("response shards"):
-                break
-            sname = se.get("name") or ""
-            if se.get("is_dir") or not sname.endswith(".md"):
-                continue
-            key = f"{slug}/{sname[:-3]}"
-            if key in response_keys:
-                continue
-            shard = transport.read(prefix + slug + "/" + sname)
-            if shard is None:
-                # unread shard -> unknown, do NOT advance over it (retry next tick)
-                _fail("responses", f"response {key} unreadable")
-                continue
-            rfm = okf.parse_frontmatter(shard) or {}
-            events.append({"type": "response", "slug": slug,
-                           "agent": str(rfm.get("agent") or "?"),
-                           "outcome": str(rfm.get("outcome") or "?")})
-            response_keys.add(key)
-
-    # Source 3 — new verdicts on reviews THIS agent REQUESTED. One list_dir of
-    # the review root; per-NEW-slug the review doc is read once and the requester
-    # (`requested_by`) cached; verdict dirs are listed ONLY for my still-unsettled
-    # slugs. A `.settled` listing first EMITS every unseen shard + one terminal
-    # SETTLED event, then drops the slug so it is never listed again (the review
-    # is immutable once settled). Its OWN degraded source `verdicts`.
-    if _tail_ready("settled-review index"):
-        settled_reviews.update(rec._load_settled_index(transport, team))
-    review_prefix = f"team/{team}/review/"
-    rentries = [] if history_feed else None
-    if not history_feed and _tail_ready("verdicts"):
-        try:
-            rentries = transport.list_dir(review_prefix)
-        except TransportError as e:
-            _fail("verdicts", f"review listing unreadable ({e})")
-    for e in rentries or []:
-        if not _tail_ready("review classification"):
-            break
-        name = e.get("name") or ""
-        # The review DOCS are the `.md` entries; `{slug}/` dirs hold the verdicts.
-        if e.get("is_dir") or not name.endswith(".md"):
-            continue
-        slug = name[:-3]
-        if not slug or slug in settled_reviews:
-            continue  # settled -> immutable, never list its verdicts again
-        requested = review_requested.get(slug)
-        if requested is None:
-            doc = transport.read(_review_doc_path(team, slug))
-            if doc is None:
-                # Ordinarily the slug came from the listing so the doc exists and a
-                # None read is a transient transport failure — but a settled/archived
-                # review can leave its `<slug>/` verdicts subtree listed with the
-                # `<slug>.md` doc gone, a PERMANENT None. Requester UNKNOWN either
-                # way: do NOT cache and do NOT advance (no-false-advance), retry next
-                # tick. EMIT-ONCE per slug: a fail-closed watcher treats persistent
-                # DEGRADED as fatal, so a permanently-missing doc must not re-degrade
-                # every tick. First occurrence fails loud on `verdicts`; the slug is
-                # skipped silently thereafter, never pinning the source. Other
-                # sources still fail-loud on their own transport failures, so a real
-                # outage is never masked. Recovery below re-arms the slug.
-                if slug not in flagged_orphan_verdicts:
-                    _fail("verdicts", f"requester unresolved for {slug}")
-                    flagged_orphan_verdicts.add(slug)
-                continue
-            fm = okf.parse_frontmatter(doc) or {}
-            requested = str(fm.get("requested_by") or "").strip() == agent
-            review_requested[slug] = requested  # definitive classification: cache
-            flagged_orphan_verdicts.discard(slug)  # recovered -> re-arm fail-loud
-            if not _tail_ready("review requester"):
-                break
-        if not requested:
-            continue  # someone else's review -> noise
-        try:
-            ventries = transport.list_dir(_verdicts_prefix(team, slug))
-        except TransportError as ex:
-            _fail("verdicts", f"verdicts dir {slug} unreadable ({ex})")
-            continue
-        settling = any((x.get("name") or "") == SETTLED_MARKER for x in ventries)
-        # Emit every UNSEEN shard BEFORE any settle-drop. The settling tick is
-        # the DOMINANT flow, not an edge: a single approve settles the review and
-        # the reviewer settles it themselves (`review status` right after filing,
-        # per doctrine), so the final — often only — verdict shard and `.settled`
-        # co-exist by the requester's next tick. Dropping the slug first would
-        # swallow that verdict and make the `await verdicts:` breadcrumb false.
-        # Cost stays bounded: only unseen shards are read, once per slug lifetime.
-        unread = False
-        for ve in ventries:
-            if not _tail_ready("verdict shards"):
-                unread = True
-                break
-            vname = ve.get("name") or ""
-            if ve.get("is_dir") or not vname.endswith(".md"):
-                continue  # `.settled` and dirs are not verdict shards
-            vkey = f"{slug}/{vname[:-3]}"
-            if vkey in verdict_keys:
-                continue
-            shard = transport.read(_verdicts_prefix(team, slug) + vname)
-            if shard is None:
-                # listed file unreadable -> unknown, do NOT advance (retry)
-                _fail("verdicts", f"verdict {vkey} unreadable")
-                unread = True
-                continue
-            vfm = okf.parse_frontmatter(shard) or {}
-            events.append({"type": "verdict", "slug": slug,
-                           "reviewer": vname[:-3],
-                           "verdict": str(vfm.get("verdict") or "?")})
-            verdict_keys.add(vkey)
-        if settling and not unread:
-            # Terminal-settled AND every shard affirmatively seen: emit the one
-            # terminal SETTLED event (so the requester learns the outcome even
-            # when all shards were seen on earlier ticks), then drop the slug —
-            # zero verdict-dir listings hereafter. The marker only ever caches
-            # terminal-APPROVED (`_write_settled_marker`), so the state is known
-            # without reading it. An unreadable shard keeps the slug ACTIVE
-            # (degraded already flagged): settling must not swallow an
-            # unreadable final verdict — it emits on recovery, then drops.
-            events.append({"type": "settled", "slug": slug,
-                           "state": review.APPROVED})
-            settled_reviews.add(slug)
-
-    # Dir-only review slugs: a `<slug>/` dir with no `<slug>.md` doc is skipped by
-    # the doc-keyed scan above. Classify each via the tombstone three-way (one
-    # verdicts listing apiece): a dir with real verdict shards is an ORPHAN —
-    # surface it ONCE (cached in `orphan_slugs`) so a listener learns the slug
-    # exists (repair stays human/maintainer, never auto-delete); an EMPTY dir (no
-    # shards, or only a stale `.settled` marker) is a soft-delete TOMBSTONE carrying
-    # zero information — skip it silently and NEVER cache it; a verdicts listing
-    # that RAISES is UNKNOWN — fail closed, degrade the `verdicts` source visibly
-    # and do not cache (never assume tombstone on transport failure). Skipped
-    # entirely when the review listing failed (rentries is None): an unreadable
-    # root is UNKNOWN, not an absence of docs.
-    #
-    # BUDGETED (codex P1): unlike the source's other listings — bounded by
-    # MY-unsettled-slugs, a small shrinking set — the dir-only set is PERMANENT
-    # and growing (soft deletes), so an unbudgeted pass spends up to
-    # N x transport-timeout on a degraded tick, on the listener whose tick
-    # latency is load-bearing. The pass runs under ``_listen_classify_budget()``
-    # (default 10s, env COORD_LISTEN_CLASSIFY_BUDGET), checked before each
-    # classification listing (equivalently after the previous one — adjacent
-    # iterations — so an overrunning listing is detected immediately; overshoot
-    # is bounded by ONE listing, whose completed result is definitive and kept).
-    # On exhaustion: degrade the `verdicts` source (its existing streak), cache
-    # NOTHING for the unvisited slugs (unknown != classified — no false
-    # orphan/tombstone knowledge may persist), and stop — the next tick retries.
-    orphan_slugs = set(state.get("orphan_slugs") or [])
-    if rentries is not None:
-        doc_names = {(e.get("name") or "")[:-3] for e in rentries
-                     if not e.get("is_dir") and (e.get("name") or "").endswith(".md")}
-        classify_dl = Deadline.open(_listen_classify_budget())
-        for e in rentries:
-            if not _tail_ready("orphan review classification"):
-                break
-            if not e.get("is_dir"):
-                continue
-            oslug = (e.get("name") or "").rstrip("/")
-            if (not oslug or oslug in doc_names or oslug in orphan_slugs
-                    or oslug in settled_reviews):
-                continue
-            if classify_dl.expired():
-                _fail("verdicts", "dir classification budget spent — "
-                      "unclassified review dirs remain, retried next tick")
-                break
-            kind = _classify_orphan_dir(transport, team, oslug)
-            if kind == "orphan":
-                events.append({"type": "orphan", "slug": oslug})
-                orphan_slugs.add(oslug)
-            elif kind == "unknown":
-                _fail("verdicts", f"orphan dir {oslug} unclassifiable "
-                      f"(verdicts listing unreadable)")
-            # tombstone -> silently skipped, never cached
-
-    # Final after-op check: a last blocking read/list that crossed the aggregate
-    # deadline must not return a falsely clean tick merely because there is no
-    # next iteration whose pre-op guard would observe it.
-    _tail_ready("tail completion")
-
-    state["inbox_ids"] = sorted(inbox_ids)
-    state["response_keys"] = sorted(response_keys)
-    state["slug_owned"] = slug_owned
-    state["verdict_keys"] = sorted(verdict_keys)
-    state["review_requested"] = review_requested
-    state["settled_reviews"] = sorted(settled_reviews)
-    state["orphan_slugs"] = sorted(orphan_slugs)
-    state["flagged_orphan_responses"] = sorted(flagged_orphan_responses)
-    state["flagged_orphan_verdicts"] = sorted(flagged_orphan_verdicts)
-    # Never consume a window whose tick was incomplete.  A conclusive feed tick
-    # OR a conclusive full-listing fallback may advance; any degraded source
-    # leaves the old cursor intact so recovery inclusively replays the window.
-    if not failures:
-        state["feed_cursor"] = now_iso
-    return events, failures
-
-
-def _format_listen_event(ev: dict[str, Any]) -> str:
-    if ev["type"] == "directive":
-        return f"DIRECTIVE {ev['slug']} (from {ev['owner']}): {ev['title'][:80]}"
-    if ev["type"] == "verdict":
-        return f"VERDICT {ev['slug']} by {ev['reviewer']}: {ev['verdict']}"
-    if ev["type"] == "settled":
-        return f"SETTLED {ev['slug']}: {ev['state']}"
-    if ev["type"] == "orphan":
-        return f"ORPHAN {ev['slug']} (verdicts dir, no review doc — needs repair)"
-    return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
-
-
-def _shadow_window_active(transport: Any, team: str) -> bool:
-    """True iff a W7 shadow window is armed — the `shadow-window.json` marker
-    exists and carries a `started_at`. One cheap read; absent/unreadable/malformed
-    ⇒ off, so the delivery probes stay silent outside the window (and default-off
-    on any doubt). Checked only when there is something to probe."""
-    raw = transport.read(router.router_prefix(team) + "shadow-window.json")
-    if not raw:
-        return False
-    try:
-        doc = json.loads(raw)
-    except ValueError:
-        return False
-    # codex #470 P2: a PARSEABLE started_at, not mere truthiness — a malformed
-    # marker ({"started_at":"bogus"}) is doubt ⇒ off, matching this fn's own
-    # contract and `shadow status`.
-    return isinstance(doc, dict) and router.parse_iso(doc.get("started_at")) is not None
-
-
-def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any],
-                     *, json_mode: bool, verbose: bool) -> tuple[list, dict[str, list[str]]]:
-    events, failures = _listen_tick(transport, team, agent, state)
-    for ev in events:
-        print(jsonutil.dumps(ev) if json_mode else _format_listen_event(ev))
-    sys.stdout.flush()
-
-    # W7 delivery probe (path=listener). Each DIRECTIVE surfaced this tick is a
-    # live delivery of a directed item to this agent; while a shadow window is
-    # armed, record an idempotency-keyed evidence shard the acceptance report
-    # correlates against router decisions. FULLY GUARDED: a probe failure never
-    # perturbs the load-bearing watcher tick. The marker read happens only when a
-    # directive was actually delivered (not every quiet tick). Removable after
-    # acceptance. (Writing shadow-evidence/ from the listener is sanctioned by
-    # the spec's namespace-writer rule.)
-    try:
-        directives = [ev for ev in events if ev.get("type") == "directive"]
-        if directives and _shadow_window_active(transport, team):
-            base = router.router_prefix(team) + router.SHADOW_EVIDENCE_SUBPATH
-            delivered_at = router.iso(_now())
-            for ev in directives:
-                key = router.idempotency_key(str(ev.get("slug")), agent)
-                transport.write(
-                    base + router.shadow_evidence_filename(agent, key),
-                    json.dumps(router.shadow_evidence_record(
-                        key=key, agent=agent, delivered_at=delivered_at,
-                        path="listener"), sort_keys=True) + "\n")
-    except Exception as e:  # never let the probe break the watcher
-        print(f"listen: W7 shadow probe skipped ({type(e).__name__}: {e})",
-              file=sys.stderr)
-
-    # Per-source streaks: each source alarms ONCE per its own consecutive-failure
-    # streak (the flags persist in state across `--once` runs) and resets on its
-    # own recovery — a pinned orphan can't swallow a new inbox/responses outage.
-    degraded = _coerce_degraded(state.get("degraded"))  # defensive: tolerate legacy bool
-    state["degraded"] = degraded
-    newly: list[str] = []
-    for source in _LISTEN_SOURCES:
-        msgs = failures.get(source)
-        if msgs:
-            if not degraded[source]:  # this source just entered a failure streak
-                newly.append("; ".join(msgs))
-                degraded[source] = True
-        else:
-            degraded[source] = False  # clean this tick -> streak reset for this source
-    if newly:
-        print(f"LISTEN DEGRADED: {'; '.join(newly)}", file=sys.stderr)
-    elif verbose and not events and not failures:
-        print(f"listen: quiet ({len(state['inbox_ids'])} inbox, "
-              f"{len(state['response_keys'])} responses, "
-              f"{len(state.get('verdict_keys') or [])} verdicts seen)", file=sys.stderr)
-    sys.stderr.flush()
-    return events, failures
-
-
-def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
-    state_path = _listen_state_path(args.team, agent)
-    if getattr(args, "state_path", False):
-        # Resolver for listener-tick.sh's one-time `.items` -> listen-state
-        # migration: the slugify/agent_key naming lives here, so the shell asks the
-        # engine rather than reimplementing it. Print and exit; no tick, no writes.
-        print(str(state_path))
-        return 0
-    state = _load_listen_state(
-        state_path, transport=transport, team=args.team, agent=agent)
-    json_mode = bool(getattr(args, "json", False))
-    verbose = bool(getattr(args, "verbose", False))
-
-    def tick() -> dict[str, list[str]]:
-        _events, failures = _run_listen_tick(
-            transport, args.team, agent, state,
-            json_mode=json_mode, verbose=verbose)
-        _save_listen_state(
-            state_path, state, transport=transport, team=args.team, agent=agent)
-        return failures
-
-    if args.once:
-        failures = tick()
-        # A captured transport failure is data, not an exception.  Keep the
-        # pulse-once stderr contract in _run_listen_tick, but return a stable
-        # machine-readable status on *every* one-shot tick so schedulers do not
-        # mistake a suppressed second pulse for recovery.
-        return 3 if failures else 0
-    interval = args.interval if args.interval and args.interval > 0 else 60
-    try:
-        while True:
-            # Per-tick guard: `listen` is the load-bearing watcher (its tick latency
-            # is the reply leg of `tell`/`respond`/`review`). An UNMODELED exception
-            # in one tick must degrade THAT tick, never kill the daemon — a
-            # transient bug would otherwise silence the whole watcher. Log to stderr
-            # in the `LISTEN DEGRADED:` register, keep the streak state, continue.
-            # `--once` deliberately stays UNguarded above: a one-shot run surfaces
-            # its failure (rc 1 via main's envelope) to whatever scheduled it.
-            try:
-                tick()
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                _log.error("listen tick failed (daemon continues)",
-                           team=args.team, agent=agent,
-                           error=f"{type(e).__name__}: {e}")
-                print(f"LISTEN DEGRADED: tick raised {type(e).__name__}: {e} — "
-                      f"daemon continues, next tick in {interval}s", file=sys.stderr)
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        if verbose:
-            print("listen: stopped", file=sys.stderr)
-        return 0
 
 
 # --- continuity completion (A6): role checkpoints, park, briefing ---
@@ -4059,25 +5090,34 @@ def _held_roles(transport: Any, team: str, agent: str) -> tuple[list[str], bool]
 
 
 def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
-    """Session-exit checkpoint: snapshot every role the agent holds and point
-    each role's checkpoint_ref at it. The incumbent's `park`."""
+    """Session-exit checkpoint for every held role, or one selected role."""
     agent = args.agent or _host()
     now = _iso(_now())
-    held, ok = _held_roles(transport, args.team, agent)
+    if args.role:
+        holders, ok = _role_fresh_holders(
+            transport, args.team, args.role, now=now)
+        held = [args.role] if ok and agent in holders else []
+    else:
+        held, ok = _held_roles(transport, args.team, agent)
     if not ok:
         # UNKNOWN is not "nothing to park". Refusing here is the whole point: a
         # session runs park as it exits, so a silent no-op discards the checkpoint
         # the NEXT session resumes from, and nobody is watching to notice. Say the
         # checkpoint was not written, loudly and non-zero, while the operator can
         # still retry with the context still alive.
-        print(f"park: could not determine which roles {agent} holds in "
-              f"team/{args.team} (role state unreadable, not empty) — "
+        scope = f"role {args.role}" if args.role else f"which roles {agent} holds"
+        print(f"park: could not determine {scope} in team/{args.team} "
+              f"(role state unreadable, not empty) — "
               f"CHECKPOINT NOT WRITTEN. Nothing was parked; retry before ending "
               f"the session.", file=sys.stderr)
         return 1
     if not held:
-        print(f"park: {agent} holds no fresh roles in team/{args.team} — nothing to park")
-        return 0
+        holding = (f"does not hold fresh role {args.role}"
+                   if args.role else "holds no fresh roles")
+        print(f"park: {agent} {holding} in team/{args.team} — "
+              f"CHECKPOINT NOT WRITTEN because there was nothing to park",
+              file=sys.stderr)
+        return 2
     for role in held:
         task_slug = f"role-{tasks.slugify(role)}"
         snap = continuity.build_snapshot(
@@ -4091,6 +5131,12 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
             print(f"park: snapshot write FAILED for {role}; checkpoint_ref left unchanged",
                   file=sys.stderr)
             continue
+        # The save landed, so the moment is owed — emitted BEFORE the
+        # checkpoint_ref update because the two answer different questions. The
+        # ref is role bookkeeping; the moment records that this agent saved
+        # state at this instant, which is true whether or not the role doc
+        # accepts a pointer to it.
+        _checkpoint_moment(transport, args.team, snap, path)
         if not _set_role_field(transport, args.team, role, "checkpoint_ref", path):
             print(f"park: checkpoint_ref update FAILED for {role}", file=sys.stderr)
             continue
@@ -4108,7 +5154,10 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # not an add-on — an UNKNOWN summaries index must surface as the shared marker,
     # never a silently-empty board/inbox/needs-me that reads as "all clear". The
     # bundle stays tolerant (rc 0); the marker + stderr notice make it loud.
-    rows, rows_ok, rows_reason = _load_rows_status(transport, args.team)
+    doc_sink: list[Any] = []
+    rows, rows_ok, rows_reason = _load_rows_status(
+        transport, args.team, doc_sink=doc_sink)
+    agg_doc = doc_sink[0] if doc_sink else None
     if not rows_ok:
         out["read_degraded"] = _read_degraded_row(rows_reason)
     # One shared add-on deadline (see _briefing_budget), opened HERE — before the
@@ -4179,13 +5228,15 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # tighter, already-shipped budget (whichever bound is sooner).
     try:
         out["pending_reviews"] = _pending_reviews_for(
-            transport, args.team, agent, rows=rows, deadline=add_on.instant)
+            transport, args.team, agent, rows=rows, deadline=add_on.instant,
+            aggregate_doc=agg_doc)
     except Exception as e:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
     try:
         out["forge_feedback"] = _forge_feedback_for(
-            transport, args.team, agent, deadline=add_on.instant)
+            transport, args.team, agent, deadline=add_on.instant,
+            aggregate_doc=agg_doc)
     except Exception as e:
         print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
         out["forge_feedback"] = []
@@ -4253,7 +5304,7 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # split out and dispatched, never tallied; only real review rows count.
     _review_degraded_markers = (
         "review-fold-degraded", "review-head-degraded",
-        "review-orphan-degraded", "review-role-degraded")
+        "review-orphan-degraded", "review-role-degraded", "review-source")
     pend_rows = [r for r in out["pending_reviews"]
                  if r.get("type") not in _review_degraded_markers]
     degraded_rows = [r for r in out["pending_reviews"]
@@ -4264,13 +5315,17 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in degraded_rows:  # always shown — a degraded/UNKNOWN fold must never hide
         print(_review_row_line(r) or _line(r))
     forge_rows = out.get("forge_feedback") or []
-    forge_fb = [r for r in forge_rows if r.get("type") != "forge-degraded"]
+    forge_fb = [r for r in forge_rows
+                if r.get("type") not in ("forge-degraded", "forge-source")]
     forge_deg = [r for r in forge_rows if r.get("type") == "forge-degraded"]
+    forge_src = [r for r in forge_rows if r.get("type") == "forge-source"]
     print(f"  forge feedback: {len(forge_fb)} PR(s)")
     for r in forge_fb[:5]:
         print(_forge_feedback_line(r))
     for r in forge_deg:  # always shown — a degraded fold must never hide
         print(_forge_degraded_line(r))
+    for r in forge_src:  # the fold's source disclosure (projection vs raw scan)
+        print(_source_line("forge", r))
     # A budget cut means UNKNOWN/stale, not ABSENT. The stderr line above already
     # gives the remedy; do not contradict it with continuity's absence rendering.
     if not resume_cut:
@@ -4506,6 +5561,7 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
         "type": "Presence", "title": f"presence — {agent}", "agent": agent,
         "workstreams": args.workstream or [], "summary": args.summary or "",
         "timestamp": _iso(now),
+        "engine": records.engine_stamp(),
     }
     if engagement_obj is not None:
         fm["engagement"] = engagement_obj
@@ -4899,6 +5955,31 @@ def cmd_roles_release(args: argparse.Namespace, transport: Any) -> int:
 
 
 # --- router (feed-first decision plane + host-local executor) ---
+
+def _shadow_window_active(transport: Any, team: str) -> bool:
+    """True iff a W7 shadow window is armed — the `shadow-window.json` marker
+    exists and carries a `started_at`. One cheap read; absent/unreadable/malformed
+    ⇒ off, so the delivery probes stay silent outside the window (and default-off
+    on any doubt). Checked only when there is something to probe.
+
+    Lives here (not with a delivery path) because both surviving callers are the
+    router's adapter legs: `_router_pass`'s cloud-adapter delivery and the
+    host-local executor's. It was written alongside the `listen` tick's
+    `path="listener"` probe; that verb retired with bus v3 and was removed, but
+    the window gate itself is live and `router.SHADOW_EVIDENCE_PATHS` still
+    carries `"listener"` so historical evidence stays readable."""
+    raw = transport.read(router.router_prefix(team) + "shadow-window.json")
+    if not raw:
+        return False
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return False
+    # codex #470 P2: a PARSEABLE started_at, not mere truthiness — a malformed
+    # marker ({"started_at":"bogus"}) is doubt ⇒ off, matching this fn's own
+    # contract and `shadow status`.
+    return isinstance(doc, dict) and router.parse_iso(doc.get("started_at")) is not None
+
 
 def _router_presence(transport: Any, team: str, agent: str,
                      memo: dict) -> "tuple[Optional[datetime], bool]":
@@ -5446,6 +6527,29 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
     return counts
 
 
+def _run_fixed_rate(pass_fn: Any, *, label: str,
+                    period_s: float = router.ROUTER_POLL_SECONDS,
+                    clock: Any = None, sleeper: Any = None) -> None:
+    """Run ``pass_fn`` on an anchored cadence without burst catch-up."""
+    monotonic = clock or time.monotonic
+    sleep = sleeper or time.sleep
+    next_tick = monotonic()
+    while True:
+        pass_fn()
+        next_tick += period_s
+        now = monotonic()
+        if now > next_tick:
+            late_by = now - next_tick
+            # Advance to the first anchor at or after ``now``.  ``floor + 1``
+            # incorrectly skips an anchor when lateness is an exact multiple
+            # of the period (for example, a 120s pass on a 60s cadence).
+            skipped = math.ceil(late_by / period_s)
+            next_tick += skipped * period_s
+            print(f"{label}: cadence overrun by {late_by:.3f}s — skipped "
+                  f"{skipped} tick(s), no burst catch-up", file=sys.stderr)
+        sleep(max(0.0, next_tick - now))
+
+
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
     # W7 shadow mode is READ-ONLY: log + persist decisions, never enqueue OR
     # execute (the pass suppresses the enqueue; the executor is skipped here).
@@ -5460,23 +6564,25 @@ def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
         return 2
     if json_mode:
         args._defer_json = True
-    rc = _router_pass(args, transport)
-    execute_counts = None
-    if not shadow:
-        execute_counts = _router_execute_cloud(
-            args, transport, emit=not json_mode)
+    def _pass() -> tuple[int, Optional[dict[str, int]]]:
+        pass_rc = _router_pass(args, transport)
+        counts = None
+        if not shadow:
+            counts = _router_execute_cloud(
+                args, transport, emit=not json_mode)
+        return pass_rc, counts
+
+    if not getattr(args, "once", False):
+        _run_fixed_rate(lambda: _pass(), label="router run")
+        raise AssertionError("resident router loop returned")
+
+    rc, execute_counts = _pass()
     if json_mode:
         jsonutil.print_json({
             "pass": getattr(args, "_router_pass_result", None),
             "execute": execute_counts,
         })
-    if getattr(args, "once", False):
-        return rc
-    while True:  # resident decision plane: FIXED 60s cadence (plan §2.5)
-        time.sleep(router.ROUTER_POLL_SECONDS)
-        _router_pass(args, transport)
-        if not shadow:
-            _router_execute_cloud(args, transport)
+    return rc
 
 
 def cmd_router_shadow_arm(args: argparse.Namespace, transport: Any) -> int:
@@ -6041,15 +7147,18 @@ def cmd_router_execute(args: argparse.Namespace, transport: Any) -> int:
         print("router execute: --json requires --once or --dry-run",
               file=sys.stderr)
         return 2
-    counts = _router_execute_host(args, transport, emit=not json_mode)
+    def _pass() -> dict[str, int]:
+        return _router_execute_host(args, transport, emit=not json_mode)
+
+    if not (getattr(args, "once", False)
+            or getattr(args, "dry_run", False)):
+        _run_fixed_rate(_pass, label="router execute")
+        raise AssertionError("resident router executor loop returned")
+
+    counts = _pass()
     if json_mode:
         jsonutil.print_json(counts)
-    rc = 1 if counts.get("degraded") else 0
-    if getattr(args, "once", False) or getattr(args, "dry_run", False):
-        return rc
-    while True:  # resident thin executor: FIXED 60s cadence (plan §2.5)
-        time.sleep(router.ROUTER_POLL_SECONDS)
-        _router_execute_host(args, transport)
+    return 1 if counts.get("degraded") else 0
 
 
 # --- stash (fulcra-agent-durable-state) ---
@@ -6269,8 +7378,53 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     return code
 
 
+def writer_present() -> bool:
+    """Is the ``fulcra_common`` annotation writer importable RIGHT HERE?
+
+    Deliberately imported in the running interpreter rather than probed from
+    outside. ``uv tool install`` gives the engine its own venv, so a
+    system-python import proves nothing in either direction — and when doctor
+    itself is the engine entry point, "here" is exactly the environment the
+    annotate/digest legs will run in.
+    """
+    try:
+        import fulcra_common  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _report_writer_presence() -> None:
+    """One doctor line for writer presence. WARN, never unhealthy.
+
+    A bare ``uv tool install coord-engine`` silently drops ``fulcra_common``,
+    and the legs that need it — ``annotate project``, ``digest
+    --emit-timeline`` — swallow the ImportError and exit 0 (see
+    commands_annotate._emit, whose contract is "returns False, never an
+    exception"). That combination is why the task digest went dark on
+    2026-08-04 with nothing failing anywhere.
+
+    Absence is a WARN and not a failure ON PURPOSE: most hosts never run those
+    legs, and flipping doctor to unhealthy fleet-wide for a capability they do
+    not use would train agents to ignore the exit code — which costs more than
+    it buys. The line carries the CONSEQUENCE, not just the state, so a reader
+    who does run those legs knows immediately what it means for them.
+    """
+    if writer_present():
+        print("  ✓ fulcra_common writer present (annotate/digest legs can emit)")
+    else:
+        print("  ! fulcra_common writer MISSING — annotate/digest legs will "
+              "SILENTLY NO-OP (they exit 0 without it). Re-run the store "
+              "adopt-latest.sh, or install with "
+              "--with 'git+…#subdirectory=packages/fulcra-common'")
+
+
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
+    if getattr(args, "self", False):
+        return _doctor_self(args, transport)
+    if getattr(args, "delivery", False):
+        return _doctor_delivery(args, transport)
     import shutil
     ok = True
     from .transport import _split_command
@@ -6290,8 +7444,228 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
         ok = False
     from . import __version__ as _v
     print(f"  ✓ coord-engine v{_v}")
+    _report_writer_presence()
+    if args.team:
+        cfg, cfg_status = records.load_config_classified(transport, args.team)
+        if cfg_status == "error":
+            print("  ✗ Bus V3 authority UNKNOWN (store read failed)",
+                  file=sys.stderr)
+            ok = False
+        elif cfg_status == "invalid":
+            print("  ✗ Bus V3 authority malformed or partially versioned",
+                  file=sys.stderr)
+            ok = False
+        elif cfg is None:
+            print("  ! Bus V3 authority absent or malformed; fleet version "
+                  "census unavailable")
+        else:
+            gate = records.compatibility(
+                cfg, engine_version=_v, write_cursor=True)
+            if not gate["ok"]:
+                print(f"  ✗ Bus V3 version gate: {gate['reason']}",
+                      file=sys.stderr)
+                ok = False
+            for warning in gate["warnings"]:
+                print(f"  ! Bus V3 version warning: {warning}")
+            if records.v2_transport_ready(transport):
+                print("  ✓ Bus V3 cursor CAS transport available")
+            elif records.v2_active(cfg):
+                print("  ✗ Bus V3 cursor v2 is active but this transport "
+                      "cannot prove atomic CAS", file=sys.stderr)
+                ok = False
+            else:
+                print("  ! Bus V3 cursor CAS transport unavailable; schema v2 "
+                      "activation remains blocked")
+            record_rows = None
+            try:
+                record_rows = transport.records(
+                    cfg["data_type"],
+                    _iso(_now() - timedelta(days=30)), _iso(_now()))
+            except Exception:
+                record_rows = None
+            now_iso = _iso(_now())
+            fresh_presence = [
+                shard for shard in _presence_shards(transport, args.team)
+                if presence.classify(
+                    shard.get("timestamp") if isinstance(shard, dict) else None,
+                    now=now_iso) != "stale"
+            ]
+            census = records.fleet_version_census(
+                fresh_presence, record_rows)
+            if census["record_evidence_unknown"]:
+                print("  ! Fleet census: adoption-claim evidence UNKNOWN")
+            if not census["agents"]:
+                print("  ! Fleet census: no adoption/presence version evidence")
+            for row in census["agents"]:
+                running = row["running_engine_version"] or "UNKNOWN"
+                adopted = row["adopted_engine_version"] or "UNKNOWN"
+                print(f"  {'!' if running == 'UNKNOWN' else '✓'} "
+                      f"{row['agent']}: running={running} "
+                      f"(protocol={row['running_protocol_version']}, "
+                      f"cursor={row['running_cursor_schema_version']}); "
+                      f"adopted={adopted}")
+            if census["mixed"]:
+                print("  ! Fleet census: MIXED/UNKNOWN versions; v2 cursor "
+                      "activation is unsafe")
+            # respec s7: supersession-adoption metric (deputy-corrected
+            # definition). Classification evidence exists only in v2 cursor
+            # `handled` rows, so pre-activation windows honestly read UNKNOWN
+            # — never 0% — and an empty denominator reads n/a, never 100%.
+            # `outcomes` stays None (UNKNOWN) until at least one cursor READS
+            # ok: activation alone proves nothing was read, an empty census
+            # has no sources, and absent/invalid/error reads are unreadable
+            # evidence, not an empty classification set (pr-503 round 1).
+            fleet_ev = records.fleet_events(record_rows)
+            outcomes = None
+            if (fleet_ev is not None and cfg is not None
+                    and records.v2_active(cfg)):
+                for row in census["agents"]:
+                    cur, _raw, status = records.load_v2_cursor_classified(
+                        transport, args.team, row["agent"],
+                        cfg["cursor_generation"])
+                    if status == "ok" and cur is not None:
+                        if outcomes is None:
+                            outcomes = {}
+                        for h in cur["committed"]["handled"]:
+                            outcomes[h["record_id"]] = h["outcome"]
+            adoption = records.supersession_adoption(
+                fleet_ev or [], outcomes)
+            if adoption["status"] == "unknown":
+                print("  ! Supersession adoption: UNKNOWN (no v2 "
+                      "classification evidence this window — not 0%)")
+            elif adoption["counted"] == 0:
+                print(f"  ✓ Supersession adoption: n/a (0 candidates; "
+                      f"{adoption['unknown']} unmeasurable)")
+            else:
+                print(f"  ✓ Supersession adoption: "
+                      f"{adoption['superseded']}/{adoption['counted']} "
+                      f"({adoption['ratio']:.0%}; "
+                      f"{adoption['unknown']} unmeasurable)")
     print("doctor: healthy" if ok else "doctor: PROBLEMS FOUND")
     return 0 if ok else 1
+
+
+def _doctor_self(args: argparse.Namespace, transport: Any) -> int:
+    """Am I the engine the fleet expects? rc 0 current, 3 stale, 2 unknown.
+
+    The one-command replacement for the unconditional restore-and-adopt
+    preamble: a wake runs this and only pays for repair when it is nonzero.
+    Tri-state on purpose — rc 0 is claimed ONLY when the pin exists, parses
+    and this engine meets it. An unreadable config, an authority with no pin,
+    and a malformed pin are all rc 2 with the reason named, because
+    "comparison impossible" reported as "current" is the failure mode a
+    self-check exists to prevent.
+    """
+    from . import __version__ as engine_version
+    if not args.team:
+        print("doctor --self: team is required (the authority lives per team)",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        detail = {
+            "error": "the records config could not be READ (transport "
+                     "failure) — retry when the store is reachable",
+            "invalid": "the records config is malformed — human-fixable, the "
+                       "bytes are the evidence",
+        }.get(cfg_status,
+              f"no bus-v3 records config for team {args.team}")
+        print(f"self: UNKNOWN — {detail}", file=sys.stderr)
+        return 2
+    state, detail = records.authority_currency_state(
+        cfg, engine_version=engine_version)
+    if state == "current":
+        print(f"self: CURRENT — {detail}")
+        return 0
+    if state == "stale":
+        print(f"self: STALE — {detail}", file=sys.stderr)
+        print("  run the store's adopt-latest.sh, then re-run "
+              "`coord-engine doctor <team> --self`", file=sys.stderr)
+        return 3
+    print(f"self: UNKNOWN — {detail}", file=sys.stderr)
+    return 2
+
+
+def _doctor_delivery(args: argparse.Namespace, transport: Any) -> int:
+    """Write and read one probe through the production typed-record seams."""
+    agent = args.agent or os.environ.get("FULCRA_COORD_AGENT")
+    if not args.team:
+        print("doctor --delivery: team is required", file=sys.stderr)
+        return 2
+    if not agent:
+        print("doctor --delivery: no agent identity", file=sys.stderr)
+        return 2
+    cfg = records.load_config(transport, args.team)
+    if cfg is None:
+        print("doctor --delivery: no records config — cannot write",
+              file=sys.stderr)
+        return 2
+
+    nonce = uuid.uuid4().hex[:8]
+    slug = f"delivery-probe-{nonce}"
+    # Build once through the public probe helper as a local contract check;
+    # emit_event below is the normal event path used by reminders/directives.
+    payload = records.roundtrip_probe_payload(agent, nonce)
+    if records.parse_payload(payload) is None:  # pragma: no cover - invariant
+        print("doctor --delivery: probe payload is not parseable",
+              file=sys.stderr)
+        return 2
+    started = _now()
+    written = records.emit_event(
+        transport, cfg, sender=agent, to=f"{agent}-probe", kind="claim",
+        priority="P3", slug=slug, team=args.team)
+    if not written:
+        print("doctor --delivery: probe write REFUSED", file=sys.stderr)
+        return 2
+
+    deadline = time.monotonic() + args.deadline
+    while True:
+        now = _now()
+        window = transport.records(
+            cfg["data_type"], _iso(started - timedelta(minutes=2)), _iso(now))
+        if window is not None:
+            for rec in window:
+                if not isinstance(rec, dict):
+                    continue
+                parsed = records.parse_payload(rec.get("note"))
+                if parsed is None or parsed.get("slug") != slug:
+                    continue
+                stamp = parsed.get("writer") or {}
+                from . import __version__
+                if stamp.get("engine_version") != __version__:
+                    print(
+                        "delivery: probe readable but writer stamp is "
+                        f"{stamp.get('engine_version')!r}, engine is "
+                        f"{__version__} — TWO engines are writing as this "
+                        "identity",
+                        file=sys.stderr,
+                    )
+                    return 3
+                lag = max(0.0, (now - started).total_seconds())
+                print("delivery: PROVEN — probe written, ingested and parsed "
+                      f"in {lag:.0f}s (payload v1, stamped {__version__})")
+                return 0
+            for rec in window:
+                if not isinstance(rec, dict):
+                    continue
+                note = rec.get("note")
+                if (isinstance(note, str) and slug in note
+                        and records.parse_payload(note) is None):
+                    print(
+                        "delivery: probe written but NOT readable — this "
+                        "engine wrote a non-v1 note (legacy/rolled-back "
+                        "writer). Run adopt-latest and retry.",
+                        file=sys.stderr,
+                    )
+                    return 3
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(5.0, remaining))
+    print("delivery: UNKNOWN — probe not readable within "
+          f"{args.deadline:.0f}s (ingest lag or store failure); NOT proof of "
+          "delivery", file=sys.stderr)
+    return 3
 
 
 # --- digest + escalate (fulcra-agent-health, A5b) ---
@@ -6669,6 +8043,210 @@ def cmd_answer(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# --- bus-v3 tag provisioning (timeline identity) ----------------------------
+
+
+def _tag_recipe(dimension: str, name: str) -> str:
+    """The exact commands a human runs when the engine cannot create a tag.
+
+    Printed, never guessed at: an agent that cannot provision must be able to
+    hand a person something that works verbatim, and then record the result
+    with the matching ``--tag-id-<dimension>``.
+    """
+    return "\n".join([
+        f"  # {dimension}: create the tag "
+        "(409 means it already exists — list and reuse):",
+        "  TOKEN=$(fulcra-api auth print-access-token)",
+        "  curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/tag \\",
+        "    -H \"Authorization: Bearer $TOKEN\" -H 'Content-Type: application/json' \\",
+        f"    -d '{{\"name\": \"{name}\"}}'",
+        "  # (list them all: curl -sS "
+        "https://api.fulcradynamics.com/user/v1alpha1/tag \\",
+        "  #    -H \"Authorization: Bearer $TOKEN\")",
+        "  # then record the uuid it returns:",
+        "  coord-engine bus-v3 tag-provision <team> --agent <name> "
+        f"--tag-id-{dimension} <uuid>",
+    ])
+
+
+def _tag_declarations(args: argparse.Namespace, agent: str,
+                      entry: dict) -> "list[tuple[str, Optional[str], Optional[str]]]":
+    """Which dimensions this invocation is provisioning.
+
+    Each item is ``(dimension, declared_value, explicit_uuid)``. ``agent`` is
+    always in play (it is the identity); the other three appear only when the
+    caller declares them or supplies a uuid for them. That is what makes a
+    model switch ``--model <new>`` and nothing else: undeclared dimensions are
+    left exactly as the registry already has them, never blanked.
+    """
+    out = []
+    for dim in bus_tags.DIMENSIONS:
+        explicit = getattr(args, f"tag_id_{dim}", None)
+        declared = agent if dim == "agent" else getattr(args, dim, None)
+        if dim == "agent" and not explicit and entry.get("agent"):
+            continue  # already recorded; re-resolving would just cost a call
+        if explicit or (declared and (dim != "agent" or not entry.get("agent"))):
+            out.append((dim, declared, explicit))
+    return out
+
+
+def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
+    """Register an identity's timeline tags — agent, platform, harness, model.
+
+    rc 0 when every requested dimension is recorded (or already was), 2
+    otherwise. Partial progress is still WRITTEN before a nonzero exit: a tag
+    that exists but is unrecorded is the one state that leads to a duplicate
+    tag on the retry, so recording what resolved is strictly safer than
+    discarding it.
+
+    The registry itself is NEVER created or repaired here: an absent one means
+    the team has not adopted tagging (a cutover decision, made once by a human,
+    documented in docs/coord/BUS-V3.md), and a malformed one is evidence a
+    person must read. Both print what to do and refuse — an engine that writes
+    over durable bytes it could not parse destroys the only copy of the
+    mistake.
+
+    MODEL IS A DECLARATION. The engine cannot see which model drives it, so
+    ``--model`` is taken on trust; a wrong one is a presence-integrity bug and
+    the fix is to re-provision, which is cheap and rewrites only that
+    dimension.
+    """
+    agent = args.agent or os.environ.get("FULCRA_COORD_AGENT")
+    if not agent:
+        print("tag-provision: no agent identity (--agent or "
+              "FULCRA_COORD_AGENT)", file=sys.stderr)
+        return 2
+    path = bus_tags.tags_path(args.team)
+    registry, status = bus_tags.load_registry(transport, args.team,
+                                              use_cache=False)
+    if status == "error":
+        print(f"tag-provision: UNKNOWN — {path} could not be read; retry when "
+              "the store is reachable", file=sys.stderr)
+        return 2
+    if status == "absent":
+        print(f"tag-provision: ABSENT — {path} does not exist. This team has "
+              "not adopted identity tagging; seed the registry first (see "
+              "docs/coord/BUS-V3.md, \"Setup (once per account)\"), then "
+              "re-run.", file=sys.stderr)
+        return 2
+    if status != "ok" or registry is None:
+        print(f"tag-provision: INVALID — {path} exists but does not parse as "
+              f"{bus_tags.SCHEMA}. A human must fix the bytes; this verb will "
+              "not recreate them.", file=sys.stderr)
+        return 2
+
+    agents = {name: dict(entry) for name, entry in registry["agents"].items()}
+    entry = agents.get(agent, {})
+    wanted = _tag_declarations(args, agent, entry)
+    if not wanted:
+        have = ", ".join(f"{d}={entry[d]}" for d in bus_tags.DIMENSIONS
+                         if d in entry)
+        print(f"tag-provision: {agent} already registered ({have}); declare "
+              "--platform/--harness/--model to add or update a dimension")
+        return 0
+
+    # VALIDATE EVERY EXPLICIT UUID BEFORE CREATING ANYTHING. Rejecting a bad
+    # --tag-id mid-loop would abandon tags that earlier iterations had already
+    # created on the account: they exist, nothing records them, and the retry
+    # mints duplicates. An argument error is knowable with zero side effects,
+    # so it is settled before the first side effect.
+    for dim, _declared, explicit in wanted:
+        if explicit and not bus_tags.is_uuid(explicit):
+            print(f"tag-provision: --tag-id-{dim} {explicit!r} is not a uuid "
+                  "(record tags are uuids, never names); nothing was created",
+                  file=sys.stderr)
+            return 2
+
+    ensure = getattr(transport, "tag_ensure", None)
+    resolved: dict[str, str] = {}
+    failures: list[str] = []
+    for dim, declared, explicit in wanted:
+        if explicit:
+            resolved[dim] = explicit.strip()
+            continue
+        name = bus_tags.tag_name(dim, declared)
+        tag_id = ensure(name) if callable(ensure) else None
+        if not tag_id or not bus_tags.is_uuid(tag_id):
+            failures.append(dim)
+            print(f"tag-provision: cannot create the tag {name!r} from here. "
+                  "Run this, then record the uuid:", file=sys.stderr)
+            print(_tag_recipe(dim, name), file=sys.stderr)
+            continue
+        resolved[dim] = tag_id.strip()
+
+    if resolved:
+        entry.update(resolved)
+        agents[agent] = entry
+        if not transport.write(
+                path, bus_tags.render_registry(registry["base"], agents)):
+            hint = " ".join(f"--tag-id-{d} {t}" for d, t in resolved.items())
+            print(f"tag-provision: the registry write to {path} did not land "
+                  f"— the tags exist but are NOT recorded; re-run with {hint}",
+                  file=sys.stderr)
+            return 2
+        bus_tags.cache_clear()
+        print(f"tag-provision: {agent} -> "
+              + ", ".join(f"{d}={resolved[d]}" for d in bus_tags.DIMENSIONS
+                          if d in resolved)
+              + f" (channel tag {registry['base']} rides every event)")
+
+    missing = [d for d in bus_tags.DIMENSIONS if d not in entry]
+    if missing and not failures:
+        print(f"tag-provision: {agent} has no {'/'.join(missing)} tag — its "
+              "events stay filterable by the dimensions it does have; declare "
+              "the rest whenever you like")
+    return 2 if failures else 0
+
+
+def cmd_bus_v3_send(args: argparse.Namespace, transport: Any) -> int:
+    """Write ONE bus event — the supported hand-send, tagged like every other.
+
+    WHY THIS VERB EXISTS. ``tell``/``respond``/``remind`` cover the directive
+    workflow, but the bus also carries bare events (a `claim` announcing you
+    are on the bus, a `verdict`, a demo `directive`), and the documentation
+    taught those as a raw ``fulcra-api record`` pipe. A raw pipe cannot read
+    ``tags.json``, so every hand-sent event stayed untagged no matter how
+    carefully its sender had provisioned — the documented path defeated the
+    feature. This is that same write, through ``records.emit_event``, which is
+    where tagging lives.
+
+    Fail-closed on the stream: no records config means the event has nowhere
+    to go that is certainly right, and guessing a stream is worse than not
+    writing. rc 0 written, 2 otherwise.
+    """
+    sender = args.sender or os.environ.get("FULCRA_COORD_AGENT")
+    if not sender:
+        print("send: no agent identity (--from or FULCRA_COORD_AGENT)",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        detail = {
+            "error": "the records config could not be READ (transport "
+                     "failure) — retry when the store is reachable",
+            "invalid": "the records config is malformed — a human fixes the "
+                       "bytes; retrying will not",
+        }.get(cfg_status,
+              f"no bus-v3 records config for team {args.team} "
+              f"(team/{args.team}/{records.CONFIG_NAME})")
+        print(f"send: {detail}", file=sys.stderr)
+        return 2
+    try:
+        written = records.emit_event(
+            transport, cfg, sender=sender, to=args.to, kind=args.kind,
+            priority=args.priority, slug=args.slug, ptr=args.ptr,
+            team=args.team)
+    except ValueError as e:   # unknown kind/priority — fails AT the write
+        print(f"send: {e}", file=sys.stderr)
+        return 2
+    if not written:
+        print("send: the record did NOT land", file=sys.stderr)
+        return 2
+    print(f"send: {args.kind} {args.slug} -> {args.to} "
+          f"(from {sender}; readable in their queue in ~20s)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coord-engine", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -6697,6 +8275,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="include acknowledged, closed, and future history")
     add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
+
+    ob = sub.add_parser("obligations",
+                        help="terminal answer: does this agent owe work?")
+    ob.add_argument("team"); ob.add_argument("--agent", required=True)
+    add_json(ob)
+    ob.set_defaults(func=cmd_obligations)
 
     sc = sub.add_parser("search", help="substring search over tasks")
     sc.add_argument("team"); sc.add_argument("query"); add_json(sc)
@@ -6772,20 +8356,67 @@ def build_parser() -> argparse.ArgumentParser:
     it.add_argument("--from", dest="sender", help="capturing agent (records ownership)")
     it.add_argument("--priority", "-p", default="P2")
     it.set_defaults(func=cmd_intent)
+    qu = sub.add_parser("queue", help="bus v3 transactional event delivery (`queue TEAM` stages; `queue commit TEAM --token TOKEN` advances)")
+    qu.add_argument("team", help="team name, or literal `commit`")
+    qu.add_argument("commit_team", nargs="?",
+                    help=argparse.SUPPRESS)
+    qu.add_argument("--agent", "-a")
+    qu.add_argument("--token",
+                    help="delivery token (required by `queue commit TEAM`)")
+    qu.add_argument(
+        "--result", dest="results", action="append",
+        help="commit classification RECORD_ID=completed|blocked|superseded|ignored (repeat for every staged event)")
+    qu.add_argument("--peek", action="store_true",
+                    help="show events without advancing the cursor (safe diagnostic read)")
+    qu.add_argument("--consume", action="store_true",
+                    help="advance another agent's cursor deliberately (reading as a non-self identity peeks by default)")
+    # DEFAULT OFF — OPT-IN (promise plan T3(b), 2026-08-02), openly reversing
+    # the 2026-07-30 default-ON ruling on measured grounds: at the default
+    # budget the fold reaches 0/7 components in production, so the default
+    # could only ever answer UNKNOWN while charging 3+ listings on every empty
+    # wake fleet-wide — a signal with no information at a positive price.
+    # The skip is never silent: EVERY machine-readable success envelope carries
+    # "obligations": {"state": "not-checked"}. --no-obligations is retained as
+    # an accepted no-op alias so existing callers keep parsing. Default-ON
+    # returns if an aggregate-fold rewrite ever makes CLEAR reachable.
+    # Passing it explicitly ALWAYS folds (round-2 findings 1/2) — an eventful
+    # window is not a reason to drop a flag the caller paid for.
+    qu.add_argument("--obligations", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="reconcile durable obligations alongside the read "
+                         "(an empty queue is not proof nothing is owed); "
+                         "OFF by default, and a default read folds nothing — "
+                         "the verdict rides the success envelope, it never "
+                         "changes the exit code. --no-obligations is the "
+                         "(default) no-op alias")
+    add_json(qu)
+    qu.set_defaults(func=cmd_queue)
+    bv = sub.add_parser(
+        "bus-v3",
+        help="Bus V3 administration: authority migration, tag registry, tagged send")
+    bvsub = bv.add_subparsers(dest="bus_v3_command", required=True)
+    bvm = bvsub.add_parser(
+        "migrate",
+        help="classify legacy cursors and upgrade the authority to schema v1",
+    )
+    bvm.add_argument("team")
+    modes = bvm.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--dry-run", action="store_true",
+                       help="classify and print the plan; write nothing")
+    modes.add_argument("--apply", action="store_true",
+                       help="apply the schema-v1 authority upgrade")
+    bvm.add_argument(
+        "--agent", dest="agents", action="append",
+        help="include a known agent in cursor proof (repeatable; discovered "
+             "agent directories are always included)")
+    add_json(bvm)
+    bvm.set_defaults(func=cmd_bus_v3_migrate)
     ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
     ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
     ib.add_argument("--all", action="store_true",
                     help="include acknowledged, closed, future, and @backlog history")
     add_json(ib)
     ib.set_defaults(func=cmd_inbox)
-    ls = sub.add_parser("listen", help="await new directives + responses to directives you own (the reply leg of tell)")
-    ls.add_argument("team"); ls.add_argument("--agent", "-a")
-    ls.add_argument("--interval", type=int, default=60, help="loop poll seconds (default 60; ignored with --once)")
-    ls.add_argument("--once", action="store_true", help="one tick then exit — 0 clean or nothing-new, 3 if the tick captured degradation")
-    ls.add_argument("--verbose", action="store_true", help="heartbeat quiet ticks to stderr")
-    ls.add_argument("--state-path", action="store_true", dest="state_path",
-                    help=argparse.SUPPRESS)  # print resolved state file path, no tick
-    add_json(ls); ls.set_defaults(func=cmd_listen)
     hl = sub.add_parser("health", help="fleet health: which hosts reconcile this team (fulcra-agent-health)")
     hl.add_argument("team"); add_json(hl)
     hl.set_defaults(func=cmd_health)
@@ -6869,7 +8500,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
+    dr.add_argument(
+        "--self", action="store_true",
+        help="engine currency only: rc 0 current, 3 stale (adopt latest), "
+             "2 unknown (no config, or no/malformed authority pin)")
+    dr.add_argument(
+        "--delivery", action="store_true",
+        help="write/read a probe event and prove fleet-readable delivery")
+    dr.add_argument("--agent", help="identity for --delivery (or $FULCRA_COORD_AGENT)")
+    dr.add_argument(
+        "--deadline", type=float, default=90.0,
+        help="seconds to wait for the delivery probe (default 90)")
     dr.set_defaults(func=cmd_doctor)
+
+    ac = sub.add_parser(
+        "acceptance", help="production acceptance probes across agent identities")
+    acsub = ac.add_subparsers(dest="acceptance_command", required=True)
+    acp = acsub.add_parser(
+        "pair", help="prove delivery, nonce round-trip, park/resume, and join")
+    acp.add_argument("team")
+    acp.add_argument("--agent", required=True, help="initiating identity A")
+    acp.add_argument("--peer", required=True, help="responding identity B")
+    acp.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="seconds allowed for each delivery/queue hop (default 90)")
+    acp.add_argument("--nonce", help=argparse.SUPPRESS)
+    acp.set_defaults(func=cmd_acceptance_pair)
 
     ak = sub.add_parser("asks", help="waiting-for-operator asks, oldest first (orchestrator pull)")
     ak.add_argument("team"); ak.add_argument("--human"); add_json(ak)
@@ -6945,10 +8601,11 @@ def build_parser() -> argparse.ArgumentParser:
     tdn = tksub.add_parser("done", help="mark done (requires evidence)")
     tdn.add_argument("team"); tdn.add_argument("name"); tdn.add_argument("--evidence", "-e", required=True)
     tdn.set_defaults(func=cmd_task_done)
-    tbl = tksub.add_parser("block", help="mark blocked (sets blocked_on; --on-user routes to a human)")
+    tbl = tksub.add_parser("block", help="mark blocked (requires --unlock; sets blocked_on; --on-user routes to a human)")
     tbl.add_argument("team"); tbl.add_argument("name")
     tbl.add_argument("--blocked-on", dest="blocked_on")
     tbl.add_argument("--on-user", dest="on_user", help="human-facing ask; assigns to FULCRA_COORD_HUMAN/human + tags needs:human")
+    tbl.add_argument("--unlock", help="REQUIRED: what specifically unblocks this (the concrete unlock, not just the blocker)")
     tbl.set_defaults(func=cmd_task_block, verb="block")
     tpa = tksub.add_parser("pause", help="pause to waiting (requires --next)")
     tpa.add_argument("team"); tpa.add_argument("name"); tpa.add_argument("--next", "-n", required=True)
@@ -6962,6 +8619,11 @@ def build_parser() -> argparse.ArgumentParser:
     tas = tksub.add_parser("assign", help="set/redirect assignee")
     tas.add_argument("team"); tas.add_argument("name"); tas.add_argument("assignee")
     tas.set_defaults(func=cmd_task_assign, verb="assign")
+    tsp = tksub.add_parser("supersede", help="close a re-dispatched task's origin copy, naming its successor (legal from any live state)")
+    tsp.add_argument("team"); tsp.add_argument("name")
+    tsp.add_argument("--by", required=True, help="the successor task slug (or PR/artifact) that replaces this copy")
+    tsp.add_argument("--reason", "-r")
+    tsp.set_defaults(func=cmd_task_supersede, verb="supersede")
 
     rv = sub.add_parser("review", help="review verdict tally (fulcra-agent-review)")
     rvsub = rv.add_subparsers(dest="review_command", required=True)
@@ -6995,7 +8657,11 @@ def build_parser() -> argparse.ArgumentParser:
               "host-local wakes (fixed 60s cadence; --once for one pass)"),
     )
     ror.add_argument("team")
-    ror.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
+    ror.add_argument(
+        "--once", action="store_true",
+        help="one pass then exit; resident mode uses an anchored fixed-rate "
+             "cadence compatible with the duty gate, while externally "
+             "scheduled --once inherits that scheduler's throttle semantics")
     ror.add_argument("--shadow", action="store_true", help="W7 read-only shadow mode: log + persist a decision per directed item, enqueue and execute NOTHING (the >=48h acceptance measurement)")
     ror.add_argument("--state-prefix", default=None, metavar="NAME", help="relocate the router's own cursor-tracked state to the sibling team/<team>/_coord/router-<NAME>/ (default: canonical router/; env COORD_ROUTER_STATE_PREFIX is the fallback). Lets one host run live delivery and a shadow measurement in parallel without a shared-cursor collision. Config stays shared/canonical. Charset [A-Za-z0-9_.-]+.")
     add_json(ror)
@@ -7070,13 +8736,16 @@ def build_parser() -> argparse.ArgumentParser:
     ctc = ctsub.add_parser("checkpoint", help="get/set a role's durable checkpoint_ref")
     ctc.add_argument("team"); ctc.add_argument("--role", required=True); ctc.add_argument("--ref")
     ctc.set_defaults(func=cmd_continuity_checkpoint)
-    ctp = ctsub.add_parser("park", help="session-exit: snapshot every held role + set checkpoint_refs")
+    ctp = ctsub.add_parser("park", help="session-exit: snapshot held roles + set checkpoint_refs")
     ctp.add_argument("team"); ctp.add_argument("--agent", "-a"); ctp.add_argument("--objective")
+    ctp.add_argument("--role", help="snapshot only this role (must have a fresh lease)")
     ctp.add_argument("--next", action="append"); ctp.add_argument("--open-question", action="append", dest="open_question")
     ctp.set_defaults(func=cmd_continuity_park)
 
     ctr = ctsub.add_parser("resume", help="print a resume brief from the latest snapshot")
     ctr.add_argument("team"); ctr.add_argument("agent"); ctr.add_argument("task", nargs="?")
+    ctr.add_argument("--max-age", metavar="DURATION",
+                     help="exit 2 unless checkpoint age is at most DURATION (for example 30m, 12h, 2d)")
     ctr.add_argument("--json", action="store_true")
     ctr.set_defaults(func=cmd_continuity_resume)
 
@@ -7094,6 +8763,46 @@ def build_parser() -> argparse.ArgumentParser:
                            help="fold reconcile's fresh transitions onto the timeline (model-free)")
     anp.add_argument("team")
     anp.set_defaults(func=cmd_annotate_project)
+
+    # tag-provision/send attach to the bus-v3 subparser created above (a second
+    # add_parser("bus-v3") is an argparse ArgumentError — PRs 515+524 each
+    # created one green in isolation and broke build_parser on their union)
+    bvt = bvsub.add_parser(
+        "tag-provision",
+        help="register an identity's timeline tags (agent/platform/harness/"
+             "model) in _coord/bus-v3/tags.json")
+    bvt.add_argument("team")
+    bvt.add_argument("--agent", "-a",
+                     help="identity to provision (default FULCRA_COORD_AGENT)")
+    bvt.add_argument("--platform",
+                     help="platform declaration, e.g. claude-code")
+    bvt.add_argument("--harness", help="harness declaration, e.g. ccr")
+    bvt.add_argument("--model",
+                     help="model declaration, e.g. opus-5 — DECLARED, not "
+                          "detectable; re-provision when it changes")
+    for _dim in ("agent", "platform", "harness", "model"):
+        bvt.add_argument(f"--tag-id-{_dim}", dest=f"tag_id_{_dim}",
+                         help=f"record an EXTERNALLY created {_dim} tag uuid "
+                              "instead of creating one")
+    bvt.set_defaults(func=cmd_bus_v3_tag_provision)
+    bvs = bvsub.add_parser(
+        "send",
+        help="write ONE bus event (the supported hand-send — identity-tagged, "
+             "unlike a raw `fulcra-api record` pipe)")
+    bvs.add_argument("team")
+    bvs.add_argument("--to", required=True,
+                     help="recipient agent name, or `all`")
+    bvs.add_argument("--kind", required=True, choices=list(records.KINDS))
+    bvs.add_argument("--slug", required=True,
+                     help="short kebab-case identity for the exchange")
+    bvs.add_argument("--priority", "-p", default="P2",
+                     choices=["P0", "P1", "P2", "P3"])
+    bvs.add_argument("--ptr",
+                     help="team-relative File Store path of the document, "
+                          "when there is a body worth reading")
+    bvs.add_argument("--from", dest="sender",
+                     help="sending identity (default FULCRA_COORD_AGENT)")
+    bvs.set_defaults(func=cmd_bus_v3_send)
     return p
 
 
@@ -7190,7 +8899,8 @@ def _refresh_activity_presence(
         # list_dir-CONFIRMED absent — the sole safe case for a minimal beat. No
         # engagement object: an activity bump must not manufacture one.
         fm = {"type": "Presence", "title": f"presence — {actor}",
-              "agent": actor, "timestamp": now_iso}
+              "agent": actor, "timestamp": now_iso,
+              "engine": records.engine_stamp()}
         transport.write(shard_path, okf.render_frontmatter(fm) + f"\n# Presence: {actor}\n")
     except Exception as e:
         print(f"presence activity-refresh failed: {e}", file=sys.stderr)
@@ -7275,6 +8985,10 @@ _threads_blocked_signal = commands_threads._threads_blocked_signal
 _threads_ash_activity = commands_threads._threads_ash_activity
 _threads_candidate_rows = commands_threads._threads_candidate_rows
 cmd_threads = commands_threads.cmd_threads
+
+from . import commands_acceptance  # noqa: E402
+
+cmd_acceptance_pair = commands_acceptance.cmd_acceptance_pair
 
 
 if __name__ == "__main__":  # pragma: no cover

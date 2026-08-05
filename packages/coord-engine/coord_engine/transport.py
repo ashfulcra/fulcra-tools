@@ -17,6 +17,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Optional
@@ -68,7 +69,8 @@ def _kill_process_group(proc: "subprocess.Popen") -> None:
 
 
 def run_bounded(
-    argv: list[str], timeout: float, **popen_kw: Any
+    argv: list[str], timeout: float, *, stdin_data: Optional[str] = None,
+    **popen_kw: Any
 ) -> "tuple[int, str, str]":
     """Run ``argv`` with a HARD upper bound of ``timeout`` + ``_TRANSPORT_GRACE``,
     no matter what the child's descendant tree does. Returns
@@ -85,6 +87,7 @@ def run_bounded(
     — callers convert both to their documented failure mode."""
     proc = subprocess.Popen(
         argv,
+        stdin=subprocess.PIPE if stdin_data is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -92,7 +95,7 @@ def run_bounded(
         **popen_kw,
     )
     try:
-        out, err = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(input=stdin_data, timeout=timeout)
         return proc.returncode, out, err
     except subprocess.TimeoutExpired as exc:
         _kill_process_group(proc)
@@ -241,6 +244,96 @@ class FulcraFileTransport:
         except Exception:
             return None
 
+    def records(self, data_type: str, since: str, until: str) -> Optional[list]:
+        """Typed-record window for ``[since, until]`` — the coord v3 read path.
+
+        ``fulcra-api get-records <type> <since> <until>`` emits JSONL, one record
+        per line. Normalize to the transport-independent shape
+        ``{id, recorded_at, sources, note}`` and return them in the order the
+        endpoint gave them.
+
+        Fail-closed, exactly like :meth:`updates`: ANY doubt returns **None**
+        (UNKNOWN), never ``[]``. A malformed line makes the whole window unknown
+        rather than a silently short list, because a consumer that treats a
+        truncated window as complete advances its cursor past work it never saw.
+        An empty window with clean parses is a legitimate ``[]``.
+
+        Never raises. Hard-bounded by ``run_bounded`` so a hung child cannot
+        stall a listener pass.
+        """
+        try:
+            rc, out, _err = run_bounded(
+                [*self.command, "get-records", data_type, since, until],
+                self.timeout,
+            )
+            if rc != 0:
+                return None
+            parsed: list[dict[str, Any]] = []
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    return None  # one bad line ⇒ the window is UNKNOWN
+                if not isinstance(rec, dict):
+                    return None
+                recorded_at = rec.get("recorded_at")
+                if not isinstance(recorded_at, str) or not recorded_at.strip():
+                    return None  # no timestamp ⇒ cannot order or checkpoint it
+                sources = rec.get("sources")
+                if sources is not None and not isinstance(sources, list):
+                    return None
+                parsed.append({
+                    "id": rec.get("id"),
+                    "recorded_at": recorded_at.strip(),
+                    "sources": list(sources or []),
+                    "note": rec.get("note"),
+                })
+            return parsed
+        except Exception:
+            return None
+
+    def record_write(self, data_type: str, api_version: str, note: str,
+                     source: str, recorded_at: Optional[str] = None,
+                     tags: Optional[list[str]] = None) -> bool:
+        """Write ONE typed record — the coord v3 write path.
+
+        ``recorded_at`` may be in the FUTURE: the platform accepts it and the
+        record stays invisible to every "what's new" window until that time
+        arrives, then surfaces in the ordinary queue read (verified live
+        2026-07-27). That makes a future-dated record a timer, and this method
+        the engine's scheduling primitive.
+
+        The payload rides stdin as JSON — in a non-TTY process a flag-only
+        ``record`` invocation fails with "No input provided". Returns True only
+        on rc 0; any failure or exception returns False and the CALLER decides
+        what that means (the convention: the durable file doc is the truth and
+        the record is delivery, so a failed write degrades latency, never
+        loses work). Never raises.
+
+        ``tags`` are tag **UUIDs** (the ingest endpoint validates them as
+        uuids and rejects names). They ride the same stdin document; an empty
+        or absent list omits the key entirely, so an untagged write is
+        byte-identical to what this method sent before tagging existed.
+        """
+        try:
+            doc: dict[str, Any] = {"note": note}
+            if recorded_at:
+                doc["recorded_at"] = recorded_at
+            if tags:
+                doc["tags"] = list(tags)
+            rc, _out, _err = run_bounded(
+                [*self.command, "record", data_type,
+                 "--api-version", api_version, "--source", source],
+                self.timeout,
+                stdin_data=json.dumps(doc, separators=(",", ":")),
+            )
+            return rc == 0
+        except Exception:
+            return False
+
     def _access_token(self) -> Optional[str]:
         """A Fulcra bearer token, or None if one can't be had. Same source the
         rest of the repo uses: ``FULCRA_ACCESS_TOKEN`` when set, else the stdout
@@ -293,6 +386,76 @@ class FulcraFileTransport:
         files = data.get("files") if isinstance(data, dict) else None
         return files if isinstance(files, list) else None
 
+    def tag_ensure(self, name: str) -> Optional[str]:
+        """Ensure a tag named ``name`` exists; return its UUID, or None.
+
+        The provisioning verb's raw capability. Like :meth:`recent_changes`
+        this is REST rather than CLI (``fulcra-api`` carries no tag verb) with
+        auth borrowed from the CLI, and like it, ANY doubt returns None so the
+        caller falls back to printing a recipe a human can run.
+
+        Idempotent by construction: list first and reuse an existing tag of the
+        same name, then create. Creating a second tag with the same name would
+        be worse than failing — two ids for one label splits its timeline in
+        half.
+
+        THE RACE IS THE NORMAL CASE, not an edge. Dimension tags are SHARED:
+        ``platform:claude-code`` is created once and reused by every agent that
+        declares it, so a fleet cutover has many agents provisioning the same
+        names at the same time. Losers of that race get the documented benign
+        **409** — which means "it exists now", the very thing we wanted — so a
+        409 re-lists and returns the winner's uuid instead of reporting
+        failure. Any other error is still None.
+        """
+        wanted = (name or "").strip()
+        if not wanted:
+            return None
+        token = self._access_token()
+        if token is None:
+            return None
+        base = os.environ.get("FULCRA_API_BASE", DEFAULT_API_BASE).rstrip("/")
+        headers = {"Authorization": f"Bearer {token}",
+                   "Accept": "application/json"}
+
+        def _lookup() -> Optional[str]:
+            try:
+                req = urllib.request.Request(f"{base}/user/v1alpha1/tag",
+                                             headers=headers)
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    rows = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                return None
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                if isinstance(row, dict) and row.get("name") == wanted:
+                    found = row.get("id")
+                    if isinstance(found, str) and found:
+                        return found
+            return None
+
+        found = _lookup()
+        if found:
+            return found
+        try:
+            body = json.dumps({"name": wanted}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base}/user/v1alpha1/tag", data=body, method="POST",
+                headers={**headers, "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                created = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # 409: someone else created it between our list and our POST. That
+            # is success with a different author — go read who won.
+            return _lookup() if exc.code == 409 else None
+        except Exception:
+            return None
+        if isinstance(created, dict):
+            new_id = created.get("id")
+            if isinstance(new_id, str) and new_id:
+                return new_id
+        return None
+
     def _run(self, args: list[str], **kw: Any) -> subprocess.CompletedProcess:
         """Invoke ``fulcra-api file <args>``, HARD-bounded by ``self.timeout``.
 
@@ -337,13 +500,31 @@ class FulcraFileTransport:
     def read(self, path: str) -> Optional[str]:
         # contract: None on any failure — timeout/exec error follow the same path
         # as a non-zero return code.
+        content, _ = self.read_classified(path)
+        return content
+
+    def read_classified(self, path: str) -> tuple[Optional[str], str]:
+        # contract: (content, "ok") | (None, "absent") | (None, "error").
+        # "absent" is claimed ONLY on the CLI's affirmative not-found message;
+        # every other failure (timeout, exec, network, auth) is "error" so a
+        # degraded transport can never masquerade as a missing file. Callers
+        # that need only content keep using read(); callers whose behavior
+        # forks on absent-vs-unreadable (e.g. the queue verb's records config)
+        # use this.
         try:
             cp = self._run(["download", path, "-"])
         except TransportError:
-            return None
+            return None, "error"
         if cp.returncode != 0:
-            return None  # not found / error -> None (caller handles)
-        return cp.stdout
+            # Claim "absent" ONLY on the CLI's exact not-found signature —
+            # generic substring matching would classify an auth error like
+            # "token not found" as a missing file (codex-reviewer spec,
+            # acceptance test 4). Anything else stays "error".
+            stderr = (cp.stderr or "").strip().lower()
+            if stderr.startswith("error: file not found in fulcra"):
+                return None, "absent"
+            return None, "error"
+        return cp.stdout, "ok"
 
     def write(self, path: str, content: str) -> bool:
         # contract: True on success, False on any REMOTE failure (incl. timeout/exec
