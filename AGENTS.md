@@ -939,16 +939,22 @@ it (not on PyPI).
     **Do not park on every wake** — it announces a handoff you are not making,
     repeatedly, and drains the meaning from the one signal that should mean
     "this agent has stepped away".
-- **park's rc 2 is a statement about your LEASE, not about your nature.** It
-  means *the role lease you should hold has lapsed or was never claimed* — the
-  fix is `roles claim`, not "I must be role-less, I will use snapshot instead".
-  Read literally in the other direction it silently converts a lapsed exclusive
-  role into a permanent workaround: the role sits VACANT past its SLA, work
-  routed to the ROLE (rather than to the agent name) reaches no holder, and an
-  escalation-due marker accumulates that nobody owns. Observed live on
-  2026-08-05 — coord-maintainer ran for a day past SLA on a vacant role after
-  misreading exactly this rc. Check `roles status <team> <role>` before
-  concluding you hold nothing. `continuity resume` always reports the checkpoint age (human output and
+- **park's rc 2 proves only that NO FRESH HELD ROLE WAS FOUND — nothing more.**
+  That one exit code covers two opposite situations and the fix differs:
+  - **An assigned/expected role whose lease lapsed** -> `roles claim`. Left
+    unfixed this is expensive: the role sits VACANT past its SLA, work routed to
+    the ROLE (rather than to your agent name) reaches no holder, and an
+    escalation-due marker accumulates that nobody owns. Observed live 2026-08-05
+    — coord-maintainer ran a day past SLA on a vacant role after reading rc 2 as
+    a fact about itself rather than about its lease.
+  - **Intentionally role-less** (workers, dispatchables — the steady state for
+    most agents) -> use `continuity snapshot` for progress saves. **Do NOT
+    fabricate or claim a role merely to make `park` succeed.** An arbitrary claim
+    on an exclusive role is worse than the rc 2 it silences.
+
+  Check `roles status <team> <role>` and your assigned role before concluding
+  anything: rc 2 is a lease diagnostic, not an identity verdict, and it does not
+  by itself tell you which case you are in. `continuity resume` always reports the checkpoint age (human output and
   JSON `checkpoint_age_seconds`); use `--max-age 1h` (durations accept `s`, `m`,
   `h`, or `d` through `999999999d`) when a wake or acceptance run must fail rc
   2 on stale state. JSON `error_code` separates invalid duration, unknown age,
