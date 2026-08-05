@@ -39,19 +39,26 @@ that mechanism, and plumbing that does not end in the model running is not a wak
 
 **Two rules that fall out of this table.**
 
-1. **Adapter success is not agent execution — and only ONE adapter proves it.**
-   `managed-agents-message` re-enters a session directly. `queued-wake-file`,
-   `routine-align` and `codex-exec-resume` are INDIRECT: they land a nudge or align
+1. **Adapter success is not agent execution — and only TWO adapters prove it.**
+   `managed-agents-message` re-enters a session directly, and `codex-exec-resume`
+   invokes `codex exec resume <thread-id>` to re-enter the exact persisted thread.
+   `queued-wake-file` and `routine-align` are INDIRECT: they land a nudge or align
    a schedule, and the wake completes only if that independent consumer (session
-   loop, Routine, thread heartbeat) exists and is verified running —
-   `align_routine` records `no_session_created: true` in its own result, and a
-   wake file is consumed only at a later `SessionStart`. `macos-notify` terminates
-   in a human's eyeballs and is never a wake. An agent whose only route is
-   notifying, or whose indirect route has no live consumer, is **un-wakeable while
-   the router reports clean deliveries.** Separately, three of the five host-local
-   adapters (`codex-exec-resume`, `openclaw-post`, and `opencode-wake` from PR 482)
+   loop, Routine) exists and is verified running — `align_routine` records
+   `no_session_created: true` in its own result, and a wake file is consumed only
+   at a later `SessionStart`. `macos-notify` terminates in a human's eyeballs and
+   is never a wake. An agent whose only route is notifying, or whose indirect route
+   has no live consumer, is **un-wakeable while the router reports clean
+   deliveries.**
+
+   Classify by the adapter's CONTRACT, not by whether it is wired up here — those
+   are different questions and the second one is loud enough to drown the first.
+   Separately and independently: three of the five host-local adapters
+   (`codex-exec-resume`, `openclaw-post`, and `opencode-wake` from PR 482)
    currently lack either a script or a registration, so their routes validate and
-   never execute.
+   never execute. `codex-exec-resume` sits in both lists — a DIRECT adapter that
+   cannot execute today — which is exactly why the two questions need separate
+   answers.
 2. **Never retire a wake without naming and proving its replacement.**
    coord-maintainer — the maintainer of this system — deleted its standing session
    loop on 2026-07-24 to save budget, and replaced it over two weeks with a

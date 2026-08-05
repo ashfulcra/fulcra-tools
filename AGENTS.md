@@ -275,8 +275,8 @@ it (not on PyPI).
 
   | class | adapters | success proves |
   |---|---|---|
-  | DIRECT INVOKE | `managed-agents-message` | the model session was re-entered |
-  | INDIRECT (queued / alignment) | `queued-wake-file`, `routine-align`, `codex-exec-resume` | a nudge landed or a schedule was aligned — **not** that the model ran |
+  | DIRECT INVOKE | `managed-agents-message`, `codex-exec-resume` | the model session was re-entered |
+  | INDIRECT (queued / alignment) | `queued-wake-file`, `routine-align` | a nudge landed or a schedule was aligned — **not** that the model ran |
   | NOTIFYING | `macos-notify` | a human was shown a banner. Never a wake. |
 
   `queued-wake-file` writes a file consumed only at a later `SessionStart`
@@ -286,6 +286,16 @@ it (not on PyPI).
   chain only when its independent consumer — the session loop, the Routine, the
   thread heartbeat — exists AND is verified running.** Delivery evidence covers the
   first hop only.
+
+  `codex-exec-resume` is DIRECT by its specified semantics: it invokes
+  `codex exec resume <thread-id>` and re-enters the exact persisted thread, with no
+  independent consumer standing between delivery and execution. **Classify axis 1 by
+  what the adapter's contract does, never by whether it is wired up here.** That it
+  currently ships no host-local script is an axis-2 fact and belongs in the table
+  below — an unconfigured DIRECT adapter cannot execute today, which does not make
+  its behaviour indirect. Collapsing those two questions is precisely the error this
+  section exists to prevent, and it is easy to make in the direction of whichever
+  axis you have the louder evidence for.
 
   **Axis 2 — is there an implementation on the named executor?** Registration and
   implementation are separate, and either half can be missing:
