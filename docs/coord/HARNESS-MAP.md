@@ -39,11 +39,19 @@ that mechanism, and plumbing that does not end in the model running is not a wak
 
 **Two rules that fall out of this table.**
 
-1. **A notify-only route is not a wake.** `macos-notify` terminates in a human's
-   eyeballs; every other adapter terminates in something that runs an agent. An
-   agent whose only route is notifying is **un-wakeable by construction**, and the
-   router will report clean deliveries forever while it never runs. Declare a
-   notifier *alongside* an invoking mechanism, never instead of one.
+1. **Adapter success is not agent execution — and only ONE adapter proves it.**
+   `managed-agents-message` re-enters a session directly. `queued-wake-file`,
+   `routine-align` and `codex-exec-resume` are INDIRECT: they land a nudge or align
+   a schedule, and the wake completes only if that independent consumer (session
+   loop, Routine, thread heartbeat) exists and is verified running —
+   `align_routine` records `no_session_created: true` in its own result, and a
+   wake file is consumed only at a later `SessionStart`. `macos-notify` terminates
+   in a human's eyeballs and is never a wake. An agent whose only route is
+   notifying, or whose indirect route has no live consumer, is **un-wakeable while
+   the router reports clean deliveries.** Separately, three of the five host-local
+   adapters (`codex-exec-resume`, `openclaw-post`, and `opencode-wake` from PR 482)
+   currently lack either a script or a registration, so their routes validate and
+   never execute.
 2. **Never retire a wake without naming and proving its replacement.**
    coord-maintainer — the maintainer of this system — deleted its standing session
    loop on 2026-07-24 to save budget, and replaced it over two weeks with a

@@ -265,27 +265,41 @@ it (not on PyPI).
   112 entries × ~0.9s = 103.5s serial vs 14.3s prefetched. A raising entry read
   still fails closed (degraded, nothing executed, wakes stay visibly queued);
   the pool must never swallow it into a clean "0 delivered".
-- **ADAPTERS ARE INVOKING OR NOTIFYING, and only invoking ones are a wake.** The
-  router calls an adapter, the adapter exits 0, and the pass records `delivered`.
-  That measures *the adapter ran*, never *the agent ran* — and for one adapter
-  those are not the same event:
+- **AN ADAPTER'S SUCCESS PROVES THE ADAPTER RAN — never that the AGENT ran.** The
+  router calls an adapter, it exits 0, the pass records `delivered`. Whether that
+  constitutes a wake depends on TWO independent questions, and conflating them is
+  the error this section exists to stop (codex-reviewer caught the first version of
+  this table making exactly that conflation).
 
-  | adapter | terminates in | wake? |
+  **Axis 1 — what does adapter success actually prove?**
+
+  | class | adapters | success proves |
   |---|---|---|
-  | `codex-exec-resume` | resumes a codex thread | INVOKING |
-  | `managed-agents-message` | resumes a cloud session | INVOKING |
-  | `routine-align` | aligns a Routine that runs the agent | INVOKING |
-  | `queued-wake-file` | a file the agent's own schedule collects | INVOKING (via that schedule) |
-  | `macos-notify` | **a human's eyeballs** | **NOTIFYING — not a wake** |
+  | DIRECT INVOKE | `managed-agents-message` | the model session was re-entered |
+  | INDIRECT (queued / alignment) | `queued-wake-file`, `routine-align`, `codex-exec-resume` | a nudge landed or a schedule was aligned — **not** that the model ran |
+  | NOTIFYING | `macos-notify` | a human was shown a banner. Never a wake. |
 
-  An agent whose ONLY route is a notifying adapter is **un-wakeable by
-  construction**: the router will report clean deliveries forever while the agent
-  never runs. Observed live — coord-maintainer, the maintainer of this system,
-  sat on `macos-notify` as its sole route and was the one agent the wake router
-  could not wake; every P0 addressed to it waited for a human to notice a desktop
-  banner. `validate_config` accepts this today. It should not: a notify-only
-  route is an ESCALATION channel and must be declared alongside an invoking one,
-  never instead of it.
+  `queued-wake-file` writes a file consumed only at a later `SessionStart`
+  (`queue_wake_file` and `consume_wake_files` are separate legs). `align_routine`
+  records `no_session_created: true` in its own result — it aligns an already
+  self-armed Routine and creates nothing. **An INDIRECT adapter is a viable wake
+  chain only when its independent consumer — the session loop, the Routine, the
+  thread heartbeat — exists AND is verified running.** Delivery evidence covers the
+  first hop only.
+
+  **Axis 2 — is there an implementation on the named executor?** Registration and
+  implementation are separate, and either half can be missing:
+
+  | adapter | registered in router | host-local script | result |
+  |---|---|---|---|
+  | `macos-notify` | yes | yes (`SCRIPT_ADAPTERS`) | executes |
+  | `codex-exec-resume` | yes | **no** | executor returns `unconfigured`; 60 wakes sat enqueued |
+  | `openclaw-post` | yes (+ `endpoint_name`) | **no** | same class, currently un-executable |
+  | `opencode-wake` (PR 482) | **no** | yes (script shipped) | `validate_config` would reject the route |
+
+  Three of the five host-local adapters cannot currently execute. A route can
+  therefore look configured, validate, enqueue forever, and never deliver — which
+  is what the shadow-window audit measured as 112 unattempted wakes.
 - **EVERY HARNESS MUST NAME THE THING THAT RE-ENTERS THE AGENT.** Per
   [`docs/coord/HARNESS-MAP.md`](docs/coord/HARNESS-MAP.md), each harness row owns
   a wake mechanism, and it is always the mechanism that *runs the model* — not a
