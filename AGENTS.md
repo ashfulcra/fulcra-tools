@@ -657,11 +657,12 @@ it (not on PyPI).
   to write paths: a command that ACTS on the roles you hold
   (not just reports them) resolves through the one helper and refuses to act on UNKNOWN rather than
   treating it as "nothing to do".**
-  Cost per pass is **`1 + Σ(2 + L_r)` ops** over the roles the open work references (`L_r` = that
-  role's lease shards — one per agent that claimed it and never `roles release`-d, so it tracks
-  lifetime churn and is unbounded in principle: a role with ten shards is 13 ops, measured). ONE
-  `roles/` listing settles which assignees are roles at all, so the literal-agent-id majority costs
-  zero reads and a team with no role-addressed open work pays nothing; the prefilter is per-pass,
+  Cost per pass is **at most `1 + 3R` ops** over the roles the open work references: ONE `roles/`
+  listing, then each referenced role's doc + leases listing + at most the caller's own lease shard.
+  Peer lease shards cannot change whether this caller holds the role, so lifetime holder churn does
+  not expand the hot-path fan-out. Direct whole-role status/escalation folds still read every shard
+  because they answer the complete holder set. The roles listing also means the literal-agent-id
+  majority costs zero reads and a team with no role-addressed open work pays nothing; the prefilter is per-pass,
   never cached across passes (leases change, and a newly-registered role must route on the very next
   fold). Because no op count bounds LATENCY when each op can burn a transport timeout, the pass also
   runs under one cumulative `COORD_ROLE_FOLD_BUDGET` (default 20s) opened ahead of that listing — a

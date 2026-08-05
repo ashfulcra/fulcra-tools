@@ -324,14 +324,9 @@ def test_role_resolution_is_one_pass_for_both_folds(capsys):
     assert t.lists.count(cli._leases_prefix(TEAM, "reviewer")) == 1
 
 
-def test_multi_lease_role_costs_a_read_per_shard(capsys):
-    # The HONEST bound, pinned. This docstring used to claim `1 + 3R` ops, R =
-    # distinct roles — and the claim was false and shipped anyway. Every LISTED
-    # lease shard is read, and shards accumulate per claiming agent forever (only
-    # `roles release` prunes one), so the real cost is 1 + sum(2 + L_r): one role
-    # with ten shards is 13 ops, not the 4 that `1 + 3R` predicts. `3R` is just the
-    # L_r == 1 case. If a future change makes the cost formula in
-    # `_held_roles_for_rows` false again, this test says so in op counts.
+def test_multi_lease_role_reads_only_callers_shard(capsys):
+    # The hot path answers membership for ONE caller. Peer shards cannot change
+    # that fact and lifetime holder churn must not make every wake slower.
     t = ListCountingTransport()
     _put_role(t, "reviewer")
     _put_lease(t, "reviewer", "bob")
@@ -344,9 +339,30 @@ def test_multi_lease_role_costs_a_read_per_shard(capsys):
     assert [r["name"] for r in b["inbox"]] == ["role-do-1"]  # still routes
     role_ops = ([p for p in t.reads if "/roles/" in p]
                 + [p for p in t.lists if "/roles/" in p])
-    # 1 roles/ listing + 1 doc read + 1 leases listing + 10 shard reads
-    assert len(role_ops) == 13, sorted(role_ops)
-    assert len([p for p in t.reads if "/leases/" in p]) == 10
+    # 1 roles/ listing + 1 doc read + 1 leases listing + caller shard read
+    assert len(role_ops) == 4, sorted(role_ops)
+    assert [p for p in t.reads if "/leases/" in p] == [
+        cli._leases_prefix(TEAM, "reviewer") + f"{tasks.agent_key('bob')}.md"]
+
+
+def test_unreadable_peer_lease_does_not_make_callers_membership_unknown(capsys):
+    class PeerReadFails(ListCountingTransport):
+        def read(self, path):
+            if path.endswith("ghost.md"):
+                return None
+            return super().read(path)
+
+    t = PeerReadFails()
+    _put_role(t, "reviewer")
+    _put_lease(t, "reviewer", "bob")
+    _put_lease(t, "reviewer", "ghost")
+    _put_directive(t, "role-do-1", "Review", owner="alice", assignee="reviewer")
+    _reconcile(t)
+    t.lists.clear(); t.reads.clear()
+    b = _briefing(t, "bob", capsys)
+    assert "role_degraded" not in b
+    assert [r["name"] for r in b["inbox"]] == ["role-do-1"]
+    assert not any(path.endswith("ghost.md") for path in t.reads)
 
 
 # --- the wall-clock bound: a budget cut is UNKNOWN, not "no roles" --------

@@ -1518,6 +1518,63 @@ def _role_fresh_holders(
             for l in roles.fresh_holders(leases, now=now, sla_hours=sla)], True
 
 
+def _role_membership_for_agent(
+    transport: Any, team: str, name: str, agent: str, *, now: str,
+    listing_cache: Optional[dict[str, Any]] = None,
+    deadline: Optional[Deadline] = None,
+) -> tuple[list[str], bool]:
+    """Resolve one caller's role membership without reading peer leases.
+
+    Once the lease listing positively identifies the caller's shard, peer shards
+    cannot change whether this caller holds the role. Return the minimal holder
+    evidence downstream matching needs (``[agent]`` or ``[]``); UNKNOWN remains
+    loud when the role doc, lease listing, or caller's own listed shard is
+    unreadable.
+    """
+    if "/" in name:
+        return [], True
+    dl = deadline if deadline is not None else Deadline(None)
+    raw_doc = transport.read(_role_doc_path(team, name))
+    reg = okf.parse_frontmatter(raw_doc)
+    if reg is None:
+        cache = listing_cache if listing_cache is not None else {}
+        if "names" not in cache:
+            cache["names"] = _roles_listing_names(transport, team)
+        names = cache["names"]
+        if names is None or f"{name}.md" in names:
+            return [], False
+        return [], True
+    sla = roles.parse_sla_hours(reg.get("sla_hours"))
+    if sla is None:
+        return [], False
+    if dl.expired():
+        return [], False
+    try:
+        entries = transport.list_dir(_leases_prefix(team, name))
+    except TransportError:
+        return [], False
+    own_name = f"{tasks.agent_key(agent)}.md"
+    own_listed = any(
+        not entry.get("is_dir") and (entry.get("name") or "") == own_name
+        for entry in entries
+    )
+    if not own_listed:
+        return [], True
+    if dl.expired():
+        return [], False
+    fm = okf.parse_frontmatter(
+        transport.read(_leases_prefix(team, name) + own_name))
+    if fm is None:
+        return [], False
+    lease_agent = str(fm.get("agent") or agent)
+    if lease_agent != agent:
+        return [], True
+    fresh = roles.fresh_holders(
+        [{"agent": lease_agent, "timestamp": fm.get("timestamp")}],
+        now=now, sla_hours=sla)
+    return ([agent] if fresh else []), True
+
+
 # --- role routing on the READ folds ---------------------------------------
 #
 # A directive assigned to a ROLE is directed at whoever holds a fresh lease on it
@@ -1567,21 +1624,18 @@ def _held_roles_for_rows(
     for the retired `listen` tick's benefit; it went with that verb — every
     surviving caller resolves the full open set.)
 
-    **The honest op bound** (corrected 2026-07-16 — the docstring here previously
-    claimed a tidy ``1 + 3R``, which was simply false, and the claim propagated to
-    the PR that shipped it). A pass costs::
+    **The hot-path op bound** is caller-specific. A pass costs::
 
-        1 + SUM over probed roles r of (2 + L_r)
+        1 + SUM over probed roles r of (2 + M_r)
 
     ops: one roles/ listing, then per probed role a doc read + a lease listing +
-    ``L_r`` shard reads. ``L_r`` is the number of ``.md`` shards in the role's
-    leases/ prefix — one per agent that has ever claimed the role and not
-    ``roles release``-d it. Nothing prunes an abandoned shard, so ``L_r`` tracks
-    lifetime holder CHURN, not current holders, and is unbounded in principle: a
-    role with ten lease shards costs 13 ops, not 4. ``3R`` is only the ``L_r == 1``
-    special case. "Probed roles" = the candidates the roles/ listing confirms are
-    roles; if that listing RAISES, membership is unknown and EVERY candidate is
-    probed at 1 op (its doc read) plus the lease terms for those whose docs parse.
+    ``M_r`` caller-shard reads, where ``M_r`` is 1 when the listing names the
+    caller's lease and 0 otherwise. Peer shards cannot change whether this caller
+    holds the role and are not read. Thus the pass is at most ``1 + 3R`` regardless
+    of lifetime holder churn. "Probed roles" = the candidates the roles/ listing
+    confirms are roles; if that listing RAISES, membership is unknown and EVERY
+    candidate is probed at 1 op (its doc read) plus the lease terms for those whose
+    docs parse.
     A transport op is a `fulcra-api` subprocess + HTTPS round trip (~0.8s measured)
     and this runs on `briefing` — the hot path — so the terms matter. The per-role
     ops buy a FAIL-CLOSED answer: reading the agent's own lease shard directly
@@ -1662,8 +1716,9 @@ def _held_roles_for_rows(
                 for pending_role in tail:
                     resolution_sink[pending_role] = ([], False)
             break
-        holders, ok = _role_fresh_holders(transport, team, role, now=now,
-                                          listing_cache=listing_cache, deadline=dl)
+        holders, ok = _role_membership_for_agent(
+            transport, team, role, agent, now=now,
+            listing_cache=listing_cache, deadline=dl)
         if resolution_sink is not None:
             resolution_sink[role] = (holders, ok)
         if not ok:
