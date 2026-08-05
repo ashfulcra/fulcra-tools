@@ -65,6 +65,8 @@ import json
 import sys
 from typing import Any, Optional
 
+from . import read_retry
+
 #: Team-relative path of the checkpoint-channel config. NOT ``records.json``:
 #: see the module docstring — widening the bus authority breaks old engines.
 CONFIG_NAME = "_coord/bus-v3/checkpoints.json"
@@ -155,7 +157,7 @@ def load_config(transport: Any, team: str, *, use_cache: bool = True
         status = "absent" if raw is None else "ok"
     else:
         try:
-            raw, status = reader(path)
+            raw, status = read_retry.read_classified_retrying(reader, path)
         except Exception:
             return None, "error"
     if status == "error":

@@ -34,3 +34,26 @@ def _no_host_wake_provisioning(monkeypatch):
     that exercise the seam set it explicitly to a throwaway stub dir."""
     monkeypatch.delenv("COORD_WAKE_ADAPTER_DIR", raising=False)
     monkeypatch.delenv("COORD_WAKE_ADAPTER_TIMEOUT", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_transient_read_retry(monkeypatch):
+    """Disable the single transient-read retry by default across the suite.
+
+    The retry (``coord_engine.read_retry``) sleeps ~2s before its one retry, and
+    it fires on exactly the ``error`` path that dozens of fail-closed tests
+    exercise deliberately — roughly 20s of pure sleep across a 70s suite, on the
+    tests that are SUPPOSED to be simulating a dark store.
+
+    Turning it off here also keeps those tests measuring what they were written
+    to measure: that an unreadable document classifies UNKNOWN rather than
+    absent. That claim is about classification, not about blip absorption, and
+    it should not silently start depending on how many times the transport is
+    asked.
+
+    The retry itself is covered explicitly — including at all four wired call
+    sites — in ``test_read_retry.py``, which sets this variable itself. Tests
+    that want the retry set the env var; nothing here can hide a regression in
+    it.
+    """
+    monkeypatch.setenv("COORD_READ_RETRY_MS", "0")

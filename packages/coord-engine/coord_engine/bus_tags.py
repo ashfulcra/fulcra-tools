@@ -68,6 +68,8 @@ import re
 import sys
 from typing import Any, Optional
 
+from . import read_retry
+
 #: Team-relative path of the tag registry.
 TAGS_NAME = "_coord/bus-v3/tags.json"
 
@@ -197,7 +199,7 @@ def load_registry(transport: Any, team: str, *,
         status = "absent" if raw is None else "ok"
     else:
         try:
-            raw, status = reader(path)
+            raw, status = read_retry.read_classified_retrying(reader, path)
         except Exception:
             return None, "error"
     if status == "error":

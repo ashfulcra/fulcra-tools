@@ -33,6 +33,8 @@ import json
 import re
 from typing import Any, Optional
 
+from . import read_retry
+
 #: Payload schema version. Bump only for incompatible shape changes; readers
 #: must ignore payloads whose version they do not know rather than guess.
 PAYLOAD_VERSION = 1
@@ -567,7 +569,7 @@ def load_config_classified(
     if reader is None:
         cfg = load_config(transport, team)
         return cfg, ("ok" if cfg is not None else "absent")
-    raw, status = reader(config_path(team))
+    raw, status = read_retry.read_classified_retrying(reader, config_path(team))
     if status == "error":
         return None, "error"
     if raw is None:
