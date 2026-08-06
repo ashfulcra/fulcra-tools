@@ -33,7 +33,7 @@ from . import (
     checkpoint_channel, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, projection as projection_mod,
-    pin_currency, query, read_retry, records, review,
+    handoff, pin_currency, query, read_retry, records, review,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
@@ -5119,14 +5119,31 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
               f"CHECKPOINT NOT WRITTEN because there was nothing to park",
               file=sys.stderr)
         return 2
-    for role in held:
+    def _build(role: str) -> "tuple[str, dict]":
         task_slug = f"role-{tasks.slugify(role)}"
-        snap = continuity.build_snapshot(
+        return task_slug, continuity.build_snapshot(
             agent=agent, task=task_slug,
             objective=args.objective or f"parked role {role} at session exit",
             now=now, next_actions=args.next or [],
             open_questions=args.open_question or [],
+            decisions=getattr(args, "decision", None) or [],
+            artifacts=getattr(args, "artifact", None) or [],
         )
+
+    if getattr(args, "handoff", False):
+        # Validate BEFORE writing anything. The sections are identical across
+        # held roles, so one check covers the batch — and a half-written batch
+        # is the worst outcome available here: some roles pointing at a
+        # checkpoint the successor was told to trust, others not.
+        _, probe = _build(held[0])
+        findings = handoff.validate(
+            probe, resolve=handoff.store_resolver(transport, args.team))
+        if findings:
+            print(handoff.format_findings(findings), file=sys.stderr)
+            return 3
+
+    for role in held:
+        task_slug, snap = _build(role)
         path = _continuity_path(args.team, agent, task_slug)
         if not transport.write(path, json.dumps(snap, indent=2)):
             print(f"park: snapshot write FAILED for {role}; checkpoint_ref left unchanged",
@@ -8825,6 +8842,14 @@ def build_parser() -> argparse.ArgumentParser:
     ctp.add_argument("team"); ctp.add_argument("--agent", "-a"); ctp.add_argument("--objective")
     ctp.add_argument("--role", help="snapshot only this role (must have a fresh lease)")
     ctp.add_argument("--next", action="append"); ctp.add_argument("--open-question", action="append", dest="open_question")
+    ctp.add_argument("--decision", action="append", dest="decision")
+    ctp.add_argument("--artifact", action="append", dest="artifact",
+                     help="cold-start reading list entry; 'path#anchor' or "
+                          "'path (Anchor section)' has its anchor checked too")
+    ctp.add_argument("--handoff", action="store_true",
+                     help="enforce the five-section handoff form "
+                          "(docs/coord/CHECKPOINT-HANDOFF.md) and REFUSE to "
+                          "write anything if it is not resumable")
     ctp.set_defaults(func=cmd_continuity_park)
 
     ctr = ctsub.add_parser("resume", help="print a resume brief from the latest snapshot")
