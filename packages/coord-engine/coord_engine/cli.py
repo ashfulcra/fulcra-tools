@@ -967,9 +967,11 @@ def cmd_task_supersede(args: argparse.Namespace, transport: Any) -> int:
     extra steps. Supersession closes the origin copy from ANY live state and
     names its successor — the dispatcher's duty made mechanical."""
     reason = args.reason or f"work re-dispatched as {args.by}"
-    return _task_apply(args, transport, status="done",
-                       superseded_by=args.by,
-                       evidence=f"superseded by {args.by} ({reason})")
+    kw: dict[str, Any] = {"status": "done", "superseded_by": args.by,
+                          "evidence": f"superseded by {args.by} ({reason})"}
+    if getattr(args, "record", None):
+        kw["superseded_record_id"] = args.record
+    return _task_apply(args, transport, **kw)
 
 
 def cmd_task_pause(args: argparse.Namespace, transport: Any) -> int:
@@ -7613,8 +7615,38 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
                             outcomes = {}
                         for h in cur["committed"]["handled"]:
                             outcomes[h["record_id"]] = h["outcome"]
+            # s7 verb-channel link: gather `task supersede --record` evidence
+            # from HOT task docs (frontmatter `superseded_record_id`). Gated
+            # with the outcomes read — explicit ids refine a measured window
+            # and never override the UNKNOWN precedence, so scanning a
+            # pre-activation fleet would buy nothing. A failed listing/read
+            # degrades LOUDLY to stream-only evidence — affected
+            # supersessions land in the unknown bucket, never a fabricated
+            # count and never silence.
+            explicit_ids: Optional[set] = None
+            if outcomes is not None:
+                task_scan_degraded = False
+                try:
+                    task_fms = []
+                    task_prefix = f"team/{args.team}/task/"
+                    for entry in transport.list_dir(task_prefix):
+                        name = entry.get("name") or ""
+                        if entry.get("is_dir") or not name.endswith(".md"):
+                            continue
+                        raw = transport.read(task_prefix + name)
+                        if raw is None:
+                            task_scan_degraded = True
+                            continue
+                        task_fms.append(okf.parse_frontmatter(raw))
+                    explicit_ids = records.explicit_supersessions(task_fms)
+                except Exception:
+                    task_scan_degraded = True
+                if task_scan_degraded:
+                    print("  ! Supersession adoption: task-verb evidence "
+                          "unreadable (explicit `task supersede --record` "
+                          "channel degraded to stream-only this run)")
             adoption = records.supersession_adoption(
-                fleet_ev or [], outcomes)
+                fleet_ev or [], outcomes, explicit_ids=explicit_ids)
             if adoption["status"] == "unknown":
                 print("  ! Supersession adoption: UNKNOWN (no v2 "
                       "classification evidence this window — not 0%)")
@@ -8707,6 +8739,7 @@ def build_parser() -> argparse.ArgumentParser:
     tsp = tksub.add_parser("supersede", help="close a re-dispatched task's origin copy, naming its successor (legal from any live state)")
     tsp.add_argument("team"); tsp.add_argument("name")
     tsp.add_argument("--by", required=True, help="the successor task slug (or PR/artifact) that replaces this copy")
+    tsp.add_argument("--record", help="EVENT record id of the superseded predecessor dispatch — joins this supersession to the bus stream so the doctor supersession-adoption metric counts the explicit verb directly")
     tsp.add_argument("--reason", "-r")
     tsp.set_defaults(func=cmd_task_supersede, verb="supersede")
 

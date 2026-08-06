@@ -6,11 +6,13 @@ Exit-gate fixtures per the 2026-07-30 provisional ruling (slug respec-s7):
     sender+slug pairs in 24h were threads, not supersessions);
 (2) an earlier directive already terminally classified completed/blocked is
     follow-up work, not a candidate;
-(3) the explicit record-level signal (`queue commit --result <id>=superseded`)
-    is counted directly — NARROWED in pr-503 round 1 from "the `task
-    supersede` verb is counted directly": that verb's evidence lives in task
-    documents keyed by task slug with no task→record identity mapping, so
-    the fold must not expose a channel no production caller can fill;
+(3) both explicit signals count directly: the record-level `superseded`
+    classification (`queue commit --result <id>=superseded`) and — since the
+    s7 verb-channel link added the task→record join — `task supersede
+    --record <event-record-id>`, whose `superseded_record_id` frontmatter is
+    gathered by `records.explicit_supersessions` and fed to the fold by
+    doctor (the pr-503 narrowing held only while no such mapping existed;
+    its pin test is deleted per its own deletion clause);
 (4) unmeasurable is UNKNOWN — never the denominator, never 0%;
 plus: empty denominator reads n/a (never 100%), legacy windows read UNKNOWN
 (never 0%), the --json outcome_mix key is additive under the cursor block
@@ -60,18 +62,38 @@ def test_terminally_classified_predecessor_is_followup_not_candidate():
         assert (out["counted"], out["unknown"]) == (0, 0)
 
 
-def test_task_verb_channel_is_narrowed_out_of_the_fold():
-    """pr-503 round 1 pin: `task supersede` writes `superseded_by` into TASK
-    documents keyed by task slug — no identity mapping to event record ids
-    exists, so the fold must not accept explicit ids no production caller
-    can gather. The explicit record-level signal is the `superseded`
-    classification itself (covered by
-    test_directive_reissue_with_superseded_classification_counts). Delete
-    this pin only when a defined, test-covered task→record mapping wires
-    the task-verb channel end to end."""
-    import inspect
-    params = inspect.signature(records.supersession_adoption).parameters
-    assert "explicit_ids" not in params
+def test_explicit_verb_evidence_counts_directly():
+    """s7 verb-channel link: an explicit `task supersede --record` id counts
+    its candidate directly even when NO cursor classified the predecessor.
+    (This restores the ruling's fixture 3 — the pr-503 narrowing pin is
+    deleted per its own deletion clause, now that the task→record mapping
+    exists and doctor is the production caller.)"""
+    events = [_ev("directive", "a", "s", "d1", "2026-07-30T10:00:00"),
+              _ev("directive", "a", "s", "d2", "2026-07-30T11:00:00")]
+    out = records.supersession_adoption(events, {}, explicit_ids={"d1"})
+    assert (out["counted"], out["superseded"], out["unknown"]) == (1, 1, 0)
+    assert out["ratio"] == 1.0
+
+
+def test_explicit_ids_never_conjure_a_measured_window():
+    """Precedence pin: `outcomes is None` (no v2 classification evidence at
+    all) stays UNKNOWN even with explicit verb evidence in hand — explicit
+    ids refine within a measured window, they never replace one."""
+    events = [_ev("directive", "a", "s", "d1", "2026-07-30T10:00:00"),
+              _ev("directive", "a", "s", "d2", "2026-07-30T11:00:00")]
+    out = records.supersession_adoption(events, None, explicit_ids={"d1"})
+    assert out["status"] == "unknown"
+    assert out["ratio"] is None and out["counted"] == 0
+
+
+def test_explicit_supersessions_gathers_and_tolerates_malformed():
+    fms = [{"superseded_record_id": "r1"},
+           {"superseded_record_id": "  r2  "},
+           {"superseded_record_id": "r1"},          # dupe collapses
+           {"superseded_record_id": ""},            # empty: no join
+           {"superseded_record_id": 7},             # wrong type: no join
+           {"other": "field"}, None, "not-a-dict"]
+    assert records.explicit_supersessions(fms) == {"r1", "r2"}
 
 
 def test_unclassified_reissue_is_unknown_not_denominator():
@@ -236,4 +258,72 @@ def test_doctor_readable_empty_cursor_is_evidence(monkeypatch, capsys):
                       "committed_tokens": [], "handled": []}}))
     rc, out = _doctor_out(capsys, t)
     assert rc == 0
+    assert "Supersession adoption: n/a (0 candidates; 1 unmeasurable)" in out
+
+
+def _empty_cursor():
+    return json.dumps({
+        "v": 2, "authority_generation": 3, "revision": 0,
+        "committed": {"last_read": "2026-07-30T09:00:00Z", "seen_ids": [],
+                      "committed_tokens": [], "handled": []}})
+
+
+# --- s7 verb-channel link: task→record join end to end ----------------------
+
+
+def test_supersede_record_flag_writes_join_and_default_is_unchanged():
+    """`task supersede --record` writes `superseded_record_id`; without the
+    flag the closed doc carries no such field (today's behavior)."""
+    t = FakeTransport()
+    for name in ("a", "b"):
+        t.put(f"team/r/task/{name}.md",
+              f"---\ntype: Task\ntitle: {name}\nid: {name}\n"
+              "status: active\n---\nbody\n")
+    assert cli.main(["task", "supersede", "r", "a", "--by", "a2",
+                     "--record", "d1"], transport=t) == 0
+    assert "superseded_record_id: d1" in t.store["team/r/task/a.md"]
+    assert cli.main(["task", "supersede", "r", "b", "--by", "b2"],
+                    transport=t) == 0
+    assert "superseded_record_id" not in t.store["team/r/task/b.md"]
+
+
+def test_doctor_counts_task_verb_evidence_end_to_end(monkeypatch, capsys):
+    """A hot task doc carrying `superseded_record_id: d1` makes the d1→d2
+    reissue count as an adopted supersession, with no cursor classification
+    for d1 at all — the explicit verb channel, wired end to end."""
+    t = _doctor_setup(
+        monkeypatch,
+        _DoctorTransport([_record("d1", "s", "2026-07-30T10:00:00Z"),
+                          _record("d2", "s", "2026-07-30T11:00:00Z")]),
+        presence_for=("amy",))
+    t.put(records.v2_cursor_path("r", "amy", 3), _empty_cursor())
+    t.put("team/r/task/old-dispatch.md",
+          "---\ntype: Task\ntitle: Old\nid: old-dispatch\nstatus: done\n"
+          "superseded_by: new-dispatch\nsuperseded_record_id: d1\n---\n")
+    rc, out = _doctor_out(capsys, t)
+    assert rc == 0
+    assert "Supersession adoption: 1/1 (100%; 0 unmeasurable)" in out
+    assert "task-verb evidence unreadable" not in out
+
+
+def test_doctor_task_scan_failure_degrades_loudly_to_stream_only(
+        monkeypatch, capsys):
+    """An unreadable task dir must not silently drop the verb channel: the
+    marker prints, and the metric still computes from stream evidence (the
+    unclassified reissue stays in the unknown bucket — never fabricated)."""
+    class TaskListFails(_DoctorTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/task/":
+                raise RuntimeError("boom")
+            return super().list_dir(prefix)
+
+    t = _doctor_setup(
+        monkeypatch,
+        TaskListFails([_record("d1", "s", "2026-07-30T10:00:00Z"),
+                       _record("d2", "s", "2026-07-30T11:00:00Z")]),
+        presence_for=("amy",))
+    t.put(records.v2_cursor_path("r", "amy", 3), _empty_cursor())
+    rc, out = _doctor_out(capsys, t)
+    assert rc == 0
+    assert "task-verb evidence unreadable" in out
     assert "Supersession adoption: n/a (0 candidates; 1 unmeasurable)" in out
