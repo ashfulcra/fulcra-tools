@@ -265,6 +265,76 @@ it (not on PyPI).
   112 entries × ~0.9s = 103.5s serial vs 14.3s prefetched. A raising entry read
   still fails closed (degraded, nothing executed, wakes stay visibly queued);
   the pool must never swallow it into a clean "0 delivered".
+- **AN ADAPTER'S SUCCESS PROVES THE ADAPTER RAN — never that the AGENT ran.** The
+  router calls an adapter, it exits 0, the pass records `delivered`. Whether that
+  constitutes a wake depends on TWO independent questions, and conflating them is
+  the error this section exists to stop (codex-reviewer caught the first version of
+  this table making exactly that conflation).
+
+  **Axis 1 — what does adapter success actually prove?**
+
+  | class | adapters | success proves |
+  |---|---|---|
+  | DIRECT INVOKE | `managed-agents-message`, `codex-exec-resume` | the model session was re-entered |
+  | INDIRECT (queued / alignment) | `queued-wake-file`, `routine-align` | a nudge landed or a schedule was aligned — **not** that the model ran |
+  | NOTIFYING | `macos-notify` | a human was shown a banner. Never a wake. |
+
+  `queued-wake-file` writes a file consumed only at a later `SessionStart`
+  (`queue_wake_file` and `consume_wake_files` are separate legs). `align_routine`
+  records `no_session_created: true` in its own result — it aligns an already
+  self-armed Routine and creates nothing. **An INDIRECT adapter is a viable wake
+  chain only when its independent consumer — the session loop, the Routine, the
+  thread heartbeat — exists AND is verified running.** Delivery evidence covers the
+  first hop only.
+
+  `codex-exec-resume` is DIRECT by its specified semantics: it invokes
+  `codex exec resume <thread-id>` and re-enters the exact persisted thread, with no
+  independent consumer standing between delivery and execution. **Classify axis 1 by
+  what the adapter's contract does, never by whether it is wired up here.** That it
+  currently ships no host-local script is an axis-2 fact and belongs in the table
+  below — an unconfigured DIRECT adapter cannot execute today, which does not make
+  its behaviour indirect. Collapsing those two questions is precisely the error this
+  section exists to prevent, and it is easy to make in the direction of whichever
+  axis you have the louder evidence for.
+
+  **Axis 2 — is there an implementation on the named executor?** Registration and
+  implementation are separate, and either half can be missing:
+
+  | adapter | registered in router | host-local script | result |
+  |---|---|---|---|
+  | `macos-notify` | yes | yes (`SCRIPT_ADAPTERS`) | executes |
+  | `codex-exec-resume` | yes | **no** | executor returns `unconfigured`; 60 wakes sat enqueued |
+  | `openclaw-post` | yes (+ `endpoint_name`) | **no** | same class, currently un-executable |
+  | `opencode-wake` (PR 482) | **no** | yes (script shipped) | `validate_config` would reject the route |
+
+  Three of the five host-local adapters cannot currently execute. A route can
+  therefore look configured, validate, enqueue forever, and never deliver — which
+  is what the shadow-window audit measured as 112 unattempted wakes.
+- **EVERY HARNESS MUST NAME THE THING THAT RE-ENTERS THE AGENT.** Per
+  [`docs/coord/HARNESS-MAP.md`](docs/coord/HARNESS-MAP.md), each harness row owns
+  a wake mechanism, and it is always the mechanism that *runs the model* — not a
+  script that runs beside it:
+  - **Claude Code, local desktop** — the wake is a **session-level recurring
+    prompt** (the harness's own scheduled-prompt tool). A `launchd` job CANNOT
+    wake this harness: it runs shell, not the model, so at best it posts a
+    notification or drops a `queued-wake-file` for the session loop to collect.
+    `claude -p` can invoke headlessly ONLY where the CLI is authenticated —
+    verify with a real `claude -p` before designing on it; unauthenticated it
+    fails after minutes, which reads as a hang, not a refusal.
+  - **Claude Code, remote/CCR** — a CCR **Routine** on cron; `managed-agents-message`
+    resumes the session. Durable across the operator's machine being closed.
+  - **Codex CLI** — the codex **thread heartbeat**; `codex-exec-resume`.
+  - **OpenClaw** — the OpenClaw **heartbeat**; `openclaw-post`.
+  - **Headless launchd/cron hosts** — the schedule IS the agent; there is no
+    model to re-enter, so a notifying adapter is meaningless here.
+
+  Doctrine, learned the expensive way: **deleting a working wake to save budget
+  costs more than it saves.** coord-maintainer removed its standing session loop
+  on 2026-07-24 and replaced it over two weeks with a notifier that woke a human,
+  a headless invoke that could not authenticate, and a `--peek` read that never
+  consumed — three mechanisms, none of which ran the agent, while every layer
+  reported success. Before retiring a wake, name its replacement and prove the
+  replacement RUNS THE AGENT.
 - **Thin host executor (W5.5).** `coord-engine router execute <team> [--host
   <id>] [--once] [--dry-run]` is the SOLE executor for host-local adapters
   (`codex-exec-resume`, `openclaw-post`, `macos-notify`, `queued-wake-file`). It

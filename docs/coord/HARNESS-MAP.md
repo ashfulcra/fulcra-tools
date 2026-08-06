@@ -20,6 +20,54 @@ fleet or a new wall is hit, add it here in the same PR as the fix.
 | 7 | ChatGPT facade (HTTP) | find-or-create / status endpoints | Per-request process economics (see the loop-2 perf audit) |
 | 8 | Claude mobile/desktop remote control | operator-driven sessions | Unreliable delivery (the reason coord-boss exists); treat as best-effort transport, never a dependency |
 
+## The wake mechanism, per harness — what actually RE-ENTERS the agent
+
+A harness row is not complete until it names the thing that runs the model again.
+Everything else — schedules, notifications, files on disk — is plumbing *around*
+that mechanism, and plumbing that does not end in the model running is not a wake.
+
+| # | Harness | THE WAKE (runs the model) | Router adapter | Notes / what does NOT wake it |
+|---|---------|---------------------------|----------------|-------------------------------|
+| 1 | Claude Code, local desktop | **session-level recurring prompt** (the harness's own scheduled-prompt tool) | `queued-wake-file` collected by that loop; `macos-notify` = escalation only | **`launchd` cannot wake this harness** — it runs shell, not the model. `claude -p` invokes headlessly ONLY where the CLI is authenticated; unauthenticated it fails after minutes and reads as a hang. Session loop dies with the session — this harness has NO overnight autonomy without headless auth or relocation. |
+| 2 | Claude Code, remote/CCR | **CCR Routine** (cron, 24/7) | `managed-agents-message` | Durable: survives the operator closing their machine. The reason cloud agents out-produce desktop ones. |
+| 3 | Codex CLI | **codex thread heartbeat** | `codex-exec-resume` (`thread_id`) | Tightest cadence in the fleet (1–15 min); pull-based, so directed wakes are an optimisation, not a dependency. |
+| 4 | OpenClaw | **OpenClaw heartbeat** | `openclaw-post` (`endpoint_name`) | Needs a named webhook endpoint configured, or the route is inert. |
+| 5 | GitHub Actions CI | n/a — event-triggered, no resident agent | none | Nothing to wake. |
+| 6 | Headless heartbeats (launchd/cron) | **the schedule IS the agent** | none | No model to re-enter; a notifying adapter is meaningless here. |
+| 7 | ChatGPT facade | **the inbound request** | none | Per-request; no standing agent. |
+| 8 | Claude mobile/desktop remote control | **the operator** | none | Best-effort transport, never a dependency. |
+
+**Two rules that fall out of this table.**
+
+1. **Adapter success is not agent execution — and only TWO adapters prove it.**
+   `managed-agents-message` re-enters a session directly, and `codex-exec-resume`
+   invokes `codex exec resume <thread-id>` to re-enter the exact persisted thread.
+   `queued-wake-file` and `routine-align` are INDIRECT: they land a nudge or align
+   a schedule, and the wake completes only if that independent consumer (session
+   loop, Routine) exists and is verified running — `align_routine` records
+   `no_session_created: true` in its own result, and a wake file is consumed only
+   at a later `SessionStart`. `macos-notify` terminates in a human's eyeballs and
+   is never a wake. An agent whose only route is notifying, or whose indirect route
+   has no live consumer, is **un-wakeable while the router reports clean
+   deliveries.**
+
+   Classify by the adapter's CONTRACT, not by whether it is wired up here — those
+   are different questions and the second one is loud enough to drown the first.
+   Separately and independently: three of the five host-local adapters
+   (`codex-exec-resume`, `openclaw-post`, and `opencode-wake` from PR 482)
+   currently lack either a script or a registration, so their routes validate and
+   never execute. `codex-exec-resume` sits in both lists — a DIRECT adapter that
+   cannot execute today — which is exactly why the two questions need separate
+   answers.
+2. **Never retire a wake without naming and proving its replacement.**
+   coord-maintainer — the maintainer of this system — deleted its standing session
+   loop on 2026-07-24 to save budget, and replaced it over two weeks with a
+   notifier that woke a human, a headless invoke that could not authenticate, and
+   a `--peek` read that never consumed. Three replacements, none of which ran the
+   agent, each reporting success. It went unnoticed for two weeks because every
+   layer's own evidence looked healthy. Prove the replacement RUNS THE AGENT
+   before removing what worked.
+
 ## The walls (verified incidents × harness)
 
 Each of these was hit live, diagnosed, and closed. The harness column says where
