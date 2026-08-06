@@ -1006,7 +1006,36 @@ it (not on PyPI).
   the parked checkpoint loses nothing. Applies to every agent, coord-boss
   included. `continuity park` exits rc 2 when the agent holds no fresh roles and
   therefore writes no checkpoint; treat that as "not parked", never as a clean
-  no-op. `continuity resume` always reports the checkpoint age (human output and
+  no-op.
+- **`snapshot` is the routine save; `park` means you are LEAVING.** Both write a
+  checkpoint, so it is easy to treat them as interchangeable and reach for the
+  one a rule happens to name. They are not interchangeable:
+  - `continuity snapshot <team> <agent> <slug>` — a PROGRESS save. This is the
+    form for `checkpoint-on-every-wake`: you did material work, you are still
+    here, here is the state you left.
+  - `continuity park <team> --agent <self>` — a SESSION-EXIT save (its own help
+    says so): you are going away, so snapshot every held role at once and set
+    the `checkpoint_ref`s. Use it at genuine handoff, at dormancy (above), and
+    on the wake you `roles claim` so the new role starts with a checkpoint.
+    **Do not park on every wake** — it announces a handoff you are not making,
+    repeatedly, and drains the meaning from the one signal that should mean
+    "this agent has stepped away".
+- **park's rc 2 proves only that NO FRESH HELD ROLE WAS FOUND — nothing more.**
+  That one exit code covers two opposite situations and the fix differs:
+  - **An assigned/expected role whose lease lapsed** -> `roles claim`. Left
+    unfixed this is expensive: the role sits VACANT past its SLA, work routed to
+    the ROLE (rather than to your agent name) reaches no holder, and an
+    escalation-due marker accumulates that nobody owns. Observed live 2026-08-05
+    — coord-maintainer ran a day past SLA on a vacant role after reading rc 2 as
+    a fact about itself rather than about its lease.
+  - **Intentionally role-less** (workers, dispatchables — the steady state for
+    most agents) -> use `continuity snapshot` for progress saves. **Do NOT
+    fabricate or claim a role merely to make `park` succeed.** An arbitrary claim
+    on an exclusive role is worse than the rc 2 it silences.
+
+  Check `roles status <team> <role>` and your assigned role before concluding
+  anything: rc 2 is a lease diagnostic, not an identity verdict, and it does not
+  by itself tell you which case you are in. `continuity resume` always reports the checkpoint age (human output and
   JSON `checkpoint_age_seconds`); use `--max-age 1h` (durations accept `s`, `m`,
   `h`, or `d` through `999999999d`) when a wake or acceptance run must fail rc
   2 on stale state. JSON `error_code` separates invalid duration, unknown age,
