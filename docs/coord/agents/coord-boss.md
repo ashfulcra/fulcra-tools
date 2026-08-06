@@ -63,10 +63,20 @@ harness implements is documented in
    resets. Only Ash retires a standing duty. **They bind to the session that
    created them, not to the role** — so they survive a container reset but NOT
    a session handoff: a successor's first duty is re-creating its own, and the
-   predecessor's keep firing into a dead conversation until Ash retargets or
-   retires them. Minimum interval is hourly; anything finer needs an
-   in-session cron, which dies with the session and is therefore never the
-   survival wake.
+   predecessor's keep firing into a dead conversation until they are retired.
+   Minimum interval is hourly; anything finer needs an in-session cron, which
+   dies with the session and is therefore never the survival wake.
+
+   **The successor CANNOT retire the predecessor's Routines** (verified by
+   attempt, 2026-08-06): `update_trigger` returns *"updating a trigger bound to
+   another session is not enabled for this organization"*, and it carries no
+   `persistent_session_id` field, so "retarget" is not a thing that exists —
+   the choices are disable or delete, and only from the owning session or the
+   Routines UI. Plan the handoff around that: **the old session must retire its
+   own wake sources before it goes dark**, or the operator does it by hand.
+   A successor that assumes it can clean up after its predecessor will leave
+   the dead session being woken indefinitely. Re-creating the equivalents is
+   the successor's half; retiring the originals is not.
 2. **send_later self-chained one-shots** — work-loop cadence (e.g. the
    respec execution loop). Re-armed each firing; the scheduler MCP can
    flicker — bus timers (`coord-engine remind`) are the durable fallback.
