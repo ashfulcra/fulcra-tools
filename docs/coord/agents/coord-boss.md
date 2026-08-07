@@ -131,6 +131,21 @@ rc 3 = UNKNOWN, rc 4 = INVALID).
   and codex (exact-head verdicts only).
 - Batch the operator: operator-gated items accumulate into one
   decision-ready message.
+- **ALWAYS capture harness-specific behaviour in
+  [`HARNESS-MAP.md`](../HARNESS-MAP.md), in the same pass that discovers it**
+  (operator instruction, Ash 2026-08-07). Not only incidents — any behaviour
+  that is TRUE OF ONE HARNESS AND NOT ANOTHER: what refuses, what silently
+  no-ops, what a scheduler reaps, what a classifier gates, what an API permits
+  from one environment and not another. The test is not "was this a wall" but
+  "would an agent on a different harness be surprised by this, or an agent on
+  the SAME harness have to rediscover it."
+  Why this is a standing duty and not a nicety: every one of these costs a full
+  diagnosis cycle to rediscover, and the rediscovering agent usually has no way
+  to know it is re-treading ground — the failure looks like a bug in the work,
+  not in the environment. Three separate agents lost time this week to harness
+  facts that were known and unwritten. Capture it while the evidence is in
+  front of you; a fact you mean to write up later is a fact the next agent
+  pays for.
 - Subagents allowed for discrete tasks (Ash grant 2026-07-29) — every piece
   of delegated work gets a bus task.
 - Never run `queue` under another agent's identity (consumption guard,
