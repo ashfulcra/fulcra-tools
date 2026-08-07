@@ -782,6 +782,11 @@ def _role_attended(transport: Any, team: str, holders: list[str], *,
     except TransportError:
         return None, 0, 0
     total = len(reviews)
+    if not total:
+        # NOTHING to scan. A complete sweep of an empty set is not evidence of
+        # absence — it is evidence we looked somewhere with no data (a wrong
+        # prefix looks exactly like this). UNKNOWN, never False.
+        return None, 0, 0
     scanned = 0
     undatable = False
     suffixes = tuple(f"--{h}.md" for h in holders if h)
@@ -8163,14 +8168,51 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                       f"session has lapsed (declared window ended; role retained, "
                       f"not gone-dark); escalation suppressed", file=sys.stderr)
                 continue
+        # ATTENDANCE on the ACTING path. Computed only for a role that is
+        # otherwise about to escalate, so the listing cost is paid on the rare
+        # acting branch and never on every role of every sweep.
+        #
+        # Wiring this into `roles status` alone was the round-1 defect: that
+        # improved what an operator READS while the sweep kept emitting the same
+        # false "unattended" P1s. The diagnostic is not the actuator.
+        anchor = roles._parse(now)
+        attended, a_scanned, a_total = None, 0, 0
+        if anchor is not None:
+            attended, a_scanned, a_total = _role_attended(
+                transport, args.team,
+                [str(l.get("agent")) for l in (leases or [])],
+                since=anchor - timedelta(hours=sla))
+        if not roles.escalation_due(leases, now=now, sla_hours=sla,
+                                    marker_exists_today=marker_exists,
+                                    attended=attended):
+            print(f"escalate: {role} vacancy explained — a holder filed a verdict "
+                  f"within {sla:g}h (scanned {a_scanned}/{a_total}); the LEASE "
+                  f"lapsed, the job did not. Escalation suppressed — ask for a "
+                  f"lease renewal.", file=sys.stderr)
+            continue
+        # The `ROLE VACANT ...` slug family is a CONTRACT (dedupe key, existing
+        # queries, day-over-day re-notify). Keep it; change only the claim made
+        # after it, which is the part that was false.
+        if attended is False:
+            title = (f"ROLE VACANT {today}: {role} UNATTENDED past {sla:g}h SLA "
+                     f"— no holder work found")
+            evidence = (f"A COMPLETE verdict sweep ({a_scanned}/{a_total}) found no "
+                        f"work by any holder inside the window.")
+        else:
+            title = (f"ROLE VACANT {today}: {role} lease lapsed past {sla:g}h SLA "
+                     f"(attendance UNVERIFIED)")
+            evidence = (f"Attendance could NOT be established (scanned "
+                        f"{a_scanned}/{a_total}). This says the LEASE lapsed — NOT "
+                        f"that nobody is working. Verify before treating it as absence.")
         maintainer = str(reg.get("maintainer") or _human())
         transport.write(marker_path, okf.render_frontmatter(
             {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
         slug, content = tasks.new_task_doc(
-            f"ROLE VACANT {today}: {role} unattended past {sla:g}h SLA",
+            title,
             now=now, status="proposed", priority="P1", owner=_host(),
             assignee=maintainer, kind="directive",
             summary=f"Role {role} in team/{args.team} has no fresh lease past its SLA. "
+                    f"{evidence} "
                     f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
         )
         dst = _task_path(args.team, slug)

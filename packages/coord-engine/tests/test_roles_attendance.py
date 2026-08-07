@@ -166,3 +166,84 @@ def test_an_undatable_holder_verdict_is_unknown_not_absent():
         ],
     }
     assert _attended(tree, ["codex-reviewer"], since)[0] is None
+
+
+# --- the ACTING path: cmd_escalate is what actually mints the P1 ----------
+#
+# Round-1 defect: attendance was wired into `roles status` only. That improved
+# what an operator READS while the sweep kept emitting the same false
+# "unattended" tasks. The diagnostic is not the actuator — these tests go
+# through `escalate` for that reason.
+
+from coord_engine_test_helpers import FakeTransport  # noqa: E402
+
+STALE_LEASE = "---\ntype: Lease\nagent: codex-reviewer\ntimestamp: 2026-08-03T08:00:00Z\n---\n"
+ROLE_DOC = "---\ntype: Role\nsla_hours: 12\nmaintainer: ash\n---\n"
+
+
+def _team_with_stale_lease():
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md", ROLE_DOC)
+    t.put("team/r/roles/reviewer/leases/codex-reviewer.md", STALE_LEASE)
+    return t
+
+
+def _tasks(t):
+    return [p for p in t.store if "/task/" in p]
+
+
+def test_escalate_suppresses_when_a_holder_filed_a_verdict(capsys):
+    """THE regression codex asked for: stale lease + recent holder verdict,
+    end to end through the sweep. No P1 may be minted."""
+    t = _team_with_stale_lease()
+    v = "team/r/review/some-pr/verdicts/abc--codex-reviewer.md"
+    t.put(v, "---\nverdict: approved\n---\n")
+    t.mtimes[v] = "2026-08-07 07:37AM UTC"
+
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    err = capsys.readouterr().err
+    assert "Escalation suppressed" in err
+    assert "the LEASE lapsed, the job did not" in err
+    assert not _tasks(t), "a served role must not mint an unattended P1"
+
+
+def test_escalate_still_mints_for_a_genuinely_absent_role(capsys):
+    """The fix must not swallow real vacancies — and must SAY it checked."""
+    t = _team_with_stale_lease()
+    v = "team/r/review/some-pr/verdicts/abc--somebody-else.md"
+    t.put(v, "---\nverdict: approved\n---\n")
+    t.mtimes[v] = "2026-08-07 07:37AM UTC"
+
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    minted = _tasks(t)
+    assert len(minted) == 1
+    assert minted[0].startswith("team/r/task/role-vacant-"), "slug family is a contract"
+    body = t.store[minted[0]]
+    assert "UNATTENDED past" in body
+    assert "COMPLETE verdict sweep" in body
+
+
+def test_escalate_never_claims_unattended_when_it_could_not_check(capsys):
+    """No reviews to scan -> attendance UNKNOWN. It must still escalate (a
+    lapsed lease matters) but must not assert that nobody is working."""
+    t = _team_with_stale_lease()
+
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    minted = _tasks(t)
+    assert len(minted) == 1
+    body = t.store[minted[0]]
+    assert "lease lapsed past" in body
+    assert "UNVERIFIED" in body
+    assert "UNATTENDED past" not in body, (
+        "an unchecked sweep may not assert absence — this exact wording is what "
+        "made four days of false P1s read as fact"
+    )
+
+
+def test_an_empty_review_listing_is_unknown_not_absent():
+    """A complete sweep of an EMPTY set is not evidence of absence — a wrong
+    prefix looks exactly like this."""
+    from datetime import datetime, timezone
+
+    since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
+    assert _attended({}, ["codex-reviewer"], since) == (None, 0, 0)
