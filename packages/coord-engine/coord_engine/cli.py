@@ -3323,6 +3323,28 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     return rc
 
 
+def _companion_recipient(assignee: str) -> str:
+    """Translate a TASK assignee into an EVENT ``to``.
+
+    The two planes use different words for "everyone" and always have:
+    ``needs-me``, the board and the presence fold match the task token ``"*"``;
+    :func:`records.events_for` keeps ``to in (agent, records.BROADCAST)`` where
+    BROADCAST is ``"all"``. A directed assignee is the same string on both
+    sides, so the mismatch only bites the fleet-wide case — which is exactly
+    the case nobody tested.
+
+    Consequence, measured on 2026-08-07: `coord-engine broadcast` printed its
+    slug and rc 0, the record landed on the LIVE channel in a correct ``v:1``
+    shape addressed to ``"*"``, and every reader's queue stayed CLEAR. A P0
+    fleet notice reached nobody while looking, at the sender, exactly like a
+    successful send. The delivered-looking non-delivery is the recurring shape
+    (see the 2026-08-06 RCA); this is its third mechanism, after the retired
+    channel and the prose note, and the cheapest of the three to miss because
+    both values are legitimate somewhere.
+    """
+    return records.BROADCAST if assignee == records.TASK_EVERYONE else assignee
+
+
 def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
                              slug: str, assignee: str) -> None:
     """One ``v:1`` bus event pointing at the durable directive doc.
@@ -3370,7 +3392,8 @@ def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
         return
     try:
         ok = records.emit_event(
-            transport, cfg, sender=sender, to=assignee, kind="directive",
+            transport, cfg, sender=sender,
+            to=_companion_recipient(assignee), kind="directive",
             priority=getattr(args, "priority", None) or "P2", slug=slug,
             ptr=_task_path(args.team, slug).split("/", 2)[-1],
             team=args.team)
@@ -3428,7 +3451,10 @@ def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_broadcast(args: argparse.Namespace, transport: Any) -> int:
-    return _create_directive(args, transport, assignee="*")
+    # The TASK plane's everyone-token. The companion event translates it to
+    # records.BROADCAST; see _companion_recipient for why they differ.
+    return _create_directive(args, transport,
+                             assignee=records.TASK_EVERYONE)
 
 
 def cmd_remind(args: argparse.Namespace, transport: Any) -> int:

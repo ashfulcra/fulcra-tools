@@ -322,6 +322,16 @@ def fleet_version_census(presence_shards: list[Any],
 #: literal name silently drops fleet-wide directives.
 BROADCAST = "all"
 
+#: The TASK plane's "everyone" assignee, which is a DIFFERENT token from the
+#: event plane's :data:`BROADCAST`. ``needs-me``, the board and the presence
+#: fold all match ``"*"``; the queue filter matches ``"all"`` and nothing else.
+#: Anything crossing from a task assignee to an event ``to`` must translate —
+#: see ``cli._companion_recipient``. Every fleet-wide `coord-engine broadcast`
+#: between the companion landing and 2026-08-07 was written to ``"*"``, sat on
+#: the live channel in the correct ``v:1`` shape, and was dropped by every
+#: reader, because the two planes disagreed about one word.
+TASK_EVERYONE = "*"
+
 
 def events_for(records: Optional[list], agent: str) -> Optional[list[dict[str, Any]]]:
     """Control-plane events addressed to ``agent`` (or broadcast), newest last.

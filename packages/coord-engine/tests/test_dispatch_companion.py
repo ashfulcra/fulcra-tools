@@ -168,3 +168,64 @@ def test_a_deferred_directive_emits_no_companion(monkeypatch):
     cli._create_directive(args, None, assignee="a",
                           not_before="2026-09-01T00:00:00Z")
     assert calls == []
+
+
+# --- the broadcast recipient token -----------------------------------------
+#
+# The directed path above was tested when the companion shipped; the fleet-wide
+# path was not, and that is the whole of this defect. `broadcast` addresses the
+# TASK plane's everyone-token "*", the queue filter keeps only (agent, "all"),
+# so every fleet-wide directive landed on the live channel in a correct v:1
+# shape and was dropped by every reader. The sender saw a slug and rc 0.
+#
+# The load-bearing test is the last one: it does not assert on a translated
+# string, it runs the actual reader over the actual emitted note.
+
+def test_broadcast_translates_the_task_token_to_the_event_token(emitted):
+    args = _args()
+    args._directive_outcome = "written"
+    cli._emit_dispatch_companion(None, args, slug="fleet-notice-abc123",
+                                 assignee=records.TASK_EVERYONE)
+    assert len(emitted) == 1
+    assert emitted[0]["to"] == records.BROADCAST
+
+
+def test_a_directed_assignee_is_never_rewritten(emitted):
+    """Translation must apply to the everyone-token and nothing else."""
+    args = _args()
+    args._directive_outcome = "written"
+    cli._emit_dispatch_companion(None, args, slug="s", assignee="codex-coder")
+    assert emitted[0]["to"] == "codex-coder"
+
+
+def test_the_two_planes_use_different_everyone_tokens():
+    """Guards the premise. If these ever converge the translation is dead code,
+    and a future reader deleting it should be told by a test, not by an outage."""
+    assert records.TASK_EVERYONE != records.BROADCAST
+
+
+@pytest.mark.parametrize("reader", ["coord-boss", "codex-coder", "arc-maintainer"])
+def test_the_broadcast_note_actually_reaches_an_arbitrary_reader(reader):
+    """END TO END, and the only test here that would have caught the defect.
+
+    Every other assertion in this file compares a value the fix produces
+    against a value the fix chose. This one builds the note the companion
+    sends and runs `records.events_for` — the real filter, the one the
+    recipient runs — over a record carrying it. A note the reader drops is not
+    a delivery, however correct it looks at the sender.
+    """
+    note = records.build_payload(
+        to=cli._companion_recipient(records.TASK_EVERYONE), kind="directive",
+        priority="P0", slug="fleet-notice-abc123",
+        ptr="task/fleet-notice-abc123.md")
+    got = records.events_for([{"id": "r1", "note": note}], reader)
+    assert [e["slug"] for e in got] == ["fleet-notice-abc123"]
+
+
+def test_the_untranslated_token_is_what_a_reader_drops():
+    """Positive control for the test above: without the translation the very
+    same note reaches nobody. This is the outage, reproduced in one assert."""
+    note = records.build_payload(
+        to=records.TASK_EVERYONE, kind="directive", priority="P0",
+        slug="fleet-notice-abc123", ptr="task/fleet-notice-abc123.md")
+    assert records.events_for([{"id": "r1", "note": note}], "coord-boss") == []
