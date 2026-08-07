@@ -7726,8 +7726,18 @@ def _forge_head_exists(sha: str) -> "Optional[bool]":
         url = _subprocess.run(["git", "remote", "get-url", "origin"],
                               cwd=str(root), capture_output=True, text=True,
                               timeout=30)
-        m = _re.search(r"[/:]([^/:]+)/([^/]+?)(?:\.git)?\s*$", url.stdout or "")
-        if url.returncode != 0 or not m:
+        if url.returncode != 0:
+            return None
+        # THE ORIGIN MUST BE GITHUB. An earlier round parsed owner/repo out of
+        # ANY host and then asked github.com about it — so a self-hosted or
+        # GitLab origin got answered by a same-named GitHub repo, or by a 404
+        # meaning "no such repo here" that read as "commit is gone"
+        # (codex-reviewer, round 1). A wrong authority is worse than no answer.
+        raw = (url.stdout or "").strip()
+        m = _re.match(
+            r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+            r"([^/]+)/([^/]+?)(?:\.git)?$", raw)
+        if not m:
             return None
         cp = _subprocess.run(
             [gh, "api", f"repos/{m.group(1)}/{m.group(2)}/commits/{sha}",
@@ -7737,10 +7747,15 @@ def _forge_head_exists(sha: str) -> "Optional[bool]":
         return None
     if cp.returncode == 0 and (cp.stdout or "").strip():
         return True
+    # ABSENCE IS EXACTLY ONE RESPONSE. Measured against the live API:
+    #   missing commit      -> 422 "No commit found for SHA: <sha>"
+    #   inaccessible repo   -> 404 "Not Found"
+    # A bare status match would read the second as absence, which is this whole
+    # P0 one layer down: inability to SEE becoming proof of ABSENCE. So match
+    # the commit endpoint's own no-commit message and nothing else. Auth
+    # failure, rate limit, network error, 404: all UNKNOWN.
     err = (cp.stderr or "").lower()
-    # Only a clear no-such-commit is absence. Auth failure, rate limit and
-    # network error are UNKNOWN — conflating them is this bug wearing a hat.
-    if "no commit found" in err or "422" in err or "404" in err:
+    if "no commit found for sha" in err:
         return False
     return None
 
