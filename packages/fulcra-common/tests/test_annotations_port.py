@@ -101,7 +101,11 @@ def _install_router(monkeypatch, response=None) -> _Router:
     return router
 
 
-def _stub_cli(monkeypatch, *, catalog_lines, create_id="def-created"):
+_DERIVE = object()
+
+
+def _stub_cli(monkeypatch, *, catalog_lines, create_id="def-created",
+              authority=_DERIVE):
     """Stub the three CLI shell-outs.
 
     ``catalog_lines``: what ``_fulcra_cli_lines_or_error(["catalog", ...])``
@@ -125,6 +129,24 @@ def _stub_cli(monkeypatch, *, catalog_lines, create_id="def-created"):
     # Legacy sibling kept in sync for any incidental callers.
     monkeypatch.setattr(ann, "_fulcra_cli_json_lines",
                         lambda args, **k: (catalog_lines or []))
+
+    # The Agent-Tasks channel resolves from the AUTHORITY document, not the
+    # catalog, so the write path shells out for `records.json`. Stub it here or
+    # every writing test reaches the REAL CLI — the hermeticity boundary this
+    # suite exists to hold (wall 6: fixture runs writing to the prod account).
+    # Default mirrors the catalog stub's intent: `catalog_lines=None` means a
+    # lookup error, which under the new resolution is an unreadable authority.
+    resolved = authority
+    if resolved is _DERIVE:
+        resolved = None
+        if catalog_lines:
+            first = (catalog_lines[0] or {}).get("id", "")
+            resolved = first.split("/", 1)[1] if "/" in first else (first or None)
+    monkeypatch.setattr(ann, "_authority_definition_id", lambda team=None: resolved)
+    # Pin and cache both read the developer's real ~/.config; neutralise them so
+    # a machine that happens to hold a pin cannot change a test's outcome.
+    monkeypatch.setattr(ann, "_pinned_definition_id", lambda: None)
+    monkeypatch.setattr(ann, "_cached_definition_id", lambda: None)
     return calls
 
 
