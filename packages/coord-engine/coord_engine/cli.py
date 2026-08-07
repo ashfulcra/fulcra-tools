@@ -6293,6 +6293,12 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         print(f"router: delivered/ listing degraded ({e}) — skipping "
               f"delivered.json refold this pass (the populated view is "
               f"preserved; it regenerates next pass)", file=sys.stderr)
+    # codex 554 r3: a per-shard failure is EVIDENCE LOSS. For the delivered.json
+    # view it remains mere bookkeeping loss, but for the rate cap it means the
+    # window count is measured from an incomplete set — and a count that looks
+    # measured while part of the evidence was dropped is exactly the fail-open
+    # this cap exists to prevent.
+    shard_evidence_ok = True
     for e in dl_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
@@ -6302,7 +6308,12 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             try:
                 delivered_shards.append(json.loads(raw))
             except ValueError:
+                shard_evidence_ok = False
                 pass  # a corrupt record shard is bookkeeping loss, not a stop
+        else:
+            # unreadable OR genuinely empty — the transport cannot tell us
+            # which, so it counts as evidence we do not have
+            shard_evidence_ok = False
     if delivered_listing_ok:
         delivered_view = router.fold_delivered(delivered_shards)
     else:
@@ -6335,13 +6346,22 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     # delivery shards as delivered_view. When the listing degraded we hold only
     # the persisted per-agent view, which carries no per-delivery timestamps —
     # so the last hour is UNKNOWN, not zero, and the cap fails closed per item.
-    wake_counts, global_wakes = router.count_wakes_last_hour(
+    wake_counts, global_wakes, counts_complete = router.count_wakes_last_hour(
         delivered_shards, now=now)
-    counts_known = delivered_listing_ok
+    # Three independent ways the window can be unknown, and ALL of them must
+    # clear the flag: the directory listing failed, an individual shard was
+    # unreadable or malformed, or a shard parsed but could not be classified.
+    # r3 set this from the listing alone, so per-file loss ran the cap on
+    # incomplete evidence while reporting a confident number.
+    counts_known = delivered_listing_ok and shard_evidence_ok and counts_complete
     if not counts_known:
-        print("router: delivered/ listing degraded — last-hour wake counts are "
-              "UNKNOWN; the rate cap fails CLOSED (items defer to the next "
-              "window rather than ride an unmeasurable cap)", file=sys.stderr)
+        why = ("listing degraded" if not delivered_listing_ok
+               else "a delivery shard was unreadable or malformed"
+               if not shard_evidence_ok
+               else "a delivery shard could not be classified")
+        print(f"router: {why} — last-hour wake counts are UNKNOWN; the rate "
+              f"cap fails CLOSED (items defer to the next window rather than "
+              f"ride an unmeasurable cap)", file=sys.stderr)
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}

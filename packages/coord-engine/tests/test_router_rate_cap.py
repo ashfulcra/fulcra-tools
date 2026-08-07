@@ -297,7 +297,7 @@ def test_unreadable_delivery_evidence_fails_the_cap_closed(pass_clock):
 def test_counting_window_is_one_hour_and_ambiguous_stamps_count():
     """The fold itself: outside the window is excluded, an unparseable stamp
     cannot be proven outside it and so counts."""
-    per_agent, total = router.count_wakes_last_hour([
+    per_agent, total, complete = router.count_wakes_last_hour([
         {"agent": "a", "delivered_at": "2026-07-23T11:30:00Z"},   # in
         {"agent": "a", "delivered_at": "2026-07-23T10:30:00Z"},   # out
         {"agent": "a", "delivered_at": "not-a-timestamp"},        # ambiguous
@@ -307,3 +307,69 @@ def test_counting_window_is_one_hour_and_ambiguous_stamps_count():
     ], now=PASS_NOW)
     assert per_agent == {"a": 2, "b": 2}
     assert total == 4
+    assert complete is False, "the agentless shard is unclassifiable evidence"
+
+
+# --- per-shard evidence loss (codex 554 r3) ---------------------------------
+#
+# r3 set counts_known from the delivered/ DIRECTORY listing alone. A shard that
+# was unreadable, malformed, or unclassifiable was silently skipped, so the pass
+# undercounted while still reporting counts_known=True — the cap ran on
+# incomplete evidence and could let a wake through. I fixed the coarse failure
+# and left its fine-grained twin, which is the exact error I had written up two
+# PRs earlier.
+
+def _cap_pass_with_shard(t, extra_writes=None, breaker=None):
+    """A pass whose cap is generous (50/hr) and whose ONLY reason to defer can
+    be unusable delivery evidence. Under-cap with clean evidence this same setup
+    interrupts -- see test_router_pass_still_interrupts_a_p0_under_cap."""
+    _setup(t, config_doc=_enabled({"per_agent_per_hour": 50,
+                                   "global_per_hour": 50}),
+           deliveries=[(AGENT, "2026-07-23T11:10:00Z")])
+    for path, body in (extra_writes or {}).items():
+        t.put(path, body)
+    if breaker:
+        breaker(t)
+    assert cli.cmd_router_run(_pass_args(), t) == 0
+    return _sole_entry(t)
+
+
+def test_an_unreadable_delivery_shard_makes_the_window_unknown(pass_clock):
+    t = FakeTransport()
+    real_read = t.read
+
+    def flaky(path):
+        if path.startswith(RP + "delivered/"):
+            return None          # unreadable, or empty -- indistinguishable
+        return real_read(path)
+
+    entry = _cap_pass_with_shard(t, breaker=lambda tr: setattr(tr, "read", flaky))
+    assert entry["not_before"] == DEFER_TO, (
+        "an unreadable shard was skipped and the cap ran on what was left")
+
+
+def test_a_malformed_delivery_shard_makes_the_window_unknown(pass_clock):
+    t = FakeTransport()
+    entry = _cap_pass_with_shard(
+        t, extra_writes={RP + "delivered/broken.json": "{not json at all"})
+    assert entry["not_before"] == DEFER_TO, (
+        "malformed JSON was swallowed and the count reported as measured")
+
+
+def test_a_parsed_but_unclassifiable_shard_makes_the_window_unknown(pass_clock):
+    """Parses fine, carries no agent -- so it cannot be attributed, and a count
+    that drops it is not the measurement it claims to be."""
+    t = FakeTransport()
+    entry = _cap_pass_with_shard(
+        t, extra_writes={RP + "delivered/anon.json":
+                         json.dumps({"delivered_at": "2026-07-23T11:40:00Z"})})
+    assert entry["not_before"] == DEFER_TO
+
+
+def test_clean_evidence_still_measures_and_lets_an_under_cap_p0_through(pass_clock):
+    """The non-vacuity control for all three: same generous cap, evidence
+    intact -- the P0 fires now. Without this the three tests above could pass
+    because the pass defers everything."""
+    t = FakeTransport()
+    entry = _cap_pass_with_shard(t)
+    assert entry["not_before"] <= NOW_ISO_PASS

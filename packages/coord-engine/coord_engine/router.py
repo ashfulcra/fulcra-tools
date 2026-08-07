@@ -249,26 +249,40 @@ def within_caps(
 
 def count_wakes_last_hour(
     shards: list[dict[str, Any]], *, now: datetime,
-) -> tuple[dict[str, int], int]:
+) -> tuple[dict[str, int], int, bool]:
     """Per-agent and fleet wake counts over the hour ending at ``now``, folded
     from the durable delivery-record shards.
 
     :func:`fold_delivered` keeps an all-time ``count``; a rate cap needs a
     WINDOWED one, so this is a separate fold rather than a field on that view.
 
-    Fail-closed on ambiguity. A shard whose ``delivered_at`` is missing or
-    unparseable cannot be proven to lie OUTSIDE the window, so it counts.
-    Over-counting defers a wake to the next window; under-counting lets through
-    the flood the cap exists to stop. The asymmetry is the whole point.
+    Returns ``(per_agent, total, complete)``.
+
+    Two distinct kinds of ambiguity, handled differently because they differ:
+
+    * **Timestamp unknown** — a shard whose ``delivered_at`` is missing or
+      unparseable cannot be proven to lie OUTSIDE the window, so it COUNTS.
+      Over-counting defers a wake to the next window; under-counting lets
+      through the flood the cap exists to stop.
+    * **Shard unclassifiable** — not a mapping, or no usable ``agent``. It
+      cannot be attributed at all, so skipping it silently would undercount
+      while still reporting a confident number. ``complete`` goes False and the
+      caller must treat the window as UNKNOWN (codex 554 r3).
+
+    The rule under both: never return a count that looks measured when part of
+    the evidence was discarded.
     """
     window_start = now - timedelta(hours=1)
     per_agent: dict[str, int] = {}
     total = 0
+    complete = True
     for shard in shards:
         if not isinstance(shard, dict):
+            complete = False
             continue
         agent = shard.get("agent")
         if not isinstance(agent, str) or not agent:
+            complete = False
             continue
         at_dt = parse_iso(shard.get("delivered_at"))
         # unparseable/missing timestamp -> cannot exclude it -> count it
@@ -276,7 +290,7 @@ def count_wakes_last_hour(
             continue
         per_agent[agent] = per_agent.get(agent, 0) + 1
         total += 1
-    return per_agent, total
+    return per_agent, total, complete
 
 
 def validate_config(
