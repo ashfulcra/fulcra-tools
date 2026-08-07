@@ -751,3 +751,69 @@ def test_the_default_does_not_claim_to_be_sufficient():
     assert "role_duties" in marker, (
         "the known-still-blind component must stay named at the constant"
     )
+
+
+# --- the measured deadline must BIND (coord-boss correction, 2026-08-07) ----
+#
+# 555 opened setup_dl from _obligation_budget() and then called
+# _held_roles_for_rows WITHOUT deadline_seconds, so the role fold fell through
+# to COORD_ROLE_FOLD_BUDGET. The deadline that was MEASURED was not the
+# deadline that BOUND the work -- and the warning told operators to raise a
+# variable that governs something else. Three people acted on that message,
+# one of them in a fleet-wide ruling.
+
+def test_the_obligations_setup_deadline_actually_binds_the_role_fold(monkeypatch):
+    """The regression pin: the obligation budget must reach the role resolver.
+
+    Asserts the VALUE passed, not merely that a keyword was supplied -- a call
+    that passed the role fold's own default would satisfy a weaker check while
+    reinstating exactly the bug.
+    """
+    seen = {}
+    real = cli._held_roles_for_rows
+
+    def spy(*a, **kw):
+        seen["deadline_seconds"] = kw.get("deadline_seconds")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cli, "_held_roles_for_rows", spy)
+    monkeypatch.setattr(cli, "_obligation_budget", lambda: 7.0)
+    monkeypatch.setattr(cli, "_role_fold_budget", lambda: 999.0)
+    cli._obligation_probes(FakeTransport(), TEAM, AGENT, now=PINNED_NOW)
+
+    got = seen["deadline_seconds"]
+    assert got is not None, "the role fold ran unbounded by the obligation budget"
+    assert got <= 7.0, f"bound by something other than the obligation budget: {got}"
+    assert got != 999.0, "fell through to COORD_ROLE_FOLD_BUDGET — the 555 bug"
+
+
+def test_every_production_callsite_passes_the_budget_explicitly():
+    """coord-boss: 'a parameter only tests reach does not exist in production.'
+
+    Every in-repo call to the role resolver must name its governing budget at
+    the callsite, so the knob is visible where the decision is made rather than
+    hidden in a default.
+    """
+    import inspect
+    src = inspect.getsource(cli)
+    calls = src.count("_held_roles_for_rows(")
+    # definition + the spy-free production callsites
+    bound = src.count("deadline_seconds=_role_fold_budget()") \
+        + src.count("deadline_seconds=setup_dl.remaining()")
+    assert bound >= 4, (
+        f"only {bound} callsite(s) name a budget; a role fold with no stated "
+        f"bound is the defect this pins (calls seen: {calls})"
+    )
+
+
+def test_remaining_never_reports_a_spent_deadline_as_unlimited():
+    """`remaining()` on a spent deadline must be 0.0, not None and not negative.
+
+    None means unbounded to every callee, so returning it here would turn an
+    exhausted budget into an unlimited one — the fail-open this whole family of
+    bugs keeps producing.
+    """
+    from coord_engine.budget import Deadline
+    spent = Deadline.open(0.0)
+    assert spent.remaining() == 0.0
+    assert Deadline(None).remaining() is None

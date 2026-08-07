@@ -652,7 +652,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # this agent (see _held_roles_for_rows). An unresolved role is UNKNOWN and gets
     # its own marker below — never folded into "no role work".
     held_roles, unresolved_roles = _held_roles_for_rows(
-        transport, args.team, args.agent, rows, now=now)
+        transport, args.team, args.agent, rows, now=now,
+        deadline_seconds=_role_fold_budget())
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
                          held_roles=held_roles, include_history=args.all,
                          aggregate_doc=agg_doc, feed_evidence=feed_evidence)
@@ -3852,7 +3853,8 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
     ``_role_degraded_row``."""
     rows, ok, reason = _load_rows_status(transport, team)
     held, unresolved = _held_roles_for_rows(transport, team, agent, rows,
-                                            now=_iso(_now()))
+                                            now=_iso(_now()),
+                                            deadline_seconds=_role_fold_budget())
     return (_directed_inbox(transport, team, agent, rows,
                             held_roles=held or None,
                             include_backlog=include_backlog,
@@ -3899,15 +3901,25 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         feed_section_key=projection_mod.NEEDS_ME_KEY)
     agg_doc = doc_sink[0] if doc_sink else None
     feed_evidence = feed_sink[0] if feed_sink else None
+    # setup_dl now BINDS this call instead of merely timing it. Before, it
+    # opened from _obligation_budget() and the role fold fell through to
+    # COORD_ROLE_FOLD_BUDGET — so the deadline that was MEASURED was not the
+    # deadline that BOUND the work, and the warning below sent operators to a
+    # variable that governs something else (coord-boss, 2026-08-07).
     held_roles, unresolved_roles = _held_roles_for_rows(
-        transport, team, agent, rows, now=now)
+        transport, team, agent, rows, now=now,
+        deadline_seconds=setup_dl.remaining())
     if setup_dl.expired():
         # Never silent: setup outrunning its own allowance is the leading
         # indicator of the collapse this fix removed, and on a growing store it
         # will come back. Say it while the fold still succeeds.
-        print("obligations: setup (task index + role resolution) outran its "
-              "allowance; probes still get a full budget, but this store is "
-              "near the edge — raise COORD_OBLIGATION_BUDGET", file=sys.stderr)
+        print("obligations: setup (task index + role resolution) outran "
+              "COORD_OBLIGATION_BUDGET, which now bounds it; probes still get a "
+              "full budget, but this store is near the edge. Raise "
+              "COORD_OBLIGATION_BUDGET to give setup more room. NOTE: the role "
+              "fold's own default is COORD_ROLE_FOLD_BUDGET — it applies "
+              "wherever the role resolver is called WITHOUT an enclosing "
+              "budget (needs-me, inbox, briefing), not here.", file=sys.stderr)
     # Probes get their full allowance regardless of what setup cost.
     fold_dl = Deadline.open(_obligation_budget())
 
@@ -5425,7 +5437,8 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # UNKNOWN — surfaced below as `role_degraded`, never folded to "no roles".
     try:
         held_roles, unresolved_roles = _held_roles_for_rows(
-            transport, args.team, agent, rows, now=now)
+            transport, args.team, agent, rows, now=now,
+            deadline_seconds=_role_fold_budget())
     except Exception as e:
         # The resolver never raises by contract; if it somehow does, the role set is
         # UNKNOWN for EVERY role-shaped assignee in the bundle — say so, don't
