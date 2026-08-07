@@ -63,6 +63,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -900,9 +901,26 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
 #: defect below.
 _AUTHORITY_PATH = "_coord/bus-v3/records.json"
 
-#: Per-process memo, populated ONLY on a successful parse, so a transient
-#: failure retries on the next emit instead of pinning "unknown" for the run.
-_AUTHORITY_MEMO: dict[str, str] = {}
+#: Seconds a resolved channel id may be reused inside one process before the
+#: authority is re-read.
+#:
+#: An UNBOUNDED memo here would be this PR's own defect at a different layer.
+#: The population that matters most is long-lived: heartbeat daemons and
+#: resident sessions that emit for days. One of those resolves the channel once,
+#: and an unbounded memo pins it for the process lifetime — so after a cutover
+#: it keeps writing to the retired channel, delivered-looking and invisible,
+#: exactly the failure this change exists to close. (Caught by codex-reviewer on
+#: round 1; my "self-heals on the next emit" claim was true only for
+#: short-lived processes.)
+#:
+#: The neighbouring ``_DEF_ID_MEMO`` is unbounded on purpose and is NOT a
+#: precedent: a definition NAME is stable, and its memo's job is to avoid
+#: re-resolving the same name. A channel id is precisely the thing that changes.
+AUTHORITY_MEMO_TTL_SECONDS = 300.0
+
+#: Per-team ``(def_id, monotonic_stamp)``, written ONLY on a successful parse so
+#: a transient failure retries on the next emit instead of pinning "unknown".
+_AUTHORITY_MEMO: dict[str, tuple[str, float]] = {}
 
 
 def _coord_team() -> str:
@@ -918,8 +936,8 @@ def _authority_definition_id(team: Optional[str] = None) -> Optional[str]:
     name lookup; see :func:`_resolve_definition_id`."""
     team = team or _coord_team()
     memo = _AUTHORITY_MEMO.get(team)
-    if memo:
-        return memo
+    if memo and (time.monotonic() - memo[1]) < AUTHORITY_MEMO_TTL_SECONDS:
+        return memo[0]
     tmp = Path(tempfile.gettempdir()) / f"fulcra-records-{os.getpid()}.json"
     try:
         result = subprocess.run(
@@ -948,7 +966,7 @@ def _authority_definition_id(team: Optional[str] = None) -> Optional[str]:
             "annotations: %s names data_type %r whose id is not a uuid; "
             "treating the authority as unreadable", _AUTHORITY_PATH, dtype)
         return None
-    _AUTHORITY_MEMO[team] = def_id
+    _AUTHORITY_MEMO[team] = (def_id, time.monotonic())
     return def_id
 
 

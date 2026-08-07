@@ -94,6 +94,45 @@ def test_authority_unreadable_is_none_never_a_guess(monkeypatch, payload, rc):
     assert annotations._authority_definition_id() is None
 
 
+def test_a_cutover_is_picked_up_within_one_long_lived_process(monkeypatch):
+    """The memo must EXPIRE. A heartbeat daemon that resolved the old channel
+    once would otherwise keep writing to it until restart — this change's own
+    defect, one layer down. Two emissions, authority moves between them."""
+    current = {"id": SUPERSEDED}
+
+    def fake_run(cmd, **kwargs):
+        with open(cmd[-1], "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"data_type": f"MomentAnnotation/{current['id']}"}))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(annotations.subprocess, "run", fake_run)
+    monkeypatch.setattr(annotations, "AUTHORITY_MEMO_TTL_SECONDS", 0.0)
+
+    assert annotations._authority_definition_id() == SUPERSEDED
+    current["id"] = LIVE
+    assert annotations._authority_definition_id() == LIVE, (
+        "the memo outlived the cutover — a resident writer would keep "
+        "publishing to the retired channel")
+
+
+def test_memo_is_used_inside_its_ttl(monkeypatch):
+    """The TTL must not degrade into a shell-out per emit."""
+    calls = []
+
+    def counting_run(cmd, **kwargs):
+        calls.append(cmd)
+        with open(cmd[-1], "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"data_type": f"MomentAnnotation/{LIVE}"}))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(annotations.subprocess, "run", counting_run)
+    monkeypatch.setattr(annotations, "AUTHORITY_MEMO_TTL_SECONDS", 300.0)
+
+    assert annotations._authority_definition_id() == LIVE
+    assert annotations._authority_definition_id() == LIVE
+    assert len(calls) == 1, "a fresh memo must not re-read the authority"
+
+
 def test_authority_memoizes_only_on_success(monkeypatch):
     calls = []
 
