@@ -3217,6 +3217,9 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
         return 1
     rc = _write_directive(transport, args, slug=slug, content=content,
                           payload=payload, assignee=assignee, not_before=not_before)
+    if (rc == 0 and not_before is None
+            and getattr(args, "_directive_outcome", None) == "written"):
+        _emit_dispatch_companion(transport, args, slug=slug, assignee=assignee)
     # On a delivered ask (not a backlog capture — @backlog awaits no reply), point
     # the sender at the reply leg: the return of `respond` surfaces in their queue.
     if rc == 0 and assignee != directives.BACKLOG:
@@ -3224,6 +3227,66 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
         if sender:
             print(_replies_breadcrumb(args.team, sender))
     return rc
+
+
+def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
+                             slug: str, assignee: str) -> None:
+    """One ``v:1`` bus event pointing at the durable directive doc.
+
+    WHY A COMPANION EVENT AND NOT A RESHAPED PROJECTION. `tell` writes a durable
+    task document and the activity projection annotates it on the timeline —
+    but that projection's note is PROSE, and the documented queue filter keeps
+    only notes that parse as JSON with ``"v":1``. So for three days every
+    dispatch was durable, correctly recorded, and invisible to the recipient's
+    queue: 2026-08-06, `queue --peek` CLEAR while two P1 tasks sat unstarted
+    (see the coord-boss RCA and its two-defects follow-up).
+
+    The alternative fix was to make the projection itself emit a ``v:1`` note.
+    Rejected, and this is the design call the RCA asked the lane holder to make
+    explicitly:
+
+    - The projection is the TIMELINE surface; prose is its product value. Making
+      it JSON to satisfy a control-plane filter subordinates the product to the
+      transport.
+    - The projection fires on EVERY transition (create/pickup/update/complete).
+      Routing all of those onto the bus would put a stream of updates nobody
+      addressed in front of every queue reader — the "non-routable noise" that
+      :mod:`coord_engine.checkpoint_channel` gave a separate stream to avoid.
+      A dispatch is the subset that has a recipient and warrants delivery.
+    - This ships on the CURRENT engine pin. The channel fix lives in
+      ``fulcra-common``, which the fleet installs from a pinned tag, so it
+      reaches nobody until that pin moves.
+
+    Fires ONLY on a verified fresh write — never on a dedupe (a second event for
+    an already-delivered slug is noise the recipient cannot distinguish from new
+    work) and never on failure. Also never for a DEFERRED directive: `remind`
+    already emits its own future-dated record timed to ``not_before``, and a
+    companion sent now would surface the reminder immediately, which is the one
+    thing a reminder must not do. Best-effort by design: the durable doc is the
+    truth and this is delivery, so a bus that is down or unconfigured degrades to
+    file-plane-only exactly as `remind`'s timer does, and NEVER fails the tell.
+    """
+    if assignee == directives.BACKLOG:
+        return  # nobody is being dispatched; @backlog awaits no reply
+    sender = _known_sender(args) or _host()
+    cfg, _status = records.load_config_classified(transport, args.team)
+    if not cfg:
+        print("record: no bus-v3 records config — dispatch rides the file "
+              "plane only (recipient must run `needs-me`)")
+        return
+    try:
+        ok = records.emit_event(
+            transport, cfg, sender=sender, to=assignee, kind="directive",
+            priority=getattr(args, "priority", None) or "P2", slug=slug,
+            ptr=_task_path(args.team, slug).split("/", 2)[-1],
+            team=args.team)
+    except Exception as e:
+        print(f"record: dispatch companion not emitted ({e}) — dispatch rides "
+              f"the file plane only", file=sys.stderr)
+        return
+    if not ok:
+        print("record: dispatch companion emission failed — dispatch rides the "
+              "file plane only (recipient must run `needs-me`)")
 
 
 def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
