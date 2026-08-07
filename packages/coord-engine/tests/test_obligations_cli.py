@@ -790,19 +790,36 @@ def test_the_obligations_setup_deadline_actually_binds_the_role_fold(monkeypatch
 def test_every_production_callsite_passes_the_budget_explicitly():
     """coord-boss: 'a parameter only tests reach does not exist in production.'
 
-    Every in-repo call to the role resolver must name its governing budget at
-    the callsite, so the knob is visible where the decision is made rather than
-    hidden in a default.
+    Asserts the INVARIANT — no production call omits `deadline_seconds` — rather
+    than counting literal spellings. The string-counting version broke the
+    moment briefing started COMPOSING two budgets (min(own cap, shared window)),
+    which is a stronger callsite than the one the test was written against. A
+    test that fails when a callsite improves is measuring the wrong thing.
     """
     import inspect
     src = inspect.getsource(cli)
-    calls = src.count("_held_roles_for_rows(")
-    # definition + the spy-free production callsites
-    bound = src.count("deadline_seconds=_role_fold_budget()") \
-        + src.count("deadline_seconds=setup_dl.remaining()")
-    assert bound >= 4, (
-        f"only {bound} callsite(s) name a budget; a role fold with no stated "
-        f"bound is the defect this pins (calls seen: {calls})"
+    needle = "_held_roles_for_rows("
+    unbound = []
+    for i in range(len(src)):
+        if not src.startswith(needle, i):
+            continue
+        if src.rfind("def ", 0, i) == i - 4:      # the definition itself
+            continue
+        depth, j = 0, i + len(needle) - 1
+        while j < len(src):                        # walk to the matching paren
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        call = src[i:j]
+        if "deadline_seconds" not in call:
+            unbound.append(src[max(0, i - 120):i].splitlines()[-1].strip())
+    assert not unbound, (
+        "these _held_roles_for_rows callsites state no budget, so the role fold "
+        f"runs on a hidden default: {unbound}"
     )
 
 
