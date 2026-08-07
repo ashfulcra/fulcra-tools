@@ -7729,9 +7729,19 @@ def _git_head_probe() -> "Callable[[str], Optional[bool]]":
         """
         if _git_out("rev-parse", "--is-shallow-repository") != "false":
             return False
-        for key in ("remote.origin.promisor", "remote.origin.partialclonefilter"):
-            if _git_out("config", "--get-all", key):
-                return False
+        # PARTIAL CLONE, detected as a CAPABILITY rather than at one remote.
+        # An earlier round of this fix checked `remote.origin.*` only; git does
+        # not require the promisor remote to be named origin, so a clone whose
+        # promisor is `upstream` passed the guard and kept the destructive path
+        # open (codex-reviewer, round 1 — verified with
+        # remote.upstream.promisor=true). Checking one instance of a thing
+        # instead of the thing itself is the same mistake this whole P0 is
+        # about: asking "is it HERE" rather than "does it EXIST".
+        if _git_out("config", "--get", "extensions.partialclone"):
+            return False
+        if _git_out("config", "--get-regexp",
+                    r"^remote\..*\.(promisor|partialclonefilter)$"):
+            return False
         return True
 
     absence_is_trustworthy = _can_prove_absence()

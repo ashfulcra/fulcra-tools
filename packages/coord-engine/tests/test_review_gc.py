@@ -430,3 +430,88 @@ def test_a_full_clone_still_proves_absence():
     if shallow.stdout.strip() != "false":
         pytest.skip("this checkout is itself shallow")
     assert cli._git_head_probe()("0" * 40) is False
+
+
+def _partial_repo(tmp_path, remote_name):
+    """A NON-shallow repo configured as a partial clone via ``remote_name``."""
+    import subprocess
+
+    d = tmp_path / f"partial-{remote_name}"
+    d.mkdir()
+    def g(*a):
+        return subprocess.run(["git", *a], cwd=str(d), capture_output=True)
+    if g("init", "-q").returncode != 0:
+        pytest.skip("git init failed")
+    g("config", "user.email", "t@example.invalid")
+    g("config", "user.name", "t")
+    (d / "f").write_text("x")
+    g("add", "f")
+    if g("commit", "-qm", "c").returncode != 0:
+        pytest.skip("git commit failed")
+    g("config", f"remote.{remote_name}.promisor", "true")
+    g("config", f"remote.{remote_name}.partialclonefilter", "blob:none")
+    return d
+
+
+@pytest.mark.parametrize("remote_name", ["origin", "upstream", "fork"])
+def test_a_partial_clone_never_reports_absence_whatever_the_remote_is_called(
+        tmp_path, monkeypatch, remote_name):
+    """codex round 1: git does not require the promisor remote to be named
+    `origin`. Checking `remote.origin.*` specifically left the destructive path
+    open for any other name — the same mistake as the bug itself, one level up:
+    testing ONE INSTANCE of a thing instead of the thing."""
+    from coord_engine import cli, handoff
+
+    d = _partial_repo(tmp_path, remote_name)
+    monkeypatch.setattr(handoff, "repo_root", lambda: d)
+    assert cli._git_head_probe()("0" * 40) is None, (
+        f"a partial clone with promisor '{remote_name}' claimed authoritative "
+        f"absence"
+    )
+
+
+def test_extensions_partialclone_alone_is_enough_to_refuse(tmp_path, monkeypatch):
+    """The canonical marker git itself writes. Present without any
+    remote.*.promisor entry, it still means objects arrive lazily."""
+    import subprocess
+    from coord_engine import cli, handoff
+
+    d = tmp_path / "ext-partial"
+    d.mkdir()
+    def g(*a):
+        return subprocess.run(["git", *a], cwd=str(d), capture_output=True)
+    if g("init", "-q").returncode != 0:
+        pytest.skip("git init failed")
+    g("config", "user.email", "t@example.invalid")
+    g("config", "user.name", "t")
+    (d / "f").write_text("x")
+    g("add", "f")
+    if g("commit", "-qm", "c").returncode != 0:
+        pytest.skip("git commit failed")
+    g("config", "extensions.partialClone", "somewhere")
+
+    monkeypatch.setattr(handoff, "repo_root", lambda: d)
+    assert cli._git_head_probe()("0" * 40) is None
+
+
+def test_an_ordinary_local_repo_still_proves_absence(tmp_path, monkeypatch):
+    """Over-correction guard for the generalised check: a plain full repo with
+    no partial-clone config must still be able to say 'gone'."""
+    import subprocess
+    from coord_engine import cli, handoff
+
+    d = tmp_path / "plain"
+    d.mkdir()
+    def g(*a):
+        return subprocess.run(["git", *a], cwd=str(d), capture_output=True)
+    if g("init", "-q").returncode != 0:
+        pytest.skip("git init failed")
+    g("config", "user.email", "t@example.invalid")
+    g("config", "user.name", "t")
+    (d / "f").write_text("x")
+    g("add", "f")
+    if g("commit", "-qm", "c").returncode != 0:
+        pytest.skip("git commit failed")
+
+    monkeypatch.setattr(handoff, "repo_root", lambda: d)
+    assert cli._git_head_probe()("0" * 40) is False
