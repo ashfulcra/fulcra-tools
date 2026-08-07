@@ -30,7 +30,9 @@ apply wherever a caller can resolve a pointer.
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
 #: The five required sections, in the order the standard lists them. Findings
@@ -277,8 +279,16 @@ def store_resolver(transport: Any, team: str) -> Resolver:
 
 def _read_candidate(transport: Any, team: str, path: str
                     ) -> "tuple[Optional[str], str]":
-    """``(text, where)`` — store first, then the local repo. ``where`` doubles
-    as the failure reason when text is None."""
+    """``(text, where)`` — store first, then the REPOSITORY. ``where`` doubles
+    as the failure reason when text is None.
+
+    The working-tree leg is confined to the discovered repository root, and it
+    rejects absolute paths and traversal. An artifact must be store-carried or
+    repo-carried: those are the two things a successor will have. A path that
+    resolves only because THIS host happens to have that file — ``/etc/hosts``,
+    ``../../something-local`` — is a lying pointer that merely lies later, which
+    is the exact class this gate exists to reject (codex-reviewer, round 2).
+    """
     candidates = [path] if path.startswith("team/") else [
         f"team/{team}/{path}", path]
     for candidate in candidates:
@@ -288,22 +298,64 @@ def _read_candidate(transport: Any, team: str, path: str
             raw = None
         if raw is not None:
             return raw, f"store:{candidate}"
+    local = _repo_relative(path)
+    if local is None:
+        return None, ("not found in the store, and not a repository-relative "
+                      "path (absolute paths and traversal outside the repo "
+                      "are refused — a successor will not have them)")
     try:
-        import os
-        if os.path.isfile(path):
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                return fh.read(), f"repo:{path}"
+        if local.is_file():
+            return local.read_text(encoding="utf-8", errors="replace"), \
+                f"repo:{path}"
     except Exception:
         pass
-    return None, "not found in the store or the working tree"
+    return None, "not found in the store or the repository"
+
+
+def repo_root(start: "Optional[Path]" = None) -> "Optional[Path]":
+    """The enclosing git repository root, or None if there is not one.
+
+    Discovered rather than assumed: resolving repo paths against the CURRENT
+    WORKING DIRECTORY made the gate's verdict depend on where it was invoked
+    from — the same document passed from the repo root and failed from a
+    subdirectory.
+    """
+    here = (start or Path.cwd()).resolve()
+    for candidate in [here, *here.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _repo_relative(path: str) -> "Optional[Path]":
+    """``path`` resolved inside the repo, or None if it escapes or there is no
+    repo. Absolute paths are refused outright rather than clamped."""
+    if os.path.isabs(path):
+        return None
+    root = repo_root()
+    if root is None:
+        return None
+    try:
+        resolved = (root / path).resolve()
+        resolved.relative_to(root)
+    except (ValueError, OSError):
+        return None
+    return resolved
 
 
 def _anchor_present(text: str, anchor: str) -> bool:
     """Is ``anchor`` a heading in ``text``?
 
-    Compares on words, not punctuation: a reading list says "Cold start
-    section" where the document says "## Cold start", and failing a handoff over
-    the trailing word "section" would be a gate nobody trusts.
+    Compares NORMALIZED word sequences for EQUALITY. Normalization drops
+    punctuation, case, and the trailing word "section" — a reading list says
+    "Cold start section" where the document says "## Cold start", and failing a
+    handoff over that difference is a gate nobody trusts.
+
+    Equality, not containment. Round 1 of this gate used subset matching in
+    either direction, which meant an artifact naming "Cold start" was satisfied
+    by a document whose only heading was "# Start" (codex-reviewer reproduced
+    it). A pointer that resolves to the WRONG section is the lying-pointer class
+    this whole module exists to reject, so a near-miss must fail.
     """
     wanted = _words(anchor)
     if not wanted:
@@ -312,11 +364,17 @@ def _anchor_present(text: str, anchor: str) -> bool:
         stripped = line.strip()
         if not stripped.startswith("#"):
             continue
-        heading = _words(stripped.lstrip("#"))
-        if wanted and (wanted <= heading or heading <= wanted):
+        if _words(stripped.lstrip("#")) == wanted:
             return True
     return False
 
 
-def _words(value: str) -> set:
-    return {w for w in re.split(r"[^a-z0-9]+", value.lower()) if w} - {"section"}
+def _words(value: str) -> tuple:
+    """Normalized word sequence: lowercase, punctuation-free, minus "section".
+
+    A SEQUENCE rather than a set, so "Cold start" and "Start cold" are not the
+    same anchor.
+    """
+    return tuple(w for w in re.split(r"[^a-z0-9]+", value.lower())
+                 if w and w != "section")
+

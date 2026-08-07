@@ -278,9 +278,11 @@ def test_store_resolver_checks_the_anchor_in_the_resolved_document():
     assert not ok and "no section matching" in reason
 
 
-def test_store_resolver_falls_back_to_the_working_tree(tmp_path, monkeypatch):
-    doc = tmp_path / "handoff.md"
-    doc.write_text("# Doc\n\n## Cold start\n")
+def test_store_resolver_falls_back_to_the_repository(tmp_path, monkeypatch):
+    """The fallback is the REPOSITORY, not the working directory — see the
+    round-2 finding. A tree with no repo root has no second leg at all."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "handoff.md").write_text("# Doc\n\n## Cold start\n")
     monkeypatch.chdir(tmp_path)
     ok, where = handoff.store_resolver(FakeTransport({}), "fulcra")(
         handoff.parse_artifact("handoff.md (Cold start)"))
@@ -295,3 +297,68 @@ def test_store_resolver_treats_a_raising_transport_as_unresolved():
     ok, reason = handoff.store_resolver(Boom(), "fulcra")(
         handoff.parse_artifact("_coord/x.md"))
     assert not ok and "not found" in reason
+
+
+# --- round 2: codex-reviewer's two blockers --------------------------------
+
+@pytest.mark.parametrize("doc_heading,anchor", [
+    ("# Start", "Cold start"),          # reviewer's exact reproduction
+    ("## Cold", "Cold start"),
+    ("## Cold start guide", "Cold start"),
+    ("## Start cold", "Cold start"),     # same words, wrong order
+])
+def test_a_partial_or_reordered_heading_is_NOT_the_anchor(doc_heading, anchor):
+    """Round 1 matched on subset-in-either-direction, so an artifact naming
+    'Cold start' was satisfied by a document whose only heading was '# Start'.
+    A pointer resolving to the WRONG section is the lying-pointer class this
+    module exists to reject, so a near-miss must fail."""
+    assert not handoff._anchor_present(f"# Doc\n\n{doc_heading}\n", anchor)
+
+
+@pytest.mark.parametrize("anchor", ["Cold start", "Cold start section",
+                                    "cold-start", "COLD  START!"])
+def test_normalization_still_accepts_the_real_anchor(anchor):
+    assert handoff._anchor_present("# Doc\n\n## Cold start\n", anchor)
+
+
+@pytest.mark.parametrize("escaping", [
+    "/etc/hosts",                 # reviewer's exact reproduction
+    "/tmp/anything.md",
+    "../../host-local-file",
+    "../outside.md",
+])
+def test_paths_outside_the_repository_are_refused(escaping):
+    """An artifact must be store-carried or repo-carried — those are the two
+    things a successor will have. A path that resolves only because THIS host
+    happens to have that file is a lying pointer that merely lies later."""
+    assert handoff._repo_relative(escaping) is None
+
+
+def test_a_repo_relative_path_still_resolves():
+    assert handoff._repo_relative("README.md") is not None
+
+
+def test_repo_root_is_discovered_not_assumed_from_cwd(tmp_path, monkeypatch):
+    """Resolving against cwd made the verdict depend on where the gate was
+    invoked from: the same document passed from the repo root and failed from a
+    subdirectory."""
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    (root / "docs").mkdir()
+    (root / "docs" / "a.md").write_text("# A\n")
+    monkeypatch.chdir(root / "docs")
+    assert handoff.repo_root() == root.resolve()
+    assert handoff._repo_relative("docs/a.md") == (root / "docs" / "a.md").resolve()
+
+
+def test_no_repository_means_the_working_tree_leg_is_refused(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert handoff.repo_root() is None
+    assert handoff._repo_relative("anything.md") is None
+
+
+def test_store_resolver_refuses_an_absolute_path_with_a_reason():
+    ok, reason = handoff.store_resolver(FakeTransport({}), "fulcra")(
+        handoff.parse_artifact("/etc/hosts"))
+    assert not ok
+    assert "repository-relative" in reason
