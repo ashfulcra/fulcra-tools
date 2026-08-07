@@ -184,6 +184,9 @@ def idempotency_key(shard_id: str, agent: str) -> str:
 #: raised in config, while a cap that is too loose is the incident.
 RATE_CAP_FAILSAFE: dict[str, int] = {"per_agent_per_hour": 1, "global_per_hour": 1}
 
+#: Top-level config.json keys that are policy blocks rather than agent entries.
+RESERVED_CONFIG_KEYS: frozenset[str] = frozenset({"executors", "caps"})
+
 
 def validate_caps(raw: Optional[str]) -> tuple[dict[str, int], Optional[str]]:
     """→ (caps, error). NEVER returns unlimited.
@@ -244,6 +247,38 @@ def within_caps(
     return True, ""
 
 
+def count_wakes_last_hour(
+    shards: list[dict[str, Any]], *, now: datetime,
+) -> tuple[dict[str, int], int]:
+    """Per-agent and fleet wake counts over the hour ending at ``now``, folded
+    from the durable delivery-record shards.
+
+    :func:`fold_delivered` keeps an all-time ``count``; a rate cap needs a
+    WINDOWED one, so this is a separate fold rather than a field on that view.
+
+    Fail-closed on ambiguity. A shard whose ``delivered_at`` is missing or
+    unparseable cannot be proven to lie OUTSIDE the window, so it counts.
+    Over-counting defers a wake to the next window; under-counting lets through
+    the flood the cap exists to stop. The asymmetry is the whole point.
+    """
+    window_start = now - timedelta(hours=1)
+    per_agent: dict[str, int] = {}
+    total = 0
+    for shard in shards:
+        if not isinstance(shard, dict):
+            continue
+        agent = shard.get("agent")
+        if not isinstance(agent, str) or not agent:
+            continue
+        at_dt = parse_iso(shard.get("delivered_at"))
+        # unparseable/missing timestamp -> cannot exclude it -> count it
+        if at_dt is not None and at_dt <= window_start:
+            continue
+        per_agent[agent] = per_agent.get(agent, 0) + 1
+        total += 1
+    return per_agent, total
+
+
 def validate_config(
     raw: Optional[str],
 ) -> tuple[dict[str, dict[str, Any]], list[str], dict[str, str]]:
@@ -267,7 +302,10 @@ def validate_config(
     agents: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     for agent, cfg in doc.items():
-        if agent == "executors":
+        # Reserved top-level blocks, not agents. `caps` joins `executors` here:
+        # without it the rate-cap block parses as a phantom agent named "caps"
+        # and lands in the unroutable lane on every pass.
+        if agent in RESERVED_CONFIG_KEYS:
             continue
         if not isinstance(cfg, dict):
             errors[agent] = "agent config is not an object"
@@ -374,6 +412,7 @@ def decide(
     caps: Optional[dict[str, int]] = None,
     agent_wakes_last_hour: int = 0,
     global_wakes_last_hour: int = 0,
+    counts_known: bool = True,
 ) -> tuple[str, Optional[datetime], str]:
     """One item's wake decision → (decision, not_before, reason).
 
@@ -408,6 +447,13 @@ def decide(
     # being lost, which is what makes capping a P0 acceptable. Callers that do
     # not measure counts pass none and get today's behaviour unchanged.
     if caps is not None:
+        if not counts_known:
+            # The delivery evidence the counts are folded from was unreadable.
+            # UNKNOWN is not zero: passing 0 here would silently lift the cap at
+            # exactly the moment we cannot see what has already been sent.
+            return "defer", now + timedelta(hours=1), reason(
+                "wake counts UNKNOWN (delivery evidence unreadable) — "
+                "rate cap fails closed")
         ok, why = within_caps(
             caps=caps,
             agent_wakes_last_hour=agent_wakes_last_hour,

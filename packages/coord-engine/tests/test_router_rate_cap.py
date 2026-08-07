@@ -12,7 +12,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from coord_engine import router
+from coord_engine import cli, router
+from coord_engine.transport import TransportError
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
 PINNED_NOW = NOW
@@ -126,3 +127,183 @@ def test_debounce_still_precedes_the_cap():
         agent_wakes_last_hour=99, global_wakes_last_hour=99)
     assert decision == "debounce"
     assert "cap" not in why
+
+
+# --- router-pass integration (codex 554 r2) ---------------------------------
+#
+# The r2 CHANGES verdict: validate_caps/within_caps had NO production caller.
+# `_router_pass` called decide() without caps, so caps defaulted to None and
+# every live decision stayed uncapped — the policy shipped as dead code. These
+# drive the REAL pass (cmd_router_run), so they fail against a router that
+# merely defines the helpers.
+
+import argparse
+
+from coord_engine import okf, tasks
+from coord_engine_test_helpers import FakeTransport
+
+TEAM = "t"
+RP = f"team/{TEAM}/_coord/router/"
+TASKP = f"team/{TEAM}/task/"
+PASS_NOW = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+NOW_ISO_PASS = "2026-07-23T12:00:00Z"
+AGENT = "worker-a"
+CFG = {"priority_floor": "P2", "debounce_min": 15,
+       "adapter": "managed-agents-message",
+       "adapter_args": {"session_ref": "s-1"}}
+
+
+@pytest.fixture
+def pass_clock(monkeypatch):
+    monkeypatch.setattr(cli, "_now", lambda: PASS_NOW)
+
+
+def _pass_args(**kw):
+    ns = argparse.Namespace(team=TEAM, once=True, json=False)
+    for k, v in kw.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _p0_task(tid):
+    return okf.render_frontmatter(
+        {"type": "Task", "title": tid, "id": tid, "status": "proposed",
+         "priority": "P0", "assignee": AGENT,
+         "timestamp": "2026-07-23T11:00:00Z"}) + f"\n# {tid}\n"
+
+
+def _delivery(agent, delivered_at, shard):
+    return json.dumps({"agent": agent, "delivered_at": delivered_at,
+                       "source_shard": shard})
+
+
+def _setup(t, *, config_doc, deliveries=()):
+    """A pass poised to interrupt: P0 item, enabled agent, fresh presence.
+    Debounce is dodged by dating deliveries outside the 15-min window while
+    keeping them inside the cap's 1-hour window."""
+    t.put(TASKP + "urgent-1.md", _p0_task("urgent-1"),
+          mtime="2026-07-23 11:30AM UTC")
+    t.put(RP + "cursor.json",
+          json.dumps({"watermark": "2026-07-23T11:00:00Z", "processed": {}}))
+    t.put(RP + "config.json", config_doc)
+    t.put(f"team/{TEAM}/presence/{tasks.agent_key(AGENT)}.md",
+          okf.render_frontmatter(
+              {"type": "Presence", "title": f"presence — {AGENT}",
+               "agent": AGENT, "timestamp": "2026-07-23T11:55:00Z"})
+          + "\n# beat\n")
+    for i, (agent, at) in enumerate(deliveries):
+        t.put(RP + f"delivered/d{i}.json", _delivery(agent, at, f"s{i}"))
+
+
+def _queued(t):
+    return {p: json.loads(c) for p, c in t.store.items()
+            if p.startswith(RP + "queue/")}
+
+
+def _enabled(caps=None):
+    doc = {AGENT: dict(CFG)}
+    if caps is not None:
+        doc["caps"] = caps          # top-level block, per validate_caps
+    return json.dumps(doc)
+
+
+DEFER_TO = "2026-07-23T13:00:00Z"   # now + 1h, the cap's defer window
+
+
+def _sole_entry(t):
+    (entry,) = _queued(t).values()
+    return entry
+
+
+def test_router_pass_defers_an_over_cap_p0(pass_clock):
+    """The load-bearing one. A P0 normally interrupts; over cap it DEFERS."""
+    t = FakeTransport()
+    _setup(t, config_doc=_enabled({"per_agent_per_hour": 2,
+                                   "global_per_hour": 50}),
+           # two deliveries inside the hour, outside the 15-min debounce
+           deliveries=[(AGENT, "2026-07-23T11:10:00Z"),
+                       (AGENT, "2026-07-23T11:20:00Z")])
+    assert cli.cmd_router_run(_pass_args(), t) == 0
+    # A cap DEFERS rather than drops: the entry survives, dated to the next
+    # window. Asserting an empty queue would have tested item loss instead.
+    entry = _sole_entry(t)
+    assert entry["not_before"] == DEFER_TO
+    assert entry["not_before"] > NOW_ISO_PASS
+
+
+def test_router_pass_still_interrupts_a_p0_under_cap(pass_clock):
+    """Control: identical pass, cap not reached — the P0 still gets through, so
+    the test above pins the CAP and not some unrelated breakage."""
+    t = FakeTransport()
+    _setup(t, config_doc=_enabled({"per_agent_per_hour": 5,
+                                   "global_per_hour": 50}),
+           deliveries=[(AGENT, "2026-07-23T11:10:00Z")])
+    assert cli.cmd_router_run(_pass_args(), t) == 0
+    entry = _sole_entry(t)
+    assert entry["agent"] == AGENT and entry["priority"] == "P0"
+    assert entry["not_before"] <= NOW_ISO_PASS, "under cap, a P0 fires now"
+
+
+@pytest.mark.parametrize("config_doc, label", [
+    (json.dumps({AGENT: dict(CFG)}), "no caps key at all"),
+    (json.dumps({AGENT: dict(CFG), "caps": "nonsense"}), "caps not an object"),
+    (json.dumps({AGENT: dict(CFG), "caps": {}}), "caps object is empty"),
+    (json.dumps({AGENT: dict(CFG),
+                 "caps": {"per_agent_per_hour": 0,
+                          "global_per_hour": -3}}), "caps below 1"),
+    (json.dumps({AGENT: dict(CFG),
+                 "caps": {"per_agent_per_hour": True,
+                          "global_per_hour": True}}), "caps are booleans"),
+    (json.dumps({AGENT: dict(CFG),
+                 "caps": {"per_agent_per_hour": 99}}), "one key present, one missing"),
+])
+def test_missing_or_malformed_caps_apply_the_failsafe_not_unlimited(
+        pass_clock, config_doc, label):
+    """codex r2: a cap config that cannot be trusted must NOT read as
+    unlimited. The failsafe is 1/hour, so ONE prior delivery inside the window
+    is already at the cap and the P0 defers."""
+    t = FakeTransport()
+    _setup(t, config_doc=config_doc,
+           deliveries=[(AGENT, "2026-07-23T11:10:00Z")])
+    assert cli.cmd_router_run(_pass_args(), t) == 0
+    entry = _sole_entry(t)
+    assert entry["not_before"] == DEFER_TO, (
+        f"{label}: must fail closed to the failsafe, not read as unlimited")
+
+
+def test_unreadable_delivery_evidence_fails_the_cap_closed(pass_clock):
+    """UNKNOWN is not zero. If the delivered/ listing degrades we cannot know
+    what was already sent, and a cap that silently lifts at that moment is the
+    defect this whole branch exists to refuse."""
+    t = FakeTransport()
+    _setup(t, config_doc=_enabled({"per_agent_per_hour": 50,
+                                   "global_per_hour": 50}))
+
+    real_list = t.list_dir
+
+    def flaky(path):
+        if path == RP + "delivered/":
+            raise TransportError("listing degraded")
+        return real_list(path)
+
+    t.list_dir = flaky
+    t.put(RP + "delivered.json", json.dumps({}))  # valid view: pass proceeds
+    assert cli.cmd_router_run(_pass_args(), t) == 0
+    entry = _sole_entry(t)
+    assert entry["not_before"] == DEFER_TO, (
+        "unmeasurable counts must defer, not run uncapped")
+
+
+def test_counting_window_is_one_hour_and_ambiguous_stamps_count():
+    """The fold itself: outside the window is excluded, an unparseable stamp
+    cannot be proven outside it and so counts."""
+    per_agent, total = router.count_wakes_last_hour([
+        {"agent": "a", "delivered_at": "2026-07-23T11:30:00Z"},   # in
+        {"agent": "a", "delivered_at": "2026-07-23T10:30:00Z"},   # out
+        {"agent": "a", "delivered_at": "not-a-timestamp"},        # ambiguous
+        {"agent": "b", "delivered_at": "2026-07-23T11:59:00Z"},   # in
+        {"agent": "b"},                                           # ambiguous
+        {"no_agent": True},                                       # skipped
+    ], now=PASS_NOW)
+    assert per_agent == {"a": 2, "b": 2}
+    assert total == 4

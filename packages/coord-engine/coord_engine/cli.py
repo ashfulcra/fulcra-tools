@@ -6260,8 +6260,14 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
               "decision is logged + persisted per directed item, nothing "
               "enqueued or executed", file=sys.stderr)
 
-    agents_cfg, _executors, cfg_errors = router.validate_config(
-        transport.read(config_prefix + "config.json"))
+    raw_config = transport.read(config_prefix + "config.json")
+    agents_cfg, _executors, cfg_errors = router.validate_config(raw_config)
+    # Rate caps come from the SAME authoritative document as enablement, read
+    # once so the two can never disagree about which config they saw.
+    caps, caps_err = router.validate_caps(raw_config)
+    if caps_err:
+        print(f"router: rate cap {caps_err} — holding at the failsafe "
+              f"{caps}", file=sys.stderr)
     measurement_failed = bool(shadow and cfg_errors)
     if "_config" in cfg_errors:
         print(f"router: {cfg_errors['_config']} — every agent reads "
@@ -6324,6 +6330,18 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                   "the pass closed (nothing enqueued, cursor not advanced; "
                   "retries next pass)", file=sys.stderr)
             return 1
+
+    # Windowed wake counts for the rate cap, folded from the SAME durable
+    # delivery shards as delivered_view. When the listing degraded we hold only
+    # the persisted per-agent view, which carries no per-delivery timestamps —
+    # so the last hour is UNKNOWN, not zero, and the cap fails closed per item.
+    wake_counts, global_wakes = router.count_wakes_last_hour(
+        delivered_shards, now=now)
+    counts_known = delivered_listing_ok
+    if not counts_known:
+        print("router: delivered/ listing degraded — last-hour wake counts are "
+              "UNKNOWN; the rate cap fails CLOSED (items defer to the next "
+              "window rather than ride an unmeasurable cap)", file=sys.stderr)
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}
@@ -6452,6 +6470,10 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             last_wake_at=queue_last.get(assignee),
             last_delivered_at=router.parse_iso(d_row.get("last_delivered_at")),
             now=now,
+            caps=caps,
+            agent_wakes_last_hour=wake_counts.get(assignee, 0),
+            global_wakes_last_hour=global_wakes,
+            counts_known=counts_known,
         )
         counts[decision] += 1
         suffix = ""
