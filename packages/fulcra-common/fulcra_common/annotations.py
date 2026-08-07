@@ -891,16 +891,47 @@ def _digest_definition_cache_path() -> Path:
     return annotations_dir() / "digest-definition.json"
 
 
+def pin_definition_id(def_id: str, *, digest: bool = False) -> str:
+    """Operator-explicit pin: write a never-expiring cache entry for the
+    (Agent Tasks | Digest) definition id. Returns the cache path written.
+
+    DO NOT REMOVE AS DEAD CODE. This function has zero in-repo callers by
+    design — its caller is a human or an agent at a shell, and that is the
+    whole point of an operator escape hatch. It was swept up by #523
+    ("drop dead helpers") on exactly that reasoning, which is true of the
+    repository and false of the system.
+
+    Restored 2026-08-06 after it turned out to be the ONLY working mitigation
+    for a live fleet-wide delivery defect: ``TRACK_NAME`` resolves the
+    superseded ``Agent Tasks`` definition by name, so every task projection was
+    landing on a channel retired at the 2026-08-03 cutover and no agent could
+    see a dispatch. Pinning the live definition id relocates them, verified
+    end-to-end that night. Because the reader half of the pin was (correctly)
+    kept, main could still *honor* a pin while offering no way to *write* one —
+    so a release cut from main would have shipped strictly backwards from the
+    deployed ``fulcra-common-v0.2.0``, silently disarming the mitigation on
+    every host that adopted it.
+
+    The durable fix is to resolve the definition from the authority document
+    (``_coord/bus-v3/records.json``) at write time rather than by name. Keep
+    this hatch even after that lands: it is what makes the next by-name
+    surprise survivable in one call instead of one release.
+    """
+    annotations_dir().mkdir(parents=True, exist_ok=True)
+    path = _digest_definition_cache_path() if digest else _definition_cache_path()
+    path.write_text(json.dumps(
+        {"id": def_id, "written_at": _cache_now_iso(), "pinned": True}))
+    return str(path)
+
+
 def _cached_digest_definition_id() -> Optional[str]:
     path = _digest_definition_cache_path()
     try:
         if path.exists():
             data = json.loads(path.read_text())
             did = data.get("id")
-            # `pinned` = never expires. It is set by hand in the cache file (an
-            # operator pin); the `pin_definition_id` helper that also wrote it was
-            # removed as dead — zero callers, zero tests — but ALREADY-PINNED
-            # caches on disk must keep working, so this branch stays.
+            # `pinned` = never expires, written by `pin_definition_id` above
+            # (restored 2026-08-06) or by hand in the cache file.
             if did and (data.get("pinned") or _is_fresh(data.get("written_at"))):
                 return did
     except (OSError, json.JSONDecodeError):
