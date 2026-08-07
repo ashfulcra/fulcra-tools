@@ -151,6 +151,61 @@ the wall exists — not where it happened first.
     is not optional for them — use the harness's, and always write a trailing
     RC line so a truncated run is detectable rather than ambiguous.
 
+14. **A fresh config file is not evidence its reader is alive; a coincidence in
+    time is not a cause; and a service that was switched off on purpose looks
+    exactly like one that crashed** (harness 3, any long-running service on a
+    remote host). A team's wake router stopped and nobody noticed for **70
+    hours**. Its cursor file had written every ~4 minutes across **10,626
+    versions** and then stopped dead; the hourly heartbeat shards stopped in the
+    same window. Three separate things kept it invisible, and all three
+    generalise past the incident.
+
+    **(a) Liveness must be measured on artifacts the service WRITES.** The
+    router's `config.json` was modified the morning the outage was found — by an
+    agent, not by the router. A config file is written by whoever *edits* it,
+    never by whoever *reads* it, so its freshness says nothing about the reader
+    being alive. A dashboard keying on it would have shown green for three days.
+
+    **(b) Configuration correctness and mechanism liveness are two questions.** A
+    watchdog asking *"do these routes point at live sessions?"* returned
+    `0 stale` against a router that had not existed for three days — and
+    answering the second question confidently is exactly what hides the first
+    one's absence. The same watchdog also checked only **2 of 5** bindings,
+    silently skipping every agent addressed by executor rather than by session
+    id: **a watchdog that narrows its own scope without saying so reports green
+    about a population it never looked at.** Make the unchecked set part of the
+    output.
+
+    **(c) Before asserting that A killed B, confirm A and B are on the same
+    host.** The first diagnosis of this incident blamed a process tree on a
+    machine that turned out to be unrelated — two hosts went quiet six minutes
+    apart and the coincidence was written up as a mechanism. That mis-routed a
+    P0 to an agent which was both dead and, being elsewhere, never able to act.
+    Presence identities in this scheme encode `harness:host:agent`, so the host
+    was inside the string the entire time it was being reasoned about. The trap
+    underneath is **identity ambiguity**: one machine can carry a tool identity,
+    a bus identity and a presence identity, and only one of them heartbeats.
+    Resolve which name you are reasoning about *before* the correlation, not
+    after the dispatch.
+
+    **The cause, once someone with shell finally looked, was none of the above:
+    the unit had been deliberately stopped and masked** under an earlier
+    containment ruling, because it was an unisolated decision plane sharing
+    state it should not have. It was already a supervised system unit — so
+    *"put it under supervision"*, the obvious structural fix, was already done
+    and was never the remedy. **An intentional shutdown and a crash present
+    identically to every external observer.** If a service is down, look for the
+    decision to take it down before you design a fix for the failure to stay up:
+    the journal (`systemctl` / auth logs) answers in one query what three
+    diagnoses guessed at.
+
+    Corollary that cost the most time here: **a repair path that runs over the
+    mechanism being repaired is not a repair path** — it is an operator
+    escalation wearing one. Check that before assigning the fix.
+
+    Team-specific evidence for this wall — hosts, identities, timestamps, the
+    containment ruling — lives on the team store, not here.
+
 ## What "monitoring" should grow into
 
 The pattern in every wall above: **the failure was silent in the harness where
@@ -206,3 +261,8 @@ nobody was looking.** The monitoring vision, staged:
 - 2026-08-07: wall 13 (gated harness refuses the install script), from
   codex-coder hitting it on the pin move to e1880da9 and adopting via the
   literal-commands path instead.
+- 2026-08-07: wall 14 (a fresh config file is not evidence its reader is alive;
+  a coincidence in time is not a cause; a deliberate shutdown looks exactly like
+  a crash), from a wake router that was 70h dead unnoticed while every
+  association check read green — and from two wrong causes published inside that
+  right finding before someone with shell access read the journal.
