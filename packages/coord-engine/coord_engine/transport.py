@@ -17,6 +17,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +36,9 @@ DEFAULT_API_BASE = "https://api.fulcradynamics.com"
 #: or the constructor arg (which wins). Watchers run this tight (e.g. 8s) so the
 #: engine's fold budgets buy real responsiveness instead of soft promises.
 DEFAULT_TRANSPORT_TIMEOUT = 30.0
+#: In-process access-token memo TTL (seconds). Far inside the token's own
+#: lifetime; exists to stop paying ~840ms of CLI import cost per read.
+_TOKEN_MEMO_TTL = 300.0
 
 #: After the op timeout fires we SIGKILL the child's whole group, then give the
 #: drain this long to complete; if it still won't, we abandon the pipes rather
@@ -195,6 +199,22 @@ class FulcraFileTransport:
         self.command = command or _split_command()
         # constructor arg wins (tests pin it); else the env-hardened default.
         self.timeout = timeout if timeout is not None else _transport_timeout()
+        # In-process token memo. Every CLI shell-out pays ~840ms of Python
+        # imports before it does anything (measured 2026-08-07: `python3 -c
+        # pass` is 17ms, `import fulcra_api.cli` is ~840ms — pandas 360ms via
+        # fulcra_api.core, dateparser 284ms via fulcra_api.cli.auth, neither
+        # needed by a file op). `auth print-access-token` paid that on EVERY
+        # call. Memoized per-process with a conservative TTL well inside the
+        # token's own lifetime.
+        self._token_memo: Optional[tuple[float, str]] = None
+
+    def _http_enabled(self) -> bool:
+        """HTTP read fast-path on/off. Default ON; ``COORD_TRANSPORT_HTTP=0``
+        forces every read back through the CLI. The flag exists because this
+        is the fleet's hottest code path and a bad HTTP day must be revertible
+        by an operator without a release."""
+        return (os.environ.get("COORD_TRANSPORT_HTTP", "1").strip().lower()
+                not in ("0", "false", "no", "off"))
 
     def updates(self, since: str, *, team: Optional[str] = None) -> Optional[list]:
         """Parsed file-change feed for the explicit ``since`` window.
@@ -344,13 +364,68 @@ class FulcraFileTransport:
         env = os.environ.get("FULCRA_ACCESS_TOKEN")
         if env and env.strip():
             return env.strip()
+        memo = self._token_memo
+        if memo is not None and (time.monotonic() - memo[0]) < _TOKEN_MEMO_TTL:
+            return memo[1]
         try:
             rc, out, _err = run_bounded(
                 [*self.command, "auth", "print-access-token"], self.timeout
             )
         except Exception:
             return None
-        return (out or "").strip() or None if rc == 0 else None
+        token = (out or "").strip() or None if rc == 0 else None
+        # Memoize successes only: a failure must be retried, never cached, or a
+        # transient auth blip would blind the process for the whole TTL.
+        if token:
+            self._token_memo = (time.monotonic(), token)
+        return token
+
+    def _http_read(self, path: str) -> tuple[Optional[str], str]:
+        """HTTP read: ``(content, "ok"|"absent"|"error")``, same contract as
+        :meth:`read_classified`, without spawning a process.
+
+        Two GETs — resolve the path to its current version id, then fetch that
+        version's bytes. "absent" is claimed ONLY on an affirmative empty
+        resolve (HTTP 200 with no files), never on an exception, so a degraded
+        network can never masquerade as a missing file. Everything else is
+        "error", and the caller falls back to the CLI."""
+        token = self._access_token()
+        if not token:
+            return None, "error"
+        base = os.environ.get("FULCRA_API_BASE", DEFAULT_API_BASE).rstrip("/")
+        clean = path.lstrip("/")
+        parent, _, name = clean.rpartition("/")
+        if not name:
+            return None, "error"
+        headers = {"Authorization": f"Bearer {token}",
+                   "Accept": "application/json"}
+        try:
+            query = urllib.parse.urlencode(
+                {"path": "/" + parent, "name": name, "state": "uploaded"})
+            req = urllib.request.Request(
+                f"{base}/input/v1/file_upload?{query}", headers=headers)
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                files = json.loads(resp.read().decode("utf-8")).get("files") or []
+        except urllib.error.HTTPError as exc:
+            # 404 on the RESOLVE endpoint is an affirmative not-found.
+            return (None, "absent") if exc.code == 404 else (None, "error")
+        except Exception:
+            return None, "error"
+        if not files:
+            return None, "absent"          # affirmative: 200 with zero matches
+        version_id = files[0].get("id") or files[0].get("version_id")
+        if not version_id:
+            return None, "error"
+        try:
+            req = urllib.request.Request(
+                f"{base}/input/v1/file_upload/{version_id}/download",
+                headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return resp.read().decode("utf-8"), "ok"
+        except urllib.error.HTTPError as exc:
+            return (None, "absent") if exc.code == 404 else (None, "error")
+        except Exception:
+            return None, "error"
 
     def recent_changes(self, start_iso: str, end_iso: str) -> Optional[list]:
         """Tree-wide what-changed query over ``[start_iso, end_iso]`` — the ack
@@ -511,6 +586,13 @@ class FulcraFileTransport:
         # that need only content keep using read(); callers whose behavior
         # forks on absent-vs-unreadable (e.g. the queue verb's records config)
         # use this.
+        # HTTP fast path first. On "ok" or an AFFIRMATIVE "absent" we are done;
+        # on "error" fall through to the CLI, so an HTTP-layer problem degrades
+        # to the old behaviour instead of inventing a missing file.
+        if self._http_enabled():
+            content, state = self._http_read(path)
+            if state in ("ok", "absent"):
+                return content, state
         try:
             cp = self._run(["download", path, "-"])
         except TransportError:
