@@ -3868,7 +3868,16 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # can overrun the wake cadence it is supposed to ride inside. A shared
     # deadline also means an expensive earlier probe shrinks what the next gets,
     # rather than each one starting the clock fresh.
-    fold_dl = Deadline.open(_obligation_budget())
+    # THE FIX (codex/coord-boss P0): setup is accounted SEPARATELY from the
+    # probes. Previously one shared deadline opened here and the two setup calls
+    # below spent all of it (measured on the live store: 6.8s + 19.3s = 26.1s
+    # against a 20s budget), so every probe hit its expired guard and returned
+    # UNREADABLE without ever touching the store — 0 of 7 consulted, hiding 110
+    # owed items behind a blanket UNKNOWN. Setup now gets its own bounded
+    # allowance and the probe budget opens AFTER it, so a slow store degrades
+    # GRADUALLY (an expensive early probe still shrinks what later ones get)
+    # instead of collapsing to zero coverage.
+    setup_dl = Deadline.open(_obligation_budget())
     doc_sink: list[Any] = []
     feed_sink: list[Any] = []
     rows, rows_ok, rows_reason = _load_rows_status(
@@ -3878,13 +3887,24 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     feed_evidence = feed_sink[0] if feed_sink else None
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, team, agent, rows, now=now)
+    if setup_dl.expired():
+        # Never silent: setup outrunning its own allowance is the leading
+        # indicator of the collapse this fix removed, and on a growing store it
+        # will come back. Say it while the fold still succeeds.
+        print("obligations: setup (task index + role resolution) outran its "
+              "allowance; probes still get a full budget, but this store is "
+              "near the edge — raise COORD_OBLIGATION_BUDGET", file=sys.stderr)
+    # Probes get their full allowance regardless of what setup cost.
+    fold_dl = Deadline.open(_obligation_budget())
 
     def _rows_probe(kinds: "tuple[str, ...]"):
         def probe():
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
             if fold_dl.expired():
-                return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+                return P(state=S.UNREADABLE,
+                         detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
             mine = _needs_me_rows(transport, team, agent, rows, now=now,
                                   held_roles=held_roles, include_history=False,
                                   aggregate_doc=agg_doc,
@@ -3899,7 +3919,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         if not rows_ok:
             return P(state=S.UNREADABLE, detail=rows_reason)
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
         if unresolved_roles:
             # A role whose lease could not be read might route work here. Doubt.
             return P(state=S.UNREADABLE,
@@ -3935,7 +3956,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             # already-dead deadline can legitimately return [] without ever
             # attempting a read — and [] here would be a false CLEAR caused by
             # our own cost control, which is the worst possible source for one.
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
         sink: list[str] = []
         found = _pending_reviews_for(transport, team, agent, rows=rows,
                                      deadline=fold_dl.instant,
@@ -3954,7 +3976,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         """Unacknowledged forge feedback — a durable obligation surfaced by
         needs-me and briefing, and absent from the first cut of this registry."""
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
         found = _forge_feedback_for(transport, team, agent,
                                     deadline=fold_dl.instant,
                                     aggregate_doc=agg_doc)
@@ -3996,6 +4019,7 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
             "consulted": result.consulted,
             "degraded": result.degraded,
             "malformed": result.malformed,
+            "details": result.details,
             "reason": result.reason(),
         }))
     else:
@@ -4003,9 +4027,15 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
         for row in result.owed:
             print(f"  - {row.get('slug') or row.get('id') or row}")
         for name in result.degraded:
-            print(f"  ! {name}: UNREADABLE — cannot claim clear", file=sys.stderr)
+            why = result.details.get(name)
+            suffix = f" ({why})" if why else ""
+            print(f"  ! {name}: UNREADABLE — cannot claim clear{suffix}",
+                  file=sys.stderr)
         for name in result.malformed:
-            print(f"  ! {name}: INVALID — human fix needed", file=sys.stderr)
+            why = result.details.get(name)
+            suffix = f" ({why})" if why else ""
+            print(f"  ! {name}: INVALID — human fix needed{suffix}",
+                  file=sys.stderr)
     if result.state is obligations_mod.ObligationState.UNKNOWN:
         return 3
     if result.state is obligations_mod.ObligationState.INVALID:

@@ -16,6 +16,7 @@ and the tests below are what keep it wired.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -534,10 +535,12 @@ def test_expired_budget_is_unknown_never_a_false_clear(monkeypatch):
     clock = {"t": 0.0}
 
     def fake_monotonic():
-        # First read opens the deadline; everything after is far past it.
-        value = clock["t"]
-        clock["t"] = 1e9
-        return value
+        # Time leaps forward on EVERY read, so whichever deadline was opened
+        # last is already past by the next check. Keyed to elapsed time rather
+        # than to a call count, which silently stopped forcing expiry once the
+        # fold opened a second deadline (setup vs probes).
+        clock["t"] += 1e9
+        return clock["t"]
 
     monkeypatch.setattr(budget_mod.time, "monotonic", fake_monotonic)
     transport = _counting([f"pr-{i}" for i in range(3)])
@@ -606,15 +609,19 @@ def test_budget_breach_during_the_forge_scan_degrades_not_truncates(monkeypatch)
     """
     from coord_engine import budget as budget_mod
 
-    ticks = {"n": 0}
+    clock = {"t": 0.0}
 
     def creeping_monotonic():
-        # Opens with budget, then jumps past the deadline once the scan is
-        # under way — a breach mid-fan-out rather than before it.
-        ticks["n"] += 1
-        return 0.0 if ticks["n"] <= 2 else 1e9
+        # Time creeps one second per read, so a deadline opened with a 5s budget
+        # is live when the fan-out starts and breaches partway through it.
+        # Deliberately keyed to ELAPSED TIME rather than to a call count: the
+        # count version broke the moment the fold opened a second deadline, and
+        # it broke by going GREEN (never expiring) rather than red.
+        clock["t"] += 1.0
+        return clock["t"]
 
     monkeypatch.setattr(budget_mod.time, "monotonic", creeping_monotonic)
+    monkeypatch.setattr(cli, "_obligation_budget", lambda: 5.0)
     transport = _counting([f"pr-{i}" for i in range(20)])
     result = obligations_mod.fold(
         cli._obligation_probes(transport, TEAM, AGENT, now=PINNED_NOW),
@@ -626,3 +633,87 @@ def test_budget_breach_during_the_forge_scan_degrades_not_truncates(monkeypatch)
     )
     assert result.state is obligations_mod.ObligationState.UNKNOWN
     assert result.degraded, "the breach must name which component went dark"
+
+
+# --- the budget collapse (coord-boss P0, 2026-08-07) ------------------------
+#
+# `_obligation_probes` opened ONE shared deadline and then spent it on setup:
+# measured on the live store, _load_rows_status 6.8s + _held_roles_for_rows
+# 19.3s = 26.1s against a 20s budget. Every probe then hit its expired guard
+# and returned UNREADABLE WITHOUT TOUCHING THE STORE — 0 of 7 consulted, and
+# 110 owed items fleet-wide hidden behind a blanket UNKNOWN. It did not fail to
+# read. It never attempted to.
+
+class SlowSetup(FakeTransport):
+    """A store whose SETUP reads are slow enough to burn a whole shared budget.
+
+    Only the task-index and role paths are slowed, which is where the real cost
+    sits; the per-component probe reads stay fast. That is exactly the live
+    profile, so a fold that still collapses here is collapsing for the reason
+    the incident did.
+    """
+
+    #: The exact two accesses the setup phase makes, verified by instrumenting
+    #: the fold. Matched EXACTLY, not by substring: the probes list
+    #: ``_coord/forge/watch/``, so a ``_coord/`` prefix test would slow the
+    #: probes too and the test would no longer isolate setup cost.
+    SETUP_READ = "team/fulcra/_coord/summaries.json"
+    SETUP_LIST = "team/fulcra/_coord/"
+
+    def __init__(self, *a, delay=0.05, **kw):
+        super().__init__(*a, **kw)
+        self._delay = delay
+
+    def list_dir(self, prefix: str):
+        if prefix == self.SETUP_LIST:
+            time.sleep(self._delay)
+        return super().list_dir(prefix)
+
+    def read(self, path: str):
+        if path == self.SETUP_READ:
+            time.sleep(self._delay)
+        return super().read(path)
+
+
+def test_setup_cost_no_longer_starves_every_probe(monkeypatch):
+    """The regression pin. With a budget smaller than setup, the OLD code
+    consulted ZERO components. Setup is now accounted separately, so the probes
+    still run and the fold reports real coverage."""
+    monkeypatch.setattr(cli, "_obligation_budget", lambda: 0.01)
+    result = _fold(SlowSetup(delay=0.02))
+    assert result.consulted, (
+        "every component reported UNREADABLE without touching the store — "
+        "setup spent the probes' budget, which is the 2026-08-07 collapse"
+    )
+
+
+def test_a_degraded_component_says_WHY_not_just_which(monkeypatch):
+    """coord-boss: 'a degraded report that will not say why is one you cannot
+    act on.' An exhausted budget and an unreachable store rendered identically,
+    and their remedies are opposite."""
+    monkeypatch.setattr(cli, "_obligation_budget", lambda: 0.01)
+    result = _fold(SlowSetup(delay=0.02))
+    if not result.degraded:                     # fast machine: force the case
+        result = obligations_mod.fold(
+            [obligations_mod.Component(
+                name="reviews",
+                probe=lambda: obligations_mod.ProbeResult(
+                    state=obligations_mod.ProbeState.UNREADABLE,
+                    detail="obligation probe budget exhausted"))],
+            expected=("reviews",))
+    for name in result.degraded:
+        assert result.details.get(name), f"{name} degraded with no reason given"
+        assert name in result.reason() and result.details[name] in result.reason()
+
+
+def test_review_listing_failure_still_reports_its_transport_reason():
+    """The other half: a real transport failure must NOT be described as a
+    budget problem. The two causes stay distinguishable in the output."""
+    result = _fold(ReviewListingDown())
+    assert "reviews" in result.degraded
+    why = result.details.get("reviews", "")
+    assert why, "a transport failure must carry its reason"
+    assert "budget" not in why.lower(), (
+        "a transport failure described as a budget problem sends the reader to "
+        "the wrong remedy"
+    )
