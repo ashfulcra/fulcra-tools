@@ -15,7 +15,19 @@ import pytest
 from coord_engine import router
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+PINNED_NOW = NOW
 FAILSAFE = router.RATE_CAP_FAILSAFE
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    """Pin cli._now, per the repo clock convention. Every test here passes
+    `now` explicitly, so nothing reads the real clock today — the convention
+    exists because that stops being true quietly, and this repo has been bitten
+    by a real-clock boundary three times."""
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
 
 
 @pytest.mark.parametrize("raw, why", [
