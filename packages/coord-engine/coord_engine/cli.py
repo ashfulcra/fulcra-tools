@@ -7677,6 +7677,170 @@ def _report_pin_currency(transport: Any, team: Optional[str]) -> None:
               f"({type(e).__name__}) — currency unknown")
 
 
+_UNSET = object()
+_REMOTE_TIPS: Any = _UNSET
+
+
+def _remote_ref_tips() -> "Optional[set]":
+    """SHAs advertised by ``git ls-remote origin``, or None if it could not run.
+
+    Cached for the process: ONE network call, not one per register entry.
+    GitHub advertises ``refs/pull/*/head`` here — 553 of 863 refs on this repo —
+    which is precisely why a PR head missing from a local clone is still
+    visible at the source.
+    """
+    global _REMOTE_TIPS
+    if _REMOTE_TIPS is not _UNSET:
+        return _REMOTE_TIPS
+    import shutil as _shutil
+    import subprocess as _subprocess
+    git = _shutil.which("git")
+    root = handoff.repo_root()
+    tips = None
+    if git and root is not None:
+        try:
+            cp = _subprocess.run([git, "ls-remote", "origin"], cwd=str(root),
+                                 capture_output=True, text=True, timeout=120)
+            if cp.returncode == 0:
+                tips = {ln.split()[0] for ln in cp.stdout.splitlines() if ln.strip()}
+        except Exception:
+            tips = None
+    _REMOTE_TIPS = tips
+    return tips
+
+
+def _forge_head_exists(sha: str) -> "Optional[bool]":
+    """Authoritative existence check via the forge API, or None if unavailable.
+
+    The ONLY source permitted to answer False, because it is the only one that
+    distinguishes "does not exist" from "I cannot see it".
+    """
+    import re as _re
+    import shutil as _shutil
+    import subprocess as _subprocess
+    gh = _shutil.which("gh")
+    root = handoff.repo_root()
+    if not gh or root is None:
+        return None
+    try:
+        url = _subprocess.run(["git", "remote", "get-url", "origin"],
+                              cwd=str(root), capture_output=True, text=True,
+                              timeout=30)
+        if url.returncode != 0:
+            return None
+        # THE ORIGIN MUST BE GITHUB. An earlier round parsed owner/repo out of
+        # ANY host and then asked github.com about it — so a self-hosted or
+        # GitLab origin got answered by a same-named GitHub repo, or by a 404
+        # meaning "no such repo here" that read as "commit is gone"
+        # (codex-reviewer, round 1). A wrong authority is worse than no answer.
+        raw = (url.stdout or "").strip()
+        m = _re.match(
+            r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+            r"([^/]+)/([^/]+?)(?:\.git)?$", raw)
+        if not m:
+            return None
+        cp = _subprocess.run(
+            [gh, "api", f"repos/{m.group(1)}/{m.group(2)}/commits/{sha}",
+             "--jq", ".sha"], cwd=str(root), capture_output=True, text=True,
+            timeout=60)
+    except Exception:
+        return None
+    if cp.returncode == 0 and (cp.stdout or "").strip():
+        return True
+    # ABSENCE IS EXACTLY ONE RESPONSE. Measured against the live API:
+    #   missing commit      -> 422 "No commit found for SHA: <sha>"
+    #   inaccessible repo   -> 404 "Not Found"
+    # A bare status match would read the second as absence, which is this whole
+    # P0 one layer down: inability to SEE becoming proof of ABSENCE. So match
+    # the commit endpoint's own no-commit message and nothing else. Auth
+    # failure, rate limit, network error, 404: all UNKNOWN.
+    err = (cp.stderr or "").lower()
+    if "no commit found for sha" in err:
+        return False
+    return None
+
+
+def _fetch_probe_head_exists(sha: str) -> "Optional[bool]":
+    """Ask the remote whether it can serve this object. PRESENCE ONLY.
+
+    Forge-agnostic, and measured against GitHub:
+
+        full sha, alive       -> rc 0                       -> True
+        full sha, fabricated  -> "upload-pack: not our ref"
+        ABBREVIATED sha       -> "couldn't find remote ref"  -- ALWAYS, either way
+
+    TWO THINGS THIS DELIBERATELY DOES NOT DO, both from coord-boss on round 3:
+
+    1. **It never answers False.** "not our ref" is only absence if ``origin``
+       is the CANONICAL repository. In a fork checkout origin is the fork, and
+       an upstream ``refs/pull`` head returns exactly that string while being
+       perfectly alive. Since this layer runs FIRST, a False here would
+       short-circuit the origin-verified forge path that would have answered
+       correctly -- the same wrong-authority shape round 2 existed to fix,
+       reintroduced one layer above it. So presence is the whole contribution;
+       absence stays with the authority that proves which repo it is asking.
+
+    2. **It runs in a THROWAWAY repository**, because ``--dry-run`` DOES write
+       to the object store. Verified: fetching a reachable non-tip into a
+       ``--depth 1`` clone with ``--dry-run`` left the object present and took
+       .git from 4.0M to 12M. Probing in the working repo would therefore
+       mutate it, pay a pack per unknown head, and make the classifier
+       HISTORY-DEPENDENT -- a second run answering True locally from what the
+       first downloaded. An earlier docstring here claimed the opposite, which
+       is worse than saying nothing: the next person would have trusted it.
+    """
+    if len(sha or "") != 40:
+        return None
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    git = _shutil.which("git")
+    root = handoff.repo_root()
+    if not git or root is None:
+        return None
+    try:
+        url = _subprocess.run([git, "remote", "get-url", "origin"], cwd=str(root),
+                              capture_output=True, text=True, timeout=30)
+        if url.returncode != 0 or not (url.stdout or "").strip():
+            return None
+        origin = url.stdout.strip()
+        with _tempfile.TemporaryDirectory() as td:
+            for args in (["init", "-q"], ["remote", "add", "origin", origin]):
+                if _subprocess.run([git, *args], cwd=td, capture_output=True,
+                                   timeout=30).returncode != 0:
+                    return None
+            cp = _subprocess.run(
+                [git, "fetch", "--dry-run", "--depth=1", "origin", sha],
+                cwd=td, capture_output=True, text=True, timeout=120)
+    except Exception:
+        return None
+    return True if cp.returncode == 0 else None
+
+
+def _remote_head_exists(sha: str) -> "Optional[bool]":
+    """Does this sha exist AT THE SOURCE? True / False / None(unknown).
+
+    Layered, and the layering is MEASURED rather than assumed:
+
+    * an advertised ref tip proves PRESENCE — cheap, one cached call;
+    * a MISS proves nothing. ``ls-remote`` sees ref TIPS only, and 2 of the 6
+      live heads in this register are reachable-but-not-tips; treating a miss
+      as absence would still have destroyed them;
+    * so a miss falls through to the forge API, the only authoritative answer;
+    * and when that cannot speak, the answer is None.
+    """
+    tips = _remote_ref_tips()
+    if tips and any(t.startswith(sha) or sha.startswith(t) for t in tips):
+        return True
+    # A tips MISS proves nothing (ref tips only). Ask the remote directly --
+    # forge-agnostic, so a GitLab or self-hosted origin gets a real answer
+    # instead of the None the GitHub-only path is obliged to return.
+    fetched = _fetch_probe_head_exists(sha)
+    if fetched is not None:
+        return fetched
+    return _forge_head_exists(sha)
+
+
 def _git_head_probe() -> "Callable[[str], Optional[bool]]":
     """``sha -> True | False | None`` via ``git cat-file -e``.
 
@@ -7762,9 +7926,15 @@ def _git_head_probe() -> "Callable[[str], Optional[bool]]":
         # as absence — a broken repo must not retire a review.
         err = (cp.stderr or b"").decode("utf-8", "replace").lower()
         if "not a valid object" in err or "could not get object" in err or not err:
-            # git looked and did not find it. That is only ABSENCE if this
-            # repository could have held it in the first place.
-            return False if absence_is_trustworthy else None
+            # LOCAL ABSENCE IS NOT ABSENCE. A standard clone fetches branches,
+            # not refs/pull/*, and a review register is full of PR heads.
+            # Measured on this register: 6 of 6 entries this classifier called
+            # dead were ALIVE at the source, from a full, non-shallow,
+            # non-partial clone. So the question moves to the REMOTE, and this
+            # branch never returns False on its own again.
+            if not absence_is_trustworthy:
+                return None
+            return _remote_head_exists(sha)
         return None
 
     # Published so callers on the DESTRUCTIVE path can tell "found nothing"

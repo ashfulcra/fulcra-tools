@@ -179,7 +179,7 @@ def test_probe_finds_a_real_object_in_this_repository():
     assert cli._git_head_probe()(head.stdout.strip()) is True
 
 
-def test_probe_reports_a_fabricated_sha_as_absent():
+def test_probe_reports_a_fabricated_sha_as_absent(monkeypatch):
     """Absent -> False, but ONLY where this checkout could prove absence.
 
     This assertion used to be unconditional, and CI is what proved it wrong:
@@ -206,6 +206,11 @@ def test_probe_reports_a_fabricated_sha_as_absent():
     shallow = subprocess.run(
         ["git", "rev-parse", "--is-shallow-repository"], cwd=str(root),
         capture_output=True, text=True).stdout.strip()
+    # The SOURCE boundary is mocked. Round 1 of PR 551 left these tests calling
+    # the live remote and `gh`, so they passed for me and failed for the
+    # reviewer — the exact environment-dependence coord-opus-worker named and I
+    # had endorsed one wake earlier. What is under test is the LOCAL branch.
+    monkeypatch.setattr(cli, "_remote_head_exists", lambda sha: False)
     expected = False if shallow == "false" else None
     assert cli._git_head_probe()("0" * 40) is expected
 
@@ -449,9 +454,15 @@ def test_a_shallow_clone_still_confirms_what_it_does_hold(tmp_path, monkeypatch)
     assert cli._git_head_probe()(head.stdout.strip()) is True
 
 
-def test_a_full_clone_still_proves_absence():
-    """The over-correction guard: a complete repository must still be able to
-    say 'gone', or gc can never retire anything and the register rots."""
+def test_a_full_clone_still_proves_absence(monkeypatch):
+    """The over-correction guard: with the SOURCE confirming absence, gc must
+    still be able to say 'gone', or it can never retire anything and the
+    register rots.
+
+    The source is mocked. Round 1 left this calling the live remote and `gh`,
+    so it passed on my host and failed on the reviewer's — environment
+    dependence in the very file whose subject is environment dependence.
+    """
     from coord_engine import cli, handoff
 
     if handoff.repo_root() is None:
@@ -462,7 +473,12 @@ def test_a_full_clone_still_proves_absence():
         cwd=str(handoff.repo_root()), capture_output=True, text=True)
     if shallow.stdout.strip() != "false":
         pytest.skip("this checkout is itself shallow")
+    monkeypatch.setattr(cli, "_remote_head_exists", lambda sha: False)
     assert cli._git_head_probe()("0" * 40) is False
+
+    # ...and the same local state with the source UNABLE to answer is UNKNOWN.
+    monkeypatch.setattr(cli, "_remote_head_exists", lambda sha: None)
+    assert cli._git_head_probe()("0" * 40) is None
 
 
 def _partial_repo(tmp_path, remote_name):
@@ -527,9 +543,9 @@ def test_extensions_partialclone_alone_is_enough_to_refuse(tmp_path, monkeypatch
     assert cli._git_head_probe()("0" * 40) is None
 
 
-def test_an_ordinary_local_repo_still_proves_absence(tmp_path, monkeypatch):
-    """Over-correction guard for the generalised check: a plain full repo with
-    no partial-clone config must still be able to say 'gone'."""
+def test_an_ordinary_local_repo_defers_to_the_source(tmp_path, monkeypatch):
+    """A plain full repo with no partial-clone config passes the SHALLOW guard
+    and still cannot answer alone — absence is the source's to confirm."""
     import subprocess
     from coord_engine import cli, handoff
 
@@ -547,6 +563,20 @@ def test_an_ordinary_local_repo_still_proves_absence(tmp_path, monkeypatch):
         pytest.skip("git commit failed")
 
     monkeypatch.setattr(handoff, "repo_root", lambda: d)
+    # CONTRACT CHANGED, and this is the third pre-existing test in this file to
+    # have encoded the defect: "a complete local repo can prove absence" is the
+    # belief that reported six live heads as dead. A repo with no reachable
+    # source cannot prove anything about absence, however complete it is.
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
+    assert cli._git_head_probe()("0" * 40) is None
+
+    # ...and absence IS provable once the SOURCE answers. This is the
+    # over-correction guard in its new, correct form: without it gc can never
+    # retire anything and the register rots, which is the problem gc exists for.
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: False)
     assert cli._git_head_probe()("0" * 40) is False
 
 
@@ -629,3 +659,255 @@ def test_the_real_probe_publishes_its_capability():
     probe = cli._git_head_probe()
     assert hasattr(probe, "absence_is_trustworthy")
     assert isinstance(probe.absence_is_trustworthy, bool)
+
+
+# --- local absence is not absence: prove it at the SOURCE ------------------
+#
+# Measured on the live register: 6 of 6 entries the classifier called dead were
+# ALIVE at the source, from a FULL non-shallow non-partial clone. A standard
+# clone fetches branches, not refs/pull/*, and a review register is full of PR
+# heads. Completeness of the clone was never the right test.
+
+
+def test_an_advertised_ref_tip_proves_presence(monkeypatch):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"a" * 40})
+    monkeypatch.setattr(cli, "_forge_head_exists",
+                        lambda sha: pytest.fail("must not need the API for a tip"))
+    assert cli._remote_head_exists("a" * 40) is True
+
+
+def test_a_ls_remote_MISS_is_not_absence(monkeypatch):
+    """THE regression for this round. ls-remote sees ref TIPS only; 2 of the 6
+    live heads were reachable-but-not-tips. A miss must fall through, never
+    resolve to False on its own."""
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"b" * 40})
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: True)
+    assert cli._remote_head_exists("a" * 40) is True, (
+        "a non-tip commit that the forge confirms is ALIVE was reported absent"
+    )
+
+
+def test_only_the_forge_may_answer_absent(monkeypatch):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"b" * 40})
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: False)
+    assert cli._remote_head_exists("a" * 40) is False
+
+
+def test_no_remote_answer_at_all_is_UNKNOWN(monkeypatch):
+    """No ls-remote, no forge -> None. gc collapsing to can-never-retire is
+    honest and useless, which beats confident and wrong."""
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
+    assert cli._remote_head_exists("a" * 40) is None
+
+
+def test_the_probe_never_returns_False_from_local_absence_alone(monkeypatch):
+    """End to end through _git_head_probe: a sha absent locally, with the
+    source unreachable, must be UNKNOWN. This is the exact path that reported
+    six live heads as dead."""
+    from coord_engine import cli, handoff
+
+    if handoff.repo_root() is None:
+        pytest.skip("not running inside a git repository")
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
+    assert cli._git_head_probe()("0" * 40) is None
+
+
+# --- the forge boundary: only ONE response is absence ----------------------
+#
+# codex round 1 on PR 551: a 404 can mean the repository is inaccessible, not
+# that the commit is gone, and the origin parser accepted any host and then
+# asked github.com about a same-named repo. Inability to SEE becoming proof of
+# ABSENCE — this P0 one layer down. Measured against the live API:
+#   missing commit    -> 422 "No commit found for SHA: <sha>"
+#   inaccessible repo -> 404 "Not Found"
+
+
+def _fake_gh(monkeypatch, tmp_path, *, origin, rc, stdout="", stderr=""):
+    """Pin `gh`, the repo root and both subprocess calls the forge path makes."""
+    import subprocess
+    from coord_engine import cli, handoff
+
+    monkeypatch.setattr(handoff, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(cli.shutil if hasattr(cli, "shutil") else __import__("shutil"),
+                        "which", lambda n: "/usr/bin/gh")
+
+    def fake_run(cmd, **kw):
+        if "remote" in cmd and "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=origin + "\n", stderr="")
+        return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return cli
+
+
+GH = "https://github.com/ashfulcra/fulcra-tools"
+
+
+def test_forge_absent_only_on_the_no_commit_message(monkeypatch, tmp_path):
+    cli = _fake_gh(monkeypatch, tmp_path, origin=GH, rc=1,
+                   stderr="gh: No commit found for SHA: aaa (HTTP 422)")
+    assert cli._forge_head_exists("a" * 40) is False
+
+
+def test_an_inaccessible_repository_404_is_UNKNOWN(monkeypatch, tmp_path):
+    """THE regression. A 404 means we could not see the repo, not that the
+    commit is gone — and this False would have written .gc-closed."""
+    cli = _fake_gh(monkeypatch, tmp_path, origin=GH, rc=1,
+                   stderr="gh: Not Found (HTTP 404)")
+    assert cli._forge_head_exists("a" * 40) is None
+
+
+def test_an_unrelated_422_is_UNKNOWN(monkeypatch, tmp_path):
+    cli = _fake_gh(monkeypatch, tmp_path, origin=GH, rc=1,
+                   stderr="gh: Validation Failed (HTTP 422)")
+    assert cli._forge_head_exists("a" * 40) is None
+
+
+@pytest.mark.parametrize("origin", [
+    "https://gitlab.com/ashfulcra/fulcra-tools",
+    "git@git.internal.example:ashfulcra/fulcra-tools.git",
+    "https://github.example.com/ashfulcra/fulcra-tools",
+])
+def test_a_non_github_origin_is_never_answered_by_github(monkeypatch, tmp_path, origin):
+    """A wrong authority is worse than no answer: asking github.com about a
+    same-named repo could return either a false True or a 404."""
+    cli = _fake_gh(monkeypatch, tmp_path, origin=origin, rc=1,
+                   stderr="gh: No commit found for SHA: aaa (HTTP 422)")
+    assert cli._forge_head_exists("a" * 40) is None
+
+
+def test_a_github_hit_is_presence(monkeypatch, tmp_path):
+    cli = _fake_gh(monkeypatch, tmp_path, origin=GH + ".git", rc=0,
+                   stdout="a" * 40 + "\n")
+    assert cli._forge_head_exists("a" * 40) is True
+
+
+# --- the fetch probe: forge-agnostic, and abbreviation is a trap -----------
+#
+# Measured against GitHub:
+#   full sha alive       -> rc 0
+#   full sha fabricated  -> "remote error: upload-pack: not our ref <sha>"
+#   ABBREVIATED sha      -> "couldn't find remote ref" for BOTH
+# I ran the abbreviated form, got the failure, and reported it as proof that
+# fetch cannot probe GitHub. It was proof that abbreviations are not fetchable.
+
+
+def _fetch_env(monkeypatch, tmp_path, *, rc, stderr=""):
+    import subprocess
+    from coord_engine import cli, handoff
+    import shutil
+
+    monkeypatch.setattr(handoff, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/" + n)
+    def fake_run(cmd, **kw):
+        # the probe resolves origin first, then inits a throwaway repo; only the
+        # FETCH carries the outcome under test.
+        if "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://x/y\n", stderr="")
+        if "fetch" not in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return cli
+
+
+def test_fetch_probe_rc0_is_presence(monkeypatch, tmp_path):
+    cli = _fetch_env(monkeypatch, tmp_path, rc=0)
+    assert cli._fetch_probe_head_exists("a" * 40) is True
+
+
+def test_fetch_probe_NEVER_answers_absence(monkeypatch, tmp_path):
+    """coord-boss, round 3. "not our ref" is absence only if origin is the
+    CANONICAL repo. In a fork checkout origin is the fork and an upstream
+    refs/pull head returns exactly that string while alive — and because this
+    layer runs FIRST, a False here short-circuits the origin-verified forge
+    path that would have answered correctly. Presence is the contribution."""
+    cli = _fetch_env(monkeypatch, tmp_path, rc=1,
+                     stderr="fatal: remote error: upload-pack: not our ref aaa")
+    assert cli._fetch_probe_head_exists("a" * 40) is None
+
+
+def test_fetch_probe_couldnt_find_remote_ref_is_UNKNOWN(monkeypatch, tmp_path):
+    """THE trap. This is what an ABBREVIATED sha returns whether the object is
+    alive or dead, so it can never mean absence."""
+    cli = _fetch_env(monkeypatch, tmp_path, rc=128,
+                     stderr="fatal: couldn't find remote ref 48e248ce9298")
+    assert cli._fetch_probe_head_exists("a" * 40) is None
+
+
+def test_fetch_probe_refuses_an_abbreviated_sha_outright(monkeypatch, tmp_path):
+    """Never even ask: an abbreviated sha is not a valid fetch argument, so the
+    answer would be uninterpretable rather than merely unknown."""
+    cli = _fetch_env(monkeypatch, tmp_path, rc=0)
+    assert cli._fetch_probe_head_exists("48e248ce9298") is None
+
+
+def test_the_fetch_probe_is_preferred_for_PRESENCE(monkeypatch):
+    """Forge-agnostic presence first: a GitLab or self-hosted origin gets a
+    real True rather than the None the GitHub-only path must return."""
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: set())
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: True)
+    monkeypatch.setattr(
+        cli, "_forge_head_exists",
+        lambda sha: pytest.fail("must not need GitHub when fetch proved presence"))
+    assert cli._remote_head_exists("a" * 40) is True
+
+
+def test_the_github_path_is_still_the_fallback(monkeypatch):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: set())
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: True)
+    assert cli._remote_head_exists("a" * 40) is True
+
+
+def test_the_fetch_probe_does_not_touch_the_working_repository(monkeypatch, tmp_path):
+    """`--dry-run` DOES write to the object store — verified: fetching a
+    reachable non-tip into a --depth 1 clone left the object present and took
+    .git from 4.0M to 12M. Probing in the working repo would mutate it and make
+    the classifier HISTORY-DEPENDENT: run 2 answering True from run 1's
+    download. So the fetch must happen somewhere disposable."""
+    import subprocess
+    from coord_engine import cli, handoff
+    import shutil
+
+    seen = []
+    monkeypatch.setattr(handoff, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def fake_run(cmd, **kw):
+        seen.append((list(cmd), kw.get("cwd")))
+        if "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://x/y\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert cli._fetch_probe_head_exists("a" * 40) is True
+
+    fetches = [(c, cwd) for c, cwd in seen if "fetch" in c]
+    assert fetches, seen
+    for cmd, cwd in fetches:
+        assert str(cwd) != str(tmp_path), (
+            "the fetch ran in the WORKING repo — it would download packs into it "
+            "and the next run would answer from what this one fetched"
+        )
+        assert "--depth=1" in cmd, "the transfer must be bounded"
