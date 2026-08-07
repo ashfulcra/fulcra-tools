@@ -1288,12 +1288,26 @@ def _briefing_budget() -> float:
     return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
 
 
-#: Aggregate deadline (seconds) for ONE obligation fold. The fold runs on every
-#: empty wake now, so its cost is fleet-wide per-wake cost — it needs a hard
-#: ceiling, not a per-component hope. Deliberately tighter than the briefing
-#: budget: a briefing is a human asking a question, a fold is a machine on a
-#: schedule. Env ``COORD_OBLIGATION_BUDGET``.
-DEFAULT_OBLIGATION_BUDGET = 20.0
+#: Deadline (seconds) for the obligation fold's PROBES. Setup is measured
+#: separately and does not draw on this, so the two can no longer starve each
+#: other. Env ``COORD_OBLIGATION_BUDGET``.
+#:
+#: 90, and the number carries a warning. At 20 the fold was measured blind on
+#: three hosts (0/7, 0/7, 1/7 components consulted) while 110, 64 and 6 owed
+#: items sat hidden behind a blanket UNKNOWN. 90 is the smallest value OBSERVED
+#: TO HELP — **it is a floor, not a proven ceiling**: at 90 `role_duties` still
+#: reports UNREADABLE on at least one host, and `role_duties` is where
+#: role-routed obligations live.
+#:
+#: So do not read 90 as "enough". The real cost is `_held_roles_for_rows` at
+#: 19.3s of a 26.1s setup; lowering that is the actual fix and it helps every
+#: caller. Raising a budget to outrun a cost is the move that produced the
+#: original collapse, and this raise is deliberately the stopgap half of a
+#: two-part ruling (coord-boss, 2026-08-07) — chosen first only because the
+#: default ships in the engine PIN, and the pin is the one channel that reaches
+#: a host whose environment is rebuilt every wake and therefore cannot hold an
+#: env-var mitigation at all.
+DEFAULT_OBLIGATION_BUDGET = 90.0
 
 
 def _obligation_budget() -> float:

@@ -717,3 +717,37 @@ def test_review_listing_failure_still_reports_its_transport_reason():
         "a transport failure described as a budget problem sends the reader to "
         "the wrong remedy"
     )
+
+
+# --- the raised default (coord-boss ruling, 2026-08-07) ---------------------
+
+def test_default_probe_budget_is_the_measured_floor_not_the_old_collapse_value():
+    """Pins the raise, and pins WHY.
+
+    At 20 the fold was measured blind on three hosts (0/7, 0/7, 1/7 consulted)
+    with 110 / 64 / 6 owed items hidden. 90 is the smallest value observed to
+    help. The assertion is a floor rather than equality so the follow-up cost
+    fix can lower the real cost without this test dictating the number -- but
+    it can never silently slide back toward the value that collapsed.
+    """
+    assert cli.DEFAULT_OBLIGATION_BUDGET >= 90.0, (
+        "the default probe budget was measured blind at 20s on three hosts; "
+        "lowering it below the observed floor reinstates that collapse"
+    )
+
+
+def test_the_default_does_not_claim_to_be_sufficient():
+    """coord-boss: 90 must not become the number everyone assumes is enough.
+
+    `role_duties` still reports UNREADABLE at 90 on at least one host, so the
+    constant carries that caveat in prose. A future editor who raises or lowers
+    the number without reading it is exactly who this test is for.
+    """
+    import inspect
+    src = inspect.getsource(cli)
+    marker = src[src.find("#: Deadline (seconds) for the obligation fold's PROBES"):
+                 src.find("DEFAULT_OBLIGATION_BUDGET = ")]
+    assert "floor, not a proven ceiling" in marker
+    assert "role_duties" in marker, (
+        "the known-still-blind component must stay named at the constant"
+    )
