@@ -7693,6 +7693,49 @@ def _git_head_probe() -> "Callable[[str], Optional[bool]]":
     git = _shutil.which("git")
     root = handoff.repo_root()
 
+    def _git_out(*args: str) -> Optional[str]:
+        """stdout of a successful git call, else None."""
+        if not git or root is None:
+            return None
+        try:
+            cp = _subprocess.run([git, *args], cwd=str(root),
+                                 capture_output=True, timeout=15)
+        except Exception:
+            return None
+        if cp.returncode != 0:
+            return None
+        return (cp.stdout or b"").decode("utf-8", "replace").strip()
+
+    def _can_prove_absence() -> bool:
+        """Is THIS repository able to say an object does not exist?
+
+        `git cat-file -e` answers "is this object HERE", not "does this object
+        EXIST". In a clone that legitimately does not hold all history those are
+        different questions, and the gc treats a False as authoritative grounds
+        to retire a review. So absence is trustworthy only in a repository that
+        has everything:
+
+        * **shallow** — history truncated by `--depth`; live commits outside the
+          cut are simply not present. Verified live: `git cat-file -e` on a
+          merged, current-main commit in a `--depth 1` clone exits 128 with
+          "fatal: Not a valid object name", which the classifier below reads as
+          FALSE. That is a live head reported affirmatively dead.
+        * **partial / promisor** — objects are fetched lazily, so absence is
+          "not fetched yet", not "gone".
+
+        Anything we cannot determine counts as cannot-prove. This is the
+        destructive path; the cost of an unnecessary None is a review that stays
+        open one more cycle, and the cost of a wrong False is a review destroyed.
+        """
+        if _git_out("rev-parse", "--is-shallow-repository") != "false":
+            return False
+        for key in ("remote.origin.promisor", "remote.origin.partialclonefilter"):
+            if _git_out("config", "--get-all", key):
+                return False
+        return True
+
+    absence_is_trustworthy = _can_prove_absence()
+
     def _probe(sha: str) -> Optional[bool]:
         if not git or root is None or not sha_re.match(sha or ""):
             return None
@@ -7709,7 +7752,9 @@ def _git_head_probe() -> "Callable[[str], Optional[bool]]":
         # as absence — a broken repo must not retire a review.
         err = (cp.stderr or b"").decode("utf-8", "replace").lower()
         if "not a valid object" in err or "could not get object" in err or not err:
-            return False
+            # git looked and did not find it. That is only ABSENCE if this
+            # repository could have held it in the first place.
+            return False if absence_is_trustworthy else None
         return None
 
     return _probe

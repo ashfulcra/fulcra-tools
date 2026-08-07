@@ -350,3 +350,83 @@ def test_a_projection_containing_a_retired_entry_SURVIVES_validation():
     validated = cli._validated_review_projection(section)
     assert validated is not None, ("the retired entry invalidated the whole "
                                    "section — exactly the round-2 defect")
+
+
+# --- shallow / partial clones cannot prove absence -------------------------
+#
+# P0 (coord-opus-worker, 2026-08-07): `git cat-file -e` answers "is this object
+# HERE", not "does this object EXIST". In a clone that legitimately lacks
+# history those diverge, and the gc treats False as authoritative grounds to
+# retire a review. Reproduced against a real `--depth 1` clone: probing a
+# merged, current-main commit exits 128 with "fatal: Not a valid object name",
+# which the classifier read as FALSE — a LIVE head reported affirmatively dead.
+
+
+def _shallow_clone(tmp_path):
+    """A real depth-1 clone of this repository, or skip."""
+    import subprocess
+    from coord_engine import handoff
+
+    root = handoff.repo_root()
+    if root is None:
+        pytest.skip("not running inside a git repository")
+    dst = tmp_path / "shallow"
+    cp = subprocess.run(
+        ["git", "clone", "--depth", "1", "file://" + str(root), str(dst)],
+        capture_output=True, timeout=180)
+    if cp.returncode != 0:
+        pytest.skip("could not create a shallow clone here")
+    return dst
+
+
+def test_a_shallow_clone_never_reports_absence(tmp_path, monkeypatch):
+    """THE regression. A sha this clone does not hold must read UNKNOWN, not
+    dead — otherwise gc destroys reviews whose heads are alive."""
+    import subprocess
+    from coord_engine import cli, handoff
+
+    dst = _shallow_clone(tmp_path)
+    monkeypatch.setattr(handoff, "repo_root", lambda: dst)
+
+    assert subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"], cwd=str(dst),
+        capture_output=True, text=True).stdout.strip() == "true", "not shallow"
+
+    probe = cli._git_head_probe()
+    # A well-formed sha that is certainly not in a depth-1 clone.
+    assert probe("0" * 40) is None, (
+        "a shallow clone claimed authoritative absence — this is the data-loss "
+        "path: gc would retire a review whose head is alive"
+    )
+
+
+def test_a_shallow_clone_still_confirms_what_it_does_hold(tmp_path, monkeypatch):
+    """The guard must not blind the probe: presence is still provable, so gc
+    keeps working on the objects a shallow clone actually has."""
+    import subprocess
+    from coord_engine import cli, handoff
+
+    dst = _shallow_clone(tmp_path)
+    monkeypatch.setattr(handoff, "repo_root", lambda: dst)
+
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(dst),
+                          capture_output=True, text=True)
+    if head.returncode != 0:
+        pytest.skip("git rev-parse failed in the clone")
+    assert cli._git_head_probe()(head.stdout.strip()) is True
+
+
+def test_a_full_clone_still_proves_absence():
+    """The over-correction guard: a complete repository must still be able to
+    say 'gone', or gc can never retire anything and the register rots."""
+    from coord_engine import cli, handoff
+
+    if handoff.repo_root() is None:
+        pytest.skip("not running inside a git repository")
+    import subprocess
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=str(handoff.repo_root()), capture_output=True, text=True)
+    if shallow.stdout.strip() != "false":
+        pytest.skip("this checkout is itself shallow")
+    assert cli._git_head_probe()("0" * 40) is False
