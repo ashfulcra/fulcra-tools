@@ -333,12 +333,21 @@ def test_a_retired_slug_leaves_the_pending_review_fold():
     assert "live-slug" in blob
 
 
-def test_apply_writes_the_marker_where_the_readers_look():
+def test_apply_writes_the_marker_where_the_readers_look(monkeypatch):
     """End-to-end: --apply must put the marker in the verdicts prefix the two
-    readers list, not merely somewhere plausible."""
+    readers list, not merely somewhere plausible.
+
+    The probe is PINNED here. Unpinned, this test asked the ambient repository
+    whether "aaaa…" exists, so its result depended on how the host had cloned
+    us: dead in a full clone, UNKNOWN in a shallow one — where gc correctly
+    retires nothing and the assertion fails. CI hid that behind `--maxfail=1`
+    (it aborted on an earlier failure in this file, so this test never ran).
+    What is under test is the marker's PATH, not the host's clone shape.
+    """
     import argparse
     from coord_engine import cli
 
+    monkeypatch.setattr(cli, "_git_head_probe", lambda: (lambda sha: False))
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
     args = argparse.Namespace(team="fulcra", apply=True, sender="tester")
