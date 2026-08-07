@@ -900,7 +900,10 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
         print(f"roles status: unparseable dormant_until for {role} in team/{team} — "
               f"treated as absent (not dormant); fix the date to park it",
               file=sys.stderr)
-    if status == roles.VACANT and dormant:
+    if status in (roles.VACANT, roles.LAPSED) and dormant:
+        # A deliberately-parked role reads DORMANT whether its last holder's
+        # lease merely lapsed or there was never one — the park is the operator's
+        # statement either way, and it outranks both.
         status = roles.DORMANT
     today = _now().strftime("%Y-%m-%d")
     marker_exists = transport.read(_escalation_marker_path(team, role, today)) is not None
