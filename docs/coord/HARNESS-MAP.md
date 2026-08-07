@@ -130,6 +130,26 @@ the wall exists — not where it happened first.
     **same-owner fork**. Plan this in the parking doc's operator pre-flight
     (fulcra-agent-continuity, "Parking for a successor") — discovering it
     serially costs a human round-trip per failed attempt.
+12. **`setsid`-detached processes are reaped when the tool call returns; the
+    harness's own background mechanism is not** (2). A long job started with
+    `setsid bash -c '… > out 2>&1' &` dies when the shell that launched it
+    exits — and dies *silently*: the wrapper's own trailing
+    `echo "RC=$?"` never runs, so the output file is left at **zero bytes**
+    with no error anywhere. The same command run through the harness's
+    background facility completes normally. Verified twice on 2026-08-06/07
+    with `coord-engine health fulcra` (~25 min on a 1.2s/op transport): two
+    `setsid` runs → 0 bytes, no RC line, no process; one harness-background
+    run → full census, `rc 0`.
+    This is the same family as BOOTSTRAP's *"never `& disown` a leg inside a
+    launchd job"* — a supervisor reaping the children of an exited parent — and
+    it fails the same way: it survives an interactive test and vanishes in
+    production. **An empty output file is the signature; do not read it as
+    "the job found nothing."** The two failure modes are distinguishable:
+    a job you killed with a short `timeout` exits **rc 143** with partial
+    output, while a reaped job leaves **zero bytes and no exit line at all**.
+    Long legs also exceed the 10-minute foreground tool ceiling, so background
+    is not optional for them — use the harness's, and always write a trailing
+    RC line so a truncated run is detectable rather than ambiguous.
 
 ## What "monitoring" should grow into
 
@@ -153,3 +173,6 @@ nobody was looking.** The monitoring vision, staged:
 - 2026-07-14: initial map (coord-boss), from the 07-11..07-14 incident record.
 - 2026-07-22: wall 11 (cloud repo scoping), from Webster's handoff
   retrospective + the Fabio session restart (BUS-79).
+- 2026-08-07: wall 12 (setsid reaping), from two silent `health` census
+  failures during a coord-boss watchdog sweep — both zero-byte, neither
+  reported by anything.
