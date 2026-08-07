@@ -7761,44 +7761,60 @@ def _forge_head_exists(sha: str) -> "Optional[bool]":
 
 
 def _fetch_probe_head_exists(sha: str) -> "Optional[bool]":
-    """Ask the REMOTE directly: ``git fetch --dry-run origin <full-sha>``.
+    """Ask the remote whether it can serve this object. PRESENCE ONLY.
 
-    Forge-agnostic and authoritative, measured against GitHub:
+    Forge-agnostic, and measured against GitHub:
 
-        full sha, alive       -> rc 0, "* branch <sha> -> FETCH_HEAD"
-        full sha, fabricated  -> "remote error: upload-pack: not our ref <sha>"
-        ABBREVIATED sha       -> "couldn't find remote ref" -- ALWAYS, for both
+        full sha, alive       -> rc 0                       -> True
+        full sha, fabricated  -> "upload-pack: not our ref"
+        ABBREVIATED sha       -> "couldn't find remote ref"  -- ALWAYS, either way
 
-    That last line is why this is worth writing down. An abbreviated sha is not
-    a valid fetch argument at all, so it fails identically whether the object
-    lives or not. I ran exactly that experiment, got the failure, and reported
-    it as proof that fetch cannot probe GitHub -- attributing an error to the
-    wrong cause while writing about that very class of mistake. So: FULL SHAS
-    ONLY, and anything that is not the explicit not-our-ref answer is UNKNOWN.
+    TWO THINGS THIS DELIBERATELY DOES NOT DO, both from coord-boss on round 3:
 
-    ``--dry-run`` contacts the server without writing to the object store.
+    1. **It never answers False.** "not our ref" is only absence if ``origin``
+       is the CANONICAL repository. In a fork checkout origin is the fork, and
+       an upstream ``refs/pull`` head returns exactly that string while being
+       perfectly alive. Since this layer runs FIRST, a False here would
+       short-circuit the origin-verified forge path that would have answered
+       correctly -- the same wrong-authority shape round 2 existed to fix,
+       reintroduced one layer above it. So presence is the whole contribution;
+       absence stays with the authority that proves which repo it is asking.
+
+    2. **It runs in a THROWAWAY repository**, because ``--dry-run`` DOES write
+       to the object store. Verified: fetching a reachable non-tip into a
+       ``--depth 1`` clone with ``--dry-run`` left the object present and took
+       .git from 4.0M to 12M. Probing in the working repo would therefore
+       mutate it, pay a pack per unknown head, and make the classifier
+       HISTORY-DEPENDENT -- a second run answering True locally from what the
+       first downloaded. An earlier docstring here claimed the opposite, which
+       is worse than saying nothing: the next person would have trusted it.
     """
     if len(sha or "") != 40:
         return None
     import shutil as _shutil
     import subprocess as _subprocess
+    import tempfile as _tempfile
     git = _shutil.which("git")
     root = handoff.repo_root()
     if not git or root is None:
         return None
     try:
-        cp = _subprocess.run([git, "fetch", "--dry-run", "origin", sha],
-                             cwd=str(root), capture_output=True, text=True,
-                             timeout=120)
+        url = _subprocess.run([git, "remote", "get-url", "origin"], cwd=str(root),
+                              capture_output=True, text=True, timeout=30)
+        if url.returncode != 0 or not (url.stdout or "").strip():
+            return None
+        origin = url.stdout.strip()
+        with _tempfile.TemporaryDirectory() as td:
+            for args in (["init", "-q"], ["remote", "add", "origin", origin]):
+                if _subprocess.run([git, *args], cwd=td, capture_output=True,
+                                   timeout=30).returncode != 0:
+                    return None
+            cp = _subprocess.run(
+                [git, "fetch", "--dry-run", "--depth=1", "origin", sha],
+                cwd=td, capture_output=True, text=True, timeout=120)
     except Exception:
         return None
-    if cp.returncode == 0:
-        return True
-    err = (cp.stderr or "").lower()
-    if "not our ref" in err:
-        return False
-    # "couldn't find remote ref", auth failures, network errors: UNKNOWN.
-    return None
+    return True if cp.returncode == 0 else None
 
 
 def _remote_head_exists(sha: str) -> "Optional[bool]":

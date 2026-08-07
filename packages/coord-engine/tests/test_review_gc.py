@@ -813,9 +813,16 @@ def _fetch_env(monkeypatch, tmp_path, *, rc, stderr=""):
 
     monkeypatch.setattr(handoff, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/" + n)
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda cmd, **kw: subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr))
+    def fake_run(cmd, **kw):
+        # the probe resolves origin first, then inits a throwaway repo; only the
+        # FETCH carries the outcome under test.
+        if "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://x/y\n", stderr="")
+        if "fetch" not in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
     return cli
 
 
@@ -824,10 +831,15 @@ def test_fetch_probe_rc0_is_presence(monkeypatch, tmp_path):
     assert cli._fetch_probe_head_exists("a" * 40) is True
 
 
-def test_fetch_probe_not_our_ref_is_absence(monkeypatch, tmp_path):
+def test_fetch_probe_NEVER_answers_absence(monkeypatch, tmp_path):
+    """coord-boss, round 3. "not our ref" is absence only if origin is the
+    CANONICAL repo. In a fork checkout origin is the fork and an upstream
+    refs/pull head returns exactly that string while alive — and because this
+    layer runs FIRST, a False here short-circuits the origin-verified forge
+    path that would have answered correctly. Presence is the contribution."""
     cli = _fetch_env(monkeypatch, tmp_path, rc=1,
                      stderr="fatal: remote error: upload-pack: not our ref aaa")
-    assert cli._fetch_probe_head_exists("a" * 40) is False
+    assert cli._fetch_probe_head_exists("a" * 40) is None
 
 
 def test_fetch_probe_couldnt_find_remote_ref_is_UNKNOWN(monkeypatch, tmp_path):
@@ -845,17 +857,17 @@ def test_fetch_probe_refuses_an_abbreviated_sha_outright(monkeypatch, tmp_path):
     assert cli._fetch_probe_head_exists("48e248ce9298") is None
 
 
-def test_the_fetch_probe_is_preferred_over_the_github_only_path(monkeypatch):
-    """Forge-agnostic first: a GitLab or self-hosted origin must get a real
-    answer rather than the None the GitHub path is obliged to return."""
+def test_the_fetch_probe_is_preferred_for_PRESENCE(monkeypatch):
+    """Forge-agnostic presence first: a GitLab or self-hosted origin gets a
+    real True rather than the None the GitHub-only path must return."""
     from coord_engine import cli
 
     monkeypatch.setattr(cli, "_remote_ref_tips", lambda: set())
-    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: False)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: True)
     monkeypatch.setattr(
         cli, "_forge_head_exists",
-        lambda sha: pytest.fail("must not need GitHub when fetch answered"))
-    assert cli._remote_head_exists("a" * 40) is False
+        lambda sha: pytest.fail("must not need GitHub when fetch proved presence"))
+    assert cli._remote_head_exists("a" * 40) is True
 
 
 def test_the_github_path_is_still_the_fallback(monkeypatch):
@@ -866,3 +878,36 @@ def test_the_github_path_is_still_the_fallback(monkeypatch):
     monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
     monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: True)
     assert cli._remote_head_exists("a" * 40) is True
+
+
+def test_the_fetch_probe_does_not_touch_the_working_repository(monkeypatch, tmp_path):
+    """`--dry-run` DOES write to the object store — verified: fetching a
+    reachable non-tip into a --depth 1 clone left the object present and took
+    .git from 4.0M to 12M. Probing in the working repo would mutate it and make
+    the classifier HISTORY-DEPENDENT: run 2 answering True from run 1's
+    download. So the fetch must happen somewhere disposable."""
+    import subprocess
+    from coord_engine import cli, handoff
+    import shutil
+
+    seen = []
+    monkeypatch.setattr(handoff, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def fake_run(cmd, **kw):
+        seen.append((list(cmd), kw.get("cwd")))
+        if "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://x/y\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert cli._fetch_probe_head_exists("a" * 40) is True
+
+    fetches = [(c, cwd) for c, cwd in seen if "fetch" in c]
+    assert fetches, seen
+    for cmd, cwd in fetches:
+        assert str(cwd) != str(tmp_path), (
+            "the fetch ran in the WORKING repo — it would download packs into it "
+            "and the next run would answer from what this one fetched"
+        )
+        assert "--depth=1" in cmd, "the transfer must be bounded"
