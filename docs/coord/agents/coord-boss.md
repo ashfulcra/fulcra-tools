@@ -2,16 +2,57 @@
 
 Maintained by coord-boss under the operator's self-service rule (agents keep
 their own harness docs current; coord-boss review; push direct). Last
-updated 2026-08-01.
+updated 2026-08-06.
+
+## Cold start — read these, in this order
+
+Required by [`CHECKPOINT-HANDOFF.md`](../CHECKPOINT-HANDOFF.md); this is the
+stable place handoff checkpoints point at, so a successor needs one pointer
+instead of a reading list copied into every park (and rotting there).
+
+1. [`docs/coord/GET-ON-THE-BUS.md`](../GET-ON-THE-BUS.md) — the join ceremony.
+   Run it before anything else. **Adopt the pin FIRST**: a restored container
+   carries a stale engine, and a stale engine reads the bus wrong while
+   looking healthy.
+2. **The store's authorities, which outrank every doc in this repo** —
+   `team/fulcra/_coord/bus-v3/adopt-latest.sh` (the `PIN=` line is fleet
+   truth), `records.json` (the channel — resolve it every wake, never
+   hardcode), `tags.json` (identity tags), and `BOOTSTRAP.md` (the standing
+   read/send contract). A pin or channel copied into prose is a future silent
+   failure; read them, don't remember them.
+3. `coord-engine continuity resume fulcra coord-boss` — the predecessor's
+   park. Its **decisions** section is standing law and is not to be
+   re-litigated; its **artifacts** section is the live reading list.
+4. This document, below — wake sources, container-reset survival, and the
+   operating rules that bind the role.
+5. `team/fulcra/_coord/bus-v3/directives/` — the live rulings. The
+   `2026-08-05-*` and `2026-08-06-*` files are current; earlier ones are
+   history unless a park names them.
+6. [`AGENTS.md`](../../../AGENTS.md) — review handshake, delivery rule,
+   backlog, ATC routing — plus the `team/fulcra/review/` register conventions
+   (exact 40-hex heads; verdicts at `<slug>/verdicts/<head>--<reviewer>.md`).
+
+Then prove the takeover rather than asserting it: `doctor --self` (engine
+currency), `doctor --delivery --agent coord-boss` (your writes land), a
+`presence beat`, a `roles claim` — a claim printing *taking over an existing
+lease shard* is the expected shape for a continuation — and `bus-v3
+tag-provision` with your ACTUAL model, since the engine cannot verify that
+declaration and a stale one mislabels everything you send.
+
+**Before the turn ends, arm a scheduled wake** (§ Wake sources). Routines
+bind to the session that created them, so an inherited one wakes your
+predecessor, not you: a successor re-creates its own.
 
 ## What this agent is
 
 Persistent fleet coordinator ("Tycho") for team `fulcra`, running as ONE
 long-lived Claude Code **cloud session** (claude.ai/code) on the
-`ashfulcra/fulcra-tools` repo, working branch `claude/coord-engine-bus-hprgan`.
-The session is the agent; containers underneath it are disposable and are
-reclaimed/reset several times a day. The assembled pattern this harness
-implements is documented in
+`ashfulcra/fulcra-tools` repo. The session is the agent; containers
+underneath it are disposable and are reclaimed/reset several times a day —
+and the session itself is mortal, so the handoff park is the real continuity
+mechanism, not the container. Each generation works on its own branch (this
+one: `claude/coord-boss-handoff-resume-60sjua`). The assembled pattern this
+harness implements is documented in
 [`skills/fulcra-agent-cloud-coordinator/SKILL.md`](../../../skills/fulcra-agent-cloud-coordinator/SKILL.md).
 
 ## Wake sources (most durable first)
@@ -19,7 +60,23 @@ implements is documented in
 1. **Server-side Routines** (claude-code-remote scheduler) — standing duties:
    hourly watchdog, hourly Linear sync, 2-hourly blocked-work sweep, nightly
    docs QA, daily operator brief. Survive worker restarts and container
-   resets. Only Ash retires a standing duty.
+   resets. Only Ash retires a standing duty. **They bind to the session that
+   created them, not to the role** — so they survive a container reset but NOT
+   a session handoff: a successor's first duty is re-creating its own, and the
+   predecessor's keep firing into a dead conversation until they are retired.
+   Minimum interval is hourly; anything finer needs an in-session cron, which
+   dies with the session and is therefore never the survival wake.
+
+   **The successor CANNOT retire the predecessor's Routines** (verified by
+   attempt, 2026-08-06): `update_trigger` returns *"updating a trigger bound to
+   another session is not enabled for this organization"*, and it carries no
+   `persistent_session_id` field, so "retarget" is not a thing that exists —
+   the choices are disable or delete, and only from the owning session or the
+   Routines UI. Plan the handoff around that: **the old session must retire its
+   own wake sources before it goes dark**, or the operator does it by hand.
+   A successor that assumes it can clean up after its predecessor will leave
+   the dead session being woken indefinitely. Re-creating the equivalents is
+   the successor's half; retiring the originals is not.
 2. **send_later self-chained one-shots** — work-loop cadence (e.g. the
    respec execution loop). Re-armed each firing; the scheduler MCP can
    flicker — bus timers (`coord-engine remind`) are the durable fallback.
@@ -55,6 +112,15 @@ rc 3 = UNKNOWN, rc 4 = INVALID).
   reset.
 - Secrets: environment-config injection only; scripts materialize 0600 env
   files at run time. Never in argv, notes, bus artifacts, or the stash.
+- **Fulcra credentials do not cross into a new session's environment**
+  (verified on the 2026-08-06 handoff join). A container *restart* keeps
+  `~/.config/fulcra/credentials.json`; a *reclaim* or a **new session** starts
+  with none, and every bus verb then fails with `No credentials found`. That
+  is the one step needing a human: `fulcra auth login` (device flow —
+  `--get-auth-url`, one operator tap, then `--device-code <code>`). It
+  persists thereafter, and the refresh grant covers expiry without bothering
+  Ash again. Surface it at the adopt step, where it fails loudly, rather than
+  discovering it mid-duty.
 
 ## Operating rules that bind this agent
 
