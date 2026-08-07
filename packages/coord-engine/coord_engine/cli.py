@@ -6304,8 +6304,14 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
               "decision is logged + persisted per directed item, nothing "
               "enqueued or executed", file=sys.stderr)
 
-    agents_cfg, _executors, cfg_errors = router.validate_config(
-        transport.read(config_prefix + "config.json"))
+    raw_config = transport.read(config_prefix + "config.json")
+    agents_cfg, _executors, cfg_errors = router.validate_config(raw_config)
+    # Rate caps come from the SAME authoritative document as enablement, read
+    # once so the two can never disagree about which config they saw.
+    caps, caps_err = router.validate_caps(raw_config)
+    if caps_err:
+        print(f"router: rate cap {caps_err} — holding at the failsafe "
+              f"{caps}", file=sys.stderr)
     measurement_failed = bool(shadow and cfg_errors)
     if "_config" in cfg_errors:
         print(f"router: {cfg_errors['_config']} — every agent reads "
@@ -6331,6 +6337,12 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         print(f"router: delivered/ listing degraded ({e}) — skipping "
               f"delivered.json refold this pass (the populated view is "
               f"preserved; it regenerates next pass)", file=sys.stderr)
+    # codex 554 r3: a per-shard failure is EVIDENCE LOSS. For the delivered.json
+    # view it remains mere bookkeeping loss, but for the rate cap it means the
+    # window count is measured from an incomplete set — and a count that looks
+    # measured while part of the evidence was dropped is exactly the fail-open
+    # this cap exists to prevent.
+    shard_evidence_ok = True
     for e in dl_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
@@ -6340,7 +6352,12 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             try:
                 delivered_shards.append(json.loads(raw))
             except ValueError:
+                shard_evidence_ok = False
                 pass  # a corrupt record shard is bookkeeping loss, not a stop
+        else:
+            # unreadable OR genuinely empty — the transport cannot tell us
+            # which, so it counts as evidence we do not have
+            shard_evidence_ok = False
     if delivered_listing_ok:
         delivered_view = router.fold_delivered(delivered_shards)
     else:
@@ -6368,6 +6385,27 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                   "the pass closed (nothing enqueued, cursor not advanced; "
                   "retries next pass)", file=sys.stderr)
             return 1
+
+    # Windowed wake counts for the rate cap, folded from the SAME durable
+    # delivery shards as delivered_view. When the listing degraded we hold only
+    # the persisted per-agent view, which carries no per-delivery timestamps —
+    # so the last hour is UNKNOWN, not zero, and the cap fails closed per item.
+    wake_counts, global_wakes, counts_complete = router.count_wakes_last_hour(
+        delivered_shards, now=now)
+    # Three independent ways the window can be unknown, and ALL of them must
+    # clear the flag: the directory listing failed, an individual shard was
+    # unreadable or malformed, or a shard parsed but could not be classified.
+    # r3 set this from the listing alone, so per-file loss ran the cap on
+    # incomplete evidence while reporting a confident number.
+    counts_known = delivered_listing_ok and shard_evidence_ok and counts_complete
+    if not counts_known:
+        why = ("listing degraded" if not delivered_listing_ok
+               else "a delivery shard was unreadable or malformed"
+               if not shard_evidence_ok
+               else "a delivery shard could not be classified")
+        print(f"router: {why} — last-hour wake counts are UNKNOWN; the rate "
+              f"cap fails CLOSED (items defer to the next window rather than "
+              f"ride an unmeasurable cap)", file=sys.stderr)
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}
@@ -6496,6 +6534,10 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             last_wake_at=queue_last.get(assignee),
             last_delivered_at=router.parse_iso(d_row.get("last_delivered_at")),
             now=now,
+            caps=caps,
+            agent_wakes_last_hour=wake_counts.get(assignee, 0),
+            global_wakes_last_hour=global_wakes,
+            counts_known=counts_known,
         )
         counts[decision] += 1
         suffix = ""
