@@ -146,6 +146,14 @@ rc 3 = UNKNOWN, rc 4 = INVALID).
   facts that were known and unwritten. Capture it while the evidence is in
   front of you; a fact you mean to write up later is a fact the next agent
   pays for.
+- **Verify a dispatch by reading it out of a RECIPIENT's queue** — never by the
+  sender's exit code, and never by finding the record on the channel. Three
+  separate mechanisms have now produced a send that printed rc 0 and reached
+  nobody: a retired channel, a prose note, and (2026-08-07) `broadcast`
+  addressing the task plane's `"*"` while every reader keeps only `"all"`. In
+  the last one the record was on the LIVE channel in a correct `v:1` shape and
+  still undelivered, so even "I found the record" is not the check. One
+  `queue --peek --agent <recipient>` settles it in seconds.
 - Subagents allowed for discrete tasks (Ash grant 2026-07-29) — every piece
   of delegated work gets a bus task.
 - Never run `queue` under another agent's identity (consumption guard,
