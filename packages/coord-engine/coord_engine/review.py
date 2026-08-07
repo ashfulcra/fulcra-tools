@@ -10,6 +10,12 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+#: Terminal, but NOT a review outcome: the entry was retired by ``review gc``
+#: because it can never settle. Kept distinct from APPROVED on purpose — the
+#: register must keep "reviewed and approved" separable from "abandoned when the
+#: subsystem was retired", and a reader that saw RETIRED as APPROVED would
+#: report work as done that nobody ever looked at.
+RETIRED = "RETIRED"
 APPROVED = "APPROVED"
 CHANGES = "CHANGES"
 PENDING = "PENDING"

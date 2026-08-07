@@ -115,6 +115,14 @@ _FUTURE_SKEW_HOURS = 0.25
 #: — defined there first; duplicated here because ``cli`` imports this module).
 SETTLED_MARKER = ".settled"
 
+#: ``review gc``'s terminal marker (mirrors ``review_gc.GC_MARKER``). A retired
+#: entry is terminal but was never reviewed, so it is folded as RETIRED rather
+#: than APPROVED — and, crucially, it is skipped HERE, in the reader. Writing the
+#: marker without teaching the readers would have retired nothing: the entry
+#: would still be scanned, still tallied pending, and still consume the exact
+#: projection budget the verb exists to recover (codex-reviewer, review-gc r1).
+GC_MARKER = ".gc-closed"
+
 
 def max_age_hours() -> float:
     """Serve-threshold for projection sections, hours. Env
@@ -331,7 +339,13 @@ def _scan_review_slug(
         "mtime": entry.get("mtime"),
         "size": entry.get("size"),
     }
-    if any((v.get("name") or "") == SETTLED_MARKER for v in ventries):
+    vnames = {(v.get("name") or "") for v in ventries}
+    if GC_MARKER in vnames:
+        # Retired by gc: terminal, no outstanding required reviewers, and NOT
+        # approved. Nothing here was ever reviewed.
+        return {**base, "state": review.RETIRED, "pending_required": [],
+                "settled": True, "retired": True}, True
+    if SETTLED_MARKER in vnames:
         # Settled-cache hit: the round is terminal-APPROVED and immutable — the
         # doc read above already gave us the forge-relevant identity fields.
         return {**base, "state": review.APPROVED, "pending_required": [],

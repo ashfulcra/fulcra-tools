@@ -218,3 +218,102 @@ def test_a_bare_sha_without_the_word_head_is_not_a_head():
 @pytest.mark.parametrize("bad", [None, 42, "", "head deadbeef"])
 def test_prose_extraction_survives_junk(bad):
     assert review_gc.head_from_prose(bad) is None
+
+
+# --- the round-1 blocker: the marker must be CONSUMED, not just written ----
+
+class RegisterTransport:
+    """Enough store to exercise both review readers over one register."""
+
+    def __init__(self, slugs):
+        # slugs: {slug: {"doc": str, "verdicts": [names]}}
+        self.slugs = slugs
+        self.written: dict[str, str] = {}
+
+    def list_dir(self, prefix):
+        if prefix.endswith("/review/"):
+            return [{"name": f"{s}.md"} for s in sorted(self.slugs)]
+        for slug, data in self.slugs.items():
+            if prefix.endswith(f"/review/{slug}/verdicts/"):
+                names = list(data.get("verdicts") or [])
+                if f"review/{slug}/verdicts/.gc-closed" in "".join(self.written):
+                    pass
+                return [{"name": n} for n in names]
+        return []
+
+    def read(self, path):
+        for slug, data in self.slugs.items():
+            if path.endswith(f"/review/{slug}.md"):
+                return data["doc"]
+        return None
+
+    def write(self, path, content):
+        self.written[path] = content
+        # Reflect the write, so a later listing sees it — the whole point of
+        # this test is that the marker becomes VISIBLE to the readers.
+        for slug in self.slugs:
+            if path.endswith(f"/review/{slug}/verdicts/.gc-closed"):
+                self.slugs[slug].setdefault("verdicts", []).append(".gc-closed")
+        return True
+
+
+DOC = ("---\ntype: Review\nschema: review-request/v2\nrequested_by: boss\n"
+       "of: PR 1\nrequired:\n  - codex-reviewer\nhead: {head}\n---\nbody\n")
+
+
+def test_a_retired_slug_leaves_the_projection_scan():
+    """THE round-1 blocker. gc wrote `.gc-closed` and both readers still only
+    knew `.settled`, so a 'retired' entry was still scanned, still tallied
+    pending, and still consumed the exact budget the verb exists to recover."""
+    from coord_engine import projection, review
+
+    from coord_engine.budget import Deadline
+
+    t = RegisterTransport({"dead-slug": {
+        "doc": DOC.format(head="a" * 40), "verdicts": [".gc-closed"]}})
+    row, complete = projection._scan_review_slug(
+        t, "fulcra", "dead-slug", {"name": "dead-slug.md"},
+        now="2026-08-07T00:00:00Z", deadline=Deadline.open(60.0))
+    assert complete
+    assert row["state"] == review.RETIRED
+    assert row["pending_required"] == []
+    assert row["state"] != review.APPROVED  # never claim it was reviewed
+
+
+def test_retired_is_a_distinct_state_from_approved():
+    from coord_engine import review
+    assert review.RETIRED != review.APPROVED
+
+
+def test_a_retired_slug_leaves_the_pending_review_fold():
+    """The other reader named in the verdict. A retired entry can never become
+    pending for anybody, so the fold must skip it exactly as it skips settled —
+    that skip is what actually recovers the budget."""
+    from coord_engine import cli
+
+    t = RegisterTransport({
+        "dead-slug": {"doc": DOC.format(head="a" * 40),
+                      "verdicts": [".gc-closed"]},
+        "live-slug": {"doc": DOC.format(head="b" * 40), "verdicts": []},
+    })
+    rows = cli._pending_reviews_for(t, "fulcra", "codex-reviewer")
+    rows = rows[0] if isinstance(rows, tuple) else rows
+    blob = repr(rows)
+    # The retired slug must be absent from the fold entirely; the live one must
+    # still be there, so the skip is targeted rather than a fold that broke.
+    assert "dead-slug" not in blob
+    assert "live-slug" in blob
+
+
+def test_apply_writes_the_marker_where_the_readers_look():
+    """End-to-end: --apply must put the marker in the verdicts prefix the two
+    readers list, not merely somewhere plausible."""
+    import argparse
+    from coord_engine import cli
+
+    t = RegisterTransport({"dead-slug": {
+        "doc": DOC.format(head="a" * 40), "verdicts": []}})
+    args = argparse.Namespace(team="fulcra", apply=True, sender="tester")
+    cli.cmd_review_gc(args, t)
+    assert any(p.endswith("/review/dead-slug/verdicts/.gc-closed")
+               for p in t.written), t.written

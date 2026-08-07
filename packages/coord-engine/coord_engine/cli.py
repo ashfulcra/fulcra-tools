@@ -2011,8 +2011,13 @@ def _pending_reviews_raw(
         slug = (e.get("name") or "")[:-3]
         try:
             ventries = transport.list_dir(_verdicts_prefix(team, slug))
-            if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
-                return "ok"  # settled -> skip entirely, zero reads beyond this listing
+            vnames = {(x.get("name") or "") for x in ventries}
+            # gc-retired entries skip for the same reason settled ones do — they
+            # can never become pending for anybody. Skipping them HERE is what
+            # makes `review gc` recover budget at all; the marker alone changed
+            # nothing (codex-reviewer, review-gc round 1).
+            if review_gc.GC_MARKER in vnames or SETTLED_MARKER in vnames:
+                return "ok"  # terminal -> skip entirely, zero reads beyond this listing
             doc_raw = transport.read(_review_doc_path(team, slug))
             if doc_raw is None:
                 # Slug came from the listing, so its doc exists — a None read is a
