@@ -70,6 +70,8 @@ functions never raise (reconcile wraps them best-effort anyway).
 
 from __future__ import annotations
 
+import hashlib
+
 from typing import Any, Optional
 
 from . import config, forge, okf, review
@@ -121,6 +123,7 @@ SETTLED_MARKER = ".settled"
 #: marker without teaching the readers would have retired nothing: the entry
 #: would still be scanned, still tallied pending, and still consume the exact
 #: projection budget the verb exists to recover (codex-reviewer, review-gc r1).
+VFP_KEY = "vfp"   #: verdicts-listing fingerprint recorded on each scanned row
 GC_MARKER = ".gc-closed"
 
 
@@ -291,6 +294,76 @@ def _normalize_required(required: Any) -> list[str]:
     return []
 
 
+def _verdicts_fingerprint(ventries: list[dict[str, Any]]) -> str:
+    """Order-independent fingerprint of a verdicts listing.
+
+    A review's tally is a function of (required set from the doc) x (verdict
+    files). Tier 3 below carries an UNSETTLED row when the doc is unchanged AND
+    this fingerprint is unchanged — which is the same immutability argument
+    tier 1 already makes, extended over the one input tier 1 does not cover.
+    Name+size+mtime per shard, sorted, so listing order cannot perturb it."""
+    parts = sorted(
+        f"{e.get('name') or ''}\x1f{e.get('size')}\x1f{e.get('mtime')}"
+        for e in ventries if not e.get("is_dir"))
+    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _shards_minutes_closed(ventries: list[dict[str, Any]],
+                           prior_generated_at: Any) -> bool:
+    """True iff EVERY verdict shard's mtime-minute closed before the prior pass.
+
+    The fingerprint alone is not enough, and this is the half I got wrong in the
+    first cut: I applied the same-minute guard to the review DOC and left the
+    shards unguarded, in a change whose own description named minute-granular
+    mtime as the hazard. codex-reviewer reproduced it at the exact head — an
+    unsettled row projected at 15:00:30Z, its `approve` shard rewritten to an
+    equal-length `changes` inside the same clock-minute, and the second build
+    carried the stale PENDING row because name+size+mtime were all identical.
+
+    A verdict flipping approve->changes at equal length inside one minute is not
+    a contrived case: it is a reviewer correcting themselves, and carrying it
+    would freeze a CHANGES review as PENDING durably. So: any shard whose minute
+    is not provably closed forces a full rescan. Correct beats cheap, and only
+    the recently-touched slugs pay."""
+    from . import reconcile as rec  # lazy: reconcile imports projection
+    for v in ventries:
+        if v.get("is_dir"):
+            continue
+        if rec._same_minute_reuse_safe(v.get("mtime"), prior_generated_at) is not True:
+            return False   # ambiguous or unprovable -> rescan, never carry
+    return True
+
+
+def _unsettled_carry_safe(prior_row: Any, entry: dict[str, Any],
+                          prior_generated_at: Any) -> bool:
+    """Doc-side half of the TIER-3 carry: is this row *eligible* for a
+    one-listing carry? The verdicts fingerprint is compared separately, because
+    obtaining it costs the one op tier 3 is budgeted for.
+
+    Why tier 3 exists: unsettled rows never carry under tier 1, so a
+    permanently-unsettleable entry sits in the FRESH set on every pass forever,
+    consuming a full scan each time. That is a non-converging tax which breaks
+    the convergence property this module documents — and it cannot be cleared by
+    gc alone, which only retires entries it can *prove* dead (9 of 158 measured
+    on 2026-08-07, against a 129/158 budget cut). Tier 3 fixes the cost
+    structurally instead of trying to decide which entries are dead.
+
+    Same guards as tier 1: doc mtime+size identical, and the same-minute reuse
+    guard — mtime granularity is ONE MINUTE, so a same-minute edit at identical
+    size is invisible and must not be trusted."""
+    if not isinstance(prior_row, dict) or prior_row.get("settled") is True:
+        return False                      # settled rows are tier 1's business
+    if not prior_row.get(VFP_KEY):
+        return False                      # no fingerprint recorded: cannot compare
+    entry_mtime = entry.get("mtime")
+    if not entry_mtime or prior_row.get("mtime") != entry_mtime:
+        return False
+    if prior_row.get("size") is None or prior_row.get("size") != entry.get("size"):
+        return False
+    from . import reconcile as rec  # lazy: reconcile imports projection
+    return rec._same_minute_reuse_safe(entry_mtime, prior_generated_at) is not False
+
+
 def _settled_carry_safe(prior_row: Any, entry: dict[str, Any],
                         prior_generated_at: Any) -> bool:
     """True iff ``prior_row`` may be carried WITHOUT re-reading its review.
@@ -339,6 +412,7 @@ def _scan_review_slug(
         "mtime": entry.get("mtime"),
         "size": entry.get("size"),
     }
+    base[VFP_KEY] = _verdicts_fingerprint(ventries)
     vnames = {(v.get("name") or "") for v in ventries}
     if GC_MARKER in vnames:
         # Retired by gc: OMITTED from the projection, and the scan counts as
@@ -433,8 +507,27 @@ def build_review_projection(
     # Zero-op carries first, budgeted fresh scans second — so a budget cut always
     # lands on the scan frontier and each pass converges further than the last.
     fresh: list[tuple[str, dict[str, Any]]] = []
+    maybe: list[tuple[str, dict[str, Any]]] = []
     for slug, e in doc_entries:
         if _settled_carry_safe(prior_rows.get(slug), e, prior_generated_at):
+            rows.append(prior_rows[slug])
+        elif _unsettled_carry_safe(prior_rows.get(slug), e, prior_generated_at):
+            maybe.append((slug, e))
+        else:
+            fresh.append((slug, e))
+    # TIER 3: one listing each. If no verdict shard was added, removed or
+    # modified AND the doc is unchanged, the tally provably cannot have moved,
+    # so carry instead of re-reading every shard. A listing failure or any
+    # mismatch demotes the slug to a full scan — never to a guess.
+    for slug, e in maybe:
+        if deadline.expired():
+            fresh.append((slug, e)); continue
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError:
+            fresh.append((slug, e)); continue
+        if (_verdicts_fingerprint(ventries) == prior_rows[slug].get(VFP_KEY)
+                and _shards_minutes_closed(ventries, prior_generated_at)):
             rows.append(prior_rows[slug])
         else:
             fresh.append((slug, e))
