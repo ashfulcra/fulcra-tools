@@ -527,9 +527,9 @@ def test_extensions_partialclone_alone_is_enough_to_refuse(tmp_path, monkeypatch
     assert cli._git_head_probe()("0" * 40) is None
 
 
-def test_an_ordinary_local_repo_still_proves_absence(tmp_path, monkeypatch):
-    """Over-correction guard for the generalised check: a plain full repo with
-    no partial-clone config must still be able to say 'gone'."""
+def test_an_ordinary_local_repo_defers_to_the_source(tmp_path, monkeypatch):
+    """A plain full repo with no partial-clone config passes the SHALLOW guard
+    and still cannot answer alone — absence is the source's to confirm."""
     import subprocess
     from coord_engine import cli, handoff
 
@@ -547,6 +547,18 @@ def test_an_ordinary_local_repo_still_proves_absence(tmp_path, monkeypatch):
         pytest.skip("git commit failed")
 
     monkeypatch.setattr(handoff, "repo_root", lambda: d)
+    # CONTRACT CHANGED, and this is the third pre-existing test in this file to
+    # have encoded the defect: "a complete local repo can prove absence" is the
+    # belief that reported six live heads as dead. A repo with no reachable
+    # source cannot prove anything about absence, however complete it is.
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
+    assert cli._git_head_probe()("0" * 40) is None
+
+    # ...and absence IS provable once the SOURCE answers. This is the
+    # over-correction guard in its new, correct form: without it gc can never
+    # retire anything and the register rots, which is the problem gc exists for.
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: False)
     assert cli._git_head_probe()("0" * 40) is False
 
 
@@ -629,3 +641,64 @@ def test_the_real_probe_publishes_its_capability():
     probe = cli._git_head_probe()
     assert hasattr(probe, "absence_is_trustworthy")
     assert isinstance(probe.absence_is_trustworthy, bool)
+
+
+# --- local absence is not absence: prove it at the SOURCE ------------------
+#
+# Measured on the live register: 6 of 6 entries the classifier called dead were
+# ALIVE at the source, from a FULL non-shallow non-partial clone. A standard
+# clone fetches branches, not refs/pull/*, and a review register is full of PR
+# heads. Completeness of the clone was never the right test.
+
+
+def test_an_advertised_ref_tip_proves_presence(monkeypatch):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"a" * 40})
+    monkeypatch.setattr(cli, "_forge_head_exists",
+                        lambda sha: pytest.fail("must not need the API for a tip"))
+    assert cli._remote_head_exists("a" * 40) is True
+
+
+def test_a_ls_remote_MISS_is_not_absence(monkeypatch):
+    """THE regression for this round. ls-remote sees ref TIPS only; 2 of the 6
+    live heads were reachable-but-not-tips. A miss must fall through, never
+    resolve to False on its own."""
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"b" * 40})
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: True)
+    assert cli._remote_head_exists("a" * 40) is True, (
+        "a non-tip commit that the forge confirms is ALIVE was reported absent"
+    )
+
+
+def test_only_the_forge_may_answer_absent(monkeypatch):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"b" * 40})
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: False)
+    assert cli._remote_head_exists("a" * 40) is False
+
+
+def test_no_remote_answer_at_all_is_UNKNOWN(monkeypatch):
+    """No ls-remote, no forge -> None. gc collapsing to can-never-retire is
+    honest and useless, which beats confident and wrong."""
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
+    assert cli._remote_head_exists("a" * 40) is None
+
+
+def test_the_probe_never_returns_False_from_local_absence_alone(monkeypatch):
+    """End to end through _git_head_probe: a sha absent locally, with the
+    source unreachable, must be UNKNOWN. This is the exact path that reported
+    six live heads as dead."""
+    from coord_engine import cli, handoff
+
+    if handoff.repo_root() is None:
+        pytest.skip("not running inside a git repository")
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
+    assert cli._git_head_probe()("0" * 40) is None
