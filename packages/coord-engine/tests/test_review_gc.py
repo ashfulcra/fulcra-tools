@@ -180,10 +180,34 @@ def test_probe_finds_a_real_object_in_this_repository():
 
 
 def test_probe_reports_a_fabricated_sha_as_absent():
+    """Absent -> False, but ONLY where this checkout could prove absence.
+
+    This assertion used to be unconditional, and CI is what proved it wrong:
+    `actions/checkout@v4` clones with `fetch-depth: 1` by default, so the CI
+    runner's own working copy is a shallow clone. The correct answer there is
+    None, and the old test encoded the assumption the shallow-clone P0 is about
+    — that a repository can always tell you an object does not exist.
+
+    Worth stating plainly rather than skipping past: the data-loss path was live
+    in CI. Anything running `review gc --apply` from a stock GitHub Actions
+    checkout would have retired reviews whose heads are alive.
+
+    The full-clone branch stays covered in CI by
+    `test_an_ordinary_local_repo_still_proves_absence`, which builds its own
+    complete repository instead of depending on how the runner checked us out.
+    """
+    import subprocess
+
     from coord_engine import cli, handoff
-    if handoff.repo_root() is None:
+
+    root = handoff.repo_root()
+    if root is None:
         pytest.skip("not running inside a git repository")
-    assert cli._git_head_probe()("0" * 40) is False
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"], cwd=str(root),
+        capture_output=True, text=True).stdout.strip()
+    expected = False if shallow == "false" else None
+    assert cli._git_head_probe()("0" * 40) is expected
 
 
 # --- v1 docs hide the head in prose ---------------------------------------
