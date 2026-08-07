@@ -591,6 +591,16 @@ it (not on PyPI).
   [`fulcra-agent-continuity`](skills/fulcra-agent-continuity/SKILL.md)
   "Parking for a successor"; cloud repo-scoping wall:
   [`HARNESS-MAP`](docs/coord/HARNESS-MAP.md) wall 11.
+- **A lapsed lease is not proof a role is unattended.** `roles status` classifies
+  from lease timestamps alone, so its predicate is *"has a lease been renewed"*
+  while the alarm reads *"is anybody doing this job"* — those diverged for four
+  days (codex-reviewer's lease went stale while it filed verdicts hourly, and
+  the sweep filed a false P1 per role per day). Escalation now takes a TRI-STATE
+  `attended`: True suppresses it as `LEASE LAPSED, ROLE IS BEING SERVED`, False
+  escalates as `UNATTENDED`, and the default None still escalates but must say
+  **attendance not checked** rather than assert absence. Pass
+  `roles status --check-attendance` (opt-in: one listing per review, budgeted and
+  reported as `scanned N/M`) before calling any role unattended.
 - **Park a role, don't mute the sweep by hand.** Deliberately leaving a role unattended (a reviewer on leave, seasonal on-call) is an ENGINE fact, not an agent-side convention: set `dormant_until: <ISO>` in `team/<team>/roles/<role>.md`, and while that date is future the mechanical `escalate` sweep suppresses the role's vacancy escalation on every heartbeat host and `roles status` reports `DORMANT (until <ts>)`; escalation resumes automatically past the date, a live lease still shows HELD, and a garbage `dormant_until` fails OPEN (noted on stderr, escalation still fires) so a typo can't silently mute a role — see [`fulcra-agent-roles`](skills/fulcra-agent-roles/SKILL.md).
 - **Fold text is capped; the task doc is the payload's home.** Summaries rows bound
   `title`/`description` to `COORD_SUMMARY_TEXT_CAP` (default 280 chars, ellipsis-marked),

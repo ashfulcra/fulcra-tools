@@ -761,6 +761,65 @@ def _role_doc_path(team: str, role: str) -> str:
     return f"team/{team}/roles/{role}.md"
 
 
+def _role_attended(transport: Any, team: str, holders: list[str], *,
+                   since: Any, budget: int = 40) -> tuple[Optional[bool], int, int]:
+    """Did any ``holders`` file a verdict since ``since``?
+
+    Returns ``(attended, scanned, total)``. ``attended`` is None when the answer
+    could not be established — an unreadable listing or a budget cut-off — never
+    False, because "I did not look at everything" is not "nobody worked".
+
+    Verdict filenames are ``<head>--<reviewer>.md``, so the reviewer identity is
+    in the name and a listing answers the question without reading any file.
+    Bounded and reported (``scanned N/M``) per the budgeted-fold rule: an
+    unbounded scan on a big team is how a status verb becomes a two-minute call.
+    """
+    if not holders:
+        return None, 0, 0
+    try:
+        reviews = [e for e in transport.list_dir(f"team/{team}/review/")
+                   if e.get("is_dir")]
+    except TransportError:
+        return None, 0, 0
+    total = len(reviews)
+    if not total:
+        # NOTHING to scan. A complete sweep of an empty set is not evidence of
+        # absence — it is evidence we looked somewhere with no data (a wrong
+        # prefix looks exactly like this). UNKNOWN, never False.
+        return None, 0, 0
+    scanned = 0
+    undatable = False
+    suffixes = tuple(f"--{h}.md" for h in holders if h)
+    for e in reviews[:budget]:
+        slug = (e.get("name") or "").rstrip("/")
+        if not slug:
+            continue
+        scanned += 1
+        try:
+            entries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError:
+            return None, scanned, total
+        for v in entries:
+            name = v.get("name") or ""
+            if not name.endswith(suffixes):
+                continue
+            raw = v.get("mtime")
+            mt = router.parse_store_mtime(raw) or router.parse_iso(raw)
+            if mt is None:
+                # A holder verdict we cannot DATE. Skipping it would quietly
+                # count as "no work in the window" — the false-absent this
+                # whole change exists to remove. Undatable evidence is UNKNOWN.
+                undatable = True
+                continue
+            if mt >= since:
+                return True, scanned, total
+    if undatable:
+        return None, scanned, total
+    # Everything we were allowed to look at is clean. Only a COMPLETE sweep can
+    # say "no work"; a truncated one stays UNKNOWN.
+    return (False if scanned >= total else None), scanned, total
+
+
 def _leases_prefix(team: str, role: str) -> str:
     return f"team/{team}/roles/{role}/leases/"
 
@@ -845,14 +904,28 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
         status = roles.DORMANT
     today = _now().strftime("%Y-%m-%d")
     marker_exists = transport.read(_escalation_marker_path(team, role, today)) is not None
+    # ATTENDANCE (opt-in): a lapsed lease is not proof nobody is doing the job.
+    # Default None = NOT CHECKED, which still escalates but must never be
+    # reported as "unattended" — see roles.escalation_due.
+    attended: Optional[bool] = None
+    att_scanned = att_total = 0
+    if getattr(args, "check_attendance", False):
+        anchor = roles._parse(now)
+        if anchor is not None:
+            attended, att_scanned, att_total = _role_attended(
+                transport, team, [l.get("agent") for l in (leases or [])],
+                since=anchor - timedelta(hours=sla))
     esc = roles.escalation_due(leases, now=now, sla_hours=sla,
-                               marker_exists_today=marker_exists, dormant=dormant)
+                               marker_exists_today=marker_exists, dormant=dormant,
+                               attended=attended)
     fresh = roles.fresh_holders(leases, now=now, sla_hours=sla) if leases else []
     result = {
         "team": team, "role": role, "status": status, "policy": policy, "sla_hours": sla,
         "holders": [l.get("agent") for l in (leases or [])],
         "fresh_holders": [l.get("agent") for l in fresh],
         "escalation_due": esc,
+        "attended": attended,
+        "attendance_scanned": f"{att_scanned}/{att_total}" if att_total else None,
     }
     if status == roles.DORMANT:
         result["dormant_until"] = reg.get("dormant_until")
@@ -864,8 +937,19 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
         print(f"role {role} in team/{team}: {label} (policy={policy}, sla={sla:g}h)")
         if fresh:
             print("  fresh holders: " + ", ".join(str(l.get("agent")) for l in fresh))
+        if attended is True:
+            print(f"  LEASE LAPSED, ROLE IS BEING SERVED — a holder filed a verdict "
+                  f"within {sla:g}h (scanned {att_scanned}/{att_total} reviews). "
+                  f"Ask for a lease renewal; do NOT escalate as unattended.")
         if esc:
-            print("  ESCALATION DUE — vacant past SLA, no marker today")
+            if attended is False:
+                print("  ESCALATION DUE — UNATTENDED: lease lapsed past SLA and no "
+                      f"holder work product found (scanned {att_scanned}/{att_total}).")
+            else:
+                print("  ESCALATION DUE — lease not renewed past SLA, no marker "
+                      "today. ATTENDANCE NOT CHECKED: this says the LEASE lapsed, "
+                      "not that nobody is working. Re-run with --check-attendance "
+                      "before calling a role unattended.")
     if status == roles.UNKNOWN:
         # FAIL CLOSED (2026-07-11): the lease listing was unreadable, so the role's
         # state is UNKNOWN — NOT vacant. A degraded transport must not let a caller
@@ -8084,14 +8168,51 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                       f"session has lapsed (declared window ended; role retained, "
                       f"not gone-dark); escalation suppressed", file=sys.stderr)
                 continue
+        # ATTENDANCE on the ACTING path. Computed only for a role that is
+        # otherwise about to escalate, so the listing cost is paid on the rare
+        # acting branch and never on every role of every sweep.
+        #
+        # Wiring this into `roles status` alone was the round-1 defect: that
+        # improved what an operator READS while the sweep kept emitting the same
+        # false "unattended" P1s. The diagnostic is not the actuator.
+        anchor = roles._parse(now)
+        attended, a_scanned, a_total = None, 0, 0
+        if anchor is not None:
+            attended, a_scanned, a_total = _role_attended(
+                transport, args.team,
+                [str(l.get("agent")) for l in (leases or [])],
+                since=anchor - timedelta(hours=sla))
+        if not roles.escalation_due(leases, now=now, sla_hours=sla,
+                                    marker_exists_today=marker_exists,
+                                    attended=attended):
+            print(f"escalate: {role} vacancy explained — a holder filed a verdict "
+                  f"within {sla:g}h (scanned {a_scanned}/{a_total}); the LEASE "
+                  f"lapsed, the job did not. Escalation suppressed — ask for a "
+                  f"lease renewal.", file=sys.stderr)
+            continue
+        # The `ROLE VACANT ...` slug family is a CONTRACT (dedupe key, existing
+        # queries, day-over-day re-notify). Keep it; change only the claim made
+        # after it, which is the part that was false.
+        if attended is False:
+            title = (f"ROLE VACANT {today}: {role} UNATTENDED past {sla:g}h SLA "
+                     f"— no holder work found")
+            evidence = (f"A COMPLETE verdict sweep ({a_scanned}/{a_total}) found no "
+                        f"work by any holder inside the window.")
+        else:
+            title = (f"ROLE VACANT {today}: {role} lease lapsed past {sla:g}h SLA "
+                     f"(attendance UNVERIFIED)")
+            evidence = (f"Attendance could NOT be established (scanned "
+                        f"{a_scanned}/{a_total}). This says the LEASE lapsed — NOT "
+                        f"that nobody is working. Verify before treating it as absence.")
         maintainer = str(reg.get("maintainer") or _human())
         transport.write(marker_path, okf.render_frontmatter(
             {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
         slug, content = tasks.new_task_doc(
-            f"ROLE VACANT {today}: {role} unattended past {sla:g}h SLA",
+            title,
             now=now, status="proposed", priority="P1", owner=_host(),
             assignee=maintainer, kind="directive",
             summary=f"Role {role} in team/{args.team} has no fresh lease past its SLA. "
+                    f"{evidence} "
                     f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
         )
         dst = _task_path(args.team, slug)
@@ -8488,6 +8609,10 @@ def build_parser() -> argparse.ArgumentParser:
     rlsub = rl.add_subparsers(dest="roles_command", required=True)
     rst = rlsub.add_parser("status", help="HELD/VACANT/CONTESTED + escalation-due")
     rst.add_argument("team"); rst.add_argument("role"); add_json(rst)
+    rst.add_argument("--check-attendance", action="store_true",
+                     help="scan verdicts for holder work inside the SLA window; a "
+                          "lapsed lease alone never proves a role is unattended "
+                          "(opt-in: it costs one listing per review)")
     rst.set_defaults(func=cmd_roles_status)
     rcl = rlsub.add_parser("claim", help="claim/refresh a lease on a role")
     rcl.add_argument("team"); rcl.add_argument("role"); rcl.add_argument("--agent", "-a")

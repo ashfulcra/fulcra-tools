@@ -152,10 +152,28 @@ def escalation_due(
     sla_hours: float = DEFAULT_SLA_HOURS,
     marker_exists_today: bool = False,
     dormant: bool = False,
+    attended: Optional[bool] = None,
 ) -> bool:
     """Engine DECIDES escalation (the SKILL prose ACTS): true iff the role is
-    vacant past its SLA, not deliberately parked (``dormant``), and today's dedupe
-    marker isn't already present."""
-    if dormant or marker_exists_today:
+    vacant past its SLA, not deliberately parked (``dormant``), today's dedupe
+    marker isn't already present, and the role is not demonstrably being served.
+
+    ``attended`` is TRI-STATE and the distinction is the point:
+
+    * ``True``  — a role holder produced work inside the SLA window. The lease
+      lapsed; the JOB did not. Escalating "unattended" here is false.
+    * ``False`` — checked, and no work product found. A real vacancy.
+    * ``None``  — NOT CHECKED (the default). Escalate, because an unchecked
+      window is not evidence of absence — but callers must say "attendance not
+      checked" rather than assert nobody is working.
+
+    WHY THIS EXISTS. Escalation used to key on lease timestamps alone, so the
+    predicate was "has a lease been renewed lately" while the alarm it raised
+    read "is anybody doing this job." Those diverged for four days:
+    codex-reviewer's lease went stale while it filed verdicts hourly, and the
+    detector filed a P1 per role per day, every one of them false. A standing
+    alarm that is always wrong is worse than no alarm — it trains readers to
+    ignore the one that is real."""
+    if dormant or marker_exists_today or attended is True:
         return False
     return classify(leases, now=now, sla_hours=sla_hours) == VACANT
