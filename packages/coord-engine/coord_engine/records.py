@@ -1165,6 +1165,7 @@ def commit_v2_delivery(
 def supersession_adoption(
     events: list[Any],
     outcomes: Optional[dict[str, str]],
+    explicit_ids: Optional[set] = None,
 ) -> dict[str, Any]:
     """Fold the supersession-adoption metric over a window of bus events.
 
@@ -1175,14 +1176,15 @@ def supersession_adoption(
     fleet) — the whole metric is then UNKNOWN, never 0% (absence of data is
     not evidence of non-adoption).
 
-    Scope (narrowed, pr-503 round 1): the explicit signal this fold counts
-    directly is the record-level ``superseded`` classification
-    (``queue commit --result <id>=superseded``). The ``task supersede`` verb
-    (D3) writes its ``superseded_by`` evidence into TASK documents keyed by
-    task slug, and no identity mapping from task slugs to event record ids
-    exists in the data model — so that channel is out of scope here rather
-    than exposed as a parameter no production caller can fill. Wiring it
-    requires a schema-level task→record link first.
+    ``explicit_ids``: EVENT record ids whose supersession went through the
+    explicit ``task supersede --record`` verb — the task→record join added by
+    the s7 verb-channel link (the pr-503 narrowing held only while no such
+    mapping existed; :func:`explicit_supersessions` gathers it from task-doc
+    frontmatter and ``cmd_doctor`` is the production caller). An explicit id
+    counts its candidate directly (deputy rule 3) even when no cursor
+    classified the predecessor. Precedence is unchanged: with ``outcomes``
+    ``None`` the whole metric stays UNKNOWN — explicit ids refine within a
+    measured window, they never conjure one.
 
     Returns ``{"status", "counted", "superseded", "unknown", "ratio"}``:
     ratio is ``None`` when nothing was countable — an empty denominator must
@@ -1191,6 +1193,7 @@ def supersession_adoption(
     if outcomes is None:
         return {"status": "unknown", "counted": 0, "superseded": 0,
                 "unknown": 0, "ratio": None}
+    explicit = explicit_ids or set()
 
     directives: list[dict[str, Any]] = []
     for event in events:
@@ -1213,7 +1216,7 @@ def supersession_adoption(
         earlier = by_key.get(key)
         if earlier is not None:
             outcome = outcomes.get(earlier["record_id"])
-            if outcome == "superseded":
+            if earlier["record_id"] in explicit or outcome == "superseded":
                 counted += 1
                 superseded += 1
             elif outcome in ("completed", "blocked"):
@@ -1227,6 +1230,26 @@ def supersession_adoption(
     ratio = (superseded / counted) if counted else None
     return {"status": "ok", "counted": counted, "superseded": superseded,
             "unknown": unknown, "ratio": ratio}
+
+
+def explicit_supersessions(frontmatters: list[Any]) -> set:
+    """EVENT record ids evidenced by ``task supersede --record`` — the
+    task→record join for :func:`supersession_adoption`'s explicit channel.
+
+    Pure fold over parsed task-doc frontmatter dicts: keeps every non-empty
+    string ``superseded_record_id``, dedupes, and tolerates malformed rows
+    (a task doc that is not a dict, or whose field is not a usable string,
+    contributes nothing — the fold's unknown bucket already covers
+    supersessions without a usable join, so silence here is honest, not
+    lossy)."""
+    out: set = set()
+    for fm in frontmatters:
+        if not isinstance(fm, dict):
+            continue
+        rid = fm.get("superseded_record_id")
+        if isinstance(rid, str) and rid.strip():
+            out.add(rid.strip())
+    return out
 
 
 def outcome_mix(cursor: Optional[dict[str, Any]]) -> Optional[dict[str, int]]:

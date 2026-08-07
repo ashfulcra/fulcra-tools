@@ -105,6 +105,7 @@ def apply_update(
     remove_tags: Optional[list[str]] = None,
     unlock: Optional[str] = None,
     superseded_by: Optional[str] = None,
+    superseded_record_id: Optional[str] = None,
 ) -> str:
     """Read-modify-write a task doc, enforcing the status machine. Raises
     ``TaskError`` on a missing doc, unparseable frontmatter, or illegal transition."""
@@ -155,6 +156,12 @@ def apply_update(
         fm["unlock"] = unlock
     if superseded_by is not None:
         fm["superseded_by"] = superseded_by
+    if superseded_record_id is not None:
+        # s7 verb-channel link: the superseded predecessor's EVENT record id,
+        # the join the supersession-adoption fold's explicit channel keys on.
+        # Optional — a supersession with no known event id stays legal and
+        # reads as unmeasured, never guessed.
+        fm["superseded_record_id"] = superseded_record_id
     if checkpoint_ref is not None:
         fm["checkpoint_ref"] = checkpoint_ref
     if add_tags:
