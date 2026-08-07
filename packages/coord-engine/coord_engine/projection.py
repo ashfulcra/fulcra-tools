@@ -115,6 +115,14 @@ _FUTURE_SKEW_HOURS = 0.25
 #: — defined there first; duplicated here because ``cli`` imports this module).
 SETTLED_MARKER = ".settled"
 
+#: ``review gc``'s terminal marker (mirrors ``review_gc.GC_MARKER``). A retired
+#: entry is terminal but was never reviewed, so it is folded as RETIRED rather
+#: than APPROVED — and, crucially, it is skipped HERE, in the reader. Writing the
+#: marker without teaching the readers would have retired nothing: the entry
+#: would still be scanned, still tallied pending, and still consume the exact
+#: projection budget the verb exists to recover (codex-reviewer, review-gc r1).
+GC_MARKER = ".gc-closed"
+
 
 def max_age_hours() -> float:
     """Serve-threshold for projection sections, hours. Env
@@ -331,7 +339,18 @@ def _scan_review_slug(
         "mtime": entry.get("mtime"),
         "size": entry.get("size"),
     }
-    if any((v.get("name") or "") == SETTLED_MARKER for v in ventries):
+    vnames = {(v.get("name") or "") for v in ventries}
+    if GC_MARKER in vnames:
+        # Retired by gc: OMITTED from the projection, and the scan counts as
+        # COMPLETE. Round 2 of this review emitted a `state: RETIRED,
+        # settled: true` row instead, and `_validated_review_projection` accepts
+        # only PENDING/APPROVED/CHANGES and rejects any settled row that is not
+        # APPROVED — so the first retired entry invalidated the WHOLE section and
+        # every consumer fell back to the raw scan. Omission needs no new state
+        # in a validated schema, and a retired entry carries no review
+        # information a consumer wants: it owes nobody a verdict.
+        return None, True
+    if SETTLED_MARKER in vnames:
         # Settled-cache hit: the round is terminal-APPROVED and immutable — the
         # doc read above already gave us the forge-relevant identity fields.
         return {**base, "state": review.APPROVED, "pending_required": [],
@@ -432,6 +451,10 @@ def build_review_projection(
             unknown += 1
             if slug in prior_rows:
                 rows.append(prior_rows[slug])
+            continue
+        if row is None:
+            # Scanned successfully and deliberately not projected (gc-retired).
+            # Complete, not unknown: the pass DID resolve this slug.
             continue
         rows.append(row)
     rows.sort(key=lambda r: str(r.get("name")))
