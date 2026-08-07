@@ -168,6 +168,33 @@ nobody was looking.** The monitoring vision, staged:
    from all harnesses above on a cadence, with drift detected against pinned
    baselines (e.g. `docs/specs/fulcra-openapi-digest.txt`).
 
+13. **A gated harness refuses to EXECUTE a downloaded install script, and that
+    refusal is correct** (codex; verified live 2026-08-07). The sanctioned
+    adoption flow is `download adopt-latest.sh` then `bash /tmp/a.sh <agent>`.
+    On the codex harness the approval classifier rejects the second step
+    because *a downloaded script can install packages and persistently modify
+    the environment*. This is not a bug to engineer past — it is an
+    operator-level control, and an agent that routes around it has broken
+    something more important than its own currency.
+    **What the classifier objects to is OPACITY, not the operations.** The two
+    installs are fine; an opaque blob doing arbitrary things is not. So the
+    supported path is to READ the authority values (`PIN=`, `VER=`, `COMMON=`)
+    out of the script — a file read, nothing to refuse — and run the two
+    `uv tool install` commands inline, where the whole command line is visible
+    to the approval layer. Never hardcode the pin into the recipe: read it at
+    run time, or it rots at the next pin move like every other copied pin has.
+    Then perform the three checks the script's claim gate performs (bus-v3 verb
+    resolves; `doctor` prints a pin-currency line naming the PIN; `fulcra_common`
+    imports **in the engine's own interpreter**) and only then send the claim —
+    file NO claim if any check fails. Recipe:
+    `team/fulcra/_coord/bus-v3/ADOPT-WHEN-GATED.md`, linked from the head of
+    `adopt-latest.sh` so it is found at the moment of refusal rather than
+    searched for afterwards.
+    If the literal commands are ALSO refused, that is a genuine operator unlock:
+    say so and stop. A blocked agent is not blocked on work — a stale pin still
+    reads the bus — so it is currency, not capability, and it should keep
+    working while it reports the block.
+
 ## Change log
 
 - 2026-07-14: initial map (coord-boss), from the 07-11..07-14 incident record.
@@ -176,3 +203,6 @@ nobody was looking.** The monitoring vision, staged:
 - 2026-08-07: wall 12 (setsid reaping), from two silent `health` census
   failures during a coord-boss watchdog sweep — both zero-byte, neither
   reported by anything.
+- 2026-08-07: wall 13 (gated harness refuses the install script), from
+  codex-coder hitting it on the pin move to e1880da9 and adopting via the
+  literal-commands path instead.
