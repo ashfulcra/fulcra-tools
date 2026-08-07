@@ -61,6 +61,20 @@ class Deadline:
         deadline never expires. Uses ``>=`` — the boundary instant counts as spent."""
         return self.instant is not None and time.monotonic() >= self.instant
 
+    def remaining(self) -> Optional[float]:
+        """Seconds left, or ``None`` if unbounded. Never negative — a spent
+        deadline yields ``0.0``, which callees treat as "no time", not as
+        "unlimited".
+
+        This exists so a phase deadline can BIND the callee it measures. Without
+        it a caller can only ask ``expired()`` after the fact, which is how a
+        deadline ends up measuring a phase it does not bound — three separate
+        instances of that bug shipped in one day (2026-08-07).
+        """
+        if self.instant is None:
+            return None
+        return max(0.0, self.instant - time.monotonic())
+
     def reserve(self, fraction: float) -> "Deadline":
         """A sub-deadline that reserves ``fraction`` of the budget for LATER work,
         giving the current phase the remainder. ``reserve(0.5)`` on a 30s budget
