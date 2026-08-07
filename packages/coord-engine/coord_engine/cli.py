@@ -21,6 +21,7 @@ import math
 import os
 import pathlib
 import secrets
+import re
 import socket
 import sys
 import time
@@ -61,8 +62,51 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
+#: Characters an identity may contain. Matches the charset the installer already
+#: validates agent ids against — applied here at ID CONSTRUCTION, which is where
+#: the unvalidated value actually enters the keyspace.
+_IDENTITY_SAFE = re.compile(r"[^A-Za-z0-9:_.-]+")
+
+_hostname_rewrite_warned = False
+
+
+def _sanitize_hostname(raw: str) -> tuple[str, bool]:
+    """→ (safe, rewritten). Runs of unsafe characters collapse to one ``-``;
+    leading/trailing separators are stripped.
+
+    A hostname is whatever the OS hands back, and the fleet id built from it is
+    the KEY for presence, health, roles and leases. One host has been registered
+    as ``coord-reconcile: <control chars>`` since at least 2026-07-16: unmatched
+    by any fold that keys on name, impossible to ``tell``, invisible to a
+    version-skew audit, and permanently unaddressable — a hole in a shared
+    keyspace that nothing can now reference.
+    """
+    safe = _IDENTITY_SAFE.sub("-", raw).strip("-.:_")
+    return safe, safe != raw
+
+
 def _host() -> str:
-    return os.environ.get("FULCRA_COORD_AGENT") or f"coord-reconcile:{socket.gethostname()}"
+    explicit = os.environ.get("FULCRA_COORD_AGENT")
+    if explicit:
+        return explicit
+    global _hostname_rewrite_warned
+    raw = socket.gethostname()
+    safe, rewritten = _sanitize_hostname(raw)
+    if not safe:
+        # Refuse rather than invent. A process that cannot establish WHO IT IS
+        # must not write to a shared keyspace — minting a placeholder is how the
+        # phantom-identity traps got there in the first place.
+        raise RuntimeError(
+            "cannot derive a fleet identity: this host's name contains no "
+            "usable characters (" + repr(raw) + "). Set FULCRA_COORD_AGENT to "
+            "an explicit identity before writing to the coordination store.")
+    if rewritten and not _hostname_rewrite_warned:
+        _hostname_rewrite_warned = True
+        print(f"coord-engine: hostname {raw!r} is not a usable fleet id; using "
+              f"{safe!r}. This host's presence/lease/health keys depend on it — "
+              f"set FULCRA_COORD_AGENT explicitly to pin your identity.",
+              file=sys.stderr)
+    return f"coord-reconcile:{safe}"
 
 
 def cmd_wake_queue_file(args: argparse.Namespace, transport: Any) -> int:
