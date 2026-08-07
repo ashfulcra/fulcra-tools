@@ -168,3 +168,54 @@ def test_a_deferred_directive_emits_no_companion(monkeypatch):
     cli._create_directive(args, None, assignee="a",
                           not_before="2026-09-01T00:00:00Z")
     assert calls == []
+
+
+# --- the two planes disagree about the word for everyone -------------------
+#
+# coord-boss P0, 2026-08-07: `broadcast` printed a slug and rc 0 and reached
+# NOBODY. The task plane says "*", the event plane says "all"
+# (records.BROADCAST), and the reader filter is `to in (agent, BROADCAST)` — so
+# an event addressed to "*" matches no one. Neither token is wrong on its own;
+# nothing translated between them. Directed dispatch was unaffected because the
+# two strings coincide there, which is exactly why this survived being tested.
+
+def test_broadcast_is_translated_to_the_event_plane_token():
+    from coord_engine import directives, records
+
+    assert directives.EVERYONE == "*"
+    assert records.BROADCAST == "all"
+    assert directives.EVERYONE != records.BROADCAST, (
+        "if these ever become the same string, the translation below is a no-op "
+        "and this test stops protecting anything"
+    )
+
+
+def test_the_reader_filter_would_drop_the_task_plane_token():
+    """The mechanism itself, asserted rather than described: an event addressed
+    with the TASK plane's everyone-token reaches nobody."""
+    from coord_engine import records
+
+    for agent in ("coord-boss", "codex-reviewer", "anyone-at-all"):
+        assert "*" not in (agent, records.BROADCAST)
+        assert records.BROADCAST in (agent, records.BROADCAST)
+
+
+def test_a_broadcast_companion_is_addressed_to_the_EVENT_plane_token(emitted):
+    """THE regression. `broadcast` assigns the task-plane "*"; the companion
+    must emit the event-plane "all" or the reader filter drops it and the
+    broadcast reaches nobody while printing a slug and rc 0."""
+    cli._emit_dispatch_companion(None, _args(), slug="fleet-wide-thing",
+                                 assignee=directives.EVERYONE)
+    assert len(emitted) == 1
+    assert emitted[0]["to"] == records.BROADCAST, (
+        f'emitted to={emitted[0]["to"]!r} — the task-plane token reaches nobody'
+    )
+
+
+def test_a_directed_companion_is_untouched_by_the_translation(emitted):
+    """The over-correction guard: only the everyone-token is rewritten. A
+    recipient literally named something else must pass through verbatim."""
+    for who in ("coord-boss", "codex-reviewer", "all", "star*ish"):
+        emitted.clear()
+        cli._emit_dispatch_companion(None, _args(), slug="s", assignee=who)
+        assert emitted[0]["to"] == who
