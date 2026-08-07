@@ -274,15 +274,19 @@ def test_a_retired_slug_leaves_the_projection_scan():
     row, complete = projection._scan_review_slug(
         t, "fulcra", "dead-slug", {"name": "dead-slug.md"},
         now="2026-08-07T00:00:00Z", deadline=Deadline.open(60.0))
-    assert complete
-    assert row["state"] == review.RETIRED
-    assert row["pending_required"] == []
-    assert row["state"] != review.APPROVED  # never claim it was reviewed
+    # OMITTED, and the scan counts COMPLETE: the pass did resolve this slug, it
+    # simply has nothing a consumer wants. Emitting a new state instead is what
+    # broke round 2.
+    assert row is None
+    assert complete is True
 
 
-def test_retired_is_a_distinct_state_from_approved():
+def test_no_new_state_leaks_into_the_validated_schema():
+    """Round 2's fix added `review.RETIRED`; the validated consumer rejected it.
+    Omission needs no new state at all, so the schema stays exactly as the
+    consumer already accepts it."""
     from coord_engine import review
-    assert review.RETIRED != review.APPROVED
+    assert not hasattr(review, "RETIRED")
 
 
 def test_a_retired_slug_leaves_the_pending_review_fold():
@@ -317,3 +321,32 @@ def test_apply_writes_the_marker_where_the_readers_look():
     cli.cmd_review_gc(args, t)
     assert any(p.endswith("/review/dead-slug/verdicts/.gc-closed")
                for p in t.written), t.written
+
+
+def test_a_projection_containing_a_retired_entry_SURVIVES_validation():
+    """THE round-2 blocker, tested end to end rather than producer-only.
+
+    Round 2 emitted retired rows as `state: RETIRED, settled: true`.
+    `_validated_review_projection` accepts only PENDING/APPROVED/CHANGES and
+    rejects any settled row that is not APPROVED, so the FIRST retired entry
+    invalidated the entire section and every consumer fell back to the raw
+    scan — defeating the durable path the verb exists to restore. Testing the
+    producer alone did not catch it; this consumes the projection."""
+    from coord_engine import cli, projection
+    from coord_engine.budget import Deadline
+
+    t = RegisterTransport({
+        "dead-slug": {"doc": DOC.format(head="a" * 40),
+                      "verdicts": [".gc-closed"]},
+        "live-slug": {"doc": DOC.format(head="b" * 40), "verdicts": []},
+    })
+    section = projection.build_review_projection(
+        t, "fulcra", now="2026-08-07T00:00:00Z", prior=None,
+        settled_index=set(), deadline=Deadline.open(60.0))
+    names = {str(r.get("name")) for r in (section.get("rows") or [])}
+    assert not any("dead-slug" in n for n in names), names
+    assert any("live-slug" in n for n in names), names
+
+    validated = cli._validated_review_projection(section)
+    assert validated is not None, ("the retired entry invalidated the whole "
+                                   "section — exactly the round-2 defect")
