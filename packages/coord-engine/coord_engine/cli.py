@@ -3369,8 +3369,17 @@ def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
               "plane only (recipient must run `needs-me`)")
         return
     try:
+        # TRANSLATE THE EVERYONE-TOKEN AT THE PLANE BOUNDARY. The task plane
+        # says "*" and the event plane says "all" (records.BROADCAST); the
+        # reader filter is `to in (agent, BROADCAST)`, so an event addressed to
+        # "*" matches NOBODY. Passing the assignee straight through was correct
+        # for every DIRECTED dispatch -- the two strings coincide there, which
+        # is why tell worked and was tested -- and silently dropped every
+        # BROADCAST. Neither plane is wrong on its own; the defect was that
+        # nothing translated between them (coord-boss, 2026-08-07).
+        to = records.BROADCAST if assignee == directives.EVERYONE else assignee
         ok = records.emit_event(
-            transport, cfg, sender=sender, to=assignee, kind="directive",
+            transport, cfg, sender=sender, to=to, kind="directive",
             priority=getattr(args, "priority", None) or "P2", slug=slug,
             ptr=_task_path(args.team, slug).split("/", 2)[-1],
             team=args.team)
@@ -3483,7 +3492,12 @@ def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
         ok = records.emit_event(
             transport, cfg,
             sender=_known_sender(args) or _host(),
-            to=args.assignee, kind="directive",
+            # Same plane boundary as the dispatch companion: the task plane's
+            # "*" is not the event plane's "all". `remind --assignee '*'` hit
+            # the identical drop, unreported only because nobody had used it.
+            to=(records.BROADCAST if args.assignee == directives.EVERYONE
+                else args.assignee),
+            kind="directive",
             priority=getattr(args, "priority", None) or "P2",
             slug=slug, ptr=f"task/{slug}.md", recorded_at=when,
             team=args.team)
