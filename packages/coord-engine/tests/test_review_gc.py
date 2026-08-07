@@ -548,3 +548,84 @@ def test_an_ordinary_local_repo_still_proves_absence(tmp_path, monkeypatch):
 
     monkeypatch.setattr(handoff, "repo_root", lambda: d)
     assert cli._git_head_probe()("0" * 40) is False
+
+
+# --- blindness must be loud, and --apply must refuse it --------------------
+#
+# The guard made gc SAFE in a clone that cannot prove absence: every head reads
+# UNKNOWN, nothing is retirable, nothing is written. It also made it SILENT --
+# "retired 0" reads exactly like a clean register. That is this P0's own shape
+# one layer up: absence of a finding standing in for a finding of absence.
+
+
+def _blind_probe():
+    p = lambda sha: None          # noqa: E731 - a stand-in probe
+    p.absence_is_trustworthy = False
+    return p
+
+
+def _seeing_probe():
+    p = lambda sha: False         # noqa: E731
+    p.absence_is_trustworthy = True
+    return p
+
+
+def test_a_blind_clone_says_so_on_a_dry_run(monkeypatch, capsys):
+    import argparse
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_git_head_probe", _blind_probe)
+    t = RegisterTransport({"dead-slug": {
+        "doc": DOC.format(head="a" * 40), "verdicts": []}})
+    rc = cli.cmd_review_gc(
+        argparse.Namespace(team="fulcra", apply=False, sender="tester"), t)
+    err = capsys.readouterr().err
+    assert rc == 0, "a dry run from a blind clone is still allowed"
+    assert "CANNOT PROVE ABSENCE" in err
+    assert "BLIND, not clean" in err
+
+
+def test_apply_refuses_from_a_blind_clone_and_writes_nothing(monkeypatch, capsys):
+    """The technical control. A hold that is only announced is a social
+    control; this makes the destructive verb refuse on its own."""
+    import argparse
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_git_head_probe", _blind_probe)
+    t = RegisterTransport({"dead-slug": {
+        "doc": DOC.format(head="a" * 40), "verdicts": []}})
+    rc = cli.cmd_review_gc(
+        argparse.Namespace(team="fulcra", apply=True, sender="tester"), t)
+    assert rc == 2, "refusal must be a distinct non-zero rc, not a quiet 0"
+    assert "refusing --apply" in capsys.readouterr().err
+    assert not t.written, t.written
+
+
+def test_a_seeing_clone_is_unaffected(monkeypatch, capsys):
+    """Over-correction guard: the warning and the refusal must not fire where
+    absence IS provable, or gc can never retire anything again."""
+    import argparse
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_git_head_probe", _seeing_probe)
+    t = RegisterTransport({"dead-slug": {
+        "doc": DOC.format(head="a" * 40), "verdicts": []}})
+    rc = cli.cmd_review_gc(
+        argparse.Namespace(team="fulcra", apply=True, sender="tester"), t)
+    err = capsys.readouterr().err
+    assert "CANNOT PROVE ABSENCE" not in err
+    assert "refusing --apply" not in err
+    assert rc == 0
+    assert any(p.endswith("/review/dead-slug/verdicts/.gc-closed")
+               for p in t.written), t.written
+
+
+def test_the_real_probe_publishes_its_capability():
+    """The flag must actually be set by the real constructor, not only by the
+    doubles above — otherwise these tests pass against a probe that never
+    exposes it and cmd_review_gc silently defaults to 'trustworthy'."""
+    from coord_engine import cli
+
+    probe = cli._git_head_probe()
+    assert hasattr(probe, "absence_is_trustworthy")
+    assert isinstance(probe.absence_is_trustworthy, bool)

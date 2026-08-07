@@ -7767,6 +7767,10 @@ def _git_head_probe() -> "Callable[[str], Optional[bool]]":
             return False if absence_is_trustworthy else None
         return None
 
+    # Published so callers on the DESTRUCTIVE path can tell "found nothing"
+    # from "could not look". Without it a blind run is indistinguishable from
+    # a clean register — safe, but silently wrong to a reader.
+    _probe.absence_is_trustworthy = absence_is_trustworthy  # type: ignore[attr-defined]
     return _probe
 
 
@@ -7816,7 +7820,25 @@ def cmd_review_gc(args: argparse.Namespace, transport: Any) -> int:
         print(f"review gc: register unreadable ({e}) — nothing scanned, "
               f"nothing retired", file=sys.stderr)
         return 2
-    verdicts = review_gc.plan(entries, head_exists=_git_head_probe())
+    probe = _git_head_probe()
+    # BLINDNESS MUST BE LOUD. With the shallow/partial guard in place gc is
+    # SAFE in such a clone -- every head reads UNKNOWN, so nothing is
+    # classified dead and nothing is retired. It is also SILENT: the run
+    # reports "retired 0", which reads exactly like a clean register. That is
+    # the same failure this whole P0 is about, one layer up -- absence of a
+    # finding standing in for a finding of absence.
+    blind = not getattr(probe, "absence_is_trustworthy", True)
+    if blind:
+        print("review gc: this checkout CANNOT PROVE ABSENCE (shallow or "
+              "partial clone), so no entry can be classified dead here. A "
+              "'nothing retirable' result from this clone is BLIND, not clean. "
+              "Re-run from a full checkout (git fetch --unshallow).",
+              file=sys.stderr)
+        if args.apply:
+            print("review gc: refusing --apply from a clone that cannot prove "
+                  "absence -- nothing was written", file=sys.stderr)
+            return 2
+    verdicts = review_gc.plan(entries, head_exists=probe)
     print(review_gc.render_plan(verdicts, applying=bool(args.apply)))
     for slug in unreadable:
         print(f"  keep {slug} — UNREADABLE: doc or verdicts dir could not be "
