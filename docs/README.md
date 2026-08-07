@@ -36,20 +36,16 @@ kept for provenance, not written for you.
 - [`TESTING.md`](TESTING.md) — how to run the suites and install Collect as a
   launchd agent.
 
-## Internal (Fulcra-team history, roadmap, and audits)
+## Team-internal material
 
-Kept for provenance; safe to skip on a first read.
+Anything specific to one team that runs this toolkit — agent rosters, incident
+evidence, rollout records, internal pitch material, audit artifacts — lives in
+**that team's file store**, not in this repository. This repo is the tools.
 
-- [`coord/pitch/`](coord/pitch) — the internal Fulcra pitch for coord
-  (one-pager, wave-1 PR draft, live-demo script). Written for the Fulcra team,
-  not a cold recipient.
 - [`coord/COORD2-README.md`](coord/COORD2-README.md) — provenance pointer for
   the coord subtree's migration history.
 - [`coord/proposals/`](coord/proposals) and [`proposals/`](proposals) —
-  historical design proposals.
-- [`analysis/`](analysis) and [`audits/`](audits) — internal analysis and QA
-  audit artifacts.
-- [`fulcra-coord-0.13.0-rollout.md`](fulcra-coord-0.13.0-rollout.md) — rollout
-  notes for the deprecated first-generation `fulcra-coord`.
+  design proposals that shipped code still cites as its source. Historical, but
+  load-bearing: two `coord-engine` modules name them as their design.
 - [`skill-quality-pattern.md`](skill-quality-pattern.md) — the maintainer
   convention for skill quality across the `fulcra-agent-*` set.
