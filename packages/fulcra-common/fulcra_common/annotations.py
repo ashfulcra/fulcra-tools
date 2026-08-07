@@ -891,7 +891,9 @@ def _digest_definition_cache_path() -> Path:
     return annotations_dir() / "digest-definition.json"
 
 
-def pin_definition_id(def_id: str, *, digest: bool = False) -> str:
+def pin_definition_id(def_id: str, *, digest: bool = False,
+                      token: Optional[str] = None,
+                      force: bool = False) -> str:
     """Operator-explicit pin: write a never-expiring cache entry for the
     (Agent Tasks | Digest) definition id. Returns the cache path written.
 
@@ -916,7 +918,53 @@ def pin_definition_id(def_id: str, *, digest: bool = False) -> str:
     (``_coord/bus-v3/records.json``) at write time rather than by name. Keep
     this hatch even after that lands: it is what makes the next by-name
     surprise survivable in one call instead of one release.
+
+    Validated, because ``pinned`` means NEVER EXPIRES and an unguarded hatch
+    can make the incident permanent. In an outage whose root cause is "we
+    resolved to a superseded definition", pinning a superseded (or mistyped)
+    id would outlive every TTL in the system. Liveness is tri-state and is
+    treated the way this module treats every other ambiguous read:
+
+    * ``False`` — verified dead (soft-deleted, or not this account's).
+      **Refuse**: pinning it IS the incident, made durable.
+    * ``None`` — undeterminable (no token, auth flake, 5xx, offline).
+      **Warn loudly and proceed.** The hatch has to work in exactly the
+      degraded conditions it exists for; refusing here would make it
+      unusable during the incident it is meant to end.
+    * ``True`` — proceed.
+
+    Pass ``token`` to check against a specific credential, or ``force=True``
+    to skip the check entirely (recorded in the warning, for the case where
+    an operator knows better than the catalog).
     """
+    def_id = (def_id or "").strip()
+    if not def_id:
+        raise ValueError("pin_definition_id: empty definition id")
+    try:
+        uuid.UUID(def_id)
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(
+            f"pin_definition_id: {def_id!r} is not a definition uuid") from None
+
+    if force:
+        logger.warning(
+            "pin_definition_id: pinning %s WITHOUT a liveness check (force=True)",
+            def_id)
+    else:
+        live = _definition_live(def_id, token if token is not None else _resolve_token())
+        if live is False:
+            raise ValueError(
+                f"pin_definition_id: refusing to pin {def_id} — the catalog "
+                "reports it soft-deleted or inaccessible. A pin never expires, "
+                "so this would make a dead definition permanent. Pass force=True "
+                "only if you know the catalog is wrong.")
+        if live is None:
+            logger.warning(
+                "pin_definition_id: could not verify %s is live (no token, or the "
+                "catalog was unreachable) — pinning anyway, as the operator is "
+                "explicit and a pin never expires. Re-verify when connectivity "
+                "returns.", def_id)
+
     annotations_dir().mkdir(parents=True, exist_ok=True)
     path = _digest_definition_cache_path() if digest else _definition_cache_path()
     path.write_text(json.dumps(
