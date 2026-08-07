@@ -568,12 +568,14 @@ def test_an_ordinary_local_repo_defers_to_the_source(tmp_path, monkeypatch):
     # belief that reported six live heads as dead. A repo with no reachable
     # source cannot prove anything about absence, however complete it is.
     monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
     monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
     assert cli._git_head_probe()("0" * 40) is None
 
     # ...and absence IS provable once the SOURCE answers. This is the
     # over-correction guard in its new, correct form: without it gc can never
     # retire anything and the register rots, which is the problem gc exists for.
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
     monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: False)
     assert cli._git_head_probe()("0" * 40) is False
 
@@ -683,6 +685,7 @@ def test_a_ls_remote_MISS_is_not_absence(monkeypatch):
     from coord_engine import cli
 
     monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"b" * 40})
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
     monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: True)
     assert cli._remote_head_exists("a" * 40) is True, (
         "a non-tip commit that the forge confirms is ALIVE was reported absent"
@@ -693,6 +696,7 @@ def test_only_the_forge_may_answer_absent(monkeypatch):
     from coord_engine import cli
 
     monkeypatch.setattr(cli, "_remote_ref_tips", lambda: {"b" * 40})
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
     monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: False)
     assert cli._remote_head_exists("a" * 40) is False
 
@@ -703,6 +707,7 @@ def test_no_remote_answer_at_all_is_UNKNOWN(monkeypatch):
     from coord_engine import cli
 
     monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
     monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
     assert cli._remote_head_exists("a" * 40) is None
 
@@ -716,6 +721,7 @@ def test_the_probe_never_returns_False_from_local_absence_alone(monkeypatch):
     if handoff.repo_root() is None:
         pytest.skip("not running inside a git repository")
     monkeypatch.setattr(cli, "_remote_ref_tips", lambda: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
     monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: None)
     assert cli._git_head_probe()("0" * 40) is None
 
@@ -788,3 +794,75 @@ def test_a_github_hit_is_presence(monkeypatch, tmp_path):
     cli = _fake_gh(monkeypatch, tmp_path, origin=GH + ".git", rc=0,
                    stdout="a" * 40 + "\n")
     assert cli._forge_head_exists("a" * 40) is True
+
+
+# --- the fetch probe: forge-agnostic, and abbreviation is a trap -----------
+#
+# Measured against GitHub:
+#   full sha alive       -> rc 0
+#   full sha fabricated  -> "remote error: upload-pack: not our ref <sha>"
+#   ABBREVIATED sha      -> "couldn't find remote ref" for BOTH
+# I ran the abbreviated form, got the failure, and reported it as proof that
+# fetch cannot probe GitHub. It was proof that abbreviations are not fetchable.
+
+
+def _fetch_env(monkeypatch, tmp_path, *, rc, stderr=""):
+    import subprocess
+    from coord_engine import cli, handoff
+    import shutil
+
+    monkeypatch.setattr(handoff, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr))
+    return cli
+
+
+def test_fetch_probe_rc0_is_presence(monkeypatch, tmp_path):
+    cli = _fetch_env(monkeypatch, tmp_path, rc=0)
+    assert cli._fetch_probe_head_exists("a" * 40) is True
+
+
+def test_fetch_probe_not_our_ref_is_absence(monkeypatch, tmp_path):
+    cli = _fetch_env(monkeypatch, tmp_path, rc=1,
+                     stderr="fatal: remote error: upload-pack: not our ref aaa")
+    assert cli._fetch_probe_head_exists("a" * 40) is False
+
+
+def test_fetch_probe_couldnt_find_remote_ref_is_UNKNOWN(monkeypatch, tmp_path):
+    """THE trap. This is what an ABBREVIATED sha returns whether the object is
+    alive or dead, so it can never mean absence."""
+    cli = _fetch_env(monkeypatch, tmp_path, rc=128,
+                     stderr="fatal: couldn't find remote ref 48e248ce9298")
+    assert cli._fetch_probe_head_exists("a" * 40) is None
+
+
+def test_fetch_probe_refuses_an_abbreviated_sha_outright(monkeypatch, tmp_path):
+    """Never even ask: an abbreviated sha is not a valid fetch argument, so the
+    answer would be uninterpretable rather than merely unknown."""
+    cli = _fetch_env(monkeypatch, tmp_path, rc=0)
+    assert cli._fetch_probe_head_exists("48e248ce9298") is None
+
+
+def test_the_fetch_probe_is_preferred_over_the_github_only_path(monkeypatch):
+    """Forge-agnostic first: a GitLab or self-hosted origin must get a real
+    answer rather than the None the GitHub path is obliged to return."""
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: set())
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: False)
+    monkeypatch.setattr(
+        cli, "_forge_head_exists",
+        lambda sha: pytest.fail("must not need GitHub when fetch answered"))
+    assert cli._remote_head_exists("a" * 40) is False
+
+
+def test_the_github_path_is_still_the_fallback(monkeypatch):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_remote_ref_tips", lambda: set())
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_fetch_probe_head_exists", lambda sha: None)
+    monkeypatch.setattr(cli, "_forge_head_exists", lambda sha: True)
+    assert cli._remote_head_exists("a" * 40) is True

@@ -7760,6 +7760,47 @@ def _forge_head_exists(sha: str) -> "Optional[bool]":
     return None
 
 
+def _fetch_probe_head_exists(sha: str) -> "Optional[bool]":
+    """Ask the REMOTE directly: ``git fetch --dry-run origin <full-sha>``.
+
+    Forge-agnostic and authoritative, measured against GitHub:
+
+        full sha, alive       -> rc 0, "* branch <sha> -> FETCH_HEAD"
+        full sha, fabricated  -> "remote error: upload-pack: not our ref <sha>"
+        ABBREVIATED sha       -> "couldn't find remote ref" -- ALWAYS, for both
+
+    That last line is why this is worth writing down. An abbreviated sha is not
+    a valid fetch argument at all, so it fails identically whether the object
+    lives or not. I ran exactly that experiment, got the failure, and reported
+    it as proof that fetch cannot probe GitHub -- attributing an error to the
+    wrong cause while writing about that very class of mistake. So: FULL SHAS
+    ONLY, and anything that is not the explicit not-our-ref answer is UNKNOWN.
+
+    ``--dry-run`` contacts the server without writing to the object store.
+    """
+    if len(sha or "") != 40:
+        return None
+    import shutil as _shutil
+    import subprocess as _subprocess
+    git = _shutil.which("git")
+    root = handoff.repo_root()
+    if not git or root is None:
+        return None
+    try:
+        cp = _subprocess.run([git, "fetch", "--dry-run", "origin", sha],
+                             cwd=str(root), capture_output=True, text=True,
+                             timeout=120)
+    except Exception:
+        return None
+    if cp.returncode == 0:
+        return True
+    err = (cp.stderr or "").lower()
+    if "not our ref" in err:
+        return False
+    # "couldn't find remote ref", auth failures, network errors: UNKNOWN.
+    return None
+
+
 def _remote_head_exists(sha: str) -> "Optional[bool]":
     """Does this sha exist AT THE SOURCE? True / False / None(unknown).
 
@@ -7775,6 +7816,12 @@ def _remote_head_exists(sha: str) -> "Optional[bool]":
     tips = _remote_ref_tips()
     if tips and any(t.startswith(sha) or sha.startswith(t) for t in tips):
         return True
+    # A tips MISS proves nothing (ref tips only). Ask the remote directly --
+    # forge-agnostic, so a GitLab or self-hosted origin gets a real answer
+    # instead of the None the GitHub-only path is obliged to return.
+    fetched = _fetch_probe_head_exists(sha)
+    if fetched is not None:
+        return fetched
     return _forge_head_exists(sha)
 
 
