@@ -22,9 +22,13 @@ on:
   push:
     branches: [main]
     paths:
-      - 'packages/menubar/**'
-      - 'packages/coord-engine/**'
-      - 'packages/fulcra-common/**'
+      # The job runs `pytest packages/` — the WHOLE tree — so the trigger, not
+      # the run step, is what decides whether a package's tests protect a PR.
+      # Enumerating packages here is what let #523 delete a tested function with
+      # nothing red: fulcra-common's tests ran many times a day, just never on
+      # the PR that changed it. `packages/**` keeps trigger and coverage in step
+      # by construction; test_ci_trigger_coverage.py fails if they drift apart.
+      - 'packages/**'
       - 'skills/fulcra-agent-automation/**'
       - '.github/workflows/macos.yml'
       - 'pyproject.toml'
@@ -32,9 +36,13 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'packages/menubar/**'
-      - 'packages/coord-engine/**'
-      - 'packages/fulcra-common/**'
+      # The job runs `pytest packages/` — the WHOLE tree — so the trigger, not
+      # the run step, is what decides whether a package's tests protect a PR.
+      # Enumerating packages here is what let #523 delete a tested function with
+      # nothing red: fulcra-common's tests ran many times a day, just never on
+      # the PR that changed it. `packages/**` keeps trigger and coverage in step
+      # by construction; test_ci_trigger_coverage.py fails if they drift apart.
+      - 'packages/**'
       - 'skills/fulcra-agent-automation/**'
       - '.github/workflows/macos.yml'
       - 'pyproject.toml'
