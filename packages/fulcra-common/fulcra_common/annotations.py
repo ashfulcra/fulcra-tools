@@ -62,6 +62,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -687,6 +688,28 @@ def _definition_cache_path() -> Path:
     return annotations_dir() / "definition.json"
 
 
+def _read_definition_cache() -> dict:
+    """Parsed definition cache, or ``{}`` when absent/unreadable."""
+    try:
+        path = _definition_cache_path()
+        if path.exists():
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _pinned_definition_id() -> Optional[str]:
+    """The id ONLY if an operator pinned it. A pin is the escape hatch
+    (:func:`pin_definition_id`) and therefore outranks the authority document —
+    it exists precisely for when the authority is wrong or unreachable."""
+    data = _read_definition_cache()
+    did = data.get("id")
+    return did if (did and data.get("pinned")) else None
+
+
 def _cached_definition_id() -> Optional[str]:
     path = _definition_cache_path()
     try:
@@ -721,6 +744,12 @@ _DEF_ID_MEMO: dict[str, str] = {}
 
 #: Canonical definition every Agent-Tasks moment groups under.
 DEFINITION_NAME = "Agent Tasks"
+#: RETAINED, NOT DEAD (same reasoning as :func:`pin_definition_id`, which #523
+#: removed on a repo-local "no callers" reading that was false of the system).
+#: Since resolution moved to the authority document these two are no longer read
+#: on the write path; they remain the record of what this definition IS, and the
+#: name is quoted in the refusal log so an operator can see what a name lookup
+#: WOULD have selected.
 DEFINITION_DESCRIPTION = (
     "Lifecycle moments for fulcra-coord agent coordination tasks "
     "(create / pickup / update / complete, plus needs-user asks)."
@@ -865,17 +894,122 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
     return ""
 
 
+#: The authority document naming the CURRENT coordination channel, relative to
+#: ``team/<team>/``. Every reader is already required to resolve the channel from
+#: here rather than bake it in; until now the WRITER did not, which is the whole
+#: defect below.
+_AUTHORITY_PATH = "_coord/bus-v3/records.json"
+
+#: Per-process memo, populated ONLY on a successful parse, so a transient
+#: failure retries on the next emit instead of pinning "unknown" for the run.
+_AUTHORITY_MEMO: dict[str, str] = {}
+
+
+def _coord_team() -> str:
+    """Team whose authority document names our channel."""
+    return os.environ.get("FULCRA_COORD_TEAM", "").strip() or "fulcra"
+
+
+def _authority_definition_id(team: Optional[str] = None) -> Optional[str]:
+    """Bare definition uuid named by ``records.json``'s ``data_type``.
+
+    ``None`` means the authority could not be read or parsed — UNKNOWN, never
+    "no channel". Callers must not treat it as permission to fall back to a
+    name lookup; see :func:`_resolve_definition_id`."""
+    team = team or _coord_team()
+    memo = _AUTHORITY_MEMO.get(team)
+    if memo:
+        return memo
+    tmp = Path(tempfile.gettempdir()) / f"fulcra-records-{os.getpid()}.json"
+    try:
+        result = subprocess.run(
+            _cli_base_cmd() + ["file", "download",
+                               f"team/{team}/{_AUTHORITY_PATH}", str(tmp)],
+            capture_output=True, text=True, timeout=_write_timeout())
+        if result.returncode != 0:
+            return None
+        data = json.loads(tmp.read_text())
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError,
+            json.JSONDecodeError, ValueError):
+        return None
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    dtype = (data.get("data_type") or "").strip() if isinstance(data, dict) else ""
+    if not dtype:
+        return None
+    def_id = dtype.split("/", 1)[1] if "/" in dtype else dtype
+    try:
+        uuid.UUID(def_id)
+    except (ValueError, AttributeError, TypeError):
+        logger.warning(
+            "annotations: %s names data_type %r whose id is not a uuid; "
+            "treating the authority as unreadable", _AUTHORITY_PATH, dtype)
+        return None
+    _AUTHORITY_MEMO[team] = def_id
+    return def_id
+
+
 def _resolve_definition_id(tag_names: list[str], *, token: Optional[str] = None) -> str:
-    """Return the ``Agent Tasks`` moment-definition UUID (disk cache -> resolve).
-    ``token`` accepted for back-compat but unused. Best-effort: a failure/refuse
-    returns ``""`` (not cached)."""
+    """Return the coordination-channel moment-definition UUID, resolved from the
+    AUTHORITY document rather than by name. ``token`` accepted for back-compat
+    but unused. Best-effort: a refusal returns ``""`` (not cached).
+
+    WHY NOT BY NAME. Resolving ``DEFINITION_NAME`` cannot work here, and the
+    reason is not a bug we can fix in the lookup: the superseded definition is
+    STILL named ``Agent Tasks``, still ``deprecated: false``, still
+    ``deleted_at: null``. Its retirement is recorded only as prose in its
+    description ("SUPERSEDED 2026-08-04 ... history read-only; do not write").
+    So every liveness check this module performs says LIVE and correctly so —
+    the definition exists and is readable; it simply must not be written to.
+    A name resolve therefore selects it forever, and the resulting records are
+    accepted, durable, and invisible to every reader (all of whom resolve the
+    channel from ``records.json``). That is the 2026-08-03..08-06 defect: three
+    days of dispatches that looked delivered and reached nobody.
+
+    Precedence, and why each step is where it is:
+
+    1. **An operator pin wins.** It is the escape hatch for exactly the case
+       where the authority is wrong or unreachable; letting this resolution
+       override it would disarm the only manual mitigation.
+    2. **The authority document.** Its id is also written through to the cache,
+       so a channel cutover self-heals on the next emit instead of waiting for
+       every host's cache to expire. Caches outliving the things they identify
+       is a wall this repo has already hit.
+    3. **An unpinned cached id, loudly**, when the authority is unreadable — a
+       previously-verified id beats no write at all.
+    4. **Refuse.** Falling back to a name lookup here would reintroduce the
+       defect silently, which is strictly worse than not annotating: the
+       projection is best-effort and the transition stays free to retry."""
+    pinned = _pinned_definition_id()
+    authority = _authority_definition_id()
+    if pinned:
+        if authority and authority != pinned:
+            logger.warning(
+                "annotations: operator pin %s disagrees with %s (%s); honoring "
+                "the pin — clear the pin to follow the authority",
+                pinned, _AUTHORITY_PATH, authority)
+        return pinned
+    if authority:
+        if _cached_definition_id() != authority:
+            _store_definition_id(authority)
+        return authority
     cached = _cached_definition_id()
     if cached:
+        logger.warning(
+            "annotations: %s unreadable; writing to UNVERIFIED cached definition "
+            "%s. If the channel has moved, these records land where nobody reads.",
+            _AUTHORITY_PATH, cached)
         return cached
-    def_id = _resolve_def_via_cli(DEFINITION_NAME, DEFINITION_DESCRIPTION, tag_names)
-    if def_id:
-        _store_definition_id(def_id)
-    return def_id
+    logger.error(
+        "annotations: cannot resolve the coordination channel — %s is unreadable "
+        "and no definition is cached. REFUSING to resolve by name: the superseded "
+        "definition is still named %r and still reads as live, so a name lookup "
+        "would write records nobody can see. Skipping this annotation; the "
+        "transition retries on the next emit.", _AUTHORITY_PATH, DEFINITION_NAME)
+    return ""
 
 
 #: The digest track's own definition — distinct so digests filter separately.

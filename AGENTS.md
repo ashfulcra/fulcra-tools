@@ -469,8 +469,13 @@ it (not on PyPI).
   board; honor every degraded row it prints as UNKNOWN.
 - **Bus-v3 convergence is authority-gated, not a rollout convention.** The
   shared `_coord/bus-v3/records.json` atomically declares protocol and cursor
-  schema versions, minimum safe reader/writer engine versions, and cursor
-  generation/activation. `queue` warns on legacy or mixed writer evidence and
+  schema versions, minimum safe reader/writer engine versions, cursor
+  generation/activation, and — since 2026-08-07 — the CHANNEL every writer
+  resolves. `fulcra-common`'s annotations writer reads `data_type` from it at
+  write time and REFUSES rather than falling back to a name lookup: the
+  superseded definition is still named `Agent Tasks` and still reads as live
+  (its retirement is prose in its description), so a by-name resolve silently
+  writes where nobody reads. Never resolve a channel by name. `queue` warns on legacy or mixed writer evidence and
   refuses an unknown/old reader or writer before cursor mutation. Run
   `coord-engine doctor <team>` for the fleet census: presence means actively
   running; a stamped claim means adopted, not necessarily active. Cursor v2

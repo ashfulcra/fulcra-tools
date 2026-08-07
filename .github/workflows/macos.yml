@@ -24,6 +24,7 @@ on:
     paths:
       - 'packages/menubar/**'
       - 'packages/coord-engine/**'
+      - 'packages/fulcra-common/**'
       - 'skills/fulcra-agent-automation/**'
       - '.github/workflows/macos.yml'
       - 'pyproject.toml'
@@ -33,6 +34,7 @@ on:
     paths:
       - 'packages/menubar/**'
       - 'packages/coord-engine/**'
+      - 'packages/fulcra-common/**'
       - 'skills/fulcra-agent-automation/**'
       - '.github/workflows/macos.yml'
       - 'pyproject.toml'
