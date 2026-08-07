@@ -33,7 +33,7 @@ from . import (
     checkpoint_channel, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, projection as projection_mod,
-    handoff, pin_currency, query, read_retry, records, review,
+    handoff, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
@@ -7585,6 +7585,114 @@ def _report_pin_currency(transport: Any, team: Optional[str]) -> None:
               f"({type(e).__name__}) — currency unknown")
 
 
+def _git_head_probe() -> "Callable[[str], Optional[bool]]":
+    """``sha -> True | False | None`` via ``git cat-file -e``.
+
+    None whenever the answer is not TRUSTWORTHY: no git, no repository, a
+    non-sha argument, or any error. Only ``git`` speaking clearly about an
+    object it looked for produces a bool — the whole gc contract rests on this
+    function refusing to guess.
+    """
+    import re as _re
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    sha_re = _re.compile(r"^[0-9a-fA-F]{7,64}$")
+    git = _shutil.which("git")
+    root = handoff.repo_root()
+
+    def _probe(sha: str) -> Optional[bool]:
+        if not git or root is None or not sha_re.match(sha or ""):
+            return None
+        try:
+            cp = _subprocess.run(
+                [git, "cat-file", "-e", f"{sha}^{{commit}}"],
+                cwd=str(root), capture_output=True, timeout=15)
+        except Exception:
+            return None
+        if cp.returncode == 0:
+            return True
+        # git says "not a valid object name" / "could not get object info" on a
+        # genuinely absent object. Any OTHER stderr is an error we cannot read
+        # as absence — a broken repo must not retire a review.
+        err = (cp.stderr or b"").decode("utf-8", "replace").lower()
+        if "not a valid object" in err or "could not get object" in err or not err:
+            return False
+        return None
+
+    return _probe
+
+
+def _gc_entries(transport: Any, team: str) -> "tuple[list, list[str]]":
+    """Read the register into :class:`review_gc.Entry` values.
+
+    Returns ``(entries, unreadable_slugs)``. A slug whose doc cannot be read is
+    NOT an entry: it is reported and skipped, because an unreadable doc is the
+    one case where we know least and could destroy the most.
+    """
+    entries: list = []
+    unreadable: list[str] = []
+    prefix = f"team/{team}/review/"
+    for row in transport.list_dir(prefix):
+        name = row.get("name") or ""
+        if not name.endswith(".md"):
+            continue
+        slug = name[:-3]
+        raw = transport.read(prefix + name)
+        if raw is None:
+            unreadable.append(slug)
+            continue
+        fm = okf.parse_frontmatter(raw) or {}
+        vprefix = _verdicts_prefix(team, slug)
+        try:
+            vnames = {e.get("name") for e in transport.list_dir(vprefix)}
+        except Exception:
+            unreadable.append(slug)
+            continue
+        entries.append(review_gc.Entry(
+            slug=slug,
+            # v2 docs carry `head:`; v1 docs hide it in the `of:` prose.
+            head=(review.normalize_head(fm.get("head"))
+                  or review_gc.head_from_prose(fm.get("of"))),
+            superseded_by=(fm.get(review_gc.SUPERSEDED_KEY) or None),
+            settled=SETTLED_MARKER in vnames,
+            gc_closed=review_gc.GC_MARKER in vnames,
+        ))
+    return entries, unreadable
+
+
+def cmd_review_gc(args: argparse.Namespace, transport: Any) -> int:
+    """Retire register entries that can never settle. DRY RUN unless --apply."""
+    try:
+        entries, unreadable = _gc_entries(transport, args.team)
+    except TransportError as e:
+        print(f"review gc: register unreadable ({e}) — nothing scanned, "
+              f"nothing retired", file=sys.stderr)
+        return 2
+    verdicts = review_gc.plan(entries, head_exists=_git_head_probe())
+    print(review_gc.render_plan(verdicts, applying=bool(args.apply)))
+    for slug in unreadable:
+        print(f"  keep {slug} — UNREADABLE: doc or verdicts dir could not be "
+              f"read; skipped", file=sys.stderr)
+    if not args.apply:
+        return 0
+    now = _iso(_now())
+    by = getattr(args, "sender", None) or _host()
+    failed = 0
+    for v in verdicts:
+        if not v.retirable:
+            continue
+        path = _verdicts_prefix(args.team, v.slug) + review_gc.GC_MARKER
+        if not transport.write(path, review_gc.marker_body(v, now=now, by=by)):
+            print(f"review gc: marker write FAILED for {v.slug} — entry stays "
+                  f"live", file=sys.stderr)
+            failed += 1
+    retired = sum(1 for v in verdicts if v.retirable) - failed
+    print(f"review gc: retired {retired} entr(ies)"
+          + (f", {failed} write(s) failed" if failed else ""))
+    return 1 if failed else 0
+
+
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
     if getattr(args, "self", False):
@@ -8840,6 +8948,13 @@ def build_parser() -> argparse.ArgumentParser:
     rvs = rvsub.add_parser("status", help="APPROVED/CHANGES/PENDING from reviewers' verdicts")
     rvs.add_argument("team"); rvs.add_argument("slug"); add_json(rvs)
     rvs.set_defaults(func=cmd_review_status)
+    rvg = rvsub.add_parser("gc", help="retire register entries that can never settle (DRY RUN by default)")
+    rvg.add_argument("team")
+    rvg.add_argument("--apply", action="store_true",
+                     help="actually write the .gc-closed markers; without it "
+                          "gc only prints what it would retire")
+    rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
+    rvg.set_defaults(func=cmd_review_gc)
     rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)
