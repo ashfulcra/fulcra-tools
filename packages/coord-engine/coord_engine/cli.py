@@ -71,8 +71,23 @@ _hostname_rewrite_warned = False
 
 
 def _sanitize_hostname(raw: str) -> tuple[str, bool]:
-    """→ (safe, rewritten). Runs of unsafe characters collapse to one ``-``;
-    leading/trailing separators are stripped.
+    """→ (safe, rewritten). Runs of unsafe characters collapse to one ``-``,
+    leading/trailing separators are stripped, and a REWRITTEN name carries a
+    short digest of the raw hostname so the mapping stays INJECTIVE.
+
+    The digest is the whole point (codex 558 r1). Collapsing alone is lossy:
+    ``bad/name``, ``bad name`` and ``bad-name`` all reduce to ``bad-name``, so
+    three distinct machines would share one fleet key and MERGE their presence,
+    lease, health and role history. That is strictly worse than the single
+    unaddressable identity this function exists to prevent — an unreachable host
+    is a hole, a merged one is corruption of two live records.
+
+    ``tasks.agent_key`` already solved this exact problem for agent ids
+    ("slugify is lossy … suffix a short hash of the raw id to make the key
+    injective"), with the same 6-hex convention used here.
+
+    An UNCHANGED hostname is returned byte-identical, with no suffix — every
+    identity currently in the fleet must survive untouched.
 
     A hostname is whatever the OS hands back, and the fleet id built from it is
     the KEY for presence, health, roles and leases. One host has been registered
@@ -81,8 +96,13 @@ def _sanitize_hostname(raw: str) -> tuple[str, bool]:
     version-skew audit, and permanently unaddressable — a hole in a shared
     keyspace that nothing can now reference.
     """
-    safe = _IDENTITY_SAFE.sub("-", raw).strip("-.:_")
-    return safe, safe != raw
+    collapsed = _IDENTITY_SAFE.sub("-", raw).strip("-.:_")
+    if collapsed == raw:
+        return raw, False
+    if not collapsed:
+        return "", True  # nothing usable — the caller refuses rather than invents
+    digest = hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:6]
+    return f"{collapsed}-{digest}", True
 
 
 def _host() -> str:

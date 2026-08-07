@@ -47,7 +47,7 @@ def test_control_characters_are_sanitised_and_reported(monkeypatch, capsys):
     """The live corruption: '\\x00aU' is the shape actually in the keyspace."""
     monkeypatch.setattr(cli.socket, "gethostname", lambda: "\x00aU")
     got = cli._host()
-    assert got == "coord-reconcile:aU"
+    assert got.startswith("coord-reconcile:aU-")   # collapsed stem + raw digest
     assert "\x00" not in got
     err = capsys.readouterr().err
     assert "not a usable fleet id" in err
@@ -82,3 +82,48 @@ def test_the_warning_fires_once_per_process_not_per_call(monkeypatch, capsys):
     for _ in range(5):
         cli._host()
     assert capsys.readouterr().err.count("not a usable fleet id") == 1
+
+
+# --- injectivity (codex 558 r1) ---------------------------------------------
+#
+# Collapsing alone is LOSSY: bad/name, bad name and bad-name all reduce to
+# bad-name. Three distinct machines would then share one fleet key and MERGE
+# their presence, lease, health and role history — strictly worse than the one
+# unaddressable identity this function exists to prevent. An unreachable host is
+# a hole; a merged one is corruption of two live records.
+
+@pytest.mark.parametrize("raws", [
+    ("bad/name", "bad name", "bad\\name"),
+    ("a b", "a/b", "a:b\x00"),
+    ("-lead", "lead-", "lead"),
+    ("x\x00y", "x\x01y", "x\x02y"),
+])
+def test_distinct_hostnames_can_never_mint_the_same_identity(raws, monkeypatch):
+    ids = set()
+    for raw in raws:
+        monkeypatch.setattr(cli.socket, "gethostname", lambda r=raw: r)
+        monkeypatch.setattr(cli, "_hostname_rewrite_warned", False)
+        try:
+            ids.add(cli._host())
+        except RuntimeError:
+            ids.add(("REFUSED", raw))   # refusal is per-raw, never a shared key
+    assert len(ids) == len(raws), (
+        f"distinct hostnames collapsed to a shared fleet key: {raws} -> {ids}"
+    )
+
+
+def test_the_digest_is_derived_from_the_RAW_name_not_the_collapsed_one():
+    """If the digest came from the collapsed stem it would be constant across
+    exactly the inputs that collide, and the suffix would prevent nothing."""
+    a, _ = cli._sanitize_hostname("bad/name")
+    b, _ = cli._sanitize_hostname("bad name")
+    assert a != b
+    assert a.startswith("bad-name-") and b.startswith("bad-name-")
+
+
+def test_an_unchanged_hostname_never_gains_a_suffix():
+    """The no-regression property, restated against the digest: a live hostname
+    must not acquire a suffix and fork its own history."""
+    for h in ("Ashs-MBP-Work", "MacBookPro.localdomain", "host_1.example.com"):
+        safe, rewritten = cli._sanitize_hostname(h)
+        assert (safe, rewritten) == (h, False)
