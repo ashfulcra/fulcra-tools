@@ -142,3 +142,72 @@ def test_fingerprint_is_order_independent_but_size_and_mtime_sensitive():
     assert projection._verdicts_fingerprint(a) != projection._verdicts_fingerprint(
         [{"name": "x.md", "size": "9B", "mtime": "m"},
          {"name": "y.md", "size": "2B", "mtime": "n"}])
+
+
+class FixedListing(Counting):
+    """Transport with CONTROLLED mtimes, so the same-minute window is reachable.
+
+    FakeTransport reports mtime=None for every entry, which makes the shard
+    guard refuse unconditionally — so a test built on it can never exercise the
+    carry path it means to test. That is how round 1's "regression test" passed
+    against the unguarded code.
+    """
+
+    def __init__(self, doc_mtime, shard_mtime):
+        super().__init__()
+        self.doc_mtime, self.shard_mtime = doc_mtime, shard_mtime
+
+    def list_dir(self, prefix):
+        out = []
+        for e in super().list_dir(prefix):
+            e = dict(e)
+            if not e.get("is_dir"):
+                e["mtime"] = (self.shard_mtime if "/verdicts/" in prefix
+                              else self.doc_mtime)
+                e["size"] = "100B"          # equal size across the rewrite
+            out.append(e)
+        return out
+
+
+def test_an_equal_size_shard_rewrite_INSIDE_the_same_minute_is_not_carried():
+    """codex-reviewer's blocking finding on round 1, reproduced for real.
+
+    The fingerprint is name+size+MINUTE-granular mtime. A reviewer flipping
+    `approve` -> `changes` at equal length inside one clock-minute leaves all
+    three identical, so the fingerprint alone carries a stale row and freezes a
+    CHANGES review as PENDING, durably.
+
+    The doc's minute IS closed (so tier 3 is genuinely entered) while the
+    SHARD's minute is not — which is the exact gap round 1 left open by
+    guarding the doc and not the shards.
+    """
+    doc_m, shard_m = "2026-01-01 12:00PM UTC", "2026-01-01 12:05PM UTC"
+    t = FixedListing(doc_m, shard_m)
+    _put_review(t, "flip", "['a','b']", verdicts=[("a", "approve")])
+
+    # Anchor the prior pass INSIDE the shard's minute (12:05) but after the
+    # doc's minute closed (12:01+). Doc carry-eligible, shard ambiguous.
+    prior = _build(t)
+    prior = dict(prior, generated_at="2026-01-01T12:05:30Z")
+
+    t.put(f"team/{TEAM}/review/flip/verdicts/a.md",
+          "---\ntype: Verdict\nreviewer: a\nverdict: changes\n---\n")
+
+    t.reads.clear()
+    _build(t, prior=prior)
+    assert [r for r in t.reads if "flip" in r], (
+        "a shard whose minute is not provably closed MUST force a rescan; "
+        "carrying it freezes a CHANGES review as PENDING")
+
+
+def test_shards_minutes_closed_refuses_unprovable_mtimes():
+    # None/absent mtime cannot prove a closed minute -> never carry.
+    assert projection._shards_minutes_closed(
+        [{"name": "a.md", "mtime": None}], "2026-01-01T00:00:00Z") is False
+    # A directory entry is not a shard and must not block the carry.
+    assert projection._shards_minutes_closed(
+        [{"name": "sub/", "is_dir": True}], "2026-01-01T00:00:00Z") is True
+    # A shard whose minute closed well before the anchor is carry-safe.
+    assert projection._shards_minutes_closed(
+        [{"name": "a.md", "mtime": "2026-01-01 12:00PM UTC"}],
+        "2026-01-01T12:30:00Z") is True

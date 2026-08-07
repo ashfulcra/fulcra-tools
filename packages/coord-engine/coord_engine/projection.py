@@ -308,6 +308,32 @@ def _verdicts_fingerprint(ventries: list[dict[str, Any]]) -> str:
     return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
+def _shards_minutes_closed(ventries: list[dict[str, Any]],
+                           prior_generated_at: Any) -> bool:
+    """True iff EVERY verdict shard's mtime-minute closed before the prior pass.
+
+    The fingerprint alone is not enough, and this is the half I got wrong in the
+    first cut: I applied the same-minute guard to the review DOC and left the
+    shards unguarded, in a change whose own description named minute-granular
+    mtime as the hazard. codex-reviewer reproduced it at the exact head — an
+    unsettled row projected at 15:00:30Z, its `approve` shard rewritten to an
+    equal-length `changes` inside the same clock-minute, and the second build
+    carried the stale PENDING row because name+size+mtime were all identical.
+
+    A verdict flipping approve->changes at equal length inside one minute is not
+    a contrived case: it is a reviewer correcting themselves, and carrying it
+    would freeze a CHANGES review as PENDING durably. So: any shard whose minute
+    is not provably closed forces a full rescan. Correct beats cheap, and only
+    the recently-touched slugs pay."""
+    from . import reconcile as rec  # lazy: reconcile imports projection
+    for v in ventries:
+        if v.get("is_dir"):
+            continue
+        if rec._same_minute_reuse_safe(v.get("mtime"), prior_generated_at) is not True:
+            return False   # ambiguous or unprovable -> rescan, never carry
+    return True
+
+
 def _unsettled_carry_safe(prior_row: Any, entry: dict[str, Any],
                           prior_generated_at: Any) -> bool:
     """Doc-side half of the TIER-3 carry: is this row *eligible* for a
@@ -500,7 +526,8 @@ def build_review_projection(
             ventries = transport.list_dir(_verdicts_prefix(team, slug))
         except TransportError:
             fresh.append((slug, e)); continue
-        if _verdicts_fingerprint(ventries) == prior_rows[slug].get(VFP_KEY):
+        if (_verdicts_fingerprint(ventries) == prior_rows[slug].get(VFP_KEY)
+                and _shards_minutes_closed(ventries, prior_generated_at)):
             rows.append(prior_rows[slug])
         else:
             fresh.append((slug, e))
