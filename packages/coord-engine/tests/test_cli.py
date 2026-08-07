@@ -168,7 +168,12 @@ def test_cli_roles_status_vacant_escalation_due(capsys):
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
     import json as _json
     res = _json.loads(capsys.readouterr().out)
-    assert res["status"] == "VACANT"
+    # LAPSED, not VACANT: the role HAS a holder whose lease went stale, and the
+    # same object names it. Escalation is unchanged — the split renamed a state,
+    # it did not decide to stop alarming.
+    assert res["status"] == "LAPSED"
+    assert res["holders"] == ["ash"]
+    assert res["fresh_holders"] == []
     assert res["escalation_due"] is True
 
 

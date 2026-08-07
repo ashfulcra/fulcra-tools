@@ -40,8 +40,18 @@ def test_held_when_fresh_lease():
     assert roles.classify([_lease("a", 1)], now=NOW, sla_hours=24) == roles.HELD
 
 
-def test_vacant_when_all_stale():
-    assert roles.classify([_lease("a", 30)], now=NOW, sla_hours=24) == roles.VACANT
+def test_LAPSED_when_a_holder_exists_but_its_lease_is_stale():
+    """Was VACANT until 2026-08-07. `status: VACANT` alongside
+    `holders: ["a"]` is incoherent in the same object, and the alarm built on it
+    escalated a reviewer that was filing verdicts hourly. "The lease lapsed" and
+    "nobody holds this" are different facts."""
+    assert roles.classify([_lease("a", 30)], now=NOW, sla_hours=24) == roles.LAPSED
+
+
+def test_a_lapsed_lease_still_escalates():
+    """The split is about honest REPORTING, not about who gets alarmed on. A
+    stale lease is still an SLA breach somebody has to answer for."""
+    assert roles.escalation_due([_lease("a", 30)], now=NOW, sla_hours=24) is True
 
 
 def test_vacant_when_no_leases():
@@ -140,3 +150,16 @@ def test_parse_sla_hours_explicitly_invalid_is_unknown():
     assert roles.parse_sla_hours("nan") is None
     assert roles.parse_sla_hours(True) is None      # `sla_hours: true` is not a number
     assert roles.parse_sla_hours(["24"]) is None    # nor is a list
+
+
+def test_VACANT_is_reserved_for_a_role_with_no_holders_at_all():
+    assert roles.classify([], now=NOW, sla_hours=24) == roles.VACANT
+
+
+def test_the_reported_state_never_contradicts_the_holders_list():
+    """The invariant the whole split exists to establish: a status of VACANT may
+    never accompany a named holder. That combination was shipped for weeks and
+    was the false-vacancy detector's entire input."""
+    stale = [_lease("codex-reviewer", 30)]
+    assert roles.classify(stale, now=NOW, sla_hours=12) != roles.VACANT
+    assert roles.classify([], now=NOW, sla_hours=12) == roles.VACANT
