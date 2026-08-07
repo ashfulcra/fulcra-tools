@@ -1090,3 +1090,41 @@ class TestAggregateRoundTrip:
         _reconciled(t, now="2026-07-01T16:15:00Z")
         # No anchor -> full fold. Our incremental path is dead until the fleet moves.
         assert _ack_lists(calls), "expected the full fold a wiped anchor forces"
+
+
+def test_default_fixture_mtime_stays_inside_the_retention_window():
+    """Guard the invariant whose violation broke clean main on 2026-08-01.
+
+    Retention tests seed a default-mtime fixture and assert it is KEPT. That
+    assertion is only meaningful while the default sits inside
+    ``--retention-days`` of the clock ``reconcile`` reads — the real one. The
+    former hardcoded ``2026-07-01`` default satisfied it for a month and then
+    silently stopped, failing two tests on code nobody had touched.
+
+    This fails the moment someone reintroduces a fixed literal — at the
+    source, rather than as a puzzling archive assertion three files away.
+    (Salvaged from closed PR 506, codex-coder; adapted to the module-level
+    ``RECENT_MTIME`` #504 introduced, which anchors to now-minus-one-day.)
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from coord_engine import router
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", "body")
+    parsed = router.parse_store_mtime(t.mtimes["team/r/task/a.md"])
+
+    assert parsed is not None, (
+        "the default fixture mtime is not in store format, so retention code "
+        f"cannot age it at all: {t.mtimes['team/r/task/a.md']!r}"
+    )
+    age = datetime.now(timezone.utc) - parsed
+    # The tightest window any test in this repo exercises is 30 days. The
+    # default anchors to now-minus-one-day at module import, so anything
+    # under 2 days is healthy; a reintroduced calendar literal blows past
+    # this the day it goes stale.
+    assert age < timedelta(days=2), (
+        "the default fixture mtime has aged out of every retention window "
+        f"this suite exercises (age {age}). It must be derived from the "
+        "clock, not hardcoded — see RECENT_MTIME."
+    )
