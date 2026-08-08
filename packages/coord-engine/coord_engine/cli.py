@@ -5436,9 +5436,20 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # is paid once per briefing rather than once per section. Unresolved roles are
     # UNKNOWN — surfaced below as `role_degraded`, never folded to "no roles".
     try:
+        # The role fold sits BETWEEN add_on's open (above, consumed by presence)
+        # and its later consumers (pending-reviews, forge, the resume check).
+        # add_on is an ABSOLUTE deadline, so a fold that ignores it does not
+        # merely overrun its own cap — it burns the shared window and starves the
+        # sections that DO respect it, while the comment below asserts the
+        # add-on stack is bounded. Keep the fold's own cap AND the shared
+        # ceiling: whichever arrives first wins, the composition pattern the
+        # overlay at _load_rows already uses.
+        _role_dl = _role_fold_budget()
+        _shared_left = add_on.remaining()
         held_roles, unresolved_roles = _held_roles_for_rows(
             transport, args.team, agent, rows, now=now,
-            deadline_seconds=_role_fold_budget())
+            deadline_seconds=(_role_dl if _shared_left is None
+                              else min(_role_dl, _shared_left)))
     except Exception as e:
         # The resolver never raises by contract; if it somehow does, the role set is
         # UNKNOWN for EVERY role-shaped assignee in the bundle — say so, don't
