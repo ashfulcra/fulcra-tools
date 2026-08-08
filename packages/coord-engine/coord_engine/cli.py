@@ -169,6 +169,38 @@ def _replies_breadcrumb(team: str, sender: str) -> str:
     return f"replies: coord-engine queue {team} --agent {sender}"
 
 
+def _close_on_reply_breadcrumb(team: str, owner: str, slug: str) -> str:
+    """The CLOSING move, with the slug already filled in, for the RECIPIENT.
+
+    SURFACE MATTERS AND I GOT IT WRONG FIRST (coord-opus-worker, 2026-08-08).
+    `_replies_breadcrumb` prints on the SENDER's terminal — its own comment says
+    so — and it has exactly one callsite, in the dispatch path. Putting the
+    closing command there hands it to the only agent with NO standing to close
+    the row: runnable, plausible-looking, and it would close a directive nobody
+    had answered. That is precisely the ghost-closure `cmd_respond` fails loud
+    to prevent.
+
+    The recipient's point of contact is the queue read, where the slug is
+    already on screen. That is the one place this line can be both correct and
+    addressed to someone who can act on it.
+
+    Measured 2026-08-08: 912 of 919 proposed board items were dispatch residue —
+    directives whose recipients had acted and replied, by `tell`, which opens a
+    NEW directive instead of closing the one it answers. Every exchange netted
+    +2 open items instead of 0.
+
+    `respond` has always closed, and a spread sample of 25 across eight owners
+    found ZERO response shards: nobody was failing to comply, the tool simply
+    never showed the closing move at the moment it was wanted. The old
+    breadcrumb pointed at a STREAM to read (`queue`) and carried no slug, so a
+    recipient who wanted to answer replied the way they knew how.
+
+    `--closes` is the mechanism; this line is the cure.
+    """
+    return (f"    reply+close: coord-engine tell {team} {owner} "
+            f"\"<your title>\" --closes {slug}")
+
+
 #: Read-cap for the freshness overlay: at most this many absent-from-index docs
 #: are read per row load. The overlay's normal bound is new-since-reconcile items
 #: (typically zero or a handful), but under a SUSTAINED reconcile outage that set
@@ -703,6 +735,31 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def print_close_hint(row: dict[str, Any], *, team: str) -> None:
+    """Show the recipient how to answer AND close, with the slug filled in.
+
+    NOT on `queue`: its text output is a BYTE-IDENTICAL contract for shell
+    consumers on BOTH streams, pinned by two golden tests.
+
+    THE PREDICATE READS `tags`, NOT `kind` (coord-opus-worker, measured against
+    939 live rows). Board/needs-me rows carry no `kind` key at all — 0 of 939 —
+    so `row.get("kind") or "task"` was always "task" and this returned before
+    printing, for every row including the 932 that ARE directives. Directive-ness
+    lives in `tags` as `kind:directive`.
+
+    `team` is a PARAMETER for the same reason: rows carry no `team` key either,
+    so recovering it from the row rendered the literal placeholder `<team>` and
+    the command could not be run. The caller has `args.team`; it is not the
+    row's to know.
+    """
+    if "kind:directive" not in (row.get("tags") or []):
+        return
+    owner, slug = row.get("owner"), row.get("id")
+    if not owner or not slug or owner == "*":
+        return
+    print(_close_on_reply_breadcrumb(team, owner, slug))
+
+
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
     doc_sink: list[Any] = []
@@ -792,6 +849,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_source_line("needs-me", r))
             else:
                 print(_line(r))
+                print_close_hint(r, team=args.team)
     return rc
 
 
@@ -3757,8 +3815,91 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
                             not_before=None)
 
 
+def _close_answered_directive(transport: Any, args: argparse.Namespace, *,
+                              reply_slug: str) -> int:
+    """Close the directive this reply answers, with the reply as the artifact.
+
+    Closure is an ARTIFACT of the recipient acting — the same shape as
+    `review close` carrying a merge sha. The reply already exists, so nothing
+    new has to be remembered by anyone.
+
+    Fails LOUD on an unresolvable slug, for the reason `respond` does: writing a
+    close against a name nobody owns GHOST-CLOSES — the record lands under a
+    slug that does not exist while the real directive stays open in the owner's
+    needs-me forever.
+    """
+    target = args.closes
+    path = _task_path(args.team, target)
+    doc = transport.read(path)
+    if doc is None:
+        print(f"tell: --closes {target!r} resolves to no directive in "
+              f"team/{args.team} (absent or unreadable) — the reply was sent, "
+              f"NOTHING was closed. Use the exact hash-suffixed slug from "
+              f"`inbox`/`briefing --json`, not the display title.",
+              file=sys.stderr)
+        return 1
+    agent = _known_sender(args) or _host()
+
+    # RELATIONSHIP GUARD (codex 564 r3). A resolvable slug is not permission to
+    # close it: a mistyped-but-valid slug would close unrelated work, and the
+    # only signal would be somebody else's row going quiet. The reply must
+    # actually answer THIS directive — it must be a directive, addressed to the
+    # agent replying, and owned by the agent being replied to.
+    fm = okf.parse_frontmatter(doc) or {}
+    recipient = getattr(args, "assignee", None)
+    problems = []
+    if "kind:directive" not in (fm.get("tags") or []):
+        problems.append("it is not a directive")
+    if str(fm.get("assignee") or "") != agent:
+        problems.append(f"it is assigned to {fm.get('assignee')!r}, not to you "
+                        f"({agent})")
+    if recipient and str(fm.get("owner") or "") != recipient:
+        problems.append(f"it is owned by {fm.get('owner')!r}, but this reply "
+                        f"goes to {recipient!r}")
+    if problems:
+        print(f"tell: --closes {target!r} is not a directive this reply "
+              f"answers — {'; '.join(problems)}. The reply was sent, NOTHING "
+              f"was closed.", file=sys.stderr)
+        return 1
+
+    evidence = f"answered by {agent} in {reply_slug}"
+    try:
+        out = tasks.apply_update(doc, now=_iso(_now()), status="done",
+                                 evidence=evidence)
+        transport.write(path, out)
+    except tasks.TaskError as e:
+        print(f"tell: reply sent; {target} NOT closed ({e})", file=sys.stderr)
+        return 1
+
+    # VERIFY THE WRITE LANDED (codex 564 r3). `review close` took three rounds
+    # to learn this and I did not carry it to the sibling verb in the same
+    # branch: a silently dropped write left the directive open while the
+    # command printed "closed" and exited 0. Read back and confirm BOTH the
+    # transition and the evidence naming this reply — status alone would pass
+    # on a row somebody else closed.
+    back = transport.read(path)
+    got = okf.parse_frontmatter(back) if back else None
+    if got is None or str(got.get("status") or "") != "done" or \
+            evidence not in (back or ""):
+        print(f"tell: reply sent, but {target} did NOT close — the write did "
+              f"not land (read-back shows status="
+              f"{(got or {}).get('status')!r}). The row is still open; retry.",
+              file=sys.stderr)
+        return 1
+    print(f"closed {target} — answered by {reply_slug}")
+    return 0
+
+
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
-    return _create_directive(args, transport, assignee=args.assignee)
+    rc = _create_directive(args, transport, assignee=args.assignee)
+    if rc != 0 or not getattr(args, "closes", None):
+        return rc
+    # The reply is durable first; only then does the answered row close. If the
+    # close fails the reply still stands and the row stays open — visibly wrong
+    # in the safe direction, never a closed row with no answer behind it.
+    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
+    reply_slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    return _close_answered_directive(transport, args, reply_slug=reply_slug)
 
 
 def cmd_broadcast(args: argparse.Namespace, transport: Any) -> int:
@@ -9512,6 +9653,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     tl = sub.add_parser("tell", help="direct work at an agent (directive = task w/ assignee)")
     tl.add_argument("team"); tl.add_argument("assignee"); tl.add_argument("title")
+    tl.add_argument("--closes", metavar="SLUG",
+                    help="the directive this reply ANSWERS — closes it with this "
+                         "reply as the artifact (exact hash-suffixed slug)")
     add_directive_flags(tl); tl.set_defaults(func=cmd_tell)
     bc = sub.add_parser("broadcast", help="direct work at every agent (*)")
     bc.add_argument("team"); bc.add_argument("title")

@@ -1,0 +1,224 @@
+"""`tell --closes` — a reply closes the directive it answers.
+
+Measured 2026-08-08: 912 of 919 proposed board items were dispatch residue.
+`respond` has always closed, and a spread sample of 25 across eight owners found
+ZERO response shards -- nobody was failing to comply. Everyone replies with
+`tell`, which opened a NEW directive instead of closing the one it answered, so
+every exchange netted +2 open items instead of 0.
+
+The mechanism is `--closes`; the cure is the breadcrumb printing that command
+with the slug already filled in, at the moment the closing move is wanted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from coord_engine import cli, okf, tasks
+from coord_engine_test_helpers import FakeTransport
+
+TEAM = "t"
+PINNED_NOW = datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin(monkeypatch):
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
+
+
+def _args(**kw):
+    ns = argparse.Namespace(team=TEAM, assignee="them", title="my reply",
+                            priority="P2", workstream=None, summary="s",
+                            next=None, sender="me", closes=None)
+    for k, v in kw.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _seed_directive(t, slug="original-ask-abc123", *, owner="them",
+                    assignee="me", kind="directive"):
+    _, content = tasks.new_task_doc(
+        "original ask", now="2026-08-07T00:00:00Z", status="proposed",
+        priority="P1", owner=owner, assignee=assignee, kind=kind)
+    t.put(cli._task_path(TEAM, slug), content)
+    return slug
+
+
+def test_a_reply_closes_the_directive_it_answers():
+    t = FakeTransport()
+    slug = _seed_directive(t)
+    assert cli.cmd_tell(_args(closes=slug), t) == 0
+    doc = t.store[cli._task_path(TEAM, slug)]
+    fm = okf.parse_frontmatter(doc)
+    assert fm["status"] == "done", "the answered directive is still open"
+    # apply_update records evidence as a note in the BODY, not frontmatter, and
+    # it REFUSES a done without evidence ("done requires evidence"), so this
+    # also pins that the close cannot degrade into a bare status flip.
+    assert "answered by" in doc and "my-reply-" in doc, (
+        "closure must name WHICH reply answered it — the artifact, not a flag"
+    )
+
+
+def test_without_closes_nothing_is_closed():
+    """Non-vacuity: the flag is what closes, not the act of telling."""
+    t = FakeTransport()
+    slug = _seed_directive(t)
+    assert cli.cmd_tell(_args(), t) == 0
+    fm = okf.parse_frontmatter(t.store[cli._task_path(TEAM, slug)])
+    assert fm["status"] == "proposed"
+
+
+def test_an_unresolvable_slug_fails_LOUD_and_closes_nothing(capsys):
+    """Ghost-close is the failure `respond` already guards: a close written
+    against a name nobody owns leaves the real directive open forever while the
+    sender believes it handled."""
+    t = FakeTransport()
+    rc = cli.cmd_tell(_args(closes="a-title-not-a-slug"), t)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "NOTHING was closed" in err
+    assert "hash-suffixed slug" in err, "the message must say how to get it right"
+
+
+def test_the_reply_survives_a_failed_close():
+    """Durable-first: the reply stands even when the close fails, so the row
+    stays visibly open rather than closed with no answer behind it."""
+    t = FakeTransport()
+    cli.cmd_tell(_args(closes="nope"), t)
+    replies = [p for p in t.store if p.startswith(f"team/{TEAM}/task/my-reply-")]
+    assert replies, "the reply was discarded when the close failed"
+
+
+def test_the_SENDER_is_never_handed_the_closing_command(capsys):
+    """Surface matters, and my first version got it wrong (coord-opus-worker).
+
+    `_replies_breadcrumb` prints on the SENDER's terminal. A closing command
+    there is handed to the one agent with NO standing to close the row —
+    runnable, plausible, and it would close a directive nobody answered. That is
+    the ghost-closure `respond` fails loud to prevent.
+    """
+    t = FakeTransport()
+    cli.cmd_tell(_args(), t)
+    out = capsys.readouterr().out
+    assert "--closes" not in out, (
+        "the dispatch path offered the sender a command that would close their "
+        "own unanswered directive"
+    )
+
+
+def test_needs_me_END_TO_END_prints_the_close_hint_for_a_real_directive(capsys):
+    """THE test that would have caught it, and did not exist.
+
+    Every earlier breadcrumb test called `print_close_hint` DIRECTLY with a
+    hand-built dict — the row shape the CODE expects, not the shape the SYSTEM
+    produces. So they verified string formatting and never touched the two
+    things that were actually wrong: the wiring (the call sat in `cmd_board`,
+    the surface my own measurement calls unread) and the schema (rows carry no
+    `kind` and no `team` key at all — 0 of 939 live rows). Measured by
+    coord-opus-worker: 0 rows where the hint would print anything.
+
+    This drives the REAL recipient command over a REAL directive document.
+    """
+    t = FakeTransport()
+    # Seed the RECONCILED index, which is what needs-me actually reads. Raw
+    # task docs alone yield zero rows -- my first attempt at this test did
+    # exactly that and "passed" nothing, which is the same class of mistake as
+    # the bug it is here to catch.
+    t.put(f"team/{TEAM}/_coord/summaries.json", json.dumps({
+        "schema": "coord.teams.summaries.v1",
+        "rows": [{
+            "id": "please-do-the-thing-abc123",
+            "name": "please-do-the-thing-abc123",
+            "title": "please do the thing",
+            "status": "proposed", "priority": "P1",
+            "owner": "them", "assignee": "me",
+            "tags": ["workstream:engine", "kind:directive"],
+            "mtime": "2026-08-07T00:00:00Z",
+        }],
+    }))
+
+    args = argparse.Namespace(team=TEAM, agent="me", all=False, json=False)
+    cli.cmd_needs_me(args, t)
+    out = capsys.readouterr().out
+
+    assert "--closes" in out, (
+        "needs-me printed no close hint for a real directive — the cure is "
+        "inert, which is the no-op-that-reads-as-a-fix this whole thread is about"
+    )
+    assert "<team>" not in out, "the team placeholder leaked; the command is un-runnable"
+    assert f"tell {TEAM} them" in out, "the reply must be addressed to the ASKER"
+
+
+def test_the_predicate_reads_tags_because_rows_have_no_kind_key(capsys):
+    """The schema half, pinned directly: a row shaped like the SYSTEM's."""
+    real_row = {"id": "the-ask-abc123", "owner": "them", "status": "proposed",
+                "tags": ["workstream:engine", "kind:directive"]}   # no kind, no team
+    cli.print_close_hint(real_row, team=TEAM)
+    assert "--closes the-ask-abc123" in capsys.readouterr().out
+
+
+def test_a_broadcast_and_a_plain_task_offer_no_close(capsys):
+    """A broadcast has no single row to close; a plain task is not an ask."""
+    cli.print_close_hint({"owner": "*", "id": "all-hands",
+                          "tags": ["kind:directive"]}, team=TEAM)
+    cli.print_close_hint({"owner": "them", "id": "some-task",
+                          "tags": ["workstream:engine"]}, team=TEAM)
+    assert "--closes" not in capsys.readouterr().out
+
+
+# --- the relationship guard + write verification (codex 564 r3) -------------
+#
+# A resolvable slug is not permission to close it. A mistyped-but-valid slug
+# would close unrelated work, and the only signal would be somebody else's row
+# going quiet.
+#
+# And the write itself was unverified: `review close` took THREE rounds to learn
+# read-back verification and I did not carry it to the sibling verb in the same
+# branch. Fixing the instance, leaving the generalisation — again.
+
+def test_closing_a_NON_directive_is_refused(capsys):
+    t = FakeTransport()
+    slug = _seed_directive(t, kind="task")
+    assert cli.cmd_tell(_args(closes=slug), t) == 1
+    assert "not a directive" in capsys.readouterr().err
+    assert okf.parse_frontmatter(t.store[cli._task_path(TEAM, slug)])["status"] \
+        == "proposed"
+
+
+def test_closing_a_directive_assigned_to_SOMEONE_ELSE_is_refused(capsys):
+    """The mistyped-valid-slug case: it exists, it is a directive, it is simply
+    not mine to close."""
+    t = FakeTransport()
+    slug = _seed_directive(t, assignee="a-third-party")
+    assert cli.cmd_tell(_args(closes=slug), t) == 1
+    err = capsys.readouterr().err
+    assert "assigned to" in err and "not to you" in err
+    assert okf.parse_frontmatter(t.store[cli._task_path(TEAM, slug)])["status"] \
+        == "proposed"
+
+
+def test_closing_a_directive_owned_by_someone_other_than_the_recipient(capsys):
+    """The reply goes to `them`; this row was asked by a different agent, so
+    this reply cannot be its answer."""
+    t = FakeTransport()
+    slug = _seed_directive(t, owner="a-different-asker")
+    assert cli.cmd_tell(_args(closes=slug), t) == 1
+    assert "goes to" in capsys.readouterr().err
+
+
+def test_a_silently_dropped_close_write_reports_failure(capsys):
+    """The defect `review close` needed three rounds to learn."""
+    class DropTaskWrite(FakeTransport):
+        def write(self, path, body):
+            if "/task/original-ask" in path:
+                return None
+            return super().write(path, body)
+    t = DropTaskWrite()
+    slug = _seed_directive(t)
+    rc = cli.cmd_tell(_args(closes=slug), t)
+    assert rc == 1, "the write vanished and the command reported closed"
+    assert "did NOT close" in capsys.readouterr().err
