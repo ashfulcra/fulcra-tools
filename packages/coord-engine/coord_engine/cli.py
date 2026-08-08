@@ -3665,6 +3665,23 @@ def _continuity_path(team: str, agent: str, task: str) -> str:
     return f"team/{team}/member/{agent}/continuity/{task}/latest.json"
 
 
+def _continuity_latest_path(team: str, agent: str) -> str:
+    """One pointer per agent naming their newest snapshot.
+
+    Exists because a listing cannot date a COLLECTION: 0 of 161 directory
+    entries under an agent's continuity prefix carry an mtime, and task dirs are
+    slugs with no ordering, so "when did this agent last checkpoint" otherwise
+    costs one read per task. Measured: 203 reads ~149s for three agents, which
+    is why `health` was killed at 240s and again at 590s. Upstream register U8.
+
+    A write-side pointer converts that to ONE read per agent. It is a
+    convention, not an invariant — the store has no conditional write and
+    nothing forces a writer to maintain it — which is exactly why the reader
+    treats a MISSING pointer as UNKNOWN rather than as "no snapshots".
+    """
+    return f"team/{team}/member/{agent}/continuity/LATEST.json"
+
+
 def _continuity_prefix(team: str, agent: str) -> str:
     return f"team/{team}/member/{agent}/continuity/"
 
@@ -3720,6 +3737,28 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 3
     print(f"snapshot {snap['checkpoint_id']}")
+    # The pointer is written only AFTER the snapshot itself is known-persisted.
+    # A pointer to a checkpoint that does not exist is worse than no pointer: a
+    # reader would take it as evidence of a save that never happened, which is
+    # the failure this whole verb was just fixed for.
+    ptr_ok = transport.write(_continuity_latest_path(args.team, args.agent),
+                             json.dumps({
+                                 "schema": "coord.continuity-latest.v1",
+                                 "agent": args.agent,
+                                 "task": task,
+                                 "checkpoint_id": snap["checkpoint_id"],
+                                 "created_at": snap.get("created_at"),
+                                 "path": path,
+                             }, indent=2))
+    if ptr_ok is False:
+        # NOT fatal: the snapshot IS saved, which is what the caller asked for.
+        # But the audit that reads this pointer will now report UNKNOWN for this
+        # agent, and saying so here is cheaper than someone later wondering why
+        # a live agent looks unaudited.
+        print(f"continuity snapshot: saved, but the LATEST pointer for "
+              f"{args.agent} was not written — `health` will report this agent's "
+              f"snapshot age as UNKNOWN until the next successful snapshot.",
+              file=sys.stderr)
     # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
     # not in the store would be a visualization of work that does not exist.
     _checkpoint_moment(transport, args.team, snap, path)
@@ -8435,16 +8474,54 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     now_dt = _now()
     pres_rows: list[dict[str, Any]] = []
     snap_rows: list[dict[str, Any]] = []
+    unknown_snapshot_agents: list[str] = []
     for r in presence.roster(_presence_shards(transport, args.team), now=_iso(now_dt)):
         pts = roles._parse(r.get("last_seen"))
         if pts is None:
             continue
         pres_rows.append({"agent": r["agent"], "ts": pts})
-        for snap in _agent_snapshots(transport, args.team, r["agent"]):
-            sts = continuity._parse_created_at(snap.get("created_at"))
-            if sts is not None:
-                snap_rows.append({"agent": r["agent"], "ts": sts})
+        # ONE read per agent via the LATEST pointer. The previous shape read
+        # EVERY snapshot document of every agent to find the newest, because a
+        # directory listing carries no mtime (upstream register U8) — measured
+        # at 203 reads / ~149s for three agents, which is why this verb was
+        # killed at 240s and again at 590s on a live store.
+        raw = transport.read(_continuity_latest_path(args.team, r["agent"]))
+        sts = None
+        if raw is not None:
+            try:
+                sts = continuity._parse_created_at(json.loads(raw).get("created_at"))
+            except (ValueError, TypeError, AttributeError):
+                sts = None
+        if sts is not None:
+            snap_rows.append({"agent": r["agent"], "ts": sts})
+            continue
+        # No usable pointer. Two very different cases hide here, and collapsing
+        # them is how this audit would start lying:
+        #
+        #   - the agent has NEVER checkpointed -> a real finding, and the one
+        #     this audit exists for;
+        #   - the agent HAS snapshots this build cannot date (pre-pointer
+        #     history, or a pointer write that failed) -> UNKNOWN, and flagging
+        #     it would manufacture a false accusation against someone who is
+        #     working.
+        #
+        # ONE listing separates them, with no reads. It is paid only for agents
+        # without a pointer, so the common path stays one read per agent.
+        try:
+            has_any = any(e.get("is_dir") for e in
+                          transport.list_dir(_continuity_prefix(args.team, r["agent"])))
+        except TransportError:
+            has_any = True   # cannot prove absence -> UNKNOWN, never a finding
+        if has_any:
+            unknown_snapshot_agents.append(r["agent"])
+            pres_rows.pop()  # undatable: it must not reach the staleness fold
+
     flagged_agents = continuity_audit.stale_agents(pres_rows, snap_rows, now=now_dt)
+    # Coverage, stated. "No stale agents" and "we could not tell for N of them"
+    # must not look the same — that equivalence is behind most of the incidents
+    # this layer has logged.
+    if unknown_snapshot_agents:
+        view["continuity_unknown"] = sorted(unknown_snapshot_agents)
     # Same row fields stale_agents returns: agent/presence_age_h/snapshot_age_h.
     view["continuity_stale"] = flagged_agents
     if args.json:

@@ -191,6 +191,18 @@ under `skills/`, each package with its own README, build, and tests.
   when the host is in trouble, which is when parking matters most. **Any caller
   of `transport.write` must treat `False` as failure**; it is not a
   Falsy-but-fine return.
+- `health`'s continuity audit reads ONE pointer per agent, not every snapshot.
+  `continuity snapshot` writes `continuity/LATEST.json` after the snapshot
+  itself persists (never before — a pointer to a checkpoint that does not exist
+  is worse than no pointer). The audit reads that. It does this because a
+  directory listing carries no mtime (upstream register U8) and task dirs are
+  unordered slugs, so finding the newest snapshot otherwise costs one read per
+  task: measured 203 reads / ~149s for three agents, and `health` was killed at
+  240s and again at 590s. **A missing pointer is UNKNOWN, never stale** — it
+  means pre-pointer history or a failed pointer write, neither of which is
+  evidence an agent stopped checkpointing. One extra listing (no reads)
+  separates "has snapshots we cannot date" from "has never checkpointed", and
+  only the latter is a finding; `continuity_unknown` reports the rest.
 - Date/clock tests: a module that fixes a top-level `NOW` for its data must also
   **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
   `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving
