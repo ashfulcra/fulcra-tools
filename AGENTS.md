@@ -711,6 +711,16 @@ it (not on PyPI).
   parses-if-non-empty check while emitting no result. A hand-kept list is how six pinned verbs and fifteen
   unpinned ones coexisted for weeks, and the widened sweep immediately found a live leak (`headroom --json`
   printed prose on its no-accounts early return).
+- **`escalate` attendance: one shared scan, and partial coverage is NOT an incident.** The vacancy
+  sweep answers "did a holder file a verdict recently" from ONE `_verdict_activity_index` pass built
+  before the role loop, not per role — it used to rebuild a 41-listing scan for every acting role
+  (measured 2026-08-08: 47.3s of a 98.2s run, pure transport). The scan is bounded by BOTH a count
+  (`budget`, 40) and a wall clock (`COORD_ATTENDANCE_SCAN_BUDGET`, 30s); a count alone cannot bound
+  time, which is how it reached 170s+ and timed the watchdog out. The register holds ~412 review dirs,
+  so **coverage is always partial by design** and the stderr envelope reports it as `attendance=40/412`
+  rather than raising an alarm. **rc 3 is reserved for a WALL-CLOCK cut** — a real anomaly. Durable fix
+  for full coverage is projection-side (reconcile already pays the listing cost); it does not carry
+  per-reviewer verdict recency today.
 - **Head-of-line: a budget cut may only ever truncate the TAIL — never the head.** The work-discovery
   folds do live per-op transport at query time over an unbounded population; under budget pressure the cut
   must land on the *lowest-priority* tail, so an agent's OWN assigned work and any decision parked on a
