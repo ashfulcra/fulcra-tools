@@ -13,6 +13,7 @@ with the slug already filled in, at the moment the closing move is wanted.
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -108,22 +109,61 @@ def test_the_SENDER_is_never_handed_the_closing_command(capsys):
     )
 
 
-def test_the_RECIPIENT_sees_the_closing_command_with_the_slug(capsys):
-    """The cure belongs where the recipient reads the ask with the slug on
-    screen. NOT `queue`: its text output is a byte-identical contract for shell
-    consumers on BOTH streams, pinned by two golden tests that caught the
-    attempt. `needs-me` is the other such surface and carries no pin."""
-    cli.print_close_hint({"kind": "directive", "owner": "them",
-                          "id": "the-ask-abc123", "team": TEAM})
+def test_needs_me_END_TO_END_prints_the_close_hint_for_a_real_directive(capsys):
+    """THE test that would have caught it, and did not exist.
+
+    Every earlier breadcrumb test called `print_close_hint` DIRECTLY with a
+    hand-built dict — the row shape the CODE expects, not the shape the SYSTEM
+    produces. So they verified string formatting and never touched the two
+    things that were actually wrong: the wiring (the call sat in `cmd_board`,
+    the surface my own measurement calls unread) and the schema (rows carry no
+    `kind` and no `team` key at all — 0 of 939 live rows). Measured by
+    coord-opus-worker: 0 rows where the hint would print anything.
+
+    This drives the REAL recipient command over a REAL directive document.
+    """
+    t = FakeTransport()
+    # Seed the RECONCILED index, which is what needs-me actually reads. Raw
+    # task docs alone yield zero rows -- my first attempt at this test did
+    # exactly that and "passed" nothing, which is the same class of mistake as
+    # the bug it is here to catch.
+    t.put(f"team/{TEAM}/_coord/summaries.json", json.dumps({
+        "schema": "coord.teams.summaries.v1",
+        "rows": [{
+            "id": "please-do-the-thing-abc123",
+            "name": "please-do-the-thing-abc123",
+            "title": "please do the thing",
+            "status": "proposed", "priority": "P1",
+            "owner": "them", "assignee": "me",
+            "tags": ["workstream:engine", "kind:directive"],
+            "mtime": "2026-08-07T00:00:00Z",
+        }],
+    }))
+
+    args = argparse.Namespace(team=TEAM, agent="me", all=False, json=False)
+    cli.cmd_needs_me(args, t)
     out = capsys.readouterr().out
-    assert "--closes the-ask-abc123" in out, "the slug must be filled in"
+
+    assert "--closes" in out, (
+        "needs-me printed no close hint for a real directive — the cure is "
+        "inert, which is the no-op-that-reads-as-a-fix this whole thread is about"
+    )
+    assert "<team>" not in out, "the team placeholder leaked; the command is un-runnable"
     assert f"tell {TEAM} them" in out, "the reply must be addressed to the ASKER"
+
+
+def test_the_predicate_reads_tags_because_rows_have_no_kind_key(capsys):
+    """The schema half, pinned directly: a row shaped like the SYSTEM's."""
+    real_row = {"id": "the-ask-abc123", "owner": "them", "status": "proposed",
+                "tags": ["workstream:engine", "kind:directive"]}   # no kind, no team
+    cli.print_close_hint(real_row, team=TEAM)
+    assert "--closes the-ask-abc123" in capsys.readouterr().out
 
 
 def test_a_broadcast_and_a_plain_task_offer_no_close(capsys):
     """A broadcast has no single row to close; a plain task is not an ask."""
-    cli.print_close_hint({"kind": "directive", "owner": "*",
-                          "id": "all-hands", "team": TEAM})
-    cli.print_close_hint({"kind": "task", "owner": "them",
-                          "id": "some-task", "team": TEAM})
+    cli.print_close_hint({"owner": "*", "id": "all-hands",
+                          "tags": ["kind:directive"]}, team=TEAM)
+    cli.print_close_hint({"owner": "them", "id": "some-task",
+                          "tags": ["workstream:engine"]}, team=TEAM)
     assert "--closes" not in capsys.readouterr().out

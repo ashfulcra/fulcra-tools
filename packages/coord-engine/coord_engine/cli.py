@@ -732,26 +732,32 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
             print(f"{section.upper()} ({len(items)})")
             for r in items:
                 print(_line(r))
-                print_close_hint(r)
     return 0
 
 
-def print_close_hint(row: dict[str, Any]) -> None:
+def print_close_hint(row: dict[str, Any], *, team: str) -> None:
     """Show the recipient how to answer AND close, with the slug filled in.
 
-    Placed here rather than on `queue` (coord-opus-worker named that surface,
-    and it was the right instinct) because the queue's text output is a
-    BYTE-IDENTICAL contract for shell consumers — on BOTH streams — pinned by
-    two golden tests that caught the attempt. `needs-me` carries no such pin and
-    is the other surface where the recipient reads the ask with the slug already
-    on screen.
+    NOT on `queue`: its text output is a BYTE-IDENTICAL contract for shell
+    consumers on BOTH streams, pinned by two golden tests.
+
+    THE PREDICATE READS `tags`, NOT `kind` (coord-opus-worker, measured against
+    939 live rows). Board/needs-me rows carry no `kind` key at all — 0 of 939 —
+    so `row.get("kind") or "task"` was always "task" and this returned before
+    printing, for every row including the 932 that ARE directives. Directive-ness
+    lives in `tags` as `kind:directive`.
+
+    `team` is a PARAMETER for the same reason: rows carry no `team` key either,
+    so recovering it from the row rendered the literal placeholder `<team>` and
+    the command could not be run. The caller has `args.team`; it is not the
+    row's to know.
     """
-    if (row.get("kind") or "task") != "directive":
+    if "kind:directive" not in (row.get("tags") or []):
         return
     owner, slug = row.get("owner"), row.get("id")
     if not owner or not slug or owner == "*":
         return
-    print(_close_on_reply_breadcrumb(row.get("team") or "<team>", owner, slug))
+    print(_close_on_reply_breadcrumb(team, owner, slug))
 
 
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
@@ -824,6 +830,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_source_line("needs-me", r))
             else:
                 print(_line(r))
+                print_close_hint(r, team=args.team)
     return 0
 
 
@@ -4296,9 +4303,6 @@ def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> Non
         print(f"{event.get('recorded_at','')[:19]} {event.get('from') or '?'} "
               f"{event['kind']} {event.get('priority') or '-'} "
               f"{event['slug']} {event.get('ptr') or '-'}")
-        # The closing move, addressed to the agent reading it, with the slug
-        # already filled in. Only for a directed ask: a broadcast has no single
-        # row to close, and offering one would invite closing someone else's.
 
 
 def _queue_result_envelope(
