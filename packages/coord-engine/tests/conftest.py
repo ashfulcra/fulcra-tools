@@ -3,7 +3,7 @@
 import pytest
 
 from coord_engine import bus_tags, checkpoint_channel
-from coord_engine.cli import IDENTITY_ENV
+from coord_engine.cli import INHERITED_ENV
 
 
 @pytest.fixture(autouse=True)
@@ -38,8 +38,8 @@ def _no_host_wake_provisioning(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_inherited_coord_identity(monkeypatch):
-    """The suite must never inherit the identity of whoever is running it.
+def _no_inherited_coord_environment(monkeypatch):
+    """The suite must never inherit the environment of whoever is running it.
 
     Every agent's standing wake prompt opens with
     ``export FULCRA_COORD_AGENT=<identity>``, and 25 tests across
@@ -56,11 +56,18 @@ def _no_inherited_coord_identity(monkeypatch):
     merging main and probing origin/main in a clean worktree all agreed the tree
     was broken, because every one of them inherited the same shell.
 
-    Tests that exercise identity resolution set these explicitly in their own
-    body; ``monkeypatch`` is function-scoped and applies after this fixture, so
-    they still see exactly the environment they intend.
+    The channel variable ``COORD_RECORDS_TYPE`` is the same shape one family
+    over, and sharper: all 8 tests it broke have a PREMISE that the records
+    config is absent or unreadable, so an exported channel supplies the very
+    thing they test the absence of. They did not merely fail — they stopped
+    being the tests they are named after, which is the version of this bug that
+    survives a green suite.
+
+    Tests that exercise identity or channel resolution set these explicitly in
+    their own body; ``monkeypatch`` is function-scoped and applies after this
+    fixture, so they still see exactly the environment they intend.
     """
-    for name in IDENTITY_ENV:
+    for name in INHERITED_ENV:
         monkeypatch.delenv(name, raising=False)
 
 

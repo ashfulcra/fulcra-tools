@@ -105,14 +105,36 @@ def _sanitize_hostname(raw: str) -> tuple[str, bool]:
     return f"{collapsed}-{digest}", True
 
 
-#: The environment variables that carry WHO is running this process. Named once,
-#: here, because the test suite must be able to neutralise exactly this set: 25
-#: tests read these as a fallback sender, so an inherited identity made a green
-#: tree report failures for anyone following the standing wake procedure (which
-#: opens by exporting one of them). The suite's conftest clears this tuple and a
-#: wall re-runs the affected tests under both environments; a variable added
-#: here without being added there is the drift that reintroduces the bug.
-IDENTITY_ENV: tuple[str, ...] = ("FULCRA_COORD_AGENT", "FULCRA_COORD_HUMAN")
+#: Ambient environment a real caller exports that the TEST SUITE must neutralise,
+#: mapped to a representative value the hermeticity wall populates. One mapping
+#: rather than a name list plus a parallel list of samples: the fixture clears
+#: these keys and the wall sets them, so there is nothing for the two to drift on.
+#:
+#: Two families, one shape — the suite reading state its caller happens to have:
+#:
+#: - **identity** (`FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`): 25 tests read
+#:   these as a fallback sender, so an inherited identity made a green tree
+#:   report failures for anyone following the standing wake procedure, which
+#:   opens by exporting one of them.
+#: - **channel** (`COORD_RECORDS_TYPE`): 8 tests, and every one is a test whose
+#:   PREMISE is that the records config is absent or unreadable —
+#:   `test_documented_send_fails_closed_without_a_records_config`,
+#:   `test_doctor_self_unreadable_config_is_unknown`, the `[config-absent]`
+#:   envelope case. An exported channel supplies the very thing they test the
+#:   absence of, so they do not merely fail: they stop being the tests they are
+#:   named after.
+#:
+#: A variable belongs here when the suite reading it makes the ANSWER depend on
+#: who ran it. It does NOT belong here when the variable legitimately changes
+#: behaviour a test is about — see `NOT_YET_WALLED` in the wall for
+#: `COORD_TRANSPORT_HTTP`, where a test asserting "no subprocess" SHOULD fail
+#: when you disable the HTTP path, and separating those from real leaks is work
+#: nobody has done yet.
+INHERITED_ENV: dict[str, str] = {
+    "FULCRA_COORD_AGENT": "some-other-agent",
+    "FULCRA_COORD_HUMAN": "some-other-human",
+    "COORD_RECORDS_TYPE": "some.other.channel",
+}
 
 
 def _host() -> str:

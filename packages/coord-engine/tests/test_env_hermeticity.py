@@ -28,34 +28,47 @@ import pathlib
 import subprocess
 import sys
 
-from coord_engine.cli import IDENTITY_ENV
+from coord_engine.cli import INHERITED_ENV
 
-#: Files that actually broke under an inherited identity, so the wall exercises
-#: the real regression rather than a sample chosen for convenience.
+#: Files that actually broke under an inherited environment, so the wall
+#: exercises the real regressions rather than a sample chosen for convenience.
+#: The first four broke on identity; the rest broke on an exported channel, and
+#: every one of those is a test whose premise is an ABSENT or unreadable records
+#: config that the variable then supplies.
 SUBSET = (
     "test_dispatch_companion.py",
     "test_records_write.py",
     "test_records_transactional.py",
     "test_queue_contract_engine_adapter.py",
+    "test_authority_currency.py",
+    "test_bus_tags.py",
+    "test_directive_collision.py",
+    "test_json_purity.py",
+    "test_queue_terminal_states.py",
+    "test_read_retry.py",
 )
 
 #: Measured, NOT yet walled. Recorded here rather than in someone's memory,
-#: because a coverage gap nobody can see reads as coverage. Setting
-#: ``COORD_RECORDS_TYPE`` alone reddens 8 tests — including one named
-#: ``[config-absent]``, whose entire premise is a channel the environment then
-#: supplies. Same family as the identity leak; separate fix, separate review.
-#: (``COORD_TRANSPORT_HTTP`` also perturbs the suite, but there at least some of
-#: the failures are the variable doing its job — a test asserting "no
-#: subprocess" SHOULD fail when you disable the HTTP path. Untangling which is
-#: which is exactly why it is not being waved through here.)
-NOT_YET_WALLED = ("COORD_RECORDS_TYPE", "COORD_TRANSPORT_HTTP")
+#: because a coverage gap nobody can see reads as coverage.
+#:
+#: ``COORD_TRANSPORT_HTTP`` perturbs the suite, but there at least some failures
+#: are the variable doing its job — a test asserting "no subprocess" SHOULD fail
+#: when you disable the HTTP path. Separating those from real leaks is real work
+#: and it has not been done, so it is named here rather than waved through.
+#:
+#: ``COORD_RECORDS_TYPE`` used to sit in this list and is now walled: all 8 of
+#: its failures turned out to be tests whose premise is an absent config, with
+#: no legitimate case among them. Checked, not assumed — a sibling in the same
+#: family, ``COORD_RECORDS_API_VERSION``, was measured and leaks NOTHING, which
+#: is why it is in neither list.
+NOT_YET_WALLED = ("COORD_TRANSPORT_HTTP",)
 
 _TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
 
 def _run_subset(overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Run SUBSET in a child process under a deliberately controlled env."""
-    env = {k: v for k, v in os.environ.items() if k not in IDENTITY_ENV}
+    env = {k: v for k, v in os.environ.items() if k not in INHERITED_ENV}
     env.update(overrides)
     # -p no:cacheprovider: the child must not race the parent run's .pytest_cache
     return subprocess.run(
@@ -75,7 +88,7 @@ def test_the_suite_answers_the_same_with_and_without_an_exported_identity():
         f"variable:\n{clean.stdout[-3000:]}"
     )
 
-    dirty = _run_subset({name: "some-other-agent" for name in IDENTITY_ENV})
+    dirty = _run_subset(dict(INHERITED_ENV))
     assert dirty.returncode == 0, (
         "these tests fail when the caller has exported a coordination identity "
         "— which every wake prompt tells every agent to do, so the suite is "
@@ -92,7 +105,7 @@ def test_the_walled_variables_are_the_ones_the_fixture_clears():
     is cheap precisely because it only guards that coupling — it is not the
     wall, and it is not a substitute for the run above.
     """
-    assert IDENTITY_ENV, "the fixture must declare what it clears"
-    assert set(IDENTITY_ENV).isdisjoint(NOT_YET_WALLED), (
+    assert INHERITED_ENV, "the fixture must declare what it clears"
+    assert set(INHERITED_ENV).isdisjoint(NOT_YET_WALLED), (
         "a variable cannot be both walled and listed as an unwalled gap"
     )
