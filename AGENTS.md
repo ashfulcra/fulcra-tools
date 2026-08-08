@@ -703,7 +703,10 @@ it (not on PyPI).
   now enforced for the whole class by PARSER DISCOVERY, not by a hand-kept list: `test_json_purity.py`
   walks the real parser for every path that accepts `--json` (28 today) and fails until each is either in
   `_JSON_PINNED` (smoke-run under a corrupt index AND all fold budgets squeezed to nothing) or in
-  `_JSON_EXEMPT` with a stated reason. **A new `--json` path fails the suite until you represent it** —
+  `_JSON_EXEMPT` with a stated reason — and `_JSON_EXEMPT` is **empty today**: all 28 are pinned, with the
+  mutating paths driven through their own `--dry-run`/`--once`/`--shadow` modes against an in-memory
+  transport. An exemption is a claim to justify in review, not a parking space for a path that was awkward
+  to invoke. **A new `--json` path fails the suite until you represent it** —
   and the pinned paths must print SOMETHING, since a verb regressing to silence would otherwise pass a
   parses-if-non-empty check while emitting no result. A hand-kept list is how six pinned verbs and fifteen
   unpinned ones coexisted for weeks, and the widened sweep immediately found a live leak (`headroom --json`

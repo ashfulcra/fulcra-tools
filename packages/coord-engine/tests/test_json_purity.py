@@ -169,19 +169,33 @@ _JSON_PINNED = {
     "stash list": ["stash", "list", "r"],
     "status": ["status", "r"],
     "threads": ["threads", "r", "--for", "alice"],
+    # codex-reviewer, PR 568 r2: these six were exempt in r1 and should not have
+    # been. Every "unsafe / emits nothing" justification I wrote was really my own
+    # WRONG INVOCATION — `route` takes --needs not --task, `review status` needs a
+    # slug that exists, and the three mutating paths all have dry-run/once/shadow
+    # modes built for exactly this. Called correctly, all six print one JSON value.
+    #
+    # MUTATION, measured rather than assumed: `bus-v3 migrate --dry-run` and
+    # `router execute --once --dry-run` write NOTHING. `router run --once
+    # --shadow` DOES write three paths (a router cursor plus shadow marks and a
+    # shadow decision) — it suppresses live delivery, not persistence. That is
+    # safe here ONLY because every fixture is a per-test in-memory FakeTransport;
+    # it would advance a real cursor against a real store. Do not lift these argv
+    # into a smoke script that points at the live bus.
+    "bus-v3 migrate": ["bus-v3", "migrate", "r", "--dry-run"],
+    "router execute": ["router", "execute", "r", "--once", "--dry-run"],
+    "router run": ["router", "run", "r", "--once", "--shadow"],
+    "engagement gate": ["engagement", "gate", "r"],
+    "review status": ["review", "status", "r", "pr1"],
+    "route": ["route", "r", "--needs", "review"],
 }
 
-#: Paths deliberately NOT smoke-run, each with the reason. Exemptions are
-#: explicit so "not covered" can never be mistaken for "covered and passing".
-_JSON_EXEMPT = {
-    "bus-v3 migrate": "mutates the shared bus authority; not safe to smoke-run",
-    "router execute": "executes queued work as a side effect",
-    "router run": "runs the router loop as a side effect",
-    "engagement gate": "requires a live engagement context; exits before output",
-    "review status": "prints nothing when the named review is absent — no JSON "
-                     "result is contracted for a missing slug",
-    "route": "requires a resolvable task and account set to produce a decision",
-}
+#: Paths deliberately NOT smoke-run, each with the reason. EMPTY BY DESIGN today:
+#: every parser-discovered `--json` path is pinned. The hatch stays because a
+#: future path may genuinely contract no output — but an entry here is a claim
+#: someone must justify in review, not a place to park a path that was merely
+#: awkward to invoke. That is what it degenerated into in r1.
+_JSON_EXEMPT: dict[str, str] = {}
 
 
 def _json_paths_from_parser():
@@ -268,7 +282,10 @@ def test_pinned_json_path_under_budget_pressure(path, capsys, monkeypatch):
 
 @pytest.mark.parametrize("path", sorted(_JSON_PINNED), ids=sorted(_JSON_PINNED))
 def test_pinned_json_path_under_read_degraded(path, capsys):
-    t = FakeTransport()
+    # Seeded THEN corrupted: some pinned paths need a real slug/review to have
+    # anything to say, and an empty store would make them vacuously "silent"
+    # rather than exercising the degraded read.
+    t = _seeded_store()
     _corrupt_index(t)
     capsys.readouterr()
     try:
