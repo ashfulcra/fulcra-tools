@@ -1409,9 +1409,22 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
             }, separators=(",", ":")))
             print(f"restored review {args.slug} from reviews/{month}/")
             return 0
-        if files != ["codex-reviewer.md"]:
-            print(f"review restore failed: unexpected archived verdict shape for {args.slug}",
-                  file=sys.stderr)
+        # A doc-less archive: verdict shards with no request doc, so the family
+        # path above cannot run. Exactly ONE shard is restorable here; the count
+        # is a deliberate risk bound, not an accident, because a restore with no
+        # doc recreates an ORPHAN review dir (verdicts, no doc) and doing that
+        # for N shards at once makes a bigger claim than this verb can justify.
+        #
+        # The NAME was hardcoded to one team's reviewer (`codex-reviewer.md`),
+        # which made `review restore` work for exactly one agent on exactly one
+        # team and fail with "unexpected archived verdict shape" for everyone
+        # else. Team-particular content does not belong in this repo — the shape
+        # is "one shard", and whose shard it is was never the engine's business.
+        if len(files) != 1:
+            print(f"review restore failed: {args.slug} has {len(files)} archived "
+                  f"verdict shard(s) and no request doc. Exactly one is "
+                  f"restorable without a doc; restore the doc alongside them to "
+                  f"take the family path.", file=sys.stderr)
             return 1
         filename = files[0]
         src = cold_prefix + filename
@@ -1422,6 +1435,10 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
             return 1
         if rec._crash_safe_move(transport, src, dst):
             print(f"restored review {args.slug} from reviews/{month}/")
+            print(f"review restore: {args.slug} came back WITHOUT a request doc, "
+                  f"so it is now an orphan (verdicts, no doc) and will surface "
+                  f"as needing maintainer repair until a doc is written.",
+                  file=sys.stderr)
             return 0
         print(f"review restore failed: verified move from reviews/{month}/ failed",
               file=sys.stderr)
