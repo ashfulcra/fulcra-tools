@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from . import state
+from . import freshness, state
 
 if TYPE_CHECKING:
     from .daemon import Daemon
@@ -56,7 +56,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     # as one — and changing annotation_count's meaning would alter the
     # "Ran successfully — no new data" feed entry it also drives.
     accepted_count = 0
-    newest_observed_at: str | None = None
+    newest_observed_at: datetime | None = None
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -92,8 +92,12 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
                 annotation_count += 1
                 if event.get("ok", True):
                     accepted_count += 1
-                    observed = event.get("observed_at")
-                    if isinstance(observed, str) and (
+                    # Instant comparison, not string comparison — see
+                    # PluginState.record_yield for why the two disagree.
+                    # record_yield re-validates, but picking the wrong
+                    # candidate here would discard the right one.
+                    observed = freshness.parse_instant(event.get("observed_at"))
+                    if observed is not None and (
                         newest_observed_at is None or observed > newest_observed_at
                     ):
                         newest_observed_at = observed

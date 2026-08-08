@@ -198,3 +198,49 @@ def test_naive_timestamps_are_treated_as_utc():
         newest_item_at=datetime(2026, 8, 8, 11, 0),  # noqa: DTZ001
     )
     assert report.state is Freshness.FRESH
+
+
+# --------------------------------------------------------------------------
+# ROUND 2 — codex-reviewer, head 6a2b387a. Two correctness bugs, both about
+# one signal wrongly overriding another.
+# --------------------------------------------------------------------------
+
+
+def test_a_proven_breach_is_not_erased_by_an_unknown_in_the_other_dimension():
+    """Bug 2. Either bound alone is sufficient to prove staleness, so an
+    absent signal in one dimension must never downgrade a breach proven in the
+    other. The original code returned UNKNOWN from inside each dimension's
+    branch, so a two-day-stale source with no yield clock reported UNKNOWN and
+    would not have alerted."""
+    report = _assess(
+        last_yield_at=None,                       # unknown dimension
+        newest_item_at=NOW - timedelta(days=2),   # PROVEN breach
+    )
+    assert report.state is Freshness.STALE, "an unknown erased a proven breach"
+
+
+def test_the_mirror_case_a_stale_yield_with_no_source_timestamp():
+    """Same bug, dimensions swapped."""
+    report = _assess(
+        last_yield_at=NOW - timedelta(days=2),    # PROVEN breach
+        newest_item_at=None,                      # unknown dimension
+    )
+    assert report.state is Freshness.STALE
+
+
+def test_clock_skew_in_one_dimension_does_not_erase_a_breach_in_the_other():
+    """Skew makes THAT dimension untrustworthy — it is not a licence to ignore
+    a breach the other dimension proves."""
+    report = _assess(
+        last_yield_at=NOW - timedelta(days=3),    # PROVEN breach
+        newest_item_at=NOW + timedelta(hours=5),  # untrustworthy
+    )
+    assert report.state is Freshness.STALE
+    assert report.clock_skew is True
+
+
+def test_unknown_still_wins_when_no_breach_is_proven():
+    """The fail-closed half must survive the fix: with nothing proven and a
+    required signal missing, the answer is UNKNOWN, never FRESH."""
+    report = _assess(last_yield_at=None, newest_item_at=NOW - timedelta(hours=1))
+    assert report.state is Freshness.UNKNOWN

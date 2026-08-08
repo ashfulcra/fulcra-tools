@@ -157,3 +157,51 @@ def test_a_plugin_can_declare_an_expectation():
         last_yield_at=NOW - timedelta(days=3),
     )
     assert report.state is Freshness.STALE
+
+
+# --------------------------------------------------------------------------
+# ROUND 2 — codex-reviewer. Lexicographic ISO comparison is not chronological.
+# --------------------------------------------------------------------------
+
+
+def test_offsets_are_compared_as_instants_not_as_strings():
+    """Bug 1, codex's exact probe. '2026-08-08T12:00:00+05:00' is 07:00Z —
+    OLDER than '2026-08-08T08:00:00+00:00' — but sorts LATER as a string. A
+    raw string comparison moves the watermark backwards in real time, which is
+    precisely the monotonic guarantee record_yield exists to provide."""
+    st = state.PluginState(plugin_id="example")
+    st.record_yield(when=NOW, observed_at="2026-08-08T08:00:00+00:00")
+    st.record_yield(when=NOW, observed_at="2026-08-08T12:00:00+05:00")  # older!
+
+    from datetime import datetime as _dt
+    kept = _dt.fromisoformat(st.newest_item_at)
+    assert kept == _dt(2026, 8, 8, 8, 0, tzinfo=timezone.utc)
+
+
+def test_equivalent_instants_in_different_offsets_do_not_regress():
+    """The same moment written two ways must be a no-op, not a rewrite."""
+    st = state.PluginState(plugin_id="example")
+    st.record_yield(when=NOW, observed_at="2026-08-08T12:00:00+00:00")
+    first = st.newest_item_at
+    st.record_yield(when=NOW, observed_at="2026-08-08T17:00:00+05:00")  # same instant
+    from datetime import datetime as _dt
+    assert _dt.fromisoformat(st.newest_item_at) == _dt.fromisoformat(first)
+
+
+def test_the_watermark_is_persisted_in_a_canonical_utc_form():
+    """Storing whatever offset the source happened to send makes every future
+    comparison depend on parsing. Normalize once, on write."""
+    st = state.PluginState(plugin_id="example")
+    st.record_yield(when=NOW, observed_at="2026-08-08T17:00:00+05:00")
+    assert st.newest_item_at.endswith("+00:00")
+
+
+def test_an_unparseable_source_timestamp_does_not_advance_the_watermark():
+    """Garbage must not become the high-water mark — that would freeze the
+    watermark forever and mask every real advance behind it."""
+    st = state.PluginState(plugin_id="example")
+    st.record_yield(when=NOW, observed_at="2026-08-08T10:00:00+00:00")
+    good = st.newest_item_at
+    st.record_yield(when=NOW, observed_at="not-a-timestamp")
+    assert st.newest_item_at == good
+    assert st.last_yield_at == NOW      # the yield itself still counts

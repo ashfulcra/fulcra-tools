@@ -109,12 +109,41 @@ class FreshnessReport:
 CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 
 
-def _age(now: datetime, then: datetime | None) -> timedelta | None:
-    if then is None:
+def parse_instant(value: str | datetime | None) -> datetime | None:
+    """Parse a source timestamp into an aware instant, or None if unusable.
+
+    ISO strings must never be compared as STRINGS. Offsets make lexical order
+    diverge from chronological order: ``2026-08-08T12:00:00+05:00`` is 07:00Z,
+    genuinely EARLIER than ``2026-08-08T08:00:00+00:00``, yet sorts after it.
+    A watermark maintained by string comparison therefore moves backwards in
+    real time — destroying the monotonic guarantee it exists to provide — and
+    unparseable junk sorts above every real timestamp, freezing the watermark
+    permanently. Parse, then compare instants.
+    """
+    if value is None:
         return None
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    return now - then
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
+    # A naive timestamp is assumed UTC: state rows written before timestamps
+    # carried offsets must keep working rather than crash the daemon loop.
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def to_canonical_utc(value: str | datetime | None) -> str | None:
+    """Normalize to a UTC ISO string, so stored watermarks are directly
+    comparable and no future reader has to re-derive the offset."""
+    dt = parse_instant(value)
+    return dt.astimezone(timezone.utc).isoformat() if dt else None
+
+
+def _age(now: datetime, then: datetime | None) -> timedelta | None:
+    instant = parse_instant(then)
+    return None if instant is None else now - instant
 
 
 def assess(
@@ -144,60 +173,48 @@ def assess(
     yield_age = _age(now, last_yield_at)
     upstream_age = _age(now, newest_item_at)
 
-    # A source timestamp in the future makes every age meaningless — and
-    # crucially would make a stalled source look permanently fresh. Refuse to
-    # judge instead.
-    skewed = any(
-        age is not None and age < -CLOCK_SKEW_TOLERANCE
-        for age in (yield_age, upstream_age)
-    )
-    if skewed:
-        return FreshnessReport(
-            plugin_id=plugin_id,
-            state=Freshness.UNKNOWN,
-            summary=(
-                "source timestamp is in the future — clock skew; "
-                "freshness cannot be judged"
-            ),
-            yield_age=yield_age,
-            upstream_age=upstream_age,
-            clock_skew=True,
-        )
-
-    # Clamp small negative ages to zero now that gross skew is excluded.
-    if yield_age is not None and yield_age < timedelta(0):
-        yield_age = timedelta(0)
-    if upstream_age is not None and upstream_age < timedelta(0):
-        upstream_age = timedelta(0)
-
+    # EVERY configured dimension is evaluated before any verdict is formed.
+    # Returning early from inside a dimension let an UNKNOWN in one erase a
+    # breach PROVEN by the other — a two-day-stale source with no yield clock
+    # reported UNKNOWN and would not have alerted. Either bound alone is
+    # sufficient to prove staleness, so a proof must outrank an absence.
     breaches: list[str] = []
-    if expectation.max_yield_silence is not None:
-        if yield_age is None:
-            return FreshnessReport(
-                plugin_id=plugin_id,
-                state=Freshness.UNKNOWN,
-                summary="has never accepted a record — nothing to judge yet",
-                upstream_age=upstream_age,
-            )
-        if yield_age > expectation.max_yield_silence:
-            breaches.append(
-                f"collected nothing for {_humanize(yield_age)} "
-                f"(limit {_humanize(expectation.max_yield_silence)})",
-            )
+    unknowns: list[str] = []
+    skewed = False
 
-    if expectation.max_upstream_lag is not None:
-        if upstream_age is None:
-            return FreshnessReport(
-                plugin_id=plugin_id,
-                state=Freshness.UNKNOWN,
-                summary="no source timestamp recorded yet — nothing to judge",
-                yield_age=yield_age,
-            )
-        if upstream_age > expectation.max_upstream_lag:
-            breaches.append(
-                f"newest item is {_humanize(upstream_age)} old "
-                f"(limit {_humanize(expectation.max_upstream_lag)})",
-            )
+    def _judge(age: timedelta | None, bound: timedelta | None,
+               missing: str, breach: str) -> timedelta | None:
+        """Assess one dimension. Returns the age, clamped."""
+        nonlocal skewed
+        if bound is None:
+            return age
+        if age is None:
+            unknowns.append(missing)
+            return None
+        if age < -CLOCK_SKEW_TOLERANCE:
+            # A timestamp in the future makes THIS dimension's age
+            # meaningless, and would otherwise make a stalled source look
+            # permanently fresh. It is not licence to ignore the other
+            # dimension.
+            skewed = True
+            unknowns.append("timestamp is in the future — clock skew")
+            return age
+        age = max(age, timedelta(0))    # tolerate sub-tolerance skew
+        if age > bound:
+            breaches.append(breach.format(age=_humanize(age),
+                                          limit=_humanize(bound)))
+        return age
+
+    yield_age = _judge(
+        yield_age, expectation.max_yield_silence,
+        "has never accepted a record",
+        "collected nothing for {age} (limit {limit})",
+    )
+    upstream_age = _judge(
+        upstream_age, expectation.max_upstream_lag,
+        "no source timestamp recorded yet",
+        "newest item is {age} old (limit {limit})",
+    )
 
     if breaches:
         return FreshnessReport(
@@ -206,6 +223,17 @@ def assess(
             summary="; ".join(breaches),
             yield_age=yield_age,
             upstream_age=upstream_age,
+            clock_skew=skewed,
+        )
+
+    if unknowns:
+        return FreshnessReport(
+            plugin_id=plugin_id,
+            state=Freshness.UNKNOWN,
+            summary="; ".join(unknowns) + " — nothing proven either way",
+            yield_age=yield_age,
+            upstream_age=upstream_age,
+            clock_skew=skewed,
         )
 
     return FreshnessReport(

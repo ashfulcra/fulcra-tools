@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from . import db
+from . import db, freshness
 
 
 @dataclass
@@ -75,9 +75,18 @@ class PluginState:
         works.
         """
         self.last_yield_at = when
-        if observed_at and (self.newest_item_at is None
-                            or observed_at > self.newest_item_at):
-            self.newest_item_at = observed_at
+        # Compare INSTANTS, never ISO strings: offsets make lexical order
+        # diverge from chronological order (12:00+05:00 is earlier than
+        # 08:00+00:00 yet sorts after it), and unparseable junk sorts above
+        # every real timestamp — one moves the watermark backwards, the other
+        # freezes it forever. Unusable values are dropped, but the yield still
+        # counts: a record WAS accepted.
+        incoming = freshness.parse_instant(observed_at)
+        if incoming is None:
+            return
+        current = freshness.parse_instant(self.newest_item_at)
+        if current is None or incoming > current:
+            self.newest_item_at = freshness.to_canonical_utc(incoming)
 
 
 def _parse_dt(value: str | None) -> datetime | None:
