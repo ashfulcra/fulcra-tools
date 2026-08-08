@@ -1557,7 +1557,7 @@ def _settled_marker_present(transport: Any, team: str, slug: str) -> Optional[bo
     listing — so an unreadable marker plus an unreadable listing produced a
     silent rc 0 exactly where this code promises to fail closed. That is the
     UNKNOWN-collapsed-to-a-definite-answer bug, inside the helper written to
-    prevent it (codex-reviewer, PR 572 r3).
+    prevent it.
     """
     try:
         names = {(e.get("name") or "") for e in
@@ -3385,7 +3385,7 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # being requested INVISIBLE — a silently hidden obligation, versus evidence
     # that one `review close` restores. The marker does two jobs with opposite
     # lifetimes (durable evidence vs a fold-skip cache); separating them is the
-    # real fix and is coord-boss's to rule on.
+    # real fix, and it is a design decision rather than a local one.
     transport.delete(_settled_marker_path(team, slug))
     # Atomic notification: with the doc durably landed, deliver ONE directive per
     # required reviewer through the canonical hash-slug directive path, so a
