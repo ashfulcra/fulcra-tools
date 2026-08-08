@@ -423,3 +423,96 @@ class TestOpenClaw:
         assert oc._BEGIN in out and "real prose" in out
         # the documented sample is preserved verbatim inside the code fence
         assert "```" in out and out.count(oc._LEGACY_BEGIN) == 1
+
+
+class TestCodexWatchFailsClosed:
+    """P1 (codex-reviewer, 2026-07-10): the watcher reported WATCH_OK while reviews
+    were waiting — it read a fold that had degraded and could not tell.
+
+    The hook stacks THREE truncations on the briefing read: `2>/dev/null`,
+    `| head -60`, and a final `ctx[:4000]`. Every one discards the TAIL, and the
+    tail is where a fold's degraded markers and verdict live. stderr is the one
+    stream truncation does not reach — and it was being thrown away."""
+
+    def test_session_start_keeps_briefing_stderr_instead_of_discarding_it(self):
+        sh = cx.SESSION_START_SH
+        assert 'coord-engine briefing "$TEAM" --agent "$AGENT" 2>/dev/null' not in sh, (
+            "briefing stderr is the trust signal that survives stdout truncation; "
+            "sending it to /dev/null is the defect this closes")
+        assert "BRIEF_ERR" in sh
+
+    def test_degraded_block_is_placed_before_the_truncated_payload(self):
+        """Order is the whole point: a signal appended after an unbounded payload is
+        a signal inside the part that gets cut."""
+        sh = cx.SESSION_START_SH
+        assert sh.index("coord degraded:") < sh.index("coord briefing (stdout")
+
+    def test_truncated_stdout_is_labelled_as_truncated(self):
+        # Absence of a marker in a truncated stream is not evidence of its absence.
+        assert "absence of a marker here is NOT" in cx.SESSION_START_SH
+
+    def test_prompt_forbids_watch_ok_on_a_degraded_read(self):
+        prompt = cx.COORD_WATCH_PROMPT.format(team="teamx", agent="agent")
+        assert "WATCH_OK claims you looked and saw everything" in prompt
+        assert "coord degraded:" in prompt      # the exact block the hook emits
+        for phrase in ("degraded", "timed-out", "not that you saw nothing"):
+            assert phrase in prompt, phrase
+        # The compactness budget above is real — this prompt is re-sent every tick.
+        assert len(prompt) < 900
+
+    def test_the_hook_still_renders_and_stays_bounded(self, tmp_path):
+        """The fix must not break rendering or reintroduce an unbounded dump."""
+        cx.install("teamx", "agent", codex_dir=tmp_path, thread_id="thr-1")
+        hook = (tmp_path / cx.MANAGED_DIRNAME / "session-start.sh").read_text()
+        assert "__TEAM__" not in hook and "__AGENT__" not in hook
+        assert "head -60" in hook and "ctx[:4000]" in hook
+        assert "head -6 " in hook          # the stderr capture is bounded too
+
+
+def _render_and_run(tmp_path, stub_body, agent="cm"):
+    """Render the hook and EXECUTE it against a stub coord-engine.
+
+    Grepping the template proved nothing: an earlier version of this fix passed
+    every string assertion while emitting no degraded block at runtime. Only
+    running it caught that."""
+    import json as _j
+    import os
+    import stat as _stat
+    import subprocess
+    cx.install("fulcra", agent, codex_dir=tmp_path, thread_id="t1")
+    hook = tmp_path / cx.MANAGED_DIRNAME / "session-start.sh"
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "coord-engine"
+    stub.write_text(stub_body)
+    stub.chmod(stub.stat().st_mode | _stat.S_IEXEC)
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    r = subprocess.run(["bash", str(hook)], input="{}", capture_output=True,
+                       text=True, env=env)
+    return _j.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+_STUB_WARNS_AT_THE_TAIL = """#!/bin/bash
+case "$1" in
+  briefing)
+    for i in $(seq 1 200); do echo "row $i"; done
+    echo "briefing: presence section unavailable (TransportError)" >&2 ;;
+  *) echo "" ;;
+esac
+exit 0
+"""
+
+
+def test_a_fold_that_warns_AFTER_a_long_payload_still_reaches_the_model(tmp_path):
+    """The regression the P1 asked for, and the one that nearly shipped broken.
+
+    Piping to `head -60` closes the pipe and SIGPIPEs the producer, so a fold whose
+    degraded marker comes after a long payload is killed before writing it to
+    stdout OR stderr — the warning disappears and the tick reads clean. The hook
+    therefore runs the command to completion into a file and truncates afterwards."""
+    ctx = _render_and_run(tmp_path, _STUB_WARNS_AT_THE_TAIL)
+    assert "coord degraded:" in ctx, (
+        "a tail-emitted warning was lost — the truncation killed the producer")
+    assert "presence section unavailable" in ctx
+    assert ctx.index("coord degraded:") < ctx.index("coord briefing (stdout")

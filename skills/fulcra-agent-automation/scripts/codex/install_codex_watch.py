@@ -95,8 +95,10 @@ resume continuity, run `coord-engine inbox {team} --agent {agent} --json` once, 
 `coord-engine briefing {team} --agent {agent}` once. Do not rely on briefing's inbox section:
 if either read is degraded, use its documented direct-listing fallback. Handle every surfaced
 item end-to-end. For reviews, write and verify the exact required verdict before acking.
-Snapshot material work, refresh presence/held-role leases, then report last. If nothing is
-actionable, the final output is exactly WATCH_OK.
+Snapshot material work, refresh presence/held-role leases, then report last.
+WATCH_OK claims you looked and saw everything, not that you saw nothing. Emit it ONLY if
+every read completed: no degraded/UNKNOWN row, no `coord degraded:` block, nothing
+timed-out or unread-to-the-end. Otherwise report what you could not see.
 """
 
 SESSION_START_SH = """\
@@ -128,18 +130,45 @@ fi
 command -v coord-engine >/dev/null 2>&1 || exit 0
 WAKE_CONTEXT="$(coord-engine wake consume "$TEAM" --agent "$AGENT" 2>/dev/null | head -8)"
 BRIEF="$(coord-engine continuity resume "$TEAM" "$AGENT" 2>/dev/null | head -25)"
-BRIEFING="$(coord-engine briefing "$TEAM" --agent "$AGENT" 2>/dev/null | head -60)"
-[ -z "$WAKE_CONTEXT$BRIEF$BRIEFING" ] && exit 0
-python3 - "$WAKE_CONTEXT" "$BRIEF" "$BRIEFING" <<'PYEOF'
+# briefing's stdout is BOUNDED here (head -60) and the assembled context is capped
+# again below, so anything at the TAIL of the fold is the first thing lost — and the
+# tail is exactly where its degraded markers and verdict live. Its stderr carries the
+# trust signal (the `briefing: <section> unavailable` lines, and the compact envelope
+# where the engine emits one); this hook used to send that to /dev/null, discarding the
+# only part that survives truncation by being separate. Capture it, keep it SHORT, and
+# place it FIRST in the assembled context so no later cap can reach it.
+BRIEF_ERR_FILE="$(mktemp 2>/dev/null || echo /tmp/coord-brief-err.$$)"
+BRIEF_OUT_FILE="$(mktemp 2>/dev/null || echo /tmp/coord-brief-out.$$)"
+# NOT `briefing | head -60`: a pipe to `head` closes after 60 lines and SIGPIPEs the
+# producer, so a fold that emits its degraded markers at the TAIL is killed before it
+# can write them to EITHER stream — including the stderr this block exists to capture.
+# Verified 2026-08-08 by running the rendered hook against a fold that warns after a
+# long payload: the warning vanished entirely. Let the command RUN TO COMPLETION into
+# a file, then truncate for display. Truncation is a display concern, never a reason
+# to cut the process off mid-verdict.
+coord-engine briefing "$TEAM" --agent "$AGENT" >"$BRIEF_OUT_FILE" 2>"$BRIEF_ERR_FILE"
+BRIEFING="$(head -60 "$BRIEF_OUT_FILE" 2>/dev/null)"
+BRIEF_ERR="$(head -6 "$BRIEF_ERR_FILE" 2>/dev/null)"
+rm -f "$BRIEF_ERR_FILE" "$BRIEF_OUT_FILE" 2>/dev/null
+[ -z "$WAKE_CONTEXT$BRIEF$BRIEFING$BRIEF_ERR" ] && exit 0
+python3 - "$WAKE_CONTEXT" "$BRIEF" "$BRIEFING" "$BRIEF_ERR" <<'PYEOF'
 import json, sys
 wake, brief, briefing = sys.argv[1], sys.argv[2], sys.argv[3]
+briefing_err = sys.argv[4] if len(sys.argv) > 4 else ""
 parts = []
+if briefing_err:
+    # FIRST, deliberately: a truncated tail must never be mistaken for a clean read.
+    parts.append("coord degraded: the briefing fold reported the following on stderr; "
+                 "treat these sections as UNKNOWN, not empty, and do not report "
+                 "WATCH_OK on this tick:\\n" + briefing_err)
 if wake:
     parts.append("coord wake nudge:\\n" + wake)
 if brief:
     parts.append("coord resume brief:\\n" + brief)
 if briefing:
-    parts.append("coord briefing:\\n" + briefing)
+    parts.append("coord briefing (stdout, TRUNCATED to 60 lines — its trailing "
+                 "degraded markers may be cut; absence of a marker here is NOT "
+                 "evidence of a clean fold):\\n" + briefing)
 ctx = "\\n\\n".join(parts)
 print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "SessionStart", "additionalContext": ctx[:4000]}}))
