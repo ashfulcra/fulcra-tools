@@ -716,7 +716,9 @@ it (not on PyPI).
   merge EVIDENCE written by `review close`, and **nothing recomputes it**: a merged-but-never-verdicted
   review tallies PENDING forever, because nobody reviews a PR that landed weeks ago. `review status`
   therefore deletes a stale cache but **never** a MERGED marker, and an unreadable marker is left alone
-  (`read` cannot tell unreadable from absent, so UNKNOWN fails toward keeping evidence). Before this guard,
+  and an unclassifiable marker is PRESERVED, reported on stderr, and returns **rc 3** — TRI-state, because
+  two states conflated "known cache" with "cannot tell" and only a POSITIVELY identified cache may be
+  deleted. An unrecognised `state:` from a future writer counts as unclassifiable, not as a cache. Before this guard,
   running `review status` on a retroactively-closed review silently destroyed its closure — a read-only
   diagnostic erasing history. **If you add a writer to a shared marker path, audit every existing
   deleter of it in the same change.**

@@ -1539,29 +1539,55 @@ def _role_fold_budget() -> float:
     return config.env_float("COORD_ROLE_FOLD_BUDGET", DEFAULT_ROLE_FOLD_BUDGET)
 
 
-def _settled_marker_is_a_tally_cache(transport: Any, team: str, slug: str) -> bool:
-    """May a recomputed tally DELETE this slug's ``.settled``?
+#: Tri-state classification of a `.settled` marker, because the two-state answer
+#: (delete / keep) silently conflated "known cache" with "cannot tell".
+SETTLED_CACHE = "cache"      #: an APPROVED tally cache — recomputable, safe to drop
+SETTLED_MERGED = "merged"    #: merge evidence — a PR landed; nothing recomputes it
+SETTLED_UNKNOWN = "unknown"  #: unreadable or unrecognised — preserve AND say so
 
-    ``.settled`` carries two different things since PR 561:
 
-    - a **tally cache** (``state: APPROVED``), written by
-      :func:`_write_settled_marker`. Cheap to recompute, safe to drop.
-    - **merge evidence** (``state: MERGED`` + ``merge_sha``), written by
-      ``review close``. It records that a PR actually merged. Nothing recomputes
-      it, and a merged review that was never verdicted tallies PENDING forever,
-      so a tally-driven delete destroys it permanently.
+def _settled_marker_listed(transport: Any, team: str, slug: str) -> bool:
+    """Does a ``.settled`` OBJECT exist, independent of whether it can be read?
 
-    True only for the cache. UNKNOWN (unreadable marker) returns False: refusing
-    to delete evidence we cannot classify is the safe direction — the cost is a
-    stale cache entry, the cost of the other choice is lost history.
+    `read` returning None conflates "absent" with "unreadable", which is exactly
+    the distinction the UNKNOWN branch needs: an ABSENT marker is nothing to warn
+    about, an UNREADABLE one is. The listing answers presence without parsing, so
+    the two are separable. A raised listing is itself UNKNOWN -> False, because a
+    warning we cannot substantiate is noise.
+    """
+    try:
+        names = {(e.get("name") or "") for e in
+                 transport.list_dir(_verdicts_prefix(team, slug))}
+    except TransportError:
+        return False
+    return SETTLED_MARKER in names
+
+
+def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
+    """``cache`` / ``merged`` / ``unknown`` for a slug's ``.settled``.
+
+    ``.settled`` carries two different things since PR 561: a tally CACHE
+    (``state: APPROVED``, written by :func:`_write_settled_marker`) and merge
+    EVIDENCE (``state: MERGED`` + ``merge_sha``, written by ``review close``).
+    Only the cache is recomputable.
+
+    THREE states, not two: a marker we cannot read or whose ``state`` we do not
+    recognise is NOT a cache, and pretending otherwise would delete evidence we
+    merely failed to parse. It is also not simply "keep" — a silent keep hides a
+    store or schema problem, so the caller reports it and fails nonzero.
+    ``read`` returning None cannot distinguish absent from unreadable, so an
+    absent marker classifies as ``unknown`` too; deleting nothing costs nothing.
     """
     raw = transport.read(_settled_marker_path(team, slug))
     if raw is None:
-        # Absent OR unreadable — `read` cannot tell those apart. Either way there
-        # is nothing to gain by deleting.
-        return False
+        return SETTLED_UNKNOWN
     fm = okf.parse_frontmatter(raw) or {}
-    return str(fm.get("state") or "") != "MERGED"
+    state = str(fm.get("state") or "")
+    if state == "MERGED":
+        return SETTLED_MERGED
+    if state == review.APPROVED:
+        return SETTLED_CACHE
+    return SETTLED_UNKNOWN
 
 
 def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
@@ -3423,25 +3449,37 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         return 1
     # A direct query recomputes the truth (never trusts the marker). doc_ok and
     # vreads_ok are both proven above, so the tally is trustworthy here.
+    _marker_unknown = False
     if _is_settleable(result):
         # PROVEN terminal-settled (non-empty required, every listed verdict read):
         # refresh the fold cache so the fan-out fold can skip this slug next time.
         _write_settled_marker(transport, team, slug, now=_iso(_now()))
-    elif _settled_marker_is_a_tally_cache(transport, team, slug):
+    else:
         # F4: a full, trustworthy tally that is NOT settleable, yet a `.settled`
-        # marker may linger (e.g. a since-reopened review). Best-effort delete
-        # (delete is timeout-safe -> False, ignored) so the next fan-out fold
-        # recomputes and sees the pending obligation, complementing the I2
-        # re-request delete. Self-healing on direct query.
-        #
-        # GUARDED, because PR 561 gave `.settled` a SECOND meaning. This comment
-        # used to say "the marker only ever caches a terminal-APPROVED state" —
-        # true until `review close` began writing `state: MERGED` with a merge
-        # sha: durable EVIDENCE that a PR merged, not a cache of a tally. A
-        # merged-but-never-verdicted review tallies PENDING forever (nobody
-        # reviews a PR that landed weeks ago), so this branch deleted the closure
-        # every time anyone RAN `review status` on it.
-        transport.delete(_settled_marker_path(team, slug))
+        # marker may linger. Which of the marker's TWO meanings it carries decides
+        # what we may do — see `_classify_settled_marker`. Before PR 561 there was
+        # only one meaning and this branch deleted unconditionally, which is how
+        # `review status` came to destroy merge evidence just by being run.
+        marker_state = _classify_settled_marker(transport, team, slug)
+        if marker_state == SETTLED_CACHE:
+            # Recomputable: drop it so the next fan-out fold sees the pending
+            # obligation. Best-effort (delete is timeout-safe -> False, ignored).
+            transport.delete(_settled_marker_path(team, slug))
+        elif marker_state == SETTLED_UNKNOWN and _settled_marker_listed(
+                transport, team, slug):
+            # A marker EXISTS but this build could not classify it — unreadable
+            # under a degraded transport, or a `state:` it does not know. PRESERVE
+            # it (never delete what we failed to parse) and say so LOUDLY: a
+            # silent keep leaves a marker suppressing the fan-out fold with
+            # nothing on any surface explaining why. rc is nonzero so an
+            # unattended caller cannot read this as a clean tally.
+            print(f"review status: {slug} carries a `.settled` marker this build "
+                  f"cannot classify (unreadable, or an unrecognised state:) — "
+                  f"PRESERVED, not deleted. The fan-out fold may skip this slug "
+                  f"until it is resolved.", file=sys.stderr)
+            _marker_unknown = True
+        # SETTLED_MERGED, or absent: nothing to do. Merge evidence is not a cache
+        # and is never dropped by a tally recompute.
     result.update({"team": team, "slug": slug})
     if args.json:
         jsonutil.print_json(result)
@@ -3453,7 +3491,10 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             print("  changes requested: " + ", ".join(result["changes"]))
         if result["pending_required"]:
             print("  awaiting required: " + ", ".join(result["pending_required"]))
-    return 0
+    # An unclassifiable marker is a DEGRADED answer, not a clean tally: the slug
+    # may stay invisible to the fan-out fold and this verb cannot say why. rc 3,
+    # the established UNKNOWN code, so an unattended caller fails closed.
+    return 3 if _marker_unknown else 0
 
 
 # --- continuity (fulcra-agent-continuity snapshots) ---

@@ -248,12 +248,55 @@ def test_review_status_still_clears_a_stale_TALLY_CACHE(capsys):
     assert not t.read(path), "a stale tally cache should still be cleared"
 
 
-def test_an_unreadable_marker_is_not_deleted():
-    """UNKNOWN fails toward preserving evidence: `read` cannot distinguish an
-    unreadable marker from an absent one, so we never delete on that answer."""
+def test_classification_is_TRI_state_not_two(capsys):
+    """codex-reviewer, PR 572 r1: two states conflated "known cache" with
+    "cannot tell". Only a POSITIVELY identified cache may be deleted."""
+    t = FakeTransport()
+    t.put(cli._settled_marker_path("r", "a"),
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    t.put(cli._settled_marker_path("r", "b"),
+          "---\nschema: review-settled/v1\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    t.put(cli._settled_marker_path("r", "c"),
+          "---\nschema: review-settled/v1\nstate: SOMETHING_NEW\n---\n")
+    t.put(cli._settled_marker_path("r", "d"), "not frontmatter at all")
+    assert cli._classify_settled_marker(t, "r", "a") == cli.SETTLED_CACHE
+    assert cli._classify_settled_marker(t, "r", "b") == cli.SETTLED_MERGED
+    # an unrecognised state is NOT a cache — a future writer must not be deleted
+    assert cli._classify_settled_marker(t, "r", "c") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "d") == cli.SETTLED_UNKNOWN
+    # absent is UNKNOWN too, and deleting nothing costs nothing
+    assert cli._classify_settled_marker(t, "r", "missing") == cli.SETTLED_UNKNOWN
+
+
+def test_an_unclassifiable_marker_is_preserved_AND_reported_AND_rc3(capsys):
+    """The visibility path codex asked for: preserving silently would leave a
+    marker suppressing the fold with nothing on any surface to explain it."""
     class T(FakeTransport):
         def read(self, path):
             if path.endswith("/.settled"):
-                return None          # unreadable OR absent — indistinguishable
+                return None                      # exists (listed) but unreadable
             return super().read(path)
-    assert cli._settled_marker_is_a_tally_cache(T(), "r", "pr-z") is False
+
+    t = T()
+    t.put("team/r/review/pr-u.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    t.put(cli._settled_marker_path("r", "pr-u"), "unreadable-by-this-transport")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-u"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3, "an unclassifiable marker is a DEGRADED answer, not a clean tally"
+    assert "cannot classify" in err and "PRESERVED" in err
+    # and it is still there
+    assert cli._settled_marker_listed(t, "r", "pr-u")
+
+
+def test_an_ABSENT_marker_is_silent_and_rc0(capsys):
+    """Absent is not a degradation. `read` cannot tell absent from unreadable, so
+    the listing is what separates them — without it every clean slug would warn."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-v.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-v"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 0 and "cannot classify" not in err
