@@ -151,3 +151,50 @@ def test_closing_over_a_stale_marker_SUCCEEDS_when_the_write_lands():
     assert cli.cmd_review_close(_args(), t) == 0
     fm = okf.parse_frontmatter(t.store[cli._settled_marker_path(TEAM, SLUG)])
     assert fm["state"] == "MERGED" and fm["merge_sha"] == SHA
+
+
+# --- same-SHA stale provenance (codex 561 r2) -------------------------------
+#
+# My r1 fix hand-picked `state` and `merge_sha`. But the verb's contract records
+# merged_at, closed_by and reason too, so re-closing the SAME sha with corrected
+# provenance could silently drop the write, match on the two fields I happened
+# to check, and exit 0 while the requested evidence never landed.
+#
+# A hand-picked subset goes stale the moment a field is added. The comparison is
+# now derived from the payload; these pin that.
+
+@pytest.mark.parametrize("stale_field, stale_value", [
+    ("merged_at", "2001-01-01T00:00:00Z"),
+    ("closed_by", "somebody-else"),
+    ("reason", "an older reason"),
+])
+def test_same_sha_but_stale_provenance_is_caught(stale_field, stale_value):
+    """state and merge_sha both MATCH — only the provenance differs."""
+    t = _with_review(WriteSilentlyDrops())
+    marker = {"schema": "review-settled/v1", "state": "MERGED",
+              "merge_sha": SHA, "merged_at": PINNED, "closed_by": "tester",
+              "reason": "PR merged; the head will not be reviewed again",
+              "ts": PINNED}
+    marker[stale_field] = stale_value
+    t.put(cli._settled_marker_path(TEAM, SLUG), okf.render_frontmatter(marker))
+
+    rc = cli.cmd_review_close(_args(reason="PR merged; the head will not be "
+                                           "reviewed again"), t)
+    assert rc == 1, (
+        f"{stale_field} was stale but state and merge_sha matched, so the "
+        f"closure reported success with evidence that never landed"
+    )
+
+
+def test_the_check_is_derived_from_the_payload_not_a_hardcoded_list():
+    """Non-staleness: every field the verb writes must be compared.
+
+    If someone adds a field to the marker and the comparison keeps its own
+    list, this verb silently stops verifying it — which is precisely how r1's
+    fix was already incomplete when it shipped.
+    """
+    import inspect
+    src = inspect.getsource(cli.cmd_review_close)
+    assert "marker.items()" in src, (
+        "the read-back comparison must enumerate the payload's own fields"
+    )

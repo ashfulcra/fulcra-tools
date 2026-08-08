@@ -1446,7 +1446,7 @@ def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
         return 2
 
     now = _iso(_now())
-    payload = okf.render_frontmatter({
+    marker = {
         "schema": "review-settled/v1",
         "state": "MERGED",
         "merge_sha": sha,
@@ -1454,7 +1454,8 @@ def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
         "closed_by": args.sender or _host(),
         "reason": args.reason or "PR merged; the head will not be reviewed again",
         "ts": now,
-    })
+    }
+    payload = okf.render_frontmatter(marker)
     path = _settled_marker_path(args.team, slug)
     try:
         transport.write(path, payload)
@@ -1476,14 +1477,22 @@ def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 1
     if back != payload:
+        # Compare EVERY field we wrote, derived from the payload itself
+        # (codex 561 r2). My r1 fix hand-picked `state` and `merge_sha` and
+        # called them load-bearing — but this verb's contract records
+        # merged_at, closed_by and reason too, so re-closing the SAME sha with
+        # a corrected timestamp or reason could silently drop the write, match
+        # on the two fields I happened to check, and exit 0 while the requested
+        # evidence never landed. A hand-picked subset goes stale the moment a
+        # field is added; deriving the list from `marker` cannot.
         got = okf.parse_frontmatter(back) or {}
-        stale = [k for k, want in (("state", "MERGED"), ("merge_sha", sha))
-                 if str(got.get(k) or "") != want]
+        stale = sorted(k for k, want in marker.items()
+                       if str(got.get(k) if got.get(k) is not None else "")
+                       != str(want))
         if stale:
-            print(f"review close: {slug} read back a DIFFERENT marker "
-                  f"({', '.join(stale)} mismatched; found state="
-                  f"{got.get('state')!r} merge_sha={got.get('merge_sha')!r}) — "
-                  f"the write did not land. Closure UNVERIFIED; the row is "
+            print(f"review close: {slug} read back a DIFFERENT marker — "
+                  f"{', '.join(stale)} did not match what was written. The "
+                  f"write did not land; closure UNVERIFIED and the row is "
                   f"still open.", file=sys.stderr)
             return 1
     print(f"review close: {slug} closed as MERGED at {sha[:12]} "
