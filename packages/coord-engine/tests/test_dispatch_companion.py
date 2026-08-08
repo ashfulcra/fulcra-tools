@@ -219,3 +219,56 @@ def test_a_directed_companion_is_untouched_by_the_translation(emitted):
         emitted.clear()
         cli._emit_dispatch_companion(None, _args(), slug="s", assignee=who)
         assert emitted[0]["to"] == who
+
+
+# --- the filter itself, not a restatement of it ----------------------------
+#
+# The tests above assert that the companion EMITS records.BROADCAST. That is
+# the fix comparing a value it produced against a value it chose: if the
+# reader's predicate ever changed, every one of them would still pass while the
+# broadcast reached nobody. `test_the_reader_filter_would_drop_the_task_plane
+# _token` re-implements the predicate inline for the same reason, and inherits
+# the same blind spot.
+#
+# These two close the loop instead: they run the companion, take the note it
+# ACTUALLY emitted, and feed it to records.events_for — the function the
+# recipient's queue calls. Nothing in between is asserted or restated. That is
+# the check the outage needed, because the record WAS on the live channel, in a
+# correct v:1 shape, and undelivered.
+#
+# (Written after a first attempt that built the note from records.BROADCAST by
+# hand. It read as end-to-end and was not: reverting the translation left it
+# green, because it never went through the companion at all.)
+
+
+def _note_the_companion_emitted(emitted, assignee):
+    """Drive the real dispatch path and return the note that went on the wire.
+
+    ``emit_event`` builds the note from its ``to`` kwarg, so reconstructing it
+    from the captured call is the same string the transport would have written.
+    """
+    cli._emit_dispatch_companion(None, _args(), slug="fleet-notice-abc123",
+                                 assignee=assignee)
+    call = emitted[-1]
+    return records.build_payload(
+        to=call["to"], kind=call["kind"], priority=call["priority"],
+        slug=call["slug"], ptr=call.get("ptr"))
+
+
+@pytest.mark.parametrize("reader", ["coord-boss", "codex-coder", "arc-maintainer"])
+def test_a_broadcast_actually_reaches_an_arbitrary_reader_end_to_end(
+        emitted, reader):
+    note = _note_the_companion_emitted(emitted, directives.EVERYONE)
+    got = records.events_for([{"id": "r1", "note": note}], reader)
+    assert [e["slug"] for e in got] == ["fleet-notice-abc123"], (
+        "the note the broadcast companion emitted was dropped by the reader "
+        "the recipient's queue actually runs"
+    )
+
+
+def test_a_directed_dispatch_reaches_its_recipient_and_nobody_else(emitted):
+    """The other half: translation must not turn a directed dispatch into one."""
+    note = _note_the_companion_emitted(emitted, "codex-coder")
+    assert [e["slug"] for e in
+            records.events_for([{"id": "r1", "note": note}], "codex-coder")]
+    assert records.events_for([{"id": "r1", "note": note}], "coord-boss") == []
