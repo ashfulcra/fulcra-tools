@@ -9272,12 +9272,48 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _is_self_addressed_vacancy(maintainer: str, leases: Any) -> bool:
+    """Would this role's vacancy notice be addressed to the party who lapsed?
+
+    A closed loop with no exit: the notice about someone's absence lands in the
+    absent one's own unread bucket. Observed live — three daily ROLE VACANT
+    directives for a role whose registered `maintainer:` was its own retired
+    holder.
+
+    The predicate is deliberately NARROW: the maintainer is one of THIS role's
+    lease holders. Decidable from data already in hand, with no judgement about
+    whether an identity is alive. The obvious wider rule — "refuse to address a
+    notice to anyone who looks stale in presence" — would be wrong AND dangerous
+    here: presence staleness is not death (a reviewer on this bus read 5 days
+    stale while filing verdicts hourly), so it would misroute alarms for
+    live-but-quiet maintainers. That is this function's own failure, inverted.
+
+    REPORTS, does not redirect. My first version rerouted to ``_human()`` and an
+    existing test caught it doing harm: a role legitimately maintained by the
+    human operator, who also appears as a lease agent, got its notice moved off
+    a real person onto the bare ``"human"`` default — an address nobody reads.
+    The engine cannot know a better addressee than the registry does, and a
+    silent rewrite to a worse one is the same class of bug as the loop itself.
+    Same rule we just agreed for alias resolution: warn and let a human fix the
+    field, never silently rewrite the destination.
+    """
+    # No carve-out for the human operator. I tried one — exempting `_human()` —
+    # and it does not survive contact: `_human()` is whatever
+    # FULCRA_COORD_HUMAN happens to say, so a role naming a person the engine
+    # has not been told is the operator looks exactly like the ArcBot case, and
+    # a role naming the configured human would be exempted without the engine
+    # knowing anything more than the string matched. FLAGGING is safe in a way
+    # REROUTING was not: nothing moves, we only say what we see, and a human who
+    # really is reachable loses nothing but one accurate stderr line.
+    return maintainer in {str(l.get("agent") or "") for l in (leases or [])}
+
+
 def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     """Role-vacancy sweep: for every role doc, if vacancy past SLA and no marker
     today, write the marker + a P1 directive to the role's maintainer.
     Heartbeat-safe (idempotent per day)."""
     now = _iso(_now()); today = _now().strftime("%Y-%m-%d")
-    escalated = checked = 0
+    escalated = checked = undelivered = 0
     try:
         entries = transport.list_dir(f"team/{args.team}/roles/")
     except TransportError:
@@ -9427,23 +9463,68 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                         f"{a_scanned}/{a_total}). This says the LEASE lapsed — NOT "
                         f"that nobody is working. Verify before treating it as absence.")
         maintainer = str(reg.get("maintainer") or _human())
-        transport.write(marker_path, okf.render_frontmatter(
-            {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
+        self_addressed = _is_self_addressed_vacancy(maintainer, leases)
+        if not self_addressed:
+            # The daily marker is a SUPPRESSOR: it stops tomorrow's sweep from
+            # re-notifying. Writing it for a notice that reached nobody would
+            # record a delivery that did not happen and then silence the only
+            # mechanism that would try again (codex-reviewer, 577 r1). A
+            # closed-loop role therefore keeps re-surfacing every sweep until
+            # its `maintainer:` field is fixed. It does not spam: the directive
+            # write below is guarded on the task not already existing, so the
+            # repeat is one stderr line and one "suppressed" note, not a new
+            # document per run.
+            transport.write(marker_path, okf.render_frontmatter(
+                {"type": "Escalation", "role": role, "timestamp": now})
+                + "\nescalated\n")
         slug, content = tasks.new_task_doc(
             title,
             now=now, status="proposed", priority="P1", owner=_host(),
             assignee=maintainer, kind="directive",
             summary=f"Role {role} in team/{args.team} has no fresh lease past its SLA. "
                     f"{evidence} "
-                    f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
+                    + (f"CLOSED LOOP: this notice is addressed to {maintainer}, "
+                       f"who is also this role's lapsed holder — an alarm about "
+                       f"an absence, delivered to the absent party. It was NOT "
+                       f"rerouted, because nothing here knows a better addressee "
+                       f"than the registry does. Fix the `maintainer:` field in "
+                       f"the role doc. " if self_addressed else "")
+                    + f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
         )
+        # Counted OUTSIDE the write branch. codex-reviewer, 577 r1: the first
+        # sweep was correctly degraded, and the SECOND one went clean — run 2
+        # found the existing directive, skipped the whole branch, and reported
+        # undelivered=0, degraded=0, rc 0 while the notice was still sitting
+        # undeliverable in the absent party's bucket. The delivery failure is a
+        # property of WHO the notice is addressed to, not of whether this
+        # particular sweep wrote a new document, so a retry must not launder it.
+        if self_addressed:
+            undelivered += 1
         dst = _task_path(args.team, slug)
         if transport.read(dst) is None:
             transport.write(dst, content)
             escalated += 1
-            print(f"escalated {role} -> {maintainer}")
+            print(f"escalated {role} -> {maintainer}"
+                  + (" (UNDELIVERED: closed loop)" if self_addressed else ""))
+            if self_addressed:
+                print(f"escalate: {role}'s maintainer ({maintainer}) IS its own "
+                      f"lapsed holder — this notice lands in the absent party's "
+                      f"bucket and has no exit. NOT rerouted: the engine does "
+                      f"not know a better addressee, and a silent rewrite to a "
+                      f"worse one is the same bug pointed the other way. Fix "
+                      f"the role doc's `maintainer:` field. The daily marker "
+                      f"was NOT written, so this re-surfaces every sweep until "
+                      f"it is — an undelivered notice must not be recorded as "
+                      f"a delivery.", file=sys.stderr)
         else:
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
+            if self_addressed:
+                print(f"escalate: {role} still has an UNDELIVERED notice — its "
+                      f"maintainer ({maintainer}) is its own lapsed holder, and "
+                      f"today's directive is sitting in that unread bucket. The "
+                      f"retry is suppressed because the document exists, NOT "
+                      f"because anyone received it. Fix the role doc's "
+                      f"`maintainer:` field.", file=sys.stderr)
     # The verdict, on stderr, so a vacancy check that could not finish is not
     # mistaken for one that found nothing. escalate returned rc 0 after a 98s
     # run that printed 136 bytes — indistinguishable from a clean sweep, which is
@@ -9457,11 +9538,18 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     # — and the ordinary count cap is reported as coverage, not as degradation.
     # An alarm that fires on every run is worth exactly as much as no alarm.
     att_cut = _att_cut
-    rc = 3 if att_cut else 0
+    # UNDELIVERED is degradation in the same register as a cut scan: the sweep
+    # ran, but a notice it counted reached nobody. rc 0 there would report a
+    # clean vacancy check while an alarm sat in an absent party's bucket —
+    # stderr is transient observability, not durable delivery, and an unattended
+    # caller keys on the rc (codex-reviewer, 577 r1).
+    rc = 3 if (att_cut or undelivered) else 0
     emit_envelope("escalate", count=checked, rc=rc, escalated=escalated,
+                  undelivered=undelivered,
                   attendance=f"{_att_scanned}/{_att_total}",
-                  degraded=1 if att_cut else 0)
-    print(f"escalate: {checked} role(s) checked, {escalated} escalated")
+                  degraded=1 if (att_cut or undelivered) else 0)
+    print(f"escalate: {checked} role(s) checked, {escalated} escalated"
+          + (f", {undelivered} UNDELIVERED (closed loop)" if undelivered else ""))
     if att_cut:
         print(f"escalate: DEGRADED — the attendance scan was cut by its "
               f"wall-clock budget (COORD_ATTENDANCE_SCAN_BUDGET) after "

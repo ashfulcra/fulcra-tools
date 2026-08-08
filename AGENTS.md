@@ -197,6 +197,27 @@ under `skills/`, each package with its own README, build, and tests.
   relative ages from `PINNED_NOW`, never asserting against the real clock.
   Otherwise the suite flips red once wall-clock passes `NOW + window`. Enforced
   by `tests/test_clock_pin_convention.py`.
+- `escalate` never addresses a role's vacancy notice to the party who lapsed.
+  When a role's registered `maintainer:` is also one of its own lease holders,
+  the alarm about an absence lands in the absent one's bucket with no exit —
+  observed live as three daily ROLE VACANT directives nobody could receive. The
+  notice is still written and still counted; it is REPORTED (stderr, and in the
+  directive body so whoever eventually reads the bucket sees it) and never
+  rerouted. Rerouting was tried and did harm: it moved a notice off a real
+  operator onto the bare `human` default. The engine does not know a better
+  addressee than the registry does — fix the role doc's `maintainer:` field.
+  The undelivered count is computed from the closed-loop condition on EVERY
+  sweep, not only when the directive write is new — otherwise the second run
+  finds the existing document, skips the branch, and reports clean while the
+  notice is still undeliverable.
+  It is also **not** recorded as a delivery: the daily marker is a SUPPRESSOR,
+  so writing it for a notice that reached nobody would silence the only
+  mechanism that would try again. A closed-loop role re-surfaces every sweep
+  (one stderr line and a "suppressed" note — the directive write is guarded, so
+  no new document per run), `escalate` reports `undelivered=N` in its envelope,
+  and the verb exits 3. There is no carve-out for the configured human: the
+  engine only knows a string matched, and flagging is safe in a way rerouting
+  was not.
 - The `no-team-internals` CI guard PROVES it can fail before it reports clean.
   `scripts/no-team-internals.sh` runs `--self-test` first: it stages a fixture
   carrying a public IP and a session ref, asserts the scan flags both, and only
