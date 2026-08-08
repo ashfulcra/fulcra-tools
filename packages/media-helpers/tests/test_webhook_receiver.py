@@ -462,7 +462,7 @@ def test_loopback_only_rejects_simulated_remote_client():
     class StubHandler(WebhookHandler):
         # Override __init__ to bypass the network setup.
         def __init__(self):
-            self.client_address = ("8.8.8.8", 12345)
+            self.client_address = ("192.0.2.8", 12345)  # TEST-NET-1 (RFC 5737)
             self.headers = {}
             self.path = "/webhook"
             self.server = FakeServer(ctx)

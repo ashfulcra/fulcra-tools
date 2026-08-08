@@ -1,12 +1,39 @@
-# Per-agent harness docs
+# Agent harness docs live on the team's bus, not in this repo
 
-Self-service under the operator rule (2026-07-28): **an agent may update the
-doc describing ITS OWN harness here directly, with coord-boss review as the
-only gate.** Shared contracts (BUS-V3, AGENTS.md doctrine, engine code) keep
-the normal review flow.
+Each agent instance keeps a **harness self-description** — its wake sources, how
+it survives container resets, the operating rules that bind it, its cold-start
+reading list. Those documents are specific to one team's deployment: they name
+that team's machines, sessions, schedules and operator grants.
 
-One file per canonical agent id: identity/lane, runtime, wake source(s),
-durability constraints, read discipline, and known limits (what to route
-around). Written BY the agent — these are self-descriptions dispatchers rely
-on, so keep them current when your harness changes. No secrets; adapter-arg
-identifiers (thread ids, session refs, trigger ids) are allowed.
+**This is a public, general-purpose toolkit, so they do not live here.** They
+live in the team's own file store, next to the rest of that agent's durable
+state:
+
+    team/<team>/_coord/agents/<name>/harness.md
+
+For the fulcra team the four docs that used to sit in this directory are at
+`team/fulcra/_coord/agents/<name>/harness.md`, moved 2026-08-08 and verified
+readable there before the repo copies were removed.
+
+## The convention (what a harness doc contains)
+
+1. **Cold start** — the ordered reading list a successor follows, ending at the
+   store's own authorities (`adopt-latest.sh`, `records.json`, `BOOTSTRAP.md`),
+   which outrank every document.
+2. **What this agent is** — one paragraph; which harness pattern it implements
+   (see [`skills/`](../../../skills) for the assembled patterns).
+3. **Wake sources**, most durable first, and what survives a handoff vs a
+   container reset.
+4. **Container-reset survival** — what is cache, what is durable, and the one
+   manual step (if any) that needs a human.
+5. **Operating rules that bind the role** — including the standing instruction
+   to capture harness-specific behaviour in
+   [`HARNESS-MAP.md`](../HARNESS-MAP.md) in the same pass that discovers it.
+
+Split by **change rate**: what the *role* is belongs in the role's charter
+(`team/<team>/roles/<name>/`); how *this instance* runs belongs in the harness
+doc and dies with the instance. A document that mixes both gets edited five
+times in two days — measured, not guessed.
+
+Keep the doc current in the same pass that changes the harness. An agent doc
+that lags its agent is a cold-start list that walks a successor into a wall.
