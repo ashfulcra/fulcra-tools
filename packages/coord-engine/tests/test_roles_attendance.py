@@ -247,3 +247,160 @@ def test_an_empty_review_listing_is_unknown_not_absent():
 
     since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
     assert _attended({}, ["codex-reviewer"], since) == (None, 0, 0)
+
+
+# --- the attendance scan is paid ONCE per sweep -----------------------------
+# coord-boss, 2026-08-08: `escalate` timed out on two consecutive watchdogs
+# (rc 143 at 170s and 175s), so the fleet's vacancy check was unavailable 12h.
+# Profiled: `_role_attended` was 47.3s of 98.2s, entirely transport — it rebuilt
+# its scan per role, 41 sequential listings each. NOT `_held_roles_for_rows`,
+# which is where we both expected to find it.
+
+def _counting_transport(base_cls, n_reviews=6):
+    class T(base_cls):
+        def __init__(self):
+            super().__init__()
+            self.review_root_lists = 0
+            self.verdict_lists = 0
+
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/":
+                self.review_root_lists += 1
+            elif prefix.startswith("team/r/review/") and prefix.endswith("/verdicts/"):
+                self.verdict_lists += 1
+            return super().list_dir(prefix)
+    return T()
+
+
+def test_the_verdict_scan_is_built_once_not_per_role(monkeypatch):
+    """The fix, stated as a behaviour: attendance cost is constant in the number
+    of roles. Before, a sweep with N acting roles re-listed the review root N
+    times and re-walked every verdict prefix N times."""
+    from coord_engine import cli
+    t = _counting_transport(FakeTransport)
+    for i in range(4):
+        t.put(f"team/r/review/pr{i}.md", "---\ntype: Review\n---\nr")
+        t.put(f"team/r/review/pr{i}/verdicts/aaa--alice.md",
+              "---\ntype: Verdict\nverdict: approve\n---\nv")
+    # three roles, each with a lapsed lease -> three acting-path candidates
+    for r in ("r1", "r2", "r3"):
+        t.put(f"team/r/roles/{r}.md",
+              "---\ntype: Role\nstatus: active\nsla_hours: 1\n---\nx")
+        t.put(f"team/r/roles/{r}/leases/alice-1.md",
+              "---\ntype: Lease\nagent: alice\ntimestamp: 2020-01-01T00:00:00Z\n---\nl")
+    cli.main(["escalate", "r"], transport=t)
+    assert t.review_root_lists == 1, (
+        f"the review root was listed {t.review_root_lists}x — the scan is being "
+        f"rebuilt per role again")
+    assert t.verdict_lists <= 4, (
+        f"{t.verdict_lists} verdict listings for 4 reviews — the per-role "
+        f"multiplication is back")
+
+
+def test_the_ordinary_count_cap_is_coverage_not_degradation(capsys):
+    """412 review dirs on the live store against a cap of 40: partial coverage is
+    the DESIGNED state. An rc-3 alarm on every single run is worth as much as no
+    alarm, so rc 3 is reserved for a wall-clock cut."""
+    from coord_engine import cli
+    t = FakeTransport()
+    for i in range(60):                       # more reviews than the count budget
+        t.put(f"team/r/review/pr{i}.md", "---\ntype: Review\n---\nr")
+        t.put(f"team/r/review/pr{i}/verdicts/aaa--alice.md",
+              "---\ntype: Verdict\nverdict: approve\n---\nv")
+    capsys.readouterr()
+    rc = cli.main(["escalate", "r"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 0, "the normal count cap must not raise a degraded rc"
+    assert "attendance=40/60" in err, err
+    assert "DEGRADED" not in err
+
+
+def test_a_wall_clock_cut_DOES_fail_closed(capsys, monkeypatch):
+    """The count budget alone cannot bound wall-clock — that is how a 40-dir scan
+    became a two-minute call. A deadline cut is the real anomaly and fails closed."""
+    from coord_engine import cli
+    # A tiny-but-positive budget RACES an in-memory transport (six listings can
+    # finish inside 0.1ms), so pin the clock instead of hoping: the deadline is
+    # already in the past on the first check.
+    monkeypatch.setattr(cli.Deadline, "expired", lambda self: True)
+    t = FakeTransport()
+    for i in range(6):
+        t.put(f"team/r/review/pr{i}.md", "---\ntype: Review\n---\nr")
+        t.put(f"team/r/review/pr{i}/verdicts/aaa--alice.md",
+              "---\ntype: Verdict\nverdict: approve\n---\nv")
+    capsys.readouterr()
+    rc = cli.main(["escalate", "r"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3, "a deadline-cut attendance scan must fail closed"
+    assert "DEGRADED" in err and "wall-clock budget" in err
+
+
+# --- the cut reason must not leak between scans -----------------------------
+# codex-reviewer, PR 570 r1: `_ATT_CUT_BY_DEADLINE` was module state updated
+# ONLY on the normal return, so the two early returns inherited the PREVIOUS
+# invocation's value. An identical unreadable scan then produced a different
+# `escalate` rc depending on whether some earlier scan had timed out. I flagged
+# the module state as a smell in my own review request and shipped it anyway;
+# the cut reason now rides in the return tuple, per scan.
+
+from coord_engine.transport import TransportError  # noqa: E402
+
+
+class _RootUnreadable(FakeTransport):
+    def list_dir(self, prefix):
+        if prefix == "team/r/review/":
+            raise TransportError("root unreadable")
+        return super().list_dir(prefix)
+
+
+def _seeded_reviews(t, n=3):
+    for i in range(n):
+        t.put(f"team/r/review/pr{i}.md", "---\ntype: Review\n---\nr")
+        t.put(f"team/r/review/pr{i}/verdicts/aaa--alice.md",
+              "---\ntype: Verdict\nverdict: approve\n---\nv")
+    return t
+
+
+def test_a_root_unreadable_scan_reports_no_deadline_cut_after_a_PRIOR_cut(monkeypatch):
+    """The exact reproduction codex described: prior scan cut by deadline, then a
+    root-unreadable scan. The second must report its OWN reason."""
+    from coord_engine import cli
+    # 1) a scan that IS cut by its deadline
+    monkeypatch.setattr(cli.Deadline, "expired", lambda self: True)
+    cut = cli._verdict_activity_index(_seeded_reviews(FakeTransport()), "r",
+                                      deadline=cli.Deadline.open(30))
+    assert cut[4] is True, "the deadline-cut scan should report a cut"
+    # 2) an unrelated scan whose ROOT listing fails — not a deadline cut
+    monkeypatch.undo()
+    unreadable = cli._verdict_activity_index(_RootUnreadable(), "r",
+                                             deadline=cli.Deadline.open(30))
+    assert unreadable[4] is False, (
+        "the root-unreadable scan inherited the previous scan's cut flag — the "
+        "diagnostic is leaking across invocations again")
+    assert unreadable[1] == 0 and unreadable[2] == 0
+
+
+def test_an_unreadable_verdicts_prefix_reports_its_own_cut_state(monkeypatch):
+    """The other early return: a verdicts prefix that raises. It is UNKNOWN
+    (undatable=True) but it is not a wall-clock cut."""
+    from coord_engine import cli
+
+    class T(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/verdicts/"):
+                raise TransportError("verdicts unreadable")
+            return super().list_dir(prefix)
+
+    out = cli._verdict_activity_index(_seeded_reviews(T()), "r",
+                                      deadline=cli.Deadline.open(30))
+    assert out[3] is True, "an unreadable verdicts prefix is UNKNOWN evidence"
+    assert out[4] is False, "it is not a deadline cut"
+
+
+def test_consecutive_clean_scans_never_accumulate_a_cut():
+    """And the benign direction: repeated clean scans stay clean."""
+    from coord_engine import cli
+    for _ in range(3):
+        out = cli._verdict_activity_index(_seeded_reviews(FakeTransport()), "r",
+                                          deadline=cli.Deadline.open(30))
+        assert out[4] is False

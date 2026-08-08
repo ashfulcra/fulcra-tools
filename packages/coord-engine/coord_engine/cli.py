@@ -845,8 +845,83 @@ def _role_doc_path(team: str, role: str) -> str:
     return f"team/{team}/roles/{role}.md"
 
 
+def _verdict_activity_index(
+    transport: Any, team: str, *, budget: int = 40,
+    deadline: Optional["Deadline"] = None,
+) -> tuple[dict[str, Any], int, int, bool, bool]:
+    """ONE pass over the review register -> ``{reviewer: latest verdict mtime}``.
+
+    Returns ``(index, scanned, total, undatable, cut_by_deadline)``.
+
+    ``cut_by_deadline`` rides in the RETURN, not in module state. It was a
+    module-level flag for one round and codex-reviewer caught the leak: only the
+    normal return updated it, so the two early returns inherited the PREVIOUS
+    invocation's value and an identical unreadable scan produced a different
+    `escalate` rc depending on whether some earlier scan had timed out. A
+    per-scan diagnostic belongs to the scan.
+
+    WHY THIS EXISTS. `_role_attended` used to do this scan itself, per call, and
+    `escalate` calls it once per about-to-escalate role — so a sweep re-listed
+    the review root and up to ``budget`` verdict prefixes for EVERY such role.
+    Profiled on the live store 2026-08-08: 23.6s per call, 47.3s of a 98.2s
+    `escalate`, entirely transport latency (41 sequential listings x ~0.59s).
+    The cost was never algorithmic; it was fan-out repeated per role. Hoisting
+    the scan to one shared pass makes a sweep's attendance cost constant in the
+    number of roles instead of linear.
+
+    BOUNDED BY BOTH a count (``budget``) and a WALL-CLOCK ``deadline``. The count
+    alone could not stop this: it caps how many dirs are visited and says nothing
+    about how long each takes, which is exactly how a 40-dir scan became a
+    two-minute call on a slow transport.
+    """
+    index: dict[str, Any] = {}
+    try:
+        reviews = [e for e in transport.list_dir(f"team/{team}/review/")
+                   if e.get("is_dir")]
+    except TransportError:
+        # Root listing failed: nothing was scanned, and this is NOT a deadline
+        # cut. Every return below states its own cut reason for the same reason.
+        return index, 0, 0, False, False
+    total = len(reviews)
+    scanned = 0
+    undatable = False
+    cut_by_deadline = False
+    for e in reviews[:budget]:
+        if deadline is not None and deadline.expired():
+            cut_by_deadline = True
+            break
+        slug = (e.get("name") or "").rstrip("/")
+        if not slug:
+            continue
+        scanned += 1
+        try:
+            entries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError:
+            # An unreadable prefix is UNKNOWN for the whole index: we cannot say
+            # whose work we failed to see, so the caller must not conclude "no
+            # work" from what we did see.
+            return index, scanned, total, True, cut_by_deadline
+        for v in entries:
+            name = v.get("name") or ""
+            if not name.endswith(".md") or "--" not in name:
+                continue
+            reviewer = name[:-3].split("--", 1)[1]
+            raw = v.get("mtime")
+            mt = router.parse_store_mtime(raw) or router.parse_iso(raw)
+            if mt is None:
+                undatable = True
+                continue
+            prev = index.get(reviewer)
+            if prev is None or mt > prev:
+                index[reviewer] = mt
+    return index, scanned, total, undatable, cut_by_deadline
+
+
 def _role_attended(transport: Any, team: str, holders: list[str], *,
-                   since: Any, budget: int = 40) -> tuple[Optional[bool], int, int]:
+                   since: Any, budget: int = 40,
+                   index: Optional[tuple[dict[str, Any], int, int, bool, bool]] = None,
+                   deadline: Optional["Deadline"] = None,
+                   ) -> tuple[Optional[bool], int, int]:
     """Did any ``holders`` file a verdict since ``since``?
 
     Returns ``(attended, scanned, total)``. ``attended`` is None when the answer
@@ -860,44 +935,26 @@ def _role_attended(transport: Any, team: str, holders: list[str], *,
     """
     if not holders:
         return None, 0, 0
-    try:
-        reviews = [e for e in transport.list_dir(f"team/{team}/review/")
-                   if e.get("is_dir")]
-    except TransportError:
-        return None, 0, 0
-    total = len(reviews)
+    # ``index`` lets a caller with MANY roles pay the scan ONCE (see
+    # `_verdict_activity_index`). Without it, behaviour is exactly as before.
+    if index is None:
+        index = _verdict_activity_index(transport, team, budget=budget,
+                                        deadline=deadline)
+    idx, scanned, total, undatable, _cut = index
     if not total:
         # NOTHING to scan. A complete sweep of an empty set is not evidence of
         # absence — it is evidence we looked somewhere with no data (a wrong
         # prefix looks exactly like this). UNKNOWN, never False.
         return None, 0, 0
-    scanned = 0
-    undatable = False
-    suffixes = tuple(f"--{h}.md" for h in holders if h)
-    for e in reviews[:budget]:
-        slug = (e.get("name") or "").rstrip("/")
-        if not slug:
+    for h in holders:
+        if not h:
             continue
-        scanned += 1
-        try:
-            entries = transport.list_dir(_verdicts_prefix(team, slug))
-        except TransportError:
-            return None, scanned, total
-        for v in entries:
-            name = v.get("name") or ""
-            if not name.endswith(suffixes):
-                continue
-            raw = v.get("mtime")
-            mt = router.parse_store_mtime(raw) or router.parse_iso(raw)
-            if mt is None:
-                # A holder verdict we cannot DATE. Skipping it would quietly
-                # count as "no work in the window" — the false-absent this
-                # whole change exists to remove. Undatable evidence is UNKNOWN.
-                undatable = True
-                continue
-            if mt >= since:
-                return True, scanned, total
+        mt = idx.get(str(h))
+        if mt is not None and mt >= since:
+            return True, scanned, total
     if undatable:
+        # A verdict we could not DATE, or a prefix we could not READ. Either way
+        # we cannot rule out that a holder worked. UNKNOWN, never False.
         return None, scanned, total
     # Everything we were allowed to look at is clean. Only a COMPLETE sweep can
     # say "no work"; a truncated one stays UNKNOWN.
@@ -1333,6 +1390,11 @@ DEFAULT_BRIEFING_BUDGET = 60.0
 #: path renders anything. 20s is a generous ~25 ops at the measured ~0.8s/op — far
 #: past the 4-7 a real team pays — while still bounding a degraded transport.
 DEFAULT_ROLE_FOLD_BUDGET = 20.0
+#: Wall-clock bound for the shared verdict-activity scan (see
+#: `_attendance_scan_budget`). 30s: the measured scan is ~24s on a slow transport
+#: and must be able to COMPLETE — a bound tighter than the honest cost would just
+#: convert a slow answer into a permanent UNKNOWN.
+DEFAULT_ATTENDANCE_SCAN_BUDGET = 30.0
 
 # The `threads` fold/window defaults (DEFAULT_THREADS_*) live with the threads
 # command in `commands_threads.py`; they are re-exported onto `cli` at module end.
@@ -1396,6 +1458,18 @@ DEFAULT_OBLIGATION_BUDGET = 90.0
 
 def _obligation_budget() -> float:
     return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
+
+
+def _attendance_scan_budget() -> float:
+    """Wall-clock bound (seconds) for the ONE shared verdict-activity scan an
+    `escalate` sweep performs. Env ``COORD_ATTENDANCE_SCAN_BUDGET``.
+
+    Its own knob because the scan is transport-bound fan-out, not role
+    resolution: measured 2026-08-08, 41 sequential listings at ~0.59s each. A
+    count budget alone cannot bound that — which is how `escalate` reached 98s
+    locally and timed out at 170s+ on the watchdog."""
+    return config.env_float("COORD_ATTENDANCE_SCAN_BUDGET",
+                            DEFAULT_ATTENDANCE_SCAN_BUDGET)
 
 
 def _role_fold_budget() -> float:
@@ -8820,6 +8894,13 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     # only when the gate passes (a BLOCKED fleet pays nothing new).
     gate_passes = _engagement_gate_passes(transport, args.team, now=now)
     pres_shards = _presence_shards(transport, args.team) if gate_passes else []
+    # ONE shared verdict-activity scan for the whole sweep, bounded by wall-clock
+    # as well as count. Built here rather than per role: see
+    # `_verdict_activity_index` for the measurement that motivated it.
+    att_dl = Deadline.open(_attendance_scan_budget())
+    att_index = _verdict_activity_index(transport, args.team, deadline=att_dl)
+    _att_scanned, _att_total, _att_cut = att_index[1], att_index[2], att_index[4]
+
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
@@ -8909,9 +8990,10 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                       f"session has lapsed (declared window ended; role retained, "
                       f"not gone-dark); escalation suppressed", file=sys.stderr)
                 continue
-        # ATTENDANCE on the ACTING path. Computed only for a role that is
-        # otherwise about to escalate, so the listing cost is paid on the rare
-        # acting branch and never on every role of every sweep.
+        # ATTENDANCE on the ACTING path, answered from the ONE shared scan built
+        # before this loop. It used to rebuild that scan per role — 41 sequential
+        # listings each — so a sweep with N acting roles paid N x ~24s. The cost
+        # is now constant in the number of roles.
         #
         # Wiring this into `roles status` alone was the round-1 defect: that
         # improved what an operator READS while the sweep kept emitting the same
@@ -8922,7 +9004,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             attended, a_scanned, a_total = _role_attended(
                 transport, args.team,
                 [str(l.get("agent")) for l in (leases or [])],
-                since=anchor - timedelta(hours=sla))
+                since=anchor - timedelta(hours=sla), index=att_index)
         if not roles.escalation_due(leases, now=now, sla_hours=sla,
                                     marker_exists_today=marker_exists,
                                     attended=attended):
@@ -8963,8 +9045,31 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             print(f"escalated {role} -> {maintainer}")
         else:
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
+    # The verdict, on stderr, so a vacancy check that could not finish is not
+    # mistaken for one that found nothing. escalate returned rc 0 after a 98s
+    # run that printed 136 bytes — indistinguishable from a clean sweep, which is
+    # exactly what let a DEGRADED watchdog read as "0 escalated" for 12 hours.
+    # An INCOMPLETE attendance scan means every "unattended" call this sweep made
+    # was made on partial evidence, so it fails closed with rc 3.
+    # COVERAGE IS ALWAYS PARTIAL BY DESIGN and must not read as an incident: the
+    # register holds 412 review dirs on the live store and the scan is capped at
+    # `budget` (40), because a complete fan-out is ~243s of transport. So rc 3 is
+    # reserved for the scan being cut by its WALL-CLOCK deadline — a real anomaly
+    # — and the ordinary count cap is reported as coverage, not as degradation.
+    # An alarm that fires on every run is worth exactly as much as no alarm.
+    att_cut = _att_cut
+    rc = 3 if att_cut else 0
+    emit_envelope("escalate", count=checked, rc=rc, escalated=escalated,
+                  attendance=f"{_att_scanned}/{_att_total}",
+                  degraded=1 if att_cut else 0)
     print(f"escalate: {checked} role(s) checked, {escalated} escalated")
-    return 0
+    if att_cut:
+        print(f"escalate: DEGRADED — the attendance scan was cut by its "
+              f"wall-clock budget (COORD_ATTENDANCE_SCAN_BUDGET) after "
+              f"{_att_scanned}/{_att_total} review dirs, so every vacancy call "
+              f"above rests on less evidence than even the count cap allows. "
+              f"UNKNOWN, not clear.", file=sys.stderr)
+    return rc
 
 
 # --- forge (fulcra-agent-forge) ---
