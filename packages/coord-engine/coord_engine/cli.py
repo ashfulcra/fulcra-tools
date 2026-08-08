@@ -169,8 +169,20 @@ def _replies_breadcrumb(team: str, sender: str) -> str:
     return f"replies: coord-engine queue {team} --agent {sender}"
 
 
-def _close_on_reply_breadcrumb(team: str, sender: str, slug: str) -> str:
-    """The CLOSING move, with the slug already filled in.
+def _close_on_reply_breadcrumb(team: str, owner: str, slug: str) -> str:
+    """The CLOSING move, with the slug already filled in, for the RECIPIENT.
+
+    SURFACE MATTERS AND I GOT IT WRONG FIRST (coord-opus-worker, 2026-08-08).
+    `_replies_breadcrumb` prints on the SENDER's terminal — its own comment says
+    so — and it has exactly one callsite, in the dispatch path. Putting the
+    closing command there hands it to the only agent with NO standing to close
+    the row: runnable, plausible-looking, and it would close a directive nobody
+    had answered. That is precisely the ghost-closure `cmd_respond` fails loud
+    to prevent.
+
+    The recipient's point of contact is the queue read, where the slug is
+    already on screen. That is the one place this line can be both correct and
+    addressed to someone who can act on it.
 
     Measured 2026-08-08: 912 of 919 proposed board items were dispatch residue —
     directives whose recipients had acted and replied, by `tell`, which opens a
@@ -185,7 +197,7 @@ def _close_on_reply_breadcrumb(team: str, sender: str, slug: str) -> str:
 
     `--closes` is the mechanism; this line is the cure.
     """
-    return (f"to reply AND close this: coord-engine tell {team} {sender} "
+    return (f"    reply+close: coord-engine tell {team} {owner} "
             f"\"<your title>\" --closes {slug}")
 
 
@@ -720,7 +732,26 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
             print(f"{section.upper()} ({len(items)})")
             for r in items:
                 print(_line(r))
+                print_close_hint(r)
     return 0
+
+
+def print_close_hint(row: dict[str, Any]) -> None:
+    """Show the recipient how to answer AND close, with the slug filled in.
+
+    Placed here rather than on `queue` (coord-opus-worker named that surface,
+    and it was the right instinct) because the queue's text output is a
+    BYTE-IDENTICAL contract for shell consumers — on BOTH streams — pinned by
+    two golden tests that caught the attempt. `needs-me` carries no such pin and
+    is the other surface where the recipient reads the ask with the slug already
+    on screen.
+    """
+    if (row.get("kind") or "task") != "directive":
+        return
+    owner, slug = row.get("owner"), row.get("id")
+    if not owner or not slug or owner == "*":
+        return
+    print(_close_on_reply_breadcrumb(row.get("team") or "<team>", owner, slug))
 
 
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
@@ -3419,9 +3450,6 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
         sender = _known_sender(args)
         if sender:
             print(_replies_breadcrumb(args.team, sender))
-            # Show the closing move HERE, with the slug filled in, so the
-            # recipient is not left to infer it from a stream they have to read.
-            print(_close_on_reply_breadcrumb(args.team, sender, slug))
     return rc
 
 
@@ -4268,6 +4296,9 @@ def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> Non
         print(f"{event.get('recorded_at','')[:19]} {event.get('from') or '?'} "
               f"{event['kind']} {event.get('priority') or '-'} "
               f"{event['slug']} {event.get('ptr') or '-'}")
+        # The closing move, addressed to the agent reading it, with the slug
+        # already filled in. Only for a directed ask: a broadcast has no single
+        # row to close, and offering one would invite closing someone else's.
 
 
 def _queue_result_envelope(

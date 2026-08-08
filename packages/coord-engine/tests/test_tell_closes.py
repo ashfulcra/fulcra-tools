@@ -91,13 +91,39 @@ def test_the_reply_survives_a_failed_close():
     assert replies, "the reply was discarded when the close failed"
 
 
-def test_the_breadcrumb_shows_the_closing_command_with_the_slug(capsys):
-    """The cure, per coord-boss: the old breadcrumb pointed at a STREAM to read
-    and carried no slug, so a recipient who wanted to answer replied the way
-    they knew how."""
+def test_the_SENDER_is_never_handed_the_closing_command(capsys):
+    """Surface matters, and my first version got it wrong (coord-opus-worker).
+
+    `_replies_breadcrumb` prints on the SENDER's terminal. A closing command
+    there is handed to the one agent with NO standing to close the row —
+    runnable, plausible, and it would close a directive nobody answered. That is
+    the ghost-closure `respond` fails loud to prevent.
+    """
     t = FakeTransport()
     cli.cmd_tell(_args(), t)
     out = capsys.readouterr().out
-    assert "--closes" in out, "the closing move is still invisible at dispatch"
-    line = [l for l in out.splitlines() if "--closes" in l][0]
-    assert "my-reply-" in line, "the breadcrumb must carry the SLUG, filled in"
+    assert "--closes" not in out, (
+        "the dispatch path offered the sender a command that would close their "
+        "own unanswered directive"
+    )
+
+
+def test_the_RECIPIENT_sees_the_closing_command_with_the_slug(capsys):
+    """The cure belongs where the recipient reads the ask with the slug on
+    screen. NOT `queue`: its text output is a byte-identical contract for shell
+    consumers on BOTH streams, pinned by two golden tests that caught the
+    attempt. `needs-me` is the other such surface and carries no pin."""
+    cli.print_close_hint({"kind": "directive", "owner": "them",
+                          "id": "the-ask-abc123", "team": TEAM})
+    out = capsys.readouterr().out
+    assert "--closes the-ask-abc123" in out, "the slug must be filled in"
+    assert f"tell {TEAM} them" in out, "the reply must be addressed to the ASKER"
+
+
+def test_a_broadcast_and_a_plain_task_offer_no_close(capsys):
+    """A broadcast has no single row to close; a plain task is not an ask."""
+    cli.print_close_hint({"kind": "directive", "owner": "*",
+                          "id": "all-hands", "team": TEAM})
+    cli.print_close_hint({"kind": "task", "owner": "them",
+                          "id": "some-task", "team": TEAM})
+    assert "--closes" not in capsys.readouterr().out
