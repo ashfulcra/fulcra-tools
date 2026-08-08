@@ -3343,6 +3343,15 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # A fresh doc can carry no stale `.settled` marker, but a since-deleted-and-
     # reopened slug at the same path could; clear it best-effort (delete is
     # timeout-safe -> False, which we ignore) so the next fold recomputes.
+    #
+    # DELIBERATELY UNGUARDED, unlike the `review status` F4 delete. This clear
+    # destroys merge evidence when the slug was a closed orphan, and that is the
+    # LESSER harm: the fan-out fold SKIPS any slug carrying this marker
+    # (see `SETTLED_MARKER in vnames`), so keeping it here would make the review
+    # being requested INVISIBLE — a silently hidden obligation, versus evidence
+    # that one `review close` restores. The marker does two jobs with opposite
+    # lifetimes (durable evidence vs a fold-skip cache); separating them is the
+    # real fix and is coord-boss's to rule on.
     transport.delete(_settled_marker_path(team, slug))
     # Atomic notification: with the doc durably landed, deliver ONE directive per
     # required reviewer through the canonical hash-slug directive path, so a
