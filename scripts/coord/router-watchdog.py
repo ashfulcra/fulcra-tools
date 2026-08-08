@@ -18,6 +18,18 @@ import json, subprocess, sys, datetime, re, os
 
 ROOT = os.environ.get("COORD_ROUTER_ROOT", "team/<team>/_coord/router")
 ROUTER_WRITTEN = ["cursor.json", "delivered.json"]   # NOT config.json — agents write that
+# VALIDATE ARGV BEFORE ANY EXTERNAL OPERATION. The liveness check used to run
+# first, so an invocation with no config path reached the live API twice before
+# discovering it had nothing to read — which made this script unsafe to launch
+# from a test, and unsafe to launch by mistake. A watchdog that talks to the
+# network before checking its own arguments is wrong regardless of who is
+# calling it (codex-reviewer, 2026-08-08).
+if len(sys.argv) < 2:
+    print("usage: router-watchdog.py <config.json> [assoc_max_age_h] "
+          "[router_max_silence_h]", file=sys.stderr)
+    print("  COORD_ROUTER_ROOT  store path of the router directory", file=sys.stderr)
+    raise SystemExit(2)
+
 ASSOC_MAX_H  = float(sys.argv[2]) if len(sys.argv) > 2 else 24.0
 SILENCE_MAX_H = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0   # cursor writes every ~4min
 FULCRA = os.environ.get("FULCRA_CLI_COMMAND", "fulcra-api")

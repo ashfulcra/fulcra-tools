@@ -35,10 +35,17 @@ import pytest
 
 _REPO = pathlib.Path(__file__).resolve().parents[3]
 
-#: Executables that are SAFE to launch with no arguments: they parse argv,
-#: find nothing usable, and exit. Adding to this list is a claim that the file
-#: does no I/O and mutates nothing before it validates its arguments — check
-#: that by reading it, not by running it and seeing what happens.
+#: Executables that are SAFE to launch with no arguments: they validate argv
+#: FIRST and exit before touching anything external. Adding to this list is a
+#: claim that the file does no I/O and mutates nothing before that validation —
+#: check it by reading the script, not by running it and seeing what happens.
+#:
+#: codex-reviewer caught the first version of that claim being false:
+#: router-watchdog.py ran its liveness probe (two `fulcra-api file stat` calls)
+#: BEFORE reaching its config argument, so an "inert" launch reached the live
+#: API. The script now guards argv first. The launch below is additionally
+#: hermetic — stubbed CLI, no credentials — so a future regression of that shape
+#: cannot escape through the environment.
 _SAFE_TO_LAUNCH = {
     "scripts/coord/router-watchdog.py",
 }
@@ -88,9 +95,17 @@ def test_an_allowlisted_script_can_be_LAUNCHED_by_path(rel: str, tmp_path):
     ``cwd`` is a tmp dir so nothing it might touch is the real tree.
     """
     script = _REPO / rel
+    # HERMETIC: the launch must not be able to reach anything real even if the
+    # script regresses. Point the CLI at a command that cannot exist, strip the
+    # credential and repo env, and run in a tmp cwd.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("FULCRA_", "COORD_"))}
+    env["FULCRA_CLI_COMMAND"] = str(tmp_path / "no-such-cli")
+    env["COORD_ROUTER_ROOT"] = "team/nonexistent/_coord/router"
+    env["HOME"] = str(tmp_path)
     try:
         cp = subprocess.run([str(script)], capture_output=True, text=True,
-                            timeout=20, cwd=str(tmp_path))
+                            timeout=20, cwd=str(tmp_path), env=env)
     except OSError as exc:            # ENOEXEC etc — the defect this catches
         pytest.fail(f"{rel} could not be executed: {exc}")
     except subprocess.TimeoutExpired:
