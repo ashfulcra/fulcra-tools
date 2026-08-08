@@ -125,3 +125,95 @@ def test_threads_json_degraded_marker_is_in_the_value(capsys):
     out = capsys.readouterr().out
     v = _one_json_value(out)
     assert any(o.get("type") == "threads-degraded" for o in v), v
+
+
+# --- close the class, not just the two reported instances -------------------
+# coord-boss filed the leak 2026-07-21 against `threads` (JSON-Lines) and
+# `needs-me` (prose markers under budget pressure). Both are fixed and pinned
+# above. But the rule — "under --json, stdout is ALWAYS one parseable JSON
+# value" — applies to EVERY --json verb, and only six of twenty-one were pinned.
+# The other fifteen were correct by accident of nobody having touched them.
+#
+# A sweep on 2026-08-08 found zero live leaks across the verbs below under BOTH
+# induced conditions, verified against a positive control (injecting a prose
+# print into needs-me's JSON branch makes the sweep flag it). These tests exist
+# so that stays true: they are regression pins on a class that is currently
+# clean, not a fix for one that is not.
+
+_JSON_VERBS = [
+    ("agents",        ["agents", "r", "--json"]),
+    ("asks",          ["asks", "r", "--json"]),
+    ("digest",        ["digest", "r", "--json"]),
+    ("health",        ["health", "r", "--json"]),
+    ("obligations",   ["obligations", "r", "--agent", "alice", "--json"]),
+    ("search",        ["search", "r", "a", "--json"]),
+    ("presence-show", ["presence", "show", "r", "--json"]),
+    ("stash-list",    ["stash", "list", "r", "--json"]),
+    ("board",         ["board", "r", "--json"]),
+    ("inbox",         ["inbox", "r", "--agent", "alice", "--json"]),
+    ("needs-me",      ["needs-me", "r", "--agent", "alice", "--json"]),
+    ("briefing",      ["briefing", "r", "--agent", "alice", "--json"]),
+    ("threads",       ["threads", "r", "--for", "alice", "--json"]),
+]
+
+#: Every fold budget, squeezed to nothing. Budget pressure is the condition the
+#: original report named, and it is the one that produces degraded markers on
+#: paths a happy-path test never reaches.
+_ALL_BUDGETS = (
+    "COORD_BRIEFING_BUDGET", "COORD_FORGE_SWEEP_BUDGET", "COORD_OBLIGATION_BUDGET",
+    "COORD_OVERLAY_BUDGET", "COORD_PROJECTION_BUILD_BUDGET",
+    "COORD_REVIEW_FOLD_BUDGET", "COORD_ROLE_FOLD_BUDGET",
+    "COORD_THREADS_FOLD_BUDGET",
+)
+
+
+def _seeded_store():
+    """A store with enough reviews/roles/intents that a squeezed budget actually
+    truncates a fold — an empty store cannot produce the markers under test."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md",
+          "---\ntype: Task\ntitle: A\nstatus: active\nassignee: alice\n"
+          "timestamp: 2026-07-20T00:00:00Z\ntags: [\"intent:alice\"]\n---\nb")
+    for i in range(6):
+        t.put(f"team/r/review/pr{i}.md", "---\ntype: Review\nrequired: [alice]\n---\nr")
+        t.put(f"team/r/review/pr{i}/verdicts/bob.md",
+              "---\ntype: Verdict\nverdict: approve\n---\nv")
+    for i in range(4):
+        t.put(f"team/r/roles/role{i}.md", "---\ntype: Role\nholder: alice\n---\nx")
+    reconcile.reconcile(t, "r", now="2026-07-20T00:00:00Z", today="2026-07-20",
+                        host="h")
+    return t
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("label,argv", _JSON_VERBS, ids=[v[0] for v in _JSON_VERBS])
+def test_every_json_verb_stays_one_value_under_budget_pressure(
+        label, argv, capsys, monkeypatch):
+    for var in _ALL_BUDGETS:
+        monkeypatch.setenv(var, "0.0001")
+    t = _seeded_store()
+    capsys.readouterr()
+    try:
+        cli.main(argv, transport=t)
+    except SystemExit:                      # a verb may exit nonzero; purity still holds
+        pass
+    out = capsys.readouterr().out
+    if out.strip():
+        _one_json_value(out)                # raises on prose or JSON-Lines
+
+
+@pytest.mark.parametrize("label,argv", _JSON_VERBS, ids=[v[0] for v in _JSON_VERBS])
+def test_every_json_verb_stays_one_value_under_read_degraded(
+        label, argv, capsys):
+    t = FakeTransport()
+    _corrupt_index(t)
+    capsys.readouterr()
+    try:
+        cli.main(argv, transport=t)
+    except SystemExit:
+        pass
+    out = capsys.readouterr().out
+    if out.strip():
+        _one_json_value(out)

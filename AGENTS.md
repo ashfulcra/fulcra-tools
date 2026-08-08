@@ -699,7 +699,11 @@ it (not on PyPI).
   emits a single JSON **array** — the dropped list plus a trailing `threads-degraded` element — NOT
   JSON-Lines (the leak this closed: streaming one object per line made `json.loads(stdout)` raise on the
   trailing data whenever 2+ threads dropped). **Ship-gate: a new `--json` path is one `json.dumps`, with a
-  red-first test that `json.loads(stdout)` yields exactly one value on every degraded path.**
+  red-first test that `json.loads(stdout)` yields exactly one value on every degraded path.** The rule is
+  now pinned for the whole class, not just the two verbs that leaked: `test_json_purity.py` parametrises
+  every `--json` verb over both induced conditions — a corrupt index and ALL fold budgets squeezed to
+  nothing. **Add your verb to `_JSON_VERBS` when you add a `--json` path**; a verb absent from that list is
+  unpinned, which is how six pinned verbs and fifteen unpinned ones coexisted for weeks.
 - **Head-of-line: a budget cut may only ever truncate the TAIL — never the head.** The work-discovery
   folds do live per-op transport at query time over an unbounded population; under budget pressure the cut
   must land on the *lowest-priority* tail, so an agent's OWN assigned work and any decision parked on a
