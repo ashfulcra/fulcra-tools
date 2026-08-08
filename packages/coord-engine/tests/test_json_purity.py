@@ -127,38 +127,96 @@ def test_threads_json_degraded_marker_is_in_the_value(capsys):
     assert any(o.get("type") == "threads-degraded" for o in v), v
 
 
-# --- close the class, not just the two reported instances -------------------
-# coord-boss filed the leak 2026-07-21 against `threads` (JSON-Lines) and
-# `needs-me` (prose markers under budget pressure). Both are fixed and pinned
-# above. But the rule — "under --json, stdout is ALWAYS one parseable JSON
-# value" — applies to EVERY --json verb, and only six of twenty-one were pinned.
-# The other fifteen were correct by accident of nobody having touched them.
+# --- close the class, discovered from the PARSER ----------------------------
+# coord-boss filed the leak 2026-07-21 against `threads` and `needs-me`. Both
+# were fixed and pinned. My first attempt at "close the class" hand-listed
+# thirteen verbs and claimed completeness; codex-reviewer rejected it because the
+# parser defines TWENTY-EIGHT `--json` paths. Widening the sweep to all of them
+# immediately found a LIVE leak the thirteen missed: `headroom --json` printed
+# prose on its no-accounts early return, which predates the `--json` branch.
 #
-# A sweep on 2026-08-08 found zero live leaks across the verbs below under BOTH
-# induced conditions, verified against a positive control (injecting a prose
-# print into needs-me's JSON branch makes the sweep flag it). These tests exist
-# so that stays true: they are regression pins on a class that is currently
-# clean, not a fix for one that is not.
+# So the registry is no longer hand-maintained as a claim. It is checked AGAINST
+# PARSER DISCOVERY: a `--json` path added tomorrow fails this suite until it is
+# either pinned or explicitly exempted with a reason.
 
-_JSON_VERBS = [
-    ("agents",        ["agents", "r", "--json"]),
-    ("asks",          ["asks", "r", "--json"]),
-    ("digest",        ["digest", "r", "--json"]),
-    ("health",        ["health", "r", "--json"]),
-    ("obligations",   ["obligations", "r", "--agent", "alice", "--json"]),
-    ("search",        ["search", "r", "a", "--json"]),
-    ("presence-show", ["presence", "show", "r", "--json"]),
-    ("stash-list",    ["stash", "list", "r", "--json"]),
-    ("board",         ["board", "r", "--json"]),
-    ("inbox",         ["inbox", "r", "--agent", "alice", "--json"]),
-    ("needs-me",      ["needs-me", "r", "--agent", "alice", "--json"]),
-    ("briefing",      ["briefing", "r", "--agent", "alice", "--json"]),
-    ("threads",       ["threads", "r", "--for", "alice", "--json"]),
-]
+import argparse  # noqa: E402
 
-#: Every fold budget, squeezed to nothing. Budget pressure is the condition the
-#: original report named, and it is the one that produces degraded markers on
-#: paths a happy-path test never reaches.
+import pytest  # noqa: E402
+
+#: path -> argv that reaches it. Every one of these must print exactly one JSON
+#: value AND print something: a verb regressing to silence would otherwise pass
+#: a "parses if non-empty" check while emitting no result at all.
+_JSON_PINNED = {
+    "agents": ["agents", "r"],
+    "annotate status": ["annotate", "status", "r"],
+    "asks": ["asks", "r"],
+    "atc report": ["atc", "report", "r"],
+    "board": ["board", "r"],
+    "briefing": ["briefing", "r", "--agent", "alice"],
+    "continuity resume": ["continuity", "resume", "r", "alice"],
+    "digest": ["digest", "r"],
+    "engagement sweep": ["engagement", "sweep", "r"],
+    "headroom": ["headroom", "r"],
+    "health": ["health", "r"],
+    "inbox": ["inbox", "r", "--agent", "alice"],
+    "needs-me": ["needs-me", "r", "--agent", "alice"],
+    "obligations": ["obligations", "r", "--agent", "alice"],
+    "presence show": ["presence", "show", "r"],
+    "queue": ["queue", "r", "--agent", "alice"],
+    "roles status": ["roles", "status", "r", "coord-maintainer"],
+    "router shadow report": ["router", "shadow", "report", "r"],
+    "search": ["search", "r", "a"],
+    "stash list": ["stash", "list", "r"],
+    "status": ["status", "r"],
+    "threads": ["threads", "r", "--for", "alice"],
+}
+
+#: Paths deliberately NOT smoke-run, each with the reason. Exemptions are
+#: explicit so "not covered" can never be mistaken for "covered and passing".
+_JSON_EXEMPT = {
+    "bus-v3 migrate": "mutates the shared bus authority; not safe to smoke-run",
+    "router execute": "executes queued work as a side effect",
+    "router run": "runs the router loop as a side effect",
+    "engagement gate": "requires a live engagement context; exits before output",
+    "review status": "prints nothing when the named review is absent — no JSON "
+                     "result is contracted for a missing slug",
+    "route": "requires a resolvable task and account set to produce a decision",
+}
+
+
+def _json_paths_from_parser():
+    """Every `--json` path the parser actually defines, discovered by walking it."""
+    found = []
+
+    def walk(parser, path=()):
+        has_json = any("--json" in (a.option_strings or []) for a in parser._actions)
+        subs = [a for a in parser._actions
+                if isinstance(a, argparse._SubParsersAction)]
+        if has_json:
+            found.append(" ".join(path))
+        for sub in subs:
+            for name, sp in sub.choices.items():
+                walk(sp, path + (name,))
+
+    walk(cli.build_parser())
+    return {p for p in found if p}
+
+
+def test_every_json_path_in_the_parser_is_pinned_or_explicitly_exempt():
+    """The completeness gate. A new `--json` path fails here until represented —
+    which is what makes the AGENTS.md rule enforceable rather than aspirational."""
+    discovered = _json_paths_from_parser()
+    covered = set(_JSON_PINNED) | set(_JSON_EXEMPT)
+    assert discovered, "parser discovery found nothing — the walk is broken"
+    missing = discovered - covered
+    assert not missing, (
+        f"{len(missing)} --json path(s) are neither pinned nor exempt: "
+        f"{sorted(missing)}. Add them to _JSON_PINNED, or to _JSON_EXEMPT with a "
+        f"reason.")
+    stale = covered - discovered
+    assert not stale, f"registry names paths the parser no longer has: {sorted(stale)}"
+
+
 _ALL_BUDGETS = (
     "COORD_BRIEFING_BUDGET", "COORD_FORGE_SWEEP_BUDGET", "COORD_OBLIGATION_BUDGET",
     "COORD_OVERLAY_BUDGET", "COORD_PROJECTION_BUILD_BUDGET",
@@ -168,8 +226,8 @@ _ALL_BUDGETS = (
 
 
 def _seeded_store():
-    """A store with enough reviews/roles/intents that a squeezed budget actually
-    truncates a fold — an empty store cannot produce the markers under test."""
+    """Enough reviews/roles/intents that a squeezed budget actually truncates a
+    fold — an empty store cannot produce the markers under test."""
     t = FakeTransport()
     t.put("team/r/task/a.md",
           "---\ntype: Task\ntitle: A\nstatus: active\nassignee: alice\n"
@@ -185,35 +243,36 @@ def _seeded_store():
     return t
 
 
-import pytest  # noqa: E402
+def _assert_one_json_value_and_non_empty(out, path):
+    # NOT "skip when empty": a verb regressing to no payload at all would sail
+    # through that, while the contract under test is exactly one JSON value.
+    assert out.strip(), (
+        f"`{path} --json` printed NOTHING; a JSON result is contracted here. If "
+        f"this path legitimately emits nothing, move it to _JSON_EXEMPT with a "
+        f"reason rather than letting silence pass.")
+    _one_json_value(out)
 
 
-@pytest.mark.parametrize("label,argv", _JSON_VERBS, ids=[v[0] for v in _JSON_VERBS])
-def test_every_json_verb_stays_one_value_under_budget_pressure(
-        label, argv, capsys, monkeypatch):
+@pytest.mark.parametrize("path", sorted(_JSON_PINNED), ids=sorted(_JSON_PINNED))
+def test_pinned_json_path_under_budget_pressure(path, capsys, monkeypatch):
     for var in _ALL_BUDGETS:
         monkeypatch.setenv(var, "0.0001")
     t = _seeded_store()
     capsys.readouterr()
     try:
-        cli.main(argv, transport=t)
-    except SystemExit:                      # a verb may exit nonzero; purity still holds
+        cli.main(_JSON_PINNED[path] + ["--json"], transport=t)
+    except SystemExit:
         pass
-    out = capsys.readouterr().out
-    if out.strip():
-        _one_json_value(out)                # raises on prose or JSON-Lines
+    _assert_one_json_value_and_non_empty(capsys.readouterr().out, path)
 
 
-@pytest.mark.parametrize("label,argv", _JSON_VERBS, ids=[v[0] for v in _JSON_VERBS])
-def test_every_json_verb_stays_one_value_under_read_degraded(
-        label, argv, capsys):
+@pytest.mark.parametrize("path", sorted(_JSON_PINNED), ids=sorted(_JSON_PINNED))
+def test_pinned_json_path_under_read_degraded(path, capsys):
     t = FakeTransport()
     _corrupt_index(t)
     capsys.readouterr()
     try:
-        cli.main(argv, transport=t)
+        cli.main(_JSON_PINNED[path] + ["--json"], transport=t)
     except SystemExit:
         pass
-    out = capsys.readouterr().out
-    if out.strip():
-        _one_json_value(out)
+    _assert_one_json_value_and_non_empty(capsys.readouterr().out, path)
