@@ -181,6 +181,16 @@ under `skills/`, each package with its own README, build, and tests.
 - PyObjC-free logic is split into its own modules so tests run on Linux CI;
   macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC
   imports lazy (inside functions), never at module import time.
+- `continuity snapshot` exits 3 and says so when the write did not persist.
+  `transport.write` returns **False** on a transport failure rather than
+  raising, and the snapshot path used to capture that into a local, spend it on
+  a cosmetic side-effect, and still print `snapshot <id>` and return 0. Found
+  live during a store outage. Continuity is the durability mechanism: a park
+  reporting success without reaching the store leaves a successor resuming from
+  the PREVIOUS checkpoint believing it is current — and that happens exactly
+  when the host is in trouble, which is when parking matters most. **Any caller
+  of `transport.write` must treat `False` as failure**; it is not a
+  Falsy-but-fine return.
 - Date/clock tests: a module that fixes a top-level `NOW` for its data must also
   **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
   `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving
