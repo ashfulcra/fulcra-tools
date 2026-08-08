@@ -39,10 +39,11 @@ def _args(**kw):
     return ns
 
 
-def _seed_directive(t, slug="original-ask-abc123"):
+def _seed_directive(t, slug="original-ask-abc123", *, owner="them",
+                    assignee="me", kind="directive"):
     _, content = tasks.new_task_doc(
         "original ask", now="2026-08-07T00:00:00Z", status="proposed",
-        priority="P1", owner="them", assignee="me", kind="directive")
+        priority="P1", owner=owner, assignee=assignee, kind=kind)
     t.put(cli._task_path(TEAM, slug), content)
     return slug
 
@@ -167,3 +168,57 @@ def test_a_broadcast_and_a_plain_task_offer_no_close(capsys):
     cli.print_close_hint({"owner": "them", "id": "some-task",
                           "tags": ["workstream:engine"]}, team=TEAM)
     assert "--closes" not in capsys.readouterr().out
+
+
+# --- the relationship guard + write verification (codex 564 r3) -------------
+#
+# A resolvable slug is not permission to close it. A mistyped-but-valid slug
+# would close unrelated work, and the only signal would be somebody else's row
+# going quiet.
+#
+# And the write itself was unverified: `review close` took THREE rounds to learn
+# read-back verification and I did not carry it to the sibling verb in the same
+# branch. Fixing the instance, leaving the generalisation — again.
+
+def test_closing_a_NON_directive_is_refused(capsys):
+    t = FakeTransport()
+    slug = _seed_directive(t, kind="task")
+    assert cli.cmd_tell(_args(closes=slug), t) == 1
+    assert "not a directive" in capsys.readouterr().err
+    assert okf.parse_frontmatter(t.store[cli._task_path(TEAM, slug)])["status"] \
+        == "proposed"
+
+
+def test_closing_a_directive_assigned_to_SOMEONE_ELSE_is_refused(capsys):
+    """The mistyped-valid-slug case: it exists, it is a directive, it is simply
+    not mine to close."""
+    t = FakeTransport()
+    slug = _seed_directive(t, assignee="a-third-party")
+    assert cli.cmd_tell(_args(closes=slug), t) == 1
+    err = capsys.readouterr().err
+    assert "assigned to" in err and "not to you" in err
+    assert okf.parse_frontmatter(t.store[cli._task_path(TEAM, slug)])["status"] \
+        == "proposed"
+
+
+def test_closing_a_directive_owned_by_someone_other_than_the_recipient(capsys):
+    """The reply goes to `them`; this row was asked by a different agent, so
+    this reply cannot be its answer."""
+    t = FakeTransport()
+    slug = _seed_directive(t, owner="a-different-asker")
+    assert cli.cmd_tell(_args(closes=slug), t) == 1
+    assert "goes to" in capsys.readouterr().err
+
+
+def test_a_silently_dropped_close_write_reports_failure(capsys):
+    """The defect `review close` needed three rounds to learn."""
+    class DropTaskWrite(FakeTransport):
+        def write(self, path, body):
+            if "/task/original-ask" in path:
+                return None
+            return super().write(path, body)
+    t = DropTaskWrite()
+    slug = _seed_directive(t)
+    rc = cli.cmd_tell(_args(closes=slug), t)
+    assert rc == 1, "the write vanished and the command reported closed"
+    assert "did NOT close" in capsys.readouterr().err

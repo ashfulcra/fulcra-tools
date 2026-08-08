@@ -3593,13 +3593,52 @@ def _close_answered_directive(transport: Any, args: argparse.Namespace, *,
               file=sys.stderr)
         return 1
     agent = _known_sender(args) or _host()
+
+    # RELATIONSHIP GUARD (codex 564 r3). A resolvable slug is not permission to
+    # close it: a mistyped-but-valid slug would close unrelated work, and the
+    # only signal would be somebody else's row going quiet. The reply must
+    # actually answer THIS directive — it must be a directive, addressed to the
+    # agent replying, and owned by the agent being replied to.
+    fm = okf.parse_frontmatter(doc) or {}
+    recipient = getattr(args, "assignee", None)
+    problems = []
+    if "kind:directive" not in (fm.get("tags") or []):
+        problems.append("it is not a directive")
+    if str(fm.get("assignee") or "") != agent:
+        problems.append(f"it is assigned to {fm.get('assignee')!r}, not to you "
+                        f"({agent})")
+    if recipient and str(fm.get("owner") or "") != recipient:
+        problems.append(f"it is owned by {fm.get('owner')!r}, but this reply "
+                        f"goes to {recipient!r}")
+    if problems:
+        print(f"tell: --closes {target!r} is not a directive this reply "
+              f"answers — {'; '.join(problems)}. The reply was sent, NOTHING "
+              f"was closed.", file=sys.stderr)
+        return 1
+
+    evidence = f"answered by {agent} in {reply_slug}"
     try:
-        out = tasks.apply_update(
-            doc, now=_iso(_now()), status="done",
-            evidence=f"answered by {agent} in {reply_slug}")
+        out = tasks.apply_update(doc, now=_iso(_now()), status="done",
+                                 evidence=evidence)
         transport.write(path, out)
     except tasks.TaskError as e:
         print(f"tell: reply sent; {target} NOT closed ({e})", file=sys.stderr)
+        return 1
+
+    # VERIFY THE WRITE LANDED (codex 564 r3). `review close` took three rounds
+    # to learn this and I did not carry it to the sibling verb in the same
+    # branch: a silently dropped write left the directive open while the
+    # command printed "closed" and exited 0. Read back and confirm BOTH the
+    # transition and the evidence naming this reply — status alone would pass
+    # on a row somebody else closed.
+    back = transport.read(path)
+    got = okf.parse_frontmatter(back) if back else None
+    if got is None or str(got.get("status") or "") != "done" or \
+            evidence not in (back or ""):
+        print(f"tell: reply sent, but {target} did NOT close — the write did "
+              f"not land (read-back shows status="
+              f"{(got or {}).get('status')!r}). The row is still open; retry.",
+              file=sys.stderr)
         return 1
     print(f"closed {target} — answered by {reply_slug}")
     return 0
