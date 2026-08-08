@@ -622,7 +622,10 @@ it (not on PyPI).
     rule below) — the projection answers the tail, never "does this agent still owe a verdict". No
     source row at all means the aggregate carries no projection: the pre-projection raw scan.
     Contract for readers: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) → "Where a fold's answer came
-    from". **Ship-gate: any new projection-served fold emits a source row through the shared renderer.**
+    from". A `needs-me` raw fallback that cannot finish emits `forge-degraded`, preserves its partial
+    rows, and returns rc 3; rc 0 therefore means the forge leg is complete even when its disclosed
+    source is `raw-scan`. **Ship-gate: any new projection-served fold emits a source row through the
+    shared renderer.**
   - **Honor every degraded row; never read a bounded fold as complete.** `briefing`/`needs-me` bound
     each section under `COORD_BRIEFING_BUDGET` (default 60s, opened once at the TOP of `briefing` and
     spent cumulatively across presence + forge + resume) and emit a `{scanned, total, skipped}`
