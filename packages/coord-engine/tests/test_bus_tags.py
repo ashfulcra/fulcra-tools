@@ -530,7 +530,6 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 SEND_DOCS = (
     "docs/coord/BUS-V3.md",
     "docs/coord/GET-ON-THE-BUS.md",
-    "docs/coord/pitch/demo-script.md",
     "skills/fulcra-agent-cloud-coordinator/SKILL.md",
 )
 
