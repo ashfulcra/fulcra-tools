@@ -144,7 +144,12 @@ under `skills/`, each package with its own README, build, and tests.
   index instead of repeatedly classifying historical tombstones, and the legacy
   `artifact/` namespace is consolidated into `artifacts/`. UNKNOWN listings stay
   hot, moves are copy-verified rather than destructive-only, and archived work
-  reverses through `task restore` or `review restore`.
+  reverses through `task restore` or `review restore`. Note the age thresholds
+  above are necessary, not sufficient: tasks and reviews share ONE per-pass
+  archive cap and tasks are swept first, so a large task backlog defers review
+  archiving indefinitely. When that happens the pass now warns `retention: cap
+  reached ... N review slug(s) not examined this pass` — treat that warning as
+  "review retention is not running", not as routine throttling.
 - The one-shot `migrate` exporter and unused atomic `handoff` convenience verb
   are retired. Reassign live work with `task update --assignee <agent> --next
   "..."`; when another session needs resumable context, write the continuity
