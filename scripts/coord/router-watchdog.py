@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json, subprocess, sys, datetime, re, os
 
 # router-watchdog — TWO independent checks on a wake router.
