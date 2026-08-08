@@ -516,3 +516,72 @@ def test_a_fold_that_warns_AFTER_a_long_payload_still_reaches_the_model(tmp_path
         "a tail-emitted warning was lost — the truncation killed the producer")
     assert "presence section unavailable" in ctx
     assert ctx.index("coord degraded:") < ctx.index("coord briefing (stdout")
+
+
+# --- 567 + 569 TOGETHER ------------------------------------------------------
+# codex-reviewer, PR 569 r1: PR 567 makes the folds emit a verdict envelope on
+# stderr on EVERY run, healthy ones included. This hook treated any stderr as a
+# degraded signal — so with both changes present, every healthy watch would be
+# labelled degraded and the new prompt would forbid WATCH_OK forever. I shipped
+# both PRs claiming they "compose" without ever running them together.
+
+_HEALTHY_ENVELOPE_STUB = """#!/bin/bash
+case "$1" in
+  briefing)
+    echo "  board: active=1"
+    echo "briefing: 3 item(s), inbox=0, reviews=0, degraded=0, rc=0" >&2 ;;
+  *) echo "" ;;
+esac
+exit 0
+"""
+
+_DEGRADED_ENVELOPE_STUB = """#!/bin/bash
+case "$1" in
+  briefing)
+    echo "  board: active=1"
+    echo "briefing: 3 item(s), inbox=0, reviews=0, degraded=2, rc=0" >&2 ;;
+  *) echo "" ;;
+esac
+exit 0
+"""
+
+
+def test_a_healthy_envelope_is_not_treated_as_degradation(tmp_path):
+    """The interaction defect: healthy stderr must not forbid WATCH_OK."""
+    ctx = _render_and_run(tmp_path, _HEALTHY_ENVELOPE_STUB)
+    assert "coord degraded:" not in ctx, (
+        "a healthy `degraded=0, rc=0` envelope was misread as degradation — every "
+        "healthy tick would be blocked from WATCH_OK")
+    # and it is kept as POSITIVE evidence that the fold completed
+    assert "coord verdict (fold completed clean)" in ctx
+    assert "degraded=0, rc=0" in ctx
+
+
+def test_a_nonzero_envelope_still_fails_closed(tmp_path):
+    ctx = _render_and_run(tmp_path, _DEGRADED_ENVELOPE_STUB)
+    assert "coord degraded:" in ctx
+    assert "NONZERO verdict envelope" in ctx
+    assert "coord verdict (fold completed clean)" not in ctx
+
+
+def test_unclassified_stderr_still_fails_closed(tmp_path):
+    """Anything that is not an envelope at all stays fail-closed — the original
+    `briefing: <section> unavailable` warnings must keep working."""
+    ctx = _render_and_run(tmp_path, _STUB_WARNS_AT_THE_TAIL)
+    assert "coord degraded:" in ctx
+    assert "unclassified output to stderr" in ctx
+
+
+def test_mktemp_failure_captures_nothing_rather_than_a_guessable_path(tmp_path):
+    """codex-reviewer, PR 569 r1: the old fallback wrote to /tmp/coord-brief-*.$$,
+    and `>` follows a symlink — a local process could aim that name at any file
+    the agent can write. There is no safe predictable name, so fail closed."""
+    sh = cx.SESSION_START_SH
+    # Assert the CONSTRUCT is gone, not the string: the comment above the fix names
+    # the guessable path as the thing being avoided, and a blunt substring check
+    # would forbid explaining the defect.
+    assert "|| echo /tmp/coord-brief" not in sh, "predictable-path fallback is back"
+    for var in ("BRIEF_ERR_FILE", "BRIEF_OUT_FILE"):
+        assert f'{var}="$(mktemp 2>/dev/null)" || {var}=""' in sh
+    assert "mktemp unavailable, briefing not captured" in sh
+    assert "trap 'rm -f" in sh          # interruption cannot strand temp files

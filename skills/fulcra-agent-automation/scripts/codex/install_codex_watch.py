@@ -137,8 +137,15 @@ BRIEF="$(coord-engine continuity resume "$TEAM" "$AGENT" 2>/dev/null | head -25)
 # where the engine emits one); this hook used to send that to /dev/null, discarding the
 # only part that survives truncation by being separate. Capture it, keep it SHORT, and
 # place it FIRST in the assembled context so no later cap can reach it.
-BRIEF_ERR_FILE="$(mktemp 2>/dev/null || echo /tmp/coord-brief-err.$$)"
-BRIEF_OUT_FILE="$(mktemp 2>/dev/null || echo /tmp/coord-brief-out.$$)"
+# mktemp or NOTHING. A predictable fallback path (/tmp/coord-brief-out.$$) is a
+# symlink-clobber primitive: `>` follows an existing symlink, so any local process
+# could point that name at a file this agent can write and have the watcher
+# truncate it. There is no safe predictable name here, so on mktemp failure we
+# FAIL CLOSED — capture nothing and say so — rather than write somewhere guessable.
+BRIEF_ERR_FILE="$(mktemp 2>/dev/null)" || BRIEF_ERR_FILE=""
+BRIEF_OUT_FILE="$(mktemp 2>/dev/null)" || BRIEF_OUT_FILE=""
+# Interruption must not strand these; the trap fires on normal exit and on signals.
+trap 'rm -f "$BRIEF_ERR_FILE" "$BRIEF_OUT_FILE" 2>/dev/null' EXIT HUP INT TERM
 # NOT `briefing | head -60`: a pipe to `head` closes after 60 lines and SIGPIPEs the
 # producer, so a fold that emits its degraded markers at the TAIL is killed before it
 # can write them to EITHER stream — including the stderr this block exists to capture.
@@ -146,21 +153,44 @@ BRIEF_OUT_FILE="$(mktemp 2>/dev/null || echo /tmp/coord-brief-out.$$)"
 # long payload: the warning vanished entirely. Let the command RUN TO COMPLETION into
 # a file, then truncate for display. Truncation is a display concern, never a reason
 # to cut the process off mid-verdict.
-coord-engine briefing "$TEAM" --agent "$AGENT" >"$BRIEF_OUT_FILE" 2>"$BRIEF_ERR_FILE"
-BRIEFING="$(head -60 "$BRIEF_OUT_FILE" 2>/dev/null)"
-BRIEF_ERR="$(head -6 "$BRIEF_ERR_FILE" 2>/dev/null)"
+if [ -n "$BRIEF_ERR_FILE" ] && [ -n "$BRIEF_OUT_FILE" ]; then
+  coord-engine briefing "$TEAM" --agent "$AGENT" >"$BRIEF_OUT_FILE" 2>"$BRIEF_ERR_FILE"
+  BRIEFING="$(head -60 "$BRIEF_OUT_FILE" 2>/dev/null)"
+  BRIEF_ERR="$(head -6 "$BRIEF_ERR_FILE" 2>/dev/null)"
+else
+  BRIEFING=""
+  BRIEF_ERR="hook: mktemp unavailable, briefing not captured this tick"
+fi
 rm -f "$BRIEF_ERR_FILE" "$BRIEF_OUT_FILE" 2>/dev/null
 [ -z "$WAKE_CONTEXT$BRIEF$BRIEFING$BRIEF_ERR" ] && exit 0
 python3 - "$WAKE_CONTEXT" "$BRIEF" "$BRIEFING" "$BRIEF_ERR" <<'PYEOF'
-import json, sys
+import json, re, sys
 wake, brief, briefing = sys.argv[1], sys.argv[2], sys.argv[3]
 briefing_err = sys.argv[4] if len(sys.argv) > 4 else ""
+# The engine emits a compact verdict envelope on stderr on EVERY run, healthy runs
+# included ("briefing: N item(s), ..., degraded=0, rc=0"). So stderr-is-nonempty is
+# NOT a degraded signal — treating it as one would mark every healthy tick degraded
+# and forbid WATCH_OK forever, which is worse than the false-clear this fixes.
+# Classify instead: a healthy envelope is positive evidence the fold COMPLETED; a
+# nonzero envelope, or any stderr line that is not an envelope at all, fails closed.
+_HEALTHY_ENVELOPE = re.compile(
+    r"^[a-z][a-z-]*:\\s.*\\bdegraded=0\\b.*\\brc=0\\b\\s*$")
+_ENVELOPE = re.compile(r"^[a-z][a-z-]*:\\s.*\\bdegraded=\\d+\\b.*\\brc=\\d+\\b\\s*$")
+err_lines = [ln.strip() for ln in briefing_err.splitlines() if ln.strip()]
+healthy = [ln for ln in err_lines if _HEALTHY_ENVELOPE.match(ln)]
+concerning = [ln for ln in err_lines if not _HEALTHY_ENVELOPE.match(ln)]
 parts = []
-if briefing_err:
+if concerning:
     # FIRST, deliberately: a truncated tail must never be mistaken for a clean read.
-    parts.append("coord degraded: the briefing fold reported the following on stderr; "
-                 "treat these sections as UNKNOWN, not empty, and do not report "
-                 "WATCH_OK on this tick:\\n" + briefing_err)
+    why = ("carries a NONZERO verdict envelope" if any(_ENVELOPE.match(ln)
+           for ln in concerning) else "wrote unclassified output to stderr")
+    parts.append("coord degraded: the briefing fold " + why + "; treat its sections "
+                 "as UNKNOWN, not empty, and do not report WATCH_OK on this "
+                 "tick:\\n" + "\\n".join(concerning))
+elif healthy:
+    # Positive heartbeat: the fold ran to completion and said so. Absence of this
+    # line is not proof of trouble, but its presence IS proof of a complete read.
+    parts.append("coord verdict (fold completed clean):\\n" + "\\n".join(healthy))
 if wake:
     parts.append("coord wake nudge:\\n" + wake)
 if brief:
