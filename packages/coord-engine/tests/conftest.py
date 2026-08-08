@@ -3,6 +3,7 @@
 import pytest
 
 from coord_engine import bus_tags, checkpoint_channel
+from coord_engine.cli import IDENTITY_ENV
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +35,33 @@ def _no_host_wake_provisioning(monkeypatch):
     that exercise the seam set it explicitly to a throwaway stub dir."""
     monkeypatch.delenv("COORD_WAKE_ADAPTER_DIR", raising=False)
     monkeypatch.delenv("COORD_WAKE_ADAPTER_TIMEOUT", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_coord_identity(monkeypatch):
+    """The suite must never inherit the identity of whoever is running it.
+
+    Every agent's standing wake prompt opens with
+    ``export FULCRA_COORD_AGENT=<identity>``, and 25 tests across
+    ``records_transactional``, ``queue_contract_engine_adapter``,
+    ``records_write`` and ``dispatch_companion`` read it as a fallback sender.
+    So the suite reported 25 failures on a GREEN tree for anyone following the
+    documented procedure, and passed for anyone who happened not to — the answer
+    depended on who ran it.
+
+    That is worse than the failures themselves. A suite that is red for
+    environmental reasons is indistinguishable at a glance from one that is red
+    for real ones, and the next real regression arrives inside that noise. It
+    also defeats the controls you would normally reach for: stashing the diff,
+    merging main and probing origin/main in a clean worktree all agreed the tree
+    was broken, because every one of them inherited the same shell.
+
+    Tests that exercise identity resolution set these explicitly in their own
+    body; ``monkeypatch`` is function-scoped and applies after this fixture, so
+    they still see exactly the environment they intend.
+    """
+    for name in IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
