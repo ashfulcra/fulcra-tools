@@ -158,6 +158,15 @@ rc 3 = UNKNOWN, rc 4 = INVALID).
   of delegated work gets a bus task.
 - Never run `queue` under another agent's identity (consumption guard,
   v1.7.1); `--peek` for safe foreign reads.
+- **Check review closure by LISTING the verdicts prefix for `.settled`, never
+  with `review status`** (until PR 572 lands). `review status` deletes a
+  `state: MERGED` marker as though it were a stale tally cache — 111 such
+  markers exist, and the read-only-looking diagnostic is the deleter. The 6h
+  watchdog's reviewer sweep used to run `review status` on every doc naming
+  coord-boss, which made a standing duty into a marker-destroying pass every six
+  hours. `review status` answers *"what do the verdicts tally to"*, which for a
+  merged-but-never-verdicted review is PENDING forever — it was never the right
+  question for closure.
 
 ## Session identifiers (non-secret adapter identifiers)
 
