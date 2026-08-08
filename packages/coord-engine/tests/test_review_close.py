@@ -93,3 +93,61 @@ def test_a_swallowed_write_failure_must_not_report_success():
         "the write vanished and close reported success — the row is open and "
         "the register says otherwise"
     )
+
+
+# --- the stale-marker case (codex 561 r1) -----------------------------------
+#
+# `.settled` is very often ALREADY occupied by the fold's APPROVED cache marker
+# -- that is the normal state for a terminal review, which is exactly the review
+# a merged PR has. So a presence-only read-back passes on the OLD content and
+# the command reports a merge sha the durable record does not contain.
+#
+# Presence is not identity. That distinction is the whole point of this verb.
+
+class WriteSilentlyDrops(FakeTransport):
+    def write(self, path, body):
+        if path.endswith(cli.SETTLED_MARKER):
+            return None           # the write vanishes; everything else works
+        return super().write(path, body)
+
+
+def _preexisting_approved_marker(t):
+    t.put(cli._settled_marker_path(TEAM, SLUG),
+          okf.render_frontmatter({"schema": "review-settled/v1",
+                                  "state": "APPROVED", "ts": "2026-08-01T00:00:00Z"}))
+
+
+def test_a_dropped_write_over_an_APPROVED_cache_marker_is_caught():
+    """The exact shape codex named: the marker exists, so presence passes."""
+    t = _with_review(WriteSilentlyDrops())
+    _preexisting_approved_marker(t)
+    rc = cli.cmd_review_close(_args(), t)
+    assert rc == 1, (
+        "the write vanished, the stale APPROVED marker satisfied a presence "
+        "check, and close reported success with a merge sha that is not in the "
+        "durable record"
+    )
+
+
+def test_a_dropped_write_over_an_OLDER_merged_closure_is_caught():
+    """Same defect one step subtler: state already says MERGED, so a
+    state-only check would pass while the SHA is somebody else's."""
+    t = _with_review(WriteSilentlyDrops())
+    t.put(cli._settled_marker_path(TEAM, SLUG),
+          okf.render_frontmatter({"schema": "review-settled/v1",
+                                  "state": "MERGED", "merge_sha": "b" * 40,
+                                  "ts": "2026-08-01T00:00:00Z"}))
+    assert cli.cmd_review_close(_args(), t) == 1, (
+        "state matched but the merge sha did not — the closure names the wrong "
+        "commit"
+    )
+
+
+def test_closing_over_a_stale_marker_SUCCEEDS_when_the_write_lands():
+    """Non-vacuity: a pre-existing marker must not itself block a real close,
+    or the verb would be unusable on precisely the reviews it targets."""
+    t = _with_review(FakeTransport())
+    _preexisting_approved_marker(t)
+    assert cli.cmd_review_close(_args(), t) == 0
+    fm = okf.parse_frontmatter(t.store[cli._settled_marker_path(TEAM, SLUG)])
+    assert fm["state"] == "MERGED" and fm["merge_sha"] == SHA

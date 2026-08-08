@@ -1462,11 +1462,30 @@ def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
         print(f"review close: write FAILED for {slug} ({type(e).__name__}) — "
               f"the row is still open.", file=sys.stderr)
         return 1
-    if transport.read(path) is None:
+    # Verify the marker IS THE ONE WE WROTE, not merely that something is
+    # there (codex 561 r1). `.settled` is very often already occupied by the
+    # fold's APPROVED cache marker — that is the NORMAL state for a terminal
+    # review, which is exactly the review a merged PR has. So a silently
+    # dropped write leaves the OLD content behind, a presence check passes, and
+    # the command reports a merge sha the durable record does not contain.
+    # Presence is not identity; that distinction is the whole point of this verb.
+    back = transport.read(path)
+    if back is None:
         print(f"review close: wrote {slug} but the read-back was empty — "
               f"closure UNVERIFIED, treat the row as still open and retry.",
               file=sys.stderr)
         return 1
+    if back != payload:
+        got = okf.parse_frontmatter(back) or {}
+        stale = [k for k, want in (("state", "MERGED"), ("merge_sha", sha))
+                 if str(got.get(k) or "") != want]
+        if stale:
+            print(f"review close: {slug} read back a DIFFERENT marker "
+                  f"({', '.join(stale)} mismatched; found state="
+                  f"{got.get('state')!r} merge_sha={got.get('merge_sha')!r}) — "
+                  f"the write did not land. Closure UNVERIFIED; the row is "
+                  f"still open.", file=sys.stderr)
+            return 1
     print(f"review close: {slug} closed as MERGED at {sha[:12]} "
           f"(marker {path})")
     return 0
