@@ -404,3 +404,52 @@ def test_consecutive_clean_scans_never_accumulate_a_cut():
         out = cli._verdict_activity_index(_seeded_reviews(FakeTransport()), "r",
                                           deadline=cli.Deadline.open(30))
         assert out[4] is False
+
+
+# --- a vacancy alarm addressed to the absent party (coord-boss, 2026-08-08) ---
+
+def test_a_self_addressed_vacancy_is_reported_not_silently_delivered(capsys):
+    """The live loss: three daily ROLE VACANT directives for a role whose
+    registered `maintainer:` was its own retired holder. The alarm about an
+    absence, delivered to the absent party — a closed loop with no exit, and
+    every instrument said 'escalated' because one had been written."""
+    t = FakeTransport()
+    t.put("team/r/roles/arc.md", "---\ntype: Role\nmaintainer: arcbot\n---\n")
+    t.put("team/r/roles/arc/leases/arcbot.md",
+          "---\ntype: Lease\nagent: arcbot\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    capsys.readouterr()
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    out, err = capsys.readouterr()
+    assert "escalated arc -> arcbot" in out, "still escalates; the notice is not suppressed"
+    assert "IS its own lapsed holder" in err and "no exit" in err
+    # and the directive itself carries it, for whoever eventually reads the bucket
+    written = [v for k, v in t.store.items() if "/task/" in k]
+    assert written, "a directive must still be written"
+    assert any("CLOSED LOOP" in d for d in written), (
+        "the written directive must carry it too — the stderr line is invisible "
+        "to whoever eventually reads the bucket")
+
+
+def test_a_third_party_maintainer_stays_silent(capsys):
+    """The other side, and the reason this is not 'warn whenever the maintainer
+    looks quiet': a normal role maintained by someone else must produce no
+    noise, or the warning that matters gets tuned out."""
+    t = FakeTransport()
+    t.put("team/r/roles/rev.md", "---\ntype: Role\nmaintainer: coord-boss\n---\n")
+    t.put("team/r/roles/rev/leases/someone.md",
+          "---\ntype: Lease\nagent: someone\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    capsys.readouterr()
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert "lapsed holder" not in capsys.readouterr().err
+
+
+def test_the_notice_is_never_rerouted_to_a_worse_address():
+    """My first version rerouted to `_human()`, and an existing test caught it
+    doing harm: a role legitimately maintained by the human operator, who also
+    appears as a lease agent, had its notice moved off a real person onto the
+    bare 'human' default that nobody reads. Detect and report; never rewrite the
+    destination — the same rule we hold for alias resolution."""
+    assert cli._is_self_addressed_vacancy("ash", [{"agent": "ash"}]) is True
+    assert cli._is_self_addressed_vacancy("coord-boss", [{"agent": "ash"}]) is False
+    assert cli._is_self_addressed_vacancy("coord-boss", []) is False
+    assert cli._is_self_addressed_vacancy("coord-boss", None) is False

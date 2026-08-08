@@ -187,6 +187,15 @@ under `skills/`, each package with its own README, build, and tests.
   relative ages from `PINNED_NOW`, never asserting against the real clock.
   Otherwise the suite flips red once wall-clock passes `NOW + window`. Enforced
   by `tests/test_clock_pin_convention.py`.
+- `escalate` never addresses a role's vacancy notice to the party who lapsed.
+  When a role's registered `maintainer:` is also one of its own lease holders,
+  the alarm about an absence lands in the absent one's bucket with no exit —
+  observed live as three daily ROLE VACANT directives nobody could receive. The
+  notice is still written and still counted; it is REPORTED (stderr, and in the
+  directive body so whoever eventually reads the bucket sees it) and never
+  rerouted. Rerouting was tried and did harm: it moved a notice off a real
+  operator onto the bare `human` default. The engine does not know a better
+  addressee than the registry does — fix the role doc's `maintainer:` field.
 - Environment hermeticity: the suite's answer must not depend on **who** runs
   it. `cli.IDENTITY_ENV` names the coordination-identity variables (currently
   `FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`); the coord-engine conftest clears

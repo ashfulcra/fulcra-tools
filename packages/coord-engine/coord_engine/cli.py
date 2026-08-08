@@ -9130,6 +9130,34 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _is_self_addressed_vacancy(maintainer: str, leases: Any) -> bool:
+    """Would this role's vacancy notice be addressed to the party who lapsed?
+
+    A closed loop with no exit: the notice about someone's absence lands in the
+    absent one's own unread bucket. Observed live — three daily ROLE VACANT
+    directives for a role whose registered `maintainer:` was its own retired
+    holder.
+
+    The predicate is deliberately NARROW: the maintainer is one of THIS role's
+    lease holders. Decidable from data already in hand, with no judgement about
+    whether an identity is alive. The obvious wider rule — "refuse to address a
+    notice to anyone who looks stale in presence" — would be wrong AND dangerous
+    here: presence staleness is not death (a reviewer on this bus read 5 days
+    stale while filing verdicts hourly), so it would misroute alarms for
+    live-but-quiet maintainers. That is this function's own failure, inverted.
+
+    REPORTS, does not redirect. My first version rerouted to ``_human()`` and an
+    existing test caught it doing harm: a role legitimately maintained by the
+    human operator, who also appears as a lease agent, got its notice moved off
+    a real person onto the bare ``"human"`` default — an address nobody reads.
+    The engine cannot know a better addressee than the registry does, and a
+    silent rewrite to a worse one is the same class of bug as the loop itself.
+    Same rule we just agreed for alias resolution: warn and let a human fix the
+    field, never silently rewrite the destination.
+    """
+    return maintainer in {str(l.get("agent") or "") for l in (leases or [])}
+
+
 def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     """Role-vacancy sweep: for every role doc, if vacancy past SLA and no marker
     today, write the marker + a P1 directive to the role's maintainer.
@@ -9285,6 +9313,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                         f"{a_scanned}/{a_total}). This says the LEASE lapsed — NOT "
                         f"that nobody is working. Verify before treating it as absence.")
         maintainer = str(reg.get("maintainer") or _human())
+        self_addressed = _is_self_addressed_vacancy(maintainer, leases)
         transport.write(marker_path, okf.render_frontmatter(
             {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
         slug, content = tasks.new_task_doc(
@@ -9293,13 +9322,26 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             assignee=maintainer, kind="directive",
             summary=f"Role {role} in team/{args.team} has no fresh lease past its SLA. "
                     f"{evidence} "
-                    f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
+                    + (f"CLOSED LOOP: this notice is addressed to {maintainer}, "
+                       f"who is also this role's lapsed holder — an alarm about "
+                       f"an absence, delivered to the absent party. It was NOT "
+                       f"rerouted, because nothing here knows a better addressee "
+                       f"than the registry does. Fix the `maintainer:` field in "
+                       f"the role doc. " if self_addressed else "")
+                    + f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
         )
         dst = _task_path(args.team, slug)
         if transport.read(dst) is None:
             transport.write(dst, content)
             escalated += 1
             print(f"escalated {role} -> {maintainer}")
+            if self_addressed:
+                print(f"escalate: {role}'s maintainer ({maintainer}) IS its own "
+                      f"lapsed holder — this notice lands in the absent party's "
+                      f"bucket and has no exit. NOT rerouted: the engine does "
+                      f"not know a better addressee, and a silent rewrite to a "
+                      f"worse one is the same bug pointed the other way. Fix "
+                      f"the role doc's `maintainer:` field.", file=sys.stderr)
         else:
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
     # The verdict, on stderr, so a vacancy check that could not finish is not
