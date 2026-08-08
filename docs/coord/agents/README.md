@@ -35,5 +35,15 @@ Split by **change rate**: what the *role* is belongs in the role's charter
 doc and dies with the instance. A document that mixes both gets edited five
 times in two days — measured, not guessed.
 
+6. **Environment manifest** — a sibling `environment.json`
+   (`coord.agent-environment/v1`): the plugins, CLI tools and credentials a
+   successor must restore, each with its **install commands, a verify command,
+   and what survives** a container restart vs a reclaim vs a session handoff.
+   Installed plugins are part of the role definition (operator ruling,
+   2026-08-08): a park that does not carry the environment is a park that loses
+   capabilities silently — that is not hypothetical, it happened across a real
+   handoff and was noticed two days later. Restore is part of the join, and the
+   verify line is the artifact ("installed" is a proxy).
+
 Keep the doc current in the same pass that changes the harness. An agent doc
 that lags its agent is a cold-start list that walks a successor into a wall.
