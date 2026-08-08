@@ -699,7 +699,18 @@ it (not on PyPI).
   emits a single JSON **array** — the dropped list plus a trailing `threads-degraded` element — NOT
   JSON-Lines (the leak this closed: streaming one object per line made `json.loads(stdout)` raise on the
   trailing data whenever 2+ threads dropped). **Ship-gate: a new `--json` path is one `json.dumps`, with a
-  red-first test that `json.loads(stdout)` yields exactly one value on every degraded path.**
+  red-first test that `json.loads(stdout)` yields exactly one value on every degraded path.** The rule is
+  now enforced for the whole class by PARSER DISCOVERY, not by a hand-kept list: `test_json_purity.py`
+  walks the real parser for every path that accepts `--json` (28 today) and fails until each is either in
+  `_JSON_PINNED` (smoke-run under a corrupt index AND all fold budgets squeezed to nothing) or in
+  `_JSON_EXEMPT` with a stated reason — and `_JSON_EXEMPT` is **empty today**: all 28 are pinned, with the
+  mutating paths driven through their own `--dry-run`/`--once`/`--shadow` modes against an in-memory
+  transport. An exemption is a claim to justify in review, not a parking space for a path that was awkward
+  to invoke. **A new `--json` path fails the suite until you represent it** —
+  and the pinned paths must print SOMETHING, since a verb regressing to silence would otherwise pass a
+  parses-if-non-empty check while emitting no result. A hand-kept list is how six pinned verbs and fifteen
+  unpinned ones coexisted for weeks, and the widened sweep immediately found a live leak (`headroom --json`
+  printed prose on its no-accounts early return).
 - **Head-of-line: a budget cut may only ever truncate the TAIL — never the head.** The work-discovery
   folds do live per-op transport at query time over an unbounded population; under budget pressure the cut
   must land on the *lowest-priority* tail, so an agent's OWN assigned work and any decision parked on a
