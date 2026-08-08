@@ -1748,21 +1748,31 @@ def _is_settleable(tally: dict[str, Any]) -> bool:
             and bool(tally.get("required")))
 
 
-def _is_unattributable(name: str) -> bool:
-    """Can this verdict filename name a reviewer under ANY head?
+def _is_unattributable(name: str, *, keyed: bool) -> bool:
+    """Can this verdict filename name a reviewer on THIS review?
 
-    ``<head>--<reviewer>.md`` on a superseded head is skipped deliberately and
-    silently: that is a round this fold is not looking at, and treating it as a
-    problem would make every multi-round review noisy.
+    ``keyed`` is whether the REQUEST carries a head. That parameter is the fix
+    codex-reviewer found in r2: without it the predicate answered a question
+    about the filename alone, and a filename is only meaningful against the
+    review it sits under.
 
-    A ``--`` prefix that is not a well-formed head names no round that could
-    ever exist, so the file is unreachable by construction rather than merely
-    out of scope. That is the case worth surfacing, and the one that cost a
-    reviewer their counted verdict.
+    - On a KEYED review, ``<valid-head>--<reviewer>.md`` for a non-active head
+      is a superseded round: skipped deliberately and silently, because making
+      every multi-round review noisy would train everyone past the warning that
+      matters.
+    - On a HEADLESS review there are no rounds at all, so a keyed-looking shard
+      names a round that cannot exist here. It is uncounted, and the r2 build
+      said nothing: `PENDING`, `awaiting required: bob`, rc 0, with bob's
+      approve verdict present. The same silent false negative this whole change
+      exists to remove, hiding one branch deeper.
+    - A ``--`` prefix that is not a well-formed head is unattributable either
+      way: it names no round that could ever exist, under any review.
     """
     stem = name[:-3] if name.endswith(".md") else name
     if "--" not in stem:
         return False
+    if not keyed:
+        return True  # no rounds here, so nothing keyed can belong
     return review.normalize_head(stem.split("--", 1)[0]) is None
 
 
@@ -1830,7 +1840,7 @@ def _tally_from_verdict_entries(
             #
             # A prefix that is not a well-formed head can never name a round, so
             # it is unattributable under ANY head, not merely under this one.
-            if _is_unattributable(n):
+            if _is_unattributable(n, keyed=bool(head)):
                 unattributable.append(n)
             continue
         if dl.expired():

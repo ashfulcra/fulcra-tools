@@ -179,3 +179,42 @@ def test_the_unattributable_line_names_the_rule_that_skipped_it(capsys):
     cli.main(["review", "status", "r", "pr-x2"], transport=t)
     err = capsys.readouterr().err
     assert "RULE:" in err and "40/64-hex" in err
+
+
+def test_a_keyed_shard_on_a_HEADLESS_review_is_uncounted_and_loud(capsys):
+    """codex-reviewer, 576 r2: my predicate asked a question about the FILENAME
+    alone, and a filename is only meaningful against the review it sits under.
+
+    On a headless review there are no rounds, so `<valid-head>--bob.md` names a
+    round that cannot exist here. The r2 build skipped it in silence — PENDING,
+    awaiting bob, rc 0 — with bob's approve verdict sitting in the directory.
+    The exact false negative this whole change exists to remove, one branch
+    deeper than I looked."""
+    h = "a" * 40
+    t = FakeTransport()
+    t.put("team/r/review/pr-h.md", _req())          # no head: -> headless
+    t.put(f"team/r/review/pr-h/verdicts/{h}--bob.md",
+          f"---\nreviewer: bob\nverdict: approve\nhead: {h}\n---\nlgtm")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-h"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3, "a present-but-uncounted verdict is not a clean tally"
+    assert f"{h}--bob.md" in err and "NOT counted" in err
+
+
+def test_a_superseded_shard_on_a_KEYED_review_stays_silent(capsys):
+    """The control that keeps the fix honest. Returning True unconditionally for
+    every `--` filename would pass the test above and make every multi-round
+    review noisy — which is how a warning stops being read."""
+    active, old = "b" * 40, "a" * 40
+    t = FakeTransport()
+    t.put("team/r/review/pr-k.md", _req(head=active, rnd=2))
+    t.put(f"team/r/review/pr-k/verdicts/{old}--bob.md",
+          f"---\nreviewer: bob\nverdict: approve\nhead: {old}\n---\nold round")
+    t.put(f"team/r/review/pr-k/verdicts/{active}--bob.md",
+          f"---\nreviewer: bob\nverdict: approve\nhead: {active}\n---\nthis round")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-k"], transport=t)
+    out, err = capsys.readouterr()
+    assert "APPROVED" in out and rc == 0
+    assert "NOT counted" not in err, "a superseded round is out of scope, not broken"

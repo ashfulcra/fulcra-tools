@@ -580,8 +580,9 @@ it (not on PyPI).
   **A verdict that cannot be counted is REPORTED, never dropped, and the verb
   exits 3.** Two ways a real verdict goes uncounted, both of which happened:
   a filename whose pre-`--` prefix is not a well-formed head (e.g.
-  `2026-08-08--alice.md`) names no round that could ever exist, so it is
-  unattributable rather than merely superseded; a `verdict:` token outside
+  `2026-08-08--alice.md`) names no round that could ever exist; a KEYED-looking
+  shard on a HEADLESS review names a round that cannot exist *there* (the
+  predicate takes the review into account, not the filename alone); a `verdict:` token outside
   `review.accepted_vocabulary()` normalises to nothing; and a shard at the
   CURRENT round's path whose own frontmatter attests a DIFFERENT head is
   refused (correctly — otherwise a copied round-1 verdict discharges round 2)
