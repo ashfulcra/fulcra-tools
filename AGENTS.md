@@ -577,6 +577,17 @@ it (not on PyPI).
   `head` + `round`, and ignores superseded-head verdicts without deleting them.
   This keeps exact-head rigor without `pr-N-r2`/`r3` slug ceremony. Legacy or
   non-code reviews may omit `--head` and retain `verdicts/<required-token>.md`.
+  **A verdict that cannot be counted is REPORTED, never dropped, and the verb
+  exits 3.** Two ways a real verdict goes uncounted, both of which happened:
+  a filename whose pre-`--` prefix is not a well-formed head (e.g.
+  `2026-08-08--alice.md`) names no round that could ever exist, so it is
+  unattributable rather than merely superseded; and a `verdict:` token outside
+  `review.accepted_vocabulary()` normalises to nothing. Either way the old
+  behaviour reported `pending_required: [alice]` — not "a file here is
+  unreadable" but the affirmative claim that alice had not voted, with her
+  verdict sitting in the directory. A superseded-head shard stays silent on
+  purpose; making every `--` noisy would train everyone to ignore the warning
+  that matters.
   The request is **durable-first, not atomic**: the review doc lands FIRST (that
   doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened

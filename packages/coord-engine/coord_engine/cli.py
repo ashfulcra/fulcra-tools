@@ -1748,6 +1748,24 @@ def _is_settleable(tally: dict[str, Any]) -> bool:
             and bool(tally.get("required")))
 
 
+def _is_unattributable(name: str) -> bool:
+    """Can this verdict filename name a reviewer under ANY head?
+
+    ``<head>--<reviewer>.md`` on a superseded head is skipped deliberately and
+    silently: that is a round this fold is not looking at, and treating it as a
+    problem would make every multi-round review noisy.
+
+    A ``--`` prefix that is not a well-formed head names no round that could
+    ever exist, so the file is unreachable by construction rather than merely
+    out of scope. That is the case worth surfacing, and the one that cost a
+    reviewer their counted verdict.
+    """
+    stem = name[:-3] if name.endswith(".md") else name
+    if "--" not in stem:
+        return False
+    return review.normalize_head(stem.split("--", 1)[0]) is None
+
+
 def _tally_from_verdict_entries(
     transport: Any, team: str, slug: str, entries: list[dict[str, Any]],
     doc_raw: Optional[str], *, deadline: Optional[float] = None,
@@ -1786,6 +1804,8 @@ def _tally_from_verdict_entries(
     elif isinstance(required, list):
         required = [str(r).strip() for r in required if str(r).strip()]
     verdicts: list[dict[str, Any]] = []
+    unattributable: list[str] = []
+    unrecognised: list[tuple[str, str]] = []
     reads_ok = True
     fully_scanned = True
     dl = Deadline(deadline)
@@ -1797,6 +1817,20 @@ def _tally_from_verdict_entries(
         if reviewer is None:
             # A keyed review reads only the active head's append-only shards;
             # legacy reviews ignore keyed files. Superseded heads cost zero reads.
+            #
+            # But "skipped a superseded round" and "cannot attribute this file at
+            # all" are different facts, and collapsing them cost a real reviewer
+            # their verdict: a shard named `<date>--<reviewer>.md` on a headless
+            # review was read as a superseded head, dropped before it was opened,
+            # and `review status` then reported pending_required=[that reviewer]
+            # — not "a file here is unreadable", but the affirmative claim that
+            # they had not voted. A false negative wearing the costume of a fact,
+            # and the person who did the work is the last one who would check.
+            #
+            # A prefix that is not a well-formed head can never name a round, so
+            # it is unattributable under ANY head, not merely under this one.
+            if _is_unattributable(n):
+                unattributable.append(n)
             continue
         if dl.expired():
             # Budget expired mid-slug: stop reading shards. The tally built so far
@@ -1822,8 +1856,21 @@ def _tally_from_verdict_entries(
         # not the frontmatter
         # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
         # could shadow alice's real verdict. One verdict file per reviewer.
-        verdicts.append({"reviewer": reviewer, "verdict": fm.get("verdict")})
+        token = fm.get("verdict")
+        if token is not None and review.normalize_verdict(token) is None:
+            # A reviewer who wrote `approve-with-required-changes` has
+            # unmistakably voted. Normalising that to None and moving on is the
+            # engine choosing the least informative reading of a clear intent —
+            # and it lands in the same PENDING as no verdict at all. Record it
+            # so the surface can say WHY the vote did not count.
+            unrecognised.append((n, str(token)))
+        verdicts.append({"reviewer": reviewer, "verdict": token})
     tally = review.tally(verdicts, required=required)
+    if unattributable:
+        tally["unattributable"] = sorted(unattributable)
+    if unrecognised:
+        tally["unrecognised_verdicts"] = [
+            {"file": f, "verdict": v} for f, v in sorted(unrecognised)]
     if head:
         tally["head"] = head
         try:
@@ -3525,10 +3572,32 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             print("  changes requested: " + ", ".join(result["changes"]))
         if result["pending_required"]:
             print("  awaiting required: " + ", ".join(result["pending_required"]))
+    # Verdicts that EXIST but could not be counted. Printed even in JSON mode's
+    # sibling branch above (they ride in the payload), and always to stderr here
+    # so a reviewer reading `awaiting required: <themselves>` is not left to
+    # conclude they forgot to vote when the file is sitting right there.
+    for name in result.get("unattributable") or []:
+        print(f"review status: {slug} carries a verdict file that names no "
+              f"round and no reviewer: {name}. It is NOT counted. A verdict "
+              f"filename is either `<reviewer>.md` or `<head>--<reviewer>.md` "
+              f"— the request breadcrumb prints the exact path to use.",
+              file=sys.stderr)
+    for row in result.get("unrecognised_verdicts") or []:
+        print(f"review status: {slug} has a verdict in {row['file']} whose "
+              f"`verdict: {row['verdict']}` is outside the accepted vocabulary "
+              f"[{review.accepted_vocabulary()}], so it does NOT count toward "
+              f"the tally. The file was read; only the token was unrecognised.",
+              file=sys.stderr)
     # An unclassifiable marker is a DEGRADED answer, not a clean tally: the slug
     # may stay invisible to the fan-out fold and this verb cannot say why. rc 3,
     # the established UNKNOWN code, so an unattended caller fails closed.
-    return 3 if _marker_unknown else 0
+    #
+    # An uncounted verdict is the same register of answer: the tally is not the
+    # truth about who reviewed, and reporting `pending_required: [x]` while a
+    # file from x sits unread is a falsehood, not an omission. Same rc.
+    _uncounted = bool(result.get("unattributable")
+                      or result.get("unrecognised_verdicts"))
+    return 3 if (_marker_unknown or _uncounted) else 0
 
 
 # --- continuity (fulcra-agent-continuity snapshots) ---

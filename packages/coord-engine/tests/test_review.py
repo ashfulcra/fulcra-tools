@@ -1,4 +1,5 @@
-from coord_engine import review
+from coord_engine import cli, review
+from coord_engine_test_helpers import FakeTransport
 
 
 def _v(reviewer, verdict):
@@ -44,3 +45,75 @@ def test_garbage_verdicts_ignored():
     t = review.tally([{"reviewer": "a"}, {"verdict": "approve"}, "nope", _v("b", "approve")])
     assert t["state"] == review.APPROVED
     assert t["approvals"] == ["b"]
+
+
+# --- uncounted verdicts must be LOUD, not silent (coord-maintainer + ---
+# --- collect-maintainer, 2026-08-08) --------------------------------------
+
+def _req(required="bob", head=None, rnd=None):
+    lines = ["---", "type: Review", "schema: review-request/v2",
+             "required:", f"  - {required}"]
+    if head:
+        lines += [f"head: {head}", f"round: {rnd or 1}"]
+    return "\n".join(lines + ["---", "the request"])
+
+
+def test_a_date_prefixed_shard_is_reported_not_silently_skipped(capsys):
+    """The live failure: collect-maintainer filed a real, careful verdict as
+    `<date>--<reviewer>.md` on a headless review. `--` means "superseded head",
+    so it was dropped BEFORE the file was opened, and `review status` then
+    reported `pending_required: [collect-maintainer]` — the affirmative claim
+    that they had not voted, about a file sitting right there."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-x.md", _req())
+    t.put("team/r/review/pr-x/verdicts/2026-08-08--bob.md",
+          "---\nreviewer: bob\nverdict: approve\n---\nlgtm")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-x"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3, "a verdict that exists but cannot be counted is not a clean tally"
+    assert "2026-08-08--bob.md" in err and "NOT counted" in err
+    assert "<head>--<reviewer>.md" in err, "say what a correct name looks like"
+
+
+def test_a_superseded_head_shard_stays_silent(capsys):
+    """The other side of the same rule, and the reason it is not just 'warn on
+    every `--`': a keyed review legitimately carries shards for rounds this fold
+    is not looking at. Making those noisy would train everyone to ignore the
+    warning that matters."""
+    head, old = "a" * 40, "b" * 40
+    t = FakeTransport()
+    t.put("team/r/review/pr-y.md", _req(head=head, rnd=2))
+    t.put(f"team/r/review/pr-y/verdicts/{old}--bob.md",
+          f"---\nreviewer: bob\nverdict: approve\nhead: {old}\n---\nold round")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-y"], transport=t)
+    err = capsys.readouterr().err
+    assert "NOT counted" not in err, "a superseded round is out of scope, not broken"
+    assert rc == 0
+
+
+def test_an_unrecognised_verdict_token_is_reported_with_the_vocabulary(capsys):
+    """`approve-with-required-changes` is an unmistakable vote. Normalising it
+    to None and landing in the same PENDING as no verdict at all is the engine
+    choosing the least informative reading of a clear intent."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-z.md", _req())
+    t.put("team/r/review/pr-z/verdicts/bob.md",
+          "---\nreviewer: bob\nverdict: approve-with-required-changes\n---\nok")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-z"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3
+    assert "approve-with-required-changes" in err and "bob.md" in err
+    assert "lgtm" in err, "name the accepted tokens or the reviewer guesses again"
+    assert "read" in err, "distinguish 'unreadable' from 'read but not understood'"
+
+
+def test_the_reported_vocabulary_comes_from_the_tally_not_a_copy():
+    """A hand-copied list in the error message drifts from the one that decides,
+    and a stale list is worse than none: it sends the reviewer to re-file with
+    another token that also does not count."""
+    vocab = review.accepted_vocabulary()
+    for token in sorted(review._APPROVE | review._CHANGES):
+        assert token in vocab, f"{token} counts but is not offered to the reviewer"
