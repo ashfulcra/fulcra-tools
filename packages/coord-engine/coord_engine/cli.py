@@ -1401,6 +1401,77 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> 
         pass
 
 
+#: A merge sha is EVIDENCE, so it must look like one. Closure that accepts an
+#: arbitrary string is closure by assertion, which is the inference this verb
+#: exists to replace.
+_MERGE_SHA = re.compile(r"\A[0-9a-f]{40}\Z|\A[0-9a-f]{64}\Z")
+
+
+def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
+    """Close a review because its PR MERGED — an artifact of the merge, not an
+    inference about it (coord-boss ruling 1, 2026-08-07).
+
+    A merged PR leaves an immortal obligation: the register keeps asking for a
+    verdict on a head nobody will ever review again. `review gc` is deliberately
+    NOT the answer — its predicate asks whether a HEAD is still alive, 551 raised
+    that bar on purpose, and "the PR merged" is a different question that a
+    liveness probe cannot answer.
+
+    Unlike :func:`_write_settled_marker`, which is a best-effort CACHE and
+    swallows its failures, this is a DURABLE RECORD: a swallowed failure would
+    leave the row open while reporting closed, so the write is verified by
+    read-back and a failure is a non-zero exit.
+    """
+    slug = args.slug
+    sha = (args.merge_sha or "").strip().lower()
+    if not _MERGE_SHA.match(sha):
+        print(f"review close: --merge-sha must be a full 40- or 64-hex commit "
+              f"sha, got {args.merge_sha!r}. Closure carries evidence; an "
+              f"abbreviation or a branch name is an assertion.", file=sys.stderr)
+        return 2
+
+    # Refuse to close a slug that does not exist: a write into a nonexistent
+    # register entry succeeds silently and reads exactly like a closure.
+    try:
+        vnames = {(e.get("name") or "")
+                  for e in transport.list_dir(_verdicts_prefix(args.team, slug))}
+    except TransportError as e:
+        print(f"review close: cannot read the verdicts prefix for {slug} ({e}) "
+              f"— UNKNOWN, not closed. Retry.", file=sys.stderr)
+        return 1
+    doc = transport.read(_review_doc_path(args.team, slug))
+    if doc is None and not vnames:
+        print(f"review close: {slug} has no review doc and no verdicts — "
+              f"nothing to close. Check the slug.", file=sys.stderr)
+        return 2
+
+    now = _iso(_now())
+    payload = okf.render_frontmatter({
+        "schema": "review-settled/v1",
+        "state": "MERGED",
+        "merge_sha": sha,
+        "merged_at": args.merged_at or now,
+        "closed_by": args.sender or _host(),
+        "reason": args.reason or "PR merged; the head will not be reviewed again",
+        "ts": now,
+    })
+    path = _settled_marker_path(args.team, slug)
+    try:
+        transport.write(path, payload)
+    except Exception as e:
+        print(f"review close: write FAILED for {slug} ({type(e).__name__}) — "
+              f"the row is still open.", file=sys.stderr)
+        return 1
+    if transport.read(path) is None:
+        print(f"review close: wrote {slug} but the read-back was empty — "
+              f"closure UNVERIFIED, treat the row as still open and retry.",
+              file=sys.stderr)
+        return 1
+    print(f"review close: {slug} closed as MERGED at {sha[:12]} "
+          f"(marker {path})")
+    return 0
+
+
 def _is_settleable(tally: dict[str, Any]) -> bool:
     """True only for a tally that may be CACHED as settled: APPROVED, nothing
     pending, and a parsed NON-EMPTY required list. The required gate is the
@@ -9523,6 +9594,15 @@ def build_parser() -> argparse.ArgumentParser:
                           "gc only prints what it would retire")
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
+    rvc = rvsub.add_parser("close", help="close a review because its PR MERGED (evidence, not inference)")
+    rvc.add_argument("team"); rvc.add_argument("slug")
+    rvc.add_argument("--merge-sha", required=True,
+                     help="the FULL 40- or 64-hex merge commit sha — closure "
+                          "carries evidence; an abbreviation is an assertion")
+    rvc.add_argument("--merged-at", help="ISO timestamp of the merge (defaults to now)")
+    rvc.add_argument("--reason", help="why this row is closed")
+    rvc.add_argument("--from", dest="sender", help="acting agent (for the marker)")
+    rvc.set_defaults(func=cmd_review_close)
     rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)
