@@ -55,10 +55,42 @@ action.
 Without this line the alias table is a privilege-escalation primitive with a
 convenience story on top.
 
-## NORMATIVE: the map is injective and acyclic
+## NORMATIVE: alias debt is visible and is NOT ordinary work
 
-> **One canonical per alias. A canonical that is itself an alias is a config
-> error the loader REFUSES — it is never resolved transitively.**
+> **A row joined in from an alias must be rendered as UNDISCHARGEABLE by the
+> canonical identity, with the remediation named. It is never presented as
+> work the canonical can simply do.**
+
+This is the gap the first draft left, and it follows directly from the
+authority boundary rather than contradicting it. Concretely: `needs-me` joins a
+review required from retired alias `A` into canonical `B`'s view — correct, `B`
+should see it. But the verdict tally refuses alias resolution, as it must, so a
+verdict filed as `B` does not satisfy required token `A`, and filing as `A`
+would cross the boundary. `B` is shown an obligation with no legal move.
+
+So the read side must not lie about actionability:
+
+```
+[P1] review pr-123 — required from `A` (retired -> B)
+     ALIAS DEBT: you cannot discharge this. The requirement names a retired
+     identity and a verdict from B will not satisfy it.
+     Remediation: the requester re-requests naming B, or reassigns.
+```
+
+The row carries `alias_debt: true` and a `remediation` field in `--json`.
+Counters that report "open obligations" must be able to exclude it, or every
+dashboard shows permanent work nobody can finish.
+
+**Rule of thumb for the whole design:** an alias join may change what you can
+SEE and must never change what you can DO — including making something look
+doable that is not.
+
+## NORMATIVE: one canonical per alias; many aliases per canonical is EXPECTED
+
+> **The map is a FUNCTION from alias to canonical, and acyclic. Two canonicals
+> for one alias is a config error the loader REFUSES. A canonical that is
+> itself an alias is a config error the loader REFUSES — chains are never
+> resolved transitively.**
 
 Transitive resolution is how two live agents quietly become one. A loader that
 follows `A -> B -> C` will, the first time someone adds a row carelessly, merge
@@ -68,6 +100,13 @@ because every fold downstream reports a single tidy identity.
 The loader fails loudly on: an alias that is also a canonical, a cycle, or two
 canonicals for one alias. Refusing a malformed table is correct — a coordination
 store with no alias table behaves exactly as it does today.
+
+**"Injective" was the wrong word in the first draft and is withdrawn.** Strict
+injectivity would forbid several retired identities mapping to one canonical —
+which is exactly the motivating case, where one agent was renamed more than
+once. Many aliases to one canonical is REQUIRED. The constraint that matters is
+that the map is a function (one canonical per alias) and acyclic; those are what
+the loader enforces.
 
 ## NORMATIVE: a retired id is burned
 
