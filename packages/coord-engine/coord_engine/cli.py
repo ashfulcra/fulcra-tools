@@ -751,6 +751,20 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     # status fail closed so unattended callers cannot mistake 0/N for a clean
     # durable-assignment read.
     forge_incomplete = any(r.get("type") == "forge-degraded" for r in got)
+    rc = 3 if forge_incomplete else 0
+    # The verdict, on stderr, BEFORE the unbounded payload it is a verdict about:
+    # emitted unconditionally (json mode included) and independent of whether the
+    # rows below survive the reader's context. See `emit_envelope`.
+    emit_envelope(
+        "needs-me", count=len(got), rc=rc,
+        forge=_fold_source(got, "forge-source"),
+        source=_fold_source(got, "needs-me-source"),
+        degraded=sum(1 for r in got if _is_degraded_row(r)),
+    )
+    if getattr(args, "envelope_only", False):
+        # The durable answer for a truncating harness: the verdict WITHOUT the
+        # records. Same rc, same envelope, no payload to truncate.
+        return rc
     if args.json:
         jsonutil.print_json(got)
     else:
@@ -778,7 +792,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_source_line("needs-me", r))
             else:
                 print(_line(r))
-    return 3 if forge_incomplete else 0
+    return rc
 
 
 def cmd_search(args: argparse.Namespace, transport: Any) -> int:
@@ -2548,6 +2562,48 @@ def _review_row_line(r: dict[str, Any]) -> Optional[str]:
     if t == "review-source":
         return _source_line("review", r)
     return None
+
+
+#: Every degraded marker row type in this module ends in ``degraded``
+#: (``read-degraded``, ``role-degraded``, ``forge-degraded``, the four
+#: ``review-*-degraded``, ``inbox-degraded``, ``presence-degraded``,
+#: ``engagement-degraded``). ONE predicate, so a marker type added tomorrow is
+#: counted by the envelope that day rather than the day someone notices it never
+#: was.
+def _is_degraded_row(r: Any) -> bool:
+    return isinstance(r, dict) and str(r.get("type") or "").endswith("degraded")
+
+
+def _fold_source(rows: list, type_name: str) -> str:
+    """``projection`` / ``raw`` / ``absent`` for the ``*-source`` row named by
+    ``type_name`` — the envelope's one-word form of `_source_line`."""
+    for r in rows:
+        if isinstance(r, dict) and str(r.get("type") or "") == type_name:
+            return "projection" if r.get("source") == "projection" else "raw"
+    return "absent"
+
+
+def emit_envelope(verb: str, *, count: int, rc: int, **fields: Any) -> None:
+    """Write ONE compact verdict line to **stderr**.
+
+    A fold that prints an unbounded row list puts its verdict — the degraded
+    markers, the source disclosure, and the rc they imply — at the END of that
+    list. A harness whose context truncates the stream loses exactly the part
+    that says whether the read can be trusted, and a truncated read then looks
+    identical to a clean one. codex-coder hit this 2026-08-08: ``needs-me``
+    completed, stdout was truncated before the markers, and the wake could not
+    certify the durable-assignment read either way. PR 565 had just made the rc
+    load-bearing for that condition, which is what made the loss bite.
+
+    stderr is a separate, tiny stream that survives stdout truncation on every
+    harness we have. It is a DUPLICATE of the inline markers, never a
+    replacement — the inline rows stay exactly where they are for readers that
+    can see them.
+    """
+    parts = [f"{verb}: {count} item(s)"]
+    parts += [f"{k}={v}" for k, v in fields.items()]
+    parts.append(f"rc={rc}")
+    print(", ".join(parts), file=sys.stderr)
 
 
 def _source_line(label: str, r: dict[str, Any]) -> str:
@@ -5703,6 +5759,24 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: resume section unavailable ({type(e).__name__})", file=sys.stderr)
         out["resume"] = None
+    # Same treatment as needs-me, for the same reason: briefing's degraded markers
+    # sit INSIDE per-section lists that scale with the store, so a truncating
+    # reader loses them while the header survives. briefing always returns 0 — the
+    # envelope's degraded count is therefore the ONLY machine signal it has, which
+    # makes this more load-bearing here, not less.
+    _brief_degraded = sum(
+        1 for section in ("presence", "inbox", "needs_me", "pending_reviews",
+                          "forge_feedback")
+        for r in (out.get(section) or [])
+        if _is_degraded_row(r)
+    ) + (1 if out.get("read_degraded") else 0) + (
+        1 if out.get("role_degraded") else 0)
+    emit_envelope(
+        "briefing", count=len(out.get("needs_me") or []), rc=0,
+        inbox=len(out.get("inbox") or []),
+        reviews=len(out.get("pending_reviews") or []),
+        degraded=_brief_degraded,
+    )
     if args.json:
         jsonutil.print_json(out)
         return 0
@@ -9258,6 +9332,11 @@ def build_parser() -> argparse.ArgumentParser:
     nm.add_argument("team"); nm.add_argument("--agent", required=True)
     nm.add_argument("--all", action="store_true",
                     help="include acknowledged, closed, and future history")
+    nm.add_argument("--envelope-only", action="store_true",
+                    help="print ONLY the stderr verdict envelope (count, fold "
+                         "sources, degraded count, rc) and no records — for a "
+                         "harness whose context truncates an unbounded payload "
+                         "before its trailing markers")
     add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
 
