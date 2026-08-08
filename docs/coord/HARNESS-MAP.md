@@ -151,23 +151,6 @@ the wall exists — not where it happened first.
     is not optional for them — use the harness's, and always write a trailing
     RC line so a truncated run is detectable rather than ambiguous.
 
-## What "monitoring" should grow into
-
-The pattern in every wall above: **the failure was silent in the harness where
-nobody was looking.** The monitoring vision, staged:
-
-1. **Now (cheap):** every heartbeat host runs `doctor` on its cadence; the
-   twice-daily digest carries headroom + health lines (shipped). Walls found in
-   one harness get regression-tested in CI where possible.
-2. **Next:** a canary matrix — one scripted probe per (harness × surface) pair
-   that exercises auth, a read fold, a write, and a timeline emit, reporting
-   into the bus as presence + a `reports/` shard. ATC can route canary runs to
-   whichever account has headroom.
-3. **Eventually:** the full surface-monitoring program (the 2026-07-11 backlog
-   item): all fulcra surfaces (CLI, lib, MCP, REST, File Store, skills) probed
-   from all harnesses above on a cadence, with drift detected against pinned
-   baselines (e.g. `docs/specs/fulcra-openapi-digest.txt`).
-
 13. **A gated harness refuses to EXECUTE a downloaded install script, and that
     refusal is correct** (codex; verified live 2026-08-07). The sanctioned
     adoption flow is `download adopt-latest.sh` then `bash /tmp/a.sh <agent>`.
@@ -195,6 +178,91 @@ nobody was looking.** The monitoring vision, staged:
     reads the bus — so it is currency, not capability, and it should keep
     working while it reports the block.
 
+14. **A fresh config file is not evidence its reader is alive; a coincidence in
+    time is not a cause; and a service that was switched off on purpose looks
+    exactly like one that crashed** (harness 3, any long-running service on a
+    remote host). A team's wake router stopped and nobody noticed for **70
+    hours**. Its cursor file had written every ~4 minutes across **10,626
+    versions** and then stopped dead; the hourly heartbeat shards stopped in the
+    same window. Three things kept it invisible, and all three generalise.
+    **(a) Liveness must be measured on artifacts the service WRITES.** The
+    router's `config.json` was modified the morning the outage was found — by an
+    agent, not by the router. A config file is written by whoever *edits* it,
+    never by whoever *reads* it, so its freshness says nothing about the reader
+    being alive. A dashboard keying on it would have shown green for three days.
+    **(b) Configuration correctness and mechanism liveness are two questions.** A
+    watchdog asking *"do these routes point at live sessions?"* returned
+    `0 stale` against a router that had not existed for three days — and
+    answering the second question confidently is exactly what hides the first
+    one's absence. The same watchdog checked only **2 of 5** bindings, silently
+    skipping every agent addressed by executor rather than by session id: **a
+    watchdog that narrows its own scope without saying so reports green about a
+    population it never looked at.** Make the unchecked set part of the output.
+    **(c) Before asserting that A killed B, confirm A and B are on the same
+    host.** The first diagnosis blamed a process tree on an unrelated machine —
+    two hosts went quiet six minutes apart and the coincidence was written up as
+    a mechanism. That mis-routed a P0 to an agent which was both dead and, being
+    elsewhere, never able to act. Presence identities encode
+    `harness:host:agent`, so the host was inside the string the whole time.
+    **The cause, once someone with shell finally looked, was none of the above:
+    the unit had been deliberately stopped and masked** under an earlier
+    containment ruling, because it was an unisolated decision plane sharing
+    state it should not have. It was already a supervised system unit — so
+    *"put it under supervision"*, the obvious structural fix, was already done
+    and was never the remedy. **An intentional shutdown and a crash present
+    identically to every external observer.** If a service is down, look for the
+    decision to take it down before you design a fix for the failure to stay up:
+    the journal answers in one query what three diagnoses guessed at.
+    Corollary that cost the most time: **a repair path that runs over the
+    mechanism being repaired is not a repair path** — it is an operator
+    escalation wearing one. Check that before assigning the fix.
+    Team-specific evidence for this wall — hosts, identities, timestamps, the
+    containment ruling — lives on the team store, not here.
+
+15. **A tool result can be truncated BEFORE its exit line, so a verdict that
+    rides at the tail of an unbounded payload is unobservable** (harness 2 /
+    codex; any harness that caps tool output). An agent ran a durable-assignment
+    read, the first phase completed normally at 30.0s, and the output exceeded
+    the harness's context cap and was cut off **before `rc`, `state`,
+    `error_code` and the source markers could be read**. The wake could not
+    certify the read either way — not degraded, not clean, *uninspectable*.
+    What makes this a wall rather than a bug report is the timing: a fix had
+    merged an hour earlier that made **`rc` the load-bearing signal** for
+    precisely that condition. On this harness the fix was unreachable by the
+    agent it was written to protect, and neither the fix nor its review could
+    have predicted that, because the two facts live in different layers.
+    The general rule: **a verdict must not live only at the end of the payload
+    it is a verdict about.** Any fold that prints an unbounded list and then
+    returns a status has this shape. Remedies, cheapest first: emit a compact
+    envelope to **`stderr`** (separate stream, a few dozen bytes, survives
+    stdout truncation everywhere); offer an **envelope-only mode** so a
+    truncating reader can ask for the verdict without the records; print the
+    summary **first as well as last**, so a head-truncated read still carries it.
+    Diagnostic tell, since this is easy to misread as a network fault: the
+    process succeeded and the phase timings were normal. **Truncation is an
+    output-volume failure, not a transport failure**, and reporting it as "host
+    degraded" sends the next agent hunting a connectivity problem that does not
+    exist. The agent that hit this classified it correctly and refused to call
+    the wake clean, which is the only reason the defect was legible at all.
+
+## What "monitoring" should grow into
+
+The pattern in every wall above: **the failure was silent in the harness where
+nobody was looking.** The monitoring vision, staged:
+
+1. **Now (cheap):** every heartbeat host runs `doctor` on its cadence; the
+   twice-daily digest carries headroom + health lines (shipped). Walls found in
+   one harness get regression-tested in CI where possible.
+2. **Next:** a canary matrix — one scripted probe per (harness × surface) pair
+   that exercises auth, a read fold, a write, and a timeline emit, reporting
+   into the bus as presence + a `reports/` shard. ATC can route canary runs to
+   whichever account has headroom.
+3. **Eventually:** the full surface-monitoring program (the 2026-07-11 backlog
+   item): all fulcra surfaces (CLI, lib, MCP, REST, File Store, skills) probed
+   from all harnesses above on a cadence, with drift detected against pinned
+   baselines (e.g. `docs/specs/fulcra-openapi-digest.txt`).
+
+
 ## Change log
 
 - 2026-07-14: initial map (coord-boss), from the 07-11..07-14 incident record.
@@ -206,3 +274,10 @@ nobody was looking.** The monitoring vision, staged:
 - 2026-08-07: wall 13 (gated harness refuses the install script), from
   codex-coder hitting it on the pin move to e1880da9 and adopting via the
   literal-commands path instead.
+- 2026-08-08: wall 14 (a fresh config file is not evidence its reader is alive;
+  a coincidence in time is not a cause; a deliberate shutdown looks exactly like
+  a crash) and wall 15 (a tool result can be truncated before its exit line),
+  from a 70h router outage whose cause was published wrong twice before anyone
+  read the journal, and from a fold whose verdict became unobservable one hour
+  after a merge made that verdict load-bearing. Wall 13 also moved back into the
+  walls list; it shipped below the monitoring section by mistake.
