@@ -490,3 +490,35 @@ def test_there_is_no_carve_out_for_the_configured_human():
     assert cli._is_self_addressed_vacancy(cli._human(), [{"agent": cli._human()}]) is True
     assert cli._is_self_addressed_vacancy("arcbot", [{"agent": "arcbot"}]) is True
     assert cli._is_self_addressed_vacancy("coord-boss", [{"agent": "arcbot"}]) is False
+
+
+def test_the_SECOND_sweep_of_a_closed_loop_is_still_degraded(capsys):
+    """codex-reviewer, 577 r1, with a two-run probe: run 1 emitted
+    `undelivered=1` and rc 3; run 2 found the existing directive, skipped the
+    whole branch, and reported `undelivered=0`, `degraded=0`, rc 0 — while the
+    notice was still sitting undeliverable in the absent party's bucket.
+
+    The delivery failure is a property of WHO the notice is addressed to, not of
+    whether this particular sweep wrote a new document. A retry must not launder
+    it, or a watchdog that samples any run after the first sees clean."""
+    def fresh():
+        t = FakeTransport()
+        t.put("team/r/roles/arc.md", "---\ntype: Role\nmaintainer: arcbot\n---\n")
+        t.put("team/r/roles/arc/leases/arcbot.md",
+              "---\ntype: Lease\nagent: arcbot\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+        return t
+
+    t = fresh()
+    capsys.readouterr()
+    rc1 = cli.main(["escalate", "r"], transport=t)
+    err1 = capsys.readouterr().err
+    assert rc1 == 3 and "undelivered=1" in err1
+
+    # SAME transport: the directive from run 1 is still there.
+    rc2 = cli.main(["escalate", "r"], transport=t)
+    out2, err2 = capsys.readouterr()
+    assert "suppressed" in out2, "the retry must still not duplicate the document"
+    assert rc2 == 3, "but a suppressed retry is NOT a clean vacancy check"
+    assert "undelivered=1" in err2, "the count must survive the write being skipped"
+    assert "still has an UNDELIVERED notice" in err2
+    assert "NOT because anyone received it" in err2

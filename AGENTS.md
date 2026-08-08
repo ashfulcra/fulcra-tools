@@ -196,6 +196,10 @@ under `skills/`, each package with its own README, build, and tests.
   rerouted. Rerouting was tried and did harm: it moved a notice off a real
   operator onto the bare `human` default. The engine does not know a better
   addressee than the registry does — fix the role doc's `maintainer:` field.
+  The undelivered count is computed from the closed-loop condition on EVERY
+  sweep, not only when the directive write is new — otherwise the second run
+  finds the existing document, skips the branch, and reports clean while the
+  notice is still undeliverable.
   It is also **not** recorded as a delivery: the daily marker is a SUPPRESSOR,
   so writing it for a notice that reached nobody would silence the only
   mechanism that would try again. A closed-loop role re-surfaces every sweep

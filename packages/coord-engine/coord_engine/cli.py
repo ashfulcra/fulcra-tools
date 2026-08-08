@@ -9349,6 +9349,15 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                        f"the role doc. " if self_addressed else "")
                     + f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
         )
+        # Counted OUTSIDE the write branch. codex-reviewer, 577 r1: the first
+        # sweep was correctly degraded, and the SECOND one went clean — run 2
+        # found the existing directive, skipped the whole branch, and reported
+        # undelivered=0, degraded=0, rc 0 while the notice was still sitting
+        # undeliverable in the absent party's bucket. The delivery failure is a
+        # property of WHO the notice is addressed to, not of whether this
+        # particular sweep wrote a new document, so a retry must not launder it.
+        if self_addressed:
+            undelivered += 1
         dst = _task_path(args.team, slug)
         if transport.read(dst) is None:
             transport.write(dst, content)
@@ -9356,7 +9365,6 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             print(f"escalated {role} -> {maintainer}"
                   + (" (UNDELIVERED: closed loop)" if self_addressed else ""))
             if self_addressed:
-                undelivered += 1
                 print(f"escalate: {role}'s maintainer ({maintainer}) IS its own "
                       f"lapsed holder — this notice lands in the absent party's "
                       f"bucket and has no exit. NOT rerouted: the engine does "
@@ -9368,6 +9376,13 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                       f"a delivery.", file=sys.stderr)
         else:
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
+            if self_addressed:
+                print(f"escalate: {role} still has an UNDELIVERED notice — its "
+                      f"maintainer ({maintainer}) is its own lapsed holder, and "
+                      f"today's directive is sitting in that unread bucket. The "
+                      f"retry is suppressed because the document exists, NOT "
+                      f"because anyone received it. Fix the role doc's "
+                      f"`maintainer:` field.", file=sys.stderr)
     # The verdict, on stderr, so a vacancy check that could not finish is not
     # mistaken for one that found nothing. escalate returned rc 0 after a 98s
     # run that printed 136 bytes — indistinguishable from a clean sweep, which is
