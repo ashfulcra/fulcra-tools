@@ -188,17 +188,22 @@ under `skills/`, each package with its own README, build, and tests.
   Otherwise the suite flips red once wall-clock passes `NOW + window`. Enforced
   by `tests/test_clock_pin_convention.py`.
 - Environment hermeticity: the suite's answer must not depend on **who** runs
-  it. `cli.IDENTITY_ENV` names the coordination-identity variables (currently
-  `FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`); the coord-engine conftest clears
-  them for every test, and `tests/test_env_hermeticity.py` re-runs the affected
-  files under both an empty and a populated environment and requires the same
-  outcome. This is not hypothetical — 25 tests failed **iff** an identity was
+  it. `cli.INHERITED_ENV` maps each ambient variable the suite must neutralise
+  to a representative value (identity: `FULCRA_COORD_AGENT`,
+  `FULCRA_COORD_HUMAN`; channel: `COORD_RECORDS_TYPE`) — ONE mapping, so the
+  fixture that clears the keys and the wall that populates them cannot drift.
+  The coord-engine conftest clears them for every test, and
+  `tests/test_env_hermeticity.py` re-runs the affected files under both an empty
+  and a populated environment and requires the same outcome. This is not hypothetical — 25 tests failed **iff** an identity was
   exported, which is line one of every agent's wake prompt, so a green tree
   reported failures for anyone following the documented procedure. A test that
-  needs a specific identity sets it in its own body. If you add a variable to
-  `IDENTITY_ENV`, the wall covers it automatically; if you add a *new* class of
-  inherited config, add it to the wall or record it in `NOT_YET_WALLED` with the
-  measurement — `COORD_RECORDS_TYPE` (8 tests) is there now.
+  needs a specific identity or channel sets it in its own body. If you add a
+  variable to `INHERITED_ENV`, the wall covers it automatically. A variable
+  belongs there when the suite reading it makes the ANSWER depend on who ran it;
+  it does NOT belong there when the variable legitimately changes behaviour a
+  test is about — record those in `NOT_YET_WALLED` with the measurement, as
+  `COORD_TRANSPORT_HTTP` is now. Measure siblings rather than guessing:
+  `COORD_RECORDS_API_VERSION` looks like it belongs and leaks nothing.
 
 ## Coordinate on the bus
 
