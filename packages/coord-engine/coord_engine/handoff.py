@@ -9,7 +9,7 @@ its context ran out — which is precisely the moment it will not.
 
 THE FAILURE THIS IS BUILT AGAINST is not a missing section, it is a **lying
 pointer**. coord-boss's 2026-08-06 takeover resumed a checkpoint whose artifact
-list pointed at a "Cold start" section of `docs/coord/agents/coord-boss.md` that
+list pointed at a "Cold start" section of `_coord/agents/coord-boss/harness.md` (on the team store) that
 did not exist on main. Every section was present; the handoff still failed,
 because the standard's real requirement — *"never point at something that does
 not exist"* — is the one a presence check cannot see. So artifacts get a LIVE
@@ -84,7 +84,7 @@ _EXPLICIT_NONE = re.compile(r"^\s*(none|n/a|nothing( open)?|no open questions)"
 MIN_ENTRY_CHARS = 24
 
 #: ``path#anchor`` and the parenthetical form the standard's own worked example
-#: uses: ``docs/coord/agents/coord-boss.md (Cold start section)``.
+#: uses: ``_coord/agents/coord-boss/harness.md (Cold start section)``.
 _ANCHOR_PAREN = re.compile(r"^(?P<path>[^()]+?)\s*\(\s*(?P<anchor>.+?)\s*\)\s*$")
 
 

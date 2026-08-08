@@ -181,6 +181,16 @@ under `skills/`, each package with its own README, build, and tests.
 - PyObjC-free logic is split into its own modules so tests run on Linux CI;
   macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC
   imports lazy (inside functions), never at module import time.
+- `continuity snapshot` exits 3 and says so when the write did not persist.
+  `transport.write` returns **False** on a transport failure rather than
+  raising, and the snapshot path used to capture that into a local, spend it on
+  a cosmetic side-effect, and still print `snapshot <id>` and return 0. Found
+  live during a store outage. Continuity is the durability mechanism: a park
+  reporting success without reaching the store leaves a successor resuming from
+  the PREVIOUS checkpoint believing it is current — and that happens exactly
+  when the host is in trouble, which is when parking matters most. **Any caller
+  of `transport.write` must treat `False` as failure**; it is not a
+  Falsy-but-fine return.
 - Date/clock tests: a module that fixes a top-level `NOW` for its data must also
   **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
   `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving
@@ -208,18 +218,32 @@ under `skills/`, each package with its own README, build, and tests.
   and the verb exits 3. There is no carve-out for the configured human: the
   engine only knows a string matched, and flagging is safe in a way rerouting
   was not.
+- The `no-team-internals` CI guard PROVES it can fail before it reports clean.
+  `scripts/no-team-internals.sh` runs `--self-test` first: it stages a fixture
+  carrying a public IP and a session ref, asserts the scan flags both, and only
+  then scans the tree. This is not ceremony — the guard's first version wrote
+  its IP pattern with `\b`, which POSIX ERE does not support, so `git grep -E`
+  matched nothing and the check went green on every PR while being structurally
+  incapable of finding the leak class it was written for. **Never use `\b` in a
+  `git grep -E` pattern.** A guard's green is only evidence when its red is
+  reachable.
 - Environment hermeticity: the suite's answer must not depend on **who** runs
-  it. `cli.IDENTITY_ENV` names the coordination-identity variables (currently
-  `FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`); the coord-engine conftest clears
-  them for every test, and `tests/test_env_hermeticity.py` re-runs the affected
-  files under both an empty and a populated environment and requires the same
-  outcome. This is not hypothetical — 25 tests failed **iff** an identity was
+  it. `cli.INHERITED_ENV` maps each ambient variable the suite must neutralise
+  to a representative value (identity: `FULCRA_COORD_AGENT`,
+  `FULCRA_COORD_HUMAN`; channel: `COORD_RECORDS_TYPE`) — ONE mapping, so the
+  fixture that clears the keys and the wall that populates them cannot drift.
+  The coord-engine conftest clears them for every test, and
+  `tests/test_env_hermeticity.py` re-runs the affected files under both an empty
+  and a populated environment and requires the same outcome. This is not hypothetical — 25 tests failed **iff** an identity was
   exported, which is line one of every agent's wake prompt, so a green tree
   reported failures for anyone following the documented procedure. A test that
-  needs a specific identity sets it in its own body. If you add a variable to
-  `IDENTITY_ENV`, the wall covers it automatically; if you add a *new* class of
-  inherited config, add it to the wall or record it in `NOT_YET_WALLED` with the
-  measurement — `COORD_RECORDS_TYPE` (8 tests) is there now.
+  needs a specific identity or channel sets it in its own body. If you add a
+  variable to `INHERITED_ENV`, the wall covers it automatically. A variable
+  belongs there when the suite reading it makes the ANSWER depend on who ran it;
+  it does NOT belong there when the variable legitimately changes behaviour a
+  test is about — record those in `NOT_YET_WALLED` with the measurement, as
+  `COORD_TRANSPORT_HTTP` is now. Measure siblings rather than guessing:
+  `COORD_RECORDS_API_VERSION` looks like it belongs and leaks nothing.
 
 ## Coordinate on the bus
 
@@ -598,6 +622,21 @@ it (not on PyPI).
   `head` + `round`, and ignores superseded-head verdicts without deleting them.
   This keeps exact-head rigor without `pr-N-r2`/`r3` slug ceremony. Legacy or
   non-code reviews may omit `--head` and retain `verdicts/<required-token>.md`.
+  **A verdict that cannot be counted is REPORTED, never dropped, and the verb
+  exits 3.** Two ways a real verdict goes uncounted, both of which happened:
+  a filename whose pre-`--` prefix is not a well-formed head (e.g.
+  `2026-08-08--alice.md`) names no round that could ever exist; a KEYED-looking
+  shard on a HEADLESS review names a round that cannot exist *there* (the
+  predicate takes the review into account, not the filename alone); a `verdict:` token outside
+  `review.accepted_vocabulary()` normalises to nothing; and a shard at the
+  CURRENT round's path whose own frontmatter attests a DIFFERENT head is
+  refused (correctly — otherwise a copied round-1 verdict discharges round 2)
+  but must say so. Each message names the rule that skipped it. Either way the old
+  behaviour reported `pending_required: [alice]` — not "a file here is
+  unreadable" but the affirmative claim that alice had not voted, with her
+  verdict sitting in the directory. A superseded-head shard stays silent on
+  purpose; making every `--` noisy would train everyone to ignore the warning
+  that matters.
   The request is **durable-first, not atomic**: the review doc lands FIRST (that
   doc IS the obligation the tally reads), then the verb delivers one directive
   per required reviewer through the canonical hash-slug path (so a verb-opened
@@ -1486,6 +1525,41 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   plugin ID and backed by `state.db`; values must be JSON (64 KiB maximum,
   256 UTF-8-byte keys). Use `kv_update` only for quick, side-effect-free atomic
   transforms because it holds SQLite's writer lock while the callback runs.
+
+### Freshness: run status cannot tell you a source has died
+
+`last_run` / `last_outcome` / `consecutive_failures` all answer **did the plugin
+run**. None answers **did it collect anything**. A source whose upstream goes
+quiet keeps running, keeps exiting cleanly, and keeps writing
+`last_outcome="done"` with zero consecutive failures — so every health signal
+stays green while the data stops. Treat a green run as evidence of execution
+only, never of freshness.
+
+`freshness.py` supplies the missing half, from two independent clocks:
+
+- `last_yield_at` (daemon clock) — when the plugin last accepted a record.
+  Catches "runs fine, produces nothing".
+- `newest_item_at` (source clock) — newest SOURCE timestamp ever accepted, and
+  **monotonic**, so a backfill accepting older items cannot drag it backwards
+  and manufacture a stall. Catches the sibling failure: a plugin that keeps
+  writing while upstream is frozen, which a yield-only check calls healthy.
+
+Plugin authors:
+
+- Pass `observed_at=<ISO source timestamp>` to `ctx.annotation(...)` — when the
+  thing happened upstream, not when you wrote it. Only the plugin knows this.
+  Without it a source can still be monitored for total silence, but not for a
+  frozen upstream.
+- Declare `freshness=FreshnessExpectation(max_yield_silence=…,
+  max_upstream_lag=…)` on your `Plugin` to opt in. **Monitoring is opt-in by
+  design**: a bound guessed from `default_interval` would alert constantly on
+  legitimately rare sources (a manual importer, a lab result arriving every few
+  months), and an alert that cries wolf teaches operators to ignore the one that
+  matters. Set `max_upstream_lag` above the source's normal quiet periods.
+- A plugin that has never yielded reports `UNKNOWN` — deliberately neither
+  healthy nor stale. "We have not looked" must stay distinguishable from "we
+  looked and it is fine"; collapsing those is what let a four-day outage read as
+  green.
 
 ### launchd PATH gotcha
 

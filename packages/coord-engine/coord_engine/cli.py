@@ -105,14 +105,36 @@ def _sanitize_hostname(raw: str) -> tuple[str, bool]:
     return f"{collapsed}-{digest}", True
 
 
-#: The environment variables that carry WHO is running this process. Named once,
-#: here, because the test suite must be able to neutralise exactly this set: 25
-#: tests read these as a fallback sender, so an inherited identity made a green
-#: tree report failures for anyone following the standing wake procedure (which
-#: opens by exporting one of them). The suite's conftest clears this tuple and a
-#: wall re-runs the affected tests under both environments; a variable added
-#: here without being added there is the drift that reintroduces the bug.
-IDENTITY_ENV: tuple[str, ...] = ("FULCRA_COORD_AGENT", "FULCRA_COORD_HUMAN")
+#: Ambient environment a real caller exports that the TEST SUITE must neutralise,
+#: mapped to a representative value the hermeticity wall populates. One mapping
+#: rather than a name list plus a parallel list of samples: the fixture clears
+#: these keys and the wall sets them, so there is nothing for the two to drift on.
+#:
+#: Two families, one shape — the suite reading state its caller happens to have:
+#:
+#: - **identity** (`FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`): 25 tests read
+#:   these as a fallback sender, so an inherited identity made a green tree
+#:   report failures for anyone following the standing wake procedure, which
+#:   opens by exporting one of them.
+#: - **channel** (`COORD_RECORDS_TYPE`): 8 tests, and every one is a test whose
+#:   PREMISE is that the records config is absent or unreadable —
+#:   `test_documented_send_fails_closed_without_a_records_config`,
+#:   `test_doctor_self_unreadable_config_is_unknown`, the `[config-absent]`
+#:   envelope case. An exported channel supplies the very thing they test the
+#:   absence of, so they do not merely fail: they stop being the tests they are
+#:   named after.
+#:
+#: A variable belongs here when the suite reading it makes the ANSWER depend on
+#: who ran it. It does NOT belong here when the variable legitimately changes
+#: behaviour a test is about — see `NOT_YET_WALLED` in the wall for
+#: `COORD_TRANSPORT_HTTP`, where a test asserting "no subprocess" SHOULD fail
+#: when you disable the HTTP path, and separating those from real leaks is work
+#: nobody has done yet.
+INHERITED_ENV: dict[str, str] = {
+    "FULCRA_COORD_AGENT": "some-other-agent",
+    "FULCRA_COORD_HUMAN": "some-other-human",
+    "COORD_RECORDS_TYPE": "some.other.channel",
+}
 
 
 def _host() -> str:
@@ -1748,6 +1770,34 @@ def _is_settleable(tally: dict[str, Any]) -> bool:
             and bool(tally.get("required")))
 
 
+def _is_unattributable(name: str, *, keyed: bool) -> bool:
+    """Can this verdict filename name a reviewer on THIS review?
+
+    ``keyed`` is whether the REQUEST carries a head. That parameter is the fix
+    codex-reviewer found in r2: without it the predicate answered a question
+    about the filename alone, and a filename is only meaningful against the
+    review it sits under.
+
+    - On a KEYED review, ``<valid-head>--<reviewer>.md`` for a non-active head
+      is a superseded round: skipped deliberately and silently, because making
+      every multi-round review noisy would train everyone past the warning that
+      matters.
+    - On a HEADLESS review there are no rounds at all, so a keyed-looking shard
+      names a round that cannot exist here. It is uncounted, and the r2 build
+      said nothing: `PENDING`, `awaiting required: bob`, rc 0, with bob's
+      approve verdict present. The same silent false negative this whole change
+      exists to remove, hiding one branch deeper.
+    - A ``--`` prefix that is not a well-formed head is unattributable either
+      way: it names no round that could ever exist, under any review.
+    """
+    stem = name[:-3] if name.endswith(".md") else name
+    if "--" not in stem:
+        return False
+    if not keyed:
+        return True  # no rounds here, so nothing keyed can belong
+    return review.normalize_head(stem.split("--", 1)[0]) is None
+
+
 def _tally_from_verdict_entries(
     transport: Any, team: str, slug: str, entries: list[dict[str, Any]],
     doc_raw: Optional[str], *, deadline: Optional[float] = None,
@@ -1786,6 +1836,9 @@ def _tally_from_verdict_entries(
     elif isinstance(required, list):
         required = [str(r).strip() for r in required if str(r).strip()]
     verdicts: list[dict[str, Any]] = []
+    unattributable: list[str] = []
+    unrecognised: list[tuple[str, str]] = []
+    mismatched: list[tuple[str, str]] = []
     reads_ok = True
     fully_scanned = True
     dl = Deadline(deadline)
@@ -1797,6 +1850,20 @@ def _tally_from_verdict_entries(
         if reviewer is None:
             # A keyed review reads only the active head's append-only shards;
             # legacy reviews ignore keyed files. Superseded heads cost zero reads.
+            #
+            # But "skipped a superseded round" and "cannot attribute this file at
+            # all" are different facts, and collapsing them cost a real reviewer
+            # their verdict: a shard named `<date>--<reviewer>.md` on a headless
+            # review was read as a superseded head, dropped before it was opened,
+            # and `review status` then reported pending_required=[that reviewer]
+            # — not "a file here is unreadable", but the affirmative claim that
+            # they had not voted. A false negative wearing the costume of a fact,
+            # and the person who did the work is the last one who would check.
+            #
+            # A prefix that is not a well-formed head can never name a round, so
+            # it is unattributable under ANY head, not merely under this one.
+            if _is_unattributable(n, keyed=bool(head)):
+                unattributable.append(n)
             continue
         if dl.expired():
             # Budget expired mid-slug: stop reading shards. The tally built so far
@@ -1816,14 +1883,42 @@ def _tally_from_verdict_entries(
         fm = okf.parse_frontmatter(raw_v) or {}
         if head and review.normalize_head(fm.get("head")) != head:
             # The path selects the round, and the verdict must independently
-            # attest the exact reviewed head. A mismatch cannot discharge it.
+            # attest the exact reviewed head. A mismatch cannot discharge it —
+            # that rule is right and is unchanged.
+            #
+            # Doing it SILENTLY was the mistake. I left this skip alone while
+            # fixing the other two, reasoning that "the path selects the round,
+            # so a mismatch is a different claim". collect-maintainer pushed
+            # back; the user-visible failure is identical. A well-formed shard
+            # from alice sits in the directory, is read, is discarded, and
+            # `review status` reports `pending_required: [alice]` at rc 0 —
+            # the same affirmative falsehood, arrived at by a different route.
+            # By the rule this very change establishes, a verdict that cannot
+            # be counted is reported, never dropped.
+            mismatched.append((n, str(fm.get("head") or "")))
             continue
         # Key by the requirement token encoded in the ACL-controlled FILENAME,
         # not the frontmatter
         # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
         # could shadow alice's real verdict. One verdict file per reviewer.
-        verdicts.append({"reviewer": reviewer, "verdict": fm.get("verdict")})
+        token = fm.get("verdict")
+        if token is not None and review.normalize_verdict(token) is None:
+            # A reviewer who wrote `approve-with-required-changes` has
+            # unmistakably voted. Normalising that to None and moving on is the
+            # engine choosing the least informative reading of a clear intent —
+            # and it lands in the same PENDING as no verdict at all. Record it
+            # so the surface can say WHY the vote did not count.
+            unrecognised.append((n, str(token)))
+        verdicts.append({"reviewer": reviewer, "verdict": token})
     tally = review.tally(verdicts, required=required)
+    if unattributable:
+        tally["unattributable"] = sorted(unattributable)
+    if unrecognised:
+        tally["unrecognised_verdicts"] = [
+            {"file": f, "verdict": v} for f, v in sorted(unrecognised)]
+    if mismatched:
+        tally["head_mismatched_verdicts"] = [
+            {"file": f, "claimed_head": h} for f, h in sorted(mismatched)]
     if head:
         tally["head"] = head
         try:
@@ -3525,10 +3620,43 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             print("  changes requested: " + ", ".join(result["changes"]))
         if result["pending_required"]:
             print("  awaiting required: " + ", ".join(result["pending_required"]))
+    # Verdicts that EXIST but could not be counted. Printed even in JSON mode's
+    # sibling branch above (they ride in the payload), and always to stderr here
+    # so a reviewer reading `awaiting required: <themselves>` is not left to
+    # conclude they forgot to vote when the file is sitting right there.
+    for name in result.get("unattributable") or []:
+        print(f"review status: {slug} carries a verdict file that names no "
+              f"round and no reviewer: {name}. It is NOT counted. RULE: the "
+              f"text before `--` is read as a commit head, and this one is not "
+              f"a 40/64-hex id, so the file can be attributed to no round and "
+              f"no reviewer. A verdict filename is either `<reviewer>.md` or "
+              f"`<head>--<reviewer>.md` — the request breadcrumb prints the "
+              f"exact path to use.", file=sys.stderr)
+    for row in result.get("unrecognised_verdicts") or []:
+        print(f"review status: {slug} has a verdict in {row['file']} whose "
+              f"`verdict: {row['verdict']}` is outside the accepted vocabulary "
+              f"[{review.accepted_vocabulary()}], so it does NOT count toward "
+              f"the tally. The file was read; only the token was unrecognised.",
+              file=sys.stderr)
+    for row in result.get("head_mismatched_verdicts") or []:
+        print(f"review status: {slug} has a verdict at {row['file']} whose own "
+              f"frontmatter claims head {row['claimed_head'] or '(none)'}, which "
+              f"is not this round's head. It is NOT counted, and that is "
+              f"deliberate — a verdict must independently attest the exact "
+              f"commit it reviewed, so a copied or stale shard cannot discharge "
+              f"a new round. Reported rather than dropped: the file exists and "
+              f"its author believes they voted.", file=sys.stderr)
     # An unclassifiable marker is a DEGRADED answer, not a clean tally: the slug
     # may stay invisible to the fan-out fold and this verb cannot say why. rc 3,
     # the established UNKNOWN code, so an unattended caller fails closed.
-    return 3 if _marker_unknown else 0
+    #
+    # An uncounted verdict is the same register of answer: the tally is not the
+    # truth about who reviewed, and reporting `pending_required: [x]` while a
+    # file from x sits unread is a falsehood, not an omission. Same rc.
+    _uncounted = bool(result.get("unattributable")
+                      or result.get("unrecognised_verdicts")
+                      or result.get("head_mismatched_verdicts"))
+    return 3 if (_marker_unknown or _uncounted) else 0
 
 
 # --- continuity (fulcra-agent-continuity snapshots) ---
@@ -3576,11 +3704,25 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
     )
     path = _continuity_path(args.team, args.agent, task)
     wrote = transport.write(path, json.dumps(snap, indent=2))
+    if wrote is False:
+        # The failure was ALREADY KNOWN here and was being spent on the
+        # cosmetic decision below while the exit code and the success line went
+        # out unchanged. A continuity snapshot is the durability mechanism: a
+        # park that reports success without reaching the store leaves the
+        # successor resuming from a stale checkpoint believing it is current —
+        # and that happens exactly when the host is in trouble, which is when
+        # parking matters most. Found live during a bus outage, where
+        # `snapshot <id>` printed and rc was 0 with the store unreachable.
+        print(f"continuity snapshot FAILED to persist: {path} was not written "
+              f"(transport failure, not a rejected write). NOTHING was saved — "
+              f"a successor resuming now would read the PREVIOUS checkpoint and "
+              f"believe it is current. Re-run when the store is reachable.",
+              file=sys.stderr)
+        return 3
     print(f"snapshot {snap['checkpoint_id']}")
     # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
     # not in the store would be a visualization of work that does not exist.
-    if wrote is not False:
-        _checkpoint_moment(transport, args.team, snap, path)
+    _checkpoint_moment(transport, args.team, snap, path)
     return 0
 
 

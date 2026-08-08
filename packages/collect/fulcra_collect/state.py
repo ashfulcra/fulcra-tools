@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from . import db
+from . import db, freshness
 
 
 @dataclass
@@ -42,6 +42,15 @@ class PluginState:
     # full-catalog definition_exists fetch is skipped. None = never
     # validated → the gate fails open into a normal validation.
     definition_validated_at: str | None = None
+    # When this plugin last ACCEPTED at least one record (daemon clock).
+    # Distinct from last_run: a plugin whose upstream has gone quiet keeps
+    # running and keeps reporting "done" while this stops advancing. See
+    # freshness.py — every run-status field above answers "did it run", and
+    # none of them answers "did it collect anything".
+    last_yield_at: datetime | None = None
+    # Newest SOURCE timestamp ever accepted (ISO string, upstream clock).
+    # Monotonic — see record_yield.
+    newest_item_at: str | None = None
 
     def record_finish(self, *, outcome: str, when: datetime,
                        error: str | None = None) -> None:
@@ -54,6 +63,39 @@ class PluginState:
             self.consecutive_failures = 0
         else:
             self.consecutive_failures += 1
+
+    def record_yield(self, *, when: datetime,
+                     observed_at: str | None = None) -> None:
+        """Record that this run accepted at least one record.
+
+        ``newest_item_at`` only ever moves FORWARD. A backfill run legitimately
+        accepts items older than ones already collected, and letting those pull
+        the watermark backwards would manufacture a stall out of a healthy
+        import — the alert firing on the very operation proving the source
+        works.
+        """
+        self.last_yield_at = when
+        # Compare INSTANTS, never ISO strings: offsets make lexical order
+        # diverge from chronological order (12:00+05:00 is earlier than
+        # 08:00+00:00 yet sorts after it), and unparseable junk sorts above
+        # every real timestamp — one moves the watermark backwards, the other
+        # freezes it forever. Unusable values are dropped, but the yield still
+        # counts: a record WAS accepted.
+        incoming = freshness.parse_instant(observed_at)
+        if incoming is None:
+            return
+        current = freshness.parse_instant(self.newest_item_at)
+        if current is None or incoming > current:
+            self.newest_item_at = freshness.to_canonical_utc(incoming)
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    """Lenient ISO parse. A malformed timestamp must not crash the daemon
+    loop — same fallback last_run has always had."""
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
 
 
 def load(plugin_id: str) -> PluginState:
@@ -83,6 +125,8 @@ def load(plugin_id: str) -> PluginState:
         definition_id=row["definition_id"],
         override_definition_name=row["override_definition_name"],
         definition_validated_at=row["definition_validated_at"],
+        last_yield_at=_parse_dt(row["last_yield_at"]),
+        newest_item_at=row["newest_item_at"],
     )
 
 
@@ -102,4 +146,6 @@ def save(st: PluginState) -> None:
         definition_id=st.definition_id,
         override_definition_name=st.override_definition_name,
         definition_validated_at=st.definition_validated_at,
+        last_yield_at=st.last_yield_at.isoformat() if st.last_yield_at else None,
+        newest_item_at=st.newest_item_at,
     )

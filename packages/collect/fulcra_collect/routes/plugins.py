@@ -5,12 +5,14 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 
 from .. import config as _config
+from .. import freshness, state
 from ._deps import RouteContext, SecretBody
 
 
@@ -401,7 +403,41 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             ],
             "health_check_available": plugin.health_check is not None,
             "permission_check_available": plugin.permission_check is not None,
+            "freshness": _freshness_payload(plugin),
         }
+
+
+    def _freshness_payload(plugin) -> dict:
+        """Is this source still producing? — reported alongside run status
+        precisely because run status cannot answer it. A plugin can show
+        last_outcome="done" with zero consecutive failures while its upstream
+        has been silent for days; without this field that reads as healthy."""
+        st = state.load(plugin.id)
+        report = freshness.assess(
+            plugin_id=plugin.id,
+            now=datetime.now(timezone.utc),
+            expectation=plugin.freshness,
+            last_yield_at=st.last_yield_at,
+            newest_item_at=_parse_iso(st.newest_item_at),
+        )
+        return {
+            "state": report.state.value,
+            "summary": report.summary,
+            "alerting": report.is_alerting,
+            "last_yield_at": st.last_yield_at.isoformat() if st.last_yield_at else None,
+            "newest_item_at": st.newest_item_at,
+        }
+
+    def _parse_iso(value: str | None):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            # A source that reported an unparseable timestamp must not crash
+            # the status route; freshness reports UNKNOWN for a missing value,
+            # which is the honest answer here too.
+            return None
 
     # ------------------------------------------------------------------
     # Plugin health check

@@ -193,7 +193,7 @@ def plex_payload(event: str = "media.scrobble",
         "owner": True,
         "Account": {"id": 42, "thumb": "x", "title": "tester"},
         "Server": {"title": "Home", "uuid": "server-uuid-abc"},
-        "Player": {"local": True, "publicAddress": "1.2.3.4",
+        "Player": {"local": True, "publicAddress": "192.0.2.4",
                    "title": "Living Room Apple TV", "uuid": "pl-uuid"},
         "Metadata": md,
     }
@@ -462,7 +462,7 @@ def test_loopback_only_rejects_simulated_remote_client():
     class StubHandler(WebhookHandler):
         # Override __init__ to bypass the network setup.
         def __init__(self):
-            self.client_address = ("8.8.8.8", 12345)
+            self.client_address = ("192.0.2.8", 12345)  # TEST-NET-1 (RFC 5737)
             self.headers = {}
             self.path = "/webhook"
             self.server = FakeServer(ctx)
