@@ -1730,6 +1730,18 @@ def _held_roles_for_rows(
     # deadline cumulatively: the listing, each role's doc + lease listing, and each
     # lease shard read within a role.
     dl = Deadline.open(deadline_seconds)
+    if candidates and dl.expired():
+        # The budget was ALREADY spent when we were called (a caller passing its
+        # own remaining window, e.g. briefing after a slow earlier phase). The
+        # listing below is an unconditional blocking op and the first expiry
+        # check used to sit AFTER it, so a spent budget still paid one full
+        # transport op — under the degraded transport this bound exists for,
+        # that is one whole timeout, charged to the sections the caller was
+        # protecting. Nothing can be classified without the listing, so every
+        # candidate is UNKNOWN. Return that, having spent nothing.
+        # (Found by coord-opus-worker reviewing PR 559; it is the same
+        # pre-budget class this function's own docstring names four lines up.)
+        return set(), set(candidates)
     if candidates:
         # Prime the cache `_role_fresh_holders` already consults, and use it to
         # drop candidates that are affirmatively NOT roles before paying a read
