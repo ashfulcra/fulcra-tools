@@ -1806,6 +1806,7 @@ def _tally_from_verdict_entries(
     verdicts: list[dict[str, Any]] = []
     unattributable: list[str] = []
     unrecognised: list[tuple[str, str]] = []
+    mismatched: list[tuple[str, str]] = []
     reads_ok = True
     fully_scanned = True
     dl = Deadline(deadline)
@@ -1850,7 +1851,19 @@ def _tally_from_verdict_entries(
         fm = okf.parse_frontmatter(raw_v) or {}
         if head and review.normalize_head(fm.get("head")) != head:
             # The path selects the round, and the verdict must independently
-            # attest the exact reviewed head. A mismatch cannot discharge it.
+            # attest the exact reviewed head. A mismatch cannot discharge it —
+            # that rule is right and is unchanged.
+            #
+            # Doing it SILENTLY was the mistake. I left this skip alone while
+            # fixing the other two, reasoning that "the path selects the round,
+            # so a mismatch is a different claim". collect-maintainer pushed
+            # back; the user-visible failure is identical. A well-formed shard
+            # from alice sits in the directory, is read, is discarded, and
+            # `review status` reports `pending_required: [alice]` at rc 0 —
+            # the same affirmative falsehood, arrived at by a different route.
+            # By the rule this very change establishes, a verdict that cannot
+            # be counted is reported, never dropped.
+            mismatched.append((n, str(fm.get("head") or "")))
             continue
         # Key by the requirement token encoded in the ACL-controlled FILENAME,
         # not the frontmatter
@@ -1871,6 +1884,9 @@ def _tally_from_verdict_entries(
     if unrecognised:
         tally["unrecognised_verdicts"] = [
             {"file": f, "verdict": v} for f, v in sorted(unrecognised)]
+    if mismatched:
+        tally["head_mismatched_verdicts"] = [
+            {"file": f, "claimed_head": h} for f, h in sorted(mismatched)]
     if head:
         tally["head"] = head
         try:
@@ -3578,16 +3594,26 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     # conclude they forgot to vote when the file is sitting right there.
     for name in result.get("unattributable") or []:
         print(f"review status: {slug} carries a verdict file that names no "
-              f"round and no reviewer: {name}. It is NOT counted. A verdict "
-              f"filename is either `<reviewer>.md` or `<head>--<reviewer>.md` "
-              f"— the request breadcrumb prints the exact path to use.",
-              file=sys.stderr)
+              f"round and no reviewer: {name}. It is NOT counted. RULE: the "
+              f"text before `--` is read as a commit head, and this one is not "
+              f"a 40/64-hex id, so the file can be attributed to no round and "
+              f"no reviewer. A verdict filename is either `<reviewer>.md` or "
+              f"`<head>--<reviewer>.md` — the request breadcrumb prints the "
+              f"exact path to use.", file=sys.stderr)
     for row in result.get("unrecognised_verdicts") or []:
         print(f"review status: {slug} has a verdict in {row['file']} whose "
               f"`verdict: {row['verdict']}` is outside the accepted vocabulary "
               f"[{review.accepted_vocabulary()}], so it does NOT count toward "
               f"the tally. The file was read; only the token was unrecognised.",
               file=sys.stderr)
+    for row in result.get("head_mismatched_verdicts") or []:
+        print(f"review status: {slug} has a verdict at {row['file']} whose own "
+              f"frontmatter claims head {row['claimed_head'] or '(none)'}, which "
+              f"is not this round's head. It is NOT counted, and that is "
+              f"deliberate — a verdict must independently attest the exact "
+              f"commit it reviewed, so a copied or stale shard cannot discharge "
+              f"a new round. Reported rather than dropped: the file exists and "
+              f"its author believes they voted.", file=sys.stderr)
     # An unclassifiable marker is a DEGRADED answer, not a clean tally: the slug
     # may stay invisible to the fan-out fold and this verb cannot say why. rc 3,
     # the established UNKNOWN code, so an unattended caller fails closed.
@@ -3596,7 +3622,8 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     # truth about who reviewed, and reporting `pending_required: [x]` while a
     # file from x sits unread is a falsehood, not an omission. Same rc.
     _uncounted = bool(result.get("unattributable")
-                      or result.get("unrecognised_verdicts"))
+                      or result.get("unrecognised_verdicts")
+                      or result.get("head_mismatched_verdicts"))
     return 3 if (_marker_unknown or _uncounted) else 0
 
 

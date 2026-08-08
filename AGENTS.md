@@ -581,8 +581,11 @@ it (not on PyPI).
   exits 3.** Two ways a real verdict goes uncounted, both of which happened:
   a filename whose pre-`--` prefix is not a well-formed head (e.g.
   `2026-08-08--alice.md`) names no round that could ever exist, so it is
-  unattributable rather than merely superseded; and a `verdict:` token outside
-  `review.accepted_vocabulary()` normalises to nothing. Either way the old
+  unattributable rather than merely superseded; a `verdict:` token outside
+  `review.accepted_vocabulary()` normalises to nothing; and a shard at the
+  CURRENT round's path whose own frontmatter attests a DIFFERENT head is
+  refused (correctly — otherwise a copied round-1 verdict discharges round 2)
+  but must say so. Each message names the rule that skipped it. Either way the old
   behaviour reported `pending_required: [alice]` — not "a file here is
   unreadable" but the affirmative claim that alice had not voted, with her
   verdict sitting in the directory. A superseded-head shard stays silent on

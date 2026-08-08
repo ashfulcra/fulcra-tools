@@ -916,10 +916,24 @@ def test_current_head_requires_matching_head_in_verdict_frontmatter(capsys):
     )
     t.put(_head_verdict_path("pr-86", HEAD_B), _head_verdict(HEAD_A))
     capsys.readouterr()
-    assert cli.main(["review", "status", "r", "pr-86", "--json"], transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    # rc 3, not 0. The claim this test was written for is UNCHANGED — a shard
+    # attesting a different head does not discharge the requirement — but the
+    # old rc 0 also encoded the silence beside it: a well-formed verdict from
+    # alice sat at this round's path, was read, was discarded, and the register
+    # reported `pending_required: [alice]` on a clean exit. A file written to
+    # the CURRENT round's path that attests a different commit is an anomaly,
+    # not routine supersession: a genuinely superseded shard lives under the old
+    # head's filename and is still skipped silently, by name, costing zero reads.
+    rc = cli.main(["review", "status", "r", "pr-86", "--json"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 3, "uncounted-but-present is a degraded answer, not a clean tally"
+    assert "not this round's head" in cap.err
+    got = json.loads(cap.out)
     assert got["state"] == "PENDING"
     assert got["pending_required"] == ["alice"]
+    assert got["head_mismatched_verdicts"] == [
+        {"file": f"{HEAD_B}--alice.md", "claimed_head": HEAD_A}
+    ], "the JSON payload must carry it too — most readers here are not human"
 
 
 def test_same_head_rerequest_is_idempotent_recovery(capsys):

@@ -117,3 +117,65 @@ def test_the_reported_vocabulary_comes_from_the_tally_not_a_copy():
     vocab = review.accepted_vocabulary()
     for token in sorted(review._APPROVE | review._CHANGES):
         assert token in vocab, f"{token} counts but is not offered to the reviewer"
+
+
+def test_a_head_mismatched_verdict_is_reported_not_silently_skipped(capsys):
+    """collect-maintainer argued the third skip and was right about the family.
+
+    Their stated mechanism was wrong — they expected it to MANUFACTURE a vote,
+    and it does not: the shard is skipped, so the vote is LOST. But the
+    user-visible failure is identical to the two already fixed. A well-formed
+    verdict from alice sits in the directory, is read, is discarded, and the
+    register reports `pending_required: [alice]` at rc 0 while her file is
+    right there.
+
+    The skip itself stays — a verdict must independently attest the exact
+    commit it reviewed, or a copied round-1 shard discharges round 2. Only the
+    silence changes.
+    """
+    h2, h1 = "b" * 40, "a" * 40
+    t = FakeTransport()
+    t.put("team/r/review/pr-q.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n"
+          f"head: {h2}\nround: 2\n---\nreq")
+    t.put(f"team/r/review/pr-q/verdicts/{h2}--alice.md",
+          f"---\nreviewer: alice\nverdict: approve\nhead: {h1}\n---\nlgtm")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-q"], transport=t)
+    out, err = capsys.readouterr()
+    assert "PENDING" in out, "the skip stands — a stale shard must not discharge a round"
+    assert rc == 3, "but it is no longer a CLEAN pending"
+    assert h1 in err and "not this round's head" in err
+    assert "its author believes they voted" in err
+
+
+def test_a_matching_head_verdict_stays_silent_and_counts(capsys):
+    """The control. Without it the test above passes on a build that shouts
+    about every verdict, which is the failure mode of every diagnostic that
+    stops discriminating."""
+    h = "c" * 40
+    t = FakeTransport()
+    t.put("team/r/review/pr-ok.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n"
+          f"head: {h}\nround: 1\n---\nreq")
+    t.put(f"team/r/review/pr-ok/verdicts/{h}--alice.md",
+          f"---\nreviewer: alice\nverdict: approve\nhead: {h}\n---\nlgtm")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-ok"], transport=t)
+    out, err = capsys.readouterr()
+    assert "APPROVED" in out and rc == 0
+    assert "not this round's head" not in err
+
+
+def test_the_unattributable_line_names_the_rule_that_skipped_it(capsys):
+    """coord-boss's addendum: the unrecognized-verdict half already names its
+    reason; the filename half should too, or the next debugging session starts
+    from 'skipped, but why' again."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-x2.md", _req())
+    t.put("team/r/review/pr-x2/verdicts/2026-08-08--bob.md",
+          "---\nreviewer: bob\nverdict: approve\n---\nlgtm")
+    capsys.readouterr()
+    cli.main(["review", "status", "r", "pr-x2"], transport=t)
+    err = capsys.readouterr().err
+    assert "RULE:" in err and "40/64-hex" in err
