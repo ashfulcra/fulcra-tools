@@ -198,3 +198,178 @@ def test_the_check_is_derived_from_the_payload_not_a_hardcoded_list():
     assert "marker.items()" in src, (
         "the read-back comparison must enumerate the payload's own fields"
     )
+
+
+# --- `review status` must not delete MERGE EVIDENCE -------------------------
+# Found 2026-08-08 by controlled reproduction, chasing what looked like a store
+# durability fault: close a review, confirm the marker, run `review status`,
+# marker GONE. The read-only-looking diagnostic was the deleter.
+#
+# Root cause is mine. Before PR 561, `.settled` only ever cached a terminal
+# APPROVED tally, so `cmd_review_status` deleting it on a non-settleable tally
+# was correct and self-healing. 561 gave the same path a SECOND meaning —
+# `state: MERGED` + a merge sha, evidence that a PR landed — and I did not audit
+# the existing deleters when I added the new writer. A merged-but-never-verdicted
+# review tallies PENDING forever, so EVERY ruling-1 retroactive closure was
+# erasable by anyone merely LOOKING at it.
+
+def _closed_by_merge(t, slug="pr-x", sha="a" * 40):
+    cli.main(["review", "close", "r", slug, "--merge-sha", sha,
+              "--reason", "merged"], transport=t)
+    return cli._settled_marker_path("r", slug)
+
+
+def test_review_status_does_not_delete_a_MERGE_marker(capsys):
+    t = FakeTransport()
+    t.put("team/r/review/pr-x.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    path = _closed_by_merge(t)
+    assert t.read(path), "precondition: review close wrote the marker"
+    capsys.readouterr()
+    # The tally is PENDING — nobody verdicted, and nobody ever will on a merged PR.
+    cli.main(["review", "status", "r", "pr-x"], transport=t)
+    assert "PENDING" in capsys.readouterr().out
+    assert t.read(path), (
+        "`review status` deleted MERGE EVIDENCE — a read-only diagnostic must "
+        "never destroy the record that a PR landed")
+
+
+def test_review_status_still_clears_a_stale_TALLY_CACHE(capsys):
+    """The original F4 behaviour must survive: an APPROVED-tally cache on a
+    review that no longer tallies APPROVED is stale and should go."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-y.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    path = cli._settled_marker_path("r", "pr-y")
+    cli._write_settled_marker(t, "r", "pr-y", now="2026-08-08T00:00:00Z")
+    assert t.read(path) and "MERGED" not in (t.read(path) or "")
+    capsys.readouterr()
+    cli.main(["review", "status", "r", "pr-y"], transport=t)
+    assert not t.read(path), "a stale tally cache should still be cleared"
+
+
+def test_classification_is_TRI_state_not_two(capsys):
+    """codex-reviewer, PR 572 r1: two states conflated "known cache" with
+    "cannot tell". Only a POSITIVELY identified cache may be deleted."""
+    t = FakeTransport()
+    t.put(cli._settled_marker_path("r", "a"),
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    # codex-reviewer r3: a truncated marker keeping ONLY `state:` is NOT a cache
+    t.put(cli._settled_marker_path("r", "trunc"), "---\nstate: APPROVED\n---\n")
+    # ...and MERGED without a well-formed sha is INCOMPLETE evidence, not merged
+    t.put(cli._settled_marker_path("r", "nosha"),
+          "---\nschema: review-settled/v1\nstate: MERGED\n---\n")
+    t.put(cli._settled_marker_path("r", "b"),
+          "---\nschema: review-settled/v1\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    t.put(cli._settled_marker_path("r", "c"),
+          "---\nschema: review-settled/v1\nstate: SOMETHING_NEW\n---\n")
+    t.put(cli._settled_marker_path("r", "d"), "not frontmatter at all")
+    # codex-reviewer r4: the schema demand was ASYMMETRIC — APPROVED needed it,
+    # MERGED got in on `state` + a sha. A marker that lost only its schema line
+    # therefore still passed as merge evidence.
+    t.put(cli._settled_marker_path("r", "noschema"),
+          "---\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    # ...and a schema this build has never heard of is not ours to interpret
+    t.put(cli._settled_marker_path("r", "future"),
+          "---\nschema: review-settled/v9\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    assert cli._classify_settled_marker(t, "r", "a") == cli.SETTLED_CACHE
+    assert cli._classify_settled_marker(t, "r", "b") == cli.SETTLED_MERGED
+    assert cli._classify_settled_marker(t, "r", "noschema") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "future") == cli.SETTLED_UNKNOWN
+    # an unrecognised state is NOT a cache — a future writer must not be deleted
+    assert cli._classify_settled_marker(t, "r", "c") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "d") == cli.SETTLED_UNKNOWN
+    # absent is UNKNOWN too, and deleting nothing costs nothing
+    assert cli._classify_settled_marker(t, "r", "missing") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "trunc") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "nosha") == cli.SETTLED_UNKNOWN
+
+
+def test_an_unclassifiable_marker_is_preserved_AND_reported_AND_rc3(capsys):
+    """The visibility path codex asked for: preserving silently would leave a
+    marker suppressing the fold with nothing on any surface to explain it."""
+    class T(FakeTransport):
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None                      # exists (listed) but unreadable
+            return super().read(path)
+
+    t = T()
+    t.put("team/r/review/pr-u.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    t.put(cli._settled_marker_path("r", "pr-u"), "unreadable-by-this-transport")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-u"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3, "an unclassifiable marker is a DEGRADED answer, not a clean tally"
+    assert "cannot classify" in err and "PRESERVED" in err
+    # and it is still there
+    assert cli._settled_marker_present(t, "r", "pr-u") is True
+
+
+def test_an_ABSENT_marker_is_silent_and_rc0(capsys):
+    """Absent is not a degradation. `read` cannot tell absent from unreadable, so
+    the listing is what separates them — without it every clean slug would warn."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-v.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-v"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 0 and "cannot classify" not in err
+
+
+def test_a_listing_failure_after_an_unknown_read_still_fails_closed(capsys):
+    """codex-reviewer, PR 572 r3: the two-state presence helper returned False on
+    a raised listing, so unreadable-marker + unreadable-listing produced a SILENT
+    rc 0 exactly where this code promises to fail closed.
+
+    r4: the first version of this test asserted only that the HELPER returns
+    None. That pins a diagnostic, not the behaviour — the command could stop
+    calling the helper entirely and this would still pass. `review status` lists
+    the verdicts prefix TWICE (once for the tally, once for presence), so the
+    transport below lets the first listing through and fails the second: that is
+    the only shape that reaches the presence check with an unknown read already
+    in hand, which is the state the promise is about.
+    """
+    class T(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.verdict_listings = 0
+
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None                       # UNKNOWN read
+            return super().read(path)
+
+        def list_dir(self, prefix):
+            if prefix.endswith("/verdicts/"):
+                self.verdict_listings += 1
+                if self.verdict_listings > 1:     # the PRESENCE listing
+                    raise TransportError("listing unavailable")
+            return super().list_dir(prefix)
+
+    t = T()
+    t.put("team/r/review/pr-w.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-w"], transport=t)
+    err = capsys.readouterr().err
+    assert t.verdict_listings >= 2, (
+        "the tally listing must have SUCCEEDED — otherwise this exercises the "
+        "listing-failure guard upstream and never reaches the presence check")
+    assert rc == 3, "unknown read + unknown presence is a DEGRADED answer, not rc 0"
+    assert "cannot classify" in err and "PRESERVED" in err
+    assert cli._settled_marker_present(t, "r", "pr-w") is None, "presence is TRI-state"
+
+
+def test_presence_is_tri_state_not_boolean():
+    class Raises(FakeTransport):
+        def list_dir(self, prefix):
+            raise TransportError("boom")
+
+    t = FakeTransport()
+    assert cli._settled_marker_present(t, "r", "absent") is False   # positively absent
+    t.put(cli._settled_marker_path("r", "there"), "x")
+    assert cli._settled_marker_present(t, "r", "there") is True
+    assert cli._settled_marker_present(Raises(), "r", "any") is None
