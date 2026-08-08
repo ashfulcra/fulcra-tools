@@ -152,9 +152,13 @@ def test_cli_roles_escalate_absent_sla_still_escalates(capsys):
     # And the over-correction guard: a doc that omits `sla_hours` is well-formed, so
     # a genuinely vacant role must STILL escalate under the default.
     t = FakeTransport()
+    # The lapsed holder is deliberately NOT the maintainer: this test is about
+    # the missing-`sla_hours` default, and a fixture where the maintainer holds
+    # its own lapsed lease would also trip the closed-loop check and muddle
+    # which property failed.
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\nmaintainer: ash\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",
-          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    t.put("team/r/roles/reviewer/leases/holder.md",
+          "---\ntype: Lease\nagent: holder\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
     assert "escalated reviewer -> ash" in capsys.readouterr().out
     assert [p for p in t.store if "/task/" in p], "absent SLA must not suppress"
