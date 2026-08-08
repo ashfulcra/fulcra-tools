@@ -3704,11 +3704,25 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
     )
     path = _continuity_path(args.team, args.agent, task)
     wrote = transport.write(path, json.dumps(snap, indent=2))
+    if wrote is False:
+        # The failure was ALREADY KNOWN here and was being spent on the
+        # cosmetic decision below while the exit code and the success line went
+        # out unchanged. A continuity snapshot is the durability mechanism: a
+        # park that reports success without reaching the store leaves the
+        # successor resuming from a stale checkpoint believing it is current —
+        # and that happens exactly when the host is in trouble, which is when
+        # parking matters most. Found live during a bus outage, where
+        # `snapshot <id>` printed and rc was 0 with the store unreachable.
+        print(f"continuity snapshot FAILED to persist: {path} was not written "
+              f"(transport failure, not a rejected write). NOTHING was saved — "
+              f"a successor resuming now would read the PREVIOUS checkpoint and "
+              f"believe it is current. Re-run when the store is reachable.",
+              file=sys.stderr)
+        return 3
     print(f"snapshot {snap['checkpoint_id']}")
     # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
     # not in the store would be a visualization of work that does not exist.
-    if wrote is not False:
-        _checkpoint_moment(transport, args.team, snap, path)
+    _checkpoint_moment(transport, args.team, snap, path)
     return 0
 
 
