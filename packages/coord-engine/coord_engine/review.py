@@ -19,6 +19,18 @@ _CHANGES = {"changes", "request-changes", "reject", "rejected"}
 _EXACT_HEAD = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
+def accepted_vocabulary() -> str:
+    """The verdict tokens that count, rendered for an error message.
+
+    Public because a caller that has to reach into ``_APPROVE`` to tell a
+    reviewer why their verdict was ignored will eventually drift from it — and
+    a stale list in that message is worse than none, since it sends the reviewer
+    to re-file with another token that also does not count.
+    """
+    return (f"{'|'.join(sorted(_APPROVE))} (approve) / "
+            f"{'|'.join(sorted(_CHANGES))} (changes)")
+
+
 def normalize_head(value: Any) -> Optional[str]:
     """Return a canonical exact commit id, or ``None``.
 
