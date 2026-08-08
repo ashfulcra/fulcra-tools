@@ -105,6 +105,16 @@ def _sanitize_hostname(raw: str) -> tuple[str, bool]:
     return f"{collapsed}-{digest}", True
 
 
+#: The environment variables that carry WHO is running this process. Named once,
+#: here, because the test suite must be able to neutralise exactly this set: 25
+#: tests read these as a fallback sender, so an inherited identity made a green
+#: tree report failures for anyone following the standing wake procedure (which
+#: opens by exporting one of them). The suite's conftest clears this tuple and a
+#: wall re-runs the affected tests under both environments; a variable added
+#: here without being added there is the drift that reintroduces the bug.
+IDENTITY_ENV: tuple[str, ...] = ("FULCRA_COORD_AGENT", "FULCRA_COORD_HUMAN")
+
+
 def _host() -> str:
     explicit = os.environ.get("FULCRA_COORD_AGENT")
     if explicit:

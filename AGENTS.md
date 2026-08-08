@@ -187,6 +187,18 @@ under `skills/`, each package with its own README, build, and tests.
   relative ages from `PINNED_NOW`, never asserting against the real clock.
   Otherwise the suite flips red once wall-clock passes `NOW + window`. Enforced
   by `tests/test_clock_pin_convention.py`.
+- Environment hermeticity: the suite's answer must not depend on **who** runs
+  it. `cli.IDENTITY_ENV` names the coordination-identity variables (currently
+  `FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`); the coord-engine conftest clears
+  them for every test, and `tests/test_env_hermeticity.py` re-runs the affected
+  files under both an empty and a populated environment and requires the same
+  outcome. This is not hypothetical — 25 tests failed **iff** an identity was
+  exported, which is line one of every agent's wake prompt, so a green tree
+  reported failures for anyone following the documented procedure. A test that
+  needs a specific identity sets it in its own body. If you add a variable to
+  `IDENTITY_ENV`, the wall covers it automatically; if you add a *new* class of
+  inherited config, add it to the wall or record it in `NOT_YET_WALLED` with the
+  measurement — `COORD_RECORDS_TYPE` (8 tests) is there now.
 
 ## Coordinate on the bus
 
