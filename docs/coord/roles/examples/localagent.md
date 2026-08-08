@@ -37,10 +37,15 @@ its claims.
 
 ## Wake pattern
 
-Whatever the local platform supports (launchd, cron, a resident session) —
-with the survival caveat that local schedulers die with logouts and reboots.
-The durable fallback is the bus: a local agent that cannot be woken must at
-minimum be READ on a cadence, and its silence alarmed on by someone else.
+Whatever the local platform supports (launchd, cron, a resident session).
+Be precise about persistence per scheduler and per domain: the scheduler
+DEFINITION commonly survives reboot and reloads at the domain's start
+(system domain at boot, user domain at login); the RUNNING JOB dies with its
+session; and MISSED RUNS may or may not replay depending on the scheduler.
+Design the wake against those three separately — dismissing a scheduler as
+"dies on reboot" and hand-rolling a worse fallback is the common error.
+The durable fallback is still the bus: a local agent that cannot be woken must
+at minimum be READ on a cadence, and its silence alarmed on by someone else.
 
 ## Observed failure modes
 

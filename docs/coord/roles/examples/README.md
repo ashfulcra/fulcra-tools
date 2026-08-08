@@ -2,7 +2,7 @@
 
 Five worked examples of agent roles for a coordination fleet, extracted from
 real long-running deployments and **generalized**: no team names, no hosts, no
-schedules. Use them as starting charters — copy one to your team's store
+deployment-specific schedules (cadences shown are illustrative). Use them as starting charters — copy one to your team's store
 (`team/<team>/roles/<name>/charter.md`), fill in the particulars there, and
 keep the particulars there. The structural rule this repo follows: **examples
 generalize; anything particular to one team rides that team's bus.**

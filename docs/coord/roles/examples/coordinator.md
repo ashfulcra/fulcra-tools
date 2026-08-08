@@ -42,8 +42,8 @@ it produces rulings and merges, not code.
 
 ## Wake pattern
 
-Scheduled ticks (hourly heartbeat; longer-period watchdog and blocked-work
-sweeps). Every wake: read the queue fail-closed, beat presence, verify engine
+Scheduled ticks — an illustrative shape: a frequent heartbeat, plus
+longer-period watchdog and blocked-work sweeps; pick cadences for your fleet. Every wake: read the queue fail-closed, beat presence, verify engine
 currency, snapshot continuity state. Positive heartbeat every pass — a leg
 that only speaks on findings cannot be told from a dead one.
 
