@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
+from .freshness import FreshnessExpectation
+
 # How long a successful definition_exists validation is trusted before the
 # cached definition id must be re-validated against the live catalog.
 #
@@ -239,6 +241,12 @@ class Plugin:
     required_settings: tuple[Setting, ...] = ()
     setup_steps: tuple[SetupStep, ...] = ()
     health_check: Callable[["RunContext"], "HealthResult"] | None = None
+    #: How long this source may be quiet before silence is a fault. OPT-IN:
+    #: left None, the plugin is never assessed for freshness. A bound guessed
+    #: from default_interval would alert constantly on legitimately rare
+    #: sources, and an alert that cries wolf is worse than no alert. See
+    #: freshness.py.
+    freshness: FreshnessExpectation | None = None
     permission_check: Callable[["RunContext"], dict] | None = None
     """Optional callable that verifies an OS-level permission is actually
     granted (e.g. Full Disk Access). Returns
@@ -466,13 +474,27 @@ class RunContext:
         """Report structured progress back to the hub core."""
         self._emit({"type": "progress", **fields})
 
-    def annotation(self, summary: str, *, ok: bool = True) -> None:
+    def annotation(self, summary: str, *, ok: bool = True,
+                   observed_at: str | None = None) -> None:
         """Report that an annotation was written to Fulcra. Surfaces in
         the web UI's recent-activity feed as a real receipt of the app
         working. Call this AFTER a successful (or attempted) annotation
         POST.
+
+        ``observed_at`` is the SOURCE timestamp of the item just written (ISO
+        8601) — when the thing happened upstream, not when we wrote it. Passing
+        it lets the daemon tell a source that is still producing from one that
+        is merely re-emitting old items; without it a plugin can still be
+        monitored for total silence, but not for a frozen upstream. Only the
+        plugin knows its items' source times, which is why this is reported
+        rather than inferred.
         """
-        self._emit({"type": "annotation", "summary": summary, "ok": ok})
+        event: dict[str, object] = {
+            "type": "annotation", "summary": summary, "ok": ok,
+        }
+        if observed_at is not None:
+            event["observed_at"] = observed_at
+        self._emit(event)
 
     def fulcra_token(self) -> str | None:
         """Return the Fulcra access token.

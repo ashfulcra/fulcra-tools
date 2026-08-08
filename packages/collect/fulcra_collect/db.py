@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .config import config_dir
 
-LATEST_VERSION = 6
+LATEST_VERSION = 7
 
 # Plugin KV is deliberately small state, not a document store.  The limits
 # keep a misbehaving long-lived plugin from turning state.db into an unbounded
@@ -187,6 +187,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < 6:
         _migration_006_plugin_kv(conn)
         _record_version(conn, 6)
+    if current < 7:
+        _migration_007_freshness(conn)
+        _record_version(conn, 7)
 
 
 def _migration_001_initial(conn: sqlite3.Connection) -> None:
@@ -393,6 +396,24 @@ def _migration_006_plugin_kv(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_007_freshness(conn: sqlite3.Connection) -> None:
+    """Add ``plugin_state.last_yield_at`` and ``plugin_state.newest_item_at``.
+
+    Every pre-existing run-status column answers "did this plugin RUN". None
+    answers "did it collect anything". A source whose upstream goes quiet keeps
+    running, keeps exiting cleanly, and keeps writing last_outcome="done" with
+    consecutive_failures=0 — so every health signal stays green while the data
+    stops. ``last_yield_at`` (daemon clock) and ``newest_item_at`` (source
+    clock) are the two independent signals freshness.py needs to tell a
+    producing source from a merely-executing one.
+
+    NULL on every pre-existing row means "never observed", which freshness.py
+    reports as UNKNOWN — deliberately neither healthy nor stale, so the upgrade
+    cannot manufacture an alert storm on first boot."""
+    conn.execute("ALTER TABLE plugin_state ADD COLUMN last_yield_at TEXT")
+    conn.execute("ALTER TABLE plugin_state ADD COLUMN newest_item_at TEXT")
+
+
 # ---- low-level CRUD used by state.py --------------------------------
 
 
@@ -412,19 +433,23 @@ def upsert_plugin_state(conn: sqlite3.Connection, *, plugin_id: str,
                         watermark: str | None,
                         definition_id: str | None,
                         override_definition_name: str | None,
-                        definition_validated_at: str | None = None) -> None:
+                        definition_validated_at: str | None = None,
+                        last_yield_at: str | None = None,
+                        newest_item_at: str | None = None) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO plugin_state (
             plugin_id, last_run, last_outcome, last_error,
             consecutive_failures, watermark, definition_id,
-            override_definition_name, definition_validated_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            override_definition_name, definition_validated_at,
+            last_yield_at, newest_item_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             plugin_id, last_run, last_outcome, last_error,
             int(consecutive_failures), watermark, definition_id,
             override_definition_name, definition_validated_at,
+            last_yield_at, newest_item_at,
             datetime.now(timezone.utc).isoformat(),
         ),
     )

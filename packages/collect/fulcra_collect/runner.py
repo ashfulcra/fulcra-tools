@@ -50,6 +50,13 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     # message: "Ran, no new data" when the run was clean but quiet, vs.
     # nothing-extra when the user already saw "Recorded N items".
     annotation_count = 0
+    # Counted separately from annotation_count, which includes ok=False
+    # receipts (attempted-but-failed writes) because the activity feed shows
+    # those too. A failed write is not a yield, so freshness must not treat it
+    # as one — and changing annotation_count's meaning would alter the
+    # "Ran successfully — no new data" feed entry it also drives.
+    accepted_count = 0
+    newest_observed_at: str | None = None
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -83,6 +90,13 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
                 # Surface this in the daemon's activity buffer so the web UI's
                 # dashboard "Recently" feed shows the receipt.
                 annotation_count += 1
+                if event.get("ok", True):
+                    accepted_count += 1
+                    observed = event.get("observed_at")
+                    if isinstance(observed, str) and (
+                        newest_observed_at is None or observed > newest_observed_at
+                    ):
+                        newest_observed_at = observed
                 if daemon is not None:
                     summary = event.get("summary", "")
                     ok = event.get("ok", True)
@@ -105,6 +119,11 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     if definition_validated_at is not None:
         st.definition_validated_at = definition_validated_at
     st.record_finish(outcome=outcome, when=now, error=error)
+    # Freshness is recorded from what the run PRODUCED, never from its outcome.
+    # A run that exits "done" having accepted nothing must leave last_yield_at
+    # untouched — that untouched watermark is the entire signal.
+    if accepted_count:
+        st.record_yield(when=now, observed_at=newest_observed_at)
     state.save(st)
 
     # Add a run-summary entry to the activity feed so failures are visible
