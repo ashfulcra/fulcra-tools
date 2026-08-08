@@ -33,6 +33,10 @@ kept for provenance, not written for you.
   router scan) with fail-closed full-scan fallbacks.
 - [`coord/atc-DESIGN.md`](coord/atc-DESIGN.md) — the design of ATC,
   capability-matched model routing on subscription caps.
+- [`coord/roles/examples/`](coord/roles/examples) — five worked example roles
+  (Coordinator, Coder, Reviewer, Maintainer, LocalAgent), extracted from real
+  deployments and generalized; copy one to your team's store and fill in the
+  particulars there.
 - [`TESTING.md`](TESTING.md) — how to run the suites and install Collect as a
   launchd agent.
 
