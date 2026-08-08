@@ -467,6 +467,15 @@ it (not on PyPI).
   `coord-engine briefing <team> --agent <you>` remains the fold over durable
   state — identity, role inboxes, reviews owed — for when you need the full
   board; honor every degraded row it prints as UNKNOWN.
+- **If your harness truncates output, read the verdict off stderr.** `needs-me`
+  and `briefing` print an unbounded row list to stdout with their degraded and
+  source markers inside it, so a truncating reader can lose exactly the part
+  that says whether the read is trustworthy. Both now also emit one compact
+  envelope line to **stderr** — `needs-me: N item(s), forge=…, source=…,
+  degraded=N, rc=N` — which survives stdout truncation. `needs-me
+  --envelope-only` gives you that verdict with no records at all, same rc.
+  Trust the envelope's `degraded` and `rc` over a payload you cannot see the end
+  of; `degraded>0` or `rc=3` means UNKNOWN, never clear.
 - **Bus-v3 convergence is authority-gated, not a rollout convention.** The
   shared `_coord/bus-v3/records.json` atomically declares protocol and cursor
   schema versions, minimum safe reader/writer engine versions, cursor

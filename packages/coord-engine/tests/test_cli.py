@@ -2863,3 +2863,60 @@ def test_toplevel_unexpected_error_is_registered(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "error:" in err and "command=status" in err and "RuntimeError" in err
+
+
+# --- the verdict must not live only at the end of the payload ---------------
+# codex-coder 2026-08-08: `needs-me` completed, its stdout exceeded the harness
+# context and was truncated BEFORE the degraded/source markers and the rc they
+# imply. PR 565 had just made that rc load-bearing, so the wake could not certify
+# the durable-assignment read either way. stderr is a separate, tiny stream that
+# survives stdout truncation, so the verdict rides there too.
+
+def test_needs_me_emits_the_verdict_envelope_on_stderr(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/a.md",
+          "---\ntype: Task\ntitle: A\nid: a\nstatus: active\nassignee: amy\n---\n")
+    assert cli.main(["needs-me", "r", "--agent", "amy"], transport=t) == 0
+    cap = capsys.readouterr()
+    assert "needs-me:" in cap.err and "rc=0" in cap.err, cap.err
+    assert "degraded=" in cap.err, cap.err
+    # a DUPLICATE, never a replacement: the payload still goes to stdout
+    assert "item(s) need amy" in cap.out
+
+
+def test_needs_me_envelope_rides_stderr_in_json_mode_too(capsys):
+    """JSON mode is where a truncating reader is MOST likely to be a machine.
+
+    stdout must stay exactly one parseable object, so the envelope cannot go
+    there — which is the argument for stderr rather than an extra stdout line."""
+    import json as _j
+    t = FakeTransport()
+    t.put("team/r/task/a.md",
+          "---\ntype: Task\ntitle: A\nid: a\nstatus: active\nassignee: amy\n---\n")
+    cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
+    cap = capsys.readouterr()
+    assert "needs-me:" in cap.err
+    _j.loads(cap.out)          # stdout is still ONE object, unpolluted
+
+
+def test_needs_me_envelope_only_prints_no_records_and_keeps_the_rc(capsys):
+    t = FakeTransport()
+    for i in range(5):
+        t.put(f"team/r/task/a{i}.md",
+              f"---\ntype: Task\ntitle: A{i}\nid: a{i}\nstatus: active\n"
+              f"assignee: amy\n---\n")
+    rc = cli.main(["needs-me", "r", "--agent", "amy", "--envelope-only"],
+                  transport=t)
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "needs-me:" in cap.err and "rc=0" in cap.err
+    assert cap.out == "", f"envelope-only still printed a payload: {cap.out!r}"
+
+
+def test_briefing_emits_the_verdict_envelope_on_stderr(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/a.md",
+          "---\ntype: Task\ntitle: A\nid: a\nstatus: active\nassignee: amy\n---\n")
+    cli.main(["briefing", "r", "--agent", "amy"], transport=t)
+    cap = capsys.readouterr()
+    assert "briefing:" in cap.err and "degraded=" in cap.err, cap.err
