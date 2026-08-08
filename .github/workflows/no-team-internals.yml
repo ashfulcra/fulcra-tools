@@ -24,7 +24,10 @@ jobs:
           fail=0
           ips=$(git grep -InE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' -- . \
             | grep -vE '(^|[^0-9])(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|0\.0\.0\.0|255\.|npm/[0-9]|/v?[0-9]+\.[0-9]+\.[0-9]+)' \
-            | grep -vE '\b(0|1)\.[0-9]+\.[0-9]+\.[0-9]+\b' || true)
+            | grep -vE '\b0\.[0-9]+\.[0-9]+\.[0-9]+\b' \
+            | grep -v 'guard-ok: public-ip' || true)
+          # The pragma is same-line only, so an annotation cannot silently bless
+          # a whole file; each use is visible at the use site and in review.
           if [ -n "$ips" ]; then
             echo "::error::public IP address in tracked files — host addresses live on the team store, never here"
             echo "$ips"; fail=1

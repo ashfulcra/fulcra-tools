@@ -11,9 +11,11 @@ state:
 
     team/<team>/_coord/agents/<name>/harness.md
 
-For the fulcra team the four docs that used to sit in this directory are at
-`team/fulcra/_coord/agents/<name>/harness.md`, moved 2026-08-08 and verified
-readable there before the repo copies were removed.
+When migrating docs out of a repo checkout, move FIRST and verify each copy is
+readable at the store path BEFORE deleting the repo copy — an agent whose
+cold-start list points at a path nothing resolves is an agent that wakes up
+blind. Record the migration (what moved, when, verification) in the team's own
+store, not here.
 
 ## The convention (what a harness doc contains)
 
@@ -32,18 +34,17 @@ readable there before the repo copies were removed.
 
 Split by **change rate**: what the *role* is belongs in the role's charter
 (`team/<team>/roles/<name>/`); how *this instance* runs belongs in the harness
-doc and dies with the instance. A document that mixes both gets edited five
-times in two days — measured, not guessed.
+doc and dies with the instance. A document that mixes both churns constantly,
+because the two halves change on different clocks.
 
 6. **Environment manifest** — a sibling `environment.json`
    (`coord.agent-environment/v1`): the plugins, CLI tools and credentials a
    successor must restore, each with its **install commands, a verify command,
    and what survives** a container restart vs a reclaim vs a session handoff.
-   Installed plugins are part of the role definition (operator ruling,
-   2026-08-08): a park that does not carry the environment is a park that loses
-   capabilities silently — that is not hypothetical, it happened across a real
-   handoff and was noticed two days later. Restore is part of the join, and the
-   verify line is the artifact ("installed" is a proxy).
+   Installed plugins are part of the role definition: a park that does not
+   carry the environment is a park that loses capabilities silently across a
+   handoff. Restore is part of the join, and the verify line is the artifact
+   ("installed" is a proxy).
 
 Keep the doc current in the same pass that changes the harness. An agent doc
 that lags its agent is a cold-start list that walks a successor into a wall.

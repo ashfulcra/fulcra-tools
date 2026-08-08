@@ -193,7 +193,7 @@ def plex_payload(event: str = "media.scrobble",
         "owner": True,
         "Account": {"id": 42, "thumb": "x", "title": "tester"},
         "Server": {"title": "Home", "uuid": "server-uuid-abc"},
-        "Player": {"local": True, "publicAddress": "1.2.3.4",
+        "Player": {"local": True, "publicAddress": "192.0.2.4",
                    "title": "Living Room Apple TV", "uuid": "pl-uuid"},
         "Metadata": md,
     }

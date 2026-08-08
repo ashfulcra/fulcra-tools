@@ -47,5 +47,5 @@ operator to re-explain anything already ruled?" If no — it is not done.
 
 ## Worked example
 
-See `the agent's harness doc on the bus (`_coord/agents/<name>/harness.md`)` (Cold start section) and the 2026-08-05
+See the agent's harness doc on the bus — `_coord/agents/<name>/harness.md` (Cold start section) and the 2026-08-05
 coord-boss handoff text that seeded this standard.

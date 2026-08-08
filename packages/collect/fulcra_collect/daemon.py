@@ -116,7 +116,8 @@ def is_online(*, timeout: float = 2.0) -> bool:
     well-known host be opened? Used to defer (not fail) network-requiring
     scheduled plugins while the machine is offline."""
     import socket
-    for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):
+    # Well-known anycast DNS resolvers, used only as reachability probes.
+    for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):  # guard-ok: public-ip
         try:
             with socket.create_connection((host, port), timeout=timeout):
                 return True
