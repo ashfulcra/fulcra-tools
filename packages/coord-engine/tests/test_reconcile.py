@@ -1090,3 +1090,58 @@ class TestAggregateRoundTrip:
         _reconciled(t, now="2026-07-01T16:15:00Z")
         # No anchor -> full fold. Our incremental path is dead until the fleet moves.
         assert _ack_lists(calls), "expected the full fold a wiped anchor forces"
+
+
+# --- retention cap starvation must be VISIBLE -------------------------------
+# `_run_retention` spends ONE per-pass counter across two loops: tasks first,
+# then settled reviews. On the live fleet 1024 tasks were retention-eligible
+# against a cap of 20, so the review loop broke on iteration ZERO every day and
+# no review had EVER been archived — while the pass reported nothing at all. A
+# starved loop was indistinguishable from "nothing to archive".
+#
+# These tests pin the SIGNAL, not the allocation: how the cap should be split
+# between tasks and reviews is a separate decision. What must never recur is the
+# silence.
+
+def _cap_saturating_tasks(t, n):
+    """n old terminal tasks — enough to spend the whole per-pass cap."""
+    for i in range(n):
+        t.put(f"team/r/task/old{i}.md",
+              f"---\ntype: Task\ntitle: Old{i}\nid: old{i}\nstatus: done\n"
+              f"timestamp: 2020-01-15T00:00:00Z\n---\nbody",
+              mtime="2020-01-15 04:00PM UTC")
+
+
+def _settled_review(t, slug):
+    """A review whose `.settled` marker is old enough to archive."""
+    t.put(f"team/r/review/{slug}.md",
+          "---\ntype: Review\nschema: review-request/v2\n---\nbody")
+    t.put(f"team/r/review/{slug}/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: MERGED\n---\n",
+          mtime="2020-01-15 04:00PM UTC")
+
+
+def test_retention_warns_when_the_cap_starves_the_review_loop():
+    t = FakeTransport()
+    _cap_saturating_tasks(t, reconcile.RETENTION_CAP_PER_PASS)
+    _settled_review(t, "starved-review")
+    res = _run(t)
+    # The review is still not archived — this change does not reallocate the cap.
+    assert "team/r/review/starved-review.md" in t.store
+    # But the pass must SAY so, and it must reach the caller's warnings.
+    assert any("cap reached" in w and "review" in w for w in res["warnings"]), (
+        f"starvation was silent; warnings were {res['warnings']}")
+
+
+def test_retention_does_not_cry_starvation_when_the_cap_is_not_reached():
+    """Adversarial twin: the warning must not fire on a healthy pass.
+
+    A note that appears every run is as useless as no note at all — this is the
+    direction the fix could plausibly make WORSE, so it is pinned before the
+    fix, not after."""
+    t = FakeTransport()
+    _cap_saturating_tasks(t, 2)          # nowhere near the cap
+    _settled_review(t, "roomy-review")
+    res = _run(t)
+    assert not any("cap reached" in w for w in res["warnings"]), (
+        f"false starvation alarm on a healthy pass: {res['warnings']}")

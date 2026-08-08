@@ -722,8 +722,21 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             for e in review_entries if e.get("is_dir")
         } - doc_slugs)
         settled_index = _load_settled_index(transport, team)
-        for slug in sorted(doc_slugs):
+        # `archived` is spent by the TASK loop above before this one begins, so a
+        # busy task backlog silently starves review retention: the break below
+        # can fire on iteration zero, every pass, forever. Measured on the live
+        # fleet 2026-08-08: 1024 retention-eligible tasks against a cap of 20, and
+        # ZERO reviews archived in the store's whole history while 13 sat eligible
+        # (oldest 16 days). Count what we never looked at so the starvation is
+        # visible on the FIRST pass instead of the fifty-first.
+        #
+        # Deliberately "not examined", never "eligible": establishing eligibility
+        # costs the per-slug verdict listing this break exists to avoid, so the
+        # honest report is the size of the unexamined remainder.
+        reviews_unexamined = 0
+        for i, slug in enumerate(sorted(doc_slugs)):
             if archived >= RETENTION_CAP_PER_PASS:
+                reviews_unexamined += len(doc_slugs) - i
                 break
             verdict_prefix = f"{review_prefix}{slug}/verdicts/"
             try:
@@ -760,8 +773,9 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
         transport.write(settled_index_path(team), json.dumps({
             "schema": "coord.settled-reviews.v1", "reviews": sorted(settled_index)
         }, separators=(",", ":")))
-        for slug in dir_slugs:
+        for i, slug in enumerate(dir_slugs):
             if archived >= RETENTION_CAP_PER_PASS:
+                reviews_unexamined += len(dir_slugs) - i
                 break
             verdict_prefix = f"{review_prefix}{slug}/verdicts/"
             try:
@@ -805,6 +819,15 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 notes.append(f"retention: archived review {slug} -> reviews/{month}/")
             else:
                 notes.append(f"retention: review move FAILED for {slug}; kept")
+
+        if reviews_unexamined:
+            notes.append(
+                f"retention: cap reached ({RETENTION_CAP_PER_PASS}/pass) before "
+                f"the review sweep finished; {reviews_unexamined} review slug(s) "
+                f"not examined this pass. Tasks and reviews share one per-pass "
+                f"cap and tasks are swept first, so a task backlog defers review "
+                f"archiving indefinitely."
+            )
 
     # Presence is ephemeral liveness state, not history. Prune agents that have
     # been dead for seven days; undatable/unreadable shards fail closed.
@@ -1319,9 +1342,13 @@ def reconcile(
     if days > 0:
         rows, notes, archived_map = _run_retention(
             transport, team, rows, now=now, today=today, days=days, log=log)
+        # `notes` that match none of these are DISCARDED — nothing else reads the
+        # list. "cap reached" is here because a note the caller never sees is the
+        # same silence the note exists to end.
         warnings.extend(
             n for n in notes
             if "FAILED" in n or "kept hot" in n or "UNKNOWN" in n
+            or "cap reached" in n
         )
 
     # --- ack fold + shard-GC sub-pass ---
