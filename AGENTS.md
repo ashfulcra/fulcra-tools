@@ -1471,6 +1471,41 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   256 UTF-8-byte keys). Use `kv_update` only for quick, side-effect-free atomic
   transforms because it holds SQLite's writer lock while the callback runs.
 
+### Freshness: run status cannot tell you a source has died
+
+`last_run` / `last_outcome` / `consecutive_failures` all answer **did the plugin
+run**. None answers **did it collect anything**. A source whose upstream goes
+quiet keeps running, keeps exiting cleanly, and keeps writing
+`last_outcome="done"` with zero consecutive failures — so every health signal
+stays green while the data stops. Treat a green run as evidence of execution
+only, never of freshness.
+
+`freshness.py` supplies the missing half, from two independent clocks:
+
+- `last_yield_at` (daemon clock) — when the plugin last accepted a record.
+  Catches "runs fine, produces nothing".
+- `newest_item_at` (source clock) — newest SOURCE timestamp ever accepted, and
+  **monotonic**, so a backfill accepting older items cannot drag it backwards
+  and manufacture a stall. Catches the sibling failure: a plugin that keeps
+  writing while upstream is frozen, which a yield-only check calls healthy.
+
+Plugin authors:
+
+- Pass `observed_at=<ISO source timestamp>` to `ctx.annotation(...)` — when the
+  thing happened upstream, not when you wrote it. Only the plugin knows this.
+  Without it a source can still be monitored for total silence, but not for a
+  frozen upstream.
+- Declare `freshness=FreshnessExpectation(max_yield_silence=…,
+  max_upstream_lag=…)` on your `Plugin` to opt in. **Monitoring is opt-in by
+  design**: a bound guessed from `default_interval` would alert constantly on
+  legitimately rare sources (a manual importer, a lab result arriving every few
+  months), and an alert that cries wolf teaches operators to ignore the one that
+  matters. Set `max_upstream_lag` above the source's normal quiet periods.
+- A plugin that has never yielded reports `UNKNOWN` — deliberately neither
+  healthy nor stale. "We have not looked" must stay distinguishable from "we
+  looked and it is fine"; collapsing those is what let a four-day outage read as
+  green.
+
 ### launchd PATH gotcha
 
 launchd runs the daemon with a restricted PATH

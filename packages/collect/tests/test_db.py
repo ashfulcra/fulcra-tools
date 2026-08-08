@@ -72,6 +72,10 @@ def test_plugin_state_table_has_the_phase1_columns(collect_home):
         "plugin_id", "last_run", "last_outcome", "last_error",
         "consecutive_failures", "watermark", "definition_id",
         "override_definition_name", "definition_validated_at", "updated_at",
+        # v7: freshness. Every column above answers "did this plugin RUN";
+        # these two answer "did it collect anything", which is the question a
+        # silently-stalled source makes urgent.
+        "last_yield_at", "newest_item_at",
     }
 
 
