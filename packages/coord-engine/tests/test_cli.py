@@ -2256,14 +2256,14 @@ def test_briefing_forge_degraded_exits_zero_other_sections_intact(capsys, monkey
     assert "board" in doc and "needs_me" in doc and "presence" in doc
 
 
-def test_needs_me_forge_degraded_exits_zero(capsys, monkeypatch):
+def test_needs_me_forge_degraded_exits_nonzero(capsys, monkeypatch):
     monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
     t = _SlowFeedbackTransport(delay=0.03)
     _seed_forge(t, agent="bob")
     capsys.readouterr()
-    assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 0
+    assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 3
     assert "forge fold degraded" in capsys.readouterr().out
-    assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
+    assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 3
     got = json.loads(capsys.readouterr().out)
     assert any(r.get("type") == "forge-degraded" for r in got)
 

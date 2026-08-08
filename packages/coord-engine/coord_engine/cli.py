@@ -682,6 +682,11 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
     seen = {r.get("id") for r in blocked}
     got = blocked + [r for r in got if r.get("id") not in seen]
+    # A bounded raw fallback is usable only when it completed.  Preserve the
+    # partial rows and the single-value JSON contract, but make the process
+    # status fail closed so unattended callers cannot mistake 0/N for a clean
+    # durable-assignment read.
+    forge_incomplete = any(r.get("type") == "forge-degraded" for r in got)
     if args.json:
         jsonutil.print_json(got)
     else:
@@ -709,7 +714,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_source_line("needs-me", r))
             else:
                 print(_line(r))
-    return 0
+    return 3 if forge_incomplete else 0
 
 
 def cmd_search(args: argparse.Namespace, transport: Any) -> int:
