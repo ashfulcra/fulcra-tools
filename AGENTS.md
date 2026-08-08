@@ -196,6 +196,14 @@ under `skills/`, each package with its own README, build, and tests.
   rerouted. Rerouting was tried and did harm: it moved a notice off a real
   operator onto the bare `human` default. The engine does not know a better
   addressee than the registry does — fix the role doc's `maintainer:` field.
+  It is also **not** recorded as a delivery: the daily marker is a SUPPRESSOR,
+  so writing it for a notice that reached nobody would silence the only
+  mechanism that would try again. A closed-loop role re-surfaces every sweep
+  (one stderr line and a "suppressed" note — the directive write is guarded, so
+  no new document per run), `escalate` reports `undelivered=N` in its envelope,
+  and the verb exits 3. There is no carve-out for the configured human: the
+  engine only knows a string matched, and flagging is safe in a way rerouting
+  was not.
 - Environment hermeticity: the suite's answer must not depend on **who** runs
   it. `cli.IDENTITY_ENV` names the coordination-identity variables (currently
   `FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`); the coord-engine conftest clears

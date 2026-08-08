@@ -418,9 +418,11 @@ def test_a_self_addressed_vacancy_is_reported_not_silently_delivered(capsys):
     t.put("team/r/roles/arc/leases/arcbot.md",
           "---\ntype: Lease\nagent: arcbot\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
     capsys.readouterr()
-    assert cli.main(["escalate", "r"], transport=t) == 0
+    rc = cli.main(["escalate", "r"], transport=t)
     out, err = capsys.readouterr()
+    assert rc == 3, "an undelivered notice is degraded, not a clean sweep"
     assert "escalated arc -> arcbot" in out, "still escalates; the notice is not suppressed"
+    assert "UNDELIVERED" in out, "the count line must not read as a clean delivery"
     assert "IS its own lapsed holder" in err and "no exit" in err
     # and the directive itself carries it, for whoever eventually reads the bucket
     written = [v for k, v in t.store.items() if "/task/" in k]
@@ -453,3 +455,38 @@ def test_the_notice_is_never_rerouted_to_a_worse_address():
     assert cli._is_self_addressed_vacancy("coord-boss", [{"agent": "ash"}]) is False
     assert cli._is_self_addressed_vacancy("coord-boss", []) is False
     assert cli._is_self_addressed_vacancy("coord-boss", None) is False
+
+
+def test_an_undelivered_notice_is_degraded_and_leaves_no_suppressing_marker(capsys):
+    """codex-reviewer, 577 r1: detection was right, but the ACTING path still
+    recorded a self-addressed delivery as a success — it wrote the daily marker,
+    printed `escalated`, and exited 0. The marker is a SUPPRESSOR, so the one
+    mechanism that would try again was silenced by a delivery that never
+    happened. stderr is transient observability, not durable delivery."""
+    t = FakeTransport()
+    t.put("team/r/roles/arc.md", "---\ntype: Role\nmaintainer: arcbot\n---\n")
+    t.put("team/r/roles/arc/leases/arcbot.md",
+          "---\ntype: Lease\nagent: arcbot\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    capsys.readouterr()
+    rc = cli.main(["escalate", "r"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3, "a notice that reached nobody is not a clean vacancy check"
+    assert "undelivered=1" in err, "the envelope must carry it for unattended callers"
+    markers = [k for k in t.store if "/escalation" in k or "escalated" in (t.store[k] or "")]
+    assert not [k for k in markers if k.startswith("team/r/roles/arc/")], (
+        "no daily marker: writing the suppressor would record a delivery that "
+        "did not happen and silence the next attempt")
+
+
+def test_there_is_no_carve_out_for_the_configured_human():
+    """I tried exempting `_human()` and backed it out. It does not survive
+    contact: `_human()` is whatever FULCRA_COORD_HUMAN happens to say, so a role
+    naming an operator the engine has not been told about looks exactly like the
+    ArcBot case, while a role naming the configured string would be exempted on
+    a string match and nothing more.
+
+    FLAGGING is safe in a way REROUTING was not — nothing moves, we only say
+    what we see — so the conservative choice here is the noisy one."""
+    assert cli._is_self_addressed_vacancy(cli._human(), [{"agent": cli._human()}]) is True
+    assert cli._is_self_addressed_vacancy("arcbot", [{"agent": "arcbot"}]) is True
+    assert cli._is_self_addressed_vacancy("coord-boss", [{"agent": "arcbot"}]) is False

@@ -9155,6 +9155,14 @@ def _is_self_addressed_vacancy(maintainer: str, leases: Any) -> bool:
     Same rule we just agreed for alias resolution: warn and let a human fix the
     field, never silently rewrite the destination.
     """
+    # No carve-out for the human operator. I tried one — exempting `_human()` —
+    # and it does not survive contact: `_human()` is whatever
+    # FULCRA_COORD_HUMAN happens to say, so a role naming a person the engine
+    # has not been told is the operator looks exactly like the ArcBot case, and
+    # a role naming the configured human would be exempted without the engine
+    # knowing anything more than the string matched. FLAGGING is safe in a way
+    # REROUTING was not: nothing moves, we only say what we see, and a human who
+    # really is reachable loses nothing but one accurate stderr line.
     return maintainer in {str(l.get("agent") or "") for l in (leases or [])}
 
 
@@ -9163,7 +9171,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     today, write the marker + a P1 directive to the role's maintainer.
     Heartbeat-safe (idempotent per day)."""
     now = _iso(_now()); today = _now().strftime("%Y-%m-%d")
-    escalated = checked = 0
+    escalated = checked = undelivered = 0
     try:
         entries = transport.list_dir(f"team/{args.team}/roles/")
     except TransportError:
@@ -9314,8 +9322,19 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                         f"that nobody is working. Verify before treating it as absence.")
         maintainer = str(reg.get("maintainer") or _human())
         self_addressed = _is_self_addressed_vacancy(maintainer, leases)
-        transport.write(marker_path, okf.render_frontmatter(
-            {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
+        if not self_addressed:
+            # The daily marker is a SUPPRESSOR: it stops tomorrow's sweep from
+            # re-notifying. Writing it for a notice that reached nobody would
+            # record a delivery that did not happen and then silence the only
+            # mechanism that would try again (codex-reviewer, 577 r1). A
+            # closed-loop role therefore keeps re-surfacing every sweep until
+            # its `maintainer:` field is fixed. It does not spam: the directive
+            # write below is guarded on the task not already existing, so the
+            # repeat is one stderr line and one "suppressed" note, not a new
+            # document per run.
+            transport.write(marker_path, okf.render_frontmatter(
+                {"type": "Escalation", "role": role, "timestamp": now})
+                + "\nescalated\n")
         slug, content = tasks.new_task_doc(
             title,
             now=now, status="proposed", priority="P1", owner=_host(),
@@ -9334,14 +9353,19 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if transport.read(dst) is None:
             transport.write(dst, content)
             escalated += 1
-            print(f"escalated {role} -> {maintainer}")
+            print(f"escalated {role} -> {maintainer}"
+                  + (" (UNDELIVERED: closed loop)" if self_addressed else ""))
             if self_addressed:
+                undelivered += 1
                 print(f"escalate: {role}'s maintainer ({maintainer}) IS its own "
                       f"lapsed holder — this notice lands in the absent party's "
                       f"bucket and has no exit. NOT rerouted: the engine does "
                       f"not know a better addressee, and a silent rewrite to a "
                       f"worse one is the same bug pointed the other way. Fix "
-                      f"the role doc's `maintainer:` field.", file=sys.stderr)
+                      f"the role doc's `maintainer:` field. The daily marker "
+                      f"was NOT written, so this re-surfaces every sweep until "
+                      f"it is — an undelivered notice must not be recorded as "
+                      f"a delivery.", file=sys.stderr)
         else:
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
     # The verdict, on stderr, so a vacancy check that could not finish is not
@@ -9357,11 +9381,18 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     # — and the ordinary count cap is reported as coverage, not as degradation.
     # An alarm that fires on every run is worth exactly as much as no alarm.
     att_cut = _att_cut
-    rc = 3 if att_cut else 0
+    # UNDELIVERED is degradation in the same register as a cut scan: the sweep
+    # ran, but a notice it counted reached nobody. rc 0 there would report a
+    # clean vacancy check while an alarm sat in an absent party's bucket —
+    # stderr is transient observability, not durable delivery, and an unattended
+    # caller keys on the rc (codex-reviewer, 577 r1).
+    rc = 3 if (att_cut or undelivered) else 0
     emit_envelope("escalate", count=checked, rc=rc, escalated=escalated,
+                  undelivered=undelivered,
                   attendance=f"{_att_scanned}/{_att_total}",
-                  degraded=1 if att_cut else 0)
-    print(f"escalate: {checked} role(s) checked, {escalated} escalated")
+                  degraded=1 if (att_cut or undelivered) else 0)
+    print(f"escalate: {checked} role(s) checked, {escalated} escalated"
+          + (f", {undelivered} UNDELIVERED (closed loop)" if undelivered else ""))
     if att_cut:
         print(f"escalate: DEGRADED — the attendance scan was cut by its "
               f"wall-clock budget (COORD_ATTENDANCE_SCAN_BUDGET) after "
