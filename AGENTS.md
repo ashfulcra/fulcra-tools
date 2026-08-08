@@ -144,7 +144,12 @@ under `skills/`, each package with its own README, build, and tests.
   index instead of repeatedly classifying historical tombstones, and the legacy
   `artifact/` namespace is consolidated into `artifacts/`. UNKNOWN listings stay
   hot, moves are copy-verified rather than destructive-only, and archived work
-  reverses through `task restore` or `review restore`.
+  reverses through `task restore` or `review restore`. Note the age thresholds
+  above are necessary, not sufficient: tasks and reviews share ONE per-pass
+  archive cap and tasks are swept first, so a large task backlog defers review
+  archiving indefinitely. When that happens the pass now warns `retention: cap
+  reached ... N review slug(s) not examined this pass` — treat that warning as
+  "review retention is not running", not as routine throttling.
 - The one-shot `migrate` exporter and unused atomic `handoff` convenience verb
   are retired. Reassign live work with `task update --assignee <agent> --next
   "..."`; when another session needs resumable context, write the continuity
@@ -467,6 +472,15 @@ it (not on PyPI).
   `coord-engine briefing <team> --agent <you>` remains the fold over durable
   state — identity, role inboxes, reviews owed — for when you need the full
   board; honor every degraded row it prints as UNKNOWN.
+- **If your harness truncates output, read the verdict off stderr.** `needs-me`
+  and `briefing` print an unbounded row list to stdout with their degraded and
+  source markers inside it, so a truncating reader can lose exactly the part
+  that says whether the read is trustworthy. Both now also emit one compact
+  envelope line to **stderr** — `needs-me: N item(s), forge=…, source=…,
+  degraded=N, rc=N` — which survives stdout truncation. `needs-me
+  --envelope-only` gives you that verdict with no records at all, same rc.
+  Trust the envelope's `degraded` and `rc` over a payload you cannot see the end
+  of; `degraded>0` or `rc=3` means UNKNOWN, never clear.
 - **Bus-v3 convergence is authority-gated, not a rollout convention.** The
   shared `_coord/bus-v3/records.json` atomically declares protocol and cursor
   schema versions, minimum safe reader/writer engine versions, cursor
@@ -622,7 +636,10 @@ it (not on PyPI).
     rule below) — the projection answers the tail, never "does this agent still owe a verdict". No
     source row at all means the aggregate carries no projection: the pre-projection raw scan.
     Contract for readers: [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md) → "Where a fold's answer came
-    from". **Ship-gate: any new projection-served fold emits a source row through the shared renderer.**
+    from". A `needs-me` raw fallback that cannot finish emits `forge-degraded`, preserves its partial
+    rows, and returns rc 3; rc 0 therefore means the forge leg is complete even when its disclosed
+    source is `raw-scan`. **Ship-gate: any new projection-served fold emits a source row through the
+    shared renderer.**
   - **Honor every degraded row; never read a bounded fold as complete.** `briefing`/`needs-me` bound
     each section under `COORD_BRIEFING_BUDGET` (default 60s, opened once at the TOP of `briefing` and
     spent cumulatively across presence + forge + resume) and emit a `{scanned, total, skipped}`
@@ -682,7 +699,28 @@ it (not on PyPI).
   emits a single JSON **array** — the dropped list plus a trailing `threads-degraded` element — NOT
   JSON-Lines (the leak this closed: streaming one object per line made `json.loads(stdout)` raise on the
   trailing data whenever 2+ threads dropped). **Ship-gate: a new `--json` path is one `json.dumps`, with a
-  red-first test that `json.loads(stdout)` yields exactly one value on every degraded path.**
+  red-first test that `json.loads(stdout)` yields exactly one value on every degraded path.** The rule is
+  now enforced for the whole class by PARSER DISCOVERY, not by a hand-kept list: `test_json_purity.py`
+  walks the real parser for every path that accepts `--json` (28 today) and fails until each is either in
+  `_JSON_PINNED` (smoke-run under a corrupt index AND all fold budgets squeezed to nothing) or in
+  `_JSON_EXEMPT` with a stated reason — and `_JSON_EXEMPT` is **empty today**: all 28 are pinned, with the
+  mutating paths driven through their own `--dry-run`/`--once`/`--shadow` modes against an in-memory
+  transport. An exemption is a claim to justify in review, not a parking space for a path that was awkward
+  to invoke. **A new `--json` path fails the suite until you represent it** —
+  and the pinned paths must print SOMETHING, since a verb regressing to silence would otherwise pass a
+  parses-if-non-empty check while emitting no result. A hand-kept list is how six pinned verbs and fifteen
+  unpinned ones coexisted for weeks, and the widened sweep immediately found a live leak (`headroom --json`
+  printed prose on its no-accounts early return).
+- **`escalate` attendance: one shared scan, and partial coverage is NOT an incident.** The vacancy
+  sweep answers "did a holder file a verdict recently" from ONE `_verdict_activity_index` pass built
+  before the role loop, not per role — it used to rebuild a 41-listing scan for every acting role
+  (measured 2026-08-08: 47.3s of a 98.2s run, pure transport). The scan is bounded by BOTH a count
+  (`budget`, 40) and a wall clock (`COORD_ATTENDANCE_SCAN_BUDGET`, 30s); a count alone cannot bound
+  time, which is how it reached 170s+ and timed the watchdog out. The register holds ~412 review dirs,
+  so **coverage is always partial by design** and the stderr envelope reports it as `attendance=40/412`
+  rather than raising an alarm. **rc 3 is reserved for a WALL-CLOCK cut** — a real anomaly. Durable fix
+  for full coverage is projection-side (reconcile already pays the listing cost); it does not carry
+  per-reviewer verdict recency today.
 - **Head-of-line: a budget cut may only ever truncate the TAIL — never the head.** The work-discovery
   folds do live per-op transport at query time over an unbounded population; under budget pressure the cut
   must land on the *lowest-priority* tail, so an agent's OWN assigned work and any decision parked on a

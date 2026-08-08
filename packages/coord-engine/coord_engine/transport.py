@@ -17,11 +17,13 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
+from . import budget as budget_mod
 from . import config
 
 DEFAULT_COMMAND = ("fulcra-api",)
@@ -35,6 +37,9 @@ DEFAULT_API_BASE = "https://api.fulcradynamics.com"
 #: or the constructor arg (which wins). Watchers run this tight (e.g. 8s) so the
 #: engine's fold budgets buy real responsiveness instead of soft promises.
 DEFAULT_TRANSPORT_TIMEOUT = 30.0
+#: In-process access-token memo TTL (seconds). Far inside the token's own
+#: lifetime; exists to stop paying ~840ms of CLI import cost per read.
+_TOKEN_MEMO_TTL = 300.0
 
 #: After the op timeout fires we SIGKILL the child's whole group, then give the
 #: drain this long to complete; if it still won't, we abandon the pipes rather
@@ -195,6 +200,22 @@ class FulcraFileTransport:
         self.command = command or _split_command()
         # constructor arg wins (tests pin it); else the env-hardened default.
         self.timeout = timeout if timeout is not None else _transport_timeout()
+        # In-process token memo. Every CLI shell-out pays ~840ms of Python
+        # imports before it does anything (measured 2026-08-07: `python3 -c
+        # pass` is 17ms, `import fulcra_api.cli` is ~840ms — pandas 360ms via
+        # fulcra_api.core, dateparser 284ms via fulcra_api.cli.auth, neither
+        # needed by a file op). `auth print-access-token` paid that on EVERY
+        # call. Memoized per-process with a conservative TTL well inside the
+        # token's own lifetime.
+        self._token_memo: Optional[tuple[float, str]] = None
+
+    def _http_enabled(self) -> bool:
+        """HTTP read fast-path on/off. Default ON; ``COORD_TRANSPORT_HTTP=0``
+        forces every read back through the CLI. The flag exists because this
+        is the fleet's hottest code path and a bad HTTP day must be revertible
+        by an operator without a release."""
+        return (os.environ.get("COORD_TRANSPORT_HTTP", "1").strip().lower()
+                not in ("0", "false", "no", "off"))
 
     def updates(self, since: str, *, team: Optional[str] = None) -> Optional[list]:
         """Parsed file-change feed for the explicit ``since`` window.
@@ -334,7 +355,7 @@ class FulcraFileTransport:
         except Exception:
             return False
 
-    def _access_token(self) -> Optional[str]:
+    def _access_token(self, budget: Optional[float] = None) -> Optional[str]:
         """A Fulcra bearer token, or None if one can't be had. Same source the
         rest of the repo uses: ``FULCRA_ACCESS_TOKEN`` when set, else the stdout
         of ``<cli> auth print-access-token`` (so this inherits the CLI's own
@@ -344,13 +365,88 @@ class FulcraFileTransport:
         env = os.environ.get("FULCRA_ACCESS_TOKEN")
         if env and env.strip():
             return env.strip()
+        memo = self._token_memo
+        if memo is not None and (time.monotonic() - memo[0]) < _TOKEN_MEMO_TTL:
+            return memo[1]
         try:
             rc, out, _err = run_bounded(
-                [*self.command, "auth", "print-access-token"], self.timeout
+                [*self.command, "auth", "print-access-token"],
+                self.timeout if budget is None else budget,
             )
         except Exception:
             return None
-        return (out or "").strip() or None if rc == 0 else None
+        token = (out or "").strip() or None if rc == 0 else None
+        # Memoize successes only: a failure must be retried, never cached, or a
+        # transient auth blip would blind the process for the whole TTL.
+        if token:
+            self._token_memo = (time.monotonic(), token)
+        return token
+
+    def _http_read(self, path: str,
+                   deadline: "Optional[budget_mod.Deadline]" = None
+                   ) -> tuple[Optional[str], str]:
+        """HTTP read: ``(content, "ok"|"absent"|"error")``, same contract as
+        :meth:`read_classified`, without spawning a process.
+
+        Two GETs — resolve the path to its current version id, then fetch that
+        version's bytes. "absent" is claimed ONLY on an affirmative empty
+        resolve (HTTP 200 with no files), never on an exception, so a degraded
+        network can never masquerade as a missing file. Everything else is
+        "error", and the caller falls back to the CLI."""
+        # EVERY PHASE SPENDS THE SAME BUDGET. Without this the op has four
+        # independent ``self.timeout`` bounds stacked in series — token fetch,
+        # resolve, download, then the CLI fallback in the caller — so a
+        # configured 30s per-op bound could take 120s. A budget that is not
+        # accounted per phase is not a budget; it is a race between the phases,
+        # and every fold budget in the engine assumes the per-op bound holds.
+        def _left() -> Optional[float]:
+            return self.timeout if deadline is None else deadline.remaining()
+
+        def _spent() -> bool:
+            left = _left()
+            return left is not None and left <= 0.0
+
+        if _spent():
+            return None, "error"
+        token = self._access_token(budget=_left())
+        if not token or _spent():
+            return None, "error"
+        base = os.environ.get("FULCRA_API_BASE", DEFAULT_API_BASE).rstrip("/")
+        clean = path.lstrip("/")
+        parent, _, name = clean.rpartition("/")
+        if not name:
+            return None, "error"
+        headers = {"Authorization": f"Bearer {token}",
+                   "Accept": "application/json"}
+        try:
+            query = urllib.parse.urlencode(
+                {"path": "/" + parent, "name": name, "state": "uploaded"})
+            req = urllib.request.Request(
+                f"{base}/input/v1/file_upload?{query}", headers=headers)
+            with urllib.request.urlopen(req, timeout=_left()) as resp:
+                files = json.loads(resp.read().decode("utf-8")).get("files") or []
+        except urllib.error.HTTPError as exc:
+            # 404 on the RESOLVE endpoint is an affirmative not-found.
+            return (None, "absent") if exc.code == 404 else (None, "error")
+        except Exception:
+            return None, "error"
+        if not files:
+            return None, "absent"          # affirmative: 200 with zero matches
+        version_id = files[0].get("id") or files[0].get("version_id")
+        if not version_id:
+            return None, "error"
+        try:
+            req = urllib.request.Request(
+                f"{base}/input/v1/file_upload/{version_id}/download",
+                headers={"Authorization": f"Bearer {token}"})
+            if _spent():
+                return None, "error"
+            with urllib.request.urlopen(req, timeout=_left()) as resp:
+                return resp.read().decode("utf-8"), "ok"
+        except urllib.error.HTTPError as exc:
+            return (None, "absent") if exc.code == 404 else (None, "error")
+        except Exception:
+            return None, "error"
 
     def recent_changes(self, start_iso: str, end_iso: str) -> Optional[list]:
         """Tree-wide what-changed query over ``[start_iso, end_iso]`` — the ack
@@ -456,7 +552,8 @@ class FulcraFileTransport:
                 return new_id
         return None
 
-    def _run(self, args: list[str], **kw: Any) -> subprocess.CompletedProcess:
+    def _run(self, args: list[str], timeout: Optional[float] = None,
+             **kw: Any) -> subprocess.CompletedProcess:
         """Invoke ``fulcra-api file <args>``, HARD-bounded by ``self.timeout``.
 
         The call runs through ``run_bounded``: the child gets its own process
@@ -474,11 +571,15 @@ class FulcraFileTransport:
         soft-failure return, and nothing else escapes.
         """
         argv = [*self.command, "file", *args]
+        # ``timeout`` overrides the per-op default so a CALLER holding a shared
+        # deadline can hand this leg only the budget that is LEFT. Omitted, the
+        # behaviour is exactly as before.
+        bound = self.timeout if timeout is None else timeout
         try:
-            rc, out, err = run_bounded(argv, self.timeout, **kw)
+            rc, out, err = run_bounded(argv, bound, **kw)
         except subprocess.TimeoutExpired as exc:
             raise TransportError(
-                f"timeout after {self.timeout}s: file {' '.join(args)}"
+                f"timeout after {bound}s: file {' '.join(args)}"
             ) from exc
         except OSError as exc:
             # binary missing / not executable / other exec-level failure
@@ -511,8 +612,28 @@ class FulcraFileTransport:
         # that need only content keep using read(); callers whose behavior
         # forks on absent-vs-unreadable (e.g. the queue verb's records config)
         # use this.
+        # HTTP fast path first. On "ok" or an AFFIRMATIVE "absent" we are done;
+        # on "error" fall through to the CLI, so an HTTP-layer problem degrades
+        # to the old behaviour instead of inventing a missing file.
+        # ONE deadline for the whole op, opened here and spent by every phase:
+        # HTTP token + resolve + download, then the CLI fallback. Each phase
+        # receives only what is LEFT, so ``timeout`` bounds the OPERATION rather
+        # than bounding each leg separately and multiplying.
+        op = budget_mod.Deadline.open(self.timeout)
+        if self._http_enabled():
+            content, state = self._http_read(path, deadline=op)
+            if state in ("ok", "absent"):
+                return content, state
+        left = op.remaining()
+        if left is not None and left <= 0.0:
+            # The HTTP legs consumed the whole budget. "error" is the honest
+            # answer: the fallback cannot run inside the bound the caller
+            # configured, and running it anyway is what this fix exists to stop.
+            # "error" means UNREADABLE, never absent — no caller may read this
+            # as a missing file.
+            return None, "error"
         try:
-            cp = self._run(["download", path, "-"])
+            cp = self._run(["download", path, "-"], timeout=left)
         except TransportError:
             return None, "error"
         if cp.returncode != 0:

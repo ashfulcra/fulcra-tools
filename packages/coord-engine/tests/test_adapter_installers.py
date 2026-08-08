@@ -423,3 +423,165 @@ class TestOpenClaw:
         assert oc._BEGIN in out and "real prose" in out
         # the documented sample is preserved verbatim inside the code fence
         assert "```" in out and out.count(oc._LEGACY_BEGIN) == 1
+
+
+class TestCodexWatchFailsClosed:
+    """P1 (codex-reviewer, 2026-07-10): the watcher reported WATCH_OK while reviews
+    were waiting — it read a fold that had degraded and could not tell.
+
+    The hook stacks THREE truncations on the briefing read: `2>/dev/null`,
+    `| head -60`, and a final `ctx[:4000]`. Every one discards the TAIL, and the
+    tail is where a fold's degraded markers and verdict live. stderr is the one
+    stream truncation does not reach — and it was being thrown away."""
+
+    def test_session_start_keeps_briefing_stderr_instead_of_discarding_it(self):
+        sh = cx.SESSION_START_SH
+        assert 'coord-engine briefing "$TEAM" --agent "$AGENT" 2>/dev/null' not in sh, (
+            "briefing stderr is the trust signal that survives stdout truncation; "
+            "sending it to /dev/null is the defect this closes")
+        assert "BRIEF_ERR" in sh
+
+    def test_degraded_block_is_placed_before_the_truncated_payload(self):
+        """Order is the whole point: a signal appended after an unbounded payload is
+        a signal inside the part that gets cut."""
+        sh = cx.SESSION_START_SH
+        assert sh.index("coord degraded:") < sh.index("coord briefing (stdout")
+
+    def test_truncated_stdout_is_labelled_as_truncated(self):
+        # Absence of a marker in a truncated stream is not evidence of its absence.
+        assert "absence of a marker here is NOT" in cx.SESSION_START_SH
+
+    def test_prompt_forbids_watch_ok_on_a_degraded_read(self):
+        prompt = cx.COORD_WATCH_PROMPT.format(team="teamx", agent="agent")
+        assert "WATCH_OK claims you looked and saw everything" in prompt
+        assert "coord degraded:" in prompt      # the exact block the hook emits
+        for phrase in ("degraded", "timed-out", "not that you saw nothing"):
+            assert phrase in prompt, phrase
+        # The compactness budget above is real — this prompt is re-sent every tick.
+        assert len(prompt) < 900
+
+    def test_the_hook_still_renders_and_stays_bounded(self, tmp_path):
+        """The fix must not break rendering or reintroduce an unbounded dump."""
+        cx.install("teamx", "agent", codex_dir=tmp_path, thread_id="thr-1")
+        hook = (tmp_path / cx.MANAGED_DIRNAME / "session-start.sh").read_text()
+        assert "__TEAM__" not in hook and "__AGENT__" not in hook
+        assert "head -60" in hook and "ctx[:4000]" in hook
+        assert "head -6 " in hook          # the stderr capture is bounded too
+
+
+def _render_and_run(tmp_path, stub_body, agent="cm"):
+    """Render the hook and EXECUTE it against a stub coord-engine.
+
+    Grepping the template proved nothing: an earlier version of this fix passed
+    every string assertion while emitting no degraded block at runtime. Only
+    running it caught that."""
+    import json as _j
+    import os
+    import stat as _stat
+    import subprocess
+    cx.install("fulcra", agent, codex_dir=tmp_path, thread_id="t1")
+    hook = tmp_path / cx.MANAGED_DIRNAME / "session-start.sh"
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "coord-engine"
+    stub.write_text(stub_body)
+    stub.chmod(stub.stat().st_mode | _stat.S_IEXEC)
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    r = subprocess.run(["bash", str(hook)], input="{}", capture_output=True,
+                       text=True, env=env)
+    return _j.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+_STUB_WARNS_AT_THE_TAIL = """#!/bin/bash
+case "$1" in
+  briefing)
+    for i in $(seq 1 200); do echo "row $i"; done
+    echo "briefing: presence section unavailable (TransportError)" >&2 ;;
+  *) echo "" ;;
+esac
+exit 0
+"""
+
+
+def test_a_fold_that_warns_AFTER_a_long_payload_still_reaches_the_model(tmp_path):
+    """The regression the P1 asked for, and the one that nearly shipped broken.
+
+    Piping to `head -60` closes the pipe and SIGPIPEs the producer, so a fold whose
+    degraded marker comes after a long payload is killed before writing it to
+    stdout OR stderr — the warning disappears and the tick reads clean. The hook
+    therefore runs the command to completion into a file and truncates afterwards."""
+    ctx = _render_and_run(tmp_path, _STUB_WARNS_AT_THE_TAIL)
+    assert "coord degraded:" in ctx, (
+        "a tail-emitted warning was lost — the truncation killed the producer")
+    assert "presence section unavailable" in ctx
+    assert ctx.index("coord degraded:") < ctx.index("coord briefing (stdout")
+
+
+# --- 567 + 569 TOGETHER ------------------------------------------------------
+# codex-reviewer, PR 569 r1: PR 567 makes the folds emit a verdict envelope on
+# stderr on EVERY run, healthy ones included. This hook treated any stderr as a
+# degraded signal — so with both changes present, every healthy watch would be
+# labelled degraded and the new prompt would forbid WATCH_OK forever. I shipped
+# both PRs claiming they "compose" without ever running them together.
+
+_HEALTHY_ENVELOPE_STUB = """#!/bin/bash
+case "$1" in
+  briefing)
+    echo "  board: active=1"
+    echo "briefing: 3 item(s), inbox=0, reviews=0, degraded=0, rc=0" >&2 ;;
+  *) echo "" ;;
+esac
+exit 0
+"""
+
+_DEGRADED_ENVELOPE_STUB = """#!/bin/bash
+case "$1" in
+  briefing)
+    echo "  board: active=1"
+    echo "briefing: 3 item(s), inbox=0, reviews=0, degraded=2, rc=0" >&2 ;;
+  *) echo "" ;;
+esac
+exit 0
+"""
+
+
+def test_a_healthy_envelope_is_not_treated_as_degradation(tmp_path):
+    """The interaction defect: healthy stderr must not forbid WATCH_OK."""
+    ctx = _render_and_run(tmp_path, _HEALTHY_ENVELOPE_STUB)
+    assert "coord degraded:" not in ctx, (
+        "a healthy `degraded=0, rc=0` envelope was misread as degradation — every "
+        "healthy tick would be blocked from WATCH_OK")
+    # and it is kept as POSITIVE evidence that the fold completed
+    assert "coord verdict (fold completed clean)" in ctx
+    assert "degraded=0, rc=0" in ctx
+
+
+def test_a_nonzero_envelope_still_fails_closed(tmp_path):
+    ctx = _render_and_run(tmp_path, _DEGRADED_ENVELOPE_STUB)
+    assert "coord degraded:" in ctx
+    assert "NONZERO verdict envelope" in ctx
+    assert "coord verdict (fold completed clean)" not in ctx
+
+
+def test_unclassified_stderr_still_fails_closed(tmp_path):
+    """Anything that is not an envelope at all stays fail-closed — the original
+    `briefing: <section> unavailable` warnings must keep working."""
+    ctx = _render_and_run(tmp_path, _STUB_WARNS_AT_THE_TAIL)
+    assert "coord degraded:" in ctx
+    assert "unclassified output to stderr" in ctx
+
+
+def test_mktemp_failure_captures_nothing_rather_than_a_guessable_path(tmp_path):
+    """codex-reviewer, PR 569 r1: the old fallback wrote to /tmp/coord-brief-*.$$,
+    and `>` follows a symlink — a local process could aim that name at any file
+    the agent can write. There is no safe predictable name, so fail closed."""
+    sh = cx.SESSION_START_SH
+    # Assert the CONSTRUCT is gone, not the string: the comment above the fix names
+    # the guessable path as the thing being avoided, and a blunt substring check
+    # would forbid explaining the defect.
+    assert "|| echo /tmp/coord-brief" not in sh, "predictable-path fallback is back"
+    for var in ("BRIEF_ERR_FILE", "BRIEF_OUT_FILE"):
+        assert f'{var}="$(mktemp 2>/dev/null)" || {var}=""' in sh
+    assert "mktemp unavailable, briefing not captured" in sh
+    assert "trap 'rm -f" in sh          # interruption cannot strand temp files

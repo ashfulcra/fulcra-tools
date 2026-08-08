@@ -803,6 +803,25 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
     seen = {r.get("id") for r in blocked}
     got = blocked + [r for r in got if r.get("id") not in seen]
+    # A bounded raw fallback is usable only when it completed.  Preserve the
+    # partial rows and the single-value JSON contract, but make the process
+    # status fail closed so unattended callers cannot mistake 0/N for a clean
+    # durable-assignment read.
+    forge_incomplete = any(r.get("type") == "forge-degraded" for r in got)
+    rc = 3 if forge_incomplete else 0
+    # The verdict, on stderr, BEFORE the unbounded payload it is a verdict about:
+    # emitted unconditionally (json mode included) and independent of whether the
+    # rows below survive the reader's context. See `emit_envelope`.
+    emit_envelope(
+        "needs-me", count=len(got), rc=rc,
+        forge=_fold_source(got, "forge-source"),
+        source=_fold_source(got, "needs-me-source"),
+        degraded=sum(1 for r in got if _is_degraded_row(r)),
+    )
+    if getattr(args, "envelope_only", False):
+        # The durable answer for a truncating harness: the verdict WITHOUT the
+        # records. Same rc, same envelope, no payload to truncate.
+        return rc
     if args.json:
         jsonutil.print_json(got)
     else:
@@ -831,7 +850,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             else:
                 print(_line(r))
                 print_close_hint(r, team=args.team)
-    return 0
+    return rc
 
 
 def cmd_search(args: argparse.Namespace, transport: Any) -> int:
@@ -884,8 +903,83 @@ def _role_doc_path(team: str, role: str) -> str:
     return f"team/{team}/roles/{role}.md"
 
 
+def _verdict_activity_index(
+    transport: Any, team: str, *, budget: int = 40,
+    deadline: Optional["Deadline"] = None,
+) -> tuple[dict[str, Any], int, int, bool, bool]:
+    """ONE pass over the review register -> ``{reviewer: latest verdict mtime}``.
+
+    Returns ``(index, scanned, total, undatable, cut_by_deadline)``.
+
+    ``cut_by_deadline`` rides in the RETURN, not in module state. It was a
+    module-level flag for one round and codex-reviewer caught the leak: only the
+    normal return updated it, so the two early returns inherited the PREVIOUS
+    invocation's value and an identical unreadable scan produced a different
+    `escalate` rc depending on whether some earlier scan had timed out. A
+    per-scan diagnostic belongs to the scan.
+
+    WHY THIS EXISTS. `_role_attended` used to do this scan itself, per call, and
+    `escalate` calls it once per about-to-escalate role — so a sweep re-listed
+    the review root and up to ``budget`` verdict prefixes for EVERY such role.
+    Profiled on the live store 2026-08-08: 23.6s per call, 47.3s of a 98.2s
+    `escalate`, entirely transport latency (41 sequential listings x ~0.59s).
+    The cost was never algorithmic; it was fan-out repeated per role. Hoisting
+    the scan to one shared pass makes a sweep's attendance cost constant in the
+    number of roles instead of linear.
+
+    BOUNDED BY BOTH a count (``budget``) and a WALL-CLOCK ``deadline``. The count
+    alone could not stop this: it caps how many dirs are visited and says nothing
+    about how long each takes, which is exactly how a 40-dir scan became a
+    two-minute call on a slow transport.
+    """
+    index: dict[str, Any] = {}
+    try:
+        reviews = [e for e in transport.list_dir(f"team/{team}/review/")
+                   if e.get("is_dir")]
+    except TransportError:
+        # Root listing failed: nothing was scanned, and this is NOT a deadline
+        # cut. Every return below states its own cut reason for the same reason.
+        return index, 0, 0, False, False
+    total = len(reviews)
+    scanned = 0
+    undatable = False
+    cut_by_deadline = False
+    for e in reviews[:budget]:
+        if deadline is not None and deadline.expired():
+            cut_by_deadline = True
+            break
+        slug = (e.get("name") or "").rstrip("/")
+        if not slug:
+            continue
+        scanned += 1
+        try:
+            entries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError:
+            # An unreadable prefix is UNKNOWN for the whole index: we cannot say
+            # whose work we failed to see, so the caller must not conclude "no
+            # work" from what we did see.
+            return index, scanned, total, True, cut_by_deadline
+        for v in entries:
+            name = v.get("name") or ""
+            if not name.endswith(".md") or "--" not in name:
+                continue
+            reviewer = name[:-3].split("--", 1)[1]
+            raw = v.get("mtime")
+            mt = router.parse_store_mtime(raw) or router.parse_iso(raw)
+            if mt is None:
+                undatable = True
+                continue
+            prev = index.get(reviewer)
+            if prev is None or mt > prev:
+                index[reviewer] = mt
+    return index, scanned, total, undatable, cut_by_deadline
+
+
 def _role_attended(transport: Any, team: str, holders: list[str], *,
-                   since: Any, budget: int = 40) -> tuple[Optional[bool], int, int]:
+                   since: Any, budget: int = 40,
+                   index: Optional[tuple[dict[str, Any], int, int, bool, bool]] = None,
+                   deadline: Optional["Deadline"] = None,
+                   ) -> tuple[Optional[bool], int, int]:
     """Did any ``holders`` file a verdict since ``since``?
 
     Returns ``(attended, scanned, total)``. ``attended`` is None when the answer
@@ -899,44 +993,26 @@ def _role_attended(transport: Any, team: str, holders: list[str], *,
     """
     if not holders:
         return None, 0, 0
-    try:
-        reviews = [e for e in transport.list_dir(f"team/{team}/review/")
-                   if e.get("is_dir")]
-    except TransportError:
-        return None, 0, 0
-    total = len(reviews)
+    # ``index`` lets a caller with MANY roles pay the scan ONCE (see
+    # `_verdict_activity_index`). Without it, behaviour is exactly as before.
+    if index is None:
+        index = _verdict_activity_index(transport, team, budget=budget,
+                                        deadline=deadline)
+    idx, scanned, total, undatable, _cut = index
     if not total:
         # NOTHING to scan. A complete sweep of an empty set is not evidence of
         # absence — it is evidence we looked somewhere with no data (a wrong
         # prefix looks exactly like this). UNKNOWN, never False.
         return None, 0, 0
-    scanned = 0
-    undatable = False
-    suffixes = tuple(f"--{h}.md" for h in holders if h)
-    for e in reviews[:budget]:
-        slug = (e.get("name") or "").rstrip("/")
-        if not slug:
+    for h in holders:
+        if not h:
             continue
-        scanned += 1
-        try:
-            entries = transport.list_dir(_verdicts_prefix(team, slug))
-        except TransportError:
-            return None, scanned, total
-        for v in entries:
-            name = v.get("name") or ""
-            if not name.endswith(suffixes):
-                continue
-            raw = v.get("mtime")
-            mt = router.parse_store_mtime(raw) or router.parse_iso(raw)
-            if mt is None:
-                # A holder verdict we cannot DATE. Skipping it would quietly
-                # count as "no work in the window" — the false-absent this
-                # whole change exists to remove. Undatable evidence is UNKNOWN.
-                undatable = True
-                continue
-            if mt >= since:
-                return True, scanned, total
+        mt = idx.get(str(h))
+        if mt is not None and mt >= since:
+            return True, scanned, total
     if undatable:
+        # A verdict we could not DATE, or a prefix we could not READ. Either way
+        # we cannot rule out that a holder worked. UNKNOWN, never False.
         return None, scanned, total
     # Everything we were allowed to look at is clean. Only a COMPLETE sweep can
     # say "no work"; a truncated one stays UNKNOWN.
@@ -1372,6 +1448,11 @@ DEFAULT_BRIEFING_BUDGET = 60.0
 #: path renders anything. 20s is a generous ~25 ops at the measured ~0.8s/op — far
 #: past the 4-7 a real team pays — while still bounding a degraded transport.
 DEFAULT_ROLE_FOLD_BUDGET = 20.0
+#: Wall-clock bound for the shared verdict-activity scan (see
+#: `_attendance_scan_budget`). 30s: the measured scan is ~24s on a slow transport
+#: and must be able to COMPLETE — a bound tighter than the honest cost would just
+#: convert a slow answer into a permanent UNKNOWN.
+DEFAULT_ATTENDANCE_SCAN_BUDGET = 30.0
 
 # The `threads` fold/window defaults (DEFAULT_THREADS_*) live with the threads
 # command in `commands_threads.py`; they are re-exported onto `cli` at module end.
@@ -1437,6 +1518,18 @@ def _obligation_budget() -> float:
     return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
 
 
+def _attendance_scan_budget() -> float:
+    """Wall-clock bound (seconds) for the ONE shared verdict-activity scan an
+    `escalate` sweep performs. Env ``COORD_ATTENDANCE_SCAN_BUDGET``.
+
+    Its own knob because the scan is transport-bound fan-out, not role
+    resolution: measured 2026-08-08, 41 sequential listings at ~0.59s each. A
+    count budget alone cannot bound that — which is how `escalate` reached 98s
+    locally and timed out at 170s+ on the watchdog."""
+    return config.env_float("COORD_ATTENDANCE_SCAN_BUDGET",
+                            DEFAULT_ATTENDANCE_SCAN_BUDGET)
+
+
 def _role_fold_budget() -> float:
     """Cumulative deadline (seconds) for one role-resolution pass. Env
     ``COORD_ROLE_FOLD_BUDGET`` (see the DEFAULT_ROLE_FOLD_BUDGET rationale). Its own
@@ -1457,6 +1550,105 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> 
         )
     except Exception:
         pass
+
+
+#: A merge sha is EVIDENCE, so it must look like one. Closure that accepts an
+#: arbitrary string is closure by assertion, which is the inference this verb
+#: exists to replace.
+_MERGE_SHA = re.compile(r"\A[0-9a-f]{40}\Z|\A[0-9a-f]{64}\Z")
+
+
+def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
+    """Close a review because its PR MERGED — an artifact of the merge, not an
+    inference about it (coord-boss ruling 1, 2026-08-07).
+
+    A merged PR leaves an immortal obligation: the register keeps asking for a
+    verdict on a head nobody will ever review again. `review gc` is deliberately
+    NOT the answer — its predicate asks whether a HEAD is still alive, 551 raised
+    that bar on purpose, and "the PR merged" is a different question that a
+    liveness probe cannot answer.
+
+    Unlike :func:`_write_settled_marker`, which is a best-effort CACHE and
+    swallows its failures, this is a DURABLE RECORD: a swallowed failure would
+    leave the row open while reporting closed, so the write is verified by
+    read-back and a failure is a non-zero exit.
+    """
+    slug = args.slug
+    sha = (args.merge_sha or "").strip().lower()
+    if not _MERGE_SHA.match(sha):
+        print(f"review close: --merge-sha must be a full 40- or 64-hex commit "
+              f"sha, got {args.merge_sha!r}. Closure carries evidence; an "
+              f"abbreviation or a branch name is an assertion.", file=sys.stderr)
+        return 2
+
+    # Refuse to close a slug that does not exist: a write into a nonexistent
+    # register entry succeeds silently and reads exactly like a closure.
+    try:
+        vnames = {(e.get("name") or "")
+                  for e in transport.list_dir(_verdicts_prefix(args.team, slug))}
+    except TransportError as e:
+        print(f"review close: cannot read the verdicts prefix for {slug} ({e}) "
+              f"— UNKNOWN, not closed. Retry.", file=sys.stderr)
+        return 1
+    doc = transport.read(_review_doc_path(args.team, slug))
+    if doc is None and not vnames:
+        print(f"review close: {slug} has no review doc and no verdicts — "
+              f"nothing to close. Check the slug.", file=sys.stderr)
+        return 2
+
+    now = _iso(_now())
+    marker = {
+        "schema": "review-settled/v1",
+        "state": "MERGED",
+        "merge_sha": sha,
+        "merged_at": args.merged_at or now,
+        "closed_by": args.sender or _host(),
+        "reason": args.reason or "PR merged; the head will not be reviewed again",
+        "ts": now,
+    }
+    payload = okf.render_frontmatter(marker)
+    path = _settled_marker_path(args.team, slug)
+    try:
+        transport.write(path, payload)
+    except Exception as e:
+        print(f"review close: write FAILED for {slug} ({type(e).__name__}) — "
+              f"the row is still open.", file=sys.stderr)
+        return 1
+    # Verify the marker IS THE ONE WE WROTE, not merely that something is
+    # there (codex 561 r1). `.settled` is very often already occupied by the
+    # fold's APPROVED cache marker — that is the NORMAL state for a terminal
+    # review, which is exactly the review a merged PR has. So a silently
+    # dropped write leaves the OLD content behind, a presence check passes, and
+    # the command reports a merge sha the durable record does not contain.
+    # Presence is not identity; that distinction is the whole point of this verb.
+    back = transport.read(path)
+    if back is None:
+        print(f"review close: wrote {slug} but the read-back was empty — "
+              f"closure UNVERIFIED, treat the row as still open and retry.",
+              file=sys.stderr)
+        return 1
+    if back != payload:
+        # Compare EVERY field we wrote, derived from the payload itself
+        # (codex 561 r2). My r1 fix hand-picked `state` and `merge_sha` and
+        # called them load-bearing — but this verb's contract records
+        # merged_at, closed_by and reason too, so re-closing the SAME sha with
+        # a corrected timestamp or reason could silently drop the write, match
+        # on the two fields I happened to check, and exit 0 while the requested
+        # evidence never landed. A hand-picked subset goes stale the moment a
+        # field is added; deriving the list from `marker` cannot.
+        got = okf.parse_frontmatter(back) or {}
+        stale = sorted(k for k, want in marker.items()
+                       if str(got.get(k) if got.get(k) is not None else "")
+                       != str(want))
+        if stale:
+            print(f"review close: {slug} read back a DIFFERENT marker — "
+                  f"{', '.join(stale)} did not match what was written. The "
+                  f"write did not land; closure UNVERIFIED and the row is "
+                  f"still open.", file=sys.stderr)
+            return 1
+    print(f"review close: {slug} closed as MERGED at {sha[:12]} "
+          f"(marker {path})")
+    return 0
 
 
 def _is_settleable(tally: dict[str, Any]) -> bool:
@@ -1852,6 +2044,18 @@ def _held_roles_for_rows(
     # deadline cumulatively: the listing, each role's doc + lease listing, and each
     # lease shard read within a role.
     dl = Deadline.open(deadline_seconds)
+    if candidates and dl.expired():
+        # The budget was ALREADY spent when we were called (a caller passing its
+        # own remaining window, e.g. briefing after a slow earlier phase). The
+        # listing below is an unconditional blocking op and the first expiry
+        # check used to sit AFTER it, so a spent budget still paid one full
+        # transport op — under the degraded transport this bound exists for,
+        # that is one whole timeout, charged to the sections the caller was
+        # protecting. Nothing can be classified without the listing, so every
+        # candidate is UNKNOWN. Return that, having spent nothing.
+        # (Found by coord-opus-worker reviewing PR 559; it is the same
+        # pre-budget class this function's own docstring names four lines up.)
+        return set(), set(candidates)
     if candidates:
         # Prime the cache `_role_fresh_holders` already consults, and use it to
         # drop candidates that are affirmatively NOT roles before paying a read
@@ -2490,6 +2694,48 @@ def _review_row_line(r: dict[str, Any]) -> Optional[str]:
     if t == "review-source":
         return _source_line("review", r)
     return None
+
+
+#: Every degraded marker row type in this module ends in ``degraded``
+#: (``read-degraded``, ``role-degraded``, ``forge-degraded``, the four
+#: ``review-*-degraded``, ``inbox-degraded``, ``presence-degraded``,
+#: ``engagement-degraded``). ONE predicate, so a marker type added tomorrow is
+#: counted by the envelope that day rather than the day someone notices it never
+#: was.
+def _is_degraded_row(r: Any) -> bool:
+    return isinstance(r, dict) and str(r.get("type") or "").endswith("degraded")
+
+
+def _fold_source(rows: list, type_name: str) -> str:
+    """``projection`` / ``raw`` / ``absent`` for the ``*-source`` row named by
+    ``type_name`` — the envelope's one-word form of `_source_line`."""
+    for r in rows:
+        if isinstance(r, dict) and str(r.get("type") or "") == type_name:
+            return "projection" if r.get("source") == "projection" else "raw"
+    return "absent"
+
+
+def emit_envelope(verb: str, *, count: int, rc: int, **fields: Any) -> None:
+    """Write ONE compact verdict line to **stderr**.
+
+    A fold that prints an unbounded row list puts its verdict — the degraded
+    markers, the source disclosure, and the rc they imply — at the END of that
+    list. A harness whose context truncates the stream loses exactly the part
+    that says whether the read can be trusted, and a truncated read then looks
+    identical to a clean one. codex-coder hit this 2026-08-08: ``needs-me``
+    completed, stdout was truncated before the markers, and the wake could not
+    certify the durable-assignment read either way. PR 565 had just made the rc
+    load-bearing for that condition, which is what made the loss bite.
+
+    stderr is a separate, tiny stream that survives stdout truncation on every
+    harness we have. It is a DUPLICATE of the inline markers, never a
+    replacement — the inline rows stay exactly where they are for readers that
+    can see them.
+    """
+    parts = [f"{verb}: {count} item(s)"]
+    parts += [f"{k}={v}" for k, v in fields.items()]
+    parts.append(f"rc={rc}")
+    print(", ".join(parts), file=sys.stderr)
 
 
 def _source_line(label: str, r: dict[str, Any]) -> str:
@@ -5728,6 +5974,24 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: resume section unavailable ({type(e).__name__})", file=sys.stderr)
         out["resume"] = None
+    # Same treatment as needs-me, for the same reason: briefing's degraded markers
+    # sit INSIDE per-section lists that scale with the store, so a truncating
+    # reader loses them while the header survives. briefing always returns 0 — the
+    # envelope's degraded count is therefore the ONLY machine signal it has, which
+    # makes this more load-bearing here, not less.
+    _brief_degraded = sum(
+        1 for section in ("presence", "inbox", "needs_me", "pending_reviews",
+                          "forge_feedback")
+        for r in (out.get(section) or [])
+        if _is_degraded_row(r)
+    ) + (1 if out.get("read_degraded") else 0) + (
+        1 if out.get("role_degraded") else 0)
+    emit_envelope(
+        "briefing", count=len(out.get("needs_me") or []), rc=0,
+        inbox=len(out.get("inbox") or []),
+        reviews=len(out.get("pending_reviews") or []),
+        degraded=_brief_degraded,
+    )
     if args.json:
         jsonutil.print_json(out)
         return 0
@@ -8771,6 +9035,13 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     # only when the gate passes (a BLOCKED fleet pays nothing new).
     gate_passes = _engagement_gate_passes(transport, args.team, now=now)
     pres_shards = _presence_shards(transport, args.team) if gate_passes else []
+    # ONE shared verdict-activity scan for the whole sweep, bounded by wall-clock
+    # as well as count. Built here rather than per role: see
+    # `_verdict_activity_index` for the measurement that motivated it.
+    att_dl = Deadline.open(_attendance_scan_budget())
+    att_index = _verdict_activity_index(transport, args.team, deadline=att_dl)
+    _att_scanned, _att_total, _att_cut = att_index[1], att_index[2], att_index[4]
+
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
@@ -8860,9 +9131,10 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                       f"session has lapsed (declared window ended; role retained, "
                       f"not gone-dark); escalation suppressed", file=sys.stderr)
                 continue
-        # ATTENDANCE on the ACTING path. Computed only for a role that is
-        # otherwise about to escalate, so the listing cost is paid on the rare
-        # acting branch and never on every role of every sweep.
+        # ATTENDANCE on the ACTING path, answered from the ONE shared scan built
+        # before this loop. It used to rebuild that scan per role — 41 sequential
+        # listings each — so a sweep with N acting roles paid N x ~24s. The cost
+        # is now constant in the number of roles.
         #
         # Wiring this into `roles status` alone was the round-1 defect: that
         # improved what an operator READS while the sweep kept emitting the same
@@ -8873,7 +9145,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             attended, a_scanned, a_total = _role_attended(
                 transport, args.team,
                 [str(l.get("agent")) for l in (leases or [])],
-                since=anchor - timedelta(hours=sla))
+                since=anchor - timedelta(hours=sla), index=att_index)
         if not roles.escalation_due(leases, now=now, sla_hours=sla,
                                     marker_exists_today=marker_exists,
                                     attended=attended):
@@ -8914,8 +9186,31 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             print(f"escalated {role} -> {maintainer}")
         else:
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
+    # The verdict, on stderr, so a vacancy check that could not finish is not
+    # mistaken for one that found nothing. escalate returned rc 0 after a 98s
+    # run that printed 136 bytes — indistinguishable from a clean sweep, which is
+    # exactly what let a DEGRADED watchdog read as "0 escalated" for 12 hours.
+    # An INCOMPLETE attendance scan means every "unattended" call this sweep made
+    # was made on partial evidence, so it fails closed with rc 3.
+    # COVERAGE IS ALWAYS PARTIAL BY DESIGN and must not read as an incident: the
+    # register holds 412 review dirs on the live store and the scan is capped at
+    # `budget` (40), because a complete fan-out is ~243s of transport. So rc 3 is
+    # reserved for the scan being cut by its WALL-CLOCK deadline — a real anomaly
+    # — and the ordinary count cap is reported as coverage, not as degradation.
+    # An alarm that fires on every run is worth exactly as much as no alarm.
+    att_cut = _att_cut
+    rc = 3 if att_cut else 0
+    emit_envelope("escalate", count=checked, rc=rc, escalated=escalated,
+                  attendance=f"{_att_scanned}/{_att_total}",
+                  degraded=1 if att_cut else 0)
     print(f"escalate: {checked} role(s) checked, {escalated} escalated")
-    return 0
+    if att_cut:
+        print(f"escalate: DEGRADED — the attendance scan was cut by its "
+              f"wall-clock budget (COORD_ATTENDANCE_SCAN_BUDGET) after "
+              f"{_att_scanned}/{_att_total} review dirs, so every vacancy call "
+              f"above rests on less evidence than even the count cap allows. "
+              f"UNKNOWN, not clear.", file=sys.stderr)
+    return rc
 
 
 # --- forge (fulcra-agent-forge) ---
@@ -9283,6 +9578,11 @@ def build_parser() -> argparse.ArgumentParser:
     nm.add_argument("team"); nm.add_argument("--agent", required=True)
     nm.add_argument("--all", action="store_true",
                     help="include acknowledged, closed, and future history")
+    nm.add_argument("--envelope-only", action="store_true",
+                    help="print ONLY the stderr verdict envelope (count, fold "
+                         "sources, degraded count, rc) and no records — for a "
+                         "harness whose context truncates an unbounded payload "
+                         "before its trailing markers")
     add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
 
@@ -9667,6 +9967,15 @@ def build_parser() -> argparse.ArgumentParser:
                           "gc only prints what it would retire")
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
+    rvc = rvsub.add_parser("close", help="close a review because its PR MERGED (evidence, not inference)")
+    rvc.add_argument("team"); rvc.add_argument("slug")
+    rvc.add_argument("--merge-sha", required=True,
+                     help="the FULL 40- or 64-hex merge commit sha — closure "
+                          "carries evidence; an abbreviation is an assertion")
+    rvc.add_argument("--merged-at", help="ISO timestamp of the merge (defaults to now)")
+    rvc.add_argument("--reason", help="why this row is closed")
+    rvc.add_argument("--from", dest="sender", help="acting agent (for the marker)")
+    rvc.set_defaults(func=cmd_review_close)
     rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)

@@ -52,7 +52,10 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. Sub-verb lists above are by concern, not exhaustive — the parser's help is the inventory. The
 [skills](../../skills) carry the procedures (when to run what, and why);
 per-verb command references live in each skill's `references/` directory.
-Machine JSON is emitted compactly: `threads` emits one JSON array. The hot `_coord/summaries.json` aggregate uses the same
+Machine JSON is emitted compactly: `threads` emits one JSON array. `needs-me`
+preserves partial rows but returns rc 3 when its bounded forge fallback emits
+`forge-degraded`; a complete projection or raw scan returns rc 0. The hot
+`_coord/summaries.json` aggregate uses the same
 zero-whitespace serializer; parsed values and degradation markers are unchanged.
 
 ### Pairwise acceptance

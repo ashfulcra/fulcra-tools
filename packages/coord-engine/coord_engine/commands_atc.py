@@ -110,6 +110,18 @@ def cmd_headroom(args: argparse.Namespace, transport: Any) -> int:
     text = transport.read(_atc_accounts_path(args.team))
     parsed = atc.parse_accounts(text)
     if not parsed["accounts"]:
+        # This early return predates the --json branch below and ignored it, so
+        # `headroom --json` printed PROSE to stdout on the no-accounts path — a
+        # live instance of the "--json is always one parseable value" rule, found
+        # 2026-08-08 only after the purity sweep was widened past its first
+        # thirteen verbs. Same object shape as the populated path, so a consumer
+        # parses one contract either way; the reason rides a reserved key.
+        if getattr(args, "json", False):
+            empty: dict[str, Any] = {"windows": [], "demotions": []}
+            if parsed.get("error"):
+                empty["_read_degraded"] = {"reason": str(parsed["error"])}
+            print(json.dumps(empty, indent=2))
+            return 0
         print("headroom — no accounts declared"
               + (f" ({parsed['error']})" if parsed.get("error") else "")
               + " — see fulcra-agent-atc §setup")
