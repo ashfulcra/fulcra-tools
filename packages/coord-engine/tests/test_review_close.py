@@ -198,3 +198,62 @@ def test_the_check_is_derived_from_the_payload_not_a_hardcoded_list():
     assert "marker.items()" in src, (
         "the read-back comparison must enumerate the payload's own fields"
     )
+
+
+# --- `review status` must not delete MERGE EVIDENCE -------------------------
+# Found 2026-08-08 by controlled reproduction, chasing what looked like a store
+# durability fault: close a review, confirm the marker, run `review status`,
+# marker GONE. The read-only-looking diagnostic was the deleter.
+#
+# Root cause is mine. Before PR 561, `.settled` only ever cached a terminal
+# APPROVED tally, so `cmd_review_status` deleting it on a non-settleable tally
+# was correct and self-healing. 561 gave the same path a SECOND meaning —
+# `state: MERGED` + a merge sha, evidence that a PR landed — and I did not audit
+# the existing deleters when I added the new writer. A merged-but-never-verdicted
+# review tallies PENDING forever, so EVERY ruling-1 retroactive closure was
+# erasable by anyone merely LOOKING at it.
+
+def _closed_by_merge(t, slug="pr-x", sha="a" * 40):
+    cli.main(["review", "close", "r", slug, "--merge-sha", sha,
+              "--reason", "merged"], transport=t)
+    return cli._settled_marker_path("r", slug)
+
+
+def test_review_status_does_not_delete_a_MERGE_marker(capsys):
+    t = FakeTransport()
+    t.put("team/r/review/pr-x.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    path = _closed_by_merge(t)
+    assert t.read(path), "precondition: review close wrote the marker"
+    capsys.readouterr()
+    # The tally is PENDING — nobody verdicted, and nobody ever will on a merged PR.
+    cli.main(["review", "status", "r", "pr-x"], transport=t)
+    assert "PENDING" in capsys.readouterr().out
+    assert t.read(path), (
+        "`review status` deleted MERGE EVIDENCE — a read-only diagnostic must "
+        "never destroy the record that a PR landed")
+
+
+def test_review_status_still_clears_a_stale_TALLY_CACHE(capsys):
+    """The original F4 behaviour must survive: an APPROVED-tally cache on a
+    review that no longer tallies APPROVED is stale and should go."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-y.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    path = cli._settled_marker_path("r", "pr-y")
+    cli._write_settled_marker(t, "r", "pr-y", now="2026-08-08T00:00:00Z")
+    assert t.read(path) and "MERGED" not in (t.read(path) or "")
+    capsys.readouterr()
+    cli.main(["review", "status", "r", "pr-y"], transport=t)
+    assert not t.read(path), "a stale tally cache should still be cleared"
+
+
+def test_an_unreadable_marker_is_not_deleted():
+    """UNKNOWN fails toward preserving evidence: `read` cannot distinguish an
+    unreadable marker from an absent one, so we never delete on that answer."""
+    class T(FakeTransport):
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None          # unreadable OR absent — indistinguishable
+            return super().read(path)
+    assert cli._settled_marker_is_a_tally_cache(T(), "r", "pr-z") is False

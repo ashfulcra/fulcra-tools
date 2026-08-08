@@ -711,6 +711,15 @@ it (not on PyPI).
   parses-if-non-empty check while emitting no result. A hand-kept list is how six pinned verbs and fifteen
   unpinned ones coexisted for weeks, and the widened sweep immediately found a live leak (`headroom --json`
   printed prose on its no-accounts early return).
+- **`.settled` carries TWO things and only one of them is disposable.** `state: APPROVED` is a tally
+  CACHE (`_write_settled_marker`) — cheap to recompute, safe to drop. `state: MERGED` + `merge_sha` is
+  merge EVIDENCE written by `review close`, and **nothing recomputes it**: a merged-but-never-verdicted
+  review tallies PENDING forever, because nobody reviews a PR that landed weeks ago. `review status`
+  therefore deletes a stale cache but **never** a MERGED marker, and an unreadable marker is left alone
+  (`read` cannot tell unreadable from absent, so UNKNOWN fails toward keeping evidence). Before this guard,
+  running `review status` on a retroactively-closed review silently destroyed its closure — a read-only
+  diagnostic erasing history. **If you add a writer to a shared marker path, audit every existing
+  deleter of it in the same change.**
 - **`escalate` attendance: one shared scan, and partial coverage is NOT an incident.** The vacancy
   sweep answers "did a holder file a verdict recently" from ONE `_verdict_activity_index` pass built
   before the role loop, not per role — it used to rebuild a 41-listing scan for every acting role

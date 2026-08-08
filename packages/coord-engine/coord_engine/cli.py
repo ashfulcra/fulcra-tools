@@ -1539,6 +1539,31 @@ def _role_fold_budget() -> float:
     return config.env_float("COORD_ROLE_FOLD_BUDGET", DEFAULT_ROLE_FOLD_BUDGET)
 
 
+def _settled_marker_is_a_tally_cache(transport: Any, team: str, slug: str) -> bool:
+    """May a recomputed tally DELETE this slug's ``.settled``?
+
+    ``.settled`` carries two different things since PR 561:
+
+    - a **tally cache** (``state: APPROVED``), written by
+      :func:`_write_settled_marker`. Cheap to recompute, safe to drop.
+    - **merge evidence** (``state: MERGED`` + ``merge_sha``), written by
+      ``review close``. It records that a PR actually merged. Nothing recomputes
+      it, and a merged review that was never verdicted tallies PENDING forever,
+      so a tally-driven delete destroys it permanently.
+
+    True only for the cache. UNKNOWN (unreadable marker) returns False: refusing
+    to delete evidence we cannot classify is the safe direction — the cost is a
+    stale cache entry, the cost of the other choice is lost history.
+    """
+    raw = transport.read(_settled_marker_path(team, slug))
+    if raw is None:
+        # Absent OR unreadable — `read` cannot tell those apart. Either way there
+        # is nothing to gain by deleting.
+        return False
+    fm = okf.parse_frontmatter(raw) or {}
+    return str(fm.get("state") or "") != "MERGED"
+
+
 def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
     """Best-effort settled-cache write. Failure is swallowed: the marker only
     speeds the fan-out fold; its absence just means the next fold recomputes."""
@@ -3393,13 +3418,20 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         # PROVEN terminal-settled (non-empty required, every listed verdict read):
         # refresh the fold cache so the fan-out fold can skip this slug next time.
         _write_settled_marker(transport, team, slug, now=_iso(_now()))
-    else:
+    elif _settled_marker_is_a_tally_cache(transport, team, slug):
         # F4: a full, trustworthy tally that is NOT settleable, yet a `.settled`
-        # marker may linger (e.g. a since-reopened review). It is provably stale —
-        # the marker only ever caches a terminal-APPROVED state. Best-effort
-        # delete (delete is timeout-safe -> False, ignored) so the next fan-out
-        # fold recomputes and sees the pending obligation, complementing the I2
+        # marker may linger (e.g. a since-reopened review). Best-effort delete
+        # (delete is timeout-safe -> False, ignored) so the next fan-out fold
+        # recomputes and sees the pending obligation, complementing the I2
         # re-request delete. Self-healing on direct query.
+        #
+        # GUARDED, because PR 561 gave `.settled` a SECOND meaning. This comment
+        # used to say "the marker only ever caches a terminal-APPROVED state" —
+        # true until `review close` began writing `state: MERGED` with a merge
+        # sha: durable EVIDENCE that a PR merged, not a cache of a tally. A
+        # merged-but-never-verdicted review tallies PENDING forever (nobody
+        # reviews a PR that landed weeks ago), so this branch deleted the closure
+        # every time anyone RAN `review status` on it.
         transport.delete(_settled_marker_path(team, slug))
     result.update({"team": team, "slug": slug})
     if args.json:
