@@ -1546,46 +1546,54 @@ SETTLED_MERGED = "merged"    #: merge evidence — a PR landed; nothing recomput
 SETTLED_UNKNOWN = "unknown"  #: unreadable or unrecognised — preserve AND say so
 
 
-def _settled_marker_listed(transport: Any, team: str, slug: str) -> bool:
-    """Does a ``.settled`` OBJECT exist, independent of whether it can be read?
+def _settled_marker_present(transport: Any, team: str, slug: str) -> Optional[bool]:
+    """Does a ``.settled`` OBJECT exist? ``True`` / ``False`` / ``None`` = UNKNOWN.
 
-    `read` returning None conflates "absent" with "unreadable", which is exactly
-    the distinction the UNKNOWN branch needs: an ABSENT marker is nothing to warn
-    about, an UNREADABLE one is. The listing answers presence without parsing, so
-    the two are separable. A raised listing is itself UNKNOWN -> False, because a
-    warning we cannot substantiate is noise.
+    `read` returning None conflates "absent" with "unreadable", and the UNKNOWN
+    branch needs them apart: an ABSENT marker is nothing to warn about, an
+    UNREADABLE one is. A listing answers presence without parsing.
+
+    TRI-STATE, because the previous two-state version returned False on a raised
+    listing — so an unreadable marker plus an unreadable listing produced a
+    silent rc 0 exactly where this code promises to fail closed. That is the
+    UNKNOWN-collapsed-to-a-definite-answer bug, inside the helper written to
+    prevent it (codex-reviewer, PR 572 r3).
     """
     try:
         names = {(e.get("name") or "") for e in
                  transport.list_dir(_verdicts_prefix(team, slug))}
     except TransportError:
-        return False
+        return None
     return SETTLED_MARKER in names
 
 
 def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
     """``cache`` / ``merged`` / ``unknown`` for a slug's ``.settled``.
 
-    ``.settled`` carries two different things since PR 561: a tally CACHE
-    (``state: APPROVED``, written by :func:`_write_settled_marker`) and merge
-    EVIDENCE (``state: MERGED`` + ``merge_sha``, written by ``review close``).
-    Only the cache is recomputable.
+    Both recognised shapes must be POSITIVELY identified — by schema AND the
+    fields that give them meaning — not by one surviving field:
 
-    THREE states, not two: a marker we cannot read or whose ``state`` we do not
-    recognise is NOT a cache, and pretending otherwise would delete evidence we
-    merely failed to parse. It is also not simply "keep" — a silent keep hides a
-    store or schema problem, so the caller reports it and fails nonzero.
-    ``read`` returning None cannot distinguish absent from unreadable, so an
-    absent marker classifies as ``unknown`` too; deleting nothing costs nothing.
+    - ``cache``  — ``schema: review-settled/v1`` AND ``state: APPROVED``. A
+      truncated or hand-edited marker that kept only ``state: APPROVED`` is NOT
+      a cache; treating it as one deletes a file we do not understand.
+    - ``merged`` — ``state: MERGED`` AND a well-formed ``merge_sha``. MERGED
+      without a sha is INCOMPLETE evidence: preserved like any unknown, but
+      reported, because silently accepting it would let a half-written marker
+      pass as proof a PR landed.
+    - ``unknown`` — everything else, including unreadable and absent.
+
+    Only ``cache`` is deletable. Every other answer preserves the file.
     """
     raw = transport.read(_settled_marker_path(team, slug))
     if raw is None:
         return SETTLED_UNKNOWN
     fm = okf.parse_frontmatter(raw) or {}
+    schema = str(fm.get("schema") or "")
     state = str(fm.get("state") or "")
     if state == "MERGED":
-        return SETTLED_MERGED
-    if state == review.APPROVED:
+        sha = str(fm.get("merge_sha") or "")
+        return SETTLED_MERGED if _MERGE_SHA.match(sha) else SETTLED_UNKNOWN
+    if state == review.APPROVED and schema == "review-settled/v1":
         return SETTLED_CACHE
     return SETTLED_UNKNOWN
 
@@ -3465,16 +3473,21 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             # Recomputable: drop it so the next fan-out fold sees the pending
             # obligation. Best-effort (delete is timeout-safe -> False, ignored).
             transport.delete(_settled_marker_path(team, slug))
-        elif marker_state == SETTLED_UNKNOWN and _settled_marker_listed(
-                transport, team, slug):
+        elif marker_state == SETTLED_UNKNOWN and (
+                _settled_marker_present(transport, team, slug) is not False):
             # A marker EXISTS but this build could not classify it — unreadable
             # under a degraded transport, or a `state:` it does not know. PRESERVE
             # it (never delete what we failed to parse) and say so LOUDLY: a
             # silent keep leaves a marker suppressing the fan-out fold with
             # nothing on any surface explaining why. rc is nonzero so an
             # unattended caller cannot read this as a clean tally.
-            print(f"review status: {slug} carries a `.settled` marker this build "
-                  f"cannot classify (unreadable, or an unrecognised state:) — "
+            # `is not False` covers BOTH "a marker is definitely there" and
+            # "we could not even determine presence". Only a POSITIVE absence
+            # (listing succeeded, no marker) is silent — anything less certain
+            # fails closed, which is the promise the two-state version broke.
+            print(f"review status: {slug} may carry a `.settled` marker this "
+                  f"build cannot classify — unreadable, an unrecognised "
+                  f"state:, or MERGED without a well-formed merge_sha. "
                   f"PRESERVED, not deleted. The fan-out fold may skip this slug "
                   f"until it is resolved.", file=sys.stderr)
             _marker_unknown = True

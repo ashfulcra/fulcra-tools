@@ -254,6 +254,11 @@ def test_classification_is_TRI_state_not_two(capsys):
     t = FakeTransport()
     t.put(cli._settled_marker_path("r", "a"),
           "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    # codex-reviewer r3: a truncated marker keeping ONLY `state:` is NOT a cache
+    t.put(cli._settled_marker_path("r", "trunc"), "---\nstate: APPROVED\n---\n")
+    # ...and MERGED without a well-formed sha is INCOMPLETE evidence, not merged
+    t.put(cli._settled_marker_path("r", "nosha"),
+          "---\nschema: review-settled/v1\nstate: MERGED\n---\n")
     t.put(cli._settled_marker_path("r", "b"),
           "---\nschema: review-settled/v1\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
     t.put(cli._settled_marker_path("r", "c"),
@@ -266,6 +271,8 @@ def test_classification_is_TRI_state_not_two(capsys):
     assert cli._classify_settled_marker(t, "r", "d") == cli.SETTLED_UNKNOWN
     # absent is UNKNOWN too, and deleting nothing costs nothing
     assert cli._classify_settled_marker(t, "r", "missing") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "trunc") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "nosha") == cli.SETTLED_UNKNOWN
 
 
 def test_an_unclassifiable_marker_is_preserved_AND_reported_AND_rc3(capsys):
@@ -287,7 +294,7 @@ def test_an_unclassifiable_marker_is_preserved_AND_reported_AND_rc3(capsys):
     assert rc == 3, "an unclassifiable marker is a DEGRADED answer, not a clean tally"
     assert "cannot classify" in err and "PRESERVED" in err
     # and it is still there
-    assert cli._settled_marker_listed(t, "r", "pr-u")
+    assert cli._settled_marker_present(t, "r", "pr-u") is True
 
 
 def test_an_ABSENT_marker_is_silent_and_rc0(capsys):
@@ -300,3 +307,36 @@ def test_an_ABSENT_marker_is_silent_and_rc0(capsys):
     rc = cli.main(["review", "status", "r", "pr-v"], transport=t)
     err = capsys.readouterr().err
     assert rc == 0 and "cannot classify" not in err
+
+
+def test_a_listing_failure_after_an_unknown_read_still_fails_closed(capsys):
+    """codex-reviewer, PR 572 r3: the two-state presence helper returned False on
+    a raised listing, so unreadable-marker + unreadable-listing produced a SILENT
+    rc 0 exactly where this code promises to fail closed."""
+    class T(FakeTransport):
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None                       # UNKNOWN read
+            return super().read(path)
+
+        def list_dir(self, prefix):
+            if prefix.endswith("/verdicts/"):
+                raise TransportError("listing unavailable")   # UNKNOWN presence
+            return super().list_dir(prefix)
+
+    t = T()
+    t.put("team/r/review/pr-w.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    assert cli._settled_marker_present(t, "r", "pr-w") is None, "presence is TRI-state"
+
+
+def test_presence_is_tri_state_not_boolean():
+    class Raises(FakeTransport):
+        def list_dir(self, prefix):
+            raise TransportError("boom")
+
+    t = FakeTransport()
+    assert cli._settled_marker_present(t, "r", "absent") is False   # positively absent
+    t.put(cli._settled_marker_path("r", "there"), "x")
+    assert cli._settled_marker_present(t, "r", "there") is True
+    assert cli._settled_marker_present(Raises(), "r", "any") is None
