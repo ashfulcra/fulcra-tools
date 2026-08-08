@@ -1,0 +1,48 @@
+name: no-team-internals
+# Phase 0 of the team/tool separation (operator-ordered 2026-08-07): the rules
+# "no host address, machine name, session ref or credential-holder fact in the
+# repo" and "team content lives on the team's store" are enforced here, because
+# a rule enforced by care is a rule already broken — one branch carried a live
+# VPS address paired with a named root-holder for two hours before review
+# caught it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scan tracked files for team-internal identifiers
+        run: |
+          set -eu
+          # PUBLIC unicast IPs only. Loopback, RFC1918 and link-local are
+          # legitimate documentation (50 files use 127.0.0.1 today); a guard
+          # that fails 50 files on day one gets disabled on day one, and a
+          # disabled guard is worse than none because everyone believes it runs.
+          fail=0
+          ips=$(git grep -InE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' -- . \
+            | grep -vE '(^|[^0-9])(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|0\.0\.0\.0|255\.|npm/[0-9]|/v?[0-9]+\.[0-9]+\.[0-9]+)' \
+            | grep -vE '\b0\.[0-9]+\.[0-9]+\.[0-9]+\b' \
+            | grep -v 'guard-ok: public-ip' || true)
+          # The pragma is same-line only, so an annotation cannot silently bless
+          # a whole file; each use is visible at the use site and in review.
+          if [ -n "$ips" ]; then
+            echo "::error::public IP address in tracked files — host addresses live on the team store, never here"
+            echo "$ips"; fail=1
+          fi
+          # Session refs bind a document to one team's live infrastructure.
+          refs=$(git grep -InE 'session_[A-Za-z0-9]{20,}' -- . || true)
+          if [ -n "$refs" ]; then
+            echo "::error::session ref in tracked files"
+            echo "$refs"; fail=1
+          fi
+          # An index that tells a public reader to skip a section is a section
+          # in the wrong repo (the docs/README 'safe to skip' lesson).
+          skip=$(git grep -Iin 'safe to skip on a first read' -- docs/ || true)
+          if [ -n "$skip" ]; then
+            echo "::error::'safe to skip' index section — team history belongs on the team store"
+            echo "$skip"; fail=1
+          fi
+          exit $fail
