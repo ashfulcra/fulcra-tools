@@ -264,8 +264,18 @@ def test_classification_is_TRI_state_not_two(capsys):
     t.put(cli._settled_marker_path("r", "c"),
           "---\nschema: review-settled/v1\nstate: SOMETHING_NEW\n---\n")
     t.put(cli._settled_marker_path("r", "d"), "not frontmatter at all")
+    # codex-reviewer r4: the schema demand was ASYMMETRIC — APPROVED needed it,
+    # MERGED got in on `state` + a sha. A marker that lost only its schema line
+    # therefore still passed as merge evidence.
+    t.put(cli._settled_marker_path("r", "noschema"),
+          "---\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    # ...and a schema this build has never heard of is not ours to interpret
+    t.put(cli._settled_marker_path("r", "future"),
+          "---\nschema: review-settled/v9\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
     assert cli._classify_settled_marker(t, "r", "a") == cli.SETTLED_CACHE
     assert cli._classify_settled_marker(t, "r", "b") == cli.SETTLED_MERGED
+    assert cli._classify_settled_marker(t, "r", "noschema") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "future") == cli.SETTLED_UNKNOWN
     # an unrecognised state is NOT a cache — a future writer must not be deleted
     assert cli._classify_settled_marker(t, "r", "c") == cli.SETTLED_UNKNOWN
     assert cli._classify_settled_marker(t, "r", "d") == cli.SETTLED_UNKNOWN
@@ -312,8 +322,21 @@ def test_an_ABSENT_marker_is_silent_and_rc0(capsys):
 def test_a_listing_failure_after_an_unknown_read_still_fails_closed(capsys):
     """codex-reviewer, PR 572 r3: the two-state presence helper returned False on
     a raised listing, so unreadable-marker + unreadable-listing produced a SILENT
-    rc 0 exactly where this code promises to fail closed."""
+    rc 0 exactly where this code promises to fail closed.
+
+    r4: the first version of this test asserted only that the HELPER returns
+    None. That pins a diagnostic, not the behaviour — the command could stop
+    calling the helper entirely and this would still pass. `review status` lists
+    the verdicts prefix TWICE (once for the tally, once for presence), so the
+    transport below lets the first listing through and fails the second: that is
+    the only shape that reaches the presence check with an unknown read already
+    in hand, which is the state the promise is about.
+    """
     class T(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.verdict_listings = 0
+
         def read(self, path):
             if path.endswith("/.settled"):
                 return None                       # UNKNOWN read
@@ -321,12 +344,22 @@ def test_a_listing_failure_after_an_unknown_read_still_fails_closed(capsys):
 
         def list_dir(self, prefix):
             if prefix.endswith("/verdicts/"):
-                raise TransportError("listing unavailable")   # UNKNOWN presence
+                self.verdict_listings += 1
+                if self.verdict_listings > 1:     # the PRESENCE listing
+                    raise TransportError("listing unavailable")
             return super().list_dir(prefix)
 
     t = T()
     t.put("team/r/review/pr-w.md",
           "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-w"], transport=t)
+    err = capsys.readouterr().err
+    assert t.verdict_listings >= 2, (
+        "the tally listing must have SUCCEEDED — otherwise this exercises the "
+        "listing-failure guard upstream and never reaches the presence check")
+    assert rc == 3, "unknown read + unknown presence is a DEGRADED answer, not rc 0"
+    assert "cannot classify" in err and "PRESERVED" in err
     assert cli._settled_marker_present(t, "r", "pr-w") is None, "presence is TRI-state"
 
 

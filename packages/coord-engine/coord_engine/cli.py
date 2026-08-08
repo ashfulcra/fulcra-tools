@@ -1576,11 +1576,21 @@ def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
     - ``cache``  — ``schema: review-settled/v1`` AND ``state: APPROVED``. A
       truncated or hand-edited marker that kept only ``state: APPROVED`` is NOT
       a cache; treating it as one deletes a file we do not understand.
-    - ``merged`` — ``state: MERGED`` AND a well-formed ``merge_sha``. MERGED
-      without a sha is INCOMPLETE evidence: preserved like any unknown, but
-      reported, because silently accepting it would let a half-written marker
-      pass as proof a PR landed.
+    - ``merged`` — that SAME schema AND ``state: MERGED`` AND a well-formed
+      ``merge_sha``. MERGED without a sha is INCOMPLETE evidence: preserved like
+      any unknown, but reported, because silently accepting it would let a
+      half-written marker pass as proof a PR landed.
     - ``unknown`` — everything else, including unreadable and absent.
+
+    The schema gate is checked ONCE, ahead of both shapes, and that placement is
+    the fix rather than a matter of style. The r3 version demanded a schema for
+    APPROVED and admitted MERGED on ``state`` plus a sha, so a truncated marker
+    that lost its schema line still classified as merge evidence and returned a
+    clean rc — the guard covered the direction I was thinking about and left its
+    neighbour. Both writers emit ``review-settled/v1``, so requiring it of both
+    rejects nothing this code produces; and an unrecognised FUTURE schema now
+    lands in ``unknown``, which preserves the file, instead of being read by
+    rules written before it existed.
 
     Only ``cache`` is deletable. Every other answer preserves the file.
     """
@@ -1588,12 +1598,13 @@ def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
     if raw is None:
         return SETTLED_UNKNOWN
     fm = okf.parse_frontmatter(raw) or {}
-    schema = str(fm.get("schema") or "")
+    if str(fm.get("schema") or "") != "review-settled/v1":
+        return SETTLED_UNKNOWN
     state = str(fm.get("state") or "")
     if state == "MERGED":
         sha = str(fm.get("merge_sha") or "")
         return SETTLED_MERGED if _MERGE_SHA.match(sha) else SETTLED_UNKNOWN
-    if state == review.APPROVED and schema == "review-settled/v1":
+    if state == review.APPROVED:
         return SETTLED_CACHE
     return SETTLED_UNKNOWN
 
