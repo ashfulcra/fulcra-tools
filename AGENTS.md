@@ -187,6 +187,15 @@ under `skills/`, each package with its own README, build, and tests.
   relative ages from `PINNED_NOW`, never asserting against the real clock.
   Otherwise the suite flips red once wall-clock passes `NOW + window`. Enforced
   by `tests/test_clock_pin_convention.py`.
+- The `no-team-internals` CI guard PROVES it can fail before it reports clean.
+  `scripts/no-team-internals.sh` runs `--self-test` first: it stages a fixture
+  carrying a public IP and a session ref, asserts the scan flags both, and only
+  then scans the tree. This is not ceremony — the guard's first version wrote
+  its IP pattern with `\b`, which POSIX ERE does not support, so `git grep -E`
+  matched nothing and the check went green on every PR while being structurally
+  incapable of finding the leak class it was written for. **Never use `\b` in a
+  `git grep -E` pattern.** A guard's green is only evidence when its red is
+  reachable.
 - Environment hermeticity: the suite's answer must not depend on **who** runs
   it. `cli.INHERITED_ENV` maps each ambient variable the suite must neutralise
   to a representative value (identity: `FULCRA_COORD_AGENT`,
