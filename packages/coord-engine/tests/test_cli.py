@@ -1131,19 +1131,22 @@ def test_retention_archives_old_proposed_but_never_active_or_waiting(capsys):
     assert "team/r/task/old-waiting.md" in t.store
 
 
-def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
+def test_retention_archives_single_orphan_verdict_any_reviewer(capsys):
     t = FakeTransport()
-    # Eligible: no review doc, exactly one old codex-reviewer verdict.
+    # Eligible: no review doc, exactly one old verdict, any reviewer name.
     t.put("team/r/review/settled/verdicts/codex-reviewer.md",
           _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+    t.put("team/r/review/other/verdicts/coord-maintainer.md",
+          _old_verdict("coord-maintainer"), mtime="2020-01-16 12:00PM UTC")
+    # Head-keyed shard names attribute via their `--<reviewer>` suffix.
+    t.put("team/r/review/keyed/verdicts/" + "a" * 40 + "--alice.md",
+          _old_verdict("alice"), mtime="2020-01-16 12:00PM UTC")
     t.put("team/r/review/recent/verdicts/codex-reviewer.md",
           _old_verdict("codex-reviewer"))
-    # Multi-reviewer and non-codex singletons are never settled-single reviews.
+    # Multi-shard dirs are out of the single-shard sweep's scope, counted once.
     t.put("team/r/review/multi/verdicts/codex-reviewer.md",
           _old_verdict("codex-reviewer"))
     t.put("team/r/review/multi/verdicts/coord-maintainer.md",
-          _old_verdict("coord-maintainer"))
-    t.put("team/r/review/other/verdicts/coord-maintainer.md",
           _old_verdict("coord-maintainer"))
     # A live review doc excludes the directory even when its verdict shape matches.
     t.put("team/r/review/live.md", "---\ntype: Review\nrequired: codex-reviewer\n---\n")
@@ -1152,15 +1155,46 @@ def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
 
     assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
 
-    src = "team/r/review/settled/verdicts/codex-reviewer.md"
-    dst = ("team/r/_coord/archive/reviews/2020-01/settled/verdicts/"
-           "codex-reviewer.md")
-    assert src not in t.store and dst in t.store
+    for slug, filename in [("settled", "codex-reviewer.md"),
+                           ("other", "coord-maintainer.md"),
+                           ("keyed", "a" * 40 + "--alice.md")]:
+        src = f"team/r/review/{slug}/verdicts/{filename}"
+        dst = f"team/r/_coord/archive/reviews/2020-01/{slug}/verdicts/{filename}"
+        assert src not in t.store and dst in t.store
     assert "team/r/review/recent/verdicts/codex-reviewer.md" in t.store
     assert "team/r/review/multi/verdicts/codex-reviewer.md" in t.store
     assert "team/r/review/multi/verdicts/coord-maintainer.md" in t.store
-    assert "team/r/review/other/verdicts/coord-maintainer.md" in t.store
     assert "team/r/review/live/verdicts/codex-reviewer.md" in t.store
+    err = capsys.readouterr().err
+    assert "1 orphan review dir(s) kept hot without exactly one verdict shard" in err
+
+
+def test_retention_keeps_orphan_with_noncanonical_keyed_prefix(capsys):
+    t = FakeTransport()
+    # The prefix before `--` must be a canonical exact head; `garbage--alice.md`
+    # is unattributable to the tally and must stay hot, not be archived away.
+    t.put("team/r/review/malformed/verdicts/garbage--alice.md",
+          _old_verdict("alice"), mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    assert "team/r/review/malformed/verdicts/garbage--alice.md" in t.store
+    err = capsys.readouterr().err
+    assert "does not attribute to its filename (reviewer='alice')" in err
+
+
+def test_retention_keeps_orphan_whose_verdict_disowns_its_filename(capsys):
+    t = FakeTransport()
+    # The shard is named alice.md but claims reviewer bob: attribution rides the
+    # ACL-controlled filename, so the mismatch is an anomaly, kept hot and loud.
+    t.put("team/r/review/mismatch/verdicts/alice.md",
+          _old_verdict("bob"), mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    assert "team/r/review/mismatch/verdicts/alice.md" in t.store
+    err = capsys.readouterr().err
+    assert "does not attribute to its filename (reviewer='bob')" in err
 
 
 def test_retention_archives_settled_review_wholesale_and_indexes_slug(capsys):
