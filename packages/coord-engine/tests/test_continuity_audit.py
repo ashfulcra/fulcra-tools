@@ -254,3 +254,79 @@ def test_a_successful_snapshot_WRITES_the_pointer(capsys):
     assert ptr["schema"] == "coord.continuity-latest.v1"
     assert ptr["path"] == cli._continuity_path("r", "hank", "some-task")
     assert ptr.get("created_at"), "the pointer must carry the timestamp the audit reads"
+
+
+def test_a_failed_pointer_update_removes_the_STALE_one(capsys):
+    """codex-reviewer, 585 r1, reproduced exactly: an OLD pointer plus a failed
+    pointer update is not 'pointer missing'. The old file survives, the audit
+    reads its timestamp as authoritative, and an agent who JUST checkpointed is
+    reported stale — the false finding this design claims to prevent, and it
+    made my own failure message ('will report UNKNOWN') a lie.
+
+    With no conditional write, the only way to stop a stale cache being believed
+    is to remove it. Deleting loses nothing recoverable: the pointer is a cache,
+    the snapshots behind it are untouched, and missing means UNKNOWN."""
+    class PointerWriteFails(FakeTransport):
+        def write(self, path, content):
+            if path.endswith("/continuity/LATEST.json"):
+                return False
+            return super().write(path, content)
+
+    t = PointerWriteFails()
+    _beat(t, "r", "iris", 1)
+    _snap(t, "r", "iris", "old", 30)            # an OLD snapshot AND pointer
+    capsys.readouterr()
+    # ...now a fresh snapshot saves, but its pointer update fails.
+    cli.main(["continuity", "snapshot", "r", "iris", "fresh",
+              "--objective", "o", "--next", "n"], transport=t)
+    assert t.read(cli._continuity_latest_path("r", "iris")) is None, \
+        "the stale pointer must be REMOVED, not left to be read as current"
+
+    capsys.readouterr()
+    cli.main(["health", "r", "--json"], transport=t)
+    view = json.loads(capsys.readouterr().out)
+    stale = {row.get("agent") for row in view.get("continuity_stale", [])}
+    assert "iris" not in stale, "an agent who just checkpointed is not stale"
+    assert "iris" in view.get("continuity_unknown", [])
+
+
+def test_an_unremovable_stale_pointer_is_rc3_and_says_so(capsys):
+    """If the stale pointer can be neither updated nor removed, a wrong answer
+    is queued up and this process cannot stop it. That is not a degradation to
+    mention in passing — it is the loudest thing the verb says."""
+    class Stuck(FakeTransport):
+        def write(self, path, content):
+            if path.endswith("/continuity/LATEST.json"):
+                return False
+            return super().write(path, content)
+
+        def delete(self, path):
+            return False
+
+    t = Stuck()
+    _snap(t, "r", "jane", "old", 30)
+    capsys.readouterr()
+    rc = cli.main(["continuity", "snapshot", "r", "jane", "fresh",
+                   "--objective", "o", "--next", "n"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3
+    assert "STALE pointer is still in place" in err
+    assert "may report this agent stale while they are actively checkpointing" in err
+
+
+def test_an_older_snapshot_does_not_move_the_pointer_backwards(capsys, monkeypatch):
+    """Monotonicity, best-effort. Two snapshots racing can land out of order and
+    an OLDER invocation can clobber a newer pointer, reporting an active agent
+    as older than they are. Read-then-write closes the common case; with no
+    conditional write it cannot close the race, and the comment says so."""
+    t = FakeTransport()
+    _snap(t, "r", "kip", "recent", 1)           # pointer at 1h ago
+    before = t.read(cli._continuity_latest_path("r", "kip"))
+    capsys.readouterr()
+    # An older invocation finishes late and tries to publish its own pointer.
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW - timedelta(hours=20))
+    cli.main(["continuity", "snapshot", "r", "kip", "older",
+              "--objective", "o", "--next", "n"], transport=t)
+    after = t.read(cli._continuity_latest_path("r", "kip"))
+    assert after == before, "an older snapshot must not move the pointer backwards"
+    assert "BACKWARDS" in capsys.readouterr().err

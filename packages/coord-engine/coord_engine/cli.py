@@ -3741,24 +3741,68 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
     # A pointer to a checkpoint that does not exist is worse than no pointer: a
     # reader would take it as evidence of a save that never happened, which is
     # the failure this whole verb was just fixed for.
-    ptr_ok = transport.write(_continuity_latest_path(args.team, args.agent),
-                             json.dumps({
-                                 "schema": "coord.continuity-latest.v1",
-                                 "agent": args.agent,
-                                 "task": task,
-                                 "checkpoint_id": snap["checkpoint_id"],
-                                 "created_at": snap.get("created_at"),
-                                 "path": path,
-                             }, indent=2))
+    ptr_path = _continuity_latest_path(args.team, args.agent)
+    # MONOTONICITY, best-effort. There is no conditional write in this store
+    # (upstream register U3), so two snapshots racing can land out of order and
+    # an OLDER invocation can clobber a newer pointer. Read-then-write closes
+    # the common case; it cannot close the race, and it does not pretend to.
+    prev_ts = None
+    prev_raw = transport.read(ptr_path)
+    if prev_raw is not None:
+        try:
+            prev_ts = continuity._parse_created_at(json.loads(prev_raw).get("created_at"))
+        except (ValueError, TypeError, AttributeError):
+            prev_ts = None
+    mine_ts = continuity._parse_created_at(snap.get("created_at"))
+    if prev_ts is not None and mine_ts is not None and prev_ts > mine_ts:
+        print(f"continuity snapshot: LEFT the existing LATEST pointer alone — it "
+              f"names a NEWER checkpoint than this one, so overwriting it would "
+              f"move {args.agent}'s reported age BACKWARDS.", file=sys.stderr)
+        ptr_ok = True
+    else:
+        ptr_ok = transport.write(ptr_path, json.dumps({
+            "schema": "coord.continuity-latest.v1",
+            "agent": args.agent,
+            "task": task,
+            "checkpoint_id": snap["checkpoint_id"],
+            "created_at": snap.get("created_at"),
+            "path": path,
+        }, indent=2))
     if ptr_ok is False:
-        # NOT fatal: the snapshot IS saved, which is what the caller asked for.
-        # But the audit that reads this pointer will now report UNKNOWN for this
-        # agent, and saying so here is cheaper than someone later wondering why
-        # a live agent looks unaudited.
+        # codex-reviewer, 585 r1: a FAILED pointer update does not make the
+        # pointer missing. If an older LATEST.json is already there it SURVIVES,
+        # and the audit then reads a stale timestamp as authoritative and calls
+        # an agent who just checkpointed STALE — manufacturing exactly the false
+        # finding this design claims to prevent, and making the message below
+        # ("will report UNKNOWN") a lie.
+        #
+        # With no conditional write, the only way to stop a stale cache being
+        # believed is to REMOVE it. Deleting loses nothing recoverable: the
+        # pointer is a cache, the snapshots behind it are untouched, and a
+        # missing pointer is UNKNOWN, which is the honest answer here.
+        stale_gone = True
+        if prev_raw is not None:
+            stale_gone = (transport.delete(ptr_path)
+                          if hasattr(transport, "delete") else False)
+        if stale_gone is False:
+            # Unrecoverable by this process: a stale pointer is in place and
+            # will be read as current. That is a WRONG ANSWER waiting to be
+            # given, not a degradation, so it is the loudest thing this verb
+            # says and it changes the exit code.
+            print(f"continuity snapshot: SAVED, but the LATEST pointer for "
+                  f"{args.agent} could not be updated OR removed. A STALE "
+                  f"pointer is still in place and `health` will read it as "
+                  f"current — it may report this agent stale while they are "
+                  f"actively checkpointing. Remove "
+                  f"{ptr_path} by hand, or re-run when the store is healthy.",
+                  file=sys.stderr)
+            return 3
         print(f"continuity snapshot: saved, but the LATEST pointer for "
-              f"{args.agent} was not written — `health` will report this agent's "
-              f"snapshot age as UNKNOWN until the next successful snapshot.",
-              file=sys.stderr)
+              f"{args.agent} was not written"
+              + (" (the previous one was removed, so nothing stale survives)"
+                 if prev_raw is not None else "")
+              + f" — `health` will report this agent's snapshot age as UNKNOWN "
+                f"until the next successful snapshot.", file=sys.stderr)
     # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
     # not in the store would be a visualization of work that does not exist.
     _checkpoint_moment(transport, args.team, snap, path)
