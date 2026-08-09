@@ -2152,9 +2152,21 @@ def _role_degraded_row(roles_unknown: "set[str] | list[str]") -> dict[str, Any]:
 
 
 def _role_degraded_line(r: dict[str, Any]) -> str:
+    # "assignee token(s)", not "roles". On the pre-budget path
+    # `_held_roles_for_rows` returns its RAW candidate set — every distinct
+    # assignee on the rows — because the budget was already spent before the
+    # roles listing that would tell us which of them are roles at all. So this
+    # line can name plain agent identities, and calling them roles states
+    # something we did not check. Mid-scan the set IS filtered to real roles;
+    # one wording that is true of both beats a second message that drifts.
+    #
+    # It over-reports UNKNOWN and never under-reports, which is the safe
+    # direction — the point of the fix is that the words match the evidence.
+    # (coord-boss, P3 fidelity note on 560.)
     return (f"  role resolution degraded: {', '.join(r.get('roles') or [])} — "
-            f"your role inbox is unknown (not empty); role-routed work may be "
-            f"missing, retry")
+            f"membership unresolved for these assignee token(s); your role "
+            f"inbox is unknown (not empty), role-routed work may be missing, "
+            f"retry")
 
 
 def _held_roles_for_rows(
@@ -2247,6 +2259,14 @@ def _held_roles_for_rows(
         # candidate is UNKNOWN. Return that, having spent nothing.
         # (Found by coord-opus-worker reviewing PR 559; it is the same
         # pre-budget class this function's own docstring names four lines up.)
+        #
+        # NOTE the fidelity limit, deliberately accepted: these are RAW
+        # candidates — every distinct assignee on the rows — not roles. Telling
+        # them apart needs the roles listing, which is the one blocking op this
+        # branch exists to avoid paying for. So the set can include plain agent
+        # identities, it over-reports UNKNOWN and never under-reports, and the
+        # degraded LINE is worded for that ("assignee token(s)", not "roles")
+        # rather than asserting a membership nobody checked.
         return set(), set(candidates)
     if candidates:
         # Prime the cache `_role_fresh_holders` already consults, and use it to
