@@ -225,7 +225,12 @@ under `skills/`, each package with its own README, build, and tests.
   `review status` run to CHECK a closure destroyed it. Refusing costs nothing:
   the cache exists so the fan-out fold can skip the slug, and a MERGED marker
   already makes it skip. **Both the delete AND the write need the guard**;
-  fixing one is the neighbour trap.
+  fixing one is the neighbour trap. And the write overwrites ONLY a positively
+  identified CACHE or a positively ABSENT marker — an UNKNOWN one (unreadable,
+  unrecognised `state:`, or a FUTURE schema) is preserved and reported, because
+  a marker this build cannot classify is not a marker it can prove is its own
+  disposable cache. A `review-settled/v2` marker written by a newer build must
+  survive an older build's refresh.
 - Date/clock tests: a module that fixes a top-level `NOW` for its data must also
   **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
   `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving

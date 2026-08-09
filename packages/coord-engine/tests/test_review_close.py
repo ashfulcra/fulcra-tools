@@ -418,3 +418,62 @@ def test_the_cache_IS_written_when_no_evidence_is_there(capsys):
     capsys.readouterr()
     assert cli.main(["review", "status", "r", "pr-n"], transport=t) == 0
     assert cli._classify_settled_marker(t, "r", "pr-n") == cli.SETTLED_CACHE
+
+
+def _settleable(t, slug):
+    t.put(f"team/r/review/{slug}.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
+    t.put(f"team/r/review/{slug}/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+
+
+def test_a_FUTURE_schema_marker_is_preserved_not_overwritten(capsys):
+    """codex-reviewer, 588 r1, reproduced exactly. r1 guarded MERGED and left
+    SETTLED_UNKNOWN clobberable — even though the classifier's whole contract is
+    that only `cache` is disposable, precisely because an unrecognised or
+    future-schema marker is one this build cannot prove is ours to drop.
+
+    A `review-settled/v2` marker carrying a real merge sha classified UNKNOWN
+    and was then replaced by the v1 APPROVED cache: evidence written by a NEWER
+    build, destroyed by an older one."""
+    t = FakeTransport()
+    _settleable(t, "pr-fut")
+    sha = "c" * 40
+    t.put(cli._settled_marker_path("r", "pr-fut"),
+          f"---\nschema: review-settled/v2\nstate: MERGED\nmerge_sha: {sha}\n---\n")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-fut"], transport=t)
+    err = capsys.readouterr().err
+    raw = t.read(cli._settled_marker_path("r", "pr-fut")) or ""
+    assert "review-settled/v2" in raw and sha in raw, \
+        "a future-schema marker must survive an older build's cache refresh"
+    assert rc == 3 and "cannot classify" in err and "PRESERVED" in err
+
+
+def test_an_unreadable_existing_marker_is_preserved_not_overwritten(capsys):
+    """The other UNKNOWN shape: the marker exists and this build cannot read it.
+    Absence is unprovable, so the cache must not be stamped over it."""
+    class NoMarkerRead(FakeTransport):
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None            # unreadable, NOT absent
+            return super().read(path)
+
+    t = NoMarkerRead()
+    _settleable(t, "pr-unr")
+    t.put(cli._settled_marker_path("r", "pr-unr"), "opaque-to-this-build")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-unr"], transport=t)
+    assert rc == 3
+    assert t.read.__self__.store[cli._settled_marker_path("r", "pr-unr")] \
+        == "opaque-to-this-build", "the unreadable marker must be untouched"
+
+
+def test_a_positively_absent_marker_is_still_written(capsys):
+    """The control: preserving UNKNOWN must not break the first settle, which is
+    the whole reason the cache exists."""
+    t = FakeTransport()
+    _settleable(t, "pr-new")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-new"], transport=t) == 0
+    assert cli._classify_settled_marker(t, "r", "pr-new") == cli.SETTLED_CACHE

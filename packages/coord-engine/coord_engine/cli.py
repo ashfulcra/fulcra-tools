@@ -1658,7 +1658,7 @@ def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
     return SETTLED_UNKNOWN
 
 
-def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
+def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> str:
     """Best-effort settled-cache write. Failure is swallowed: the marker only
     speeds the fan-out fold; its absence just means the next fold recomputes.
 
@@ -1676,15 +1676,38 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> 
     and loses the only durable record that the PR landed.
     """
     try:
-        if _classify_settled_marker(transport, team, slug) == SETTLED_MERGED:
-            return
+        # Overwrite ONLY a positively-identified CACHE, or a positively ABSENT
+        # marker. Everything else is preserved.
+        #
+        # r1 of this fix guarded MERGED and left SETTLED_UNKNOWN clobberable —
+        # even though the classifier's whole contract is that only `cache` is
+        # disposable, precisely because an unreadable / unrecognised /
+        # FUTURE-schema marker is one this build cannot prove is ours to drop.
+        # codex-reviewer reproduced it with a `review-settled/v2` marker
+        # carrying a real merge sha: classified UNKNOWN, then overwritten by the
+        # v1 APPROVED cache. Guarded the case I was thinking about and left its
+        # neighbour — the same shape as the delete-vs-write split this PR exists
+        # to close, one level in.
+        #
+        # The absence check costs ONE listing, and only when the read came back
+        # empty. A slug settles once and is skipped by the fold forever after,
+        # so that is one listing per slug lifetime, not per fold.
+        state = _classify_settled_marker(transport, team, slug)
+        if state != SETTLED_CACHE:
+            if state != SETTLED_UNKNOWN:
+                return "kept-merged"
+            if _settled_marker_present(transport, team, slug) is not False:
+                # Present-but-unclassifiable, or presence itself unknown. Either
+                # way we cannot prove it is a cache, so it stays.
+                return "kept-unknown"
         transport.write(
             _settled_marker_path(team, slug),
             okf.render_frontmatter({"schema": "review-settled/v1",
                                     "state": review.APPROVED, "ts": now}),
         )
+        return "written"
     except Exception:
-        pass
+        return "unknown-error"
 
 
 #: A merge sha is EVIDENCE, so it must look like one. Closure that accepts an
@@ -3610,7 +3633,17 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     if _is_settleable(result):
         # PROVEN terminal-settled (non-empty required, every listed verdict read):
         # refresh the fold cache so the fan-out fold can skip this slug next time.
-        _write_settled_marker(transport, team, slug, now=_iso(_now()))
+        if _write_settled_marker(transport, team, slug,
+                                 now=_iso(_now())) == "kept-unknown":
+            # Same register as the F4 branch below: a marker this build cannot
+            # classify was PRESERVED, and the caller must not read a clean tally
+            # as "everything here is understood" (codex-reviewer, 588 r1 —
+            # report consistently with the existing unknown-marker discipline).
+            print(f"review status: {slug} carries a `.settled` marker this "
+                  f"build cannot classify — unreadable, an unrecognised "
+                  f"state:, or a FUTURE schema. PRESERVED, and the settled "
+                  f"cache was NOT refreshed over it.", file=sys.stderr)
+            _marker_unknown = True
     else:
         # F4: a full, trustworthy tally that is NOT settleable, yet a `.settled`
         # marker may linger. Which of the marker's TWO meanings it carries decides
