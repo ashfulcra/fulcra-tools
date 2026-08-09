@@ -72,11 +72,25 @@ def _beat(t, team, agent, hours_ago):
     t.put(f"team/{team}/presence/{agent}.md", okf.render_frontmatter(fm) + f"\n# Presence: {agent}\n")
 
 
-def _snap(t, team, agent, task, hours_ago):
+def _snap(t, team, agent, task, hours_ago, *, pointer=True):
+    """A snapshot AND its LATEST pointer, which is what a real save writes.
+
+    The audit reads the pointer, not the task documents — a directory listing
+    carries no mtime, so finding the newest snapshot otherwise costs one read
+    per task (upstream register U8). `pointer=False` models the pre-pointer
+    world, or a pointer write that failed: the agent has snapshots the audit
+    cannot date."""
     snap = continuity.build_snapshot(
         agent=agent, task=task, objective="o",
         now=_iso(PINNED_NOW - timedelta(hours=hours_ago)))
     t.put(cli._continuity_path(team, agent, task), json.dumps(snap))
+    if pointer:
+        t.put(cli._continuity_latest_path(team, agent), json.dumps({
+            "schema": "coord.continuity-latest.v1", "agent": agent, "task": task,
+            "checkpoint_id": snap["checkpoint_id"],
+            "created_at": snap.get("created_at"),
+            "path": cli._continuity_path(team, agent, task),
+        }))
 
 
 def test_health_flags_fresh_presence_missing_snapshot(capsys):
@@ -110,12 +124,27 @@ def test_health_survives_malformed_snapshot_and_still_flags_from_valid_data(caps
     _beat(t, "r", "erin", 1)
     t.put(cli._continuity_path("r", "erin", "bad"), "{not json")
     _snap(t, "r", "erin", "t1", 2)
-    assert cli.main(["health", "r"], transport=t) in (0, 1)
-    out = capsys.readouterr().out
-    flagged = [ln for ln in out.splitlines() if "continuity-stale" in ln]
-    assert any("carol" in ln and "missing" in ln for ln in flagged)
-    assert any("dan" in ln and "stale (30.0h)" in ln for ln in flagged)
-    assert not any("erin" in ln for ln in flagged)
+    # SEMANTICS CHANGED WITH THE POINTER, and in the honest direction. carol has
+    # a snapshot shard — it is merely unreadable — so the old "snapshot missing"
+    # was the absent-vs-unreadable conflation this codebase keeps paying for.
+    # She is now UNKNOWN. dan is the CONTRAST that keeps this honest: he has a
+    # valid pointer at a 30h-old snapshot, so he is still proven stale, and a
+    # corrupt shard beside it does not shadow that evidence — which was this
+    # test's original point and still holds.
+    #
+    # The transitional cost is explicit elsewhere: a PRE-pointer agent reads
+    # UNKNOWN until their next snapshot writes one (see
+    # test_a_missing_pointer_is_UNKNOWN_not_stale). Losing a finding is the
+    # right trade against manufacturing one — and an agent with NO snapshots at
+    # all is still flagged (test_health_flags_fresh_presence_missing_snapshot).
+    assert cli.main(["health", "r", "--json"], transport=t) in (0, 1)
+    view = json.loads(capsys.readouterr().out)
+    stale = {row.get("agent") for row in view.get("continuity_stale", [])}
+    unknown = set(view.get("continuity_unknown", []))
+    assert "carol" in unknown and "carol" not in stale, "a shard exists; it is not missing"
+    assert "dan" in stale and "dan" not in unknown, \
+        "a valid pointer at an old snapshot is still proven staleness"
+    assert "erin" not in stale and "erin" not in unknown, "fresh pointer -> clean"
 
 
 # --- cmd_health wiring (JSON path) -------------------------------------------
@@ -141,3 +170,163 @@ def test_health_json_continuity_stale_empty_when_clean(capsys):
     assert cli.main(["health", "r", "--json"], transport=t) in (0, 1)
     payload = json.loads(capsys.readouterr().out)
     assert payload["continuity_stale"] == []
+
+
+# --- the pointer, and what a MISSING one must not be mistaken for -----------
+
+def test_a_missing_pointer_is_UNKNOWN_not_stale(capsys):
+    """The load-bearing refusal. An agent with snapshots but no LATEST pointer
+    (pre-pointer history, or a pointer write that failed) must NOT be flagged
+    stale: the audit cannot date them, and "we could not tell" is not evidence
+    that they stopped checkpointing.
+
+    I built the zero-read version of this audit first and it declared every
+    agent in the fleet stale, because it read mtimes off directory entries that
+    carry none. That is the shape this test exists to keep out."""
+    t = FakeTransport()
+    _beat(t, "r", "erin", 1)
+    _snap(t, "r", "erin", "t1", 2, pointer=False)   # fresh work, no pointer
+    capsys.readouterr()
+    assert cli.main(["health", "r", "--json"], transport=t) in (0, 1)
+    view = json.loads(capsys.readouterr().out)
+    assert "erin" not in [row.get("agent") for row in view.get("continuity_stale", [])], \
+        "an undatable agent must not be accused of going stale"
+    assert "erin" in view.get("continuity_unknown", []), \
+        "and it must be REPORTED as unknown, not silently dropped"
+
+
+def test_the_audit_costs_one_read_per_agent(capsys):
+    """The whole point of the pointer. The previous shape read every snapshot
+    document of every agent — 203 reads / ~149s for three real agents — and the
+    verb was killed at 240s and again at 590s on a live store."""
+    class Counting(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.snapshot_reads = 0
+
+        def read(self, path):
+            if "/continuity/" in path:
+                self.snapshot_reads += 1
+            return super().read(path)
+
+    t = Counting()
+    _beat(t, "r", "frank", 1)
+    for i in range(12):                      # twelve tasks, one agent
+        _snap(t, "r", "frank", f"t{i}", 2)
+    t.snapshot_reads = 0
+    capsys.readouterr()
+    cli.main(["health", "r"], transport=t)
+    assert t.snapshot_reads == 1, (
+        f"one read per agent regardless of task count; got {t.snapshot_reads}")
+
+
+def test_the_pointer_is_written_only_after_the_snapshot_persists(capsys):
+    """A pointer to a checkpoint that does not exist is worse than no pointer:
+    a reader takes it as evidence of a save that never happened."""
+    class Dark(FakeTransport):
+        def write(self, path, content):
+            return False
+
+    t = Dark()
+    capsys.readouterr()
+    rc = cli.main(["continuity", "snapshot", "r", "gina", "slug",
+                   "--objective", "o", "--next", "n"], transport=t)
+    assert rc == 3, "the snapshot itself failed, so this is degraded"
+    assert t.read(cli._continuity_latest_path("r", "gina")) is None, \
+        "no pointer may survive a snapshot that did not persist"
+
+
+def test_a_successful_snapshot_WRITES_the_pointer(capsys):
+    """The actuator test. Without it the whole pointer scheme is unpinned:
+    every other test here builds the pointer in its own fixture, so deleting
+    the writer entirely leaves them all green — I checked, by deleting it.
+
+    The audit is only cheap because this write happens."""
+    t = FakeTransport()
+    capsys.readouterr()
+    rc = cli.main(["continuity", "snapshot", "r", "hank", "some-task",
+                   "--objective", "o", "--next", "n"], transport=t)
+    assert rc == 0
+    raw = t.read(cli._continuity_latest_path("r", "hank"))
+    assert raw is not None, "a successful snapshot must leave a LATEST pointer"
+    ptr = json.loads(raw)
+    assert ptr["task"] == "some-task"
+    assert ptr["schema"] == "coord.continuity-latest.v1"
+    assert ptr["path"] == cli._continuity_path("r", "hank", "some-task")
+    assert ptr.get("created_at"), "the pointer must carry the timestamp the audit reads"
+
+
+def test_a_failed_pointer_update_removes_the_STALE_one(capsys):
+    """codex-reviewer, 585 r1, reproduced exactly: an OLD pointer plus a failed
+    pointer update is not 'pointer missing'. The old file survives, the audit
+    reads its timestamp as authoritative, and an agent who JUST checkpointed is
+    reported stale — the false finding this design claims to prevent, and it
+    made my own failure message ('will report UNKNOWN') a lie.
+
+    With no conditional write, the only way to stop a stale cache being believed
+    is to remove it. Deleting loses nothing recoverable: the pointer is a cache,
+    the snapshots behind it are untouched, and missing means UNKNOWN."""
+    class PointerWriteFails(FakeTransport):
+        def write(self, path, content):
+            if path.endswith("/continuity/LATEST.json"):
+                return False
+            return super().write(path, content)
+
+    t = PointerWriteFails()
+    _beat(t, "r", "iris", 1)
+    _snap(t, "r", "iris", "old", 30)            # an OLD snapshot AND pointer
+    capsys.readouterr()
+    # ...now a fresh snapshot saves, but its pointer update fails.
+    cli.main(["continuity", "snapshot", "r", "iris", "fresh",
+              "--objective", "o", "--next", "n"], transport=t)
+    assert t.read(cli._continuity_latest_path("r", "iris")) is None, \
+        "the stale pointer must be REMOVED, not left to be read as current"
+
+    capsys.readouterr()
+    cli.main(["health", "r", "--json"], transport=t)
+    view = json.loads(capsys.readouterr().out)
+    stale = {row.get("agent") for row in view.get("continuity_stale", [])}
+    assert "iris" not in stale, "an agent who just checkpointed is not stale"
+    assert "iris" in view.get("continuity_unknown", [])
+
+
+def test_an_unremovable_stale_pointer_is_rc3_and_says_so(capsys):
+    """If the stale pointer can be neither updated nor removed, a wrong answer
+    is queued up and this process cannot stop it. That is not a degradation to
+    mention in passing — it is the loudest thing the verb says."""
+    class Stuck(FakeTransport):
+        def write(self, path, content):
+            if path.endswith("/continuity/LATEST.json"):
+                return False
+            return super().write(path, content)
+
+        def delete(self, path):
+            return False
+
+    t = Stuck()
+    _snap(t, "r", "jane", "old", 30)
+    capsys.readouterr()
+    rc = cli.main(["continuity", "snapshot", "r", "jane", "fresh",
+                   "--objective", "o", "--next", "n"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3
+    assert "STALE pointer is still in place" in err
+    assert "may report this agent stale while they are actively checkpointing" in err
+
+
+def test_an_older_snapshot_does_not_move_the_pointer_backwards(capsys, monkeypatch):
+    """Monotonicity, best-effort. Two snapshots racing can land out of order and
+    an OLDER invocation can clobber a newer pointer, reporting an active agent
+    as older than they are. Read-then-write closes the common case; with no
+    conditional write it cannot close the race, and the comment says so."""
+    t = FakeTransport()
+    _snap(t, "r", "kip", "recent", 1)           # pointer at 1h ago
+    before = t.read(cli._continuity_latest_path("r", "kip"))
+    capsys.readouterr()
+    # An older invocation finishes late and tries to publish its own pointer.
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW - timedelta(hours=20))
+    cli.main(["continuity", "snapshot", "r", "kip", "older",
+              "--objective", "o", "--next", "n"], transport=t)
+    after = t.read(cli._continuity_latest_path("r", "kip"))
+    assert after == before, "an older snapshot must not move the pointer backwards"
+    assert "BACKWARDS" in capsys.readouterr().err

@@ -3702,6 +3702,23 @@ def _continuity_path(team: str, agent: str, task: str) -> str:
     return f"team/{team}/member/{agent}/continuity/{task}/latest.json"
 
 
+def _continuity_latest_path(team: str, agent: str) -> str:
+    """One pointer per agent naming their newest snapshot.
+
+    Exists because a listing cannot date a COLLECTION: 0 of 161 directory
+    entries under an agent's continuity prefix carry an mtime, and task dirs are
+    slugs with no ordering, so "when did this agent last checkpoint" otherwise
+    costs one read per task. Measured: 203 reads ~149s for three agents, which
+    is why `health` was killed at 240s and again at 590s. Upstream register U8.
+
+    A write-side pointer converts that to ONE read per agent. It is a
+    convention, not an invariant — the store has no conditional write and
+    nothing forces a writer to maintain it — which is exactly why the reader
+    treats a MISSING pointer as UNKNOWN rather than as "no snapshots".
+    """
+    return f"team/{team}/member/{agent}/continuity/LATEST.json"
+
+
 def _continuity_prefix(team: str, agent: str) -> str:
     return f"team/{team}/member/{agent}/continuity/"
 
@@ -3757,6 +3774,72 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 3
     print(f"snapshot {snap['checkpoint_id']}")
+    # The pointer is written only AFTER the snapshot itself is known-persisted.
+    # A pointer to a checkpoint that does not exist is worse than no pointer: a
+    # reader would take it as evidence of a save that never happened, which is
+    # the failure this whole verb was just fixed for.
+    ptr_path = _continuity_latest_path(args.team, args.agent)
+    # MONOTONICITY, best-effort. There is no conditional write in this store
+    # (upstream register U3), so two snapshots racing can land out of order and
+    # an OLDER invocation can clobber a newer pointer. Read-then-write closes
+    # the common case; it cannot close the race, and it does not pretend to.
+    prev_ts = None
+    prev_raw = transport.read(ptr_path)
+    if prev_raw is not None:
+        try:
+            prev_ts = continuity._parse_created_at(json.loads(prev_raw).get("created_at"))
+        except (ValueError, TypeError, AttributeError):
+            prev_ts = None
+    mine_ts = continuity._parse_created_at(snap.get("created_at"))
+    if prev_ts is not None and mine_ts is not None and prev_ts > mine_ts:
+        print(f"continuity snapshot: LEFT the existing LATEST pointer alone — it "
+              f"names a NEWER checkpoint than this one, so overwriting it would "
+              f"move {args.agent}'s reported age BACKWARDS.", file=sys.stderr)
+        ptr_ok = True
+    else:
+        ptr_ok = transport.write(ptr_path, json.dumps({
+            "schema": "coord.continuity-latest.v1",
+            "agent": args.agent,
+            "task": task,
+            "checkpoint_id": snap["checkpoint_id"],
+            "created_at": snap.get("created_at"),
+            "path": path,
+        }, indent=2))
+    if ptr_ok is False:
+        # codex-reviewer, 585 r1: a FAILED pointer update does not make the
+        # pointer missing. If an older LATEST.json is already there it SURVIVES,
+        # and the audit then reads a stale timestamp as authoritative and calls
+        # an agent who just checkpointed STALE — manufacturing exactly the false
+        # finding this design claims to prevent, and making the message below
+        # ("will report UNKNOWN") a lie.
+        #
+        # With no conditional write, the only way to stop a stale cache being
+        # believed is to REMOVE it. Deleting loses nothing recoverable: the
+        # pointer is a cache, the snapshots behind it are untouched, and a
+        # missing pointer is UNKNOWN, which is the honest answer here.
+        stale_gone = True
+        if prev_raw is not None:
+            stale_gone = (transport.delete(ptr_path)
+                          if hasattr(transport, "delete") else False)
+        if stale_gone is False:
+            # Unrecoverable by this process: a stale pointer is in place and
+            # will be read as current. That is a WRONG ANSWER waiting to be
+            # given, not a degradation, so it is the loudest thing this verb
+            # says and it changes the exit code.
+            print(f"continuity snapshot: SAVED, but the LATEST pointer for "
+                  f"{args.agent} could not be updated OR removed. A STALE "
+                  f"pointer is still in place and `health` will read it as "
+                  f"current — it may report this agent stale while they are "
+                  f"actively checkpointing. Remove "
+                  f"{ptr_path} by hand, or re-run when the store is healthy.",
+                  file=sys.stderr)
+            return 3
+        print(f"continuity snapshot: saved, but the LATEST pointer for "
+              f"{args.agent} was not written"
+              + (" (the previous one was removed, so nothing stale survives)"
+                 if prev_raw is not None else "")
+              + f" — `health` will report this agent's snapshot age as UNKNOWN "
+                f"until the next successful snapshot.", file=sys.stderr)
     # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
     # not in the store would be a visualization of work that does not exist.
     _checkpoint_moment(transport, args.team, snap, path)
@@ -8472,16 +8555,54 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     now_dt = _now()
     pres_rows: list[dict[str, Any]] = []
     snap_rows: list[dict[str, Any]] = []
+    unknown_snapshot_agents: list[str] = []
     for r in presence.roster(_presence_shards(transport, args.team), now=_iso(now_dt)):
         pts = roles._parse(r.get("last_seen"))
         if pts is None:
             continue
         pres_rows.append({"agent": r["agent"], "ts": pts})
-        for snap in _agent_snapshots(transport, args.team, r["agent"]):
-            sts = continuity._parse_created_at(snap.get("created_at"))
-            if sts is not None:
-                snap_rows.append({"agent": r["agent"], "ts": sts})
+        # ONE read per agent via the LATEST pointer. The previous shape read
+        # EVERY snapshot document of every agent to find the newest, because a
+        # directory listing carries no mtime (upstream register U8) — measured
+        # at 203 reads / ~149s for three agents, which is why this verb was
+        # killed at 240s and again at 590s on a live store.
+        raw = transport.read(_continuity_latest_path(args.team, r["agent"]))
+        sts = None
+        if raw is not None:
+            try:
+                sts = continuity._parse_created_at(json.loads(raw).get("created_at"))
+            except (ValueError, TypeError, AttributeError):
+                sts = None
+        if sts is not None:
+            snap_rows.append({"agent": r["agent"], "ts": sts})
+            continue
+        # No usable pointer. Two very different cases hide here, and collapsing
+        # them is how this audit would start lying:
+        #
+        #   - the agent has NEVER checkpointed -> a real finding, and the one
+        #     this audit exists for;
+        #   - the agent HAS snapshots this build cannot date (pre-pointer
+        #     history, or a pointer write that failed) -> UNKNOWN, and flagging
+        #     it would manufacture a false accusation against someone who is
+        #     working.
+        #
+        # ONE listing separates them, with no reads. It is paid only for agents
+        # without a pointer, so the common path stays one read per agent.
+        try:
+            has_any = any(e.get("is_dir") for e in
+                          transport.list_dir(_continuity_prefix(args.team, r["agent"])))
+        except TransportError:
+            has_any = True   # cannot prove absence -> UNKNOWN, never a finding
+        if has_any:
+            unknown_snapshot_agents.append(r["agent"])
+            pres_rows.pop()  # undatable: it must not reach the staleness fold
+
     flagged_agents = continuity_audit.stale_agents(pres_rows, snap_rows, now=now_dt)
+    # Coverage, stated. "No stale agents" and "we could not tell for N of them"
+    # must not look the same — that equivalence is behind most of the incidents
+    # this layer has logged.
+    if unknown_snapshot_agents:
+        view["continuity_unknown"] = sorted(unknown_snapshot_agents)
     # Same row fields stale_agents returns: agent/presence_age_h/snapshot_age_h.
     view["continuity_stale"] = flagged_agents
     if args.json:

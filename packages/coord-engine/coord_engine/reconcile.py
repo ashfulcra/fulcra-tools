@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import aggregate, config, health as health_mod, jsonutil, model, okf
+from . import aggregate, config, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .log import get_logger
@@ -734,6 +734,7 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
         # costs the per-slug verdict listing this break exists to avoid, so the
         # honest report is the size of the unexamined remainder.
         reviews_unexamined = 0
+        orphans_not_single = 0
         for i, slug in enumerate(sorted(doc_slugs)):
             if archived >= RETENTION_CAP_PER_PASS:
                 reviews_unexamined += len(doc_slugs) - i
@@ -788,7 +789,10 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 str(e.get("name") or "") for e in verdict_entries
                 if not e.get("is_dir") and str(e.get("name") or "").endswith(".md")
             )
-            if verdict_files != ["codex-reviewer.md"]:
+            if len(verdict_files) != 1:
+                # 0 or >1 shards is out of scope for the single-shard sweep, not
+                # an anomaly; counted once below so the skips stay visible.
+                orphans_not_single += 1
                 continue
             filename = verdict_files[0]
             src = verdict_prefix + filename
@@ -797,7 +801,21 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             if fm is None:
                 notes.append(f"retention: review {slug} verdict unreadable; kept hot")
                 continue
-            if fm.get("type") != "Verdict" or fm.get("reviewer") != "codex-reviewer":
+            stem = filename[:-3]
+            reviewer = str(fm.get("reviewer") or "")
+            # Attribution accepts exactly the tally's canonical filename forms:
+            # plain `<reviewer>.md`, or `<exact-head>--<reviewer>.md` with a
+            # canonical 40/64-hex head. A looser prefix (garbage--alice.md) is
+            # unattributable to the tally and must stay hot as the anomaly it is.
+            keyed_prefix = (
+                stem[:-(len(reviewer) + 2)]
+                if stem != reviewer and stem.endswith(f"--{reviewer}") else None)
+            if fm.get("type") != "Verdict" or not reviewer or (
+                    stem != reviewer
+                    and review.normalize_head(keyed_prefix) is None):
+                notes.append(
+                    f"retention: review {slug} verdict {filename} does not "
+                    f"attribute to its filename (reviewer={reviewer!r}); kept hot")
                 continue
             verdict_entry = next(e for e in verdict_entries if e.get("name") == filename)
             if not _quiet_mtime_old_enough(
@@ -820,6 +838,11 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             else:
                 notes.append(f"retention: review move FAILED for {slug}; kept")
 
+        if orphans_not_single:
+            notes.append(
+                f"retention: {orphans_not_single} orphan review dir(s) kept hot "
+                f"without exactly one verdict shard; the single-shard sweep "
+                f"does not judge them")
         if reviews_unexamined:
             notes.append(
                 f"retention: cap reached ({RETENTION_CAP_PER_PASS}/pass) before "

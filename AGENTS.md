@@ -204,6 +204,27 @@ under `skills/`, each package with its own README, build, and tests.
   there, four sites could remove one marker and two greps each found half. Do
   the reader sweep in the same change, and say in the PR which readers you
   checked — "I did not audit the others" is a finding, not a footnote.
+- `health`'s continuity audit reads ONE pointer per agent, not every snapshot.
+  `continuity snapshot` writes `continuity/LATEST.json` after the snapshot
+  itself persists (never before — a pointer to a checkpoint that does not exist
+  is worse than no pointer). The audit reads that. It does this because a
+  directory listing carries no mtime (upstream register U8) and task dirs are
+  unordered slugs, so finding the newest snapshot otherwise costs one read per
+  task: measured 203 reads / ~149s for three agents, and `health` was killed at
+  240s and again at 590s. **A missing pointer is UNKNOWN, never stale** — it
+  means pre-pointer history or a failed pointer write, neither of which is
+  evidence an agent stopped checkpointing. One extra listing (no reads)
+  separates "has snapshots we cannot date" from "has never checkpointed", and
+  only the latter is a finding; `continuity_unknown` reports the rest.
+  **A failed pointer update REMOVES the old pointer.** An update that fails
+  leaves the previous file in place, and the audit then reads a stale timestamp
+  as authoritative and calls an agent who just checkpointed stale — the exact
+  false finding the design exists to prevent. With no conditional write, the
+  only way to stop a stale cache being believed is to delete it; the pointer is
+  a cache, so nothing recoverable is lost. If it can be neither updated nor
+  removed, the verb exits 3 and says a wrong answer is queued up. Pointer
+  updates are also monotonic (best-effort read-then-write): an older snapshot
+  must never move an agent's reported age backwards.
 - Date/clock tests: a module that fixes a top-level `NOW` for its data must also
   **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
   `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving
