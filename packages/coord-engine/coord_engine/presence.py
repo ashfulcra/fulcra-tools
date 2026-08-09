@@ -200,8 +200,17 @@ def _is_lapsed(engagement: dict[str, Any], *, now: str) -> bool:
     return False
 
 
+#: "No work reading was taken." Distinct from a reading that found nothing.
+#: Callers that cannot measure work omit the argument; the row then reports
+#: UNKNOWN rather than implying the agent did nothing — the same rule as a
+#: missing health pointer, which is UNKNOWN and never stale.
+WORK_TS_ABSENT = None
+
+
 def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
-             stale_hours: float = STALE_HOURS) -> dict[str, Any]:
+             stale_hours: float = STALE_HOURS,
+             work_ts: Optional[str] = WORK_TS_ABSENT,
+             work_measured: bool = False) -> dict[str, Any]:
     """Engagement-aware liveness verdict for one presence shard.
 
     Returns ``{state, freshness, annotation, engagement}`` where:
@@ -213,12 +222,41 @@ def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
       - ``annotation`` renders the OTHER axis as a second fact: for a lapsed row,
         the freshness ("still beating … — extend session" vs "stale Nh"); for a
         live row, an occasional/within-window note and a stale-beat nudge.
+
+    ``work_ts`` is the THIRD axis and the newest one: a read-derived timestamp of
+    the agent's most recent work artifact, supplied by the caller. It exists
+    because beat recency cannot see work that does not go through a verb —
+    filing a verdict is not a verb at all (`review request` prints "file verdict
+    at …" and the reviewer writes the shard directly), so a beat-only signal
+    rendered codex-reviewer `stale 6d — nudge` with a verdict 3.5h old.
+
+    Three rules, and they are the whole contract:
+      1. BOTH facts render; they are never fused into one label. A single merged
+         verdict is what made the original signal unfalsifiable — the reader
+         could not see the two measurements disagree.
+      2. The NUDGE — the only imperative this fold emits — requires BOTH axes
+         stale. One fresh axis is enough to establish the agent is working.
+      3. "Nobody measured" and "we measured and found nothing" are DIFFERENT,
+         and only ``work_measured`` tells them apart. Unmeasured rows keep the
+         pre-existing behaviour exactly — muting the nudge for callers that
+         never opted in would trade a false positive for total signal loss, and
+         a genuinely dark agent would stop being surfaced anywhere. Measured-
+         and-empty is a real finding, so its nudge stands and the row says so.
+
+    The fold stays PURE: it never reads the store. The caller measures (mtimes,
+    read-derived) and passes the result in, so the freshness rules stay testable
+    without I/O and the measurement stays auditable at its own call site.
     """
     fm = shard if isinstance(shard, dict) else {}
     ts = fm.get("timestamp")
     freshness = classify(ts, now=now, live_hours=live_hours, stale_hours=stale_hours)
     engagement = parse_engagement(fm)
     if _is_lapsed(engagement, now=now):
+        # Dormancy is a DECLARED window, not a freshness band, so work evidence
+        # must not launder it: an agent working past its declared end is honestly
+        # LAPSED+active, which is the reading the W2 truth table already insists
+        # on. Work evidence answers "is anyone home", never "was this session
+        # authorised to still be running".
         if freshness == "stale":
             annotation = (f"LAPSED (declared session window ended; "
                           f"stale {_ago_label(ts, now)})")
@@ -235,7 +273,31 @@ def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
     elif mode == "session":
         parts.append("within committed window")
     if freshness == "stale":
-        parts.append(f"stale {_ago_label(ts, now)} — nudge")
+        if not work_measured:
+            # NOT MEASURED. Behaviour is byte-identical to before the work axis
+            # existed, and that is deliberate: several callers (briefing,
+            # broadcast_roster, the continuity audit) do not measure, and having
+            # the axis silently mute their nudge would trade a false positive
+            # for total signal loss — the genuinely dark agent would stop being
+            # surfaced anywhere. An un-opted-in caller gets the old contract.
+            parts.append(f"stale {_ago_label(ts, now)} — nudge")
+        elif work_ts and classify(work_ts, now=now, live_hours=live_hours,
+                                  stale_hours=stale_hours) != "stale":
+            # Rules 1 and 2 together: name both ages, withhold the imperative.
+            # The beat really is stale and the row keeps saying so — it is not
+            # laundered, it is completed.
+            parts.append(f"stale {_ago_label(ts, now)} (beat) · "
+                         f"but filed work {_ago_label(work_ts, now)} ago")
+        elif work_ts:
+            parts.append(f"stale {_ago_label(ts, now)} (beat) · "
+                         f"newest work {_ago_label(work_ts, now)} ago — nudge")
+        else:
+            # MEASURED and nothing found. That is a real finding, not an
+            # unknown, so the nudge stands — and the row says which it is, so a
+            # reader can tell "we looked and there was nothing" apart from
+            # "nobody looked".
+            parts.append(f"stale {_ago_label(ts, now)} (beat) · "
+                         f"no work found — nudge")
     return {"state": freshness, "freshness": freshness,
             "annotation": "; ".join(parts), "engagement": engagement}
 
@@ -380,16 +442,30 @@ def engagement_gate(shards: list[dict[str, Any]], defaults: dict[str, Any], *,
 def roster(
     shards: list[dict[str, Any]], *, now: str,
     live_hours: float = LIVE_HOURS, stale_hours: float = STALE_HOURS,
+    work_index: Optional[dict[str, str]] = None,
+    work_measured: bool = False,
 ) -> list[dict[str, Any]]:
-    """Fold presence shards into a deterministic roster (sorted by agent)."""
+    """Fold presence shards into a deterministic roster (sorted by agent).
+
+    ``work_index`` maps agent -> newest work-artifact timestamp, measured by the
+    caller; ``work_measured`` says whether that scan actually COMPLETED. Both
+    are needed, because an agent missing from the index means "no artifacts" only
+    if the scan was whole — a partial scan cannot tell absence from unreadable,
+    and the caller is the only place that knows which it got.
+
+    Omit both and every row keeps the pre-work-axis behaviour exactly.
+    """
     out: list[dict[str, Any]] = []
+    idx = work_index or {}
     for s in shards:
         if not isinstance(s, dict) or not s.get("agent"):
             continue
         ws = s.get("workstreams")
         if not isinstance(ws, list):
             ws = [ws] if ws else []
-        lv = liveness(s, now=now, live_hours=live_hours, stale_hours=stale_hours)
+        lv = liveness(s, now=now, live_hours=live_hours, stale_hours=stale_hours,
+                      work_ts=idx.get(str(s["agent"])),
+                      work_measured=work_measured)
         out.append({
             "agent": str(s["agent"]),
             "workstreams": [str(w) for w in ws],

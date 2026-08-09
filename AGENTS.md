@@ -998,6 +998,18 @@ it (not on PyPI).
   `answer`, `bus-v3 send`, `stash push` …), so an agent whose job IS reviewing rendered `stale — nudge`
   while working: measured that day, codex-reviewer showed `stale 6d` having filed a verdict 3.5h earlier,
   and the roster attaches an imperative to that judgement, so it dispatches people, not just labels them.
+  **The work axis (2026-08-09).** Verb coverage alone still cannot see an agent whose work never
+  passes through a verb — **filing a verdict is not a verb at all** (`review request` prints "file
+  verdict at …" and the reviewer writes the shard itself), and report docs are written straight to the
+  store. So `presence.liveness` takes a third input: `work_ts` (newest work-artifact time, READ-DERIVED
+  by the caller) plus `work_measured`. Three states, and the third is the one that matters:
+  **nobody measured** → behaviour is byte-identical to before the axis existed, because muting the nudge
+  for callers that never opted in (`briefing`, `broadcast_roster`, the continuity audit) would trade a
+  false positive for total signal loss; **measured, work fresh** → both ages render and the nudge is
+  withheld; **measured, nothing found** → a real finding, so the nudge stands and the row says
+  `no work found` rather than pretending to be unsure. `_work_evidence_index` returns `(index, ok)` —
+  only a scan that COMPLETED licenses the absence reading, since `list_dir` cannot tell an empty
+  directory from an unreadable one. Both facts always render separately; they are never fused.
   **Adding a READ verb is now the deliberate act** — name it in `_ACTIVITY_READ_FUNCS`;
   `tests/test_activity_covers_every_write_verb.py` fails on any store-writing verb left uncovered, and
   every exemption there carries its reason. The hook lives

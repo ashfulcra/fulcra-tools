@@ -6802,8 +6802,88 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+#: Directories whose entries are dated WORK ARTIFACTS attributable to an agent.
+#: Each is a positive finding: a file here means that agent did something at
+#: that time. Nothing here can prove the converse — an agent missing from the
+#: scan is UNKNOWN, never idle.
+def _work_evidence_index(
+    transport: Any, team: str
+) -> tuple[dict[str, str], bool]:
+    """Newest work-artifact timestamp per agent, READ-DERIVED (coord-boss's
+    third guardrail: measured mtimes, never inference).
+
+    Scans the two places an agent's work lands WITHOUT passing through a verb,
+    which is exactly the blind spot a beat-only signal has:
+
+      - ``review/<slug>/verdicts/<head>--<reviewer>.md`` — filing a verdict is
+        not a verb at all; `review request` prints the path and the reviewer
+        writes the shard itself.
+      - ``_coord/agents/<agent>/reports/*`` — report docs, likewise written
+        straight to the store.
+
+    Returns ``(index, ok)``. Every entry found is a true positive regardless, but
+    ``ok`` is what licenses the ABSENCE reading: only a scan that completed can
+    say "this agent has no recent artifact" rather than "we did not see one".
+    A listing that raises or returns ``None`` sets ``ok=False`` — `list_dir`
+    cannot tell a real empty directory from an unreadable one, so a partial scan
+    that silently reported absence would nudge working agents all over again,
+    one layer down.
+    """
+    newest: dict[str, str] = {}
+    ok = True
+
+    def _note(agent: str, mtime: Any) -> None:
+        # Store mtimes render on a TWELVE-HOUR clock ("2026-08-09 01:14AM UTC"),
+        # so comparing them as strings inverts the midnight hour — 12AM sorts
+        # after every other hour, and a "newest" picked that way can be older
+        # than what it beat. Normalize to a UTC ISO instant FIRST, then compare;
+        # `aggregate._parse_store_mtime` is the existing parser and stays the
+        # single implementation.
+        if not agent or not isinstance(mtime, str):
+            return
+        dt = aggregate._parse_store_mtime(mtime)
+        if dt is None:
+            return
+        iso = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if agent not in newest or iso > newest[agent]:
+            newest[agent] = iso
+
+    def _entries(path: str) -> list[dict[str, Any]]:
+        nonlocal ok
+        try:
+            rows = transport.list_dir(path)
+        except TransportError:
+            ok = False
+            return []
+        if rows is None:       # UNKNOWN, not empty — same ambiguity, no raise
+            ok = False
+            return []
+        return rows
+
+    for row in _entries(f"team/{team}/review"):
+        name = str(row.get("name") or "")
+        if not name.endswith("/"):
+            continue
+        for v in _entries(f"team/{team}/review/{name.rstrip('/')}/verdicts"):
+            vn = str(v.get("name") or "")
+            # `<40-hex head>--<reviewer>.md` — the reviewer is the attribution.
+            if "--" in vn and vn.endswith(".md"):
+                _note(vn.rsplit("--", 1)[1][:-3], v.get("mtime"))
+
+    for row in _entries(f"team/{team}/_coord/agents"):
+        name = str(row.get("name") or "").rstrip("/")
+        if not name:
+            continue
+        for r in _entries(f"team/{team}/_coord/agents/{name}/reports"):
+            _note(name, r.get("mtime"))
+
+    return newest, ok
+
+
 def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
-    ros = presence.roster(_presence_shards(transport, args.team), now=_iso(_now()))
+    work_index, work_ok = _work_evidence_index(transport, args.team)
+    ros = presence.roster(_presence_shards(transport, args.team), now=_iso(_now()),
+                          work_index=work_index, work_measured=work_ok)
     if args.json:
         jsonutil.print_json(ros)
         return 0
