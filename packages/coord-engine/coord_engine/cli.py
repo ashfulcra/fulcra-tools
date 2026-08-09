@@ -1531,6 +1531,23 @@ def _review_fold_budget() -> float:
     return config.env_float("COORD_REVIEW_FOLD_BUDGET", DEFAULT_REVIEW_FOLD_BUDGET)
 
 
+#: Aggregate deadline for `presence show`'s work-evidence scan, seconds.
+#: `presence show` is a DIRECT command with no surrounding add-on stack to
+#: borrow a deadline from, so it opens its own. 20s is deliberately below the
+#: review-fold budget: this scan lists every review's `verdicts/` directory (435
+#: on the live store today) plus each agent's reports, and it is decorating a
+#: roster — a slow truthful answer is worse here than a fast one that says which
+#: part it did not reach, which the PARTIAL rendering does.
+DEFAULT_PRESENCE_WORK_BUDGET = 20.0
+
+
+def _presence_work_budget() -> float:
+    """Deadline for the `presence show` work-evidence scan, seconds. Env
+    ``COORD_PRESENCE_WORK_BUDGET`` (see DEFAULT_PRESENCE_WORK_BUDGET)."""
+    return config.env_float("COORD_PRESENCE_WORK_BUDGET",
+                            DEFAULT_PRESENCE_WORK_BUDGET)
+
+
 def _briefing_budget() -> float:
     """Shared aggregate deadline (seconds) for the briefing/needs-me add-on stack.
     Env ``COORD_BRIEFING_BUDGET`` (see the DEFAULT_BRIEFING_BUDGET rationale). One
@@ -6373,7 +6390,18 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     try:
         shards, pres_degraded = _presence_shards_bounded(
             transport, args.team, deadline=add_on.instant)
-        out["presence"] = presence.roster(shards, now=now)
+        # BRIEFING MEASURES WORK (coord-boss ruling, 2026-08-09): it feeds
+        # dispatch decisions, and a false nudge is the one thing it must never
+        # emit. Bounded by the SAME add-on deadline as the shard read, and a
+        # scan that runs out of budget reports PARTIAL — which withholds the
+        # nudge rather than reverting to it. The continuity audit deliberately
+        # does NOT measure; see its own call site.
+        work_index, work_ok = _work_evidence_index(
+            transport, args.team, deadline=add_on.instant)
+        out["presence"] = presence.roster(
+            shards, now=now, work_index=work_index,
+            work_scan=(presence.WORK_SCAN_COMPLETE if work_ok
+                       else presence.WORK_SCAN_PARTIAL))
         if pres_degraded is not None:
             # Same discipline as forge: append the degraded marker to the section
             # list so partial presence knowledge stays VISIBLE (json + text).
@@ -6802,8 +6830,101 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+#: Directories whose entries are dated WORK ARTIFACTS attributable to an agent.
+#: Each is a positive finding: a file here means that agent did something at
+#: that time. Nothing here can prove the converse — an agent missing from the
+#: scan is UNKNOWN, never idle.
+def _work_evidence_index(
+    transport: Any, team: str, *, deadline: Optional[float] = None
+) -> tuple[dict[str, str], bool]:
+    """Newest work-artifact timestamp per agent, READ-DERIVED (coord-boss's
+    third guardrail: measured mtimes, never inference).
+
+    Scans the two places an agent's work lands WITHOUT passing through a verb,
+    which is exactly the blind spot a beat-only signal has:
+
+      - ``review/<slug>/verdicts/<head>--<reviewer>.md`` — filing a verdict is
+        not a verb at all; `review request` prints the path and the reviewer
+        writes the shard itself.
+      - ``_coord/agents/<agent>/reports/*`` — report docs, likewise written
+        straight to the store.
+
+    Returns ``(index, ok)``. Every entry found is a true positive regardless, but
+    ``ok`` is what licenses the ABSENCE reading: only a scan that completed can
+    say "this agent has no recent artifact" rather than "we did not see one".
+    A listing that raises or returns ``None`` sets ``ok=False`` — `list_dir`
+    cannot tell a real empty directory from an unreadable one, so a partial scan
+    that silently reported absence would nudge working agents all over again,
+    one layer down.
+    """
+    newest: dict[str, str] = {}
+    ok = True
+
+    def _note(agent: str, mtime: Any) -> None:
+        # Store mtimes render on a TWELVE-HOUR clock ("2026-08-09 01:14AM UTC"),
+        # so comparing them as strings inverts the midnight hour — 12AM sorts
+        # after every other hour, and a "newest" picked that way can be older
+        # than what it beat. Normalize to a UTC ISO instant FIRST, then compare;
+        # `aggregate._parse_store_mtime` is the existing parser and stays the
+        # single implementation.
+        if not agent or not isinstance(mtime, str):
+            return
+        dt = aggregate._parse_store_mtime(mtime)
+        if dt is None:
+            return
+        iso = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if agent not in newest or iso > newest[agent]:
+            newest[agent] = iso
+
+    def _entries(path: str) -> list[dict[str, Any]]:
+        nonlocal ok
+        if deadline is not None and time.monotonic() >= deadline:
+            ok = False          # out of budget: PARTIAL, never a false absence
+            return []
+        try:
+            rows = transport.list_dir(path)
+        except TransportError:
+            ok = False
+            return []
+        if rows is None:       # UNKNOWN, not empty — same ambiguity, no raise
+            ok = False
+            return []
+        return rows
+
+    for row in _entries(f"team/{team}/review"):
+        name = str(row.get("name") or "")
+        if not name.endswith("/"):
+            continue
+        for v in _entries(f"team/{team}/review/{name.rstrip('/')}/verdicts"):
+            vn = str(v.get("name") or "")
+            # `<40-hex head>--<reviewer>.md` — the reviewer is the attribution.
+            if "--" in vn and vn.endswith(".md"):
+                _note(vn.rsplit("--", 1)[1][:-3], v.get("mtime"))
+
+    for row in _entries(f"team/{team}/_coord/agents"):
+        name = str(row.get("name") or "").rstrip("/")
+        if not name:
+            continue
+        for r in _entries(f"team/{team}/_coord/agents/{name}/reports"):
+            _note(name, r.get("mtime"))
+
+    return newest, ok
+
+
 def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
-    ros = presence.roster(_presence_shards(transport, args.team), now=_iso(_now()))
+    # BOUNDED (codex-reviewer, 591 r3): unbounded, this listed every review's
+    # verdicts dir — 435 on the live store — synchronously, on a command whose
+    # whole job is to print a roster. Its own deadline, since a direct command
+    # has no add-on stack to share one with; expiry degrades to PARTIAL, which
+    # withholds the nudge rather than inventing an absence.
+    work_deadline = Deadline.open(_presence_work_budget())
+    work_index, work_ok = _work_evidence_index(
+        transport, args.team, deadline=work_deadline.instant)
+    ros = presence.roster(
+        _presence_shards(transport, args.team), now=_iso(_now()),
+        work_index=work_index,
+        work_scan=(presence.WORK_SCAN_COMPLETE if work_ok
+                   else presence.WORK_SCAN_PARTIAL))
     if args.json:
         jsonutil.print_json(ros)
         return 0
@@ -8683,6 +8804,11 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     pres_rows: list[dict[str, Any]] = []
     snap_rows: list[dict[str, Any]] = []
     unknown_snapshot_agents: list[str] = []
+    # DELIBERATELY UNMEASURED (coord-boss ruling, 2026-08-09). This audit's
+    # product is CHECKPOINT staleness, not activity: "this agent is working but
+    # not snapshotting" is exactly the finding it exists to make, and folding
+    # work evidence in here would mask it. `presence show` and `briefing` do
+    # measure; this asymmetry is chosen, not an omission.
     for r in presence.roster(_presence_shards(transport, args.team), now=_iso(now_dt)):
         pts = roles._parse(r.get("last_seen"))
         if pts is None:
