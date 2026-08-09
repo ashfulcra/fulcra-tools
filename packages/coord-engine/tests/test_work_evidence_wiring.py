@@ -184,3 +184,79 @@ def test_presence_show_BOUNDS_its_scan_and_degrades_to_partial(capsys, monkeypat
     # And it must actually STOP: no verdicts directory was walked.
     assert not any("verdicts" in p for p in listed), (
         f"the scan continued past its deadline: {listed}")
+
+
+def test_agent_reports_are_scanned_BEFORE_the_review_sweep():
+    """Order is load-bearing, so it is pinned.
+
+    Measured on the live store right after 591 shipped: 35 agent directories vs
+    438 review directories, one listing each. With reviews first, the sweep ate
+    the whole budget every time — at 120s (6x the shipped budget) the scan was
+    still incomplete, having attributed work to THREE agents. PARTIAL withholds
+    the nudge, so a fix aimed at false nudges produced no nudges at all.
+
+    Reordering took the same 20s budget from 2 agents to 11.
+    """
+    order: list[str] = []
+
+    class _Ordered(_Store):
+        def list_dir(self, path):
+            order.append(path)
+            return super().list_dir(path)
+
+    store = _Ordered(
+        dirs={
+            f"team/{TEAM}/_coord/agents": [{"name": "a1/"}],
+            f"team/{TEAM}/_coord/agents/a1/reports": [
+                {"name": "r.md", "mtime": "2026-08-09 09:00AM UTC"}],
+            f"team/{TEAM}/review": [{"name": "pr-1/"}],
+            f"team/{TEAM}/review/pr-1/verdicts": [
+                {"name": "abc--rev.md", "mtime": "2026-08-09 10:00AM UTC"}],
+        },
+        shards={})
+    cli._work_evidence_index(store, TEAM)
+    agents_at = order.index(f"team/{TEAM}/_coord/agents")
+    review_at = order.index(f"team/{TEAM}/review")
+    assert agents_at < review_at, (
+        "the cheap half (35 listings) must run before the expensive one (438), "
+        f"or the budget never reaches it: {order}")
+
+
+def test_a_budget_that_dies_in_the_review_sweep_still_kept_the_agent_evidence():
+    """The behavioural half: partway-through is exactly the live case.
+
+    The scan is PARTIAL on the real store either way, so what matters is WHICH
+    half completed. Agent evidence must survive a cutoff that lands in the
+    review sweep — that is the whole reason for the order.
+    """
+    class _DieAfterAgents(_Store):
+        def list_dir(self, path):
+            # Expire the budget the moment the review sweep begins.
+            if path == f"team/{TEAM}/review":
+                cli.time.monotonic = lambda: 1e9      # type: ignore[assignment]
+            return super().list_dir(path)
+
+    # The deadline is an ABSOLUTE monotonic instant, so it must be in the real
+    # future — my first cut passed 1.0, which is already long past, and the scan
+    # expired before its first listing (empty index, test red for the wrong
+    # reason).
+    real_monotonic = cli.time.monotonic
+    deadline = real_monotonic() + 60.0
+    try:
+        store = _DieAfterAgents(
+            dirs={
+                f"team/{TEAM}/_coord/agents": [{"name": "a1/"}],
+                f"team/{TEAM}/_coord/agents/a1/reports": [
+                    {"name": "r.md", "mtime": "2026-08-09 09:00AM UTC"}],
+                f"team/{TEAM}/review": [{"name": "pr-1/"}],
+                f"team/{TEAM}/review/pr-1/verdicts": [
+                    {"name": "abc--rev.md", "mtime": "2026-08-09 10:00AM UTC"}],
+            },
+            shards={})
+        idx, ok = cli._work_evidence_index(store, TEAM, deadline=deadline)
+    finally:
+        cli.time.monotonic = real_monotonic           # type: ignore[assignment]
+
+    assert idx.get("a1") == "2026-08-09T09:00:00Z", (
+        f"agent evidence was lost to a cutoff in the review sweep: {idx}")
+    assert ok is False, "a cut-off scan must report PARTIAL, never complete"

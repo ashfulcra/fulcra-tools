@@ -1032,7 +1032,13 @@ it (not on PyPI).
   briefing feeds dispatch and a false nudge is what it must never emit, so its scan shares the add-on
   deadline; `presence show` is a direct command with no add-on stack to borrow from, so it opens its own
   (`COORD_PRESENCE_WORK_BUDGET`, default 20s). Unbounded it listed every review's `verdicts/` directory —
-  435 on the live store — synchronously, to decorate a roster (codex-reviewer, 591 r3). Either scan
+  438 on the live store — synchronously, to decorate a roster (codex-reviewer, 591 r3).
+  **Scan order is load-bearing:** agent reports (35 listings) run BEFORE the review sweep (438). With
+  reviews first the sweep consumed the entire budget every time — measured after 591 shipped, a 120s
+  budget (6x the default) was still incomplete with work attributed to THREE agents, and since PARTIAL
+  withholds the nudge that turned the signal off fleet-wide. Reordering took the same 20s budget from
+  2 agents to 11. The scan is still PARTIAL at this store size; the durable fix is a per-agent pointer
+  written when an artifact is written, not a sweep. Either scan
   degrades to PARTIAL on expiry rather than reverting to a nudge. NB `env_float` is a POSITIVE-finite
   knob, so setting a budget to `0` falls back to the default rather than disabling the scan. The **continuity audit deliberately does NOT**: its product
   is checkpoint staleness, not activity, and "working but not snapshotting" is precisely its finding —
