@@ -22,7 +22,8 @@ import json
 
 import pytest
 
-from coord_engine import review_gc
+from coord_engine_test_helpers import FakeTransport
+from coord_engine import cli, review_gc
 
 
 def entry(slug="s", head="a" * 40, superseded_by=None, settled=False,
@@ -911,3 +912,52 @@ def test_the_fetch_probe_does_not_touch_the_working_repository(monkeypatch, tmp_
             "and the next run would answer from what this one fetched"
         )
         assert "--depth=1" in cmd, "the transfer must be bounded"
+
+
+# --- restore must not be hardcoded to one team's reviewer -------------------
+
+def _archive_one_shard(t, team, month, slug, filename):
+    """A doc-less cold archive: verdict shards, no request doc."""
+    from coord_engine import reconcile as _rec
+    t.put(f"{_rec.review_archive_prefix(team)}{month}/{slug}/verdicts/{filename}",
+          "---\ntype: Verdict\nverdict: approve\n---\nlgtm")
+
+
+def test_restore_works_for_any_reviewer_not_just_one_hardcoded_name(capsys):
+    """The gate read `files != ["codex-reviewer.md"]`, so `review restore`
+    worked for exactly one agent on exactly one team and told everyone else
+    "unexpected archived verdict shape". Team-particular content in a repo that
+    has to generalize — whose shard it is was never the engine's business."""
+    t = FakeTransport()
+    _archive_one_shard(t, "r", "2026-07", "pr-a", "some-other-reviewer.md")
+    capsys.readouterr()
+    rc = cli.main(["review", "restore", "r", "pr-a"], transport=t)
+    out, err = capsys.readouterr()
+    assert rc == 0, f"any single shard must restore:\n{out}\n{err}"
+    assert "restored review pr-a" in out
+    assert t.read("team/r/review/pr-a/verdicts/some-other-reviewer.md") is not None
+
+
+def test_restore_says_the_result_is_an_orphan(capsys):
+    """A doc-less restore recreates a review dir with verdicts and no doc — the
+    exact shape that surfaces as `needs maintainer repair`. Saying so at the
+    moment it happens is cheaper than the maintainer rediscovering it later."""
+    t = FakeTransport()
+    _archive_one_shard(t, "r", "2026-07", "pr-b", "alice.md")
+    capsys.readouterr()
+    assert cli.main(["review", "restore", "r", "pr-b"], transport=t) == 0
+    assert "orphan" in capsys.readouterr().err
+
+
+def test_restore_refuses_multiple_doc_less_shards_and_says_why(capsys):
+    """The COUNT bound is deliberate and stays: restoring N shards with no doc
+    makes a bigger claim than this verb can justify. The old message
+    ("unexpected archived verdict shape") did not say that; this one does."""
+    t = FakeTransport()
+    _archive_one_shard(t, "r", "2026-07", "pr-c", "alice.md")
+    _archive_one_shard(t, "r", "2026-07", "pr-c", "bob.md")
+    capsys.readouterr()
+    rc = cli.main(["review", "restore", "r", "pr-c"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "2 archived verdict shard(s)" in err and "no request doc" in err

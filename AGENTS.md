@@ -181,6 +181,12 @@ under `skills/`, each package with its own README, build, and tests.
 - PyObjC-free logic is split into its own modules so tests run on Linux CI;
   macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC
   imports lazy (inside functions), never at module import time.
+- No team-particular identity in engine logic. `review restore` gated a whole
+  code path on `files != ["codex-reviewer.md"]`, so the verb worked for exactly
+  one agent on exactly one team and told everyone else "unexpected archived
+  verdict shape". Predicates belong on the SHAPE (how many shards, is there a
+  doc), never on whose name is in the filename — the repo generalizes, and the
+  team's particulars live on the team's store.
 - `continuity snapshot` exits 3 and says so when the write did not persist.
   `transport.write` returns **False** on a transport failure rather than
   raising, and the snapshot path used to capture that into a local, spend it on
