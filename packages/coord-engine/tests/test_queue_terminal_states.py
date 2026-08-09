@@ -191,8 +191,19 @@ def test_consume_takeover_writes_audit_before_cursor(monkeypatch, capsys):
     t.put(CURSOR, '{"v":1,"last_read":"2026-07-27T17:30:00Z","seen_ids":[]}')
     assert _takeover(monkeypatch, t, "--consume") == 0
     audit_prefix = f"team/{TEAM}/{records.CONSUME_AUDIT_PREFIX}/"
-    assert [p.startswith(audit_prefix) for p in t.write_log] == [True, False]
-    assert t.write_log[1] == CURSOR, "cursor write must FOLLOW the audit"
+    # Assert the ORDERING invariant this test is named for, not the write COUNT.
+    # It previously pinned the log to exactly [audit, cursor]; that also fixed
+    # the number of writes, which is not the property in question — the
+    # docstring's claim is that no cursor MUTATION precedes the audit. A third
+    # write now follows both: `queue --consume` advances ANOTHER agent's cursor,
+    # so it counts as activity and refreshes the actor's presence shard. That is
+    # a different path and cannot violate this ordering, so the assertion is
+    # stated over the two paths it is actually about.
+    audit_at = [i for i, p in enumerate(t.write_log) if p.startswith(audit_prefix)]
+    cursor_at = [i for i, p in enumerate(t.write_log) if p == CURSOR]
+    assert audit_at, "no audit record was written"
+    assert cursor_at, "no cursor write happened"
+    assert min(audit_at) < min(cursor_at), "cursor write must FOLLOW the audit"
     audit_path, fm = _audit_doc(t)
     # <UTC-timestamp>-<caller>-takes-<target>.md under the pinned clock
     assert audit_path.startswith(f"{audit_prefix}20260727T180000Z-")

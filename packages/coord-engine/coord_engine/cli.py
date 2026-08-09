@@ -9513,7 +9513,7 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
         except Exception:
             pass
     emit_timeline = getattr(args, "emit_timeline", False)
-    if args.store or emit_timeline:
+    if _digest_persists(args):
         day = now[:10]
         window = digest_mod.window_for(now)
         marker = f"team/{args.team}/_coord/digests/{day}-{window}.md"
@@ -10784,16 +10784,126 @@ def build_parser() -> argparse.ArgumentParser:
 # Every engine bus WRITE verb refreshes the ACTOR's presence timestamp at the
 # single dispatch chokepoint below, so no verb can be missed and none has to
 # opt in. The set is keyed on the command FUNCTIONS themselves (not on parsed
-# subcommand strings) — read verbs (status/board/search/needs-me/briefing,
-# presence show, review status) and the W1 ``presence beat`` are deliberately
-# absent. See AGENTS.md, "Activity implies liveness".
-_ACTIVITY_WRITE_FUNCS = frozenset({
-    cmd_tell, cmd_respond,
-    cmd_task_start, cmd_task_update, cmd_task_block, cmd_task_pause,
-    cmd_task_abandon, cmd_task_assign, cmd_task_restore, cmd_task_done,
-    cmd_review_request, cmd_review_restore,
-    cmd_reconcile,
+# subcommand strings). See AGENTS.md, "Activity implies liveness".
+# THIS IS A DENYLIST, and it must stay one. It was an ALLOWLIST of thirteen
+# functions, which cannot keep the promise the paragraph above makes: a verb
+# added later is simply absent, silently, and absence here is indistinguishable
+# from "this agent is not working". Twenty write verbs had accumulated outside
+# it — `review close`, `escalate`, `continuity snapshot`/`park`, `roles claim`/
+# `release`, `answer`, `bus-v3 send` and `stash push` among them.
+#
+# Measured cost (2026-08-09, live store): codex-reviewer rendered
+# "stale 6d — nudge" having filed a verdict 3.5h earlier; coord-opus-worker
+# rendered "stale 42h — nudge" having filed a report 4.8h earlier. An agent
+# whose job IS reviewing — file a verdict, close a review, claim its role, save
+# continuity — performs none of the thirteen blessed verbs, so it rendered dark
+# while working. The roster attaches an IMPERATIVE to that judgement ("nudge"),
+# so the failure does not merely mislabel: it dispatches people.
+#
+# Inverting makes the default SAFE. A new write verb counts as activity without
+# anyone remembering; a new READ verb has to be named here, which is a decision
+# someone makes on purpose rather than an omission nobody notices. Reads must
+# stay out — looking at the board is not evidence that any work happened.
+#: Read verbs DEFINED IN THIS MODULE. The set is completed at module end, once
+#: the extracted command modules are imported — see the note down there; that
+#: ordering is load-bearing, not cosmetic.
+_ACTIVITY_READ_FUNCS: frozenset = frozenset({
+    cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_briefing,
+    cmd_presence_show, cmd_review_status, cmd_health, cmd_doctor,
+    cmd_obligations, cmd_roles_status, cmd_continuity_resume,
+    cmd_agents, cmd_asks, cmd_engagement_gate, cmd_stash_list,
+    cmd_router_shadow_status,
+    # `presence beat` is W1's own write of this very shard; routing it through
+    # the activity path would double-write and let the throttle memo suppress a
+    # deliberate beat.
+    cmd_presence_beat,
 })
+
+
+#: Handlers that serve BOTH a read and a write operation, so the function alone
+#: cannot classify the invocation. Each maps to a predicate over the PARSED
+#: ARGS: true when this particular invocation wrote something.
+#:
+#: codex-reviewer, 590 r2: classification keyed only by handler silently
+#: mis-answered three real commands — `queue commit` (a durable classification
+#: record) did not count as activity, while `inbox` and `digest` refreshed
+#: presence merely by being VIEWED. Both directions wrong, in the same table,
+#: for the same structural reason: one function object, two operations.
+#:
+#: `queue --consume` is here too, and codex did not name it. It deliberately
+#: advances ANOTHER agent's cursor — a mutation of someone else's state, not
+#: bookkeeping of your own read — so it belongs on the write side. Shipping the
+#: three that were reported while leaving its neighbour is the exact habit that
+#: produced this review round.
+_MIXED_MODE_ACTIVITY: dict[Any, Any] = {
+    # `queue TEAM` reads (its own cursor advance is bookkeeping of that read);
+    # `queue commit TEAM` records classifications; `--consume` moves another
+    # agent's cursor.
+    cmd_queue: lambda a: (getattr(a, "commit_team", None) is not None
+                          or bool(getattr(a, "consume", False))),
+    # `inbox TEAM` views; `inbox TEAM --ack SLUG` acknowledges.
+    cmd_inbox: lambda a: bool(getattr(a, "ack", None)),
+    # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
+    # defers to the same `_digest_persists` the command branches on.
+    cmd_digest: lambda a: _digest_persists(a),
+}
+
+
+def _digest_persists(args: Any) -> bool:
+    """Does this `digest` invocation enter the PERSISTENT branch?
+
+    ONE definition, called by `cmd_digest` itself and by the activity
+    classifier. It was two: the command branched on `store or emit_timeline`
+    while `_MIXED_MODE_ACTIVITY` checked only `store`, so `digest --emit-timeline`
+    wrote the digest marker (and possibly the emitted marker) while classifying
+    as a READ — the actor did durable work and rendered dark for it
+    (codex-reviewer, 590 r3). Two copies of one condition is how that drift
+    happened, so there is now one copy and both callers read it.
+    """
+    return bool(getattr(args, "store", False)
+                or getattr(args, "emit_timeline", False))
+
+
+def _is_activity_invocation(args: Any) -> bool:
+    """Does THIS invocation count as evidence the actor is working?
+
+    Classification is per-OPERATION, not per-function: a mixed handler is
+    resolved by its parsed args before the read/write default applies. The
+    default remains "counts", because its failure mode is an agent rendered dark
+    while doing exactly its job — but a declared read, or the read branch of a
+    mixed command, must never manufacture liveness out of looking at a view.
+    """
+    func = getattr(args, "func", None)
+    if func is None:
+        return False
+    predicate = _MIXED_MODE_ACTIVITY.get(func)
+    if predicate is not None:
+        return bool(predicate(args))
+    return func not in _ACTIVITY_READ_FUNCS
+
+
+def _is_activity_refresh_func(func: Any) -> bool:
+    """Function-only view of the rule, for callers with no parsed args.
+
+    UNSAFE for a mixed handler — it cannot see which operation ran — so it
+    answers False for those rather than guessing a direction.
+    """
+    if func is None or func in _MIXED_MODE_ACTIVITY:
+        return False
+    return func not in _ACTIVITY_READ_FUNCS
+
+
+class _ActivityRefreshFuncs:
+    """Membership seam for the coverage regression, so a test can ask "does this
+    verb refresh?" without reaching into dispatch. Membership is COMPUTED from
+    the denylist rather than curated — a curated answer here would re-create the
+    very bug the test exists to catch."""
+
+    def __contains__(self, func: Any) -> bool:
+        return _is_activity_refresh_func(func)
+
+
+ACTIVITY_REFRESH_FUNCS = _ActivityRefreshFuncs()
 
 #: Process-global throttle memo: actor -> monotonic time of its last activity
 #: refresh. Module state by design (one process = one live agent); the test
@@ -10903,7 +11013,7 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
     # ``_known_sender`` — never a target assignee); the anonymous host fallback
     # is not a presence identity, so a missing actor/team skips silently. The
     # whole step is best-effort and cannot change ``rc``.
-    if rc == 0 and args.func in _ACTIVITY_WRITE_FUNCS:
+    if rc == 0 and _is_activity_invocation(args):
         actor = _known_sender(args)
         team = getattr(args, "team", None)
         if actor and team:
@@ -10962,6 +11072,24 @@ cmd_threads = commands_threads.cmd_threads
 from . import commands_acceptance  # noqa: E402
 
 cmd_acceptance_pair = commands_acceptance.cmd_acceptance_pair
+
+
+# --- activity denylist: the EXTRACTED read verbs -----------------------------
+#
+# Completed HERE, after the extracted command modules are bound, because a
+# denylist assembled earlier in this file can only name what `cli.py` itself
+# defines. That was the hole codex-reviewer found (590 r1): `headroom`, `route`,
+# `atc report`, `annotate status` and `threads` live in extracted modules, so the
+# default-true predicate treated them as activity and merely READING one of those
+# views refreshed the reader's presence. Manufacturing liveness out of someone
+# looking at a dashboard is the worse direction to be wrong in — it suppresses
+# the nudge for an agent who really is gone.
+_ACTIVITY_READ_FUNCS = _ACTIVITY_READ_FUNCS | frozenset({
+    cmd_headroom, cmd_route, cmd_atc_report,   # commands_atc
+    cmd_dash,                                  # commands_atc — serves a view
+    cmd_annotate_status,                       # commands_annotate
+    cmd_threads,                               # commands_threads
+})
 
 
 if __name__ == "__main__":  # pragma: no cover

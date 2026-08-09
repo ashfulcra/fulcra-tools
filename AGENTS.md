@@ -1004,11 +1004,34 @@ it (not on PyPI).
   raising. Until the W3 sweep ships, no write path may set `state`/`lapsed_at` to a non-default value.**
 - **Activity implies liveness (wake-router W1.5).** Every engine bus **WRITE** verb refreshes the
   **actor's** presence timestamp, so a *working* agent is provably live — distinct from a dead session
-  whose launchd beat still ticks (W2 consumes this as liveness proof). The write-verb set is exactly
-  `tell`, `respond`, the `task` mutators (`start|update|block|pause|abandon|assign|restore|done`),
-  `review request`, `review restore`, and `reconcile`; read verbs (`status`/`board`/`search`/`needs-me`/
-  `briefing`, `presence show`, `review status`) and the W1 `presence beat` never refresh. The hook lives
-  at the **single dispatch chokepoint** (`main`, after `rc = args.func(...)`), keyed on a frozenset of the
+  whose launchd beat still ticks (W2 consumes this as liveness proof). Membership is a **DENYLIST**:
+  every verb refreshes EXCEPT the declared reads (`status`/`board`/`search`/`needs-me`/`briefing`,
+  `presence show`, `review status`, `queue`, `health`, `doctor`, `obligations`, `roles status`,
+  `continuity resume`) and the W1 `presence beat`. It was an ALLOWLIST of thirteen functions until
+  2026-08-09, which could not keep this paragraph's promise — a verb added later was simply absent, and
+  absence there is indistinguishable from "this agent is not working". Twenty write verbs had drifted
+  outside it (`review close`, `escalate`, `continuity snapshot`/`park`, `roles claim`/`release`,
+  `answer`, `bus-v3 send`, `stash push` …), so an agent whose job IS reviewing rendered `stale — nudge`
+  while working: measured that day, codex-reviewer showed `stale 6d` having filed a verdict 3.5h earlier,
+  and the roster attaches an imperative to that judgement, so it dispatches people, not just labels them.
+  **Classification is PER-OPERATION, not per-function.** Several handlers serve both a read and a write:
+  `queue TEAM` vs `queue commit TEAM` (and `--consume`, which advances ANOTHER agent's cursor),
+  `inbox TEAM` vs `inbox --ack`, `digest TEAM` vs `digest --store`. Keyed on the function alone these
+  were wrong in BOTH directions at once — `queue commit` recorded durable classifications without
+  counting as activity, while `inbox` and `digest` refreshed presence merely by being VIEWED
+  (codex-reviewer, 590 r2). `_MIXED_MODE_ACTIVITY` maps such a handler to a predicate over the PARSED
+  ARGS, and `_is_activity_invocation(args)` — not the function-only helper — is what dispatch calls.
+  **Every registered command must be CLASSIFIED**, read or write or mixed, and written down as such:
+  `tests/test_activity_covers_every_write_verb.py` walks the real argparse tree and fails on any
+  command nobody has classified, in EITHER direction. A regex cannot decide this — `tell`, `reconcile`
+  and `task restore` all persist through helpers and show no `transport.write` in their own bodies, so
+  a source-scan classifier is confidently wrong. Reads go in `_ACTIVITY_READ_FUNCS`, which is
+  COMPLETED AT MODULE END, after the extracted command modules are imported: assembled earlier it can
+  only name what `cli.py` defines, and that hole let `headroom`, `route`, `atc report`,
+  `annotate status` and `threads` refresh presence merely by being READ (codex-reviewer, 590 r1) —
+  manufacturing liveness out of looking at a view, which is the worse direction because it suppresses
+  the nudge for an agent who really is gone. The hook lives
+  at the **single dispatch chokepoint** (`main`, after `rc = args.func(...)`), keyed on the
   command FUNCTIONS themselves so no verb can be missed, and fires only on `rc == 0`. The **actor is the
   WRITER** — `--from` / `FULCRA_COORD_AGENT` via `_known_sender` (never a target assignee); the anonymous
   `coord-reconcile:<host>` fallback is not a presence identity, so a missing actor or team skips silently.
