@@ -197,6 +197,13 @@ under `skills/`, each package with its own README, build, and tests.
   when the host is in trouble, which is when parking matters most. **Any caller
   of `transport.write` must treat `False` as failure**; it is not a
   Falsy-but-fine return.
+- Audit every existing READER before you change what a marker MEANS. A
+  marker's meaning is fixed by everything that acts on it, not by the writer's
+  intent, so a new state or a new field is a change to every consumer at once.
+  This is the twin of the deleter rule that came out of the `.settled` work:
+  there, four sites could remove one marker and two greps each found half. Do
+  the reader sweep in the same change, and say in the PR which readers you
+  checked — "I did not audit the others" is a finding, not a footnote.
 - Date/clock tests: a module that fixes a top-level `NOW` for its data must also
   **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
   `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving

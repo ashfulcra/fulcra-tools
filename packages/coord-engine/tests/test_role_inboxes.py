@@ -441,3 +441,36 @@ def test_query_needs_me_expands_held_roles():
                                               held_roles={"reviewer"})] == ["x"]
     # a role the agent does NOT hold stays out
     assert query.needs_me(rows, "bob", now=NOW, held_roles={"oncall"}) == []
+
+
+def test_the_pre_budget_degraded_line_does_not_call_non_roles_roles(capsys):
+    """coord-boss's P3 fidelity note on 560. The pre-budget path returns the RAW
+    candidate set — every distinct assignee on the rows — because the budget was
+    already spent before the roles listing that would say which are roles. So
+    the set can contain plain agent identities, and the old line called them
+    "roles", asserting a membership nobody checked.
+
+    Over-reporting UNKNOWN is the safe direction and stays. Misnaming what was
+    over-reported is the defect."""
+    line = cli._role_degraded_line({"type": cli._ROLE_DEGRADED,
+                                    "roles": ["some-plain-agent", "a-real-role"]})
+    assert "assignee token(s)" in line, "must not assert these are roles"
+    assert "unknown (not empty)" in line, "the load-bearing part still holds"
+
+
+def test_the_pre_budget_path_still_reports_every_candidate(capsys):
+    """The safety property the wording change must not weaken: a spent budget
+    means NOTHING was classified, so every candidate is UNKNOWN and all of them
+    are reported. Under-reporting here would render a role-blind queue that
+    looks like 'you hold no roles'."""
+    t = FakeTransport()
+    # status must be OPEN or the row contributes no candidate at all — the
+    # candidate set is "distinct foreign assignees on OPEN rows".
+    rows = [{"assignee": "role-a", "status": "proposed"},
+            {"assignee": "role-b", "status": "proposed"},
+            {"assignee": "someone", "status": "proposed"}]
+    held, unresolved = cli._held_roles_for_rows(
+        t, "r", "me", rows, now=cli._now(), deadline_seconds=-1.0)
+    assert held == set()
+    assert unresolved == {"role-a", "role-b", "someone"}, \
+        "a spent budget classifies nothing, so every candidate is UNKNOWN"
