@@ -208,12 +208,22 @@ fi
   #
   # Best-effort in the other direction only: a failed marker WRITE costs one
   # duplicate claim next wake, which is the safe way to be wrong.
+  #
+  # The cleanup lives INSIDE the branch because `_CM` is assigned inside it and
+  # this script runs under `set -u` (line 14). Left outside, `rm -f "$_CM"`
+  # expands an unset variable on the SENT=0 path and the shell EXITS there:
+  # `exit "$rc"` below is never reached, so a DEGRADED rc 3 is replaced by a
+  # generic 1 and the rescued-step evidence line never prints. It fires only
+  # when the send already failed — i.e. when the bus is degraded — so a bus
+  # outage would read as a broken adopt script (coord-opus-worker, 589 r2).
+  # `${_CM:-}` silences it too; scoping states structurally which paths reach
+  # the line.
   if [ "$SENT" -eq 1 ]; then
     _CM="$(mktemp)"; printf 'claimed %s\n' "$SLUG" > "$_CM"
     fulcra-api file upload "$_CM" "$CLAIM_MARK" >/dev/null 2>&1 \
       || echo "adopt: claim marker not written — the claim may repeat next wake" >&2
+    rm -f "$_CM"
   fi
-  rm -f "$_CM"
 fi
 [ "$STEP_FAILS" -gt 0 ] && echo "adopt: ${STEP_FAILS} step(s) failed and were rescued by a later installer — the per-step stderr above is the evidence; the engine was still verified by the claim gate." >&2
 

@@ -63,12 +63,34 @@ def _run(tmp_path, *, send_ok: bool, record_ok: bool):
     for f in bin_dir.iterdir():
         f.chmod(0o755)
 
-    script = f'set -u\nSLUG=adopted-x\nVER=v1\nA=agent\nTYPE=t\n{_claim_block()}'
+    # `set -u` is not decoration: it is line 14 of the shipped script, and the
+    # r2 defect existed ONLY under it. The trailing sentinel is what lets a
+    # test distinguish "said the right thing and finished" from "said the right
+    # thing on its way out the door" — the first cut of these tests asserted
+    # only on stdout and the upload log, both of which are already true at the
+    # moment the shell dies, so they passed on a script that had crashed
+    # (coord-opus-worker, 589 r2).
+    script = (f'set -u\nSLUG=adopted-x\nVER=v1\nA=agent\nTYPE=t\n'
+              f'{_claim_block()}\necho BLOCK-COMPLETED\n')
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
     proc = subprocess.run(["bash", "-c", script], capture_output=True,
                           text=True, env=env, cwd=str(tmp_path))
     uploads = (tmp_path / "uploads.txt")
     return proc, (uploads.read_text() if uploads.exists() else "")
+
+
+def _assert_ran_to_completion(proc):
+    """The block must FINISH, not merely print the right line before dying.
+
+    Exit status is load-bearing here: the caller's rc is what the wake protocol
+    reports, and a `set -u` death replaces a DEGRADED rc 3 with a generic 1.
+    """
+    assert "BLOCK-COMPLETED" in proc.stdout, (
+        "the block did not run to completion — it exited early. stderr:\n"
+        f"{proc.stderr}")
+    assert proc.returncode == 0, (
+        f"non-zero exit ({proc.returncode}) destroys the caller's rc. stderr:\n"
+        f"{proc.stderr}")
 
 
 def test_a_totally_failed_send_leaves_NO_marker(tmp_path):
@@ -78,6 +100,9 @@ def test_a_totally_failed_send_leaves_NO_marker(tmp_path):
     assert uploads == "", (
         "a claim that was never delivered must not suppress the next attempt; "
         f"marker(s) written: {uploads!r}")
+    # This is the path where `_CM` is never assigned, so it is the one that
+    # dies under `set -u` if the cleanup ever drifts back outside the branch.
+    _assert_ran_to_completion(proc)
 
 
 def test_the_fallback_path_still_records(tmp_path):
@@ -86,9 +111,11 @@ def test_the_fallback_path_still_records(tmp_path):
     proc, uploads = _run(tmp_path, send_ok=False, record_ok=True)
     assert "RAW FALLBACK" in proc.stdout
     assert "adopted-x" in uploads
+    _assert_ran_to_completion(proc)
 
 
 def test_the_happy_path_records(tmp_path):
     proc, uploads = _run(tmp_path, send_ok=True, record_ok=True)
     assert "adoption claim sent (tagged)" in proc.stdout
     assert "adopted-x" in uploads
+    _assert_ran_to_completion(proc)
