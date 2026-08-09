@@ -4202,6 +4202,55 @@ def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
               "file plane only (recipient must run `needs-me`)")
 
 
+def _emit_response_companion(transport: Any, team: str, *, slug: str,
+                             owner: str, responder: str, shard_ptr: str) -> bool:
+    """One ``v:1`` bus event telling the ASKER their directive was answered.
+
+    THE MIRROR OF THE DISPATCH COMPANION, and it was missing. `tell` emits a
+    companion so a dispatch reaches the recipient's queue; `respond` emitted
+    nothing, so the reply reached nobody. The queue reads EVENTS — a shard under
+    ``_coord/responses/`` is durable, correct, and cannot appear there.
+
+    What that cost on 2026-08-08: coord-boss asked at 18:15, was answered via
+    `respond` at 18:57 (task `done`, shard written), and re-asked at 20:14
+    believing nothing had come — then attributed the silence to their own
+    message rather than to the reply leg. Using the verb correctly produced
+    silence, so "answered" was indistinguishable from "ignored".
+
+    Note the asymmetry this closes: `tell --closes` already delivered, because
+    the reply IS a tell and tells emit companions. Plain `respond` did not, so
+    the two closure paths had opposite notification behaviour and the
+    recommended one was the silent one.
+
+    Returns True ONLY when an event was actually emitted, so the caller can tell
+    the truth about delivery instead of asserting it. Best-effort by design: the
+    shard is the record and this is delivery, so a bus that is down or
+    unconfigured degrades to file-plane-only and NEVER fails the respond.
+    """
+    if not owner or owner in (directives.BACKLOG, responder):
+        # Nobody to tell: unowned, parked, or you answered your own ask.
+        return False
+    cfg, _status = records.load_config_classified(transport, team)
+    if not cfg:
+        print("record: no bus-v3 records config — the response rides the file "
+              "plane only")
+        return False
+    try:
+        to = records.BROADCAST if owner == directives.EVERYONE else owner
+        ok = records.emit_event(
+            transport, cfg, sender=responder, to=to, kind="response",
+            priority="P2", slug=slug, ptr=shard_ptr, team=team)
+    except Exception as e:
+        print(f"record: response companion not emitted ({e}) — the response "
+              f"rides the file plane only", file=sys.stderr)
+        return False
+    if not ok:
+        print("record: response companion emission failed — the response rides "
+              "the file plane only")
+        return False
+    return True
+
+
 def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
                               *, sender: str, of: str,
                               head: Optional[str] = None) -> int:
@@ -6095,18 +6144,47 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
         return 1
     stamp = _stamp_for_path(now, agent)
     fm = {"type": "Response", "agent": agent, "outcome": args.outcome, "timestamp": now}
-    transport.write(_response_path(args.team, args.name, stamp),
-                    okf.render_frontmatter(fm) + f"\n{args.evidence or args.outcome}\n")
+    shard = _response_path(args.team, args.name, stamp)
+    # T1 (coord-boss scope addition, 2026-08-08): `transport.write` returns False
+    # on a transport failure rather than raising, so this used to be able to lose
+    # the response, print success and exit 0 — the responder believes they
+    # answered and the asker never hears anything at all. Same family as PR 583.
+    if not transport.write(shard, okf.render_frontmatter(fm)
+                           + f"\n{args.evidence or args.outcome}\n"):
+        print(f"respond: response NOT recorded for {args.name} — the shard write "
+              f"failed (transport). NOTHING was closed; retry.", file=sys.stderr)
+        return 3
+    rc = 0
     try:
         out = tasks.apply_update(doc, now=now, status="done",
                                  evidence=f"{args.outcome} (respond by {agent})")
-        transport.write(path, out)
-        print(f"responded {args.name}: {args.outcome} (closed)")
+        if transport.write(path, out):
+            print(f"responded {args.name}: {args.outcome} (closed)")
+        else:
+            # apply_update succeeding is NOT the close landing.
+            print(f"responded {args.name}: {args.outcome} (response recorded; "
+                  f"not closed: the task write failed — the directive is still "
+                  f"OPEN)", file=sys.stderr)
+            rc = 3
     except tasks.TaskError as e:
+        # NOT an error rc: the status machine legitimately refuses some closes
+        # (already done, illegal transition), and the response IS recorded. Only
+        # a failed WRITE — a response or close that never landed — is non-zero.
         print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
-    # The reply leg: this shard is what the directive's owner sees on their queue.
-    print("response recorded — the owner's queue surfaces it")
-    return 0
+    # THE REPLY LEG. This printed an unconditional "the owner's queue surfaces
+    # it" while emitting nothing — the queue reads events and a shard cannot
+    # reach it. The line was believed, so a responded-to directive was re-asked
+    # twice at rising priority (2026-08-08). Say only what happened.
+    owner = str((okf.parse_frontmatter(doc) or {}).get("owner") or "")
+    delivered = _emit_response_companion(
+        transport, args.team, slug=args.name, owner=owner, responder=agent,
+        shard_ptr=shard.split("/", 2)[-1])
+    if delivered:
+        print("response recorded and delivered — the owner's queue surfaces it")
+    else:
+        print("response recorded (durable) — NOT delivered to the owner's queue; "
+              "they see it only by reading the task doc")
+    return rc
 
 
 # --- continuity completion (A6): role checkpoints, park, briefing ---
