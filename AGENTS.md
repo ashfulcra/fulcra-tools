@@ -218,6 +218,14 @@ under `skills/`, each package with its own README, build, and tests.
   removed, the verb exits 3 and says a wrong answer is queued up. Pointer
   updates are also monotonic (best-effort read-then-write): an older snapshot
   must never move an agent's reported age backwards.
+- The `.settled` marker's MERGE EVIDENCE is never overwritten by the tally
+  cache. 572 stopped `review status` DELETING it and left the WRITE path
+  unguarded, so a settleable tally stamped `state: APPROVED` over
+  `state: MERGED` + `merge_sha` — found in production, where the very
+  `review status` run to CHECK a closure destroyed it. Refusing costs nothing:
+  the cache exists so the fan-out fold can skip the slug, and a MERGED marker
+  already makes it skip. **Both the delete AND the write need the guard**;
+  fixing one is the neighbour trap.
 - Date/clock tests: a module that fixes a top-level `NOW` for its data must also
   **pin the clock** — an autouse `monkeypatch.setattr(cli, "_now", ...)` to a
   `PINNED_NOW` at/just after `NOW` (template: `tests/test_threads.py`), deriving

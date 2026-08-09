@@ -373,3 +373,48 @@ def test_presence_is_tri_state_not_boolean():
     t.put(cli._settled_marker_path("r", "there"), "x")
     assert cli._settled_marker_present(t, "r", "there") is True
     assert cli._settled_marker_present(Raises(), "r", "any") is None
+
+
+def test_review_status_does_not_stamp_the_cache_over_MERGE_EVIDENCE(capsys):
+    """Found in PRODUCTION by coord-boss, and I caused it: they closed a review
+    with a merge sha, and the `review status` I ran two minutes later TO CHECK
+    the closure overwrote it with the recomputable APPROVED cache.
+
+    PR 572 stopped this verb DELETING merge evidence and left the WRITE path
+    unguarded — the same bug wearing a smaller hat, and the same
+    guarded-one-direction-left-the-neighbour shape.
+
+    Refusing costs nothing: the cache exists so the fan-out fold can skip the
+    slug, and a MERGED marker already makes it skip."""
+    t = FakeTransport()
+    # a review that tallies APPROVED — so `review status` WANTS to cache it
+    t.put("team/r/review/pr-m.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
+    t.put("team/r/review/pr-m/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+    # ...and it has ALREADY been closed with real merge evidence.
+    sha = "b" * 40
+    t.put(cli._settled_marker_path("r", "pr-m"),
+          "---\nschema: review-settled/v1\nstate: MERGED\n"
+          f"merge_sha: {sha}\nmerged_at: 2026-08-09T01:20:00Z\n---\n")
+
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-m"], transport=t) == 0
+    after = cli._classify_settled_marker(t, "r", "pr-m")
+    assert after == cli.SETTLED_MERGED, \
+        "a tally recompute must not stamp its cache over the merge record"
+    assert sha in (t.read(cli._settled_marker_path("r", "pr-m")) or ""), \
+        "the sha is the whole point of the evidence — it must survive"
+
+
+def test_the_cache_IS_written_when_no_evidence_is_there(capsys):
+    """The control. Refusing unconditionally would break the fold's fast path,
+    which is the reason the cache exists at all."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-n.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
+    t.put("team/r/review/pr-n/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-n"], transport=t) == 0
+    assert cli._classify_settled_marker(t, "r", "pr-n") == cli.SETTLED_CACHE

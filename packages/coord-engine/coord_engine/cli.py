@@ -1660,8 +1660,24 @@ def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
 
 def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
     """Best-effort settled-cache write. Failure is swallowed: the marker only
-    speeds the fan-out fold; its absence just means the next fold recomputes."""
+    speeds the fan-out fold; its absence just means the next fold recomputes.
+
+    NEVER overwrites MERGE EVIDENCE. PR 572 stopped `review status` from
+    DELETING a `.settled` that records a merge, and left this WRITE path
+    unguarded — so a settleable tally would happily stamp the recomputable
+    APPROVED cache straight over `state: MERGED` + `merge_sha`. Found in
+    production by coord-boss: they closed 585 with a sha at ~01:20, and the
+    `review status` I ran at ~01:22 to CHECK the closure is what destroyed it.
+    Same bug as 572 wearing a smaller hat, and my own guard covered the
+    direction I was thinking about and left its neighbour — again.
+
+    Refusing costs nothing real. The cache exists so the fan-out fold can skip
+    the slug; a MERGED marker ALREADY makes it skip. Overwriting buys no speed
+    and loses the only durable record that the PR landed.
+    """
     try:
+        if _classify_settled_marker(transport, team, slug) == SETTLED_MERGED:
+            return
         transport.write(
             _settled_marker_path(team, slug),
             okf.render_frontmatter({"schema": "review-settled/v1",
