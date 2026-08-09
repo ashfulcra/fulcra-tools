@@ -101,7 +101,12 @@ EXPECTED_MIXED = {
     },
     "cmd_digest": {
         "read": [["digest", "r"]],
-        "write": [["digest", "r", "--store"]],
+        # BOTH flags enter the persistent branch. `--emit-timeline` was missing
+        # from the predicate while the command branched on it, so a digest that
+        # wrote its marker classified as a READ (codex-reviewer, 590 r3).
+        "write": [["digest", "r", "--store"],
+                  ["digest", "r", "--emit-timeline"],
+                  ["digest", "r", "--store", "--emit-timeline"]],
     },
 }
 
@@ -213,3 +218,22 @@ def test_the_three_tables_are_mutually_exclusive():
     assert not (EXPECTED_READS & EXPECTED_WRITES), "read/write overlap"
     assert not (EXPECTED_READS & mixed), "a mixed command cannot also be a pure read"
     assert not (EXPECTED_WRITES & mixed), "a mixed command cannot also be a pure write"
+
+
+def test_the_digest_predicate_and_the_command_share_ONE_condition():
+    """The anti-drift guard, not just the fix.
+
+    `digest --emit-timeline` was misclassified because the persistence condition
+    existed TWICE: `cmd_digest` branched on `store or emit_timeline` while the
+    classifier checked only `store`. Both now call `_digest_persists`, and this
+    asserts the command body still defers to it — a re-inlined condition is the
+    exact regression to catch, and it would otherwise be invisible until another
+    flag is added.
+    """
+    import inspect
+    body = inspect.getsource(cli.cmd_digest)
+    assert "_digest_persists(args)" in body, (
+        "cmd_digest must branch on the shared helper; an inlined condition here "
+        "is free to drift from the activity classifier again")
+    assert "if args.store or emit_timeline:" not in body, (
+        "the duplicated condition is back — that duplication IS the bug")

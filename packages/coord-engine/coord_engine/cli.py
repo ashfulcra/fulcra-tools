@@ -9639,7 +9639,7 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
         except Exception:
             pass
     emit_timeline = getattr(args, "emit_timeline", False)
-    if args.store or emit_timeline:
+    if _digest_persists(args):
         day = now[:10]
         window = digest_mod.window_for(now)
         marker = f"team/{args.team}/_coord/digests/{day}-{window}.md"
@@ -10969,9 +10969,25 @@ _MIXED_MODE_ACTIVITY: dict[Any, Any] = {
                           or bool(getattr(a, "consume", False))),
     # `inbox TEAM` views; `inbox TEAM --ack SLUG` acknowledges.
     cmd_inbox: lambda a: bool(getattr(a, "ack", None)),
-    # `digest TEAM` views; `digest TEAM --store` persists the digest.
-    cmd_digest: lambda a: bool(getattr(a, "store", False)),
+    # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
+    # defers to the same `_digest_persists` the command branches on.
+    cmd_digest: lambda a: _digest_persists(a),
 }
+
+
+def _digest_persists(args: Any) -> bool:
+    """Does this `digest` invocation enter the PERSISTENT branch?
+
+    ONE definition, called by `cmd_digest` itself and by the activity
+    classifier. It was two: the command branched on `store or emit_timeline`
+    while `_MIXED_MODE_ACTIVITY` checked only `store`, so `digest --emit-timeline`
+    wrote the digest marker (and possibly the emitted marker) while classifying
+    as a READ — the actor did durable work and rendered dark for it
+    (codex-reviewer, 590 r3). Two copies of one condition is how that drift
+    happened, so there is now one copy and both callers read it.
+    """
+    return bool(getattr(args, "store", False)
+                or getattr(args, "emit_timeline", False))
 
 
 def _is_activity_invocation(args: Any) -> bool:
