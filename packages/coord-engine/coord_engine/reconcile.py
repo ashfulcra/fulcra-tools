@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import aggregate, config, health as health_mod, jsonutil, model, okf
+from . import aggregate, config, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .log import get_logger
@@ -803,8 +803,16 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 continue
             stem = filename[:-3]
             reviewer = str(fm.get("reviewer") or "")
+            # Attribution accepts exactly the tally's canonical filename forms:
+            # plain `<reviewer>.md`, or `<exact-head>--<reviewer>.md` with a
+            # canonical 40/64-hex head. A looser prefix (garbage--alice.md) is
+            # unattributable to the tally and must stay hot as the anomaly it is.
+            keyed_prefix = (
+                stem[:-(len(reviewer) + 2)]
+                if stem != reviewer and stem.endswith(f"--{reviewer}") else None)
             if fm.get("type") != "Verdict" or not reviewer or (
-                    stem != reviewer and not stem.endswith(f"--{reviewer}")):
+                    stem != reviewer
+                    and review.normalize_head(keyed_prefix) is None):
                 notes.append(
                     f"retention: review {slug} verdict {filename} does not "
                     f"attribute to its filename (reviewer={reviewer!r}); kept hot")

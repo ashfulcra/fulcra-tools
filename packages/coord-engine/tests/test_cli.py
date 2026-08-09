@@ -1169,6 +1169,20 @@ def test_retention_archives_single_orphan_verdict_any_reviewer(capsys):
     assert "1 orphan review dir(s) kept hot without exactly one verdict shard" in err
 
 
+def test_retention_keeps_orphan_with_noncanonical_keyed_prefix(capsys):
+    t = FakeTransport()
+    # The prefix before `--` must be a canonical exact head; `garbage--alice.md`
+    # is unattributable to the tally and must stay hot, not be archived away.
+    t.put("team/r/review/malformed/verdicts/garbage--alice.md",
+          _old_verdict("alice"), mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    assert "team/r/review/malformed/verdicts/garbage--alice.md" in t.store
+    err = capsys.readouterr().err
+    assert "does not attribute to its filename (reviewer='alice')" in err
+
+
 def test_retention_keeps_orphan_whose_verdict_disowns_its_filename(capsys):
     t = FakeTransport()
     # The shard is named alice.md but claims reviewer bob: attribution rides the
