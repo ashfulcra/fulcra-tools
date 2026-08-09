@@ -134,3 +134,53 @@ def test_presence_show_renders_both_facts_end_to_end(capsys):
     assert "6d" in out, f"the stale beat must still be stated plainly:\n{out}"
     assert "nudge" not in out, (
         f"an agent with fresh work must not be nudged; got:\n{out}")
+
+
+def test_presence_show_BOUNDS_its_scan_and_degrades_to_partial(capsys, monkeypatch):
+    """codex-reviewer, 591 r3: the deadline must reach the real command.
+
+    Unbounded, `presence show` listed every review's `verdicts/` directory — 435
+    on the live store — synchronously, to decorate a roster. The existing budget
+    tests only exercised the helper and briefing, so a missing deadline on this
+    path was invisible to them.
+
+    Driven end to end with the budget set to zero: the scan must stop, and the
+    row must render PARTIAL rather than claiming the agent has no work.
+    """
+    # Patch the budget FUNCTION, not the env var: `config.env_float` is a
+    # positive-finite knob by policy, so COORD_PRESENCE_WORK_BUDGET=0 silently
+    # falls back to the 20s default and would make this test pass for the wrong
+    # reason. A negative budget opens an already-expired Deadline, so the stop
+    # is deterministic rather than a race against a tiny timeout.
+    monkeypatch.setattr(cli, "_presence_work_budget", lambda: -1.0)
+    shard = ("---\ntype: Presence\nagent: codex-reviewer\n"
+             "timestamp: 2026-08-03T11:49:00Z\n---\n")
+    listed: list[str] = []
+
+    class _Counting(_Store):
+        def list_dir(self, path):
+            listed.append(path)
+            return super().list_dir(path)
+
+    store = _Counting(
+        dirs={
+            f"team/{TEAM}/presence/": [{"name": "codex-reviewer.md"}],
+            f"team/{TEAM}/review": [{"name": "pr-1/"}],
+            f"team/{TEAM}/review/pr-1/verdicts": [
+                {"name": "abc--codex-reviewer.md", "mtime": "2026-08-09 11:20AM UTC"},
+            ],
+            f"team/{TEAM}/_coord/agents": [],
+        },
+        shards={f"team/{TEAM}/presence/codex-reviewer.md": shard})
+
+    assert cli.main(["presence", "show", TEAM], transport=store) == 0
+    out = capsys.readouterr().out
+    assert "scan incomplete" in out, (
+        "an expired budget must render PARTIAL, not a confident absence:\n" + out)
+    assert "no work found" not in out, (
+        "an unfinished scan must never claim the agent has no work:\n" + out)
+    assert "nudge" not in out, (
+        "PARTIAL withholds the imperative — nothing was established:\n" + out)
+    # And it must actually STOP: no verdicts directory was walked.
+    assert not any("verdicts" in p for p in listed), (
+        f"the scan continued past its deadline: {listed}")

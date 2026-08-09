@@ -1012,12 +1012,23 @@ it (not on PyPI).
   prevents. `_work_evidence_index` returns `(index, ok)` and takes an optional deadline — only a scan
   that COMPLETED licenses an absence reading, since `list_dir` cannot tell an empty directory from an
   unreadable one. Both facts always render separately; they are never fused.
-  **Who measures (coord-boss ruling 2026-08-09):** `presence show` and `briefing` DO — briefing feeds
-  dispatch and a false nudge is what it must never emit, so its scan shares the add-on deadline and
-  degrades to PARTIAL rather than reverting. The **continuity audit deliberately does NOT**: its product
+  **Who measures (coord-boss ruling 2026-08-09):** `presence show` and `briefing` DO, and BOTH are bounded —
+  briefing feeds dispatch and a false nudge is what it must never emit, so its scan shares the add-on
+  deadline; `presence show` is a direct command with no add-on stack to borrow from, so it opens its own
+  (`COORD_PRESENCE_WORK_BUDGET`, default 20s). Unbounded it listed every review's `verdicts/` directory —
+  435 on the live store — synchronously, to decorate a roster (codex-reviewer, 591 r3). Either scan
+  degrades to PARTIAL on expiry rather than reverting to a nudge. NB `env_float` is a POSITIVE-finite
+  knob, so setting a budget to `0` falls back to the default rather than disabling the scan. The **continuity audit deliberately does NOT**: its product
   is checkpoint staleness, not activity, and "working but not snapshotting" is precisely its finding —
   work evidence would mask it. That asymmetry is chosen, not an oversight.
-  **Every registered command must be CLASSIFIED**, read or write, and written down as such:
+  **Classification is PER-OPERATION, not per-function.** Several handlers serve both a read and a write:
+  `queue TEAM` vs `queue commit TEAM` (and `--consume`, which advances ANOTHER agent's cursor),
+  `inbox TEAM` vs `inbox --ack`, `digest TEAM` vs `digest --store`. Keyed on the function alone these
+  were wrong in BOTH directions at once — `queue commit` recorded durable classifications without
+  counting as activity, while `inbox` and `digest` refreshed presence merely by being VIEWED
+  (codex-reviewer, 590 r2). `_MIXED_MODE_ACTIVITY` maps such a handler to a predicate over the PARSED
+  ARGS, and `_is_activity_invocation(args)` — not the function-only helper — is what dispatch calls.
+  **Every registered command must be CLASSIFIED**, read or write or mixed, and written down as such:
   `tests/test_activity_covers_every_write_verb.py` walks the real argparse tree and fails on any
   command nobody has classified, in EITHER direction. A regex cannot decide this — `tell`, `reconcile`
   and `task restore` all persist through helpers and show no `transport.write` in their own bodies, so

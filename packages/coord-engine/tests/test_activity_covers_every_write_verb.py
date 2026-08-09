@@ -38,7 +38,7 @@ from coord_engine import cli
 #: refresh presence.
 EXPECTED_READS = {
     "cmd_status", "cmd_board", "cmd_search", "cmd_needs_me", "cmd_briefing",
-    "cmd_presence_show", "cmd_queue", "cmd_health", "cmd_doctor",
+    "cmd_presence_show", "cmd_health", "cmd_doctor",
     "cmd_obligations", "cmd_roles_status", "cmd_continuity_resume",
     "cmd_agents", "cmd_asks", "cmd_engagement_gate", "cmd_stash_list",
     "cmd_router_shadow_status",
@@ -57,7 +57,7 @@ EXPECTED_READS = {
 #: evidence of work.
 EXPECTED_WRITES = {
     "cmd_tell", "cmd_respond", "cmd_answer", "cmd_escalate", "cmd_broadcast",
-    "cmd_inbox", "cmd_intent", "cmd_later", "cmd_remind", "cmd_digest",
+    "cmd_intent", "cmd_later", "cmd_remind",
     "cmd_reconcile", "cmd_acceptance_pair",
     "cmd_task_start", "cmd_task_update", "cmd_task_block", "cmd_task_pause",
     "cmd_task_abandon", "cmd_task_assign", "cmd_task_restore", "cmd_task_done",
@@ -77,6 +77,32 @@ EXPECTED_WRITES = {
     "cmd_atc_init", "cmd_atc_harvest",
     "cmd_annotate_project", "cmd_annotate_resolution",
     "cmd_wake_consume", "cmd_wake_queue_file",
+}
+
+
+#: Handlers serving BOTH a read and a write operation, so the FUNCTION cannot
+#: classify the invocation — only the parsed args can. Each entry lists an argv
+#: for each branch, and both are asserted, because a mixed command can be (and
+#: was) wrong in either direction at once.
+#:
+#: codex-reviewer, 590 r2: `queue commit` recorded classifications without
+#: counting as activity, while `inbox` and `digest` refreshed presence merely by
+#: being VIEWED. `queue --consume` is included although it was not reported —
+#: it advances ANOTHER agent's cursor, which is a mutation of someone else's
+#: state rather than bookkeeping of your own read.
+EXPECTED_MIXED = {
+    "cmd_queue": {
+        "read": [["queue", "r"]],
+        "write": [["queue", "commit", "r"], ["queue", "r", "--consume"]],
+    },
+    "cmd_inbox": {
+        "read": [["inbox", "r"]],
+        "write": [["inbox", "r", "--ack", "some-slug"]],
+    },
+    "cmd_digest": {
+        "read": [["digest", "r"]],
+        "write": [["digest", "r", "--store"]],
+    },
 }
 
 
@@ -109,12 +135,14 @@ def test_every_registered_command_is_classified():
     omission — which is how both previous versions of this file broke.
     """
     registered = set(_registered_commands())
-    unclassified = sorted(registered - EXPECTED_READS - EXPECTED_WRITES)
+    unclassified = sorted(
+        registered - EXPECTED_READS - EXPECTED_WRITES - set(EXPECTED_MIXED))
     assert not unclassified, (
         "these commands are registered but classified neither read nor write, "
         "so nobody has decided whether running them counts as activity: "
-        f"{unclassified}. Add each to EXPECTED_READS or EXPECTED_WRITES — and a "
-        "read must ALSO be added to cli._ACTIVITY_READ_FUNCS.")
+        f"{unclassified}. Add each to EXPECTED_READS, EXPECTED_WRITES or "
+        "EXPECTED_MIXED — a read must ALSO be added to "
+        "cli._ACTIVITY_READ_FUNCS, and a mixed one to cli._MIXED_MODE_ACTIVITY.")
 
 
 def test_no_read_command_manufactures_liveness():
@@ -146,3 +174,42 @@ def test_the_classification_tables_do_not_overlap():
     """A command in both tables would make one of the assertions vacuous."""
     both = sorted(EXPECTED_READS & EXPECTED_WRITES)
     assert not both, f"classified as both read and write: {both}"
+
+
+def test_each_mixed_command_is_classified_per_OPERATION():
+    """codex-reviewer, 590 r2. One function object, two operations.
+
+    Both branches are asserted for every mixed command, because these were wrong
+    in BOTH directions simultaneously: `queue commit` recorded durable
+    classifications and did not count, while `inbox` and `digest` counted merely
+    for being viewed.
+    """
+    parser = cli.build_parser()
+    for name, branches in EXPECTED_MIXED.items():
+        for argv in branches["read"]:
+            args = parser.parse_args(argv)
+            assert getattr(args.func, "__name__", "") == name, argv
+            assert not cli._is_activity_invocation(args), (
+                f"`{' '.join(argv)}` is the READ branch and must not refresh "
+                "presence — viewing is not working")
+        for argv in branches["write"]:
+            args = parser.parse_args(argv)
+            assert getattr(args.func, "__name__", "") == name, argv
+            assert cli._is_activity_invocation(args), (
+                f"`{' '.join(argv)}` persists something and must count as "
+                "activity, or the actor renders dark while working")
+
+
+def test_the_function_only_predicate_refuses_to_guess_for_mixed_handlers():
+    """`_is_activity_refresh_func` cannot see which operation ran, so for a
+    mixed handler it must decline rather than pick a direction — a caller with
+    no parsed args has no basis to claim either."""
+    for name in EXPECTED_MIXED:
+        assert not cli._is_activity_refresh_func(getattr(cli, name))
+
+
+def test_the_three_tables_are_mutually_exclusive():
+    mixed = set(EXPECTED_MIXED)
+    assert not (EXPECTED_READS & EXPECTED_WRITES), "read/write overlap"
+    assert not (EXPECTED_READS & mixed), "a mixed command cannot also be a pure read"
+    assert not (EXPECTED_WRITES & mixed), "a mixed command cannot also be a pure write"

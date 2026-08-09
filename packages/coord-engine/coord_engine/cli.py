@@ -1531,6 +1531,23 @@ def _review_fold_budget() -> float:
     return config.env_float("COORD_REVIEW_FOLD_BUDGET", DEFAULT_REVIEW_FOLD_BUDGET)
 
 
+#: Aggregate deadline for `presence show`'s work-evidence scan, seconds.
+#: `presence show` is a DIRECT command with no surrounding add-on stack to
+#: borrow a deadline from, so it opens its own. 20s is deliberately below the
+#: review-fold budget: this scan lists every review's `verdicts/` directory (435
+#: on the live store today) plus each agent's reports, and it is decorating a
+#: roster — a slow truthful answer is worse here than a fast one that says which
+#: part it did not reach, which the PARTIAL rendering does.
+DEFAULT_PRESENCE_WORK_BUDGET = 20.0
+
+
+def _presence_work_budget() -> float:
+    """Deadline for the `presence show` work-evidence scan, seconds. Env
+    ``COORD_PRESENCE_WORK_BUDGET`` (see DEFAULT_PRESENCE_WORK_BUDGET)."""
+    return config.env_float("COORD_PRESENCE_WORK_BUDGET",
+                            DEFAULT_PRESENCE_WORK_BUDGET)
+
+
 def _briefing_budget() -> float:
     """Shared aggregate deadline (seconds) for the briefing/needs-me add-on stack.
     Env ``COORD_BRIEFING_BUDGET`` (see the DEFAULT_BRIEFING_BUDGET rationale). One
@@ -6895,7 +6912,14 @@ def _work_evidence_index(
 
 
 def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
-    work_index, work_ok = _work_evidence_index(transport, args.team)
+    # BOUNDED (codex-reviewer, 591 r3): unbounded, this listed every review's
+    # verdicts dir — 435 on the live store — synchronously, on a command whose
+    # whole job is to print a roster. Its own deadline, since a direct command
+    # has no add-on stack to share one with; expiry degrades to PARTIAL, which
+    # withholds the nudge rather than inventing an absence.
+    work_deadline = Deadline.open(_presence_work_budget())
+    work_index, work_ok = _work_evidence_index(
+        transport, args.team, deadline=work_deadline.instant)
     ros = presence.roster(
         _presence_shards(transport, args.team), now=_iso(_now()),
         work_index=work_index,
@@ -10911,7 +10935,7 @@ def build_parser() -> argparse.ArgumentParser:
 #: ordering is load-bearing, not cosmetic.
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
     cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_briefing,
-    cmd_presence_show, cmd_review_status, cmd_queue, cmd_health, cmd_doctor,
+    cmd_presence_show, cmd_review_status, cmd_health, cmd_doctor,
     cmd_obligations, cmd_roles_status, cmd_continuity_resume,
     cmd_agents, cmd_asks, cmd_engagement_gate, cmd_stash_list,
     cmd_router_shadow_status,
@@ -10922,14 +10946,61 @@ _ACTIVITY_READ_FUNCS: frozenset = frozenset({
 })
 
 
-def _is_activity_refresh_func(func: Any) -> bool:
-    """Does a successful run of ``func`` count as evidence the actor is working?
+#: Handlers that serve BOTH a read and a write operation, so the function alone
+#: cannot classify the invocation. Each maps to a predicate over the PARSED
+#: ARGS: true when this particular invocation wrote something.
+#:
+#: codex-reviewer, 590 r2: classification keyed only by handler silently
+#: mis-answered three real commands — `queue commit` (a durable classification
+#: record) did not count as activity, while `inbox` and `digest` refreshed
+#: presence merely by being VIEWED. Both directions wrong, in the same table,
+#: for the same structural reason: one function object, two operations.
+#:
+#: `queue --consume` is here too, and codex did not name it. It deliberately
+#: advances ANOTHER agent's cursor — a mutation of someone else's state, not
+#: bookkeeping of your own read — so it belongs on the write side. Shipping the
+#: three that were reported while leaving its neighbour is the exact habit that
+#: produced this review round.
+_MIXED_MODE_ACTIVITY: dict[Any, Any] = {
+    # `queue TEAM` reads (its own cursor advance is bookkeeping of that read);
+    # `queue commit TEAM` records classifications; `--consume` moves another
+    # agent's cursor.
+    cmd_queue: lambda a: (getattr(a, "commit_team", None) is not None
+                          or bool(getattr(a, "consume", False))),
+    # `inbox TEAM` views; `inbox TEAM --ack SLUG` acknowledges.
+    cmd_inbox: lambda a: bool(getattr(a, "ack", None)),
+    # `digest TEAM` views; `digest TEAM --store` persists the digest.
+    cmd_digest: lambda a: bool(getattr(a, "store", False)),
+}
 
-    Everything that is not a declared read does. The default must be "counts":
-    the old default's failure mode was an agent rendered dark while doing
-    exactly its job, and then nudged for it.
+
+def _is_activity_invocation(args: Any) -> bool:
+    """Does THIS invocation count as evidence the actor is working?
+
+    Classification is per-OPERATION, not per-function: a mixed handler is
+    resolved by its parsed args before the read/write default applies. The
+    default remains "counts", because its failure mode is an agent rendered dark
+    while doing exactly its job — but a declared read, or the read branch of a
+    mixed command, must never manufacture liveness out of looking at a view.
     """
-    return func is not None and func not in _ACTIVITY_READ_FUNCS
+    func = getattr(args, "func", None)
+    if func is None:
+        return False
+    predicate = _MIXED_MODE_ACTIVITY.get(func)
+    if predicate is not None:
+        return bool(predicate(args))
+    return func not in _ACTIVITY_READ_FUNCS
+
+
+def _is_activity_refresh_func(func: Any) -> bool:
+    """Function-only view of the rule, for callers with no parsed args.
+
+    UNSAFE for a mixed handler — it cannot see which operation ran — so it
+    answers False for those rather than guessing a direction.
+    """
+    if func is None or func in _MIXED_MODE_ACTIVITY:
+        return False
+    return func not in _ACTIVITY_READ_FUNCS
 
 
 class _ActivityRefreshFuncs:
@@ -11052,7 +11123,7 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
     # ``_known_sender`` — never a target assignee); the anonymous host fallback
     # is not a presence identity, so a missing actor/team skips silently. The
     # whole step is best-effort and cannot change ``rc``.
-    if rc == 0 and _is_activity_refresh_func(getattr(args, "func", None)):
+    if rc == 0 and _is_activity_invocation(args):
         actor = _known_sender(args)
         team = getattr(args, "team", None)
         if actor and team:
