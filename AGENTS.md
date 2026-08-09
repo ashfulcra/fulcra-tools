@@ -1017,9 +1017,16 @@ it (not on PyPI).
   degrades to PARTIAL rather than reverting. The **continuity audit deliberately does NOT**: its product
   is checkpoint staleness, not activity, and "working but not snapshotting" is precisely its finding —
   work evidence would mask it. That asymmetry is chosen, not an oversight.
-  **Adding a READ verb is now the deliberate act** — name it in `_ACTIVITY_READ_FUNCS`;
-  `tests/test_activity_covers_every_write_verb.py` fails on any store-writing verb left uncovered, and
-  every exemption there carries its reason. The hook lives
+  **Every registered command must be CLASSIFIED**, read or write, and written down as such:
+  `tests/test_activity_covers_every_write_verb.py` walks the real argparse tree and fails on any
+  command nobody has classified, in EITHER direction. A regex cannot decide this — `tell`, `reconcile`
+  and `task restore` all persist through helpers and show no `transport.write` in their own bodies, so
+  a source-scan classifier is confidently wrong. Reads go in `_ACTIVITY_READ_FUNCS`, which is
+  COMPLETED AT MODULE END, after the extracted command modules are imported: assembled earlier it can
+  only name what `cli.py` defines, and that hole let `headroom`, `route`, `atc report`,
+  `annotate status` and `threads` refresh presence merely by being READ (codex-reviewer, 590 r1) —
+  manufacturing liveness out of looking at a view, which is the worse direction because it suppresses
+  the nudge for an agent who really is gone. The hook lives
   at the **single dispatch chokepoint** (`main`, after `rc = args.func(...)`), keyed on the
   command FUNCTIONS themselves so no verb can be missed, and fires only on `rc == 0`. The **actor is the
   WRITER** — `--from` / `FULCRA_COORD_AGENT` via `_known_sender` (never a target assignee); the anonymous
