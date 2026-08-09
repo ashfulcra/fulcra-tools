@@ -373,3 +373,107 @@ def test_presence_is_tri_state_not_boolean():
     t.put(cli._settled_marker_path("r", "there"), "x")
     assert cli._settled_marker_present(t, "r", "there") is True
     assert cli._settled_marker_present(Raises(), "r", "any") is None
+
+
+def test_review_status_does_not_stamp_the_cache_over_MERGE_EVIDENCE(capsys):
+    """Found in PRODUCTION by coord-boss, and I caused it: they closed a review
+    with a merge sha, and the `review status` I ran two minutes later TO CHECK
+    the closure overwrote it with the recomputable APPROVED cache.
+
+    PR 572 stopped this verb DELETING merge evidence and left the WRITE path
+    unguarded — the same bug wearing a smaller hat, and the same
+    guarded-one-direction-left-the-neighbour shape.
+
+    Refusing costs nothing: the cache exists so the fan-out fold can skip the
+    slug, and a MERGED marker already makes it skip."""
+    t = FakeTransport()
+    # a review that tallies APPROVED — so `review status` WANTS to cache it
+    t.put("team/r/review/pr-m.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
+    t.put("team/r/review/pr-m/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+    # ...and it has ALREADY been closed with real merge evidence.
+    sha = "b" * 40
+    t.put(cli._settled_marker_path("r", "pr-m"),
+          "---\nschema: review-settled/v1\nstate: MERGED\n"
+          f"merge_sha: {sha}\nmerged_at: 2026-08-09T01:20:00Z\n---\n")
+
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-m"], transport=t) == 0
+    after = cli._classify_settled_marker(t, "r", "pr-m")
+    assert after == cli.SETTLED_MERGED, \
+        "a tally recompute must not stamp its cache over the merge record"
+    assert sha in (t.read(cli._settled_marker_path("r", "pr-m")) or ""), \
+        "the sha is the whole point of the evidence — it must survive"
+
+
+def test_the_cache_IS_written_when_no_evidence_is_there(capsys):
+    """The control. Refusing unconditionally would break the fold's fast path,
+    which is the reason the cache exists at all."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-n.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
+    t.put("team/r/review/pr-n/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-n"], transport=t) == 0
+    assert cli._classify_settled_marker(t, "r", "pr-n") == cli.SETTLED_CACHE
+
+
+def _settleable(t, slug):
+    t.put(f"team/r/review/{slug}.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
+    t.put(f"team/r/review/{slug}/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+
+
+def test_a_FUTURE_schema_marker_is_preserved_not_overwritten(capsys):
+    """codex-reviewer, 588 r1, reproduced exactly. r1 guarded MERGED and left
+    SETTLED_UNKNOWN clobberable — even though the classifier's whole contract is
+    that only `cache` is disposable, precisely because an unrecognised or
+    future-schema marker is one this build cannot prove is ours to drop.
+
+    A `review-settled/v2` marker carrying a real merge sha classified UNKNOWN
+    and was then replaced by the v1 APPROVED cache: evidence written by a NEWER
+    build, destroyed by an older one."""
+    t = FakeTransport()
+    _settleable(t, "pr-fut")
+    sha = "c" * 40
+    t.put(cli._settled_marker_path("r", "pr-fut"),
+          f"---\nschema: review-settled/v2\nstate: MERGED\nmerge_sha: {sha}\n---\n")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-fut"], transport=t)
+    err = capsys.readouterr().err
+    raw = t.read(cli._settled_marker_path("r", "pr-fut")) or ""
+    assert "review-settled/v2" in raw and sha in raw, \
+        "a future-schema marker must survive an older build's cache refresh"
+    assert rc == 3 and "cannot classify" in err and "PRESERVED" in err
+
+
+def test_an_unreadable_existing_marker_is_preserved_not_overwritten(capsys):
+    """The other UNKNOWN shape: the marker exists and this build cannot read it.
+    Absence is unprovable, so the cache must not be stamped over it."""
+    class NoMarkerRead(FakeTransport):
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None            # unreadable, NOT absent
+            return super().read(path)
+
+    t = NoMarkerRead()
+    _settleable(t, "pr-unr")
+    t.put(cli._settled_marker_path("r", "pr-unr"), "opaque-to-this-build")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-unr"], transport=t)
+    assert rc == 3
+    assert t.read.__self__.store[cli._settled_marker_path("r", "pr-unr")] \
+        == "opaque-to-this-build", "the unreadable marker must be untouched"
+
+
+def test_a_positively_absent_marker_is_still_written(capsys):
+    """The control: preserving UNKNOWN must not break the first settle, which is
+    the whole reason the cache exists."""
+    t = FakeTransport()
+    _settleable(t, "pr-new")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-new"], transport=t) == 0
+    assert cli._classify_settled_marker(t, "r", "pr-new") == cli.SETTLED_CACHE
