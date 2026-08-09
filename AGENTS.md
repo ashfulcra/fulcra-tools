@@ -988,11 +988,20 @@ it (not on PyPI).
   raising. Until the W3 sweep ships, no write path may set `state`/`lapsed_at` to a non-default value.**
 - **Activity implies liveness (wake-router W1.5).** Every engine bus **WRITE** verb refreshes the
   **actor's** presence timestamp, so a *working* agent is provably live — distinct from a dead session
-  whose launchd beat still ticks (W2 consumes this as liveness proof). The write-verb set is exactly
-  `tell`, `respond`, the `task` mutators (`start|update|block|pause|abandon|assign|restore|done`),
-  `review request`, `review restore`, and `reconcile`; read verbs (`status`/`board`/`search`/`needs-me`/
-  `briefing`, `presence show`, `review status`) and the W1 `presence beat` never refresh. The hook lives
-  at the **single dispatch chokepoint** (`main`, after `rc = args.func(...)`), keyed on a frozenset of the
+  whose launchd beat still ticks (W2 consumes this as liveness proof). Membership is a **DENYLIST**:
+  every verb refreshes EXCEPT the declared reads (`status`/`board`/`search`/`needs-me`/`briefing`,
+  `presence show`, `review status`, `queue`, `health`, `doctor`, `obligations`, `roles status`,
+  `continuity resume`) and the W1 `presence beat`. It was an ALLOWLIST of thirteen functions until
+  2026-08-09, which could not keep this paragraph's promise — a verb added later was simply absent, and
+  absence there is indistinguishable from "this agent is not working". Twenty write verbs had drifted
+  outside it (`review close`, `escalate`, `continuity snapshot`/`park`, `roles claim`/`release`,
+  `answer`, `bus-v3 send`, `stash push` …), so an agent whose job IS reviewing rendered `stale — nudge`
+  while working: measured that day, codex-reviewer showed `stale 6d` having filed a verdict 3.5h earlier,
+  and the roster attaches an imperative to that judgement, so it dispatches people, not just labels them.
+  **Adding a READ verb is now the deliberate act** — name it in `_ACTIVITY_READ_FUNCS`;
+  `tests/test_activity_covers_every_write_verb.py` fails on any store-writing verb left uncovered, and
+  every exemption there carries its reason. The hook lives
+  at the **single dispatch chokepoint** (`main`, after `rc = args.func(...)`), keyed on the
   command FUNCTIONS themselves so no verb can be missed, and fires only on `rc == 0`. The **actor is the
   WRITER** — `--from` / `FULCRA_COORD_AGENT` via `_known_sender` (never a target assignee); the anonymous
   `coord-reconcile:<host>` fallback is not a presence identity, so a missing actor or team skips silently.

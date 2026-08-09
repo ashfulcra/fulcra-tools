@@ -10784,16 +10784,58 @@ def build_parser() -> argparse.ArgumentParser:
 # Every engine bus WRITE verb refreshes the ACTOR's presence timestamp at the
 # single dispatch chokepoint below, so no verb can be missed and none has to
 # opt in. The set is keyed on the command FUNCTIONS themselves (not on parsed
-# subcommand strings) — read verbs (status/board/search/needs-me/briefing,
-# presence show, review status) and the W1 ``presence beat`` are deliberately
-# absent. See AGENTS.md, "Activity implies liveness".
-_ACTIVITY_WRITE_FUNCS = frozenset({
-    cmd_tell, cmd_respond,
-    cmd_task_start, cmd_task_update, cmd_task_block, cmd_task_pause,
-    cmd_task_abandon, cmd_task_assign, cmd_task_restore, cmd_task_done,
-    cmd_review_request, cmd_review_restore,
-    cmd_reconcile,
+# subcommand strings). See AGENTS.md, "Activity implies liveness".
+# THIS IS A DENYLIST, and it must stay one. It was an ALLOWLIST of thirteen
+# functions, which cannot keep the promise the paragraph above makes: a verb
+# added later is simply absent, silently, and absence here is indistinguishable
+# from "this agent is not working". Twenty write verbs had accumulated outside
+# it — `review close`, `escalate`, `continuity snapshot`/`park`, `roles claim`/
+# `release`, `answer`, `bus-v3 send` and `stash push` among them.
+#
+# Measured cost (2026-08-09, live store): codex-reviewer rendered
+# "stale 6d — nudge" having filed a verdict 3.5h earlier; coord-opus-worker
+# rendered "stale 42h — nudge" having filed a report 4.8h earlier. An agent
+# whose job IS reviewing — file a verdict, close a review, claim its role, save
+# continuity — performs none of the thirteen blessed verbs, so it rendered dark
+# while working. The roster attaches an IMPERATIVE to that judgement ("nudge"),
+# so the failure does not merely mislabel: it dispatches people.
+#
+# Inverting makes the default SAFE. A new write verb counts as activity without
+# anyone remembering; a new READ verb has to be named here, which is a decision
+# someone makes on purpose rather than an omission nobody notices. Reads must
+# stay out — looking at the board is not evidence that any work happened.
+_ACTIVITY_READ_FUNCS = frozenset({
+    cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_briefing,
+    cmd_presence_show, cmd_review_status, cmd_queue, cmd_health, cmd_doctor,
+    cmd_obligations, cmd_roles_status, cmd_continuity_resume,
+    # `presence beat` is W1's own write of this very shard; routing it through
+    # the activity path would double-write and let the throttle memo suppress a
+    # deliberate beat.
+    cmd_presence_beat,
 })
+
+
+def _is_activity_refresh_func(func: Any) -> bool:
+    """Does a successful run of ``func`` count as evidence the actor is working?
+
+    Everything that is not a declared read does. The default must be "counts":
+    the old default's failure mode was an agent rendered dark while doing
+    exactly its job, and then nudged for it.
+    """
+    return func is not None and func not in _ACTIVITY_READ_FUNCS
+
+
+class _ActivityRefreshFuncs:
+    """Membership seam for the coverage regression, so a test can ask "does this
+    verb refresh?" without reaching into dispatch. Membership is COMPUTED from
+    the denylist rather than curated — a curated answer here would re-create the
+    very bug the test exists to catch."""
+
+    def __contains__(self, func: Any) -> bool:
+        return _is_activity_refresh_func(func)
+
+
+ACTIVITY_REFRESH_FUNCS = _ActivityRefreshFuncs()
 
 #: Process-global throttle memo: actor -> monotonic time of its last activity
 #: refresh. Module state by design (one process = one live agent); the test
@@ -10903,7 +10945,7 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
     # ``_known_sender`` — never a target assignee); the anonymous host fallback
     # is not a presence identity, so a missing actor/team skips silently. The
     # whole step is best-effort and cannot change ``rc``.
-    if rc == 0 and args.func in _ACTIVITY_WRITE_FUNCS:
+    if rc == 0 and _is_activity_refresh_func(getattr(args, "func", None)):
         actor = _known_sender(args)
         team = getattr(args, "team", None)
         if actor and team:

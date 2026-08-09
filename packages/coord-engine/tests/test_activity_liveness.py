@@ -282,26 +282,50 @@ def test_refresh_writes_minimal_beat_when_no_shard_exists():
     assert "engagement:" not in shard
 
 
-# --- 4. THE WRITE-VERB SET ---------------------------------------------------
+# --- 4. THE VERB SET (now a denylist) ----------------------------------------
 
-def test_write_verb_set_is_exactly_the_bus_writers():
-    expected = {
-        cli.cmd_tell, cli.cmd_respond,
-        cli.cmd_task_start, cli.cmd_task_update, cli.cmd_task_block,
-        cli.cmd_task_pause, cli.cmd_task_abandon, cli.cmd_task_assign,
-        cli.cmd_task_restore, cli.cmd_task_done,
-        cli.cmd_review_request, cli.cmd_review_restore,
-        cli.cmd_reconcile,
+def test_read_verb_set_is_exactly_the_declared_reads():
+    """Membership is a DENYLIST now, so this pins the reads.
+
+    Replaces `test_write_verb_set_is_exactly_the_bus_writers`, which asserted
+    the thirteen-function allowlist verbatim and so FROZE the bug in place:
+    `review close`, `escalate`, `continuity snapshot` and `roles claim` were all
+    absent from that list, and this test's job was to keep them absent. Pinning
+    the reads puts the deliberateness where it now belongs — adding a read is
+    the change that can silently cost coverage.
+    """
+    assert set(cli._ACTIVITY_READ_FUNCS) == {
+        cli.cmd_status, cli.cmd_board, cli.cmd_search, cli.cmd_needs_me,
+        cli.cmd_briefing, cli.cmd_presence_show, cli.cmd_review_status,
+        cli.cmd_queue, cli.cmd_health, cli.cmd_doctor, cli.cmd_obligations,
+        cli.cmd_roles_status, cli.cmd_continuity_resume, cli.cmd_presence_beat,
     }
-    assert set(cli._ACTIVITY_WRITE_FUNCS) == expected
 
 
-def test_read_verbs_are_not_in_the_write_set():
+def test_read_verbs_do_not_count_as_activity():
+    """Unchanged property, retargeted at the new seam: reading the board must
+    never manufacture liveness."""
     for read_fn in (cli.cmd_status, cli.cmd_board, cli.cmd_search,
                     cli.cmd_needs_me, cli.cmd_briefing,
                     cli.cmd_presence_show, cli.cmd_review_status,
                     cli.cmd_presence_beat):
-        assert read_fn not in cli._ACTIVITY_WRITE_FUNCS
+        assert not cli._is_activity_refresh_func(read_fn)
+
+
+def test_the_verbs_that_were_silently_missing_now_count():
+    """The regression that names the actual victims.
+
+    Each of these persists to the store and is exactly what a reviewer or a
+    maintainer does all day; under the allowlist every one of them left the
+    actor rendered `stale — nudge` while working.
+    """
+    for write_fn in (cli.cmd_review_close, cli.cmd_escalate,
+                     cli.cmd_continuity_snapshot, cli.cmd_continuity_park,
+                     cli.cmd_roles_claim, cli.cmd_roles_release,
+                     cli.cmd_answer, cli.cmd_stash_push):
+        assert cli._is_activity_refresh_func(write_fn), (
+            f"{write_fn.__name__} writes to the store; an agent doing it is "
+            "working and must not be rendered dark")
 
 
 # --- dispatch-seam behavior (verb-agnostic: keyed on the set) ----------------
