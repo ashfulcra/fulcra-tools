@@ -563,13 +563,29 @@ it (not on PyPI).
   means the write was refused, and rc 3 means it was written but not proven
   fleet-readable before the deadline.
   Every queue read also compares this engine against the authority's
-  `current_engine_version` pin, for free (the config was already loaded), and
-  prints `queue: ENGINE STALE` when the runtime is older — a restored
-  environment snapshot reinstalls old engines whose writes modern readers
-  skip. `coord-engine doctor <team> --self` is the same check on demand and
-  is TRI-STATE: rc 0 `current` only when the pin exists, parses, and this
+  `current_engine_version` — the fleet **MINIMUM engine**, not "the pin" — for
+  free (the config was already loaded), and prints `queue: ENGINE STALE` when
+  the runtime is older; a restored environment snapshot reinstalls old engines
+  whose writes modern readers skip.
+  **Two different authorities, and they are not the same object.** "The pin" is
+  the COMMIT in `_coord/bus-v3/adopt-latest.sh` — what to install.
+  `current_engine_version` in `_coord/bus-v3/records.json` is a SEMVER FLOOR —
+  the minimum engine the fleet accepts, compared at-or-above. Adoption moves the
+  first and cannot touch the second. Until 2026-08-09 both were rendered as "the
+  pin", and it cost a real exchange: a pin was cut and adopted, `doctor --self`
+  still read `v1.10.0`, and the obvious inference — that the pin had not taken —
+  was wrong. Renderings now say "minimum engine" and name the field.
+  **PIN-MOVE PROTOCOL (coord-boss, 2026-08-09):** every pin move that ships
+  BEHAVIOURAL change evaluates a floor raise **in the same pass**. Otherwise the
+  floor silently trails the shipped engine — it sat at `1.10.0` while three
+  consecutive pins carried `1.11.0`, and because the check is at-or-above, every
+  host rendered `current` and nothing surfaced the drift. Raising the floor is
+  also the mechanism that reaches a dark host: it ages into `stale` and adopts
+  on its next wake.
+  `coord-engine doctor <team> --self` is the same check on demand and
+  is TRI-STATE: rc 0 `current` only when the floor exists, parses, and this
   engine meets it; rc 3 `stale` (run the store's adopt-latest, then re-run);
-  rc 2 `unknown` when the config is unreadable or the pin is absent or
+  rc 2 `unknown` when the config is unreadable or the floor is absent or
   malformed — comparison impossible is not current, so never read rc 2 as
   green. Prefer it to an unconditional restore-and-adopt preamble: repair
   only when it exits nonzero.

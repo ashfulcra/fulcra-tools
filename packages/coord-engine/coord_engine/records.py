@@ -664,7 +664,10 @@ def authority_currency(config: Optional[dict], *,
         _version_tuple(current) if isinstance(current, str) else None)
     if own is None or cur is None or own >= cur:
         return None
-    return (f"this engine is v{engine_version} but the fleet authority is "
+    # Says "minimum", never "pin": the word `pin` is already taken by the COMMIT
+    # in `adopt-latest.sh`, and this is the semver FLOOR in `records.json`. An
+    # operator told they are "below the pin" goes and reads the wrong file.
+    return (f"this engine is v{engine_version}, below the fleet minimum engine "
             f"v{current} — a stale snapshot likely restored it; run the "
             f"store adopt-latest.sh before writing anything")
 
@@ -687,16 +690,18 @@ def authority_currency_state(config: Optional[dict], *,
     if not isinstance(config, dict):
         return "unknown", (
             "the bus-v3 records config is absent or unreadable, so this "
-            "engine cannot be compared with the fleet pin")
+            "engine cannot be compared with the fleet minimum")
     current = config.get(CURRENT_ENGINE_FIELD)
     if current is None:
         return "unknown", (
-            f"the fleet authority declares no {CURRENT_ENGINE_FIELD}; "
-            "comparison is impossible, which is not the same as current")
+            f"the fleet authority declares no minimum engine "
+            f"({CURRENT_ENGINE_FIELD}); comparison is impossible, which is not "
+            "the same as current")
     if not isinstance(current, str) or _version_tuple(current) is None:
         return "unknown", (
-            f"the fleet authority's {CURRENT_ENGINE_FIELD} is {current!r}, "
-            "which is not a parseable version; comparison is impossible")
+            f"the fleet authority's minimum engine ({CURRENT_ENGINE_FIELD}) is "
+            f"{current!r}, which is not a parseable version; comparison is "
+            "impossible")
     if _version_tuple(engine_version) is None:
         return "unknown", (
             f"this engine reports version {engine_version!r}, which is not a "
@@ -704,9 +709,15 @@ def authority_currency_state(config: Optional[dict], *,
     warning = authority_currency(config, engine_version=engine_version)
     if warning:
         return "stale", warning
+    # "minimum", not "pin". `current_engine_version` is a FLOOR — the check is
+    # at-or-above — while "the pin" means the COMMIT in adopt-latest.sh. The two
+    # authorities wore the same word until 2026-08-09, and it cost a real
+    # exchange: a pin was cut and adopted, this line still read v1.10.0, and the
+    # obvious inference (the pin did not take) was wrong — adoption cannot move
+    # this field at all. Naming the field in the sentence keeps the two apart.
     return "current", (
-        f"this engine is v{engine_version}; the fleet authority pin is "
-        f"v{current}")
+        f"this engine is v{engine_version}; the fleet minimum engine "
+        f"({CURRENT_ENGINE_FIELD}) is v{current}")
 
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
