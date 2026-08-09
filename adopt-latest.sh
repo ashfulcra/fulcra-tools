@@ -160,13 +160,71 @@ echo "---       proof of no work, and \`tell\` dispatch does not appear on the e
 # send itself fails — and it is the ONLY path on a pre-bus-v3 engine.
 SLUG="adopted-${VER}-${A}-rc${rc}"
 [ "$STEP_FAILS" -gt 0 ] && SLUG="${SLUG}-steps${STEP_FAILS}"
-FULCRA_COORD_AGENT="$A" coord-engine bus-v3 send fulcra --to coord-boss --kind claim \
-    --slug "$SLUG" --priority P2 \
-  && echo "adoption claim sent (tagged) to coord-boss (slug ${SLUG})" \
-  || { printf '{"note":"{\\"v\\":1,\\"to\\":\\"coord-boss\\",\\"kind\\":\\"claim\\",\\"pri\\":\\"P2\\",\\"slug\\":\\"%s\\"}"}' "$SLUG" | \
-       fulcra-api record "$TYPE" --api-version v1alpha1 --source="$A" \
-       && echo "adoption claim sent via RAW FALLBACK (tags missing, attribution intact) — report to coord-boss" \
-       || echo "WARN: adoption claim failed to send — report this verbatim to coord-boss"; }
+
+# CLAIM DEDUPE, HELD IN THE STORE (2026-08-08). This send fired on EVERY
+# invocation, so an agent on an hourly wake re-announced the same adoption every
+# hour — five identical claims in one afternoon, pure queue noise for every
+# recipient.
+#
+# WHY NOT THE ${HOME} SENTINEL ABOVE: it gates the INSTALL legs and cannot gate
+# this. A container rebuilt from a snapshot each wake restores $HOME, so the
+# sentinel never matches there — and those hosts are exactly the ones re-running
+# this script hourly. A dedupe held on local disk is a dedupe for the hosts that
+# were already quiet. The fact has to live where the identity lives.
+#
+# KEYED ON THE FULL SLUG, not on (agent, pin): the slug encodes rc and
+# `-steps<N>`, so a RESCUED run still announces itself. Deduping on (agent,
+# pin) would suppress exactly the signal the -steps suffix exists to carry.
+# NOTE the limit of the key (codex-reviewer, 589 r1): `-steps<N>` counts how
+# many steps were rescued, not WHICH, so equal slugs mean equal rc and equal
+# step COUNT — not provably the same outcome. The dedupe is right for noise
+# suppression and must not be read as an identity claim.
+#
+# FAILS OPEN: if the marker cannot be read we SEND. A duplicate claim is noise;
+# a missed one is a fleet that cannot tell who adopted. An unreadable store must
+# never become a silent skip.
+CLAIM_MARK="team/fulcra/_coord/bus-v3/adopted/${SLUG}.txt"
+if fulcra-api file stat "$CLAIM_MARK" >/dev/null 2>&1; then
+  echo "adopt: ${A} already claimed ${VER} with this outcome — not re-sending (store marker)"
+else
+SENT=0
+if FULCRA_COORD_AGENT="$A" coord-engine bus-v3 send fulcra --to coord-boss --kind claim \
+     --slug "$SLUG" --priority P2; then
+  SENT=1
+  echo "adoption claim sent (tagged) to coord-boss (slug ${SLUG})"
+elif printf '{"note":"{\\"v\\":1,\\"to\\":\\"coord-boss\\",\\"kind\\":\\"claim\\",\\"pri\\":\\"P2\\",\\"slug\\":\\"%s\\"}"}' "$SLUG" | \
+       fulcra-api record "$TYPE" --api-version v1alpha1 --source="$A"; then
+  SENT=1
+  echo "adoption claim sent via RAW FALLBACK (tags missing, attribution intact) — report to coord-boss"
+else
+  echo "WARN: adoption claim failed to send — report this verbatim to coord-boss"
+fi
+  # Marker written ONLY on a delivery that actually succeeded (codex-reviewer,
+  # 589 r1). The first cut wrote it after the send BLOCK regardless: the final
+  # warning `echo` succeeds, so control reached the upload and a claim that was
+  # never delivered still suppressed the next wake's retry — the exact opposite
+  # of the fail-open contract three comments up, and a false-clear on the
+  # adoption record itself.
+  #
+  # Best-effort in the other direction only: a failed marker WRITE costs one
+  # duplicate claim next wake, which is the safe way to be wrong.
+  #
+  # The cleanup lives INSIDE the branch because `_CM` is assigned inside it and
+  # this script runs under `set -u` (line 14). Left outside, `rm -f "$_CM"`
+  # expands an unset variable on the SENT=0 path and the shell EXITS there:
+  # `exit "$rc"` below is never reached, so a DEGRADED rc 3 is replaced by a
+  # generic 1 and the rescued-step evidence line never prints. It fires only
+  # when the send already failed — i.e. when the bus is degraded — so a bus
+  # outage would read as a broken adopt script (coord-opus-worker, 589 r2).
+  # `${_CM:-}` silences it too; scoping states structurally which paths reach
+  # the line.
+  if [ "$SENT" -eq 1 ]; then
+    _CM="$(mktemp)"; printf 'claimed %s\n' "$SLUG" > "$_CM"
+    fulcra-api file upload "$_CM" "$CLAIM_MARK" >/dev/null 2>&1 \
+      || echo "adopt: claim marker not written — the claim may repeat next wake" >&2
+    rm -f "$_CM"
+  fi
+fi
 [ "$STEP_FAILS" -gt 0 ] && echo "adopt: ${STEP_FAILS} step(s) failed and were rescued by a later installer — the per-step stderr above is the evidence; the engine was still verified by the claim gate." >&2
 
 exit "$rc"

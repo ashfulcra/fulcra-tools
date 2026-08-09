@@ -627,7 +627,14 @@ def test_cli_respond_closes_and_records(capsys):
     assert cli.main(["respond", "r", slug, "-o", "answered", "-a", "amy"], transport=t) == 0
     out = capsys.readouterr().out
     assert "closed" in out
-    assert "response recorded — the owner's queue surfaces it" in out  # reply-leg breadcrumb
+    # THE REPLY-LEG LINE MUST MATCH REALITY. This asserted the unconditional
+    # "the owner's queue surfaces it" — pinning a guarantee the code never
+    # delivered, since `respond` emitted no event and the queue reads events.
+    # The test made the false line load-bearing, which is how it survived long
+    # enough to cost a re-asked directive (2026-08-08). This fixture has no bus
+    # config, so the honest output is NOT-delivered; the delivered branch is
+    # pinned in test_respond_companion.py.
+    assert "NOT delivered to the owner's queue" in out
     assert okf.parse_frontmatter(t.store[f"team/r/task/{slug}.md"])["status"] == "done"
     assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
