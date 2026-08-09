@@ -998,7 +998,14 @@ it (not on PyPI).
   `answer`, `bus-v3 send`, `stash push` …), so an agent whose job IS reviewing rendered `stale — nudge`
   while working: measured that day, codex-reviewer showed `stale 6d` having filed a verdict 3.5h earlier,
   and the roster attaches an imperative to that judgement, so it dispatches people, not just labels them.
-  **Every registered command must be CLASSIFIED**, read or write, and written down as such:
+  **Classification is PER-OPERATION, not per-function.** Several handlers serve both a read and a write:
+  `queue TEAM` vs `queue commit TEAM` (and `--consume`, which advances ANOTHER agent's cursor),
+  `inbox TEAM` vs `inbox --ack`, `digest TEAM` vs `digest --store`. Keyed on the function alone these
+  were wrong in BOTH directions at once — `queue commit` recorded durable classifications without
+  counting as activity, while `inbox` and `digest` refreshed presence merely by being VIEWED
+  (codex-reviewer, 590 r2). `_MIXED_MODE_ACTIVITY` maps such a handler to a predicate over the PARSED
+  ARGS, and `_is_activity_invocation(args)` — not the function-only helper — is what dispatch calls.
+  **Every registered command must be CLASSIFIED**, read or write or mixed, and written down as such:
   `tests/test_activity_covers_every_write_verb.py` walks the real argparse tree and fails on any
   command nobody has classified, in EITHER direction. A regex cannot decide this — `tell`, `reconcile`
   and `task restore` all persist through helpers and show no `transport.write` in their own bodies, so
