@@ -284,22 +284,16 @@ def test_refresh_writes_minimal_beat_when_no_shard_exists():
 
 # --- 4. THE VERB SET (now a denylist) ----------------------------------------
 
-def test_read_verb_set_is_exactly_the_declared_reads():
-    """Membership is a DENYLIST now, so this pins the reads.
-
-    Replaces `test_write_verb_set_is_exactly_the_bus_writers`, which asserted
-    the thirteen-function allowlist verbatim and so FROZE the bug in place:
-    `review close`, `escalate`, `continuity snapshot` and `roles claim` were all
-    absent from that list, and this test's job was to keep them absent. Pinning
-    the reads puts the deliberateness where it now belongs — adding a read is
-    the change that can silently cost coverage.
-    """
-    assert set(cli._ACTIVITY_READ_FUNCS) == {
-        cli.cmd_status, cli.cmd_board, cli.cmd_search, cli.cmd_needs_me,
-        cli.cmd_briefing, cli.cmd_presence_show, cli.cmd_review_status,
-        cli.cmd_queue, cli.cmd_health, cli.cmd_doctor, cli.cmd_obligations,
-        cli.cmd_roles_status, cli.cmd_continuity_resume, cli.cmd_presence_beat,
-    }
+# The exhaustive read/write classification lives in
+# `test_activity_covers_every_write_verb.py`, which walks the REAL argparse tree
+# and fails on any registered command nobody has classified.
+#
+# A pinned-membership test stood here. It duplicated the set verbatim in a second
+# file — and a hand-maintained duplicate is exactly the drift that produced the
+# bug being fixed: the original pinned the thirteen-function ALLOWLIST, so its
+# real job was keeping `review close` and `roles claim` OUT. Re-pinning a
+# 25-item set here would rebuild that hazard one layer over, so the single
+# source of truth is the classification tables in the other module.
 
 
 def test_read_verbs_do_not_count_as_activity():

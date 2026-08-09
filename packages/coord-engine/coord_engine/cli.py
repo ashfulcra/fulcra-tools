@@ -10804,10 +10804,15 @@ def build_parser() -> argparse.ArgumentParser:
 # anyone remembering; a new READ verb has to be named here, which is a decision
 # someone makes on purpose rather than an omission nobody notices. Reads must
 # stay out — looking at the board is not evidence that any work happened.
-_ACTIVITY_READ_FUNCS = frozenset({
+#: Read verbs DEFINED IN THIS MODULE. The set is completed at module end, once
+#: the extracted command modules are imported — see the note down there; that
+#: ordering is load-bearing, not cosmetic.
+_ACTIVITY_READ_FUNCS: frozenset = frozenset({
     cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_briefing,
     cmd_presence_show, cmd_review_status, cmd_queue, cmd_health, cmd_doctor,
     cmd_obligations, cmd_roles_status, cmd_continuity_resume,
+    cmd_agents, cmd_asks, cmd_engagement_gate, cmd_stash_list,
+    cmd_router_shadow_status,
     # `presence beat` is W1's own write of this very shard; routing it through
     # the activity path would double-write and let the throttle memo suppress a
     # deliberate beat.
@@ -11004,6 +11009,24 @@ cmd_threads = commands_threads.cmd_threads
 from . import commands_acceptance  # noqa: E402
 
 cmd_acceptance_pair = commands_acceptance.cmd_acceptance_pair
+
+
+# --- activity denylist: the EXTRACTED read verbs -----------------------------
+#
+# Completed HERE, after the extracted command modules are bound, because a
+# denylist assembled earlier in this file can only name what `cli.py` itself
+# defines. That was the hole codex-reviewer found (590 r1): `headroom`, `route`,
+# `atc report`, `annotate status` and `threads` live in extracted modules, so the
+# default-true predicate treated them as activity and merely READING one of those
+# views refreshed the reader's presence. Manufacturing liveness out of someone
+# looking at a dashboard is the worse direction to be wrong in — it suppresses
+# the nudge for an agent who really is gone.
+_ACTIVITY_READ_FUNCS = _ACTIVITY_READ_FUNCS | frozenset({
+    cmd_headroom, cmd_route, cmd_atc_report,   # commands_atc
+    cmd_dash,                                  # commands_atc — serves a view
+    cmd_annotate_status,                       # commands_annotate
+    cmd_threads,                               # commands_threads
+})
 
 
 if __name__ == "__main__":  # pragma: no cover
