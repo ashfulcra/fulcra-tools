@@ -201,16 +201,31 @@ def _is_lapsed(engagement: dict[str, Any], *, now: str) -> bool:
 
 
 #: "No work reading was taken." Distinct from a reading that found nothing.
-#: Callers that cannot measure work omit the argument; the row then reports
-#: UNKNOWN rather than implying the agent did nothing — the same rule as a
-#: missing health pointer, which is UNKNOWN and never stale.
 WORK_TS_ABSENT = None
+
+#: How much the caller actually managed to measure. THREE values, because two
+#: could not express the case coord-boss's briefing ruling exposed:
+#:
+#:   NONE     — nobody looked. Rendering is byte-identical to the pre-axis
+#:              behaviour, so callers that never opted in keep their nudge and a
+#:              dark agent is still surfaced.
+#:   COMPLETE — the scan finished. Absence is then a real finding, so an agent
+#:              with no artifact is nudged and the row says `no work found`.
+#:   PARTIAL  — the scan was ATTEMPTED and did not finish (budget exhausted, or a
+#:              listing that raised or returned None). Absence proves nothing, so
+#:              the nudge is withheld and the row says UNKNOWN. Falling back to
+#:              NONE here would re-emit exactly the false nudge this whole axis
+#:              exists to prevent — briefing feeds dispatch, so a partial scan
+#:              must fail SAFE and stay visible rather than quietly reverting.
+WORK_SCAN_NONE = "none"
+WORK_SCAN_COMPLETE = "complete"
+WORK_SCAN_PARTIAL = "partial"
 
 
 def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
              stale_hours: float = STALE_HOURS,
              work_ts: Optional[str] = WORK_TS_ABSENT,
-             work_measured: bool = False) -> dict[str, Any]:
+             work_scan: str = WORK_SCAN_NONE) -> dict[str, Any]:
     """Engagement-aware liveness verdict for one presence shard.
 
     Returns ``{state, freshness, annotation, engagement}`` where:
@@ -236,12 +251,12 @@ def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
          could not see the two measurements disagree.
       2. The NUDGE — the only imperative this fold emits — requires BOTH axes
          stale. One fresh axis is enough to establish the agent is working.
-      3. "Nobody measured" and "we measured and found nothing" are DIFFERENT,
-         and only ``work_measured`` tells them apart. Unmeasured rows keep the
-         pre-existing behaviour exactly — muting the nudge for callers that
-         never opted in would trade a false positive for total signal loss, and
-         a genuinely dark agent would stop being surfaced anywhere. Measured-
-         and-empty is a real finding, so its nudge stands and the row says so.
+      3. "Nobody looked", "we looked and found nothing" and "we looked and could
+         not finish" are THREE different states — see ``WORK_SCAN_*``. Two was
+         not enough: a partial scan reported as unmeasured silently reverts to
+         the legacy nudge, which is the false nudge this axis exists to prevent,
+         and briefing (which feeds dispatch, and whose scan is budgeted) is
+         exactly where that would land.
 
     The fold stays PURE: it never reads the store. The caller measures (mtimes,
     read-derived) and passes the result in, so the freshness rules stay testable
@@ -273,7 +288,7 @@ def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
     elif mode == "session":
         parts.append("within committed window")
     if freshness == "stale":
-        if not work_measured:
+        if work_scan == WORK_SCAN_NONE:
             # NOT MEASURED. Behaviour is byte-identical to before the work axis
             # existed, and that is deliberate: several callers (briefing,
             # broadcast_roster, the continuity audit) do not measure, and having
@@ -281,6 +296,13 @@ def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
             # for total signal loss — the genuinely dark agent would stop being
             # surfaced anywhere. An un-opted-in caller gets the old contract.
             parts.append(f"stale {_ago_label(ts, now)} — nudge")
+        # ORDER MATTERS, and it is asymmetric on purpose: a FRESH positive
+        # finding is conclusive under ANY scan state, because finding recent work
+        # proves the agent is working and no amount of unscanned remainder can
+        # unprove it. Only ABSENCE and STALENESS need a complete scan, so those
+        # fall through to the PARTIAL branch below. This is why briefing, whose
+        # scan usually goes PARTIAL, still reports codex-reviewer's real work
+        # rather than hiding it behind an UNKNOWN.
         elif work_ts and classify(work_ts, now=now, live_hours=live_hours,
                                   stale_hours=stale_hours) != "stale":
             # Rules 1 and 2 together: name both ages, withhold the imperative.
@@ -288,14 +310,23 @@ def liveness(shard: Any, *, now: str, live_hours: float = LIVE_HOURS,
             # laundered, it is completed.
             parts.append(f"stale {_ago_label(ts, now)} (beat) · "
                          f"but filed work {_ago_label(work_ts, now)} ago")
+        elif work_scan == WORK_SCAN_PARTIAL:
+            # ATTEMPTED and incomplete. Nothing here licenses an imperative —
+            # not even a STALE finding, because the newer artifact that would
+            # have refuted it may simply be in the part we never scanned. The
+            # row says which kind of ignorance this is rather than reverting to
+            # a nudge, which is the whole point of separating PARTIAL from NONE.
+            known = (f" · newest seen {_ago_label(work_ts, now)} ago"
+                     if work_ts else "")
+            parts.append(f"stale {_ago_label(ts, now)} (beat) · "
+                         f"work evidence UNKNOWN (scan incomplete){known}")
         elif work_ts:
             parts.append(f"stale {_ago_label(ts, now)} (beat) · "
                          f"newest work {_ago_label(work_ts, now)} ago — nudge")
         else:
-            # MEASURED and nothing found. That is a real finding, not an
-            # unknown, so the nudge stands — and the row says which it is, so a
-            # reader can tell "we looked and there was nothing" apart from
-            # "nobody looked".
+            # MEASURED and nothing found — a real finding, not an unknown, so
+            # the nudge stands and the row distinguishes "we looked and there
+            # was nothing" from "nobody looked".
             parts.append(f"stale {_ago_label(ts, now)} (beat) · "
                          f"no work found — nudge")
     return {"state": freshness, "freshness": freshness,
@@ -443,7 +474,7 @@ def roster(
     shards: list[dict[str, Any]], *, now: str,
     live_hours: float = LIVE_HOURS, stale_hours: float = STALE_HOURS,
     work_index: Optional[dict[str, str]] = None,
-    work_measured: bool = False,
+    work_scan: str = WORK_SCAN_NONE,
 ) -> list[dict[str, Any]]:
     """Fold presence shards into a deterministic roster (sorted by agent).
 
@@ -464,8 +495,7 @@ def roster(
         if not isinstance(ws, list):
             ws = [ws] if ws else []
         lv = liveness(s, now=now, live_hours=live_hours, stale_hours=stale_hours,
-                      work_ts=idx.get(str(s["agent"])),
-                      work_measured=work_measured)
+                      work_ts=idx.get(str(s["agent"])), work_scan=work_scan)
         out.append({
             "agent": str(s["agent"]),
             "workstreams": [str(w) for w in ws],

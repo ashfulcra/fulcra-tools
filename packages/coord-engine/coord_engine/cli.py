@@ -6373,7 +6373,18 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     try:
         shards, pres_degraded = _presence_shards_bounded(
             transport, args.team, deadline=add_on.instant)
-        out["presence"] = presence.roster(shards, now=now)
+        # BRIEFING MEASURES WORK (coord-boss ruling, 2026-08-09): it feeds
+        # dispatch decisions, and a false nudge is the one thing it must never
+        # emit. Bounded by the SAME add-on deadline as the shard read, and a
+        # scan that runs out of budget reports PARTIAL — which withholds the
+        # nudge rather than reverting to it. The continuity audit deliberately
+        # does NOT measure; see its own call site.
+        work_index, work_ok = _work_evidence_index(
+            transport, args.team, deadline=add_on.instant)
+        out["presence"] = presence.roster(
+            shards, now=now, work_index=work_index,
+            work_scan=(presence.WORK_SCAN_COMPLETE if work_ok
+                       else presence.WORK_SCAN_PARTIAL))
         if pres_degraded is not None:
             # Same discipline as forge: append the degraded marker to the section
             # list so partial presence knowledge stays VISIBLE (json + text).
@@ -6807,7 +6818,7 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
 #: that time. Nothing here can prove the converse — an agent missing from the
 #: scan is UNKNOWN, never idle.
 def _work_evidence_index(
-    transport: Any, team: str
+    transport: Any, team: str, *, deadline: Optional[float] = None
 ) -> tuple[dict[str, str], bool]:
     """Newest work-artifact timestamp per agent, READ-DERIVED (coord-boss's
     third guardrail: measured mtimes, never inference).
@@ -6850,6 +6861,9 @@ def _work_evidence_index(
 
     def _entries(path: str) -> list[dict[str, Any]]:
         nonlocal ok
+        if deadline is not None and time.monotonic() >= deadline:
+            ok = False          # out of budget: PARTIAL, never a false absence
+            return []
         try:
             rows = transport.list_dir(path)
         except TransportError:
@@ -6882,8 +6896,11 @@ def _work_evidence_index(
 
 def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
     work_index, work_ok = _work_evidence_index(transport, args.team)
-    ros = presence.roster(_presence_shards(transport, args.team), now=_iso(_now()),
-                          work_index=work_index, work_measured=work_ok)
+    ros = presence.roster(
+        _presence_shards(transport, args.team), now=_iso(_now()),
+        work_index=work_index,
+        work_scan=(presence.WORK_SCAN_COMPLETE if work_ok
+                   else presence.WORK_SCAN_PARTIAL))
     if args.json:
         jsonutil.print_json(ros)
         return 0
@@ -8763,6 +8780,11 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     pres_rows: list[dict[str, Any]] = []
     snap_rows: list[dict[str, Any]] = []
     unknown_snapshot_agents: list[str] = []
+    # DELIBERATELY UNMEASURED (coord-boss ruling, 2026-08-09). This audit's
+    # product is CHECKPOINT staleness, not activity: "this agent is working but
+    # not snapshotting" is exactly the finding it exists to make, and folding
+    # work evidence in here would mask it. `presence show` and `briefing` do
+    # measure; this asymmetry is chosen, not an omission.
     for r in presence.roster(_presence_shards(transport, args.team), now=_iso(now_dt)):
         pts = roles._parse(r.get("last_seen"))
         if pts is None:
