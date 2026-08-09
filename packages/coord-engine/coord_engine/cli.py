@@ -11004,6 +11004,106 @@ def _digest_persists(args: Any) -> bool:
                 or getattr(args, "emit_timeline", False))
 
 
+#: Artifact path recorded by a command for the chokepoint's pointer stamp,
+#: keyed by the parsed-args object so concurrent use cannot cross wires. A
+#: command that knows WHICH document it wrote records it here; one that does not
+#: simply leaves the pointer's `path` empty, and the `kind` still carries the
+#: verb. Deliberately not a global "last path": that would attribute one
+#: command's artifact to another.
+_ACTIVITY_ARTIFACT_PATH: dict[int, str] = {}
+
+
+def record_activity_artifact(args: Any, path: str) -> None:
+    """Tell the chokepoint which document this invocation wrote."""
+    if path:
+        _ACTIVITY_ARTIFACT_PATH[id(args)] = path
+
+
+#: Per-agent newest-work pointer. ONE read answers "has this agent done work
+#: recently", replacing a sweep that cost one listing per review directory — 438
+#: of them on the live store, which a 120s budget could not finish (U8, second
+#: instance). The 593 reorder is mitigation; this is the fix.
+WORK_POINTER_NAME = "LATEST-work.json"
+
+
+def _work_pointer_path(team: str, agent: str) -> str:
+    """Pointer path, keyed by the RAW agent name.
+
+    NOT `tasks.agent_key()`. That helper appends a hash suffix
+    (`coord-maintainer` -> `coord-maintainer-f68406`) and is correct for the
+    PRESENCE namespace, but `_coord/agents/<agent>/` uses the raw name — checked
+    against the live store, where `coord-maintainer` exists and the hashed form
+    does not. Keying this by `agent_key` would file every pointer into a
+    directory that no reader lists, so the feature would be a silent no-op that
+    no unit test could see, because the fixtures would agree with the bug.
+    """
+    return f"team/{team}/_coord/agents/{agent}/{WORK_POINTER_NAME}"
+
+
+def _read_work_pointer(transport: Any, team: str, agent: str) -> Optional[dict]:
+    """Newest-work pointer for one agent, or ``None`` meaning UNKNOWN.
+
+    UNKNOWN covers all three of: no pointer yet (the whole fleet, on day one),
+    an unreadable one, and a corrupt one. None of them licenses "this agent did
+    nothing" — the caller falls back to the sweep. Same rule as 585's missing
+    health pointer, and it never raises: one bad pointer must not break the fold
+    for every other agent.
+    """
+    try:
+        raw = transport.read(_work_pointer_path(team, agent))
+    except TransportError:
+        return None
+    if not raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) and doc.get("ts") else None
+
+
+def _stamp_work_pointer(transport: Any, team: str, agent: str, *, kind: str,
+                        path: str, now_iso: str) -> bool:
+    """Record ``agent``'s newest work artifact. True iff the pointer now holds a
+    value at least as new as ``now_iso``.
+
+    Called ONLY after the artifact itself persisted (588): a pointer to work
+    that did not land is worse than no pointer.
+
+    MONOTONIC — an out-of-order stamp cannot walk the pointer backwards. Two
+    hosts may act in either order; this records the NEWEST work, not the last
+    writer to arrive. An unparseable existing value is not eligible to win that
+    comparison, so corrupt state cannot freeze the pointer forever.
+
+    A FAILED UPDATE DELETES (588's rule, and the load-bearing one). If the new
+    value cannot land, the OLD value must not survive to be believed — a reader
+    would take a superseded timestamp as current with no way to tell. Removing
+    it degrades that agent to UNKNOWN, which the reader already handles by
+    falling back to the sweep. `transport.write` returning False and raising are
+    the same event here.
+    """
+    ptr_path = _work_pointer_path(team, agent)
+    existing = _read_work_pointer(transport, team, agent)
+    if existing and str(existing.get("ts") or "") >= now_iso:
+        return True                      # already at or ahead of this instant
+    body = json.dumps({"schema": "work-pointer/v1", "agent": agent,
+                       "kind": kind, "path": path, "ts": now_iso},
+                      sort_keys=True)
+    try:
+        wrote = transport.write(ptr_path, body)
+    except TransportError:
+        wrote = False
+    if wrote:
+        return True
+    try:
+        transport.delete(ptr_path)
+    except TransportError:
+        pass                             # best effort; the reader still degrades
+    print(f"work pointer not updated for {agent} — removed the stale pointer "
+          f"so it cannot be read as current", file=sys.stderr)
+    return False
+
+
 def _is_activity_invocation(args: Any) -> bool:
     """Does THIS invocation count as evidence the actor is working?
 
@@ -11157,9 +11257,29 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
         actor = _known_sender(args)
         team = getattr(args, "team", None)
         if actor and team:
+            now_iso = _iso(_now())
             _refresh_activity_presence(
                 transport, team, actor,
-                now_monotonic=_now_monotonic(), now_iso=_iso(_now()))
+                now_monotonic=_now_monotonic(), now_iso=now_iso)
+            # ONE WRITE SITE for the work pointer (coord-boss constraint 1,
+            # 2026-08-09). Stamped HERE rather than beside each artifact write,
+            # so pointer coverage INHERITS the classification the chokepoint
+            # already computes: a newly added write verb stamps by default, and
+            # "someone forgot the stamp" is designed out instead of tested for.
+            # Same argument that made the classifier a denylist.
+            #
+            # rc == 0 is the persistence gate (588): we are past the command,
+            # and it succeeded. Best-effort, exactly like the presence bump —
+            # it can never change rc.
+            try:
+                _stamp_work_pointer(
+                    transport, team, actor,
+                    kind=str(getattr(args, "command", "") or "write"),
+                    path=_ACTIVITY_ARTIFACT_PATH.get(id(args), ""),
+                    now_iso=now_iso)
+            except Exception as exc:                      # never break a write
+                print(f"work pointer stamp failed: {exc}", file=sys.stderr)
+    _ACTIVITY_ARTIFACT_PATH.pop(id(args), None)
     return rc
 
 
