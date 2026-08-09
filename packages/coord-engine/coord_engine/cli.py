@@ -6891,6 +6891,27 @@ def _work_evidence_index(
             return []
         return rows
 
+    # CHEAP HALF FIRST, and the order is load-bearing rather than tidy.
+    #
+    # Measured on the live store 2026-08-09, immediately after 591 shipped:
+    # 35 agent directories vs 438 review directories, one listing each. With the
+    # review sweep running first it consumed the ENTIRE budget every time — at
+    # 120s, six times the shipped budget, the scan was still incomplete and had
+    # attributed work to three agents. Because PARTIAL withholds the nudge, that
+    # turned the signal off fleet-wide: a fix for false nudges that produced no
+    # nudges at all.
+    #
+    # Agent reports are ~1/12th the listings and cover every agent that writes a
+    # report, so doing them first makes the common case COMPLETE instead of
+    # always-partial. The review sweep then spends whatever budget remains, and
+    # anything it does not reach is still reported honestly as PARTIAL.
+    for row in _entries(f"team/{team}/_coord/agents"):
+        name = str(row.get("name") or "").rstrip("/")
+        if not name:
+            continue
+        for r in _entries(f"team/{team}/_coord/agents/{name}/reports"):
+            _note(name, r.get("mtime"))
+
     for row in _entries(f"team/{team}/review"):
         name = str(row.get("name") or "")
         if not name.endswith("/"):
@@ -6900,13 +6921,6 @@ def _work_evidence_index(
             # `<40-hex head>--<reviewer>.md` — the reviewer is the attribution.
             if "--" in vn and vn.endswith(".md"):
                 _note(vn.rsplit("--", 1)[1][:-3], v.get("mtime"))
-
-    for row in _entries(f"team/{team}/_coord/agents"):
-        name = str(row.get("name") or "").rstrip("/")
-        if not name:
-            continue
-        for r in _entries(f"team/{team}/_coord/agents/{name}/reports"):
-            _note(name, r.get("mtime"))
 
     return newest, ok
 
