@@ -1409,18 +1409,34 @@ def reconcile(
                 rows, now=now, complete=fold.conclusive),
     }
     try:
+        # SEPARATE DEADLINES, opened independently. These used to share ONE
+        # Deadline object, and the review fold spent it first — so forge was not
+        # slow, it was NEVER BUILT: measured on the live store 2026-08-10, reviews
+        # cut at 192/219 and forge came back scanned=None/total=None/rows=0 on
+        # every pass, costing every consumer a 74.8s raw fallback to discover it.
+        # A section that always runs last in a shared budget starves
+        # deterministically; the head-of-line rule in AGENTS.md, applied BETWEEN
+        # sections instead of within one. Worst-case pass duration is now the sum
+        # of the two budgets — the honest cost, and a trade nobody actually chose
+        # before, since it came from passing one object twice.
+        #
+        # Forge's COMPLETENESS still follows the review fold's, and that coupling
+        # is correct: its responsibility map is derived from review rows, so a
+        # partial review set cannot yield a complete forge view. Only the budget
+        # was ever wrong.
         proj_dl = Deadline.open(projection_mod.build_budget())
         reviews_section = projection_mod.build_review_projection(
             transport, team, now=now,
             prior=(prior_agg or {}).get(projection_mod.REVIEWS_KEY),
             settled_index=_load_settled_index(transport, team),
             deadline=proj_dl, log=log)
+        forge_dl = Deadline.open(projection_mod.forge_budget())
         forge_section = projection_mod.build_forge_projection(
             transport, team, now=now,
             review_rows=reviews_section.get("rows") or [],
             reviews_complete=bool(reviews_section.get("complete")),
             prior=(prior_agg or {}).get(projection_mod.FORGE_KEY),
-            deadline=proj_dl, log=log)
+            deadline=forge_dl, log=log)
         proj_state[projection_mod.REVIEWS_KEY] = reviews_section
         proj_state[projection_mod.FORGE_KEY] = forge_section
         if not reviews_section.get("complete"):
