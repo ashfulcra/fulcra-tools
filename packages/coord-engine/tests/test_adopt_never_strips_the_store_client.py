@@ -290,14 +290,24 @@ def _run_unusable_shim(tmp_path, make_shim):
 
 
 def test_a_NON_EXECUTABLE_shim_counts_as_absent_and_is_installed(tmp_path):
-    """This is the case the `-x` guard actually carries.
+    """This is the case the `-x` guard actually carries, and it asserts a
+    DELETE — so the ruling behind it is stated here rather than inferred.
 
     `command -v` filters a dangling symlink for us, but it happily RETURNS the
-    path of a present-but-non-executable file. Without the executability check
-    that file reads as "a client worth preserving", the leg tries to repair
-    something that can never run, and the host stays broken. Verified against
-    the shell rather than assumed: a dangling symlink yields an empty
-    `command -v`, a chmod-644 file yields its path.
+    path of a present-but-non-executable file, so `-x` is what routes that file
+    to the ABSENT branch and gets it force-installed. coord-opus-worker traced
+    that through the guard (597 r4) and noted the prose then read as forbidding
+    it, since "anything not absent is UNKNOWN" covers a non-executable file.
+
+    RULED: a file that cannot be executed is NOT a capability — nothing on the
+    host can use it — so replacing it takes nothing away and is what lets a
+    wrecked install recover without a human. The invariant protects capabilities
+    and unclassifiable state, not the remains of a dead one. The script's
+    comments now say exactly this; if that ruling is ever reversed, this test is
+    the thing that must change with it.
+
+    Measured, not assumed: a dangling symlink yields an empty `command -v`, a
+    chmod-644 file yields its path.
     """
     def _mk(p):
         p.write_text("#!/bin/sh\nexit 0\n")

@@ -19,6 +19,12 @@
 # any NEW leg against (coord-boss ruling, 2026-08-10). Convergence is worth a
 # failed run; it is never worth a host that can no longer reach the bus.
 #
+# CAPABILITY is the operative word, and it is narrower than "file". Something
+# that cannot run is not a capability: nothing on the host can use it, so
+# replacing it takes nothing away and is what lets a wrecked install recover
+# without a human. What the invariant forbids is destroying something that
+# WORKS, or something whose state you cannot classify.
+#
 # It has been broken once, exactly as stated: `uv tool install --force
 # fulcra-api` deletes the tool environment before reinstalling, the delete failed
 # with "Directory not empty (os error 66)" AFTER bin/ was already gone, and the
@@ -138,8 +144,23 @@ uv_store_client() {
   # NOT WORKING IS TWO DIFFERENT FACTS, and only one of them is safe to act on.
   # A forced reinstall DELETES what is there, so treating "the probe failed" as
   # "nothing is installed" is how a diagnostic wrecks a working host
-  # (coord-opus-worker, 597 r1). ABSENT means there is nothing to lose; anything
-  # else is UNKNOWN and must not be destroyed to satisfy this script.
+  # (coord-opus-worker, 597 r1).
+  #
+  # ABSENT, precisely, is any of: nothing on PATH; a shim whose target is gone;
+  # or a file that CANNOT BE EXECUTED. None of those is a capability — nothing
+  # on this host can use them — so replacing them costs nothing and is what
+  # recovers a wrecked install without a human. The header invariant protects
+  # CAPABILITIES, not the files left behind when one dies.
+  #
+  # Anything else — present, executable, and still not answering — is UNKNOWN
+  # and must not be destroyed to satisfy this script.
+  #
+  # That distinction is stated because the earlier wording said "anything else
+  # is UNKNOWN", which read as forbidding exactly what the next line does to a
+  # non-executable file (coord-opus-worker, 597 r4, traced through the guard
+  # rather than argued). On the one path here that deletes, prose disagreeing
+  # with code is how the next reader gets it wrong; the behaviour is deliberate,
+  # so the comment now says so.
   _FA="$(command -v fulcra-api 2>/dev/null || true)"
   if [ -n "$_FA" ] && [ -x "$_FA" ]; then
     # Present, executable, and still would not run. Repair NON-destructively or
@@ -153,9 +174,10 @@ uv_store_client() {
     echo "adopt: fulcra-api at ${_FA} is present but broken, and an in-place repair did not fix it. Refusing to delete it — look at WHY it fails, then, if you still want a clean reinstall: uv tool uninstall fulcra-api; rm -rf \"\$(uv tool dir)/fulcra-api\"; uv tool install --force fulcra-api" >&2
     return 1
   fi
-  # Genuinely absent — nothing on PATH, or a shim whose target is gone (which is
-  # exactly the wreckage the ENOTEMPTY failure leaves). Nothing to lose here, so
-  # the forced install is correct.
+  # ABSENT per the definition above — nothing on PATH, a shim whose target is
+  # gone (exactly the wreckage the ENOTEMPTY failure leaves), or a file that
+  # cannot be executed. Nothing to lose, so the forced install is correct, and
+  # it is what lets a host recover on its own.
   if try "uv fulcra-api" "$UV_BIN" tool install --force fulcra-api; then return 0; fi
   # Self-heal the half-removed state. `uv tool uninstall` alone does not clear it
   # (the directory is exactly what failed to delete), and the retry REQUIRES
