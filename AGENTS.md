@@ -582,6 +582,25 @@ it (not on PyPI).
   host rendered `current` and nothing surfaced the drift. Raising the floor is
   also the mechanism that reaches a dark host: it ages into `stale` and adopts
   on its next wake.
+  **A FAILED ADOPT MUST NEVER LEAVE THE HOST WORSE THAN IT FOUND IT.** `fulcra-api` is the store
+  client — every read and write on the bus goes through it — and `uv tool install --force` DELETES the
+  tool environment before reinstalling. On macOS that delete can fail with `Directory not empty (os
+  error 66)` AFTER `bin/` is gone, leaving a dangling shim, a directory `uv tool list` calls malformed,
+  and no executable: the host is off the bus, and `doctor` then reports the adoption authority
+  unreadable, aiming the next diagnosis at the store rather than at the script that just broke it.
+  Measured 2026-08-10 on a host running this script as a pin's own acceptance test, and NOT exotic —
+  every macOS uv host runs that leg on every NEW pin, because the sentinel fast path only skips when
+  the host is already AT the pin being adopted, which is never true the moment a pin moves. So: never
+  force-reinstall a capability that works (upgrade in place, where failure costs nothing because the
+  working copy survives), force-install only when there is nothing to lose, self-heal the
+  half-removed directory once rather than cascading into fallbacks that cannot help, and still FAIL
+  when the retry fails — a rescue that claims success it did not achieve is the worse bug.
+  **TWO-OS ACCEPTANCE RUN, alongside the floor-raise step (coord-boss ruling, 2026-08-10):** before any
+  pin broadcast, the PUBLISHED script is run end to end on at least one macOS host and one Linux host,
+  publisher and delegate splitting the work as needed. The prior publish ran only on Linux, where this
+  bug cannot fire; the run-before-publish is what caught it, and it is now the named standard rather
+  than a habit. One OS is not coverage when the failure is OS-specific — and you cannot know which
+  failures are OS-specific in advance, which is the whole argument.
   `coord-engine doctor <team> --self` is the same check on demand and
   is TRI-STATE: rc 0 `current` only when the floor exists, parses, and this
   engine meets it; rc 3 `stale` (run the store's adopt-latest, then re-run);
