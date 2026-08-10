@@ -3647,16 +3647,71 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
               f"tally and stalls the review silently", file=sys.stderr)
         return 2
 
-    head = getattr(args, "head", None)
-    path = (_verdicts_prefix(args.team, args.name)
-            + review.verdict_filename(reviewer, head=head))
+    # THE REGISTER IS AUTHORITATIVE FOR THE ROUND (codex-reviewer, 595 r1).
+    # `--head` used to be optional and the register was never read, so omitting
+    # it wrote `<reviewer>.md`, printed success and returned 0 — while the tally
+    # ignored that headless shard and the reviewer stayed pending. A confident
+    # false success: the reviewer believes they voted, the round still waits.
+    doc_raw = transport.read(_review_doc_path(args.team, args.name))
+    if not doc_raw:
+        print(f"review verdict: cannot read the review register for "
+              f"{args.name} — a read of None is missing OR unreadable, and "
+              f"neither tells me which round you are voting in. Refusing rather "
+              f"than guessing.", file=sys.stderr)
+        return 3
+    doc_fm = okf.parse_frontmatter(doc_raw) or {}
+    active_head = review.normalize_head(doc_fm.get("head"))
+    supplied = review.normalize_head(getattr(args, "head", None))
+    if getattr(args, "head", None) and supplied is None:
+        print(f"review verdict: --head {args.head!r} is not a valid exact "
+              f"commit id", file=sys.stderr)
+        return 2
+    if active_head and supplied and supplied != active_head:
+        print(f"review verdict: {args.name} is at head {active_head}; a verdict "
+              f"pinned to {supplied} cannot discharge the current round and "
+              f"would sit unread. Re-run against the active head.",
+              file=sys.stderr)
+        return 1
+    if active_head and not supplied:
+        head = active_head          # resolved, never orphaned
+        print(f"(resolved active head {active_head} from the register)",
+              file=sys.stderr)
+    else:
+        head = supplied
+    if supplied and not active_head:
+        print(f"review verdict: {args.name} is not head-keyed, but --head was "
+              f"given; refusing rather than writing a shard the tally ignores",
+              file=sys.stderr)
+        return 1
 
-    existing = transport.read(path)
-    if existing:
+    filename = review.verdict_filename(reviewer, head=head)
+    path = _verdicts_prefix(args.team, args.name) + filename
+
+    # PRESENCE COMES FROM THE RAISING LISTING, NOT A READ (codex-reviewer,
+    # 595 r1). `transport.read` returns None for BOTH absence and a transient
+    # failure, so an existing CHANGES shard that happened to be unreadable read
+    # as absent and APPROVE went over it. That is the ambiguity my own
+    # transport-read-none rule exists for, and I coded straight past it.
+    #
+    # A residual create race remains: two writers can both observe absence.
+    # This store has no create-if-absent or versioned write, so a
+    # read/compare/write cannot fully protect evidence — same wall as 594's
+    # pointer. Closing the ambiguity removes the failure I can remove; the race
+    # needs a store primitive or an append-only correction design.
+    try:
+        names = {str(e.get("name") or "")
+                 for e in (transport.list_dir(_verdicts_prefix(
+                     args.team, args.name)) or [])}
+    except TransportError:
+        print(f"review verdict: the verdicts listing for {args.name} is "
+              f"UNREADABLE, so I cannot tell whether your verdict already "
+              f"exists. Refusing rather than risking an overwrite.",
+              file=sys.stderr)
+        return 3
+    if filename in names:
         print(f"review verdict: {path} already exists — a verdict is evidence, "
               f"not a draft, and overwriting one could erase a CHANGES a merge "
-              f"already rested on. Advance the head for a new round.",
-              file=sys.stderr)
+              f"already rested on.", file=sys.stderr)
         return 1
 
     body = okf.render_frontmatter({

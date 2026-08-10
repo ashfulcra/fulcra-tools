@@ -23,6 +23,7 @@ coord-boss's two compatibility constraints (ruling f40069c0), both pinned here:
 from __future__ import annotations
 
 from coord_engine import cli, okf, review
+from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
 TEAM = "r"
@@ -154,3 +155,109 @@ def test_an_UNKNOWN_verdict_value_is_refused(monkeypatch):
     assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
                      "--verdict", "maybe"], transport=t) != 0
     assert _verdict_path(t) not in t.store
+
+
+# --- codex 595 r1: the verb must satisfy the ACTIVE round --------------------
+
+def test_omitting_head_on_a_KEYED_review_does_not_silently_orphan_the_verdict(monkeypatch):
+    """codex-reviewer, 595 r1, blocker one.
+
+    `--head` was optional and the register was never read, so omitting it wrote
+    `<reviewer>.md`, printed success, returned 0 and emitted reviewer activity —
+    while the tally ignored that headless shard and the reviewer stayed in
+    `pending_required`. A confident false success: the reviewer believes they
+    voted and the round still waits on them.
+    """
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    rc = cli.main(["review", "verdict", TEAM, SLUG, "--verdict", "approve"],
+                  transport=t)
+    # Either resolve the active head, or refuse — never write an orphan.
+    orphan = f"team/{TEAM}/review/{SLUG}/verdicts/{REVIEWER}.md"
+    assert orphan not in t.store, (
+        "wrote a headless shard the tally will ignore, while reporting success")
+    if rc == 0:
+        assert _verdict_path(t) in t.store, (
+            "claimed success without discharging the active round")
+
+
+def test_a_head_that_is_NOT_the_registers_current_head_is_refused(monkeypatch):
+    """A stale or unrelated head records a shard that cannot discharge the
+    current round — the same false success, just spelled differently."""
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    rc = cli.main(["review", "verdict", TEAM, SLUG, "--head", "b" * 40,
+                   "--verdict", "approve"], transport=t)
+    assert rc != 0, "a non-current head was accepted"
+    assert f"team/{TEAM}/review/{SLUG}/verdicts/{'b' * 40}--{REVIEWER}.md" \
+        not in t.store
+
+
+def test_an_UNREADABLE_register_fails_closed(monkeypatch):
+    """UNKNOWN is not permission. If the register cannot be read, the verb
+    cannot know which round it is voting in, so it must not guess."""
+    class _NoDoc(FakeTransport):
+        def read(self, path):
+            if path.endswith(f"/review/{SLUG}.md"):
+                return None          # ambiguous: missing OR transient failure
+            return super().read(path)
+
+    t = _NoDoc()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    rc = cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+                   "--verdict", "approve"], transport=t)
+    assert rc != 0, "voted into a round it could not verify"
+
+
+# --- codex 595 r1: the refusal must not rest on an ambiguous read ------------
+
+def test_an_AMBIGUOUS_read_of_an_existing_verdict_fails_closed(monkeypatch):
+    """codex-reviewer, 595 r1, blocker two — and my own memory used against me.
+
+    The check was `existing = transport.read(path); if existing:`, and this
+    transport returns None for BOTH absence and a transient failure. So an
+    existing CHANGES shard that happened to be unreadable read as absent, and
+    APPROVE was written over evidence. `transport-read-none-is-ambiguous` is a
+    rule I wrote down after this exact class bit me twice; I then coded the
+    thing it warns against.
+
+    Confirmed absence comes from the RAISING listing, and anything else is
+    UNKNOWN, which must refuse.
+    """
+    class _ShardUnreadable(FakeTransport):
+        def read(self, path):
+            if path.endswith(f"--{REVIEWER}.md"):
+                return None          # present but unreadable
+            return super().read(path)
+
+    t = _ShardUnreadable()
+    _open_review(t, monkeypatch)
+    t.put(_verdict_path(t), okf.render_frontmatter({
+        "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
+        "verdict": "changes"}) + "\nblocked.\n")
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    rc = cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+                   "--verdict", "approve"], transport=t)
+    assert rc != 0, "overwrote evidence after an ambiguous read"
+    fm = okf.parse_frontmatter(t.store[_verdict_path(t)])
+    assert review.normalize_verdict(fm.get("verdict")) == "changes", (
+        "the existing CHANGES was replaced by APPROVE")
+
+
+def test_an_UNREADABLE_verdicts_LISTING_also_fails_closed(monkeypatch):
+    """The listing is the authority for presence, so when IT is unknown the
+    verb has no basis to claim the slot is free."""
+    class _NoListing(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix.endswith("/verdicts/"):
+                raise TransportError("listing down")
+            return super().list_dir(prefix)
+
+    t = _NoListing()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+                     "--verdict", "approve"], transport=t) != 0
