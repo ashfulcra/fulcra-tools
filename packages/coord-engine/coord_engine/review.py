@@ -41,16 +41,45 @@ def normalize_head(value: Any) -> Optional[str]:
     return head if _EXACT_HEAD.fullmatch(head) else None
 
 
-def verdict_filename(reviewer: str, *, head: Optional[str] = None) -> str:
-    """Filename for one requirement's verdict in the active review round."""
+#: The APPEND-ONLY verdict suffix: `--<iso>-<digest>` before `.md`.
+#:
+#: Two forms are first-class, forever (coord-boss ruling b99fb8da):
+#:   PLAIN   `<head>--<reviewer>.md`                  — hand-writers, unchanged
+#:   APPEND  `<head>--<reviewer>--<iso>-<digest>.md`  — the verb
+#:
+#: The verb uses the append form because this store has no create-if-absent and
+#: no versioned write, so writing a SHARED name is check-then-write and cannot
+#: protect evidence: codex-reviewer reproduced a concurrent CHANGES being
+#: overwritten by APPROVE with rc 0 (595 r2). A unique name never touches an
+#: existing file, which closes verb-vs-verb AND verb-vs-hand races without any
+#: store primitive. The plain form keeps working untouched — no migration, and
+#: nobody writing shards by hand breaks on ship day.
+_APPEND_SUFFIX = re.compile(
+    r"--(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)-(?P<digest>[0-9a-f]{6,16})$")
+
+
+def verdict_filename(reviewer: str, *, head: Optional[str] = None,
+                     ts: Optional[str] = None,
+                     digest: Optional[str] = None) -> str:
+    """Filename for one requirement's verdict in the active review round.
+
+    With ``ts``+``digest`` this is the APPEND-ONLY form — a name no other writer
+    can be holding. Without them it is the historical plain form, which stays
+    valid for hand-writers.
+    """
+    if head and ts and digest:
+        return f"{head}--{reviewer}--{ts}-{digest}.md"
     return f"{head}--{reviewer}.md" if head else f"{reviewer}.md"
 
 
-def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional[str]:
-    """Decode the requirement token from a verdict filename for ``head``.
+def parse_verdict_filename(
+    name: str, *, head: Optional[str] = None
+) -> Optional[tuple[str, Optional[str]]]:
+    """``(reviewer, ts_or_None)`` for a verdict filename, or ``None``.
 
-    Head-keyed reviews ignore every superseded head before reading its shard.
-    Legacy unkeyed reviews retain the historical ``<reviewer>.md`` layout.
+    ``ts`` is present only for the append-only form; a plain shard carries its
+    time in frontmatter (or, failing that, the listing mtime), because it was
+    written before the name had anywhere to put it.
     """
     if not name.endswith(".md"):
         return None
@@ -59,8 +88,53 @@ def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional
         prefix = f"{head}--"
         if not stem.startswith(prefix):
             return None
-        return stem[len(prefix):] or None
-    return stem if "--" not in stem else None
+        rest = stem[len(prefix):]
+        if not rest:
+            return None
+        m = _APPEND_SUFFIX.search(rest)
+        if m:
+            reviewer = rest[:m.start()]
+            return (reviewer, m.group("ts")) if reviewer else None
+        return (rest, None)
+    # Legacy unkeyed review: the historical `<reviewer>.md` layout only.
+    return (stem, None) if "--" not in stem else None
+
+
+def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional[str]:
+    """Decode the requirement token from a verdict filename for ``head``.
+
+    Head-keyed reviews ignore every superseded head before reading its shard.
+    Legacy unkeyed reviews retain the historical ``<reviewer>.md`` layout.
+    """
+    parsed = parse_verdict_filename(name, head=head)
+    return parsed[0] if parsed else None
+
+
+def fold_newest_per_reviewer(
+    rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep the newest shard per reviewer; return ``(kept, folded_away)``.
+
+    Rows carry ``reviewer``, ``name``, and ``sort_key``. Newest wins, ties break
+    deterministically on the name so two hosts folding the same directory always
+    agree.
+
+    The count is returned rather than swallowed because SUPERSESSION MUST BE
+    AUDITABLE (coord-boss constraint 4): a reader who is told "APPROVED" while
+    three shards were silently discarded has been handed the same affirmative
+    falsehood this whole cycle has been about. `review status` says how many it
+    folded away, which is also the reviewer's correction path — a correction is
+    a new file, and the original evidence stays on disk.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    folded = 0
+    for row in sorted(rows, key=lambda r: (r.get("sort_key") or "",
+                                           r.get("name") or "")):
+        prior = best.get(row["reviewer"])
+        if prior is not None:
+            folded += 1
+        best[row["reviewer"]] = row
+    return [best[k] for k in sorted(best)], folded
 
 
 def normalize_verdict(v: Optional[str]) -> Optional[str]:

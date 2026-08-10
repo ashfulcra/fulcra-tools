@@ -1071,6 +1071,19 @@ it (not on PyPI).
   counting as activity, while `inbox` and `digest` refreshed presence merely by being VIEWED
   (codex-reviewer, 590 r2). `_MIXED_MODE_ACTIVITY` maps such a handler to a predicate over the PARSED
   ARGS, and `_is_activity_invocation(args)` — not the function-only helper — is what dispatch calls.
+  **Verdict shards are APPEND-ONLY (coord-boss ruling b99fb8da, 2026-08-10).** Two forms are
+  first-class, permanently: `<head>--<reviewer>.md` (hand-writers, unchanged, no migration) and
+  `<head>--<reviewer>--<iso>-<digest>.md` (the verb). The verb uses the unique form because this store
+  has no create-if-absent and no versioned write, so writing a SHARED name is check-then-write and
+  cannot protect evidence — codex-reviewer reproduced a concurrent CHANGES overwritten by APPROVE at
+  rc 0 (595 r2). A unique name touches no existing file, closing verb-vs-verb AND verb-vs-hand races
+  without a store primitive. **Every register reader folds newest per (head, reviewer)** — `review
+  status`, the projection, and anything built on `_tally_from_verdict_entries`; the projection built
+  one entry per file and would have let a superseded CHANGES block a review forever. Ties break on the
+  name so two hosts folding the same directory always agree. **Supersession is never silent**: the
+  fold reports `superseded_verdicts`, because a reader told APPROVED while shards were quietly
+  discarded has the same affirmative falsehood everything here is about. A correction is a NEW shard;
+  the original evidence stays on disk, which is also the same-head correction path.
   **`review verdict` (2026-08-10)** exists so that filing a verdict IS an engine write. It was the one
   act with no verb — `review request` printed a path and the reviewer wrote the shard themselves — so a
   reviewer touched no chokepoint, refreshed no presence, and left no work event. Every liveness fix of

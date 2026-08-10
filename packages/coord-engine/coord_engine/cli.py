@@ -1420,6 +1420,12 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
         # team and fail with "unexpected archived verdict shape" for everyone
         # else. Team-particular content does not belong in this repo — the shape
         # is "one shard", and whose shard it is was never the engine's business.
+        # APPEND-ONLY FAMILIES LAND HERE BY DESIGN (coord-boss constraint 5,
+        # ruling b99fb8da): a reviewer may now hold several shards for one head,
+        # so an archived family of >1 is legitimate rather than corrupt. This
+        # path is the COUNTED SKIP, not a failure of the new shape — it says how
+        # many it found and points at the doc-restore route, which handles a
+        # family. Stated rather than changed, deliberately.
         if len(files) != 1:
             print(f"review restore failed: {args.slug} has {len(files)} archived "
                   f"verdict shard(s) and no request doc. Exactly one is "
@@ -1871,6 +1877,19 @@ def _is_unattributable(name: str, *, keyed: bool) -> bool:
     return review.normalize_head(stem.split("--", 1)[0]) is None
 
 
+def _store_mtime_iso(mtime: Any) -> Optional[str]:
+    """Listing mtime -> comparable ISO, or None.
+
+    Store mtimes render on a TWELVE-HOUR clock, so comparing them as strings
+    inverts the midnight hour. Parsed through the one existing parser, never
+    compared raw.
+    """
+    if not isinstance(mtime, str):
+        return None
+    dt = aggregate._parse_store_mtime(mtime)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+
+
 def _tally_from_verdict_entries(
     transport: Any, team: str, slug: str, entries: list[dict[str, Any]],
     doc_raw: Optional[str], *, deadline: Optional[float] = None,
@@ -1912,6 +1931,7 @@ def _tally_from_verdict_entries(
     unattributable: list[str] = []
     unrecognised: list[tuple[str, str]] = []
     mismatched: list[tuple[str, str]] = []
+    rows: list[dict[str, Any]] = []
     reads_ok = True
     fully_scanned = True
     dl = Deadline(deadline)
@@ -1919,7 +1939,9 @@ def _tally_from_verdict_entries(
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
             continue
-        reviewer = review.reviewer_from_filename(n, head=head)
+        parsed_name = review.parse_verdict_filename(n, head=head)
+        reviewer = parsed_name[0] if parsed_name else None
+        parsed_ts = parsed_name[1] if parsed_name else None
         if reviewer is None:
             # A keyed review reads only the active head's append-only shards;
             # legacy reviews ignore keyed files. Superseded heads cost zero reads.
@@ -1982,8 +2004,29 @@ def _tally_from_verdict_entries(
             # and it lands in the same PENDING as no verdict at all. Record it
             # so the surface can say WHY the vote did not count.
             unrecognised.append((n, str(token)))
-        verdicts.append({"reviewer": reviewer, "verdict": token})
+        # Collect, do not decide: with append-only shards a reviewer may have
+        # several, and only the NEWEST counts. Sorting on a ts we can defend —
+        # the name's for an append shard, the frontmatter's for a plain one,
+        # falling back to the listing mtime — keeps two hosts folding the same
+        # directory to the same answer.
+        rows.append({
+            "reviewer": reviewer,
+            "name": n,
+            "verdict": token,
+            "sort_key": (parsed_ts
+                         or str(fm.get("ts") or "")
+                         or _store_mtime_iso(e.get("mtime")) or ""),
+        })
+    kept, folded_away = review.fold_newest_per_reviewer(rows)
+    verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
+                for r in kept]
     tally = review.tally(verdicts, required=required)
+    if folded_away:
+        # NEVER SILENTLY (coord-boss constraint 4). A reader told "APPROVED"
+        # while shards were quietly discarded has the same affirmative
+        # falsehood this whole cycle was about; superseded evidence is still on
+        # disk and the count is how a reader knows to go look.
+        tally["superseded_verdicts"] = folded_away
     if unattributable:
         tally["unattributable"] = sorted(unattributable)
     if unrecognised:
@@ -3684,35 +3727,29 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 1
 
-    filename = review.verdict_filename(reviewer, head=head)
-    path = _verdicts_prefix(args.team, args.name) + filename
-
-    # PRESENCE COMES FROM THE RAISING LISTING, NOT A READ (codex-reviewer,
-    # 595 r1). `transport.read` returns None for BOTH absence and a transient
-    # failure, so an existing CHANGES shard that happened to be unreadable read
-    # as absent and APPROVE went over it. That is the ambiguity my own
-    # transport-read-none rule exists for, and I coded straight past it.
+    # APPEND-ONLY (coord-boss ruling b99fb8da, after codex reproduced a
+    # concurrent CHANGES being overwritten by APPROVE at rc 0). The name is
+    # unique to this write, so it can never touch a file another writer holds —
+    # which closes verb-vs-verb AND verb-vs-hand races WITHOUT a store
+    # primitive. There is deliberately NO existence check here: the previous
+    # check-then-write could not keep the promise it printed, and a promise the
+    # code cannot keep is the false-success family one level up.
     #
-    # A residual create race remains: two writers can both observe absence.
-    # This store has no create-if-absent or versioned write, so a
-    # read/compare/write cannot fully protect evidence — same wall as 594's
-    # pointer. Closing the ambiguity removes the failure I can remove; the race
-    # needs a store primitive or an append-only correction design.
-    try:
-        names = {str(e.get("name") or "")
-                 for e in (transport.list_dir(_verdicts_prefix(
-                     args.team, args.name)) or [])}
-    except TransportError:
-        print(f"review verdict: the verdicts listing for {args.name} is "
-              f"UNREADABLE, so I cannot tell whether your verdict already "
-              f"exists. Refusing rather than risking an overwrite.",
-              file=sys.stderr)
-        return 3
-    if filename in names:
-        print(f"review verdict: {path} already exists — a verdict is evidence, "
-              f"not a draft, and overwriting one could erase a CHANGES a merge "
-              f"already rested on.", file=sys.stderr)
-        return 1
+    # A correction is therefore a NEW file, and the original evidence stays on
+    # disk — which is also the same-head correction path codex asked for.
+    # SECOND precision in the name and the shard ts. `_iso` carries
+    # microseconds, which the append-suffix pattern rejects — the filename then
+    # parsed as a reviewer literally called `codex-reviewer--2026-...-<digest>`
+    # and the tally credited a phantom while the real reviewer read as pending.
+    # Mixed precision would also misorder a plain shard against an append one
+    # when compared as strings.
+    now_iso = _now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    digest = hashlib.sha1(
+        f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}"
+        .encode()).hexdigest()[:8]
+    filename = review.verdict_filename(reviewer, head=head, ts=now_iso,
+                                       digest=digest)
+    path = _verdicts_prefix(args.team, args.name) + filename
 
     body = okf.render_frontmatter({
         "type": "Verdict",

@@ -435,7 +435,9 @@ def _scan_review_slug(
         n = v.get("name") or ""
         if v.get("is_dir") or not n.endswith(".md"):
             continue
-        reviewer = review.reviewer_from_filename(n, head=head)
+        parsed_name = review.parse_verdict_filename(n, head=head)
+        reviewer = parsed_name[0] if parsed_name else None
+        parsed_ts = parsed_name[1] if parsed_name else None
         if reviewer is None:
             continue  # superseded head / foreign filename: zero reads
         if deadline.expired():
@@ -448,8 +450,24 @@ def _scan_review_slug(
         vfm = okf.parse_frontmatter(raw_v) or {}
         if head and review.normalize_head(vfm.get("head")) != head:
             continue  # the verdict must independently attest the exact head
-        verdicts.append({"reviewer": reviewer, "verdict": vfm.get("verdict")})
+        verdicts.append({
+            "reviewer": reviewer,
+            "verdict": vfm.get("verdict"),
+            "name": n,
+            "sort_key": parsed_ts or str(vfm.get("ts") or ""),
+        })
+    # FOLD NEWEST PER REVIEWER (coord-boss constraint 5, ruling b99fb8da).
+    # Append-only verdicts mean one reviewer can have several shards, and this
+    # projection built ONE ENTRY PER FILE — so a superseded CHANGES and its
+    # newer APPROVE both reached `review.tally`, where a single blocker
+    # dominates, and the stale CHANGES would have blocked the review forever.
+    # Every register reader learns the fold, not just `review status`.
+    kept, folded_away = review.fold_newest_per_reviewer(verdicts)
+    verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
+                for r in kept]
     tally = review.tally(verdicts, required=base["required"])
+    if folded_away:
+        tally["superseded_verdicts"] = folded_away
     settled = (tally["state"] == review.APPROVED
                and not tally["pending_required"] and bool(base["required"]))
     if settled:

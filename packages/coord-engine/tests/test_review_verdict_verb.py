@@ -39,9 +39,25 @@ def _open_review(t, monkeypatch):
                     transport=t) == 0
 
 
+PREFIX = f"team/{TEAM}/review/{SLUG}/verdicts/"
+
+
+def _plain_path():
+    """The hand-written form — still first-class, never written by the verb."""
+    return PREFIX + review.verdict_filename(REVIEWER, head=HEAD)
+
+
+def _append_shards(t):
+    """Shards the VERB wrote: `<head>--<reviewer>--<iso>-<digest>.md`."""
+    return sorted(k for k in t.store
+                  if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--"))
+
+
 def _verdict_path(t):
-    return f"team/{TEAM}/review/{SLUG}/verdicts/" + review.verdict_filename(
-        REVIEWER, head=HEAD)
+    """Whatever shard the verb produced, for tests that assert on its content."""
+    shards = _append_shards(t)
+    assert shards, f"the verb wrote no append shard; store: {sorted(t.store)}"
+    return shards[-1]
 
 
 # --- constraint (a): exactly the canonical artifact --------------------------
@@ -57,10 +73,16 @@ def test_the_verb_writes_EXACTLY_the_path_review_request_printed(monkeypatch, ca
     assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
                      "--verdict", "approve", "--note", "looks right"],
                     transport=t) == 0
+    # The verb writes the APPEND form, not the literal name `review request`
+    # advertises — that changed with coord-boss's revision of constraint (a),
+    # because a shared name cannot be written safely on this store. What must
+    # still hold is ATTRIBUTION: same directory, same (head, reviewer), so the
+    # register reads it without a special case.
     path = _verdict_path(t)
-    assert path in t.store, f"verdict not at the canonical path; store: {sorted(t.store)}"
-    assert path.split("/")[-1] in printed, (
-        "the verb must write the filename `review request` advertised")
+    assert path.startswith(PREFIX + f"{HEAD}--{REVIEWER}--"), path
+    assert PREFIX in printed, "the advertised directory must be unchanged"
+    assert review.parse_verdict_filename(
+        path.split("/")[-1], head=HEAD)[0] == REVIEWER
 
 
 def test_the_tally_reads_the_verb_written_shard_with_no_special_case(monkeypatch):
@@ -99,30 +121,71 @@ def test_a_HAND_WRITTEN_shard_still_tallies_after_the_verb_exists(monkeypatch):
     the day it ships."""
     t = FakeTransport()
     _open_review(t, monkeypatch)
-    t.put(_verdict_path(t), okf.render_frontmatter({
+    t.put(_plain_path(), okf.render_frontmatter({
         "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
         "verdict": "approve"}) + "\nAPPROVED by hand.\n")
     assert cli.main(["review", "status", TEAM, SLUG], transport=t) == 0
 
 
-def test_the_verb_REFUSES_to_overwrite_an_existing_verdict(monkeypatch, capsys):
-    """A verdict is evidence, not a draft. Silently replacing one would let a
-    second run erase a CHANGES that a merge decision already depended on."""
+def test_a_CONCURRENT_verdict_is_never_overwritten(monkeypatch):
+    """codex-reviewer, 595 r2, reproduced: with a shared slot, a CHANGES that
+    landed between this command's check and its write was overwritten by APPROVE
+    at rc 0.
+
+    Append-only removes the shared slot entirely: the verb's name is unique to
+    its own write, so there is nothing to overwrite and no check to lose a race
+    against. Both shards exist afterwards and the fold decides.
+    """
     t = FakeTransport()
     _open_review(t, monkeypatch)
-    t.put(_verdict_path(t), okf.render_frontmatter({
+    # A concurrent CHANGES lands first, in the plain hand-written form.
+    t.put(_plain_path(), okf.render_frontmatter({
         "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
-        "verdict": "changes"}) + "\nblocked.\n")
+        "verdict": "changes", "ts": "2026-08-10T05:00:00Z"}) + "\nblocked.\n")
     monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
-    rc = cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
-                   "--verdict", "approve"], transport=t)
-    assert rc != 0
-    fm = okf.parse_frontmatter(t.store[_verdict_path(t)])
-    # TWO VOCABULARIES, and they are easy to confuse: `normalize_verdict`
-    # returns the SHARD value ("approve"/"changes"), while `review.CHANGES` is a
-    # TALLY STATE ("APPROVED"/"CHANGES"/"PENDING"). A shard carries the former.
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+                     "--verdict", "approve"], transport=t) == 0
+    fm = okf.parse_frontmatter(t.store[_plain_path()])
     assert review.normalize_verdict(fm.get("verdict")) == "changes", (
-        "an existing verdict was overwritten")
+        "the concurrent CHANGES was destroyed — the exact failure append-only "
+        "exists to make impossible")
+    assert _append_shards(t), "the verb's own shard is missing"
+
+
+def test_the_NEWEST_shard_wins_across_both_forms(monkeypatch, capsys):
+    """A plain shard and an append shard for the same reviewer: newest counts.
+    The plain form is dated by its frontmatter ts, the append form by its
+    name."""
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    t.put(_plain_path(), okf.render_frontmatter({
+        "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
+        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n")
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+              "--verdict", "approve"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["review", "status", TEAM, SLUG], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "APPROVED" in out, f"the newer approve did not win:\n{out}"
+
+
+def test_supersession_is_REPORTED_never_silent(monkeypatch, capsys):
+    """coord-boss constraint 4. A reader told APPROVED while shards were quietly
+    discarded has the same affirmative falsehood this cycle was about."""
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    t.put(_plain_path(), okf.render_frontmatter({
+        "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
+        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n")
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+              "--verdict", "approve"], transport=t)
+    capsys.readouterr()
+    cli.main(["review", "status", TEAM, SLUG, "--json"], transport=t)
+    out = capsys.readouterr().out
+    assert "superseded_verdicts" in out, (
+        f"folded-away shards were not reported:\n{out}")
 
 
 # --- the point of the whole exercise ----------------------------------------
@@ -154,7 +217,7 @@ def test_an_UNKNOWN_verdict_value_is_refused(monkeypatch):
     monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
     assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
                      "--verdict", "maybe"], transport=t) != 0
-    assert _verdict_path(t) not in t.store
+    assert not _append_shards(t), "an unparseable verdict was written anyway"
 
 
 # --- codex 595 r1: the verb must satisfy the ACTIVE round --------------------
@@ -174,11 +237,11 @@ def test_omitting_head_on_a_KEYED_review_does_not_silently_orphan_the_verdict(mo
     rc = cli.main(["review", "verdict", TEAM, SLUG, "--verdict", "approve"],
                   transport=t)
     # Either resolve the active head, or refuse — never write an orphan.
-    orphan = f"team/{TEAM}/review/{SLUG}/verdicts/{REVIEWER}.md"
+    orphan = PREFIX + f"{REVIEWER}.md"
     assert orphan not in t.store, (
         "wrote a headless shard the tally will ignore, while reporting success")
     if rc == 0:
-        assert _verdict_path(t) in t.store, (
+        assert _append_shards(t), (
             "claimed success without discharging the active round")
 
 
@@ -191,8 +254,7 @@ def test_a_head_that_is_NOT_the_registers_current_head_is_refused(monkeypatch):
     rc = cli.main(["review", "verdict", TEAM, SLUG, "--head", "b" * 40,
                    "--verdict", "approve"], transport=t)
     assert rc != 0, "a non-current head was accepted"
-    assert f"team/{TEAM}/review/{SLUG}/verdicts/{'b' * 40}--{REVIEWER}.md" \
-        not in t.store
+    assert not [k for k in t.store if f"{'b' * 40}--{REVIEWER}" in k]
 
 
 def test_an_UNREADABLE_register_fails_closed(monkeypatch):
@@ -214,50 +276,39 @@ def test_an_UNREADABLE_register_fails_closed(monkeypatch):
 
 # --- codex 595 r1: the refusal must not rest on an ambiguous read ------------
 
-def test_an_AMBIGUOUS_read_of_an_existing_verdict_fails_closed(monkeypatch):
-    """codex-reviewer, 595 r1, blocker two — and my own memory used against me.
 
-    The check was `existing = transport.read(path); if existing:`, and this
-    transport returns None for BOTH absence and a transient failure. So an
-    existing CHANGES shard that happened to be unreadable read as absent, and
-    APPROVE was written over evidence. `transport-read-none-is-ambiguous` is a
-    rule I wrote down after this exact class bit me twice; I then coded the
-    thing it warns against.
 
-    Confirmed absence comes from the RAISING listing, and anything else is
-    UNKNOWN, which must refuse.
+# --- coord-boss constraint 5: EVERY register reader learns the fold ---------
+
+def test_the_PROJECTION_folds_too_or_a_stale_CHANGES_blocks_forever():
+    """The reader I nearly left behind.
+
+    `projection.py` built ONE ENTRY PER FILE and never folded. With append-only
+    shards a reviewer can hold several, so a superseded CHANGES and its newer
+    APPROVE both reached `review.tally` — where a single blocker dominates. The
+    stale CHANGES would have blocked that review permanently, in a fold nobody
+    would think to look at.
     """
-    class _ShardUnreadable(FakeTransport):
-        def read(self, path):
-            if path.endswith(f"--{REVIEWER}.md"):
-                return None          # present but unreadable
-            return super().read(path)
-
-    t = _ShardUnreadable()
-    _open_review(t, monkeypatch)
-    t.put(_verdict_path(t), okf.render_frontmatter({
-        "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
-        "verdict": "changes"}) + "\nblocked.\n")
-    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
-    rc = cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
-                   "--verdict", "approve"], transport=t)
-    assert rc != 0, "overwrote evidence after an ambiguous read"
-    fm = okf.parse_frontmatter(t.store[_verdict_path(t)])
-    assert review.normalize_verdict(fm.get("verdict")) == "changes", (
-        "the existing CHANGES was replaced by APPROVE")
+    rows = [
+        {"reviewer": REVIEWER, "verdict": "changes", "name": "old.md",
+         "sort_key": "2020-01-01T00:00:00Z"},
+        {"reviewer": REVIEWER, "verdict": "approve", "name": "new.md",
+         "sort_key": "2026-08-10T05:00:00Z"},
+    ]
+    kept, folded = review.fold_newest_per_reviewer(rows)
+    assert [r["verdict"] for r in kept] == ["approve"]
+    assert folded == 1
+    assert review.tally(
+        [{"reviewer": r["reviewer"], "verdict": r["verdict"]} for r in kept],
+        required=[REVIEWER])["state"] == review.APPROVED
 
 
-def test_an_UNREADABLE_verdicts_LISTING_also_fails_closed(monkeypatch):
-    """The listing is the authority for presence, so when IT is unknown the
-    verb has no basis to claim the slot is free."""
-    class _NoListing(FakeTransport):
-        def list_dir(self, prefix):
-            if prefix.endswith("/verdicts/"):
-                raise TransportError("listing down")
-            return super().list_dir(prefix)
-
-    t = _NoListing()
-    _open_review(t, monkeypatch)
-    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
-    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
-                     "--verdict", "approve"], transport=t) != 0
+def test_the_fold_is_DETERMINISTIC_when_two_shards_share_an_instant():
+    """Two hosts folding the same directory must agree. Same ts, so the name
+    breaks the tie — and it breaks it the same way everywhere."""
+    a = {"reviewer": "r", "verdict": "approve", "name": "aaa.md",
+         "sort_key": "2026-08-10T05:00:00Z"}
+    b = {"reviewer": "r", "verdict": "changes", "name": "bbb.md",
+         "sort_key": "2026-08-10T05:00:00Z"}
+    assert (review.fold_newest_per_reviewer([a, b])[0][0]["name"]
+            == review.fold_newest_per_reviewer([b, a])[0][0]["name"])
