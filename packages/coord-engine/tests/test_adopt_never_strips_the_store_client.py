@@ -236,10 +236,49 @@ def test_an_upgrade_that_returns_0_without_repairing_still_FAILS(tmp_path):
         "a repair that changed nothing was accepted on its exit code alone")
 
 
+def _run_unusable_shim(tmp_path, make_shim):
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    log = tmp_path / "uv.log"
+    make_shim(bin_dir / "fulcra-api")
+    (bin_dir / "uv").write_text(
+        f'#!/bin/sh\necho "$@" >> "{log}"\n'
+        f'case "$1 $2" in "tool dir") echo "{tmp_path}/tools" ;; esac\nexit 0\n')
+    (bin_dir / "uv").chmod(0o755)
+    proc = subprocess.run(
+        ["bash", "-c", _store_client_fn() + '\nUV_BIN=uv\nuv_store_client\n'],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=60)
+    return proc, (log.read_text() if log.exists() else "")
+
+
+def test_a_NON_EXECUTABLE_shim_counts_as_absent_and_is_installed(tmp_path):
+    """This is the case the `-x` guard actually carries.
+
+    `command -v` filters a dangling symlink for us, but it happily RETURNS the
+    path of a present-but-non-executable file. Without the executability check
+    that file reads as "a client worth preserving", the leg tries to repair
+    something that can never run, and the host stays broken. Verified against
+    the shell rather than assumed: a dangling symlink yields an empty
+    `command -v`, a chmod-644 file yields its path.
+    """
+    def _mk(p):
+        p.write_text("#!/bin/sh\nexit 0\n")
+        p.chmod(0o644)                       # present, not executable
+    proc, uv_log = _run_unusable_shim(tmp_path, _mk)
+    assert proc.returncode == 0, proc.stderr
+    assert "tool install --force fulcra-api" in uv_log, (
+        f"a non-executable shim was treated as a client worth preserving, so "
+        f"the host stays broken: {uv_log!r}")
+
+
 def test_a_DANGLING_shim_counts_as_absent_and_is_installed(tmp_path):
     """The wreckage the ENOTEMPTY failure actually leaves: the shim survives in
     PATH, its target does not. That is ABSENT — there is nothing to lose — and
     it must still be installed, or the observed real-world case never recovers.
+
+    `command -v` is what classifies this one (it returns empty for a dangling
+    link), so this pins the end-to-end outcome rather than the `-x` guard; the
+    non-executable case above is what proves `-x` load-bearing.
     """
     bin_dir = tmp_path / "bin"; bin_dir.mkdir()
     log = tmp_path / "uv.log"
