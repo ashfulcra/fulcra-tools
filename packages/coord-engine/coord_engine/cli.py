@@ -11004,6 +11004,136 @@ def _digest_persists(args: Any) -> bool:
                 or getattr(args, "emit_timeline", False))
 
 
+def record_activity_artifact(args: Any, path: str) -> None:
+    """Tell the chokepoint which document this invocation wrote.
+
+    Attached to the PARSED ARGS, not a module-global map keyed by ``id(args)``.
+    That map leaked on the exception path — `main` returns from its handler
+    before any cleanup, so a failed command left its entry behind and a later
+    object at the same id could inherit the wrong artifact path
+    (codex-reviewer, 594 r1). State that lives on the object dies with it; there
+    is no cleanup to forget.
+    """
+    if path:
+        setattr(args, "_activity_artifact_path", path)
+
+
+#: Per-agent work EVENTS. One immutable file per event, never overwritten.
+#:
+#: This was a single mutable `LATEST-work.json` with a read-compare-write
+#: "monotonic" guard, and codex-reviewer reproduced two races against it (594
+#: r1): two hosts both read the old value and the OLDER timestamp could land
+#: last; worse, the failed-write branch deleted the shared path unconditionally
+#: and could erase a NEWER pointer another host had just written. The store
+#: offers no conditional or versioned write, so there is no safe way to mutate
+#: one shared path — the fix is not to have one.
+#:
+#: Immutable events have no race to lose: a writer only ever CREATES its own
+#: event, a failed write leaves every prior event intact and still true, and
+#: "newest" is a deterministic fold over names rather than a value someone must
+#: defend. The filename leads with the ISO instant, so lexical max IS newest
+#: (our own naming, so unlike the store's 12-hour mtimes it sorts correctly).
+WORK_EVENTS_DIR = "work"
+
+#: Keep the newest few events per agent; older ones are unreachable by the fold.
+#: Pruning only ever removes entries STRICTLY OLDER than one just written, which
+#: is safe concurrently — the worst case is that another host already removed it.
+WORK_EVENTS_KEEP = 5
+
+
+def _work_events_prefix(team: str, agent: str) -> str:
+    """Events live under the RAW agent name — NOT `tasks.agent_key()`, which
+    appends a hash (`coord-maintainer` -> `coord-maintainer-f68406`). That is
+    right for the PRESENCE namespace and wrong here: `_coord/agents/<agent>/`
+    uses raw names on the live store. Keying by the hashed form would file every
+    event where no reader lists — a silent no-op that fixtures written with the
+    same helper would happily agree with."""
+    return f"team/{team}/_coord/agents/{agent}/{WORK_EVENTS_DIR}/"
+
+
+def _work_event_name(now_iso: str, kind: str, path: str) -> str:
+    """`<iso>-<digest>.json`. The digest makes concurrent DISTINCT events at the
+    same instant distinct files, while two hosts recording the SAME event write
+    the same name with the same bytes — idempotent rather than conflicting."""
+    digest = hashlib.sha1(f"{kind}|{path}".encode()).hexdigest()[:8]
+    return f"{now_iso}-{digest}.json"
+
+
+def _read_work_pointer(transport: Any, team: str, agent: str) -> Optional[dict]:
+    """Newest work event for one agent, or ``None`` meaning UNKNOWN.
+
+    UNKNOWN covers no events yet (the whole fleet on day one), an unreadable
+    listing, and a corrupt newest event. None of them licenses "this agent did
+    nothing" — the caller falls back to the sweep. Never raises: one bad agent
+    must not break the fold for the rest.
+    """
+    try:
+        rows = transport.list_dir(_work_events_prefix(team, agent))
+    except TransportError:
+        return None
+    names = sorted(str(r.get("name") or "") for r in (rows or [])
+                   if str(r.get("name") or "").endswith(".json"))
+    if not names:
+        return None
+    try:
+        raw = transport.read(_work_events_prefix(team, agent) + names[-1])
+    except TransportError:
+        return None
+    if not raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) and doc.get("ts") else None
+
+
+def _prune_work_events(transport: Any, team: str, agent: str) -> None:
+    """Best-effort: drop all but the newest ``WORK_EVENTS_KEEP`` events.
+
+    Only ever deletes entries strictly older than ones being kept, so a
+    concurrent writer's newest event is never at risk. Failure is ignored —
+    stale extra events cost storage, never correctness.
+    """
+    try:
+        rows = transport.list_dir(_work_events_prefix(team, agent)) or []
+        names = sorted(str(r.get("name") or "") for r in rows
+                       if str(r.get("name") or "").endswith(".json"))
+        for stale in names[:-WORK_EVENTS_KEEP]:
+            transport.delete(_work_events_prefix(team, agent) + stale)
+    except Exception:
+        pass
+
+
+def _stamp_work_pointer(transport: Any, team: str, agent: str, *, kind: str,
+                        path: str, now_iso: str) -> bool:
+    """Record one work event. True iff it persisted.
+
+    Called only after the command succeeded (588): an event for work that did
+    not land would be a lie. There is NO delete-on-failure — the old design
+    removed a shared mutable pointer and could erase another host's newer one.
+    A failed write here simply leaves the previous events, which are all still
+    true; the reader sees slightly stale rather than wrong, and that is the
+    right way to be wrong.
+    """
+    prefix = _work_events_prefix(team, agent)
+    body = json.dumps({"schema": "work-event/v1", "agent": agent,
+                       "kind": kind, "path": path, "ts": now_iso},
+                      sort_keys=True)
+    try:
+        wrote = transport.write(prefix + _work_event_name(now_iso, kind, path),
+                                body)
+    except TransportError:
+        wrote = False
+    if not wrote:
+        print(f"work event not recorded for {agent} — earlier events stand and "
+              f"remain true; the reader will read slightly stale, never wrong",
+              file=sys.stderr)
+        return False
+    _prune_work_events(transport, team, agent)
+    return True
+
+
 def _is_activity_invocation(args: Any) -> bool:
     """Does THIS invocation count as evidence the actor is working?
 
@@ -11157,9 +11287,28 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
         actor = _known_sender(args)
         team = getattr(args, "team", None)
         if actor and team:
+            now_iso = _iso(_now())
             _refresh_activity_presence(
                 transport, team, actor,
-                now_monotonic=_now_monotonic(), now_iso=_iso(_now()))
+                now_monotonic=_now_monotonic(), now_iso=now_iso)
+            # ONE WRITE SITE for the work pointer (coord-boss constraint 1,
+            # 2026-08-09). Stamped HERE rather than beside each artifact write,
+            # so pointer coverage INHERITS the classification the chokepoint
+            # already computes: a newly added write verb stamps by default, and
+            # "someone forgot the stamp" is designed out instead of tested for.
+            # Same argument that made the classifier a denylist.
+            #
+            # rc == 0 is the persistence gate (588): we are past the command,
+            # and it succeeded. Best-effort, exactly like the presence bump —
+            # it can never change rc.
+            try:
+                _stamp_work_pointer(
+                    transport, team, actor,
+                    kind=str(getattr(args, "command", "") or "write"),
+                    path=str(getattr(args, "_activity_artifact_path", "") or ""),
+                    now_iso=now_iso)
+            except Exception as exc:                      # never break a write
+                print(f"work pointer stamp failed: {exc}", file=sys.stderr)
     return rc
 
 

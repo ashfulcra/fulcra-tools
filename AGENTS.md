@@ -1037,8 +1037,29 @@ it (not on PyPI).
   reviews first the sweep consumed the entire budget every time — measured after 591 shipped, a 120s
   budget (6x the default) was still incomplete with work attributed to THREE agents, and since PARTIAL
   withholds the nudge that turned the signal off fleet-wide. Reordering took the same 20s budget from
-  2 agents to 11. The scan is still PARTIAL at this store size; the durable fix is a per-agent pointer
-  written when an artifact is written, not a sweep. Either scan
+  2 agents to 11. The scan is still PARTIAL at this store size, and it is now the POINTER-LESS FALLBACK only.
+  **Per-agent work EVENTS** (`_coord/agents/<agent>/work/<iso>-<digest>.json`, coord-boss GO
+  2026-08-09) answer the read-side question without a sweep: one listing plus one read per agent.
+  IMMUTABLE ON PURPOSE. The first cut was a single mutable `LATEST-work.json` with a
+  read-compare-write monotonic guard, and codex-reviewer reproduced two races (594 r1): an OLDER stamp
+  landing last overwrote a newer one, and — worse — the failed-write branch deleted the shared path
+  unconditionally and could ERASE a newer pointer another host had just written. The store has no
+  conditional or versioned write, so a shared mutable path cannot be defended; the fix is not to have
+  one. A writer only CREATES its own event, "newest" is a deterministic fold over ISO-led names, and a
+  failed write leaves prior events intact and still true (slightly stale, never wrong). NEVER add a
+  delete-on-failure here. Four rules, each a test:
+  **(1) ONE write site** — stamped from the 590 activity chokepoint, never per-verb, so pointer coverage
+  INHERITS the classification and a newly added write verb stamps by default; **(2) 585/588 refusal
+  semantics** — stamped only after the command succeeded (`rc == 0`), a missing/unreadable/corrupt
+  pointer is UNKNOWN and never "did nothing", the stamp is monotonic, and a FAILED update DELETES the
+  pointer rather than leaving a superseded value to be believed; **(3) transitional** — a pointer-less
+  agent reads UNKNOWN and falls back to the sweep, which shrinks toward zero as the fleet writes
+  pointers; **(4) attributable** — `kind` + `path` mean a row can say "verdict, 20h" instead of naming
+  whichever artifact the scan happened to reach.
+  NB the pointer is keyed by the RAW agent name, NOT `tasks.agent_key()`: `_coord/agents/<agent>/` uses
+  raw names on the live store (`coord-maintainer` exists, `coord-maintainer-f68406` does not), and
+  keying it by the hashed form would file every pointer where no reader lists — a silent no-op that
+  fixtures would happily agree with. Either scan
   degrades to PARTIAL on expiry rather than reverting to a nudge. NB `env_float` is a POSITIVE-finite
   knob, so setting a budget to `0` falls back to the default rather than disabling the scan. The **continuity audit deliberately does NOT**: its product
   is checkpoint staleness, not activity, and "working but not snapshotting" is precisely its finding —
