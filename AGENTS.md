@@ -596,11 +596,29 @@ it (not on PyPI).
   half-removed directory once rather than cascading into fallbacks that cannot help, and still FAIL
   when the retry fails — a rescue that claims success it did not achieve is the worse bug.
   **TWO-OS ACCEPTANCE RUN, alongside the floor-raise step (coord-boss ruling, 2026-08-10):** before any
-  pin broadcast, the PUBLISHED script is run end to end on at least one macOS host and one Linux host,
+  pin broadcast, the candidate script is run end to end on at least one macOS host and one Linux host,
   publisher and delegate splitting the work as needed. The prior publish ran only on Linux, where this
   bug cannot fire; the run-before-publish is what caught it, and it is now the named standard rather
   than a habit. One OS is not coverage when the failure is OS-specific — and you cannot know which
   failures are OS-specific in advance, which is the whole argument.
+  **A PRE-PUBLISH RUN CANNOT EXIT 0, AND rc 4 IS ITS EXPECTED GREEN.** The claim gate greps `doctor`
+  for `matches the fleet pin (<candidate>`, and `doctor` compares the installed build's PEP 610
+  `commit_id` against the STORE authority — which correctly still names the OLD pin, because nothing
+  but the published script defines "current". So the gate is unsatisfiable until publication, by
+  design, and both acceptance hosts hit it. Found independently on both OSes on the first run of this
+  protocol (2026-08-10). **The pre-publish PASS criterion is all three of:**
+  1. every install leg green, with the build verified by MEASURING
+     `…/coord_engine-*.dist-info/direct_url.json` → `vcs_info.commit_id` == the candidate — not by
+     reading `doctor`'s prose, which is a different claim;
+  2. for a host with a working store client, the never-strip line printed and the client still working
+     afterwards;
+  3. rc **4** at EXACTLY the currency gate, with no `step FAILED` lines and **no claim written** to
+     `_coord/bus-v3/adopted/` — verify the absence in the store, do not infer it from the message.
+  Anything else — rc 4 with a failed leg, or a claim that appeared anyway — is a real failure. Read the
+  expected rc 4 as green ONLY when the other two legs are independently verified; a run that fails
+  early also exits nonzero, and the whole point of this criterion is that those two look alike from
+  the exit code alone. Both acceptance hosts end up AHEAD of the published pin, which is expected and
+  resolves at publish; do not diagnose them as skewed.
   `coord-engine doctor <team> --self` is the same check on demand and
   is TRI-STATE: rc 0 `current` only when the floor exists, parses, and this
   engine meets it; rc 3 `stale` (run the store's adopt-latest, then re-run);
