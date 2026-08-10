@@ -5298,22 +5298,98 @@ def _obligations_not_checked() -> dict[str, Any]:
     return {"state": "not-checked"}
 
 
-def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
-    if json_mode:
-        for event in events:
-            jsonutil.print_json(event)
-        return
+#: Without these an event has no meaning to deliver: `kind` is what it IS and
+#: `slug` is what it is ABOUT. Everything else on the line is decoration that a
+#: `?` renders honestly.
+_REQUIRED_EVENT_FIELDS = ("kind", "slug")
+
+
+def _poison_line(event: Any, reason: Any) -> str:
+    """One unrenderable event, rendered LOUDLY rather than crashing or vanishing.
+
+    Best-effort on every field independently, so a single bad value cannot take
+    the rest of the line with it. Never raises: this is the last line of defence
+    for the delivery path, and a formatter that can fail here is the whole bug.
+    """
+    def _bit(name: str) -> str:
+        try:
+            value = event.get(name) if isinstance(event, dict) else None
+            return str(value) if value not in (None, "") else "?"
+        except Exception:
+            return "?"
+    return (f"POISON {_bit('recorded_at')} {_bit('from')} kind={_bit('kind')} "
+            f"slug={_bit('slug')} ptr={_bit('ptr')} "
+            f"id={_bit('record_id')} writer={_bit('writer')} "
+            f"[unrenderable: {reason}]")
+
+
+def _classify_queue_events(
+        events: list[Any]) -> "tuple[list[dict[str, Any]], list[tuple[Any, str]]]":
+    """Split a window into (renderable, [(event, reason), ...]).
+
+    ONE classification, consumed by BOTH output modes. Round 2 validated inside
+    the TEXT renderer, which `cmd_queue` calls only when `json_mode` is false —
+    so `--json`, the mode automation actually uses, skipped validation entirely,
+    saved the cursor, and then raised inside the envelope on `event["kind"]`.
+    The event was consumed and never appeared anywhere: a permanent wedge traded
+    for silent loss (codex-reviewer, 600 r2). Third time in this PR that a rule
+    landed on one path and its sibling went without, which is why the decision
+    now lives in one function that neither mode can bypass.
+    """
+    ok: list[dict[str, Any]] = []
+    bad: list[tuple[Any, str]] = []
     for event in events:
-        print(f"{event.get('recorded_at','')[:19]} {event.get('from') or '?'} "
-              f"{event['kind']} {event.get('priority') or '-'} "
-              f"{event['slug']} {event.get('ptr') or '-'}")
+        if not isinstance(event, dict):
+            bad.append((event, f"not an event object: {type(event).__name__}"))
+            continue
+        missing = [f for f in _REQUIRED_EVENT_FIELDS if not event.get(f)]
+        if missing:
+            bad.append((event, "missing required field(s): " + ", ".join(missing)))
+            continue
+        ok.append(event)
+    return ok, bad
+
+
+def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> int:
+    """Render a window. Returns the number of UNRENDERABLE events.
+
+    PER-EVENT, and never fatal. `kind` and `slug` used to be direct subscripts
+    while every neighbouring field went through `.get()` — so an event missing
+    either raised KeyError out of here, out of `cmd_queue`, and past the cursor
+    save, which never ran. At-least-once redelivery then returned the same
+    window with the same poison event on the next read, and the one after that:
+    a permanently wedged cursor with no error path that said so. Measured live
+    on codex-reviewer's window, 9 events stuck from 08:03Z (coord-boss, 2026-08-10).
+
+    Three properties, per coord-boss's constraints:
+      * a poison event is RENDERED (as an explicit POISON line), never skipped —
+        silence would trade a wedge for a disappearance;
+      * it is COUNTED, so the caller can say the window was poisoned;
+      * nothing here can raise, so the cursor save below is always reached.
+    """
+    ok, bad = _classify_queue_events(events)
+    for event in ok:
+        try:
+            if json_mode:
+                jsonutil.print_json(event)
+            else:
+                print(f"{event.get('recorded_at') or ''}"[:19].ljust(19)
+                      + f" {event.get('from') or '?'}"
+                      f" {event.get('kind')} {event.get('priority') or '-'}"
+                      f" {event.get('slug')} {event.get('ptr') or '-'}")
+        except Exception as e:      # noqa: BLE001 — deliberate: delivery > format
+            bad.append((event, f"{type(e).__name__}: {e}"))
+    for event, reason in bad:
+        print(_poison_line(event, reason), file=sys.stderr)
+    return len(bad)
 
 
 def _queue_result_envelope(
         events: list[dict[str, Any]], *, cfg: dict[str, Any],
         cursor_path: str, advanced: bool,
         outcome_mix: Optional[dict[str, int]] = None,
-        obligations: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        obligations: Optional[dict[str, Any]] = None,
+        poisoned: "Optional[list[tuple[Any, str]]]" = None) -> dict[str, Any]:
     """The single-object ``--json`` success envelope for a queue read.
 
     Shares the ``type`` discriminator convention with the ``queue-error``
@@ -5339,20 +5415,36 @@ def _queue_result_envelope(
             "cursor_schema_version": cfg["cursor_schema_version"],
             "cursor_generation": cfg["cursor_generation"],
         }
+    poisoned = poisoned or []
     envelope = {
         "type": "queue-result",
-        "state": "DATA" if events else "CLEAR",
+        "state": "DATA" if (events or poisoned) else "CLEAR",
         "events": [{
             "id": event.get("record_id"),
             "ts": event.get("recorded_at"),
             "sender": event.get("from"),
             "to": event.get("to"),
-            "kind": event["kind"],
+            # `.get()`, not a subscript: this function must not be the thing
+            # that raises on a malformed event. Callers pass VALIDATED events,
+            # and this is the belt to that braces — a formatter on the delivery
+            # path that can throw is the whole defect this PR exists to fix.
+            "kind": event.get("kind"),
             "pri": event.get("priority"),
-            "slug": event["slug"],
+            "slug": event.get("slug"),
             "ptr": event.get("ptr"),
         } for event in events],
         "count": len(events),
+        # POISON IS DELIVERED, in the machine-readable channel too. An event
+        # this build cannot format is still an event the agent RECEIVED, so it
+        # appears here with the reason rather than vanishing between a saved
+        # cursor and an envelope that omitted it.
+        "poison": [{
+            "id": (e.get("record_id") if isinstance(e, dict) else None),
+            "ts": (e.get("recorded_at") if isinstance(e, dict) else None),
+            "sender": (e.get("from") if isinstance(e, dict) else None),
+            "reason": reason,
+        } for e, reason in poisoned],
+        "poison_count": len(poisoned),
         # respec s7: outcome_mix is ADDITIVE under the cursor block (per the
         # deputy ruling) — the agent's own durable classification mix from v2
         # `handled` rows. Absent (legacy cursor / no rows) the key is omitted,
@@ -6284,35 +6376,68 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
     json_mode = bool(getattr(args, "json", False))
-    if not json_mode:
-        # Text mode stays byte-identical for shell consumers; the JSON
-        # envelope is emitted once below, after the cursor outcome is known.
-        _print_queue_events(fresh, json_mode=False)
+    # CLASSIFIED ONCE, for BOTH modes. Doing it inside the text renderer meant
+    # `--json` — the mode automation uses — skipped validation, saved the
+    # cursor, and then raised inside the envelope: consumed and invisible
+    # (codex-reviewer, 600 r2).
+    renderable, poisoned = _classify_queue_events(fresh)
+    poison = len(poisoned)
+    # Computed BEFORE the guarded region so the `finally` below always has a
+    # valid value to persist, even if a future edit raises above it. Poison is
+    # included: it appears in the output of BOTH modes, so consuming it honours
+    # at-least-once rather than dropping it.
     new_seen = seen + [e["record_id"] for e in fresh
-                       if isinstance(e.get("record_id"), str)]
+                       if isinstance(e, dict) and isinstance(e.get("record_id"), str)]
+    try:
+        if not json_mode:
+            # Text mode stays byte-identical for shell consumers; the JSON
+            # envelope is emitted once below, after the cursor outcome is known.
+            poison = _print_queue_events(fresh, json_mode=False)
+    finally:
+        # THE INVARIANT, enforced structurally rather than by remembering.
+        # Once a window has been READ, coverage is a fact about what this
+        # process received — not contingent on our ability to render, summarise
+        # or fold anything afterwards. The wedge existed because an exception
+        # between the read and the save skipped it, and at-least-once
+        # redelivery then returned the same poison forever. A `finally` holds
+        # even for exceptions a later edit introduces; a careful ordering does
+        # not. `peek` is the ONE exit that legitimately does not advance, and it
+        # is below this block, so it cannot be reached without passing here.
+        if not peek:
+            advanced = records.save_cursor(transport, args.team, agent,
+                                           last_read=_iso(now),
+                                           seen_ids=new_seen)
+            if not advanced:
+                print("queue: cursor save failed — coverage unadvanced, next "
+                      "read re-covers this window", file=sys.stderr)
     if peek:
         obligations_fragment = _requested_obligations(args, transport, agent)
         if json_mode:
             jsonutil.print_json(_queue_result_envelope(
-                fresh, cfg=cfg,
+                renderable, cfg=cfg,
                 cursor_path=records.cursor_path(args.team, agent),
-                advanced=False, obligations=obligations_fragment))
+                advanced=False, obligations=obligations_fragment,
+                poisoned=poisoned))
         if fresh:
             print(f"queue: peek — {len(fresh)} event(s) shown, cursor NOT "
                   "advanced (the owning agent still receives them)",
                   file=sys.stderr)
         return 0
-    advanced = records.save_cursor(transport, args.team, agent,
-                                   last_read=_iso(now), seen_ids=new_seen)
-    if not advanced:
-        print("queue: cursor save failed — coverage unadvanced, next read "
-              "re-covers this window", file=sys.stderr)
+    if poison:
+        # LOUD, and after the save: a poisoned window is a delivery-integrity
+        # event someone must look at, but it is no longer a reason to stop
+        # receiving mail.
+        print(f"queue: {poison} unrenderable event(s) in this window — shown as "
+              "POISON lines above and CONSUMED; coverage advanced. Report the "
+              "POISON lines verbatim: they name a writer this build cannot "
+              "format.", file=sys.stderr)
     obligations_fragment = _requested_obligations(args, transport, agent)
     if json_mode:
         envelope = _queue_result_envelope(
-            fresh, cfg=cfg,
+            renderable, cfg=cfg,
             cursor_path=records.cursor_path(args.team, agent),
-            advanced=advanced, obligations=obligations_fragment)
+            advanced=advanced, obligations=obligations_fragment,
+            poisoned=poisoned)
         jsonutil.print_json(envelope)
     return 0
 

@@ -945,6 +945,20 @@ it (not on PyPI).
   SUM of the budgets. **Completeness coupling is different from budget coupling and must not be "fixed"
   with it** — forge's `complete` still follows the review fold's, because its responsibility map is
   derived from review rows and a partial review set cannot yield a complete forge view.
+- **A DELIVERY path may never lose coverage to a FORMATTING failure.** `queue` rendered `kind` and
+  `slug` as direct subscripts while every neighbouring field used `.get()`, so an event missing either
+  raised out of the renderer, out of `cmd_queue`, and past the cursor save — which never ran.
+  At-least-once redelivery then returned the same window with the same poison event on every read: a
+  cursor wedged permanently, with no error path that said so (measured on a live agent's window, 9
+  events stuck for 6+ hours, 2026-08-10). Two layers, because the field fix alone guards the instance
+  and leaves the class: rendering is PER EVENT and cannot raise — poison renders as an explicit POISON
+  line, is COUNTED, and the count is reported, so it is delivered and visible rather than silently
+  skipped (trading a crash for a disappearance is the worse bug) — and **the cursor save lives in a
+  `finally`**. Once a window has been READ, coverage is a fact about what the process RECEIVED, not
+  something contingent on rendering, summarising or folding it afterwards; a `finally` holds for
+  exceptions a later edit introduces, careful ordering does not. `peek` stays the one exit that
+  deliberately does not advance. **When you add a step between a read and its acknowledgement, ask what
+  happens to the acknowledgement if that step throws.**
 - **Head-of-line: a budget cut may only ever truncate the TAIL — never the head.** The work-discovery
   folds do live per-op transport at query time over an unbounded population; under budget pressure the cut
   must land on the *lowest-priority* tail, so an agent's OWN assigned work and any decision parked on a
