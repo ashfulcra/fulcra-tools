@@ -176,6 +176,50 @@ def test_the_renderer_cannot_raise_on_any_shape():
         cli._print_queue_events([shape], json_mode=False)
 
 
+def test_JSON_mode_delivers_poison_visibly_and_does_not_raise(monkeypatch, capsys):
+    """codex-reviewer, 600 r2 — the mode automation actually uses.
+
+    Round 2 validated inside the TEXT renderer, which `cmd_queue` calls only
+    when `json_mode` is false. So `--json` skipped validation entirely, saved
+    the cursor, and then raised inside `_queue_result_envelope` on
+    `event["kind"]`: rc 1, no envelope, cursor advanced. The permanent wedge
+    traded for SILENT LOSS in the machine-readable channel — strictly worse,
+    because a wedge at least stops the line.
+
+    Consume policy, made explicit: poison IS consumed, and that is only
+    defensible because it APPEARS in the envelope. The assertions below bind
+    those two together — visible, counted, rc 0, cursor advanced.
+    """
+    window = [_event(rid="a"), _event(rid="b", kind=None), _event(rid="c")]
+    monkeypatch.setattr(records, "events_for", lambda w, a: list(w))
+    rc, t = _run(monkeypatch, window,
+                 args=["queue", TEAM, "--agent", AGENT, "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"the --json path raised instead of delivering: rc={rc}"
+
+    envelope = json.loads(out.strip().splitlines()[-1])
+    assert envelope["poison_count"] == 1, (
+        f"the malformed event vanished from the machine-readable channel: "
+        f"{envelope}")
+    assert [p["id"] for p in envelope["poison"]] == ["b"], (
+        f"poison was counted but not identified: {envelope['poison']}")
+    assert "missing required field" in envelope["poison"][0]["reason"]
+    assert [e["id"] for e in envelope["events"]] == ["a", "c"], (
+        "well-formed events must still be delivered alongside poison")
+    assert _cursor_saved(t), "coverage was lost on the --json path"
+
+
+def test_the_envelope_itself_cannot_raise_on_a_malformed_event():
+    """Belt to the classifier's braces: the envelope builder used to subscript
+    `kind`/`slug` directly, so it was a second place the delivery path could
+    throw. A formatter on this path that can fail IS the defect."""
+    env = cli._queue_result_envelope(
+        [{"record_id": "x"}], cfg={"data_type": "X/1", "api_version": "v1"},
+        cursor_path="p", advanced=True)
+    assert env["events"][0]["kind"] is None
+    assert env["poison_count"] == 0
+
+
 def test_PEEK_still_does_not_advance(monkeypatch, capsys):
     """The one exit that legitimately skips the save must keep skipping it —
     the reachability invariant must not turn a peek into a consume."""

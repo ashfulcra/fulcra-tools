@@ -330,6 +330,14 @@ def test_json_data_envelope_is_one_object_with_full_event_shape(
              "slug": "fleet-wide", "ptr": None},
         ],
         "count": 2,
+        # 600 r2: the envelope gained an explicit poison channel. `--json` used
+        # to skip validation entirely, save the cursor, and then RAISE inside
+        # the builder on a malformed event — consumed and invisible. Poison is
+        # now delivered here with its reason, so a machine consumer can see what
+        # it received and could not format. Empty on a clean window, and this
+        # golden says so rather than letting the keys appear only under failure.
+        "poison": [],
+        "poison_count": 0,
         "cursor": {"path": CURSOR, "advanced": True},
         "engine_version": records.engine_stamp()["engine_version"],
         "protocol": None,                 # legacy authority: no versions to report
