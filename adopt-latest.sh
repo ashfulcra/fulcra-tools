@@ -24,10 +24,11 @@
 # with "Directory not empty (os error 66)" AFTER bin/ was already gone, and the
 # host was left with no store client at all — off the bus, with `doctor` blaming
 # the store for an unreadable adoption authority. Concretely, then: probe before
-# you replace, prefer an in-place upgrade to a destructive reinstall, treat "the
-# probe failed" as UNKNOWN rather than as "nothing is installed", and when you
-# cannot repair something, leave it alone and say so loudly instead of deleting
-# it.
+# you replace; do not mutate a working capability at all in an unattended run
+# unless the failure can be rolled back, and this store offers nothing to roll
+# back to; treat "the probe failed" as UNKNOWN rather than as "nothing is
+# installed"; and when you cannot repair something, leave it alone and say so
+# loudly instead of deleting it.
 set -u
 PIN="0a093dba4ba17fe344086c8c7c0d229ad5b153af"   # == main after PR 571. Carries eleven merges since pp-b2e649e6, several of which fix things agents hit this shift: 567 (the verdict must not live only at the tail of the payload - a needs-me read whose rc was truncated out of view could not be certified either way), 566 (a cap-starved review sweep must not be silent), 571 (ONE deadline for the whole HTTP read - it was FOUR stacked bounds, so a configured 30s per-op bound could take 120s and every fold budget assumes that bound holds), 569 (the codex watcher can no longer report WATCH_OK on a blind read), 568 (--json purity for every verb), 561 (a merged PR closes its review as an ARTIFACT of the merge), 558 (a hostname the OS hands back is not a fleet key until it is validated), 565, 563, 562, 557.
 VER="pp-0a093dba"
@@ -102,20 +103,36 @@ done
 # acceptance test: it destroyed a WORKING client and every fallback leg then
 # failed for unrelated host reasons.
 #
-# So: never force-reinstall a client that works. Upgrade it in place, where a
-# failure costs nothing because the working copy survives; force-install only
-# when there is nothing to lose; and if that fails, clear the half-removed
-# directory and retry once instead of cascading.
+# So: a client that WORKS is left alone entirely. Force-install only when there
+# is nothing to lose, and if that fails, clear the half-removed directory and
+# retry once instead of cascading. A client that is present but broken gets one
+# repair attempt, whose result is RE-PROBED rather than believed.
 #
 # THE GENERAL RULE, which any future leg here must also honour: a failed adopt
 # must never leave the host worse than it found it.
 uv_store_client() {
   if fulcra-api --help >/dev/null 2>&1; then
-    # Working client. An upgrade is best-effort — `try` still counts the failure
-    # into STEP_FAILS so the adoption claim reports a rescued run honestly, but
-    # it must not fail the leg: the client we already have is the thing that
-    # matters.
-    try "uv fulcra-api (upgrade in place)" "$UV_BIN" tool upgrade fulcra-api || true
+    # WORKING. Do not touch it at all.
+    #
+    # I previously upgraded it here and called that non-destructive. That was an
+    # ASSUMPTION, not uv's documented contract — `uv tool upgrade` reinstalls a
+    # tool's executables even when they have not changed, so a failed upgrade
+    # can leave the tool broken exactly the way a failed `--force` install can,
+    # and the branch then returned 0 without re-probing (codex-reviewer, 597
+    # r3). Same unchecked partial mutation as the bug this PR exists to fix, in
+    # the branch written to prevent it.
+    #
+    # Re-probing alone would only stop the FALSE SUCCESS; the host would still
+    # have lost the capability. This store has no restorable snapshot of a tool
+    # environment that failure could roll back to, so the invariant in the
+    # header leaves one honest option: don't mutate the thing the bus depends on
+    # in an unattended script. Adoption exists to converge the ENGINE onto the
+    # pin; upgrading the client is a nice-to-have, and it is not worth the one
+    # capability we cannot lose.
+    #
+    # Says so out loud rather than silently, so a host stranded on an old client
+    # is visible and a human can upgrade it deliberately, watching.
+    echo "adopt: fulcra-api present and working — left untouched (an unattended upgrade cannot be rolled back if it breaks; run 'uv tool upgrade fulcra-api' yourself when you can watch it)" >&2
     return 0
   fi
   # NOT WORKING IS TWO DIFFERENT FACTS, and only one of them is safe to act on.

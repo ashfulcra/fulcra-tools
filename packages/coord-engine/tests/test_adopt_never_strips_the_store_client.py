@@ -111,19 +111,56 @@ def test_a_WORKING_client_is_never_force_reinstalled(tmp_path):
         f"that took a host off the bus: {uv_log!r}")
 
 
-def test_a_working_client_is_still_UPGRADED(tmp_path):
-    """Not-reinstalling must not become not-updating: the client still gets a
-    non-destructive upgrade, whose failure the working copy survives."""
+def test_a_working_client_is_NOT_MUTATED_AT_ALL(tmp_path):
+    """codex-reviewer, 597 r3.
+
+    I upgraded a working client here and called it non-destructive. That was an
+    ASSUMPTION and not uv's contract: `uv tool upgrade` reinstalls a tool's
+    executables even when they have not changed, so a failed upgrade can break
+    the tool exactly the way a failed `--force` install can. Re-probing would
+    only stop the FALSE SUCCESS — the capability would still be gone — and
+    nothing here can roll a tool environment back, so the invariant in the
+    script header leaves one honest option: do not mutate the thing the bus
+    depends on in an unattended run.
+    """
     _, uv_log = _run(tmp_path, client_works=True, force_install_fails=False)
-    assert "tool upgrade fulcra-api" in uv_log, (
-        f"the store client was never upgraded: {uv_log!r}")
+    assert uv_log.strip() == "", (
+        f"a working store client was mutated by an unattended adopt: {uv_log!r}")
 
 
-def test_a_FAILED_upgrade_does_not_fail_the_leg(tmp_path):
-    """The working copy is what matters. An upgrade that cannot complete leaves
-    the host exactly as capable as it was, so the adopt continues."""
-    class _AlwaysFail:
-        pass
+def test_an_upgrade_that_DESTROYS_the_client_cannot_happen_and_cannot_lie(tmp_path):
+    """codex's adversarial reproduction, kept as the regression.
+
+    Stub the upgrade so it REMOVES the executable and exits 1 — the partial
+    mutation the old branch assumed away. Both required outcomes are asserted:
+    the starting capability survives, and the function does not report success
+    over a host it broke. It passes now because the upgrade is never invoked;
+    if anyone reintroduces it, this fails on the first assertion, which is the
+    one that matters.
+    """
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    client = bin_dir / "fulcra-api"
+    client.write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "uv").write_text(
+        f'#!/bin/sh\ncase "$1 $2" in\n'
+        f'  "tool upgrade") rm -f "{client}"; exit 1 ;;\n'
+        f'esac\nexit 0\n')
+    for f in bin_dir.iterdir():
+        f.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", "-c", _store_client_fn() + '\nUV_BIN=uv\nuv_store_client\n'],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=60)
+    assert client.exists(), (
+        "the adopt stripped a working store client — the invariant in the "
+        "script header, broken by the branch written to hold it")
+    assert proc.returncode == 0, (
+        f"the client survived but the leg failed anyway: {proc.stderr}")
+
+
+def test_a_HOSTILE_uv_cannot_disturb_a_working_client(tmp_path):
+    """Whatever uv would do, a working client is not exposed to it: the leg
+    succeeds without invoking uv at all."""
     bin_dir = tmp_path / "bin"; bin_dir.mkdir()
     (bin_dir / "fulcra-api").write_text("#!/bin/sh\nexit 0\n")
     (bin_dir / "uv").write_text("#!/bin/sh\nexit 1\n")
@@ -134,8 +171,9 @@ def test_a_FAILED_upgrade_does_not_fail_the_leg(tmp_path):
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
         capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
-        f"a failed UPGRADE of a still-working client aborted the adopt: "
-        f"{proc.stderr}")
+        f"a working client did not survive a hostile uv: {proc.stderr}")
+    assert "left untouched" in proc.stderr, (
+        "a host stranded on an old client must be told so, not silently skipped")
 
 
 def test_an_ABSENT_client_is_installed(tmp_path):
