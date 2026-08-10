@@ -110,17 +110,60 @@ def test_an_exception_ANYWHERE_after_the_read_still_saves_the_cursor(monkeypatch
         "finally")
 
 
-def test_poison_is_RENDERED_and_COUNTED_never_silently_skipped(capsys):
-    """Constraint 1 and 3. Trading a crash for a disappearance would be a worse
-    bug: the event was delivered, so it must be visible AND counted."""
+def test_a_MISSING_REQUIRED_FIELD_is_poison_counted_and_never_an_ordinary_row(capsys):
+    """codex-reviewer, 600 r1 — the event that CAUSED the wedge.
+
+    My first fix rendered `kind`/`slug` through `.get()` with a `?` default, so
+    the missing-field event printed as an ordinary row and returned a poison
+    count of ZERO: the crash was traded for a quiet lie, and the loud-and-counted
+    promise was unmet for exactly the case that motivated the change.
+
+    Worse, my own test permitted it — `assert poison == 0 or "POISON" in err or
+    "?" in out` is a disjunction satisfied by every possible outcome. A test that
+    cannot fail is worse than no test, because it reads as coverage. This asserts
+    BOTH required outcomes and would redden on either.
+    """
+    for field in ("kind", "slug"):
+        bad = _event(rid="x")
+        del bad[field]
+        poison = cli._print_queue_events([bad], json_mode=False)
+        cap = capsys.readouterr()
+        assert poison == 1, (
+            f"an event missing {field!r} was counted as clean: poison={poison}")
+        assert "POISON" in cap.err, (
+            f"an event missing {field!r} was not rendered as POISON: {cap.err!r}")
+        assert cap.out.strip() == "", (
+            f"an event missing {field!r} printed as an ORDINARY row — the quiet "
+            f"lie: {cap.out!r}")
+        assert field in cap.err, (
+            f"the POISON line does not name the missing field: {cap.err!r}")
+
+
+def test_an_EMPTY_required_field_counts_as_missing(capsys):
+    """`kind: ""` carries no more meaning than no `kind` at all."""
+    poison = cli._print_queue_events([_event(rid="x", slug="")], json_mode=False)
+    cap = capsys.readouterr()
+    assert poison == 1 and "POISON" in cap.err, (
+        f"an empty required field slipped through as renderable: {cap.out!r}")
+
+
+def test_a_WELL_FORMED_event_is_not_poison(capsys):
+    """The other direction: the validation must not condemn healthy traffic, and
+    optional fields keep their honest `?`/`-` defaults."""
     poison = cli._print_queue_events(
-        [_event(rid="a"), {"record_id": "b"}], json_mode=False)
-    out = capsys.readouterr()
-    assert poison == 0 or "POISON" in out.err or "?" in out.out
-    # A truly unformattable event (a non-dict) must still be counted, not raise.
-    poison2 = cli._print_queue_events([object()], json_mode=False)
+        [_event(rid="a"), _event(rid="b", priority=None, ptr=None, **{"from": None})],
+        json_mode=False)
+    cap = capsys.readouterr()
+    assert poison == 0, f"a well-formed event was called poison: {cap.err!r}"
+    assert cap.out.count("\n") == 2, f"events were not rendered: {cap.out!r}"
+
+
+def test_an_unformattable_event_is_counted_not_raised(capsys):
+    """A non-dict cannot be validated OR formatted; it must still be counted and
+    shown rather than taking the process down."""
+    poison = cli._print_queue_events([object()], json_mode=False)
     err = capsys.readouterr().err
-    assert poison2 == 1, "an unrenderable event was silently skipped"
+    assert poison == 1, "an unrenderable event was silently skipped"
     assert "POISON" in err, f"poison was not rendered loudly: {err!r}"
 
 

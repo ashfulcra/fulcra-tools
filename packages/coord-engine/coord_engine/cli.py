@@ -5298,6 +5298,12 @@ def _obligations_not_checked() -> dict[str, Any]:
     return {"state": "not-checked"}
 
 
+#: Without these an event has no meaning to deliver: `kind` is what it IS and
+#: `slug` is what it is ABOUT. Everything else on the line is decoration that a
+#: `?` renders honestly.
+_REQUIRED_EVENT_FIELDS = ("kind", "slug")
+
+
 def _poison_line(event: Any, err: BaseException) -> str:
     """One unrenderable event, rendered LOUDLY rather than crashing or vanishing.
 
@@ -5337,6 +5343,19 @@ def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> int
     poison = 0
     for event in events:
         try:
+            # VALIDATE BEFORE FORMATTING. `.get()` with a `?` default turns the
+            # exact event that caused the wedge — one missing `kind` or `slug` —
+            # into an ordinary-looking row with a poison count of ZERO, which
+            # trades the crash for a quiet lie (codex-reviewer, 600 r1). These
+            # two fields are what an event MEANS; without them there is nothing
+            # to deliver, so absence is unrenderable by definition, not a
+            # cosmetic gap. Optional fields (`from`, `priority`, `ptr`) keep
+            # their `?`/`-` defaults, which are honest for genuinely absent data.
+            missing = [f for f in _REQUIRED_EVENT_FIELDS
+                       if not (isinstance(event, dict) and event.get(f))]
+            if missing:
+                raise ValueError(
+                    "missing required field(s): " + ", ".join(missing))
             if json_mode:
                 jsonutil.print_json(event)
             else:
