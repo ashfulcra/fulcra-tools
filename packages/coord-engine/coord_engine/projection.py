@@ -438,6 +438,7 @@ def _scan_review_slug(
         # in a validated schema, and a retired entry carries no review
         # information a consumer wants: it owes nobody a verdict.
         return None, True
+    marker_fm: dict = {}
     if SETTLED_MARKER in vnames:
         # A cache is only trustworthy if it still describes THIS directory.
         #
@@ -447,22 +448,13 @@ def _scan_review_slug(
         # short-circuit then answered APPROVED while the newest verdict was
         # CHANGES (codex-reviewer, 595 r4). No delete ordering fixes that.
         #
-        # So VALIDATE rather than order: recompute the evidence digest from the
-        # current listing and honour the cache only if it matches. A cache built
-        # from different evidence is ignored by construction, whenever it was
-        # written. A marker with NO digest is pre-binding and cannot be
-        # validated, so it is not trusted either — recomputing is cheap and
-        # correct, and this build cannot prove such a marker is current.
+        # So VALIDATE rather than order — in the SHARED decision function, so
+        # the fan-out obligation scan applies the identical rule. That rule now
+        # also refuses any directory holding a mutable plain shard, whose
+        # in-place rewrite a name digest cannot see (595 r5).
         marker_raw = transport.read(_verdicts_prefix(team, slug) + SETTLED_MARKER)
         marker_fm = okf.parse_frontmatter(marker_raw) or {}
-        if (str(marker_fm.get("state") or "") == review.APPROVED
-                and str(marker_fm.get("evidence") or "")
-                == review.evidence_digest(vnames)):
-            return {**base, "state": review.APPROVED, "pending_required": [],
-                    "settled": True}, True
-        # MERGED markers are EVIDENCE, not a cache — they summarise a merge, not
-        # the verdict set, so they keep short-circuiting.
-        if str(marker_fm.get("state") or "") == "MERGED":
+        if review.settle_shortcircuit(marker_fm, vnames) != review.SETTLE_NO:
             return {**base, "state": review.APPROVED, "pending_required": [],
                     "settled": True}, True
         # Otherwise fall through and fold the shards for real.
@@ -516,14 +508,29 @@ def _scan_review_slug(
         tally["superseded_verdicts"] = folded_away
     settled = (tally["state"] == review.APPROVED
                and not tally["pending_required"] and bool(base["required"]))
-    if settled:
-        # Same proven-settle cache the read fold writes — accelerates BOTH the
-        # raw fold's settled-skip and this build's own convergence. Best-effort.
+    # Same proven-settle cache the read fold writes — accelerates BOTH the raw
+    # fold's settled-skip and this build's own convergence. Best-effort.
+    #
+    # It goes through the SHARED field builder, and only when the evidence can
+    # actually be bound. This write used to emit schema/state/ts alone, so the
+    # marker it produced failed its own reader's validation on the very next
+    # pass — a cache that could never hit, written every time (codex-reviewer,
+    # 595 r5). And a directory holding a mutable plain shard gets no cache at
+    # all: one whose digest a reader must refuse is cost without benefit.
+    #
+    # An EXISTING marker is overwritten only when this build can positively
+    # identify it as a cache. Unreadable or unrecognised means it may be the
+    # merge evidence a `review close` wrote, and that is never ours to clobber.
+    evidence = (review.evidence_digest(vnames)
+                if review.evidence_is_immutable(vnames) else "")
+    prior_state = str(marker_fm.get("state") or "")
+    may_write = (SETTLED_MARKER not in vnames) or prior_state == review.APPROVED
+    if settled and evidence and may_write:
         try:
             transport.write(
                 _verdicts_prefix(team, slug) + SETTLED_MARKER,
-                okf.render_frontmatter({"schema": "review-settled/v1",
-                                        "state": review.APPROVED, "ts": now}))
+                okf.render_frontmatter(review.settled_marker_fields(
+                    state=review.APPROVED, ts=now, evidence=evidence)))
         except Exception:
             pass
     return {**base, "state": tally["state"],

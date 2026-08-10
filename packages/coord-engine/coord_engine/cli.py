@@ -1698,7 +1698,14 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str,
     Refusing costs nothing real. The cache exists so the fan-out fold can skip
     the slug; a MERGED marker ALREADY makes it skip. Overwriting buys no speed
     and loses the only durable record that the PR landed.
+
+    UNBOUND EVIDENCE IS NOT WRITTEN AT ALL. An empty digest means the caller
+    could not fingerprint this directory — a mutable plain shard participates —
+    and every reader refuses such a marker, so writing one is cost with no
+    reader (codex-reviewer, 595 r5).
     """
+    if not evidence:
+        return "unbound-evidence"
     try:
         # Overwrite ONLY a positively-identified CACHE, or a positively ABSENT
         # marker. Everything else is preserved.
@@ -1726,16 +1733,8 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str,
                 return "kept-unknown"
         transport.write(
             _settled_marker_path(team, slug),
-            okf.render_frontmatter({"schema": "review-settled/v1",
-                                    "state": review.APPROVED, "ts": now,
-                                    # BINDS THE CACHE TO ITS EVIDENCE. A reader
-                                    # recomputes this from the CURRENT listing;
-                                    # a cache written from a stale snapshot
-                                    # carries a stale digest and is ignored by
-                                    # construction, whenever it was written.
-                                    # Correctness stops depending on who wrote
-                                    # last (codex-reviewer, 595 r4).
-                                    "evidence": evidence or ""}),
+            okf.render_frontmatter(review.settled_marker_fields(
+                state=review.APPROVED, ts=now, evidence=evidence)),
         )
         return "written"
     except Exception:
@@ -2031,8 +2030,13 @@ def _tally_from_verdict_entries(
                 for r in kept]
     tally = review.tally(verdicts, required=required)
     # Computed HERE, from the same entries the fold consumed, so the cache's
-    # fingerprint provably describes what it summarises.
-    tally["evidence"] = review.evidence_digest([e.get("name") for e in entries])
+    # fingerprint provably describes what it summarises. EMPTY when a mutable
+    # plain shard participates: a name digest cannot see that shard's in-place
+    # rewrite, so there is nothing here honest enough to bind a cache to, and an
+    # empty digest is what every reader already treats as unbound (595 r5).
+    _vnames = [e.get("name") for e in entries]
+    tally["evidence"] = (review.evidence_digest(_vnames)
+                         if review.evidence_is_immutable(_vnames) else "")
     if folded_away:
         # NEVER SILENTLY (coord-boss constraint 4). A reader told "APPROVED"
         # while shards were quietly discarded has the same affirmative
@@ -2767,8 +2771,22 @@ def _pending_reviews_raw(
             # can never become pending for anybody. Skipping them HERE is what
             # makes `review gc` recover budget at all; the marker alone changed
             # nothing (codex-reviewer, review-gc round 1).
-            if review_gc.GC_MARKER in vnames or SETTLED_MARKER in vnames:
+            if review_gc.GC_MARKER in vnames:
                 return "ok"  # terminal -> skip entirely, zero reads beyond this listing
+            if SETTLED_MARKER in vnames:
+                # A `.settled` used to skip this slug on PRESENCE ALONE, which is
+                # the same unvalidated short-circuit 595 r4 fixed in the register
+                # projection — fixed THERE and left here, one reader apart. A
+                # stale cache made this scan report an agent owed nothing while
+                # the newest verdict was CHANGES: an obligation hidden by a file.
+                #
+                # Same shared rule, so the two readers cannot drift. One read per
+                # settled slug still skips the doc and every shard.
+                if review.settle_shortcircuit(
+                        okf.parse_frontmatter(
+                            transport.read(_settled_marker_path(team, slug))) or {},
+                        vnames) != review.SETTLE_NO:
+                    return "ok"
             doc_raw = transport.read(_review_doc_path(team, slug))
             if doc_raw is None:
                 # Slug came from the listing, so its doc exists — a None read is a

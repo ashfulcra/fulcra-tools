@@ -512,3 +512,219 @@ def test_a_cache_that_still_matches_its_evidence_is_HONOURED():
         now="2026-08-10T05:00:00Z", deadline=Deadline(None))
     assert ok and row and row["settled"] is True, (
         f"a valid cache was ignored, so the fast path is dead: {row}")
+
+
+# --- 595 r5: a NAME digest cannot fingerprint a MUTABLE shard ----------------
+
+def _plain_shard_store(verdict):
+    """A directory holding ONLY the canonical plain shard — the hand-written
+    form constraint (b) keeps first-class — plus a cache bound to its NAME."""
+    head = HEAD
+    plain = f"{head}--{REVIEWER}.md"
+
+    class _T:
+        def __init__(self):
+            self.store = {
+                f"team/{TEAM}/review/{SLUG}.md": okf.render_frontmatter({
+                    "type": "Review", "schema": "review-request/v2",
+                    "of": "PR #1", "head": head, "required": [REVIEWER],
+                    "requested_by": "asker"}) + "\n",
+                f"{PREFIX}{plain}": okf.render_frontmatter({
+                    "type": "Verdict", "reviewer": REVIEWER, "head": head,
+                    "verdict": verdict}) + "\nbody\n",
+                f"{PREFIX}.settled": okf.render_frontmatter({
+                    "schema": "review-settled/v1", "state": review.APPROVED,
+                    "ts": "2026-08-10T01:30:00Z",
+                    "evidence": review.evidence_digest([plain])}),
+            }
+
+        def read(self, path):
+            return self.store.get(path)
+
+        def list_dir(self, prefix):
+            return [{"name": k[len(prefix):]} for k in sorted(self.store)
+                    if k.startswith(prefix) and "/" not in k[len(prefix):]]
+
+    return _T(), plain
+
+
+def test_a_REWRITTEN_plain_shard_is_not_hidden_by_its_unchanged_name(monkeypatch):
+    """codex-reviewer, 595 r5, P1 — the exact-head reproduction.
+
+    The plain `<head>--<reviewer>.md` form is permanently supported and
+    hand-writable, so it can be rewritten IN PLACE. Its content changes from
+    APPROVE to CHANGES; its NAME does not. A digest over names therefore still
+    matches, and r4's binding accepted the cache and answered APPROVED from a
+    shard that now reads CHANGES.
+
+    No stronger identity exists on this store — no etag, no version, no content
+    hash, and listing mtimes are minute-resolution. So the cache does not bind
+    to mutable evidence at all: this directory is folded for real, every time.
+    """
+    from coord_engine import projection as pj
+    from coord_engine.budget import Deadline
+
+    t, plain = _plain_shard_store("approve")
+    # The same canonical file is rewritten. Nothing about the LISTING changes.
+    t.store[f"{PREFIX}{plain}"] = okf.render_frontmatter({
+        "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
+        "verdict": "changes"}) + "\nblocker\n"
+
+    row, ok = pj._scan_review_slug(
+        t, TEAM, SLUG, {"name": f"{SLUG}.md"},
+        now="2026-08-10T05:00:00Z", deadline=Deadline(None))
+    assert ok and row is not None
+    assert row["state"] == review.CHANGES, (
+        f"a name digest hid an in-place rewrite of the plain shard, so a "
+        f"CHANGES verdict read as APPROVED: {row}")
+
+
+def test_the_fanout_scan_applies_THE_SAME_rule_as_the_projection(capsys):
+    """The sibling reader. `needs-me` skipped a slug on `.settled` PRESENCE
+    alone — the unvalidated short-circuit r4 fixed in the projection and left
+    standing one reader away. A stale cache there hides an OBLIGATION: the
+    reviewer is told they owe nothing while the newest verdict is CHANGES.
+
+    Driven through `cli.main`, because a rule proven only in the shared helper
+    is a rule I have twice failed to actually connect.
+    """
+    import json as _j
+    t = FakeTransport()
+    head = HEAD
+    t.put(f"team/{TEAM}/review/{SLUG}.md", okf.render_frontmatter({
+        "type": "Review", "schema": "review-request/v2", "of": "PR #1",
+        "head": head, "required": [REVIEWER, "second-reviewer"],
+        "requested_by": "asker"}) + "\n")
+    t.put(f"{PREFIX}{head}--{REVIEWER}--2026-08-10T01:00:00Z-aaaaaaaa.md",
+          okf.render_frontmatter({
+              "type": "Verdict", "reviewer": REVIEWER, "head": head,
+              "verdict": "approve"}) + "\nok\n")
+    # A PRE-BINDING cache — exactly what every build before r4, and the
+    # projection's own writer, put on disk. `second-reviewer` has filed nothing.
+    t.put(f"{PREFIX}.settled", okf.render_frontmatter({
+        "schema": "review-settled/v1", "state": review.APPROVED,
+        "ts": "2026-08-10T01:30:00Z"}))
+
+    cli.main(["needs-me", TEAM, "--agent", "second-reviewer", "--json"],
+             transport=t)
+    rows = _j.loads(capsys.readouterr().out)
+    assert any(r.get("name") == SLUG for r in rows
+               if r.get("type") == "review-pending"), (
+        f"the fan-out scan honoured an unvalidated cache and hid an owed "
+        f"verdict: {rows}")
+
+
+def test_a_MERGED_marker_still_short_circuits_a_mutable_directory():
+    """Merge evidence is not a recomputable tally — no verdict set can
+    contradict "the PR landed" — so the immutability rule must not touch it."""
+    from coord_engine import projection as pj
+    from coord_engine.budget import Deadline
+
+    t, _ = _plain_shard_store("changes")
+    t.store[f"{PREFIX}.settled"] = okf.render_frontmatter({
+        "schema": "review-settled/v1", "state": "MERGED",
+        "ts": "2026-08-10T01:30:00Z", "merge_sha": "b" * 40})
+    row, ok = pj._scan_review_slug(
+        t, TEAM, SLUG, {"name": f"{SLUG}.md"},
+        now="2026-08-10T05:00:00Z", deadline=Deadline(None))
+    assert ok and row and row["settled"] is True, (
+        f"merge evidence was demoted to a cache and re-folded: {row}")
+
+
+def test_the_projection_writes_a_cache_ITS_OWN_reader_then_honours():
+    """codex-reviewer, 595 r5, P2 — write-then-read, no hand-seeded marker.
+
+    The projection composed its own marker dict and omitted `evidence`, so the
+    cache it wrote failed its own validation on the very next pass: a write that
+    could never pay off, repeated every reconcile. Seeding a valid cache by hand
+    cannot catch that — only running the writer and then the reader can.
+    """
+    from coord_engine import projection as pj
+    from coord_engine.budget import Deadline
+
+    head = HEAD
+    approve = f"{head}--{REVIEWER}--2026-08-10T01:00:00Z-aaaaaaaa.md"
+
+    class _T:
+        def __init__(self):
+            self.store = {
+                f"team/{TEAM}/review/{SLUG}.md": okf.render_frontmatter({
+                    "type": "Review", "schema": "review-request/v2",
+                    "of": "PR #1", "head": head, "required": [REVIEWER],
+                    "requested_by": "asker"}) + "\n",
+                f"{PREFIX}{approve}": okf.render_frontmatter({
+                    "type": "Verdict", "reviewer": REVIEWER, "head": head,
+                    "verdict": "approve"}) + "\nok\n",
+            }
+            self.reads: list[str] = []
+
+        def read(self, path):
+            self.reads.append(path)
+            return self.store.get(path)
+
+        def list_dir(self, prefix):
+            return [{"name": k[len(prefix):]} for k in sorted(self.store)
+                    if k.startswith(prefix) and "/" not in k[len(prefix):]]
+
+        def write(self, path, text):
+            self.store[path] = text
+            return True
+
+    t = _T()
+    args = (TEAM, SLUG, {"name": f"{SLUG}.md"})
+    row, ok = pj._scan_review_slug(t, *args, now="2026-08-10T05:00:00Z",
+                                   deadline=Deadline(None))
+    assert ok and row and row["settled"] is True
+    assert f"{PREFIX}.settled" in t.store, "the projection wrote no cache"
+
+    t.reads.clear()
+    row2, ok2 = pj._scan_review_slug(t, *args, now="2026-08-10T06:00:00Z",
+                                     deadline=Deadline(None))
+    assert ok2 and row2 and row2["settled"] is True
+    assert f"{PREFIX}{approve}" not in t.reads, (
+        "the projection's own cache did not hit its own fast path — the "
+        f"verdict shard was re-read: {t.reads}")
+
+
+def test_a_MUTABLE_directory_gets_NO_cache_written():
+    """A marker every reader must refuse is cost with no reader. Both writers
+    decline it rather than rewriting it on every pass."""
+    from coord_engine import projection as pj
+    from coord_engine.budget import Deadline
+
+    head = HEAD
+    plain = f"{head}--{REVIEWER}.md"
+
+    class _T:
+        def __init__(self):
+            self.store = {
+                f"team/{TEAM}/review/{SLUG}.md": okf.render_frontmatter({
+                    "type": "Review", "schema": "review-request/v2",
+                    "of": "PR #1", "head": head, "required": [REVIEWER],
+                    "requested_by": "asker"}) + "\n",
+                f"{PREFIX}{plain}": okf.render_frontmatter({
+                    "type": "Verdict", "reviewer": REVIEWER, "head": head,
+                    "verdict": "approve"}) + "\nok\n",
+            }
+
+        def read(self, path):
+            return self.store.get(path)
+
+        def list_dir(self, prefix):
+            return [{"name": k[len(prefix):]} for k in sorted(self.store)
+                    if k.startswith(prefix) and "/" not in k[len(prefix):]]
+
+        def write(self, path, text):
+            self.store[path] = text
+            return True
+
+    t = _T()
+    row, ok = pj._scan_review_slug(t, TEAM, SLUG, {"name": f"{SLUG}.md"},
+                                   now="2026-08-10T05:00:00Z",
+                                   deadline=Deadline(None))
+    assert ok and row and row["state"] == review.APPROVED
+    assert f"{PREFIX}.settled" not in t.store, (
+        "a cache was written over mutable evidence that no reader may honour")
+    assert cli._write_settled_marker(t, TEAM, SLUG, now="2026-08-10T05:00:00Z",
+                                     evidence="") == "unbound-evidence"
+    assert f"{PREFIX}.settled" not in t.store

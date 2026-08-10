@@ -216,3 +216,83 @@ def evidence_digest(names: Any) -> str:
     items = sorted(str(n) for n in (names or []) if str(n).endswith(".md"))
     return hashlib.sha1("\n".join(items).encode()).hexdigest()[:16]
 
+
+def evidence_is_immutable(names: Any) -> bool:
+    """May a NAME digest fingerprint this evidence at all?
+
+    Only if every shard carries an APPEND-ONLY name. The plain
+    ``<head>--<reviewer>.md`` form is permanently supported and hand-writable,
+    so it can be REWRITTEN IN PLACE: its content changes and its name does not.
+    A name digest cannot detect that, so a cache bound to one answers APPROVED
+    from a shard that now reads CHANGES (codex-reviewer, 595 r5).
+
+    This store exposes no etag, no version and no content hash, and its listing
+    renders mtimes at one-minute resolution on a 12-hour clock — there is no
+    identity here strong enough to bind a mutable shard. The honest answer is to
+    not bind one: append-only directories keep the fast path, and a directory
+    holding any mutable shard is folded for real, every time. Failing closed
+    costs reads; failing open costs a wrong verdict.
+
+    An EMPTY directory is not immutable-safe either: a cache claiming APPROVED
+    over zero shards summarises nothing this build can re-derive.
+    """
+    mds = [str(n) for n in (names or []) if str(n).endswith(".md")]
+    return bool(mds) and all(_APPEND_SUFFIX.search(n[:-3]) for n in mds)
+
+
+#: :func:`settle_shortcircuit` answers.
+SETTLE_NO = "no"
+SETTLE_CACHE = "cache"
+SETTLE_MERGED = "merged"
+
+
+def settle_shortcircuit(marker_fm: Any, names: Any) -> str:
+    """May a reader skip the fold on this ``.settled``, given these shard names?
+
+    ONE decision function, because there is more than one reader: the register
+    projection and the fan-out obligation scan both short-circuit on this marker,
+    and a rule that lives in one of them is a rule the other silently lacks.
+
+    - ``merged`` — ``state: MERGED`` is merge EVIDENCE, not a recomputable
+      tally. It records that a PR landed, which no verdict set can contradict,
+      so it short-circuits unconditionally.
+    - ``cache``  — ``state: APPROVED`` whose ``evidence`` digest both EXISTS and
+      matches a recomputation over the current listing, in a directory where a
+      name digest is a valid fingerprint at all.
+    - ``no``     — everything else: pre-binding markers carrying no digest,
+      stale digests, unreadable markers, and any directory with a mutable shard.
+    """
+    fm = marker_fm if isinstance(marker_fm, dict) else {}
+    state = str(fm.get("state") or "")
+    if state == "MERGED":
+        return SETTLE_MERGED
+    if state != APPROVED:
+        return SETTLE_NO
+    stamped = str(fm.get("evidence") or "")
+    if not stamped or not evidence_is_immutable(names):
+        return SETTLE_NO
+    return SETTLE_CACHE if stamped == evidence_digest(names) else SETTLE_NO
+
+
+def settled_marker_fields(*, state: str, ts: str,
+                          evidence: Optional[str] = None,
+                          merge_sha: Optional[str] = None) -> dict:
+    """The ``.settled`` frontmatter, composed in ONE place.
+
+    Both writers — the read fold's cache and the projection's — render through
+    here. The projection used to compose its own dict and omit ``evidence``, so
+    every marker it wrote was untrusted by its own reader on the very next pass:
+    the cache could never hit, and the write was pure cost (codex-reviewer,
+    595 r5). A field one reader requires cannot be optional at one of two write
+    sites.
+    """
+    fields: dict = {"schema": "review-settled/v1", "state": state, "ts": ts}
+    if merge_sha:
+        fields["merge_sha"] = merge_sha
+    else:
+        # BINDS THE CACHE TO ITS EVIDENCE. A reader recomputes this from the
+        # CURRENT listing, so a cache written from a stale snapshot carries a
+        # stale digest and is ignored by construction, whenever it was written.
+        fields["evidence"] = evidence or ""
+    return fields
+
