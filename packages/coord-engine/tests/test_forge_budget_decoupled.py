@@ -50,7 +50,7 @@ def _forge_of(t):
 
 
 def test_forge_is_BUILT_even_when_the_review_fold_exhausts_its_budget(monkeypatch):
-    """The regression, and the property is BUILT — not `complete`.
+    """The regression, asserted DETERMINISTICALLY: two distinct Deadlines.
 
     There are two couplings here and only one of them is a bug. The shared
     DEADLINE was the bug: forge inherited an expired one and never ran, which is
@@ -60,23 +60,42 @@ def test_forge_is_BUILT_even_when_the_review_fold_exhausts_its_budget(monkeypatc
     yield a complete forge view, and claiming otherwise would be the false-clear
     this codebase keeps hunting.
 
-    So: with a starved review fold, forge must still RUN and produce its map,
-    and must still say `complete: false`. My first version of this test asserted
-    `complete is True` and conflated the two.
+    ASSERTED ON THE DEADLINE OBJECTS, not on wall clock. My first version starved
+    the review fold with a 0.001s budget and asserted the resulting section
+    state. It passed alone and FAILED in the full suite, because whether a
+    0.001s deadline actually expires mid-fold depends on machine timing and on
+    what other tests have done to the clock — a flaky test guarding a starvation
+    fix is worse than no test. The defect was precisely "one Deadline object
+    passed twice", so that is what this asserts: two distinct objects, and the
+    one forge receives is not already spent.
     """
-    monkeypatch.setattr(projection, "build_budget", lambda: 0.001)
+    seen: list = []
+    real_forge = projection.build_forge_projection
+    real_reviews = projection.build_review_projection
+
+    def spy_reviews(*a, **kw):
+        seen.append(("reviews", kw.get("deadline")))
+        return real_reviews(*a, **kw)
+
+    def spy_forge(*a, **kw):
+        seen.append(("forge", kw.get("deadline")))
+        return real_forge(*a, **kw)
+
+    monkeypatch.setattr(projection, "build_review_projection", spy_reviews)
+    monkeypatch.setattr(projection, "build_forge_projection", spy_forge)
     monkeypatch.setattr(projection, "forge_budget", lambda: 30.0)
+
     t = FakeTransport()
-    _seed(t, reviews=25)
+    _seed(t, reviews=6)
     reconcile.reconcile(t, TEAM, now=_now(), today=_now()[:10], host="h")
 
-    forge = _forge_of(t)
-    assert forge.get("responsible") == {"o-r-1": ["bob"]}, (
-        f"forge inherited an exhausted deadline and never ran — the live "
-        f"never-built shell: {forge}")
-    assert forge.get("complete") is False, (
-        "a partial review set must still floor forge; completeness follows the "
-        "rows it is derived from")
+    kinds = dict(seen)
+    assert "reviews" in kinds and "forge" in kinds, f"a builder never ran: {seen}"
+    assert kinds["forge"] is not kinds["reviews"], (
+        "forge was handed the SAME Deadline object as the review fold — the "
+        "shared-budget defect: whatever reviews spends, forge never gets")
+    assert kinds["forge"].expired() is False, (
+        "forge's deadline was already expired when it received it")
 
 
 def test_forge_COMPLETES_when_the_review_fold_does(monkeypatch):
