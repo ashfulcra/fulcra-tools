@@ -312,3 +312,104 @@ def test_the_fold_is_DETERMINISTIC_when_two_shards_share_an_instant():
          "sort_key": "2026-08-10T05:00:00Z"}
     assert (review.fold_newest_per_reviewer([a, b])[0][0]["name"]
             == review.fold_newest_per_reviewer([b, a])[0][0]["name"])
+
+
+# --- codex 595 r3: the READ side must see a correction ----------------------
+
+def test_a_correction_after_APPROVAL_invalidates_the_settle_CACHE(monkeypatch, capsys):
+    """codex-reviewer, 595 r3, blocker one — reproduced exactly.
+
+    APPROVE -> `review status` writes `.settled` -> a later CHANGES correction
+    lands with rc 0 and both shards on disk — and the projection, which treats
+    any marker hit as immutable approval without reading shards, still says
+    APPROVED. The same-head correction contract I had just shipped was false the
+    moment a prior result settled.
+    """
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+              "--verdict", "approve"], transport=t)
+    cli.main(["review", "status", TEAM, SLUG], transport=t)      # writes .settled
+    marker = f"team/{TEAM}/review/{SLUG}/verdicts/.settled"
+    assert marker in t.store, "precondition: the cache must exist"
+
+    capsys.readouterr()
+    rc = cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+                   "--verdict", "changes", "--note", "found a blocker"],
+                  transport=t)
+    assert rc == 0, capsys.readouterr().err
+    assert marker not in t.store, (
+        "the stale APPROVED cache survived a CHANGES correction — every reader "
+        "that short-circuits on the marker still reports APPROVED")
+
+
+def test_a_MERGED_marker_is_evidence_and_survives_a_late_verdict(monkeypatch, capsys):
+    """The other half of the 572/588 distinction: `.settled` with state MERGED
+    is proof a PR landed, not a cache. A late verdict must not destroy it."""
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    marker = f"team/{TEAM}/review/{SLUG}/verdicts/.settled"
+    t.put(marker, okf.render_frontmatter({
+        "schema": "review-settled/v1", "state": "MERGED",
+        "merge_sha": "c" * 40}) + "\nmerged.\n")
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+              "--verdict", "changes"], transport=t)
+    assert marker in t.store, "merge EVIDENCE was deleted by a late verdict"
+    assert "EVIDENCE" in capsys.readouterr().err
+
+
+def test_the_PROJECTION_orders_a_ts_less_plain_shard_by_MTIME(monkeypatch):
+    """codex-reviewer, 595 r3, blocker two — driven through the projection.
+
+    The direct tally dated a plain shard by frontmatter ts then LISTING MTIME;
+    the projection stopped at frontmatter. So a plain shard with no `ts` sorted
+    as EMPTY there and lost to an older append shard: one reader said CHANGES
+    and the other APPROVED for the same directory.
+
+    My first version of this test only compared the two `_store_mtime_iso`
+    helpers — which both still existed when I deleted the projection's USE of
+    one, so it passed against the bug. Drive the reader, not its parts.
+    """
+    from coord_engine import projection as pj
+    from coord_engine.budget import Deadline
+
+    head = HEAD
+    doc = okf.render_frontmatter({
+        "type": "Review", "schema": "review-request/v2", "of": "PR #1",
+        "head": head, "required": [REVIEWER], "requested_by": "asker"}) + "\n"
+    older_append = (f"{head}--{REVIEWER}--2026-08-10T01:00:00Z-aaaaaaaa.md")
+    plain = f"{head}--{REVIEWER}.md"
+
+    class _T:
+        store = {
+            f"team/{TEAM}/review/{SLUG}.md": doc,
+            f"{PREFIX}{older_append}": okf.render_frontmatter({
+                "type": "Verdict", "reviewer": REVIEWER, "head": head,
+                "verdict": "approve", "ts": "2026-08-10T01:00:00Z"}) + "\nok\n",
+            # NO frontmatter ts — only the listing mtime dates it, and it is NEWER.
+            f"{PREFIX}{plain}": okf.render_frontmatter({
+                "type": "Verdict", "reviewer": REVIEWER, "head": head,
+                "verdict": "changes"}) + "\nblocker\n",
+        }
+
+        def read(self, path):
+            return self.store.get(path)
+
+        def list_dir(self, prefix):
+            rows = []
+            for k in self.store:
+                if k.startswith(prefix) and "/" not in k[len(prefix):]:
+                    mt = ("2026-08-10 02:00AM UTC" if k.endswith(plain)
+                          else "2026-08-10 01:00AM UTC")
+                    rows.append({"name": k[len(prefix):], "mtime": mt})
+            return rows
+
+    row, ok = pj._scan_review_slug(
+        _T(), TEAM, SLUG, {"name": f"{SLUG}.md"},
+        now="2026-08-10T05:00:00Z", deadline=Deadline(None))
+    assert ok and row is not None, "the projection refused to scan"
+    assert row["state"] == review.CHANGES, (
+        f"the projection ordered a ts-less plain shard as empty and lost the "
+        f"newer CHANGES to an older APPROVE: {row}")

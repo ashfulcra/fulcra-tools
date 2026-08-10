@@ -1083,7 +1083,14 @@ it (not on PyPI).
   name so two hosts folding the same directory always agree. **Supersession is never silent**: the
   fold reports `superseded_verdicts`, because a reader told APPROVED while shards were quietly
   discarded has the same affirmative falsehood everything here is about. A correction is a NEW shard;
-  the original evidence stays on disk, which is also the same-head correction path.
+  the original evidence stays on disk, which is also the same-head correction path. **A new verdict
+  INVALIDATES the settle cache** — without that the correction contract is false once a prior result
+  settled, because readers short-circuit on the marker and never open the shards (codex-reviewer,
+  595 r3). Only the CACHE: a `state: MERGED` marker is evidence a PR landed and survives a late
+  verdict, and an unrecognised or unreadable marker fails loud rather than being deleted.
+  **Every reader dates a plain shard the same way** — filename ts, then frontmatter ts, then the
+  normalized listing MTIME. The projection stopped at frontmatter, so a ts-less plain shard sorted as
+  empty there and the two readers disagreed about the same directory.
   **`review verdict` (2026-08-10)** exists so that filing a verdict IS an engine write. It was the one
   act with no verb — `review request` printed a path and the reviewer wrote the shard themselves — so a
   reviewer touched no chokepoint, refreshed no presence, and left no work event. Every liveness fix of

@@ -3761,6 +3761,49 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
         print(f"review verdict: write FAILED for {path} — the verdict did NOT "
               f"land, so the review still awaits you", file=sys.stderr)
         return 1
+    # A NEW VERDICT INVALIDATES THE FOLD CACHE (codex-reviewer, 595 r3).
+    # Without this the same-head correction contract is FALSE the moment a prior
+    # result has settled: APPROVE -> `review status` writes `.settled` -> a later
+    # CHANGES correction lands and is ignored, because the projection treats any
+    # marker hit as immutable approval and never reads the shards. rc 0, both
+    # shards on disk, and readers still say APPROVED.
+    #
+    # ONLY THE CACHE. `.settled` carries two meanings (572/588): `state:
+    # APPROVED` is a recomputable tally cache and is clearable; `state: MERGED`
+    # with a merge_sha is EVIDENCE that a merge happened and must never be
+    # destroyed by a late verdict. UNKNOWN is not permission either.
+    # Absent vs unreadable FIRST: `_classify_settled_marker` folds both into
+    # `unknown` (its docstring says so), and "no marker yet" is the COMMON case
+    # — treating that as ambiguous would fail every ordinary verdict. The
+    # tri-state listing separates them.
+    present = _settled_marker_present(transport, args.team, args.name)
+    if present is None:
+        print(f"review verdict: recorded at {path}, but I cannot tell whether a "
+              f"settle marker exists for {args.name}, so I cannot tell whether "
+              f"a stale cache is hiding this verdict. Verify with "
+              f"`review status`.", file=sys.stderr)
+        return 3
+    if present:
+        state = _classify_settled_marker(transport, args.team, args.name)
+        if state == SETTLED_CACHE:
+            if not _clear_settled_marker(transport, args.team, args.name):
+                print(f"review verdict: recorded at {path}, but the stale fold "
+                      f"cache for {args.name} could NOT be cleared — readers "
+                      f"may still report the previous result. Clear it before "
+                      f"trusting the tally.", file=sys.stderr)
+                return 3
+        elif state == SETTLED_MERGED:
+            print(f"review verdict: recorded at {path}, but {args.name} is "
+                  f"already closed as MERGED — that marker is EVIDENCE, not a "
+                  f"cache, so it stands. Your verdict is on disk and does not "
+                  f"change the merge record.", file=sys.stderr)
+        else:
+            print(f"review verdict: recorded at {path}, but the settle marker "
+                  f"for {args.name} is UNRECOGNISED, so I will not delete it "
+                  f"and cannot promise readers see this verdict.",
+                  file=sys.stderr)
+            return 3
+
     # Tell the chokepoint which artifact this was, so the work event names it.
     record_activity_artifact(args, path)
     print(f"verdict {normalized} recorded for {args.name} at {path}")

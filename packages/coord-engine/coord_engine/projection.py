@@ -74,7 +74,9 @@ import hashlib
 
 from typing import Any, Optional
 
-from . import config, forge, okf, review
+from datetime import timezone
+
+from . import aggregate, config, forge, okf, review
 from .budget import Deadline
 from .log import get_logger
 from .roles import age_hours
@@ -384,6 +386,18 @@ def _settled_carry_safe(prior_row: Any, entry: dict[str, Any],
     return rec._same_minute_reuse_safe(entry_mtime, prior_generated_at) is not False
 
 
+def _store_mtime_iso(mtime: Any) -> Optional[str]:
+    """Listing mtime -> comparable ISO, or None.
+
+    Store mtimes render on a TWELVE-HOUR clock, so comparing them as strings
+    inverts the midnight hour. Parsed through the one existing parser.
+    """
+    if not isinstance(mtime, str):
+        return None
+    dt = aggregate._parse_store_mtime(mtime)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+
+
 def _scan_review_slug(
     transport: Any, team: str, slug: str, entry: dict[str, Any], *,
     now: str, deadline: Deadline,
@@ -454,7 +468,16 @@ def _scan_review_slug(
             "reviewer": reviewer,
             "verdict": vfm.get("verdict"),
             "name": n,
-            "sort_key": parsed_ts or str(vfm.get("ts") or ""),
+            # SAME fallback chain as `_tally_from_verdict_entries` — filename
+            # ts, then frontmatter ts, then the LISTING MTIME. Projection used
+            # to stop at frontmatter, so a plain hand-written shard with no `ts`
+            # sorted as empty and lost to an older append shard: the direct
+            # tally said CHANGES while the projection said APPROVED for the same
+            # directory (codex-reviewer, 595 r3). Two readers disagreeing about
+            # the same evidence is worse than either answer alone.
+            "sort_key": (parsed_ts
+                         or str(vfm.get("ts") or "")
+                         or _store_mtime_iso(v.get("mtime")) or ""),
         })
     # FOLD NEWEST PER REVIEWER (coord-boss constraint 5, ruling b99fb8da).
     # Append-only verdicts mean one reviewer can have several shards, and this
