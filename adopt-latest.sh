@@ -101,6 +101,27 @@ uv_store_client() {
     try "uv fulcra-api (upgrade in place)" "$UV_BIN" tool upgrade fulcra-api || true
     return 0
   fi
+  # NOT WORKING IS TWO DIFFERENT FACTS, and only one of them is safe to act on.
+  # A forced reinstall DELETES what is there, so treating "the probe failed" as
+  # "nothing is installed" is how a diagnostic wrecks a working host
+  # (coord-opus-worker, 597 r1). ABSENT means there is nothing to lose; anything
+  # else is UNKNOWN and must not be destroyed to satisfy this script.
+  _FA="$(command -v fulcra-api 2>/dev/null || true)"
+  if [ -n "$_FA" ] && [ -x "$_FA" ]; then
+    # Present, executable, and still would not run. Repair NON-destructively or
+    # not at all: an upgrade can fix a broken environment without deleting it
+    # first, and if it cannot, a human should see why before anything is removed.
+    echo "adopt: fulcra-api is present at ${_FA} but did not run — NOT force-reinstalling, because that deletes it first. Trying an in-place repair." >&2
+    if try "uv fulcra-api (repair in place)" "$UV_BIN" tool upgrade fulcra-api \
+       && fulcra-api --help >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "adopt: fulcra-api at ${_FA} is present but broken, and an in-place repair did not fix it. Refusing to delete it — look at WHY it fails, then, if you still want a clean reinstall: uv tool uninstall fulcra-api; rm -rf \"\$(uv tool dir)/fulcra-api\"; uv tool install --force fulcra-api" >&2
+    return 1
+  fi
+  # Genuinely absent — nothing on PATH, or a shim whose target is gone (which is
+  # exactly the wreckage the ENOTEMPTY failure leaves). Nothing to lose here, so
+  # the forced install is correct.
   if try "uv fulcra-api" "$UV_BIN" tool install --force fulcra-api; then return 0; fi
   # Self-heal the half-removed state. `uv tool uninstall` alone does not clear it
   # (the directory is exactly what failed to delete), and the retry REQUIRES

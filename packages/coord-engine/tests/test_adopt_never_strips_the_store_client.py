@@ -64,10 +64,13 @@ def _run(tmp_path, *, client_works: bool, force_install_fails: bool,
     bin_dir.mkdir()
     log = tmp_path / "uv.log"
 
-    # The store client: present-and-working, or absent entirely.
-    (bin_dir / "fulcra-api").write_text(
-        "#!/bin/sh\nexit 0\n" if client_works
-        else "#!/bin/sh\necho 'not found' >&2\nexit 127\n")
+    # The store client: present-and-working, or genuinely ABSENT — nothing on
+    # PATH at all. Absent must NOT be modelled as "a script that exits nonzero":
+    # that is present-but-broken, a different state with a different safe
+    # action, and conflating the two in the fixture is the same mistake the code
+    # made (597 r1). Present-but-broken has its own fixture below.
+    if client_works:
+        (bin_dir / "fulcra-api").write_text("#!/bin/sh\nexit 0\n")
 
     # `uv`: records every subcommand, and fails `tool install` on demand. The
     # retry is distinguished from the first attempt by a marker file, so one
@@ -157,6 +160,103 @@ def test_a_HALF_REMOVED_tool_dir_is_cleared_and_retried_once(tmp_path):
     assert uv_log.count("tool install --force fulcra-api") == 2, (
         f"expected one retry after clearing, got: {uv_log!r}")
     assert proc.returncode == 0, "the retry succeeded but the leg still failed"
+
+
+# --- 597 r1: "the probe failed" is TWO facts, and one is not safe to act on ---
+
+def _run_broken_client(tmp_path, *, upgrade_repairs: bool):
+    """A client that is present and executable and still will not run.
+
+    The stub flips to working only if the upgrade is meant to repair it, so the
+    post-repair re-probe is a real check rather than an assumption.
+    """
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    log = tmp_path / "uv.log"
+    (bin_dir / "fulcra-api").write_text(
+        f'#!/bin/sh\n[ -f "{tmp_path}/repaired" ] && exit 0\n'
+        'echo "boom" >&2\nexit 1\n')
+    (bin_dir / "uv").write_text(f"""#!/bin/sh
+echo "$@" >> "{log}"
+case "$1 $2" in
+  "tool upgrade") {f'touch "{tmp_path}/repaired"; exit 0' if upgrade_repairs else 'exit 1'} ;;
+  "tool dir") echo "{tmp_path}/tools" ;;
+  *) exit 0 ;;
+esac
+""")
+    for f in bin_dir.iterdir():
+        f.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", "-c", _store_client_fn() + '\nUV_BIN=uv\nuv_store_client\n'],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=60)
+    return proc, log.read_text() if log.exists() else ""
+
+
+def test_a_PRESENT_BUT_BROKEN_client_is_never_force_reinstalled(tmp_path):
+    """coord-opus-worker, 597 r1.
+
+    My first cut branched on the probe alone: anything that did not answer was
+    force-installed. But a forced reinstall DELETES what is there, so a client
+    that fails for an unrelated reason — a bad environment, a transient fault —
+    would be destroyed by the very check meant to protect it. "The probe failed"
+    is two different facts, ABSENT and UNKNOWN, and only ABSENT is safe to act
+    on. This is the UNKNOWN-collapsed-into-a-definite-answer bug, inside the fix
+    written to stop a host being wrecked.
+    """
+    proc, uv_log = _run_broken_client(tmp_path, upgrade_repairs=False)
+    assert "tool install --force fulcra-api" not in uv_log, (
+        f"a present-but-broken client was force-reinstalled, which deletes it: "
+        f"{uv_log!r}")
+    assert proc.returncode != 0, "an unrepaired broken client must fail the leg"
+    assert "NOT force-reinstalling" in proc.stderr
+
+
+def test_a_broken_client_the_in_place_repair_FIXES_passes(tmp_path):
+    """Non-destructive repair is allowed, and is proven by RE-PROBING rather
+    than by assuming the upgrade worked."""
+    proc, uv_log = _run_broken_client(tmp_path, upgrade_repairs=True)
+    assert proc.returncode == 0, f"a repaired client still failed: {proc.stderr}"
+    assert "tool install --force fulcra-api" not in uv_log
+
+
+def test_an_upgrade_that_returns_0_without_repairing_still_FAILS(tmp_path):
+    """The re-probe is the point. An installer that exits 0 having fixed
+    nothing must not be taken at its word — that is a clean rc standing in for
+    a verified outcome."""
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    (bin_dir / "fulcra-api").write_text('#!/bin/sh\nexit 1\n')
+    (bin_dir / "uv").write_text('#!/bin/sh\nexit 0\n')   # claims success, fixes nothing
+    for f in bin_dir.iterdir():
+        f.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", "-c", _store_client_fn() + '\nUV_BIN=uv\nuv_store_client\n'],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode != 0, (
+        "a repair that changed nothing was accepted on its exit code alone")
+
+
+def test_a_DANGLING_shim_counts_as_absent_and_is_installed(tmp_path):
+    """The wreckage the ENOTEMPTY failure actually leaves: the shim survives in
+    PATH, its target does not. That is ABSENT — there is nothing to lose — and
+    it must still be installed, or the observed real-world case never recovers.
+    """
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    log = tmp_path / "uv.log"
+    (bin_dir / "fulcra-api").symlink_to(tmp_path / "gone" / "fulcra-api")
+    (bin_dir / "uv").write_text(
+        f'#!/bin/sh\necho "$@" >> "{log}"\n'
+        f'case "$1 $2" in "tool dir") echo "{tmp_path}/tools" ;; esac\nexit 0\n')
+    (bin_dir / "uv").chmod(0o755)
+    proc = subprocess.run(
+        ["bash", "-c", _store_client_fn() + '\nUV_BIN=uv\nuv_store_client\n'],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=60)
+    uv_log = log.read_text() if log.exists() else ""
+    assert proc.returncode == 0, proc.stderr
+    assert "tool install --force fulcra-api" in uv_log, (
+        f"a dangling shim was treated as a client worth preserving, so the "
+        f"host stays broken: {uv_log!r}")
 
 
 def test_a_retry_that_also_fails_reports_failure(tmp_path):
