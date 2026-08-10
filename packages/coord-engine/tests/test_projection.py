@@ -36,16 +36,34 @@ def _agg(t):
     return json.loads(t.store[f"team/{TEAM}/_coord/summaries.json"])
 
 
-def _put_review(t, slug, required, verdicts=(), requested_by=None, of=None):
+_HEAD = "a" * 40
+
+
+def _put_review(t, slug, required, verdicts=(), requested_by=None, of=None,
+                head=_HEAD):
+    """Seed a review and its verdicts.
+
+    HEAD-KEYED with APPEND-ONLY verdict names by default: a settle cache binds
+    only to evidence a name digest can fingerprint, and a plain shard can be
+    rewritten in place without its name changing (595 r5). Pass ``head=None``
+    for the legacy unkeyed shape, which by construction can never be cached.
+    """
     fm = [f"type: Review", f"required: {required}"]
+    if head:
+        fm.append(f"head: {head}")
     if requested_by:
         fm.append(f"requested_by: {requested_by}")
     if of:
         fm.append(f"of: {of}")
     t.put(f"team/{TEAM}/review/{slug}.md", "---\n" + "\n".join(fm) + "\n---\n")
-    for who, v in verdicts:
-        t.put(f"team/{TEAM}/review/{slug}/verdicts/{who}.md",
-              f"---\ntype: Verdict\nreviewer: {who}\nverdict: {v}\n---\n")
+    for i, (who, v) in enumerate(verdicts):
+        name = (f"{head}--{who}--2026-08-09T01:00:0{i}Z-aaaaaaaa.md" if head
+                else f"{who}.md")
+        vfm = f"type: Verdict\nreviewer: {who}\nverdict: {v}"
+        if head:
+            vfm += f"\nhead: {head}"
+        t.put(f"team/{TEAM}/review/{slug}/verdicts/{name}",
+              f"---\n{vfm}\n---\n")
 
 
 class CountingTransport(FakeTransport):
@@ -167,7 +185,7 @@ def test_reconcile_budget_cut_marks_projection_incomplete():
 def test_reconcile_unreadable_verdict_shard_is_unknown_not_frozen():
     class ShardHidingTransport(FakeTransport):
         def read(self, path):
-            if path.endswith("/verdicts/bob.md"):
+            if "/verdicts/" in path and "--bob--" in path:
                 return None  # listed but unreadable: a floor, never projected
             return super().read(path)
 
@@ -399,7 +417,7 @@ def test_review_fold_head_slug_covered_by_stale_settled_row_still_surfaces():
     _reconcile(t)
     agg = _agg(t)  # fresh, complete:true, pr-race carried as settled
     assert [r["settled"] for r in agg[projection.REVIEWS_KEY]["rows"]] == [True]
-    head = "a" * 40
+    head = "c" * 40          # ADVANCED past the seeded _HEAD
     t.delete(f"team/{TEAM}/review/pr-race/verdicts/{projection.SETTLED_MARKER}")
     t.put(f"team/{TEAM}/review/pr-race.md",
           f"---\ntype: Review\nrequired: alice\nhead: {head}\n---\n")

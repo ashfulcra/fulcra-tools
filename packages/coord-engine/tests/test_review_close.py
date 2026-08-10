@@ -241,7 +241,8 @@ def test_review_status_still_clears_a_stale_TALLY_CACHE(capsys):
     t.put("team/r/review/pr-y.md",
           "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
     path = cli._settled_marker_path("r", "pr-y")
-    cli._write_settled_marker(t, "r", "pr-y", now="2026-08-08T00:00:00Z")
+    cli._write_settled_marker(t, "r", "pr-y", now="2026-08-08T00:00:00Z",
+                              evidence="deadbeefdeadbeef")
     assert t.read(path) and "MERGED" not in (t.read(path) or "")
     capsys.readouterr()
     cli.main(["review", "status", "r", "pr-y"], transport=t)
@@ -388,10 +389,7 @@ def test_review_status_does_not_stamp_the_cache_over_MERGE_EVIDENCE(capsys):
     slug, and a MERGED marker already makes it skip."""
     t = FakeTransport()
     # a review that tallies APPROVED — so `review status` WANTS to cache it
-    t.put("team/r/review/pr-m.md",
-          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
-    t.put("team/r/review/pr-m/verdicts/alice.md",
-          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+    _settleable(t, "pr-m")
     # ...and it has ALREADY been closed with real merge evidence.
     sha = "b" * 40
     t.put(cli._settled_marker_path("r", "pr-m"),
@@ -411,20 +409,26 @@ def test_the_cache_IS_written_when_no_evidence_is_there(capsys):
     """The control. Refusing unconditionally would break the fold's fast path,
     which is the reason the cache exists at all."""
     t = FakeTransport()
-    t.put("team/r/review/pr-n.md",
-          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
-    t.put("team/r/review/pr-n/verdicts/alice.md",
-          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+    _settleable(t, "pr-n")
     capsys.readouterr()
     assert cli.main(["review", "status", "r", "pr-n"], transport=t) == 0
     assert cli._classify_settled_marker(t, "r", "pr-n") == cli.SETTLED_CACHE
 
 
+#: A settle cache binds only to APPEND-ONLY evidence — a plain shard can be
+#: rewritten in place and a name digest cannot see it (595 r5) — so every
+#: fixture that expects a CACHE files its verdict in the append form.
+_HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_APPEND = f"{_HEAD}--alice--2026-08-09T01:00:00Z-aaaaaaaa.md"
+
+
 def _settleable(t, slug):
     t.put(f"team/r/review/{slug}.md",
-          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - alice\n---\nr")
-    t.put(f"team/r/review/{slug}/verdicts/alice.md",
-          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\nlgtm")
+          "---\ntype: Review\nschema: review-request/v2\n"
+          f"head: {_HEAD}\nrequired:\n  - alice\n---\nr")
+    t.put(f"team/r/review/{slug}/verdicts/{_APPEND}",
+          f"---\ntype: Verdict\nreviewer: alice\nhead: {_HEAD}\n"
+          "verdict: approve\n---\nlgtm")
 
 
 def test_a_FUTURE_schema_marker_is_preserved_not_overwritten(capsys):
