@@ -252,6 +252,39 @@ def test_a_MERGED_row_carries_at_zero_ops_even_over_plain_shards():
             for r in first["rows"]}["pr-merged"][projection.BINDABLE_KEY] is True
 
 
+def test_the_bindable_proof_survives_a_real_two_pass_RECONCILE():
+    """Through `reconcile` twice, so the flag makes the JSON round trip.
+
+    The in-memory two-pass test hands the prior section straight back as a live
+    dict; production writes it to `summaries.json` and reads it again. If the
+    key were dropped or rejected anywhere on that path, the in-memory test would
+    still be green while the fleet demoted (or worse, carried) every row — the
+    decision-function-never-wired-to-the-actuator shape, twice caught before.
+    """
+    t = FakeTransport()
+    head = _HEAD
+    plain = f"team/{TEAM}/review/pr-live/verdicts/{head}--codex-reviewer.md"
+    _put_review(t, "pr-live", "codex-reviewer")
+    t.put(plain, f"---\ntype: Verdict\nreviewer: codex-reviewer\n"
+                 f"head: {head}\nverdict: approve\n---\nok\n")
+    _reconcile(t)
+    row = {r["name"]: r for r in _agg(t)[projection.REVIEWS_KEY]["rows"]}["pr-live"]
+    assert row["state"] == "APPROVED" and row["settled"] is True
+    assert row[projection.BINDABLE_KEY] is False, (
+        "a plain shard must be recorded as unbindable in the SERIALIZED row")
+
+    # The store advances an mtime on write, as the real one does. The review
+    # DOC is untouched — which is the whole point.
+    t.put(plain, f"---\ntype: Verdict\nreviewer: codex-reviewer\n"
+                 f"head: {head}\nverdict: changes\n---\nblocker\n",
+          mtime="2026-08-09 08:30AM UTC")
+    _reconcile(t)
+    got = {r["name"]: r for r in _agg(t)[projection.REVIEWS_KEY]["rows"]}["pr-live"]
+    assert got["state"] == "CHANGES", (
+        f"a real reconcile carried a stale APPROVED across a plain-shard "
+        f"rewrite: {got}")
+
+
 def test_a_PRIOR_row_from_a_build_without_the_key_is_demoted_not_trusted():
     """Fleet rollout: a row written before this key existed carries no proof its
     evidence was bindable, so it must lose the zero-op tier rather than be

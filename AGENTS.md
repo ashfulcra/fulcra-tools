@@ -874,6 +874,19 @@ it (not on PyPI).
   entirely. A settled slug now costs ONE read (the marker) rather than zero — what the budget needs is
   that the cost stays O(1) rather than growing with the verdict count. MERGED markers are untouched:
   merge evidence is not a recomputable tally, so it short-circuits unconditionally.
+- **The projection's ZERO-OP settled carry must prove its evidence was bindable — the tier ABOVE the
+  readers is a reader too.** `build_review_projection` consults `_settled_carry_safe` BEFORE it lists
+  the verdicts directory, and that carry used to accept any prior `settled: true` row whose review DOC
+  mtime+size were unchanged, on the argument that a settled round is immutable and re-opening rewrites
+  the doc. That holds for re-opening at a new head and fails for an in-place rewrite of a plain shard,
+  which touches neither the doc nor its metadata — so production reconciliation served a stale APPROVED
+  forever without ever reaching `review.settle_shortcircuit`. Rows therefore record `ev_bindable`, and
+  only a row carrying `True` may take the zero-op tier; everything else — including every row written
+  by a build before the key existed — is demoted to **tier 3's one listing, not a full rescan**, whose
+  fingerprint compares name+size+mtime per shard and whose `_shards_minutes_closed` refuses any unclosed
+  minute. MERGED rows keep the zero-op tier whatever their shards look like. **When you add a validation
+  rule to a reader, enumerate every tier that can answer BEFORE it** — three rounds of this PR each
+  fixed one layer and left a sibling one step away.
 - **`escalate` attendance: one shared scan, and partial coverage is NOT an incident.** The vacancy
   sweep answers "did a holder file a verdict recently" from ONE `_verdict_activity_index` pass built
   before the role loop, not per role — it used to rebuild a 41-listing scan for every acting role
