@@ -1071,6 +1071,15 @@ it (not on PyPI).
   counting as activity, while `inbox` and `digest` refreshed presence merely by being VIEWED
   (codex-reviewer, 590 r2). `_MIXED_MODE_ACTIVITY` maps such a handler to a predicate over the PARSED
   ARGS, and `_is_activity_invocation(args)` — not the function-only helper — is what dispatch calls.
+  **`review verdict` (2026-08-10)** exists so that filing a verdict IS an engine write. It was the one
+  act with no verb — `review request` printed a path and the reviewer wrote the shard themselves — so a
+  reviewer touched no chokepoint, refreshed no presence, and left no work event. Every liveness fix of
+  this cycle was blind to reviewers for that single reason. The verb is SUGAR over the same artifact:
+  it writes exactly the canonical `<head>--<reviewer>.md` shard at the printed path, so tally / settle /
+  retention see no new shape, and DIRECT shard-writing stays valid — the verb is additive, and its
+  ADOPTION is what upgrades a reviewer from invisible to a work event. It REFUSES to overwrite an
+  existing verdict: a verdict is evidence a merge may already rest on, and a changed head is a new
+  round with its own filename, which is the supported way to revise.
   **Every registered command must be CLASSIFIED**, read or write or mixed, and written down as such:
   `tests/test_activity_covers_every_write_verb.py` walks the real argparse tree and fails on any
   command nobody has classified, in EITHER direction. A regex cannot decide this — `tell`, `reconcile`

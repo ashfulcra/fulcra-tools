@@ -3616,6 +3616,65 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
+    """File a verdict for a review round.
+
+    SUGAR OVER THE EXISTING ARTIFACT, deliberately (coord-boss constraint a):
+    this writes exactly the canonical `<head>--<reviewer>.md` shard at the path
+    `review request` already prints, with the frontmatter the tally already
+    reads. Nothing downstream — tally, settle, retention — learns that a verb
+    exists, and DIRECT shard-writing stays valid (constraint b): reviewers who
+    write the file themselves are unaffected the day this ships.
+
+    Why it exists at all: filing a verdict was the one act with NO verb, so a
+    reviewer touched no chokepoint, refreshed no presence, and left no work
+    event. Every liveness fix of this cycle could not see reviewers for that one
+    reason. As a verb it inherits all of them at once.
+
+    REFUSES TO OVERWRITE. A verdict is evidence a merge decision may already
+    rest on; replacing one silently could erase a CHANGES. A changed head is a
+    new round with its own filename, which is the supported way to revise.
+    """
+    reviewer = _known_sender(args)
+    if not reviewer:
+        print("review verdict: no reviewer identity — set FULCRA_COORD_AGENT "
+              "or pass --from", file=sys.stderr)
+        return 2
+    normalized = review.normalize_verdict(args.verdict)
+    if normalized is None:
+        print(f"review verdict: {args.verdict!r} is not a verdict — use "
+              f"approve or changes; anything else reads as unparseable to the "
+              f"tally and stalls the review silently", file=sys.stderr)
+        return 2
+
+    head = getattr(args, "head", None)
+    path = (_verdicts_prefix(args.team, args.name)
+            + review.verdict_filename(reviewer, head=head))
+
+    existing = transport.read(path)
+    if existing:
+        print(f"review verdict: {path} already exists — a verdict is evidence, "
+              f"not a draft, and overwriting one could erase a CHANGES a merge "
+              f"already rested on. Advance the head for a new round.",
+              file=sys.stderr)
+        return 1
+
+    body = okf.render_frontmatter({
+        "type": "Verdict",
+        "reviewer": reviewer,
+        "head": head,
+        "verdict": normalized,
+    }) + f"\n{getattr(args, 'note', None) or normalized}\n"
+    if not transport.write(path, body):
+        print(f"review verdict: write FAILED for {path} — the verdict did NOT "
+              f"land, so the review still awaits you", file=sys.stderr)
+        return 1
+    # Tell the chokepoint which artifact this was, so the work event names it.
+    record_activity_artifact(args, path)
+    print(f"verdict {normalized} recorded for {args.name} at {path}")
+    return 0
+
+
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
     result, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
@@ -10738,6 +10797,18 @@ def build_parser() -> argparse.ArgumentParser:
                           "gc only prints what it would retire")
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
+    rvv = rvsub.add_parser(
+        "verdict", help="file YOUR verdict for a review round (writes the same "
+                        "canonical shard `review request` prints)")
+    rvv.add_argument("team")
+    rvv.add_argument("name", help="review slug")
+    rvv.add_argument("--head", help="exact head this verdict is pinned to")
+    rvv.add_argument("--verdict", required=True,
+                     help="approve | changes")
+    rvv.add_argument("--note", help="the body of the verdict")
+    rvv.add_argument("--from", dest="sender", help="reviewer identity")
+    rvv.set_defaults(func=cmd_review_verdict)
+
     rvc = rvsub.add_parser("close", help="close a review because its PR MERGED (evidence, not inference)")
     rvc.add_argument("team"); rvc.add_argument("slug")
     rvc.add_argument("--merge-sha", required=True,
