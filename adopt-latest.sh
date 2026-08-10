@@ -116,8 +116,29 @@ done
 #
 # THE GENERAL RULE, which any future leg here must also honour: a failed adopt
 # must never leave the host worse than it found it.
+# CLASSIFIED ONCE, BEFORE ANY INSTALLER RUNS, because the decision belongs to the
+# whole cascade and not to one leg. The uv helper protected the client and the
+# pipx and pip fallbacks still carried `fulcra-api` in their package lists, so an
+# unrelated ENGINE install failure dropped through and force-reinstalled the very
+# client the helper had just promised not to touch (codex-reviewer, 597 r5). A
+# rule that lives in one leg is a rule the other legs silently lack — the third
+# time in this PR, and the reason it is a variable now rather than a habit.
+#
+#   working — leave it ALONE everywhere. No leg may install, upgrade or replace it.
+#   broken  — present and executable but not answering. Repair non-destructively
+#             or not at all; no leg may force-install over it.
+#   absent  — nothing on PATH, a shim whose target is gone, or a file that cannot
+#             be executed. Not a capability, so any leg may install it freely.
+client_state() {
+  if fulcra-api --help >/dev/null 2>&1; then echo working; return; fi
+  _FA="$(command -v fulcra-api 2>/dev/null || true)"
+  if [ -n "$_FA" ] && [ -x "$_FA" ]; then echo broken; return; fi
+  echo absent
+}
+CLIENT_STATE="$(client_state)"
+
 uv_store_client() {
-  if fulcra-api --help >/dev/null 2>&1; then
+  if [ "$CLIENT_STATE" = working ]; then
     # WORKING. Do not touch it at all.
     #
     # I previously upgraded it here and called that non-destructive. That was an
@@ -162,7 +183,7 @@ uv_store_client() {
   # with code is how the next reader gets it wrong; the behaviour is deliberate,
   # so the comment now says so.
   _FA="$(command -v fulcra-api 2>/dev/null || true)"
-  if [ -n "$_FA" ] && [ -x "$_FA" ]; then
+  if [ "$CLIENT_STATE" = broken ]; then
     # Present, executable, and still would not run. Repair NON-destructively or
     # not at all: an upgrade can fix a broken environment without deleting it
     # first, and if it cannot, a human should see why before anything is removed.
@@ -195,7 +216,10 @@ if [ -z "$INSTALLER" ] && [ -n "$UV_BIN" ]; then
 elif [ -n "$INSTALLER" ]; then echo "adopt: install already satisfied (${INSTALLER}), skipping uv leg" >&2
 else echo "adopt: uv not on PATH, skipping" >&2; fi
 if [ -z "$INSTALLER" ] && command -v pipx >/dev/null 2>&1; then
-  try "pipx fulcra-api" pipx install --force fulcra-api \
+  # Only when ABSENT. A working or broken client is never replaced by a leg that
+  # exists to install the ENGINE (597 r5).
+  { [ "$CLIENT_STATE" != absent ] \
+      || try "pipx fulcra-api" pipx install --force fulcra-api; } \
     && try "pipx coord-engine@pin" pipx install --force "$SRC" \
     && try "pipx inject fulcra-common" pipx inject coord-engine "$COMMON" && INSTALLER=pipx
 elif [ -z "$INSTALLER" ]; then echo "adopt: pipx not on PATH, skipping" >&2; fi
@@ -204,7 +228,13 @@ elif [ -z "$INSTALLER" ]; then echo "adopt: pipx not on PATH, skipping" >&2; fi
 #  fleet's most-run script. Verified live 2026-08-06 on a box with uv at
 #  ~/.local/bin/uv. A log line that lies costs exactly one diagnosis cycle.)
 if [ -z "$INSTALLER" ]; then
-  try "pip user-install" python3 -m pip install --user --upgrade --quiet fulcra-api "$SRC" "$COMMON" && INSTALLER=pip
+  # Same rule: `--upgrade fulcra-api` would MUTATE a working client, which is
+  # exactly what r3 established this script must not do unattended.
+  if [ "$CLIENT_STATE" = absent ]; then
+    try "pip user-install" python3 -m pip install --user --upgrade --quiet fulcra-api "$SRC" "$COMMON" && INSTALLER=pip
+  else
+    try "pip user-install (engine only)" python3 -m pip install --user --upgrade --quiet "$SRC" "$COMMON" && INSTALLER=pip
+  fi
 fi
 if [ -z "$INSTALLER" ]; then
   echo "ADOPT FAILED — the per-step failures above name the exact command and stderr; report THOSE lines to coord-boss (not just this one)." >&2
