@@ -5298,15 +5298,56 @@ def _obligations_not_checked() -> dict[str, Any]:
     return {"state": "not-checked"}
 
 
-def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
-    if json_mode:
-        for event in events:
-            jsonutil.print_json(event)
-        return
+def _poison_line(event: Any, err: BaseException) -> str:
+    """One unrenderable event, rendered LOUDLY rather than crashing or vanishing.
+
+    Best-effort on every field independently, so a single bad value cannot take
+    the rest of the line with it. Never raises: this is the last line of defence
+    for the delivery path, and a formatter that can fail here is the whole bug.
+    """
+    def _bit(name: str) -> str:
+        try:
+            value = event.get(name) if isinstance(event, dict) else None
+            return str(value) if value not in (None, "") else "?"
+        except Exception:
+            return "?"
+    return (f"POISON {_bit('recorded_at')} {_bit('from')} kind={_bit('kind')} "
+            f"slug={_bit('slug')} ptr={_bit('ptr')} "
+            f"id={_bit('record_id')} writer={_bit('writer')} "
+            f"[unrenderable: {type(err).__name__}: {err}]")
+
+
+def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> int:
+    """Render a window. Returns the number of UNRENDERABLE events.
+
+    PER-EVENT, and never fatal. `kind` and `slug` used to be direct subscripts
+    while every neighbouring field went through `.get()` — so an event missing
+    either raised KeyError out of here, out of `cmd_queue`, and past the cursor
+    save, which never ran. At-least-once redelivery then returned the same
+    window with the same poison event on the next read, and the one after that:
+    a permanently wedged cursor with no error path that said so. Measured live
+    on codex-reviewer's window, 9 events stuck from 08:03Z (coord-boss, 2026-08-10).
+
+    Three properties, per coord-boss's constraints:
+      * a poison event is RENDERED (as an explicit POISON line), never skipped —
+        silence would trade a wedge for a disappearance;
+      * it is COUNTED, so the caller can say the window was poisoned;
+      * nothing here can raise, so the cursor save below is always reached.
+    """
+    poison = 0
     for event in events:
-        print(f"{event.get('recorded_at','')[:19]} {event.get('from') or '?'} "
-              f"{event['kind']} {event.get('priority') or '-'} "
-              f"{event['slug']} {event.get('ptr') or '-'}")
+        try:
+            if json_mode:
+                jsonutil.print_json(event)
+            else:
+                print(f"{event.get('recorded_at') or ''}"[:19].ljust(19)
+                      + f" {event.get('from') or '?'}"
+                      f" {event.get('kind') or '?'} {event.get('priority') or '-'}"
+                      f" {event.get('slug') or '?'} {event.get('ptr') or '-'}")
+        except Exception as e:      # noqa: BLE001 — deliberate: delivery > format
+            poison += 1
+            print(_poison_line(event, e), file=sys.stderr)
+    return poison
 
 
 def _queue_result_envelope(
@@ -6284,12 +6325,33 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
     json_mode = bool(getattr(args, "json", False))
-    if not json_mode:
-        # Text mode stays byte-identical for shell consumers; the JSON
-        # envelope is emitted once below, after the cursor outcome is known.
-        _print_queue_events(fresh, json_mode=False)
+    poison = 0
+    # Computed BEFORE the guarded region so the `finally` below always has a
+    # valid value to persist, even if a future edit raises above it.
     new_seen = seen + [e["record_id"] for e in fresh
                        if isinstance(e.get("record_id"), str)]
+    try:
+        if not json_mode:
+            # Text mode stays byte-identical for shell consumers; the JSON
+            # envelope is emitted once below, after the cursor outcome is known.
+            poison = _print_queue_events(fresh, json_mode=False)
+    finally:
+        # THE INVARIANT, enforced structurally rather than by remembering.
+        # Once a window has been READ, coverage is a fact about what this
+        # process received — not contingent on our ability to render, summarise
+        # or fold anything afterwards. The wedge existed because an exception
+        # between the read and the save skipped it, and at-least-once
+        # redelivery then returned the same poison forever. A `finally` holds
+        # even for exceptions a later edit introduces; a careful ordering does
+        # not. `peek` is the ONE exit that legitimately does not advance, and it
+        # is below this block, so it cannot be reached without passing here.
+        if not peek:
+            advanced = records.save_cursor(transport, args.team, agent,
+                                           last_read=_iso(now),
+                                           seen_ids=new_seen)
+            if not advanced:
+                print("queue: cursor save failed — coverage unadvanced, next "
+                      "read re-covers this window", file=sys.stderr)
     if peek:
         obligations_fragment = _requested_obligations(args, transport, agent)
         if json_mode:
@@ -6302,11 +6364,14 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
                   "advanced (the owning agent still receives them)",
                   file=sys.stderr)
         return 0
-    advanced = records.save_cursor(transport, args.team, agent,
-                                   last_read=_iso(now), seen_ids=new_seen)
-    if not advanced:
-        print("queue: cursor save failed — coverage unadvanced, next read "
-              "re-covers this window", file=sys.stderr)
+    if poison:
+        # LOUD, and after the save: a poisoned window is a delivery-integrity
+        # event someone must look at, but it is no longer a reason to stop
+        # receiving mail.
+        print(f"queue: {poison} unrenderable event(s) in this window — shown as "
+              "POISON lines above and CONSUMED; coverage advanced. Report the "
+              "POISON lines verbatim: they name a writer this build cannot "
+              "format.", file=sys.stderr)
     obligations_fragment = _requested_obligations(args, transport, agent)
     if json_mode:
         envelope = _queue_result_envelope(
