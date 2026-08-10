@@ -108,6 +108,11 @@ DEFAULT_MAX_AGE_HOURS = 24.0
 #: ``complete: false`` (readers keep raw-scanning, loudly) and the next pass
 #: resumes converging — carried rows cost nothing, so each pass reaches further.
 DEFAULT_BUILD_BUDGET = 240.0
+#: The FORGE section's own budget, seconds. Deliberately smaller than the review
+#: budget: the forge fold is one listing per watched PR over a far smaller
+#: population, so it does not need parity — it needs a floor that a busy review
+#: fold cannot take away.
+DEFAULT_FORGE_BUDGET = 60.0
 
 #: Skew tolerance (hours) for a section stamped slightly in the FUTURE of the
 #: reading host's clock — the same 900s budget reconcile's fast path trusts
@@ -144,9 +149,31 @@ def max_age_hours() -> float:
 
 
 def build_budget() -> float:
-    """Per-pass projection build budget, seconds. Env
+    """Per-pass REVIEW projection build budget, seconds. Env
     ``COORD_PROJECTION_BUILD_BUDGET`` (see DEFAULT_BUILD_BUDGET)."""
     return config.env_float("COORD_PROJECTION_BUILD_BUDGET", DEFAULT_BUILD_BUDGET)
+
+
+def forge_budget() -> float:
+    """Per-pass FORGE projection build budget, seconds — its OWN, not a remainder.
+
+    Both sections used to share one `Deadline` object, and the review fold spent
+    it first. That is not a slow-forge problem, it is a never-forge one: measured
+    on the live store 2026-08-10, the review fold cut at 192/219 and the forge
+    section came back `scanned=None, total=None, rows=0` — never built at all, on
+    every pass, so every consumer paid a 74.8s raw fallback to discover it.
+
+    A section that always runs last inside a shared budget does not degrade
+    gracefully; it starves deterministically. AGENTS.md already says a budget cut
+    may only truncate the tail — this is the same rule one level up, applied
+    between sections rather than within one.
+
+    The cost is honest and worth stating: worst-case pass duration is now the SUM
+    of the two budgets rather than one shared cap. Starving a section to keep a
+    wall-clock bound was never the trade anyone chose; it was an accident of
+    passing one object twice.
+    """
+    return config.env_float("COORD_FORGE_BUILD_BUDGET", DEFAULT_FORGE_BUDGET)
 
 
 def fresh_section(

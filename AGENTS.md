@@ -934,6 +934,17 @@ it (not on PyPI).
   rather than raising an alarm. **rc 3 is reserved for a WALL-CLOCK cut** — a real anomaly. Durable fix
   for full coverage is projection-side (reconcile already pays the listing cost); it does not carry
   per-reviewer verdict recency today.
+- **The head-of-line rule applies BETWEEN sections too: never hand two builders ONE budget object.**
+  `reconcile` opened a single `Deadline` and passed it to the review projection AND the forge projection.
+  The review fold spent it first, so forge was not slow — it was **never built**: measured on the live
+  store 2026-08-10, reviews cut at 192/219 and forge came back `scanned=None, total=None, rows=0` on every
+  pass, costing every consumer a 74.8s raw fallback just to discover it. A section that always runs last
+  inside a shared budget starves *deterministically*, not occasionally, and it does so silently — the
+  section exists, it is simply empty. Each builder now opens its own (`COORD_PROJECTION_BUILD_BUDGET`,
+  `COORD_FORGE_BUILD_BUDGET`), and the cost is stated rather than hidden: worst-case pass duration is the
+  SUM of the budgets. **Completeness coupling is different from budget coupling and must not be "fixed"
+  with it** — forge's `complete` still follows the review fold's, because its responsibility map is
+  derived from review rows and a partial review set cannot yield a complete forge view.
 - **A DELIVERY path may never lose coverage to a FORMATTING failure.** `queue` rendered `kind` and
   `slug` as direct subscripts while every neighbouring field used `.get()`, so an event missing either
   raised out of the renderer, out of `cmd_queue`, and past the cursor save — which never ran.
