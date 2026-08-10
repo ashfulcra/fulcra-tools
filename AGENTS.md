@@ -594,8 +594,13 @@ it (not on PyPI).
   force-reinstall a capability that works (upgrade in place, where failure costs nothing because the
   working copy survives), force-install only when there is nothing to lose, self-heal the
   half-removed directory once rather than cascading into fallbacks that cannot help, and still FAIL
-  when the retry fails — a rescue that claims success it did not achieve is the worse bug. **Run
-  adopt-latest.sh yourself before publishing a pin; that acceptance test is what caught this.**
+  when the retry fails — a rescue that claims success it did not achieve is the worse bug.
+  **TWO-OS ACCEPTANCE RUN, alongside the floor-raise step (coord-boss ruling, 2026-08-10):** before any
+  pin broadcast, the PUBLISHED script is run end to end on at least one macOS host and one Linux host,
+  publisher and delegate splitting the work as needed. The prior publish ran only on Linux, where this
+  bug cannot fire; the run-before-publish is what caught it, and it is now the named standard rather
+  than a habit. One OS is not coverage when the failure is OS-specific — and you cannot know which
+  failures are OS-specific in advance, which is the whole argument.
   `coord-engine doctor <team> --self` is the same check on demand and
   is TRI-STATE: rc 0 `current` only when the floor exists, parses, and this
   engine meets it; rc 3 `stale` (run the store's adopt-latest, then re-run);

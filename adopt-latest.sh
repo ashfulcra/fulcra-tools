@@ -11,6 +11,23 @@
 # verification steps this script's claim gate performs:
 #     team/fulcra/_coord/bus-v3/ADOPT-WHEN-GATED.md
 # The classifier objects to OPACITY, not to the operations.
+#
+# ============================================================================
+# A FAILED ADOPT MUST NEVER STRIP A CAPABILITY THE HOST HAD AT START.
+# ============================================================================
+# This is the invariant every leg below is written to hold, and the one to check
+# any NEW leg against (coord-boss ruling, 2026-08-10). Convergence is worth a
+# failed run; it is never worth a host that can no longer reach the bus.
+#
+# It has been broken once, exactly as stated: `uv tool install --force
+# fulcra-api` deletes the tool environment before reinstalling, the delete failed
+# with "Directory not empty (os error 66)" AFTER bin/ was already gone, and the
+# host was left with no store client at all — off the bus, with `doctor` blaming
+# the store for an unreadable adoption authority. Concretely, then: probe before
+# you replace, prefer an in-place upgrade to a destructive reinstall, treat "the
+# probe failed" as UNKNOWN rather than as "nothing is installed", and when you
+# cannot repair something, leave it alone and say so loudly instead of deleting
+# it.
 set -u
 PIN="0a093dba4ba17fe344086c8c7c0d229ad5b153af"   # == main after PR 571. Carries eleven merges since pp-b2e649e6, several of which fix things agents hit this shift: 567 (the verdict must not live only at the tail of the payload - a needs-me read whose rc was truncated out of view could not be certified either way), 566 (a cap-starved review sweep must not be silent), 571 (ONE deadline for the whole HTTP read - it was FOUR stacked bounds, so a configured 30s per-op bound could take 120s and every fold budget assumes that bound holds), 569 (the codex watcher can no longer report WATCH_OK on a blind read), 568 (--json purity for every verb), 561 (a merged PR closes its review as an ARTIFACT of the merge), 558 (a hostname the OS hands back is not a fleet key until it is validated), 565, 563, 562, 557.
 VER="pp-0a093dba"
