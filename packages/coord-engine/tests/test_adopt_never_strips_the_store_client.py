@@ -49,10 +49,18 @@ def _store_client_fn() -> str:
                 return "".join(rest[: i + 1])
         raise AssertionError(f"unterminated {name}() — extraction anchor moved")
 
+    # `client_state` and the CLIENT_STATE assignment come too: the helper reads
+    # that classification rather than probing for itself (597 r5 moved the
+    # decision to the whole cascade). Extracting the function WITHOUT them left
+    # CLIENT_STATE unset, so every branch fell through to `absent` and six tests
+    # here went red against code that was correct — an extraction that silently
+    # drops a dependency tests something the script never runs.
     return (
         'ELOG="$(mktemp)"\nSTEP_FAILS=0\n'
         + _fn("try", "try() {")
         + "\n"
+        + _fn("client_state", "client_state() {")
+        + '\nCLIENT_STATE="$(client_state)"\n'
         + _fn("uv_store_client", "uv_store_client() {")
     )
 
