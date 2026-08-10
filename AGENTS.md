@@ -857,6 +857,23 @@ it (not on PyPI).
   running `review status` on a retroactively-closed review silently destroyed its closure — a read-only
   diagnostic erasing history. **If you add a writer to a shared marker path, audit every existing
   deleter of it in the same change.**
+- **A cache may only bind to evidence it can actually fingerprint, and BOTH readers apply the same
+  rule.** The `.settled` tally cache carries an `evidence` digest over the verdict shard NAMES, and a
+  reader recomputes it from the current listing — so a cache written from a stale snapshot is ignored by
+  construction, whenever it was written, and no delete-ordering is needed. But a name digest can only
+  see a change a NAME shows. The plain `<head>--<reviewer>.md` form is permanently supported and
+  hand-writable, so it can be **rewritten in place**: APPROVE becomes CHANGES and the name does not
+  move. This store exposes no etag and no content hash in a listing (`file stat` carries a `Version:`,
+  but that is one op per file — exactly what the cache exists to avoid), and listing mtimes are
+  minute-resolution on a 12-hour clock. So **a directory holding any plain shard gets no cache at all**;
+  it is folded for real, every time, and append-only directories keep the fast path. Both writers refuse
+  to stamp a marker no reader may honour, and both readers — `projection._scan_review_slug` and the
+  `needs-me`/`briefing` fan-out — go through ONE decision function, `review.settle_shortcircuit`. The
+  fan-out used to skip on marker PRESENCE alone: the same unvalidated short-circuit was fixed in the
+  projection and left standing one reader away, where a stale cache hid a pending reviewer's obligation
+  entirely. A settled slug now costs ONE read (the marker) rather than zero — what the budget needs is
+  that the cost stays O(1) rather than growing with the verdict count. MERGED markers are untouched:
+  merge evidence is not a recomputable tally, so it short-circuits unconditionally.
 - **`escalate` attendance: one shared scan, and partial coverage is NOT an incident.** The vacancy
   sweep answers "did a holder file a verdict recently" from ONE `_verdict_activity_index` pass built
   before the role loop, not per role — it used to rebuild a 41-listing scan for every acting role
