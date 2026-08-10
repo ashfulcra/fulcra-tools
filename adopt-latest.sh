@@ -74,8 +74,46 @@ UV_BIN=""
 for _c in uv /opt/homebrew/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
   if command -v "$_c" >/dev/null 2>&1; then UV_BIN="$_c"; break; fi
 done
+# fulcra-api is the STORE CLIENT: every read and write on this bus goes through
+# it, so losing it takes the host OFF THE BUS entirely — and `doctor` then reports
+# the adoption authority unreadable, which points a diagnosis at the store instead
+# of at us. `uv tool install --force` DELETES the tool environment before
+# reinstalling, and on macOS that delete can fail with "Directory not empty (os
+# error 66)" AFTER bin/ is already gone, leaving a dangling shim, a directory uv
+# itself calls malformed, and no executable. Measured on this fleet 2026-08-10
+# (coord-maintainer, macOS + uv 0.11.17), running this script as a pin's own
+# acceptance test: it destroyed a WORKING client and every fallback leg then
+# failed for unrelated host reasons.
+#
+# So: never force-reinstall a client that works. Upgrade it in place, where a
+# failure costs nothing because the working copy survives; force-install only
+# when there is nothing to lose; and if that fails, clear the half-removed
+# directory and retry once instead of cascading.
+#
+# THE GENERAL RULE, which any future leg here must also honour: a failed adopt
+# must never leave the host worse than it found it.
+uv_store_client() {
+  if fulcra-api --help >/dev/null 2>&1; then
+    # Working client. An upgrade is best-effort — `try` still counts the failure
+    # into STEP_FAILS so the adoption claim reports a rescued run honestly, but
+    # it must not fail the leg: the client we already have is the thing that
+    # matters.
+    try "uv fulcra-api (upgrade in place)" "$UV_BIN" tool upgrade fulcra-api || true
+    return 0
+  fi
+  if try "uv fulcra-api" "$UV_BIN" tool install --force fulcra-api; then return 0; fi
+  # Self-heal the half-removed state. `uv tool uninstall` alone does not clear it
+  # (the directory is exactly what failed to delete), and the retry REQUIRES
+  # --force: fulcra-api ships two entry points, and the one that survives the
+  # wreck makes a plain install fail with "Executable already exists: fulcra".
+  echo "adopt: fulcra-api install failed — clearing a half-removed tool dir and retrying once" >&2
+  "$UV_BIN" tool uninstall fulcra-api >/dev/null 2>&1 || true
+  _TOOLDIR="$("$UV_BIN" tool dir 2>/dev/null)"
+  [ -n "$_TOOLDIR" ] && rm -rf "${_TOOLDIR}/fulcra-api" 2>/dev/null
+  try "uv fulcra-api (retry after clearing the tool dir)" "$UV_BIN" tool install --force fulcra-api
+}
 if [ -z "$INSTALLER" ] && [ -n "$UV_BIN" ]; then
-  try "uv fulcra-api" "$UV_BIN" tool install --force fulcra-api \
+  uv_store_client \
     && try "uv coord-engine@pin+fulcra-common" "$UV_BIN" tool install --force "$SRC" --with "$COMMON" && INSTALLER=uv
 elif [ -n "$INSTALLER" ]; then echo "adopt: install already satisfied (${INSTALLER}), skipping uv leg" >&2
 else echo "adopt: uv not on PATH, skipping" >&2; fi
