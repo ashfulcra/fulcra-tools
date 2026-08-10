@@ -8,8 +8,23 @@ actually sees.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import pytest
+
 from coord_engine import cli
 from coord_engine.transport import TransportError
+
+#: Rows here assert AGES ("6d"), which are a function of now. Pinned, because
+#: the first version asserted the literal "6d" against a fixed shard date and
+#: went red the day the date rolled to 7d — the repo's documented real-clock
+#: flake, in a test I wrote to catch a different kind of lie.
+PINNED_NOW = datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
 
 TEAM = "r"
 

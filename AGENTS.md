@@ -1038,8 +1038,16 @@ it (not on PyPI).
   budget (6x the default) was still incomplete with work attributed to THREE agents, and since PARTIAL
   withholds the nudge that turned the signal off fleet-wide. Reordering took the same 20s budget from
   2 agents to 11. The scan is still PARTIAL at this store size, and it is now the POINTER-LESS FALLBACK only.
-  **The per-agent work pointer** (`_coord/agents/<agent>/LATEST-work.json`, coord-boss GO 2026-08-09)
-  answers the read-side question in ONE read: `{schema, agent, kind, path, ts}`. Four rules, each a test:
+  **Per-agent work EVENTS** (`_coord/agents/<agent>/work/<iso>-<digest>.json`, coord-boss GO
+  2026-08-09) answer the read-side question without a sweep: one listing plus one read per agent.
+  IMMUTABLE ON PURPOSE. The first cut was a single mutable `LATEST-work.json` with a
+  read-compare-write monotonic guard, and codex-reviewer reproduced two races (594 r1): an OLDER stamp
+  landing last overwrote a newer one, and — worse — the failed-write branch deleted the shared path
+  unconditionally and could ERASE a newer pointer another host had just written. The store has no
+  conditional or versioned write, so a shared mutable path cannot be defended; the fix is not to have
+  one. A writer only CREATES its own event, "newest" is a deterministic fold over ISO-led names, and a
+  failed write leaves prior events intact and still true (slightly stale, never wrong). NEVER add a
+  delete-on-failure here. Four rules, each a test:
   **(1) ONE write site** — stamped from the 590 activity chokepoint, never per-verb, so pointer coverage
   INHERITS the classification and a newly added write verb stamps by default; **(2) 585/588 refusal
   semantics** — stamped only after the command succeeded (`rc == 0`), a missing/unreadable/corrupt

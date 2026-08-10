@@ -1,25 +1,23 @@
-"""A per-agent work pointer, so the read side stops sweeping to answer.
+"""Per-agent work EVENTS, so the read side stops sweeping — and cannot race.
 
 U8, second instance: a listing cannot date a collection, so "has this agent done
-work recently" cost one listing per review directory — 438 of them on the live
-store. Measured from merged main, a 120s budget (6x the default) still could not
-finish. 593 reordered the halves and took coverage from 2 agents to 11, which is
-mitigation; this is the fix. One read per agent instead of O(reviews).
+work recently" cost one listing per review directory — 438 on the live store,
+which a 120s budget could not finish. 593 reordered the halves (2 agents -> 11);
+this replaces the sweep for agents that have events.
 
-coord-boss's four constraints, 2026-08-09, and why each is a test here:
+WHY IMMUTABLE EVENTS RATHER THAN ONE POINTER FILE. The first version wrote a
+single mutable `LATEST-work.json` guarded by a read-compare-write "monotonic"
+check. codex-reviewer reproduced two races against it (594 r1):
 
-  1. ONE WRITE SITE — stamped from the 590 activity chokepoint, never per-verb.
-     Pointer coverage then INHERITS 590's classification, so a newly added write
-     verb stamps by default. The "someone forgot the stamp" failure is designed
-     out rather than tested for.
-  2. 585/588 refusal semantics EXACTLY — written only after the artifact
-     persists; a missing pointer is UNKNOWN and never stale; a FAILED update
-     removes the stale pointer rather than leaving it to be believed; monotonic.
-  3. Transitional — a pointer-less agent reads UNKNOWN and falls back to the
-     593 sweep, which becomes the pointer-less-only path.
-  4. kind + path + ts, so freshness is ATTRIBUTABLE. Without this,
-     codex-reviewer's row said "whichever artifact the scan reached"; with it,
-     the row can say "verdict, 20h".
+  - two hosts both read the old value, and the OLDER stamp could land last,
+    overwriting the newer;
+  - worse, the failed-write branch deleted the shared path unconditionally, so
+    it could ERASE a newer pointer another host had just written.
+
+The store offers no conditional or versioned write, so a shared mutable path
+cannot be defended. The fix is not to have one. A writer only ever CREATES its
+own event; "newest" is a deterministic fold over ISO-led names; a failed write
+leaves every prior event intact and still true.
 """
 
 from __future__ import annotations
@@ -31,29 +29,28 @@ from coord_engine.transport import TransportError
 
 TEAM = "r"
 AGENT = "worker-1"
-PTR = f"team/{TEAM}/_coord/agents/{AGENT}/LATEST-work.json"
+PREFIX = f"team/{TEAM}/_coord/agents/{AGENT}/work/"
 
 
 class _Store:
-    def __init__(self, seed=None, fail_writes=(), raise_writes=()):
+    def __init__(self, seed=None, fail_writes_all=False, raise_writes=False):
         self.store = dict(seed or {})
-        self.fail_writes = set(fail_writes)
-        self.raise_writes = set(raise_writes)
+        self.fail_writes_all = fail_writes_all
+        self.raise_writes = raise_writes
         self.deleted: list[str] = []
-        self.writes: list[str] = []
 
     def read(self, path):
         return self.store.get(path)
 
-    def list_dir(self, path):
-        return []
+    def list_dir(self, prefix):
+        return [{"name": p[len(prefix):]} for p in sorted(self.store)
+                if p.startswith(prefix) and "/" not in p[len(prefix):]]
 
     def write(self, path, text):
-        self.writes.append(path)
-        if path in self.raise_writes:
+        if self.raise_writes:
             raise TransportError(f"write blew up: {path}")
-        if path in self.fail_writes:
-            return False          # the transport's quiet-failure contract
+        if self.fail_writes_all:
+            return False
         self.store[path] = text
         return True
 
@@ -63,138 +60,184 @@ class _Store:
         return True
 
 
-def _ptr(store):
-    raw = store.read(PTR)
-    return json.loads(raw) if raw else None
+def _event(store, kind="verdict", path="a.md", ts="2026-08-09T11:20:00Z"):
+    return cli._stamp_work_pointer(store, TEAM, AGENT, kind=kind, path=path,
+                                   now_iso=ts)
 
 
-# --- constraint 4: the pointer is attributable -------------------------------
+# --- codex's two reproductions, as regressions -------------------------------
 
-def test_the_pointer_carries_kind_path_and_ts():
-    """Without all three the pointer answers "something happened" — which is
-    what the sweep already said badly. `kind` is what makes a reviewer's row say
-    "verdict, 20h" instead of naming whichever artifact was reached first."""
-    store = _Store()
-    assert cli._stamp_work_pointer(
-        store, TEAM, AGENT, kind="verdict",
-        path=f"team/{TEAM}/review/pr-1/verdicts/abc--{AGENT}.md",
-        now_iso="2026-08-09T11:20:00Z") is True
-    p = _ptr(store)
-    assert p["kind"] == "verdict"
-    assert p["path"].endswith(f"abc--{AGENT}.md")
-    assert p["ts"] == "2026-08-09T11:20:00Z"
+def test_an_OLDER_stamp_arriving_last_cannot_hide_a_newer_one():
+    """codex-reviewer, 594 r1, race one.
 
-
-# --- constraint 2: 585/588 refusal semantics ---------------------------------
-
-def test_a_failed_pointer_write_REMOVES_the_stale_pointer():
-    """588's rule, and the one that matters most.
-
-    A pointer that silently keeps an OLD value after a failed update is worse
-    than no pointer: readers believe a stale fact with no way to tell. If the
-    update cannot land, the pointer must go, so the reader degrades to UNKNOWN
-    and falls back to the sweep.
+    Under read-compare-write, two hosts both read the old value and whichever
+    wrote LAST won — so an older timestamp could overwrite a newer one. With
+    immutable events there is nothing to overwrite: both exist and the fold
+    picks the newest.
     """
-    store = _Store(seed={PTR: json.dumps(
-        {"kind": "report", "path": "old.md", "ts": "2026-08-01T00:00:00Z"})},
-        fail_writes={PTR})
-    ok = cli._stamp_work_pointer(store, TEAM, AGENT, kind="verdict",
-                                 path="new.md", now_iso="2026-08-09T11:20:00Z")
-    assert ok is False
-    assert PTR in store.deleted, (
-        "a failed update must remove the stale pointer; leaving 2026-08-01 "
-        "readable would have every reader believe a fact that is now wrong")
-    assert store.read(PTR) is None
-
-
-def test_a_RAISING_pointer_write_also_removes_it():
-    """Same rule for the raising path — `write` returning False and `write`
-    throwing are the same event to a reader."""
-    store = _Store(seed={PTR: json.dumps(
-        {"kind": "report", "path": "old.md", "ts": "2026-08-01T00:00:00Z"})},
-        raise_writes={PTR})
-    assert cli._stamp_work_pointer(store, TEAM, AGENT, kind="verdict",
-                                   path="new.md",
-                                   now_iso="2026-08-09T11:20:00Z") is False
-    assert PTR in store.deleted
-
-
-def test_the_pointer_is_MONOTONIC():
-    """An out-of-order stamp must not walk the pointer backwards. Two hosts can
-    act in either order; the pointer records the NEWEST work, not the last
-    writer to arrive."""
     store = _Store()
-    cli._stamp_work_pointer(store, TEAM, AGENT, kind="verdict", path="new.md",
-                            now_iso="2026-08-09T11:20:00Z")
-    cli._stamp_work_pointer(store, TEAM, AGENT, kind="report", path="old.md",
-                            now_iso="2026-08-01T00:00:00Z")
-    assert _ptr(store)["ts"] == "2026-08-09T11:20:00Z"
-    assert _ptr(store)["kind"] == "verdict"
+    _event(store, kind="verdict", path="new.md", ts="2026-08-10T00:00:00Z")
+    _event(store, kind="report", path="old.md", ts="2026-08-09T00:00:00Z")
+    got = cli._read_work_pointer(store, TEAM, AGENT)
+    assert got["ts"] == "2026-08-10T00:00:00Z", (
+        f"an older stamp arriving last hid the newer work: {got}")
+    assert got["kind"] == "verdict"
 
 
-def test_an_unparseable_existing_pointer_is_overwritten_not_trusted():
-    """Corrupt state must not freeze the pointer forever: an unreadable prior
-    value cannot win a monotonic comparison it is not eligible for."""
-    store = _Store(seed={PTR: "{not json"})
-    assert cli._stamp_work_pointer(store, TEAM, AGENT, kind="verdict",
-                                   path="new.md",
-                                   now_iso="2026-08-09T11:20:00Z") is True
-    assert _ptr(store)["ts"] == "2026-08-09T11:20:00Z"
+def test_a_FAILED_write_deletes_NOTHING():
+    """codex-reviewer, 594 r1, race two — the worse one.
 
-
-# --- constraint 3: transitional, pointer-less agents stay UNKNOWN ------------
-
-def test_a_missing_pointer_reads_UNKNOWN_never_absent():
-    """The whole fleet is pointer-less on day one. A missing pointer must mean
-    "ask the sweep", never "this agent did nothing" — the same rule as 585's
-    missing health pointer."""
+    The old failed-write branch deleted the shared pointer unconditionally, so a
+    host whose own write failed could erase a NEWER pointer another host had
+    just written. Nothing may be deleted on failure; prior events are still
+    true, and the reader degrades to slightly-stale rather than wrong.
+    """
     store = _Store()
-    assert cli._read_work_pointer(store, TEAM, AGENT) is None
+    _event(store, kind="verdict", path="theirs.md", ts="2026-08-10T00:00:00Z")
+    store.fail_writes_all = True
+    assert _event(store, kind="report", path="mine.md",
+                  ts="2026-08-09T00:00:00Z") is False
+    assert store.deleted == [], (
+        f"a failed write deleted another host's event: {store.deleted}")
+    got = cli._read_work_pointer(store, TEAM, AGENT)
+    assert got["ts"] == "2026-08-10T00:00:00Z", (
+        "the newer event must survive a concurrent failed write")
 
 
-def test_a_pointer_read_that_FAILS_is_also_UNKNOWN():
-    """Unreadable is not empty. `read` returning None conflates missing with
-    transport failure, and neither licenses an absence claim."""
+def test_a_RAISING_write_also_deletes_nothing():
+    store = _Store()
+    _event(store, kind="verdict", path="theirs.md", ts="2026-08-10T00:00:00Z")
+    store.raise_writes = True
+    assert _event(store, kind="report", path="mine.md",
+                  ts="2026-08-09T00:00:00Z") is False
+    assert store.deleted == []
+    assert cli._read_work_pointer(store, TEAM, AGENT)["ts"] == "2026-08-10T00:00:00Z"
+
+
+def test_two_hosts_recording_the_SAME_event_are_idempotent():
+    """Same instant, same artifact => same filename and same bytes, so a
+    duplicate is a no-op rather than a conflict."""
+    store = _Store()
+    _event(store, kind="verdict", path="a.md", ts="2026-08-09T11:20:00Z")
+    _event(store, kind="verdict", path="a.md", ts="2026-08-09T11:20:00Z")
+    assert len(store.list_dir(PREFIX)) == 1
+
+
+def test_distinct_events_at_the_SAME_instant_both_survive():
+    """Two different artifacts recorded in the same second must not collide —
+    the digest in the name keeps them distinct."""
+    store = _Store()
+    _event(store, kind="verdict", path="a.md", ts="2026-08-09T11:20:00Z")
+    _event(store, kind="report", path="b.md", ts="2026-08-09T11:20:00Z")
+    assert len(store.list_dir(PREFIX)) == 2
+
+
+# --- the read contract -------------------------------------------------------
+
+def test_no_events_reads_UNKNOWN_never_absent():
+    """The whole fleet has no events on day one. That must mean "ask the
+    sweep", never "this agent did nothing" — 585's missing-pointer rule."""
+    assert cli._read_work_pointer(_Store(), TEAM, AGENT) is None
+
+
+def test_an_unreadable_listing_reads_UNKNOWN():
     class _Dead(_Store):
-        def read(self, path):
-            return None
+        def list_dir(self, prefix):
+            raise TransportError("listing down")
     assert cli._read_work_pointer(_Dead(), TEAM, AGENT) is None
 
 
-def test_a_corrupt_pointer_reads_UNKNOWN_rather_than_raising():
-    """One bad pointer must not break the fold for every other agent."""
-    assert cli._read_work_pointer(_Store(seed={PTR: "{not json"}),
-                                  TEAM, AGENT) is None
+def test_a_corrupt_newest_event_reads_UNKNOWN_rather_than_raising():
+    """One bad event must not break the fold for every other agent."""
+    store = _Store(seed={PREFIX + "2026-08-09T11:20:00Z-deadbeef.json": "{nope"})
+    assert cli._read_work_pointer(store, TEAM, AGENT) is None
 
 
-# --- constraint 1: ONE write site, and it must actually be reached -----------
+def test_the_event_carries_kind_path_and_ts():
+    """Constraint 4: attributable. `kind` is what lets a row say "verdict, 20h"
+    instead of naming whichever artifact a scan happened to reach."""
+    store = _Store()
+    _event(store, kind="verdict", path="team/r/review/pr-1/verdicts/x--rev.md",
+           ts="2026-08-09T11:20:00Z")
+    got = cli._read_work_pointer(store, TEAM, AGENT)
+    assert got["kind"] == "verdict"
+    assert got["path"].endswith("x--rev.md")
+    assert got["ts"] == "2026-08-09T11:20:00Z"
 
-def test_a_real_write_verb_stamps_the_pointer_through_the_chokepoint(monkeypatch):
-    """The wiring test, driven through `cli.main`.
 
-    Twice before I have built a decision function, unit-tested it, and left it
-    unconnected. So this asserts a REAL verb produces a REAL pointer, and it
-    goes through the same chokepoint that classifies activity — which is the
-    whole point of constraint 1: coverage is inherited, not remembered.
-    """
+def test_pruning_keeps_the_newest_and_never_touches_them():
+    store = _Store()
+    for i in range(cli.WORK_EVENTS_KEEP + 3):
+        _event(store, kind="tell", path=f"{i}.md", ts=f"2026-08-{10+i:02d}T00:00:00Z")
+    names = [r["name"] for r in store.list_dir(PREFIX)]
+    assert len(names) == cli.WORK_EVENTS_KEEP
+    got = cli._read_work_pointer(store, TEAM, AGENT)
+    assert got["ts"].startswith(f"2026-08-{10 + cli.WORK_EVENTS_KEEP + 2:02d}")
+
+
+# --- constraint 1: ONE write site, reached through real dispatch -------------
+
+def test_a_real_write_verb_records_an_event_through_the_chokepoint(monkeypatch):
+    """Twice before I built a decision function and left it unconnected, so this
+    drives `cli.main` and asserts a REAL verb produces a REAL event."""
     from coord_engine_test_helpers import FakeTransport
     monkeypatch.setenv("FULCRA_COORD_AGENT", "worker-9")
     t = FakeTransport()
     assert cli.main(["tell", TEAM, "amy", "ship it"], transport=t) == 0
-    raw = t.store.get(f"team/{TEAM}/_coord/agents/worker-9/LATEST-work.json")
-    assert raw, f"no pointer written; paths: {sorted(t.store)}"
-    doc = json.loads(raw)
-    assert doc["agent"] == "worker-9"
-    assert doc["kind"] == "tell"
-    assert doc["ts"]
+    events = [p for p in t.store
+              if p.startswith(f"team/{TEAM}/_coord/agents/worker-9/work/")]
+    assert events, f"no work event written; paths: {sorted(t.store)}"
+    doc = json.loads(t.store[events[0]])
+    assert doc["agent"] == "worker-9" and doc["kind"] == "tell" and doc["ts"]
 
 
-def test_a_READ_verb_stamps_nothing(monkeypatch):
-    """The other direction, inherited for free: a read is not work, so it must
-    not leave a pointer claiming otherwise."""
+def test_a_READ_verb_records_nothing(monkeypatch):
     from coord_engine_test_helpers import FakeTransport
     monkeypatch.setenv("FULCRA_COORD_AGENT", "worker-9")
     t = FakeTransport()
     cli.main(["presence", "show", TEAM], transport=t)
-    assert not any("LATEST-work.json" in p for p in t.store), (
-        f"a read verb wrote a work pointer: {sorted(t.store)}")
+    assert not any("/work/" in p for p in t.store), (
+        f"a read verb recorded work: {sorted(t.store)}")
+
+
+# --- codex's second blocker: the side-channel must not outlive the call ------
+
+def test_the_artifact_side_channel_lives_on_args_and_cannot_leak():
+    """codex-reviewer, 594 r1, blocker two.
+
+    The path used to live in a module-global keyed by `id(args)`, cleaned up
+    only on the NORMAL dispatch path — so a raising command left its entry
+    behind and a later object at the same id could inherit it. State attached to
+    the args object dies with the object; there is nothing to clean up, so there
+    is no path on which cleanup can be skipped.
+    """
+    assert not hasattr(cli, "_ACTIVITY_ARTIFACT_PATH"), (
+        "the id-keyed global is back; that is the leak")
+
+    import argparse
+    args = argparse.Namespace()
+    cli.record_activity_artifact(args, "team/r/some/doc.md")
+    assert getattr(args, "_activity_artifact_path") == "team/r/some/doc.md"
+
+    # A different invocation shares nothing, even if the first is discarded.
+    other = argparse.Namespace()
+    assert getattr(other, "_activity_artifact_path", None) is None
+
+
+def test_a_RAISING_command_leaves_no_artifact_state(monkeypatch):
+    """The exception path, end to end: a command that records a path and then
+    blows up must not leave anything an unrelated command could inherit."""
+    from coord_engine_test_helpers import FakeTransport
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "worker-9")
+
+    def _boom(args, transport):
+        cli.record_activity_artifact(args, "team/r/doomed.md")
+        raise RuntimeError("command exploded")
+
+    monkeypatch.setattr(cli, "cmd_tell", _boom)
+    t = FakeTransport()
+    rc = cli.main(["tell", TEAM, "amy", "x"], transport=t)
+    assert rc != 0
+    assert not any("/work/" in p for p in t.store), (
+        "a failed command recorded a work event")
+    assert not hasattr(cli, "_ACTIVITY_ARTIFACT_PATH")

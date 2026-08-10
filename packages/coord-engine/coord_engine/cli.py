@@ -11004,53 +11004,79 @@ def _digest_persists(args: Any) -> bool:
                 or getattr(args, "emit_timeline", False))
 
 
-#: Artifact path recorded by a command for the chokepoint's pointer stamp,
-#: keyed by the parsed-args object so concurrent use cannot cross wires. A
-#: command that knows WHICH document it wrote records it here; one that does not
-#: simply leaves the pointer's `path` empty, and the `kind` still carries the
-#: verb. Deliberately not a global "last path": that would attribute one
-#: command's artifact to another.
-_ACTIVITY_ARTIFACT_PATH: dict[int, str] = {}
-
-
 def record_activity_artifact(args: Any, path: str) -> None:
-    """Tell the chokepoint which document this invocation wrote."""
-    if path:
-        _ACTIVITY_ARTIFACT_PATH[id(args)] = path
+    """Tell the chokepoint which document this invocation wrote.
 
-
-#: Per-agent newest-work pointer. ONE read answers "has this agent done work
-#: recently", replacing a sweep that cost one listing per review directory — 438
-#: of them on the live store, which a 120s budget could not finish (U8, second
-#: instance). The 593 reorder is mitigation; this is the fix.
-WORK_POINTER_NAME = "LATEST-work.json"
-
-
-def _work_pointer_path(team: str, agent: str) -> str:
-    """Pointer path, keyed by the RAW agent name.
-
-    NOT `tasks.agent_key()`. That helper appends a hash suffix
-    (`coord-maintainer` -> `coord-maintainer-f68406`) and is correct for the
-    PRESENCE namespace, but `_coord/agents/<agent>/` uses the raw name — checked
-    against the live store, where `coord-maintainer` exists and the hashed form
-    does not. Keying this by `agent_key` would file every pointer into a
-    directory that no reader lists, so the feature would be a silent no-op that
-    no unit test could see, because the fixtures would agree with the bug.
+    Attached to the PARSED ARGS, not a module-global map keyed by ``id(args)``.
+    That map leaked on the exception path — `main` returns from its handler
+    before any cleanup, so a failed command left its entry behind and a later
+    object at the same id could inherit the wrong artifact path
+    (codex-reviewer, 594 r1). State that lives on the object dies with it; there
+    is no cleanup to forget.
     """
-    return f"team/{team}/_coord/agents/{agent}/{WORK_POINTER_NAME}"
+    if path:
+        setattr(args, "_activity_artifact_path", path)
+
+
+#: Per-agent work EVENTS. One immutable file per event, never overwritten.
+#:
+#: This was a single mutable `LATEST-work.json` with a read-compare-write
+#: "monotonic" guard, and codex-reviewer reproduced two races against it (594
+#: r1): two hosts both read the old value and the OLDER timestamp could land
+#: last; worse, the failed-write branch deleted the shared path unconditionally
+#: and could erase a NEWER pointer another host had just written. The store
+#: offers no conditional or versioned write, so there is no safe way to mutate
+#: one shared path — the fix is not to have one.
+#:
+#: Immutable events have no race to lose: a writer only ever CREATES its own
+#: event, a failed write leaves every prior event intact and still true, and
+#: "newest" is a deterministic fold over names rather than a value someone must
+#: defend. The filename leads with the ISO instant, so lexical max IS newest
+#: (our own naming, so unlike the store's 12-hour mtimes it sorts correctly).
+WORK_EVENTS_DIR = "work"
+
+#: Keep the newest few events per agent; older ones are unreachable by the fold.
+#: Pruning only ever removes entries STRICTLY OLDER than one just written, which
+#: is safe concurrently — the worst case is that another host already removed it.
+WORK_EVENTS_KEEP = 5
+
+
+def _work_events_prefix(team: str, agent: str) -> str:
+    """Events live under the RAW agent name — NOT `tasks.agent_key()`, which
+    appends a hash (`coord-maintainer` -> `coord-maintainer-f68406`). That is
+    right for the PRESENCE namespace and wrong here: `_coord/agents/<agent>/`
+    uses raw names on the live store. Keying by the hashed form would file every
+    event where no reader lists — a silent no-op that fixtures written with the
+    same helper would happily agree with."""
+    return f"team/{team}/_coord/agents/{agent}/{WORK_EVENTS_DIR}/"
+
+
+def _work_event_name(now_iso: str, kind: str, path: str) -> str:
+    """`<iso>-<digest>.json`. The digest makes concurrent DISTINCT events at the
+    same instant distinct files, while two hosts recording the SAME event write
+    the same name with the same bytes — idempotent rather than conflicting."""
+    digest = hashlib.sha1(f"{kind}|{path}".encode()).hexdigest()[:8]
+    return f"{now_iso}-{digest}.json"
 
 
 def _read_work_pointer(transport: Any, team: str, agent: str) -> Optional[dict]:
-    """Newest-work pointer for one agent, or ``None`` meaning UNKNOWN.
+    """Newest work event for one agent, or ``None`` meaning UNKNOWN.
 
-    UNKNOWN covers all three of: no pointer yet (the whole fleet, on day one),
-    an unreadable one, and a corrupt one. None of them licenses "this agent did
-    nothing" — the caller falls back to the sweep. Same rule as 585's missing
-    health pointer, and it never raises: one bad pointer must not break the fold
-    for every other agent.
+    UNKNOWN covers no events yet (the whole fleet on day one), an unreadable
+    listing, and a corrupt newest event. None of them licenses "this agent did
+    nothing" — the caller falls back to the sweep. Never raises: one bad agent
+    must not break the fold for the rest.
     """
     try:
-        raw = transport.read(_work_pointer_path(team, agent))
+        rows = transport.list_dir(_work_events_prefix(team, agent))
+    except TransportError:
+        return None
+    names = sorted(str(r.get("name") or "") for r in (rows or [])
+                   if str(r.get("name") or "").endswith(".json"))
+    if not names:
+        return None
+    try:
+        raw = transport.read(_work_events_prefix(team, agent) + names[-1])
     except TransportError:
         return None
     if not raw:
@@ -11062,46 +11088,50 @@ def _read_work_pointer(transport: Any, team: str, agent: str) -> Optional[dict]:
     return doc if isinstance(doc, dict) and doc.get("ts") else None
 
 
+def _prune_work_events(transport: Any, team: str, agent: str) -> None:
+    """Best-effort: drop all but the newest ``WORK_EVENTS_KEEP`` events.
+
+    Only ever deletes entries strictly older than ones being kept, so a
+    concurrent writer's newest event is never at risk. Failure is ignored —
+    stale extra events cost storage, never correctness.
+    """
+    try:
+        rows = transport.list_dir(_work_events_prefix(team, agent)) or []
+        names = sorted(str(r.get("name") or "") for r in rows
+                       if str(r.get("name") or "").endswith(".json"))
+        for stale in names[:-WORK_EVENTS_KEEP]:
+            transport.delete(_work_events_prefix(team, agent) + stale)
+    except Exception:
+        pass
+
+
 def _stamp_work_pointer(transport: Any, team: str, agent: str, *, kind: str,
                         path: str, now_iso: str) -> bool:
-    """Record ``agent``'s newest work artifact. True iff the pointer now holds a
-    value at least as new as ``now_iso``.
+    """Record one work event. True iff it persisted.
 
-    Called ONLY after the artifact itself persisted (588): a pointer to work
-    that did not land is worse than no pointer.
-
-    MONOTONIC — an out-of-order stamp cannot walk the pointer backwards. Two
-    hosts may act in either order; this records the NEWEST work, not the last
-    writer to arrive. An unparseable existing value is not eligible to win that
-    comparison, so corrupt state cannot freeze the pointer forever.
-
-    A FAILED UPDATE DELETES (588's rule, and the load-bearing one). If the new
-    value cannot land, the OLD value must not survive to be believed — a reader
-    would take a superseded timestamp as current with no way to tell. Removing
-    it degrades that agent to UNKNOWN, which the reader already handles by
-    falling back to the sweep. `transport.write` returning False and raising are
-    the same event here.
+    Called only after the command succeeded (588): an event for work that did
+    not land would be a lie. There is NO delete-on-failure — the old design
+    removed a shared mutable pointer and could erase another host's newer one.
+    A failed write here simply leaves the previous events, which are all still
+    true; the reader sees slightly stale rather than wrong, and that is the
+    right way to be wrong.
     """
-    ptr_path = _work_pointer_path(team, agent)
-    existing = _read_work_pointer(transport, team, agent)
-    if existing and str(existing.get("ts") or "") >= now_iso:
-        return True                      # already at or ahead of this instant
-    body = json.dumps({"schema": "work-pointer/v1", "agent": agent,
+    prefix = _work_events_prefix(team, agent)
+    body = json.dumps({"schema": "work-event/v1", "agent": agent,
                        "kind": kind, "path": path, "ts": now_iso},
                       sort_keys=True)
     try:
-        wrote = transport.write(ptr_path, body)
+        wrote = transport.write(prefix + _work_event_name(now_iso, kind, path),
+                                body)
     except TransportError:
         wrote = False
-    if wrote:
-        return True
-    try:
-        transport.delete(ptr_path)
-    except TransportError:
-        pass                             # best effort; the reader still degrades
-    print(f"work pointer not updated for {agent} — removed the stale pointer "
-          f"so it cannot be read as current", file=sys.stderr)
-    return False
+    if not wrote:
+        print(f"work event not recorded for {agent} — earlier events stand and "
+              f"remain true; the reader will read slightly stale, never wrong",
+              file=sys.stderr)
+        return False
+    _prune_work_events(transport, team, agent)
+    return True
 
 
 def _is_activity_invocation(args: Any) -> bool:
@@ -11275,11 +11305,10 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
                 _stamp_work_pointer(
                     transport, team, actor,
                     kind=str(getattr(args, "command", "") or "write"),
-                    path=_ACTIVITY_ARTIFACT_PATH.get(id(args), ""),
+                    path=str(getattr(args, "_activity_artifact_path", "") or ""),
                     now_iso=now_iso)
             except Exception as exc:                      # never break a write
                 print(f"work pointer stamp failed: {exc}", file=sys.stderr)
-    _ACTIVITY_ARTIFACT_PATH.pop(id(args), None)
     return rc
 
 
