@@ -857,6 +857,36 @@ it (not on PyPI).
   running `review status` on a retroactively-closed review silently destroyed its closure — a read-only
   diagnostic erasing history. **If you add a writer to a shared marker path, audit every existing
   deleter of it in the same change.**
+- **A cache may only bind to evidence it can actually fingerprint, and BOTH readers apply the same
+  rule.** The `.settled` tally cache carries an `evidence` digest over the verdict shard NAMES, and a
+  reader recomputes it from the current listing — so a cache written from a stale snapshot is ignored by
+  construction, whenever it was written, and no delete-ordering is needed. But a name digest can only
+  see a change a NAME shows. The plain `<head>--<reviewer>.md` form is permanently supported and
+  hand-writable, so it can be **rewritten in place**: APPROVE becomes CHANGES and the name does not
+  move. This store exposes no etag and no content hash in a listing (`file stat` carries a `Version:`,
+  but that is one op per file — exactly what the cache exists to avoid), and listing mtimes are
+  minute-resolution on a 12-hour clock. So **a directory holding any plain shard gets no cache at all**;
+  it is folded for real, every time, and append-only directories keep the fast path. Both writers refuse
+  to stamp a marker no reader may honour, and both readers — `projection._scan_review_slug` and the
+  `needs-me`/`briefing` fan-out — go through ONE decision function, `review.settle_shortcircuit`. The
+  fan-out used to skip on marker PRESENCE alone: the same unvalidated short-circuit was fixed in the
+  projection and left standing one reader away, where a stale cache hid a pending reviewer's obligation
+  entirely. A settled slug now costs ONE read (the marker) rather than zero — what the budget needs is
+  that the cost stays O(1) rather than growing with the verdict count. MERGED markers are untouched:
+  merge evidence is not a recomputable tally, so it short-circuits unconditionally.
+- **The projection's ZERO-OP settled carry must prove its evidence was bindable — the tier ABOVE the
+  readers is a reader too.** `build_review_projection` consults `_settled_carry_safe` BEFORE it lists
+  the verdicts directory, and that carry used to accept any prior `settled: true` row whose review DOC
+  mtime+size were unchanged, on the argument that a settled round is immutable and re-opening rewrites
+  the doc. That holds for re-opening at a new head and fails for an in-place rewrite of a plain shard,
+  which touches neither the doc nor its metadata — so production reconciliation served a stale APPROVED
+  forever without ever reaching `review.settle_shortcircuit`. Rows therefore record `ev_bindable`, and
+  only a row carrying `True` may take the zero-op tier; everything else — including every row written
+  by a build before the key existed — is demoted to **tier 3's one listing, not a full rescan**, whose
+  fingerprint compares name+size+mtime per shard and whose `_shards_minutes_closed` refuses any unclosed
+  minute. MERGED rows keep the zero-op tier whatever their shards look like. **When you add a validation
+  rule to a reader, enumerate every tier that can answer BEFORE it** — three rounds of this PR each
+  fixed one layer and left a sibling one step away.
 - **`escalate` attendance: one shared scan, and partial coverage is NOT an incident.** The vacancy
   sweep answers "did a holder file a verdict recently" from ONE `_verdict_activity_index` pass built
   before the role loop, not per role — it used to rebuild a 41-listing scan for every acting role
@@ -1071,6 +1101,42 @@ it (not on PyPI).
   counting as activity, while `inbox` and `digest` refreshed presence merely by being VIEWED
   (codex-reviewer, 590 r2). `_MIXED_MODE_ACTIVITY` maps such a handler to a predicate over the PARSED
   ARGS, and `_is_activity_invocation(args)` — not the function-only helper — is what dispatch calls.
+  **Verdict shards are APPEND-ONLY (coord-boss ruling b99fb8da, 2026-08-10).** Two forms are
+  first-class, permanently: `<head>--<reviewer>.md` (hand-writers, unchanged, no migration) and
+  `<head>--<reviewer>--<iso>-<digest>.md` (the verb). The verb uses the unique form because this store
+  has no create-if-absent and no versioned write, so writing a SHARED name is check-then-write and
+  cannot protect evidence — codex-reviewer reproduced a concurrent CHANGES overwritten by APPROVE at
+  rc 0 (595 r2). A unique name touches no existing file, closing verb-vs-verb AND verb-vs-hand races
+  without a store primitive. **Every register reader folds newest per (head, reviewer)** — `review
+  status`, the projection, and anything built on `_tally_from_verdict_entries`; the projection built
+  one entry per file and would have let a superseded CHANGES block a review forever. Ties break on the
+  name so two hosts folding the same directory always agree. **Supersession is never silent**: the
+  fold reports `superseded_verdicts`, because a reader told APPROVED while shards were quietly
+  discarded has the same affirmative falsehood everything here is about. A correction is a NEW shard;
+  the original evidence stays on disk, which is also the same-head correction path. **The settle CACHE IS BOUND TO ITS EVIDENCE** — it carries a digest of the shard names it folded,
+  and every reader recomputes that from the CURRENT listing before honouring it. Deleting a stale
+  cache cannot stop another writer recreating it: a `review status` that read the old tally, paused,
+  and resumed AFTER a correction landed rewrote `.settled` from its stale snapshot, and readers then
+  answered APPROVED while the newest verdict was CHANGES (codex-reviewer, 595 r4). Validation replaces
+  ordering — a cache built from different evidence is ignored by construction, whenever it was
+  written. A marker with no digest is pre-binding and is not trusted; a `state: MERGED` marker
+  summarises a merge rather than the verdict set, so it still short-circuits. **A new verdict also
+  INVALIDATES the settle cache** — without that the correction contract is false once a prior result
+  settled, because readers short-circuit on the marker and never open the shards (codex-reviewer,
+  595 r3). Only the CACHE: a `state: MERGED` marker is evidence a PR landed and survives a late
+  verdict, and an unrecognised or unreadable marker fails loud rather than being deleted.
+  **Every reader dates a plain shard the same way** — filename ts, then frontmatter ts, then the
+  normalized listing MTIME. The projection stopped at frontmatter, so a ts-less plain shard sorted as
+  empty there and the two readers disagreed about the same directory.
+  **`review verdict` (2026-08-10)** exists so that filing a verdict IS an engine write. It was the one
+  act with no verb — `review request` printed a path and the reviewer wrote the shard themselves — so a
+  reviewer touched no chokepoint, refreshed no presence, and left no work event. Every liveness fix of
+  this cycle was blind to reviewers for that single reason. The verb is SUGAR over the same artifact:
+  it writes exactly the canonical `<head>--<reviewer>.md` shard at the printed path, so tally / settle /
+  retention see no new shape, and DIRECT shard-writing stays valid — the verb is additive, and its
+  ADOPTION is what upgrades a reviewer from invisible to a work event. It REFUSES to overwrite an
+  existing verdict: a verdict is evidence a merge may already rest on, and a changed head is a new
+  round with its own filename, which is the supported way to revise.
   **Every registered command must be CLASSIFIED**, read or write or mixed, and written down as such:
   `tests/test_activity_covers_every_write_verb.py` walks the real argparse tree and fails on any
   command nobody has classified, in EITHER direction. A regex cannot decide this — `tell`, `reconcile`

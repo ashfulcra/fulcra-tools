@@ -1420,6 +1420,12 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
         # team and fail with "unexpected archived verdict shape" for everyone
         # else. Team-particular content does not belong in this repo — the shape
         # is "one shard", and whose shard it is was never the engine's business.
+        # APPEND-ONLY FAMILIES LAND HERE BY DESIGN (coord-boss constraint 5,
+        # ruling b99fb8da): a reviewer may now hold several shards for one head,
+        # so an archived family of >1 is legitimate rather than corrupt. This
+        # path is the COUNTED SKIP, not a failure of the new shape — it says how
+        # many it found and points at the doc-restore route, which handles a
+        # family. Stated rather than changed, deliberately.
         if len(files) != 1:
             print(f"review restore failed: {args.slug} has {len(files)} archived "
                   f"verdict shard(s) and no request doc. Exactly one is "
@@ -1675,7 +1681,8 @@ def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
     return SETTLED_UNKNOWN
 
 
-def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> str:
+def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str,
+                          evidence: Optional[str] = None) -> str:
     """Best-effort settled-cache write. Failure is swallowed: the marker only
     speeds the fan-out fold; its absence just means the next fold recomputes.
 
@@ -1691,7 +1698,14 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> 
     Refusing costs nothing real. The cache exists so the fan-out fold can skip
     the slug; a MERGED marker ALREADY makes it skip. Overwriting buys no speed
     and loses the only durable record that the PR landed.
+
+    UNBOUND EVIDENCE IS NOT WRITTEN AT ALL. An empty digest means the caller
+    could not fingerprint this directory — a mutable plain shard participates —
+    and every reader refuses such a marker, so writing one is cost with no
+    reader (codex-reviewer, 595 r5).
     """
+    if not evidence:
+        return "unbound-evidence"
     try:
         # Overwrite ONLY a positively-identified CACHE, or a positively ABSENT
         # marker. Everything else is preserved.
@@ -1719,8 +1733,8 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> 
                 return "kept-unknown"
         transport.write(
             _settled_marker_path(team, slug),
-            okf.render_frontmatter({"schema": "review-settled/v1",
-                                    "state": review.APPROVED, "ts": now}),
+            okf.render_frontmatter(review.settled_marker_fields(
+                state=review.APPROVED, ts=now, evidence=evidence)),
         )
         return "written"
     except Exception:
@@ -1871,6 +1885,19 @@ def _is_unattributable(name: str, *, keyed: bool) -> bool:
     return review.normalize_head(stem.split("--", 1)[0]) is None
 
 
+def _store_mtime_iso(mtime: Any) -> Optional[str]:
+    """Listing mtime -> comparable ISO, or None.
+
+    Store mtimes render on a TWELVE-HOUR clock, so comparing them as strings
+    inverts the midnight hour. Parsed through the one existing parser, never
+    compared raw.
+    """
+    if not isinstance(mtime, str):
+        return None
+    dt = aggregate._parse_store_mtime(mtime)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+
+
 def _tally_from_verdict_entries(
     transport: Any, team: str, slug: str, entries: list[dict[str, Any]],
     doc_raw: Optional[str], *, deadline: Optional[float] = None,
@@ -1912,6 +1939,7 @@ def _tally_from_verdict_entries(
     unattributable: list[str] = []
     unrecognised: list[tuple[str, str]] = []
     mismatched: list[tuple[str, str]] = []
+    rows: list[dict[str, Any]] = []
     reads_ok = True
     fully_scanned = True
     dl = Deadline(deadline)
@@ -1919,7 +1947,9 @@ def _tally_from_verdict_entries(
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
             continue
-        reviewer = review.reviewer_from_filename(n, head=head)
+        parsed_name = review.parse_verdict_filename(n, head=head)
+        reviewer = parsed_name[0] if parsed_name else None
+        parsed_ts = parsed_name[1] if parsed_name else None
         if reviewer is None:
             # A keyed review reads only the active head's append-only shards;
             # legacy reviews ignore keyed files. Superseded heads cost zero reads.
@@ -1982,8 +2012,37 @@ def _tally_from_verdict_entries(
             # and it lands in the same PENDING as no verdict at all. Record it
             # so the surface can say WHY the vote did not count.
             unrecognised.append((n, str(token)))
-        verdicts.append({"reviewer": reviewer, "verdict": token})
+        # Collect, do not decide: with append-only shards a reviewer may have
+        # several, and only the NEWEST counts. Sorting on a ts we can defend —
+        # the name's for an append shard, the frontmatter's for a plain one,
+        # falling back to the listing mtime — keeps two hosts folding the same
+        # directory to the same answer.
+        rows.append({
+            "reviewer": reviewer,
+            "name": n,
+            "verdict": token,
+            "sort_key": (parsed_ts
+                         or str(fm.get("ts") or "")
+                         or _store_mtime_iso(e.get("mtime")) or ""),
+        })
+    kept, folded_away = review.fold_newest_per_reviewer(rows)
+    verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
+                for r in kept]
     tally = review.tally(verdicts, required=required)
+    # Computed HERE, from the same entries the fold consumed, so the cache's
+    # fingerprint provably describes what it summarises. EMPTY when a mutable
+    # plain shard participates: a name digest cannot see that shard's in-place
+    # rewrite, so there is nothing here honest enough to bind a cache to, and an
+    # empty digest is what every reader already treats as unbound (595 r5).
+    _vnames = [e.get("name") for e in entries]
+    tally["evidence"] = (review.evidence_digest(_vnames)
+                         if review.evidence_is_immutable(_vnames) else "")
+    if folded_away:
+        # NEVER SILENTLY (coord-boss constraint 4). A reader told "APPROVED"
+        # while shards were quietly discarded has the same affirmative
+        # falsehood this whole cycle was about; superseded evidence is still on
+        # disk and the count is how a reader knows to go look.
+        tally["superseded_verdicts"] = folded_away
     if unattributable:
         tally["unattributable"] = sorted(unattributable)
     if unrecognised:
@@ -2712,8 +2771,22 @@ def _pending_reviews_raw(
             # can never become pending for anybody. Skipping them HERE is what
             # makes `review gc` recover budget at all; the marker alone changed
             # nothing (codex-reviewer, review-gc round 1).
-            if review_gc.GC_MARKER in vnames or SETTLED_MARKER in vnames:
+            if review_gc.GC_MARKER in vnames:
                 return "ok"  # terminal -> skip entirely, zero reads beyond this listing
+            if SETTLED_MARKER in vnames:
+                # A `.settled` used to skip this slug on PRESENCE ALONE, which is
+                # the same unvalidated short-circuit 595 r4 fixed in the register
+                # projection — fixed THERE and left here, one reader apart. A
+                # stale cache made this scan report an agent owed nothing while
+                # the newest verdict was CHANGES: an obligation hidden by a file.
+                #
+                # Same shared rule, so the two readers cannot drift. One read per
+                # settled slug still skips the doc and every shard.
+                if review.settle_shortcircuit(
+                        okf.parse_frontmatter(
+                            transport.read(_settled_marker_path(team, slug))) or {},
+                        vnames) != review.SETTLE_NO:
+                    return "ok"
             doc_raw = transport.read(_review_doc_path(team, slug))
             if doc_raw is None:
                 # Slug came from the listing, so its doc exists — a None read is a
@@ -2742,7 +2815,8 @@ def _pending_reviews_raw(
         if state == review.APPROVED and not pending:
             # Cache only a PROVEN settle (non-empty required + every verdict read).
             if _is_settleable(tally) and vreads_ok:
-                _write_settled_marker(transport, team, slug, now=now)
+                _write_settled_marker(transport, team, slug, now=now,
+                                      evidence=tally.get("evidence"))
             return "ok"
         if state != "PENDING" or not pending:
             return "ok"
@@ -3616,6 +3690,157 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
+    """File a verdict for a review round.
+
+    SUGAR OVER THE EXISTING ARTIFACT, deliberately (coord-boss constraint a):
+    this writes exactly the canonical `<head>--<reviewer>.md` shard at the path
+    `review request` already prints, with the frontmatter the tally already
+    reads. Nothing downstream — tally, settle, retention — learns that a verb
+    exists, and DIRECT shard-writing stays valid (constraint b): reviewers who
+    write the file themselves are unaffected the day this ships.
+
+    Why it exists at all: filing a verdict was the one act with NO verb, so a
+    reviewer touched no chokepoint, refreshed no presence, and left no work
+    event. Every liveness fix of this cycle could not see reviewers for that one
+    reason. As a verb it inherits all of them at once.
+
+    REFUSES TO OVERWRITE. A verdict is evidence a merge decision may already
+    rest on; replacing one silently could erase a CHANGES. A changed head is a
+    new round with its own filename, which is the supported way to revise.
+    """
+    reviewer = _known_sender(args)
+    if not reviewer:
+        print("review verdict: no reviewer identity — set FULCRA_COORD_AGENT "
+              "or pass --from", file=sys.stderr)
+        return 2
+    normalized = review.normalize_verdict(args.verdict)
+    if normalized is None:
+        print(f"review verdict: {args.verdict!r} is not a verdict — use "
+              f"approve or changes; anything else reads as unparseable to the "
+              f"tally and stalls the review silently", file=sys.stderr)
+        return 2
+
+    # THE REGISTER IS AUTHORITATIVE FOR THE ROUND (codex-reviewer, 595 r1).
+    # `--head` used to be optional and the register was never read, so omitting
+    # it wrote `<reviewer>.md`, printed success and returned 0 — while the tally
+    # ignored that headless shard and the reviewer stayed pending. A confident
+    # false success: the reviewer believes they voted, the round still waits.
+    doc_raw = transport.read(_review_doc_path(args.team, args.name))
+    if not doc_raw:
+        print(f"review verdict: cannot read the review register for "
+              f"{args.name} — a read of None is missing OR unreadable, and "
+              f"neither tells me which round you are voting in. Refusing rather "
+              f"than guessing.", file=sys.stderr)
+        return 3
+    doc_fm = okf.parse_frontmatter(doc_raw) or {}
+    active_head = review.normalize_head(doc_fm.get("head"))
+    supplied = review.normalize_head(getattr(args, "head", None))
+    if getattr(args, "head", None) and supplied is None:
+        print(f"review verdict: --head {args.head!r} is not a valid exact "
+              f"commit id", file=sys.stderr)
+        return 2
+    if active_head and supplied and supplied != active_head:
+        print(f"review verdict: {args.name} is at head {active_head}; a verdict "
+              f"pinned to {supplied} cannot discharge the current round and "
+              f"would sit unread. Re-run against the active head.",
+              file=sys.stderr)
+        return 1
+    if active_head and not supplied:
+        head = active_head          # resolved, never orphaned
+        print(f"(resolved active head {active_head} from the register)",
+              file=sys.stderr)
+    else:
+        head = supplied
+    if supplied and not active_head:
+        print(f"review verdict: {args.name} is not head-keyed, but --head was "
+              f"given; refusing rather than writing a shard the tally ignores",
+              file=sys.stderr)
+        return 1
+
+    # APPEND-ONLY (coord-boss ruling b99fb8da, after codex reproduced a
+    # concurrent CHANGES being overwritten by APPROVE at rc 0). The name is
+    # unique to this write, so it can never touch a file another writer holds —
+    # which closes verb-vs-verb AND verb-vs-hand races WITHOUT a store
+    # primitive. There is deliberately NO existence check here: the previous
+    # check-then-write could not keep the promise it printed, and a promise the
+    # code cannot keep is the false-success family one level up.
+    #
+    # A correction is therefore a NEW file, and the original evidence stays on
+    # disk — which is also the same-head correction path codex asked for.
+    # SECOND precision in the name and the shard ts. `_iso` carries
+    # microseconds, which the append-suffix pattern rejects — the filename then
+    # parsed as a reviewer literally called `codex-reviewer--2026-...-<digest>`
+    # and the tally credited a phantom while the real reviewer read as pending.
+    # Mixed precision would also misorder a plain shard against an append one
+    # when compared as strings.
+    now_iso = _now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    digest = hashlib.sha1(
+        f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}"
+        .encode()).hexdigest()[:8]
+    filename = review.verdict_filename(reviewer, head=head, ts=now_iso,
+                                       digest=digest)
+    path = _verdicts_prefix(args.team, args.name) + filename
+
+    body = okf.render_frontmatter({
+        "type": "Verdict",
+        "reviewer": reviewer,
+        "head": head,
+        "verdict": normalized,
+    }) + f"\n{getattr(args, 'note', None) or normalized}\n"
+    if not transport.write(path, body):
+        print(f"review verdict: write FAILED for {path} — the verdict did NOT "
+              f"land, so the review still awaits you", file=sys.stderr)
+        return 1
+    # A NEW VERDICT INVALIDATES THE FOLD CACHE (codex-reviewer, 595 r3).
+    # Without this the same-head correction contract is FALSE the moment a prior
+    # result has settled: APPROVE -> `review status` writes `.settled` -> a later
+    # CHANGES correction lands and is ignored, because the projection treats any
+    # marker hit as immutable approval and never reads the shards. rc 0, both
+    # shards on disk, and readers still say APPROVED.
+    #
+    # ONLY THE CACHE. `.settled` carries two meanings (572/588): `state:
+    # APPROVED` is a recomputable tally cache and is clearable; `state: MERGED`
+    # with a merge_sha is EVIDENCE that a merge happened and must never be
+    # destroyed by a late verdict. UNKNOWN is not permission either.
+    # Absent vs unreadable FIRST: `_classify_settled_marker` folds both into
+    # `unknown` (its docstring says so), and "no marker yet" is the COMMON case
+    # — treating that as ambiguous would fail every ordinary verdict. The
+    # tri-state listing separates them.
+    present = _settled_marker_present(transport, args.team, args.name)
+    if present is None:
+        print(f"review verdict: recorded at {path}, but I cannot tell whether a "
+              f"settle marker exists for {args.name}, so I cannot tell whether "
+              f"a stale cache is hiding this verdict. Verify with "
+              f"`review status`.", file=sys.stderr)
+        return 3
+    if present:
+        state = _classify_settled_marker(transport, args.team, args.name)
+        if state == SETTLED_CACHE:
+            if not _clear_settled_marker(transport, args.team, args.name):
+                print(f"review verdict: recorded at {path}, but the stale fold "
+                      f"cache for {args.name} could NOT be cleared — readers "
+                      f"may still report the previous result. Clear it before "
+                      f"trusting the tally.", file=sys.stderr)
+                return 3
+        elif state == SETTLED_MERGED:
+            print(f"review verdict: recorded at {path}, but {args.name} is "
+                  f"already closed as MERGED — that marker is EVIDENCE, not a "
+                  f"cache, so it stands. Your verdict is on disk and does not "
+                  f"change the merge record.", file=sys.stderr)
+        else:
+            print(f"review verdict: recorded at {path}, but the settle marker "
+                  f"for {args.name} is UNRECOGNISED, so I will not delete it "
+                  f"and cannot promise readers see this verdict.",
+                  file=sys.stderr)
+            return 3
+
+    # Tell the chokepoint which artifact this was, so the work event names it.
+    record_activity_artifact(args, path)
+    print(f"verdict {normalized} recorded for {args.name} at {path}")
+    return 0
+
+
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
     result, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
@@ -3670,8 +3895,9 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     if _is_settleable(result):
         # PROVEN terminal-settled (non-empty required, every listed verdict read):
         # refresh the fold cache so the fan-out fold can skip this slug next time.
-        if _write_settled_marker(transport, team, slug,
-                                 now=_iso(_now())) == "kept-unknown":
+        if _write_settled_marker(
+                transport, team, slug, now=_iso(_now()),
+                evidence=result.get("evidence")) == "kept-unknown":
             # Same register as the F4 branch below: a marker this build cannot
             # classify was PRESERVED, and the caller must not read a clean tally
             # as "everything here is understood" (codex-reviewer, 588 r1 —
@@ -10738,6 +10964,18 @@ def build_parser() -> argparse.ArgumentParser:
                           "gc only prints what it would retire")
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
+    rvv = rvsub.add_parser(
+        "verdict", help="file YOUR verdict for a review round (writes the same "
+                        "canonical shard `review request` prints)")
+    rvv.add_argument("team")
+    rvv.add_argument("name", help="review slug")
+    rvv.add_argument("--head", help="exact head this verdict is pinned to")
+    rvv.add_argument("--verdict", required=True,
+                     help="approve | changes")
+    rvv.add_argument("--note", help="the body of the verdict")
+    rvv.add_argument("--from", dest="sender", help="reviewer identity")
+    rvv.set_defaults(func=cmd_review_verdict)
+
     rvc = rvsub.add_parser("close", help="close a review because its PR MERGED (evidence, not inference)")
     rvc.add_argument("team"); rvc.add_argument("slug")
     rvc.add_argument("--merge-sha", required=True,

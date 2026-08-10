@@ -100,13 +100,25 @@ def _pin_clock(monkeypatch, t):
     monkeypatch.setattr(budget.time, "monotonic", lambda: t.clock)
 
 
+_HEAD = "a" * 40
+
+
 def _approve(t, slug, reviewer="rev"):
     """Open a single-reviewer review and file that reviewer's approval, leaving
-    the review terminal-APPROVED with no pending_required."""
+    the review terminal-APPROVED with no pending_required.
+
+    HEAD-KEYED, and the approval is an APPEND-ONLY shard. A settle cache binds
+    only to evidence a name can fingerprint, and a plain shard can be rewritten
+    in place without its name changing (595 r5) — so a plain-shard directory
+    gets no cache, and a fixture written that way would be asserting the fast
+    path over evidence the fast path deliberately refuses.
+    """
     cli.main(["review", "request", "r", slug, "--of", "url",
-              "--reviewer", reviewer], transport=t)
-    t.put(f"team/r/review/{slug}/verdicts/{reviewer}.md",
-          f"---\ntype: Verdict\nreviewer: {reviewer}\nverdict: approve\n---\n")
+              "--head", _HEAD, "--reviewer", reviewer], transport=t)
+    t.put(f"team/r/review/{slug}/verdicts/"
+          f"{_HEAD}--{reviewer}--2026-08-09T01:00:00Z-aaaaaaaa.md",
+          f"---\ntype: Verdict\nreviewer: {reviewer}\nhead: {_HEAD}\n"
+          f"verdict: approve\n---\n")
 
 
 def test_settled_slug_skipped_with_zero_reads(capsys):
@@ -116,11 +128,18 @@ def test_settled_slug_skipped_with_zero_reads(capsys):
     capsys.readouterr()
     cli._pending_reviews_for(t, "r", "someone")
     assert "team/r/review/pr-set/verdicts/.settled" in t.store, "fold must settle it"
-    # ...so a second fold skips the slug with ZERO reads of its doc/verdicts.
+    # ...so a second fold skips the slug for ONE read: the marker itself.
+    #
+    # It used to be zero — the fold skipped on marker PRESENCE alone, which is
+    # the unvalidated short-circuit that let a stale cache hide a pending
+    # reviewer (595 r5). Validating costs one read per settled slug; what the
+    # budget actually needs is that the cost stays O(1) rather than growing
+    # with the verdict count, so the DOC and every SHARD must still go unread.
     t.reads.clear()
     cli._pending_reviews_for(t, "r", "someone")
     slug_reads = [p for p in t.reads if "pr-set" in p]
-    assert slug_reads == [], f"settled slug must cost zero reads, got {slug_reads}"
+    assert slug_reads == ["team/r/review/pr-set/verdicts/.settled"], (
+        f"a settled slug must cost exactly the marker read, got {slug_reads}")
 
 
 def test_pending_slug_fully_tallied_and_unmarked(capsys):
@@ -746,8 +765,16 @@ HEAD_A = "a" * 40
 HEAD_B = "b" * 40
 
 
-def _head_verdict_path(slug, head, reviewer="alice"):
-    return f"team/r/review/{slug}/verdicts/{head}--{reviewer}.md"
+def _head_verdict_path(slug, head, reviewer="alice", plain=False):
+    """APPEND-ONLY by default. A settle cache binds only to evidence a name
+    digest can fingerprint, and the plain `<head>--<reviewer>.md` form can be
+    rewritten in place without its name changing (595 r5) — so a fixture that
+    expects a cache must file the append form. Pass ``plain=True`` for the
+    hand-written shape, which by construction is never cached."""
+    if plain:
+        return f"team/r/review/{slug}/verdicts/{head}--{reviewer}.md"
+    return (f"team/r/review/{slug}/verdicts/"
+            f"{head}--{reviewer}--2026-08-09T01:00:00Z-aaaaaaaa.md")
 
 
 def _head_verdict(head, reviewer="alice", verdict="approve"):
@@ -773,7 +800,9 @@ def test_head_request_writes_v2_round_and_head_specific_paths(capsys):
     assert fm["schema"] == "review-request/v2"
     assert fm["head"] == HEAD_A
     assert fm["round"] == "1"
-    verdict_path = _head_verdict_path("pr-86", HEAD_A)
+    # the PRINTED next_action is the plain canonical path the skill has always
+    # advertised — constraint (b), hand-writers keep working
+    verdict_path = _head_verdict_path("pr-86", HEAD_A, plain=True)
     assert verdict_path in cap.out
     assert any(verdict_path in content for path, content in t.store.items()
                if path.startswith("team/r/task/"))
@@ -914,7 +943,7 @@ def test_current_head_requires_matching_head_in_verdict_frontmatter(capsys):
          "--head", HEAD_B, "--reviewer", "alice"],
         transport=t,
     )
-    t.put(_head_verdict_path("pr-86", HEAD_B), _head_verdict(HEAD_A))
+    t.put(_head_verdict_path("pr-86", HEAD_B, plain=True), _head_verdict(HEAD_A))
     capsys.readouterr()
     # rc 3, not 0. The claim this test was written for is UNCHANGED — a shard
     # attesting a different head does not discharge the requirement — but the

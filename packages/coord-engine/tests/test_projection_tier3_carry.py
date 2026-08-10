@@ -122,16 +122,45 @@ def test_a_failed_listing_demotes_to_fresh_scan_and_never_carries():
     assert [r for r in t2.reads if "flaky" in r] or sec["scanned"] >= 0
 
 
-def test_settled_rows_still_take_tier_one_and_cost_zero_ops():
+_HEAD = "a" * 40
+
+
+def test_settled_rows_over_APPEND_ONLY_evidence_take_tier_one_at_zero_ops():
     t = Counting()
-    _put_review(t, "done", "['a']", verdicts=[("a", "approve")])
-    t.put(f"team/{TEAM}/review/done/verdicts/.settled", "settled\n")
+    t.put(f"team/{TEAM}/review/done.md",
+          f"---\ntype: Review\nrequired: ['a']\nhead: {_HEAD}\n---\n")
+    t.put(f"team/{TEAM}/review/done/verdicts/"
+          f"{_HEAD}--a--2026-08-09T01:00:00Z-aaaaaaaa.md",
+          f"---\ntype: Verdict\nreviewer: a\nhead: {_HEAD}\nverdict: approve\n---\n")
     first = _build(t)
 
     t.listed.clear(); t.reads.clear()
     _build(t, prior=first)
     assert not [p for p in t.listed if "done/verdicts" in p], \
         "a settled row must still carry at ZERO ops — tier 3 must not steal tier 1's work"
+
+
+def test_a_settled_row_over_MUTABLE_evidence_is_demoted_to_ONE_LISTING():
+    """The demotion 595 r6 forced, priced.
+
+    A settled row whose shards are hand-written plain files can no longer take
+    the zero-op tier: such a shard is rewritable in place, so an unchanged
+    review DOC proves nothing about the tally. It drops to tier 3's ONE
+    LISTING, not to a full rescan — the fingerprint compares name+size+mtime per
+    shard and `_shards_minutes_closed` refuses any unclosed minute, which is
+    strictly more than the doc-only check could ever see.
+    """
+    t = Counting()
+    _put_review(t, "hand", "['a']", verdicts=[("a", "approve")])
+    first = _build(t)
+    assert {r["name"]: r for r in first["rows"]}["hand"]["settled"] is True
+
+    t.listed.clear(); t.reads.clear()
+    _build(t, prior=first)
+    assert [p for p in t.listed if "hand/verdicts" in p], \
+        "mutable evidence must be listed, not carried on the doc's mtime alone"
+    assert not [p for p in t.reads if "hand/verdicts/" in p], \
+        f"the demotion must cost a LISTING, not a full rescan: {t.reads}"
 
 
 def test_fingerprint_is_order_independent_but_size_and_mtime_sensitive():
