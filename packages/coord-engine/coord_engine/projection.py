@@ -126,6 +126,14 @@ SETTLED_MARKER = ".settled"
 #: would still be scanned, still tallied pending, and still consume the exact
 #: projection budget the verb exists to recover (codex-reviewer, review-gc r1).
 VFP_KEY = "vfp"   #: verdicts-listing fingerprint recorded on each scanned row
+#: Did this row's evidence admit a cache binding at all — i.e. was every verdict
+#: shard append-only (or the row backed by merge evidence)? Tier 1 carries a
+#: settled row at ZERO ops, which is only sound when nothing under the slug can
+#: change without changing the review DOC. A hand-written plain shard can be
+#: rewritten in place, touching neither the doc nor its metadata, so a row built
+#: over one may never take that tier (codex-reviewer, 595 r6). A row from a
+#: build before this key existed lacks it and is demoted — fail closed.
+BINDABLE_KEY = "ev_bindable"
 GC_MARKER = ".gc-closed"
 
 
@@ -353,8 +361,16 @@ def _unsettled_carry_safe(prior_row: Any, entry: dict[str, Any],
     Same guards as tier 1: doc mtime+size identical, and the same-minute reuse
     guard — mtime granularity is ONE MINUTE, so a same-minute edit at identical
     size is invisible and must not be trusted."""
-    if not isinstance(prior_row, dict) or prior_row.get("settled") is True:
-        return False                      # settled rows are tier 1's business
+    if not isinstance(prior_row, dict):
+        return False
+    if prior_row.get("settled") is True and prior_row.get(BINDABLE_KEY) is True:
+        return False                      # tier 1's business, and it may have it
+    # A SETTLED row whose evidence is not bindable lands HERE rather than in
+    # tier 1: its plain shard can be rewritten in place, so it needs the one
+    # listing this tier pays for. That is the demotion 595 r6 owed — and it is a
+    # listing, not a full rescan, because the fingerprint compares name+size+
+    # mtime per shard and `_shards_minutes_closed` refuses any unclosed minute,
+    # which is strictly more than a name digest could ever see.
     if not prior_row.get(VFP_KEY):
         return False                      # no fingerprint recorded: cannot compare
     entry_mtime = entry.get("mtime")
@@ -370,12 +386,23 @@ def _settled_carry_safe(prior_row: Any, entry: dict[str, Any],
                         prior_generated_at: Any) -> bool:
     """True iff ``prior_row`` may be carried WITHOUT re-reading its review.
 
-    Only a SETTLED prior row qualifies: a settled round is immutable, and
-    re-opening the slug rewrites the review doc — so an unchanged listed
-    mtime+size proves the carried tally still holds. Unsettled rows never carry
-    (their verdict shards can change without touching the doc). The same-minute
-    guard is reconcile's (imported lazily; ``reconcile`` imports this module)."""
+    Only a SETTLED prior row with BINDABLE evidence qualifies. The old rule
+    stopped at "settled", on the argument that a settled round is immutable and
+    re-opening the slug rewrites the review doc — true of re-opening at a new
+    head, and false of the one case this PR is about: a hand-written plain shard
+    rewritten IN PLACE at the same head touches neither the doc nor its
+    metadata, so this tier carried a stale APPROVED forever without ever
+    reaching `review.settle_shortcircuit` (codex-reviewer, 595 r6). Fixing the
+    two readers below it left the tier ABOVE them untouched — the third time in
+    this PR that a rule landed one layer away from a sibling that needed it.
+
+    Unsettled rows never carry here (their verdict shards can change without
+    touching the doc), and neither do settled rows over mutable evidence: both
+    fall to tier 3's one listing. The same-minute guard is reconcile's (imported
+    lazily; ``reconcile`` imports this module)."""
     if not isinstance(prior_row, dict) or prior_row.get("settled") is not True:
+        return False
+    if prior_row.get(BINDABLE_KEY) is not True:
         return False
     entry_mtime = entry.get("mtime")
     if not entry_mtime or prior_row.get("mtime") != entry_mtime:
@@ -428,6 +455,10 @@ def _scan_review_slug(
     }
     base[VFP_KEY] = _verdicts_fingerprint(ventries)
     vnames = {(v.get("name") or "") for v in ventries}
+    # Recorded on EVERY row this function returns, because the zero-op tier-1
+    # carry never lists this directory and so can never recompute it. Only a row
+    # that says True here may skip straight past both readers below.
+    base[BINDABLE_KEY] = review.evidence_is_immutable(vnames)
     if GC_MARKER in vnames:
         # Retired by gc: OMITTED from the projection, and the scan counts as
         # COMPLETE. Round 2 of this review emitted a `state: RETIRED,
@@ -454,9 +485,18 @@ def _scan_review_slug(
         # in-place rewrite a name digest cannot see (595 r5).
         marker_raw = transport.read(_verdicts_prefix(team, slug) + SETTLED_MARKER)
         marker_fm = okf.parse_frontmatter(marker_raw) or {}
-        if review.settle_shortcircuit(marker_fm, vnames) != review.SETTLE_NO:
-            return {**base, "state": review.APPROVED, "pending_required": [],
-                    "settled": True}, True
+        short = review.settle_shortcircuit(marker_fm, vnames)
+        if short != review.SETTLE_NO:
+            row = {**base, "state": review.APPROVED, "pending_required": [],
+                   "settled": True}
+            if short == review.SETTLE_MERGED:
+                # MERGE EVIDENCE is bindable whatever the shards look like: it
+                # records that a PR landed, and no later verdict can make that
+                # untrue, so no rewrite under this slug can move the row. That
+                # keeps terminal reviews — most of the register — at the zero-op
+                # tier even when their shards are hand-written.
+                row[BINDABLE_KEY] = True
+            return row, True
         # Otherwise fall through and fold the shards for real.
     head = review.normalize_head(fm.get("head"))
     verdicts: list[dict[str, Any]] = []

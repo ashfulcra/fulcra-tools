@@ -166,6 +166,103 @@ def test_reconcile_settled_rows_carry_without_rereads():
     assert sec["rows"][0]["settled"] is True
 
 
+def _build_reviews(t, prior=None, now=None):
+    return projection.build_review_projection(
+        t, TEAM, now=now or _now_iso(), prior=prior, settled_index=set(),
+        deadline=budget.Deadline(None))
+
+
+def test_a_plain_shard_rewrite_is_not_carried_by_the_ZERO_OP_settled_tier():
+    """codex-reviewer, 595 r6 — the tier ABOVE the two readers I fixed.
+
+    `build_review_projection` consults `_settled_carry_safe` BEFORE it lists the
+    verdicts directory, and that carry used to accept any prior `settled: true`
+    row whose review DOC mtime+size were unchanged. A hand-written plain shard
+    rewritten in place changes neither the doc nor its metadata, so production
+    reconciliation returned a stale APPROVED forever without ever reaching
+    `review.settle_shortcircuit`. Driven through the real entry point in two
+    passes, because the r6 test drove `_scan_review_slug` directly and therefore
+    skipped exactly the tier that was wrong.
+    """
+    t = FakeTransport()
+    head = _HEAD
+    plain = f"team/{TEAM}/review/pr-carry/verdicts/{head}--codex-reviewer.md"
+    _put_review(t, "pr-carry", "codex-reviewer")
+    t.put(plain, f"---\ntype: Verdict\nreviewer: codex-reviewer\n"
+                 f"head: {head}\nverdict: approve\n---\nok\n")
+
+    first = _build_reviews(t)
+    row = {r["name"]: r for r in first["rows"]}["pr-carry"]
+    assert row["state"] == "APPROVED" and row["settled"] is True
+    assert f"team/{TEAM}/review/pr-carry/verdicts/.settled" not in t.store, \
+        "mutable evidence must not get a cache marker in the first place"
+
+    # The SAME file is rewritten. The review doc is untouched.
+    t.put(plain, f"---\ntype: Verdict\nreviewer: codex-reviewer\n"
+                 f"head: {head}\nverdict: changes\n---\nblocker\n")
+    second = _build_reviews(t, prior=first)
+    got = {r["name"]: r for r in second["rows"]}["pr-carry"]
+    assert got["state"] == "CHANGES", (
+        f"the zero-op settled carry served a stale APPROVED over a rewritten "
+        f"plain shard: {got}")
+
+
+def test_the_APPEND_ONLY_settled_fast_path_still_carries_at_zero_ops():
+    """The other direction: the demotion must not cost append-only rows their
+    zero-op carry, which is the whole point of tier 1."""
+    t = FakeTransport()
+    _put_review(t, "pr-appended", "codex-reviewer",
+                verdicts=[("codex-reviewer", "approve")])
+    first = _build_reviews(t)
+    assert {r["name"]: r for r in first["rows"]}["pr-appended"]["settled"] is True
+
+    class _NoListing(FakeTransport):
+        def __init__(self, inner):
+            super().__init__()
+            # share every listing input, or the doc entry loses its mtime and
+            # tier 1 declines for a reason that has nothing to do with the test
+            self.store, self.mtimes, self.sizes = (
+                inner.store, inner.mtimes, inner.sizes)
+
+        def list_dir(self, prefix):
+            if "/verdicts/" in prefix:
+                raise AssertionError(f"tier 1 listed the verdicts dir: {prefix}")
+            return super().list_dir(prefix)
+
+    second = _build_reviews(_NoListing(t), prior=first)
+    got = {r["name"]: r for r in second["rows"]}["pr-appended"]
+    assert got["settled"] is True and got["state"] == "APPROVED"
+
+
+def test_a_MERGED_row_carries_at_zero_ops_even_over_plain_shards():
+    """Merge evidence records that a PR landed; no later verdict makes that
+    untrue, so no rewrite under the slug can move the row. Terminal reviews —
+    most of the register — keep the zero-op tier even hand-written."""
+    t = FakeTransport()
+    head = _HEAD
+    _put_review(t, "pr-merged", "codex-reviewer")
+    t.put(f"team/{TEAM}/review/pr-merged/verdicts/{head}--codex-reviewer.md",
+          f"---\ntype: Verdict\nreviewer: codex-reviewer\nhead: {head}\n"
+          f"verdict: approve\n---\nok\n")
+    t.put(f"team/{TEAM}/review/pr-merged/verdicts/{projection.SETTLED_MARKER}",
+          "---\nschema: review-settled/v1\nstate: MERGED\n"
+          f"merge_sha: {'b' * 40}\n---\n")
+    first = _build_reviews(t)
+    assert {r["name"]: r
+            for r in first["rows"]}["pr-merged"][projection.BINDABLE_KEY] is True
+
+
+def test_a_PRIOR_row_from_a_build_without_the_key_is_demoted_not_trusted():
+    """Fleet rollout: a row written before this key existed carries no proof its
+    evidence was bindable, so it must lose the zero-op tier rather than be
+    assumed safe."""
+    stale = {"name": "pr-old", "state": "APPROVED", "settled": True,
+             "mtime": "2026-08-10 01:00AM UTC", "size": "1KiB"}
+    entry = {"name": "pr-old.md", "mtime": "2026-08-10 01:00AM UTC",
+             "size": "1KiB"}
+    assert projection._settled_carry_safe(stale, entry, None) is False
+
+
 def test_reconcile_budget_cut_marks_projection_incomplete():
     t = FakeTransport()
     for i in range(3):
