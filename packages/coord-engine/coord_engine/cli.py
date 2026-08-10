@@ -1681,7 +1681,8 @@ def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
     return SETTLED_UNKNOWN
 
 
-def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> str:
+def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str,
+                          evidence: Optional[str] = None) -> str:
     """Best-effort settled-cache write. Failure is swallowed: the marker only
     speeds the fan-out fold; its absence just means the next fold recomputes.
 
@@ -1726,7 +1727,15 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> 
         transport.write(
             _settled_marker_path(team, slug),
             okf.render_frontmatter({"schema": "review-settled/v1",
-                                    "state": review.APPROVED, "ts": now}),
+                                    "state": review.APPROVED, "ts": now,
+                                    # BINDS THE CACHE TO ITS EVIDENCE. A reader
+                                    # recomputes this from the CURRENT listing;
+                                    # a cache written from a stale snapshot
+                                    # carries a stale digest and is ignored by
+                                    # construction, whenever it was written.
+                                    # Correctness stops depending on who wrote
+                                    # last (codex-reviewer, 595 r4).
+                                    "evidence": evidence or ""}),
         )
         return "written"
     except Exception:
@@ -2021,6 +2030,9 @@ def _tally_from_verdict_entries(
     verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
                 for r in kept]
     tally = review.tally(verdicts, required=required)
+    # Computed HERE, from the same entries the fold consumed, so the cache's
+    # fingerprint provably describes what it summarises.
+    tally["evidence"] = review.evidence_digest([e.get("name") for e in entries])
     if folded_away:
         # NEVER SILENTLY (coord-boss constraint 4). A reader told "APPROVED"
         # while shards were quietly discarded has the same affirmative
@@ -2785,7 +2797,8 @@ def _pending_reviews_raw(
         if state == review.APPROVED and not pending:
             # Cache only a PROVEN settle (non-empty required + every verdict read).
             if _is_settleable(tally) and vreads_ok:
-                _write_settled_marker(transport, team, slug, now=now)
+                _write_settled_marker(transport, team, slug, now=now,
+                                      evidence=tally.get("evidence"))
             return "ok"
         if state != "PENDING" or not pending:
             return "ok"
@@ -3864,8 +3877,9 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     if _is_settleable(result):
         # PROVEN terminal-settled (non-empty required, every listed verdict read):
         # refresh the fold cache so the fan-out fold can skip this slug next time.
-        if _write_settled_marker(transport, team, slug,
-                                 now=_iso(_now())) == "kept-unknown":
+        if _write_settled_marker(
+                transport, team, slug, now=_iso(_now()),
+                evidence=result.get("evidence")) == "kept-unknown":
             # Same register as the F4 branch below: a marker this build cannot
             # classify was PRESERVED, and the caller must not read a clean tally
             # as "everything here is understood" (codex-reviewer, 588 r1 —

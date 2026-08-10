@@ -439,10 +439,33 @@ def _scan_review_slug(
         # information a consumer wants: it owes nobody a verdict.
         return None, True
     if SETTLED_MARKER in vnames:
-        # Settled-cache hit: the round is terminal-APPROVED and immutable — the
-        # doc read above already gave us the forge-relevant identity fields.
-        return {**base, "state": review.APPROVED, "pending_required": [],
-                "settled": True}, True
+        # A cache is only trustworthy if it still describes THIS directory.
+        #
+        # Deleting a stale cache cannot stop another writer recreating it: a
+        # `review status` that read the old tally, paused, and resumed AFTER a
+        # correction landed rewrote `.settled` from its stale snapshot, and this
+        # short-circuit then answered APPROVED while the newest verdict was
+        # CHANGES (codex-reviewer, 595 r4). No delete ordering fixes that.
+        #
+        # So VALIDATE rather than order: recompute the evidence digest from the
+        # current listing and honour the cache only if it matches. A cache built
+        # from different evidence is ignored by construction, whenever it was
+        # written. A marker with NO digest is pre-binding and cannot be
+        # validated, so it is not trusted either — recomputing is cheap and
+        # correct, and this build cannot prove such a marker is current.
+        marker_raw = transport.read(_verdicts_prefix(team, slug) + SETTLED_MARKER)
+        marker_fm = okf.parse_frontmatter(marker_raw) or {}
+        if (str(marker_fm.get("state") or "") == review.APPROVED
+                and str(marker_fm.get("evidence") or "")
+                == review.evidence_digest(vnames)):
+            return {**base, "state": review.APPROVED, "pending_required": [],
+                    "settled": True}, True
+        # MERGED markers are EVIDENCE, not a cache — they summarise a merge, not
+        # the verdict set, so they keep short-circuiting.
+        if str(marker_fm.get("state") or "") == "MERGED":
+            return {**base, "state": review.APPROVED, "pending_required": [],
+                    "settled": True}, True
+        # Otherwise fall through and fold the shards for real.
     head = review.normalize_head(fm.get("head"))
     verdicts: list[dict[str, Any]] = []
     for v in ventries:

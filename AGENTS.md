@@ -1083,7 +1083,14 @@ it (not on PyPI).
   name so two hosts folding the same directory always agree. **Supersession is never silent**: the
   fold reports `superseded_verdicts`, because a reader told APPROVED while shards were quietly
   discarded has the same affirmative falsehood everything here is about. A correction is a NEW shard;
-  the original evidence stays on disk, which is also the same-head correction path. **A new verdict
+  the original evidence stays on disk, which is also the same-head correction path. **The settle CACHE IS BOUND TO ITS EVIDENCE** — it carries a digest of the shard names it folded,
+  and every reader recomputes that from the CURRENT listing before honouring it. Deleting a stale
+  cache cannot stop another writer recreating it: a `review status` that read the old tally, paused,
+  and resumed AFTER a correction landed rewrote `.settled` from its stale snapshot, and readers then
+  answered APPROVED while the newest verdict was CHANGES (codex-reviewer, 595 r4). Validation replaces
+  ordering — a cache built from different evidence is ignored by construction, whenever it was
+  written. A marker with no digest is pre-binding and is not trusted; a `state: MERGED` marker
+  summarises a merge rather than the verdict set, so it still short-circuits. **A new verdict also
   INVALIDATES the settle cache** — without that the correction contract is false once a prior result
   settled, because readers short-circuit on the marker and never open the shards (codex-reviewer,
   595 r3). Only the CACHE: a `state: MERGED` marker is evidence a PR landed and survives a late

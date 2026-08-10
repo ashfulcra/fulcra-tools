@@ -7,6 +7,7 @@ here; the I/O wrapper + CLI live in ``cli.py``.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Optional
 
@@ -193,3 +194,25 @@ def is_pending_for(pending_required: list, agent: str,
         if agent in (role_holders or {}).get(r, ()):
             return True
     return False
+
+def evidence_digest(names: Any) -> str:
+    """Fingerprint the verdict shards a cache summarises.
+
+    THE CACHE IS BOUND TO ITS EVIDENCE (codex-reviewer, 595 r4). Deleting a
+    mutable cache cannot stop another writer recreating it: a `review status`
+    that read the old tally, paused, and resumed AFTER a correction landed
+    rewrote `.settled` from its stale snapshot, and every reader that
+    short-circuits on the marker then answered APPROVED while the newest verdict
+    was CHANGES. No delete ordering fixes that — the loser of the race is
+    whoever writes last, and correctness cannot depend on who that is.
+
+    So the cache carries the digest of the shard names it folded, and a reader
+    recomputes it from the CURRENT listing. A cache written from a stale
+    snapshot carries a stale digest and is ignored by construction, whenever it
+    was written. Validation replaces ordering.
+
+    Names are sorted, so two hosts fingerprinting one directory always agree.
+    """
+    items = sorted(str(n) for n in (names or []) if str(n).endswith(".md"))
+    return hashlib.sha1("\n".join(items).encode()).hexdigest()[:16]
+

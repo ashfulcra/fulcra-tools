@@ -413,3 +413,102 @@ def test_the_PROJECTION_orders_a_ts_less_plain_shard_by_MTIME(monkeypatch):
     assert row["state"] == review.CHANGES, (
         f"the projection ordered a ts-less plain shard as empty and lost the "
         f"newer CHANGES to an older APPROVE: {row}")
+
+
+def test_a_STALE_cache_written_AFTER_a_correction_is_ignored(monkeypatch, capsys):
+    """codex-reviewer, 595 r4 — the interleaving, as a regression.
+
+    1. `review status` reads the old APPROVE tally and pauses before writing.
+    2. `review verdict changes` writes the correction, sees no marker, rc 0.
+    3. The paused status resumes and writes `.settled` from its STALE snapshot.
+    4. Readers short-circuit on the marker and answer APPROVED.
+
+    Deleting the cache cannot prevent step 3 — the loser is whoever writes last,
+    and correctness must not depend on that. The cache is bound to the evidence
+    it summarised, so the resurrected marker carries a digest for a directory
+    that no longer exists and every reader ignores it.
+    """
+    from coord_engine import projection as pj
+    from coord_engine.budget import Deadline
+
+    head = HEAD
+    doc = okf.render_frontmatter({
+        "type": "Review", "schema": "review-request/v2", "of": "PR #1",
+        "head": head, "required": [REVIEWER], "requested_by": "asker"}) + "\n"
+    approve = f"{head}--{REVIEWER}--2026-08-10T01:00:00Z-aaaaaaaa.md"
+    changes = f"{head}--{REVIEWER}--2026-08-10T02:00:00Z-bbbbbbbb.md"
+
+    class _T:
+        def __init__(self):
+            self.store = {
+                f"team/{TEAM}/review/{SLUG}.md": doc,
+                f"{PREFIX}{approve}": okf.render_frontmatter({
+                    "type": "Verdict", "reviewer": REVIEWER, "head": head,
+                    "verdict": "approve"}) + "\nok\n",
+            }
+
+        def read(self, path):
+            return self.store.get(path)
+
+        def list_dir(self, prefix):
+            return [{"name": k[len(prefix):]} for k in sorted(self.store)
+                    if k.startswith(prefix) and "/" not in k[len(prefix):]]
+
+    t = _T()
+    # (1) the paused status fingerprints ONLY the approve shard
+    stale_digest = review.evidence_digest([approve])
+    # (2) the correction lands
+    t.store[f"{PREFIX}{changes}"] = okf.render_frontmatter({
+        "type": "Verdict", "reviewer": REVIEWER, "head": head,
+        "verdict": "changes"}) + "\nblocker\n"
+    # (3) the stale status resumes and resurrects the cache
+    t.store[f"{PREFIX}.settled"] = okf.render_frontmatter({
+        "schema": "review-settled/v1", "state": review.APPROVED,
+        "ts": "2026-08-10T01:30:00Z", "evidence": stale_digest})
+
+    row, ok = pj._scan_review_slug(
+        t, TEAM, SLUG, {"name": f"{SLUG}.md"},
+        now="2026-08-10T05:00:00Z", deadline=Deadline(None))
+    assert ok and row is not None
+    assert row["state"] == review.CHANGES, (
+        f"a cache resurrected from a stale snapshot was honoured, so the newest "
+        f"CHANGES was invisible: {row}")
+
+
+def test_a_cache_that_still_matches_its_evidence_is_HONOURED():
+    """The other direction: binding must not make the cache useless. When the
+    directory is unchanged the fast path still fires."""
+    from coord_engine import projection as pj
+    from coord_engine.budget import Deadline
+
+    head = HEAD
+    approve = f"{head}--{REVIEWER}--2026-08-10T01:00:00Z-aaaaaaaa.md"
+
+    class _T:
+        store = {
+            f"team/{TEAM}/review/{SLUG}.md": okf.render_frontmatter({
+                "type": "Review", "schema": "review-request/v2", "of": "PR #1",
+                "head": head, "required": [REVIEWER],
+                "requested_by": "asker"}) + "\n",
+            f"{PREFIX}{approve}": okf.render_frontmatter({
+                "type": "Verdict", "reviewer": REVIEWER, "head": head,
+                "verdict": "approve"}) + "\nok\n",
+        }
+
+        def read(self, path):
+            return self.store.get(path)
+
+        def list_dir(self, prefix):
+            return [{"name": k[len(prefix):]} for k in sorted(self.store)
+                    if k.startswith(prefix) and "/" not in k[len(prefix):]]
+
+    t = _T()
+    t.store[f"{PREFIX}.settled"] = okf.render_frontmatter({
+        "schema": "review-settled/v1", "state": review.APPROVED,
+        "ts": "2026-08-10T01:30:00Z",
+        "evidence": review.evidence_digest([approve, ".settled"])})
+    row, ok = pj._scan_review_slug(
+        t, TEAM, SLUG, {"name": f"{SLUG}.md"},
+        now="2026-08-10T05:00:00Z", deadline=Deadline(None))
+    assert ok and row and row["settled"] is True, (
+        f"a valid cache was ignored, so the fast path is dead: {row}")
