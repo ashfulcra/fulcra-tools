@@ -52,20 +52,104 @@ SRC="git+https://github.com/ashfulcra/fulcra-tools@${PIN}#subdirectory=packages/
 # script back to back under ONE user account — a forced reinstall of an
 # already-current engine can collide with the copy installed seconds earlier
 # ("failed to remove directory"). A sentinel records the last pin THIS USER
-# adopted; when it matches AND the engine is genuinely usable (bus-v3 verb +
-# writer import both prove out), skip the install legs and go straight to the
-# queue drain + claim. Any doubt -> full install as before.
+# adopted; when it matches AND the engine on disk IS that pin, skip the install
+# legs and go straight to the queue drain + claim. Any doubt -> full install.
+#
+# THE SENTINEL IS A CLAIM, NOT EVIDENCE (2026-08-11). It records a past action of
+# this user, not the state of the engine now. Paired only with `bus-v3 --help` it
+# proved "I once adopted X" and "some bus-v3 engine is installed" — and since
+# EVERY pin since bus-v3 shipped carries that verb, verb-presence cannot tell pin
+# X from pin Y. So the pair could not distinguish the one case that matters.
+# That state is reachable: coord-opus-worker's box restores a disk snapshot
+# frequently-but-not-always and NOT UNIFORMLY — a wake came up with $HOME intact
+# while /tmp was empty. The sentinel lives in $HOME; the engine lives in the uv
+# tool dir. Once those revert independently, "my marker survived" stops implying
+# "the engine it names survived". That box fails safe today only because its
+# image predates bus-v3; a snapshot taken now would pass the verb check.
+# So compare the BUILD: `direct_url.json`'s `vcs_info.commit_id`, read from the
+# engine's own environment — the build-identity mechanism this repo settled on in
+# PR 598. Sentinel and pin are both full 40-hex commits, so it is a direct
+# comparison. Anything unreadable, malformed, or non-VCS is UNKNOWN, and UNKNOWN
+# falls through to the full install: a skipped install on a stale engine is
+# silent and lasts the whole wake, while a redundant one costs ~30-60s.
 SENTINEL="${HOME}/.coord-adopted-pin"
-if [ -f "$SENTINEL" ] && [ "$(cat "$SENTINEL" 2>/dev/null)" = "$PIN" ] \
-   && coord-engine bus-v3 --help >/dev/null 2>&1; then
+engine_is_current() {
+  [ -f "$SENTINEL" ] && [ "$(cat "$SENTINEL" 2>/dev/null)" = "$PIN" ] || return 1
+  coord-engine bus-v3 --help >/dev/null 2>&1 || return 1
   EPY=""
   if command -v uv >/dev/null 2>&1 && [ -x "$(uv tool dir 2>/dev/null)/coord-engine/bin/python" ]; then
     EPY="$(uv tool dir)/coord-engine/bin/python"
   fi
-  if [ -n "$EPY" ] && "$EPY" -c 'import fulcra_common' >/dev/null 2>&1; then
-    echo "adopt: engine already at pin ${VER} for this user (sentinel + verb + writer verified) — skipping install"
-    INSTALLER="already-current"
-  fi
+  [ -n "$EPY" ] || return 1
+  "$EPY" -c 'import fulcra_common' >/dev/null 2>&1 || return 1
+  # Read the commit the engine was actually built from. Printing nothing on any
+  # failure keeps every error path on the UNKNOWN side of the comparison.
+  # The env root is DERIVED FROM EPY rather than from interpreter introspection:
+  # `sys.executable` reports whatever the running interpreter resolves to, which
+  # is not this environment when python is reached through a wrapper. We already
+  # know which environment we are asking about — ask about that one.
+  BUILT="$("$EPY" - "${EPY%/bin/python}" <<'PYEOF' 2>/dev/null
+import glob, json, os, sys
+root = sys.argv[1]
+# EVERY readable record, not the first one found (codex-reviewer, 603 r3). This
+# loop supports two directory spellings, and a partially repaired or restored
+# environment can hold more than one. Exiting on the first non-empty commit made
+# the answer depend on filesystem ordering: a stale record naming the pin, read
+# before a conflicting one, certified a build it could not prove was running —
+# and it would be intermittent, so it would read as flakiness rather than as a
+# defect. Ambiguity is not evidence: only ONE distinct commit across all records
+# is an answer. Zero records or conflicting records print nothing, which is
+# UNKNOWN, which takes the full install.
+#
+# A record that CANNOT be read is not a record that agrees (codex-reviewer, 603
+# r4). Skipping the damaged one and accepting its readable neighbour makes the
+# set look unanimous when one member never voted: a stale record naming PIN
+# beside a corrupted current record would certify the environment. UNKNOWN has
+# to cover the whole candidate set, not only the case where the damaged record
+# is the only one — and a valid stale record next to a damaged current one is a
+# natural shape in exactly the partially restored environment this probe exists
+# for.
+seen = set()
+bad = False
+for pat in ("coord_engine-*.dist-info", "coord-engine-*.dist-info"):
+    for d in glob.glob(os.path.join(root, "lib", "*", "site-packages", pat)):
+        try:
+            with open(os.path.join(d, "direct_url.json")) as fh:
+                c = json.load(fh).get("vcs_info", {}).get("commit_id")
+        except Exception:
+            bad = True          # missing, unreadable or malformed
+            continue
+        if c:
+            seen.add(c)
+        else:
+            bad = True          # present but records no commit
+if not bad and len(seen) == 1:
+    print(seen.pop())
+PYEOF
+)" || BUILT=""
+  [ -n "$BUILT" ] && [ "$BUILT" = "$PIN" ] || return 1
+  return 0
+}
+# The comparison above assumes PIN is a full commit sha, which is the pin scheme
+# (`pp-<sha8>`), but nothing enforced it. uv records the RESOLVED commit in
+# `direct_url.json` — measured: fulcra-common is pinned by TAG and its metadata
+# carries the sha that tag resolved to. So a tag- or branch-shaped PIN could
+# never equal BUILT, the fast path would never fire, and every host would force
+# a reinstall every wake — forever, with nothing saying why. Forced reinstall is
+# the exact leg that stripped the store client on macOS, so that silence is
+# expensive. Take the safe path (full install) but SAY that the check is
+# disabled and why: a degraded mode nobody can see is the failure this whole
+# script keeps relearning.
+case "$PIN" in
+  *[!0-9a-f]* | "" ) PIN_IS_SHA=0 ;;
+  * ) [ "${#PIN}" -eq 40 ] && PIN_IS_SHA=1 || PIN_IS_SHA=0 ;;
+esac
+if [ "$PIN_IS_SHA" -ne 1 ]; then
+  echo "adopt: WARNING — PIN is not a 40-hex commit sha (${VER}); the build-identity check cannot apply, so the idempotency fast path is DISABLED and every run will reinstall. Pin a full commit sha to restore it." >&2
+fi
+if engine_is_current; then
+  echo "adopt: engine already at pin ${VER} for this user (sentinel + verb + writer + BUILD COMMIT verified) — skipping install"
+  INSTALLER="already-current"
 fi
 
 # COMMON must ride along in the SAME environment as the engine: `annotate project`
