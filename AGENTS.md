@@ -617,6 +617,17 @@ it (not on PyPI).
   candidate shares — and every unreadable/malformed/absent answer is UNKNOWN, which takes the
   expensive path. A skipped install on a stale engine is silent and lasts the whole wake; a redundant
   one costs ~30-60s.
+- **A RECORD THAT CANNOT BE READ IS NOT A RECORD THAT AGREES (2026-08-11).** Two follow-on defects in the
+  same probe, both found by codex-reviewer, both the same shape. First it exited on the FIRST readable
+  build record across two supported dist-info spellings, so in an environment holding more than one the
+  answer depended on filesystem ordering — a stale record naming the pin, read first, certified a build
+  it could not prove was running, INTERMITTENTLY, so it would read as flakiness rather than as a defect.
+  Then, having collected every readable record, it silently SKIPPED the unreadable ones: a stale record
+  naming the pin beside a corrupted current record left the set with exactly one commit and it said yes.
+  The set looked unanimous because a member never voted. Rules: when a check supports several sources,
+  DEFINE their combined evidence rather than accepting whichever appears first; and an UNKNOWN member
+  poisons the whole set, not just the case where it is the only member. Both are the UNKNOWN≠empty family
+  the rest of this file keeps relearning, and the second one appeared inside the fix for the first.
 - **Shell control flow that cannot be driven WILL ship its gap.** Both adopt defects (the strip, and the
   skip above) lived in top-level `if` blocks that no test could reach; both were found by reading, late.
   When a decision in a shipped script matters, it goes in a function so a test can drive it against

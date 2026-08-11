@@ -316,6 +316,54 @@ def _pin_shape(pin: str) -> tuple[int, str]:
     return int(out.stdout.strip() or -1), out.stderr
 
 
+def test_the_shape_classifier_is_POSIX_not_bash_only():
+    """This script runs under whatever `/bin/sh` the host has — dash on most
+    Linux boxes, bash-in-posix-mode on macOS. The classifier uses `case` with a
+    negated bracket range and `${#PIN}`; both are POSIX, but nothing stopped a
+    later edit from reaching for a bashism, and the two-OS acceptance rule
+    exists because that failure would only appear on the OS nobody tested.
+
+    Measured across sh/dash/zsh/bash: identical answers. Absent shells skip
+    rather than pass silently — a shell that is not there proves nothing.
+    """
+    checked = 0
+    for shell in ("/bin/sh", "/bin/dash", "/bin/zsh", "/bin/bash"):
+        if not pathlib.Path(shell).exists():
+            continue
+        checked += 1
+        for pin, want in (
+                ("10630261ff15ee3c03236cee01421bb13d85710d", 1),
+                ("10630261FF15EE3C03236CEE01421BB13D85710D", 0),
+                ("coord-engine-v1.3.0", 0),
+                ("", 0)):
+            out = subprocess.run(
+                [shell, "-c", f'set -u; PIN="{pin}"; VER="pp-t"\n'
+                 + _pin_shape_block() + '\nprintf %s "$PIN_IS_SHA"\n'],
+                capture_output=True, text=True)
+            assert out.stdout.strip() == str(want), (
+                f"{shell} classified {pin!r} as {out.stdout.strip()!r}, "
+                f"expected {want} — the classifier is not portable")
+    assert checked >= 2, f"only {checked} shell(s) available; too weak to claim portability"
+
+
+def test_the_range_is_not_at_the_mercy_of_the_LOCALE():
+    """A negated range like `[!0-9a-f]` is precisely where collation order can
+    betray you, and `tr_TR` is the classic case-folding trap. Uppercase must
+    stay rejected everywhere: git and `direct_url.json` both emit lowercase, so
+    an uppercase PIN would compare unequal and must take the loud path rather
+    than the silent-reinstall one."""
+    import os
+    upper = "10630261FF15EE3C03236CEE01421BB13D85710D"
+    for loc in ("C", "en_US.UTF-8", "tr_TR.UTF-8"):
+        env = dict(os.environ, LC_ALL=loc)
+        out = subprocess.run(
+            ["/bin/sh", "-c", f'set -u; PIN="{upper}"; VER="pp-t"\n'
+             + _pin_shape_block() + '\nprintf %s "$PIN_IS_SHA"\n'],
+            capture_output=True, text=True, env=env)
+        assert out.stdout.strip() == "0", (
+            f"under LC_ALL={loc} an uppercase sha was accepted as the pin shape")
+
+
 def test_a_NON_SHA_pin_disables_the_check_LOUDLY(tmp_path):
     """A tag- or branch-shaped PIN can never equal the recorded commit, because
     uv records the RESOLVED sha (measured: fulcra-common is pinned by tag and
