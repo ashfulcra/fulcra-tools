@@ -64,18 +64,21 @@ def _fast_path_fn() -> str:
 
 def _run(tmp_path, *, sentinel: str | None, installed: str | None,
          bus_v3: bool = True, writer: bool = True,
-         metadata: str | None = "json", spaces: bool = False) -> bool:
+         metadata: str | None = "json", spaces: bool = False,
+         extra_dists: tuple[tuple[str, str], ...] | None = None) -> bool:
     """Drive the real function against a stub engine. Returns whether the fast
     path was taken."""
-    if spaces:
-        # Unique per call: a test that drives BOTH directions must not collide
-        # on one directory (my first version did, and the resulting error looked
-        # exactly like the quoting failure it was meant to detect).
-        n = 0
-        while (cand := tmp_path / f"a dir with spaces {n}").exists():
-            n += 1
-        cand.mkdir()
-        tmp_path = cand
+    # ALWAYS a fresh subdirectory per call. Any test that drives both directions
+    # calls this twice, and a collision raises FileExistsError — which looks
+    # exactly like the probe failures these tests hunt. I fixed this for the
+    # spaces case only, and the very next two-call test tripped the same wire on
+    # the default path; the isolation belongs here, not at one call site.
+    stem = "a dir with spaces" if spaces else "run"
+    n = 0
+    while (cand := tmp_path / f"{stem} {n}").exists():
+        n += 1
+    cand.mkdir()
+    tmp_path = cand
     home = tmp_path / "home"
     home.mkdir()
     bin_dir = tmp_path / "bin"
@@ -102,6 +105,12 @@ def _run(tmp_path, *, sentinel: str | None, installed: str | None,
     site = env_dir / "lib" / "python3.13" / "site-packages"
     dist = site / "coord_engine-1.11.0.dist-info"
     dist.mkdir(parents=True)
+    for name, commit in (extra_dists or ()):
+        d = site / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "direct_url.json").write_text(json.dumps(
+            {"url": "https://github.com/ashfulcra/fulcra-tools",
+             "vcs_info": {"vcs": "git", "commit_id": commit}}))
     if metadata == "json" and installed is not None:
         (dist / "direct_url.json").write_text(json.dumps(
             {"url": "https://github.com/ashfulcra/fulcra-tools",
@@ -197,6 +206,42 @@ def test_a_missing_bus_v3_verb_still_falls_through(tmp_path):
     """The pre-bus-v3 snapshot case — the one check that DOES catch
     coord-opus-worker's July image today. It must survive the refactor."""
     assert not _run(tmp_path, sentinel=PIN, installed=PIN, bus_v3=False)
+
+
+def test_CONFLICTING_dist_info_records_are_ambiguous_not_evidence(tmp_path):
+    """codex-reviewer, 603 r3, reproduced independently.
+
+    The probe supports two directory spellings, and a partially repaired or
+    restored environment can hold more than one. Exiting on the FIRST non-empty
+    commit made the answer depend on filesystem ordering: a stale record naming
+    the pin, encountered before a conflicting one, certified a build it could
+    not prove was running. Worse than wrong — intermittent, so it would read as
+    flakiness rather than as a defect.
+
+    Both orderings, because order-dependence is the whole bug: the matching
+    record first is the dangerous one, and it must fail exactly like the other.
+    """
+    stale_matches_first = (("coord-engine-2.0.0.dist-info", OTHER),)
+    assert not _run(tmp_path, sentinel=PIN, installed=PIN,
+                    extra_dists=stale_matches_first), (
+        "a record naming the pin certified the environment while a CONFLICTING "
+        "record sat beside it — ambiguity is not evidence")
+
+    # The reverse ordering: the conflicting record lives under the pattern that
+    # is scanned first, so it is seen before the matching one.
+    assert not _run(tmp_path, sentinel=PIN, installed=OTHER,
+                    extra_dists=(("coord-engine-2.0.0.dist-info", PIN),)), (
+        "the conflict was tolerated when the matching record came second")
+
+
+def test_DUPLICATE_records_agreeing_on_the_pin_are_still_evidence(tmp_path):
+    """The other direction — the conservative rule must not become a rule that
+    can never say yes. Two records that AGREE are not ambiguous; rejecting them
+    would force a reinstall every wake on any host that legitimately carries
+    both directory spellings."""
+    assert _run(tmp_path, sentinel=PIN, installed=PIN,
+                extra_dists=(("coord-engine-1.11.0.dist-info", PIN),)), (
+        "two records agreeing on the pin were treated as a conflict")
 
 
 def test_a_path_with_SPACES_does_not_break_the_probe(tmp_path):

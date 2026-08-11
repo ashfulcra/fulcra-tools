@@ -91,6 +91,16 @@ engine_is_current() {
   BUILT="$("$EPY" - "${EPY%/bin/python}" <<'PYEOF' 2>/dev/null
 import glob, json, os, sys
 root = sys.argv[1]
+# EVERY readable record, not the first one found (codex-reviewer, 603 r3). This
+# loop supports two directory spellings, and a partially repaired or restored
+# environment can hold more than one. Exiting on the first non-empty commit made
+# the answer depend on filesystem ordering: a stale record naming the pin, read
+# before a conflicting one, certified a build it could not prove was running —
+# and it would be intermittent, so it would read as flakiness rather than as a
+# defect. Ambiguity is not evidence: only ONE distinct commit across all records
+# is an answer. Zero records or conflicting records print nothing, which is
+# UNKNOWN, which takes the full install.
+seen = set()
 for pat in ("coord_engine-*.dist-info", "coord-engine-*.dist-info"):
     for d in glob.glob(os.path.join(root, "lib", "*", "site-packages", pat)):
         try:
@@ -99,8 +109,9 @@ for pat in ("coord_engine-*.dist-info", "coord-engine-*.dist-info"):
         except Exception:
             continue
         if c:
-            print(c)
-            sys.exit(0)
+            seen.add(c)
+if len(seen) == 1:
+    print(seen.pop())
 PYEOF
 )" || BUILT=""
   [ -n "$BUILT" ] && [ "$BUILT" = "$PIN" ] || return 1
