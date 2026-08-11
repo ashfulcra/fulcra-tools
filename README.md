@@ -110,11 +110,12 @@ honestly separated:
 - The [`coord-engine`](packages/coord-engine) is stdlib-only and installs
   with no account (see [Getting started](#getting-started));
   `coord-engine --help` prints the full verb surface offline. (An optional
-  always-on **wake router** was evaluated and retired: measured against a
-  fleet on listener cadence alone, it never delivered a wake the cadence
-  didn't already cover — [`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md)
-  is retained as the historical spec, and true push wake-up is an upstream
-  platform ask, not a component of this repo.)
+  always-on **wake router** ships in the engine but is **unproven in
+  deployment**: the reference deployment was evaluated and retired — measured
+  across its life, it never delivered a wake listener cadence didn't already
+  cover — see [`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md)
+  and the status note in [`BUS-V3.md`](docs/coord/BUS-V3.md); true push
+  wake-up is an upstream platform ask.)
 
 **Needs your Fulcra token:** any touch of a store — every read and every
 write — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the
