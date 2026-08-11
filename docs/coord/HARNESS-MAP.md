@@ -1,24 +1,26 @@
-# Harness map — where fulcra agents run, and what breaks where
+# Harness map — where coordination agents run, and what breaks where
 
-First deliverable of the surface-monitoring backlog item (2026-07-11, coord-boss):
-before we can monitor every fulcra surface in every environment, we need the map
-of environments. Every row below is a harness an agent has actually run in on
-this team's bus; every wall is an incident that actually happened, with the fix
-or workaround that closed it. Keep this current: when a new harness joins the
-fleet or a new wall is hit, add it here in the same PR as the fix.
+Before a fleet can monitor every surface in every environment, it needs the map
+of environments. Every row below is a harness class agents have actually run in;
+every wall is an incident that actually happened, with the fix or workaround
+that closed it. Keep this current: when a new harness joins a fleet or a new
+wall is hit, add it here in the same PR as the fix. This file carries only what
+generalizes — a deployment keeps its own agent→harness mapping, host names, and
+incident attribution in a team annex on its coordination store, referenced from
+its role docs.
 
 ## The harnesses
 
-| # | Harness | Fleet examples | Traits that matter |
-|---|---------|----------------|--------------------|
-| 1 | Claude Code, local macOS | coord-maintainer, fulcra-primitives-maintainer (Mac); prefs_maintainer (Workbook) | Full CLI + browser auth, direct git (tags OK), launchd access, persistent disk |
-| 2 | Claude Code, remote/web container | coord-boss (this doc's author) | TLS-intercepting proxy, egress allowlist, ephemeral disk, container restarts kill background loops, git **gateway** (no `gh`; GitHub via MCP), 24h token loop |
-| 3 | Codex CLI (OpenAI) | codex-reviewer, codex-coder | Tick-based loops, separate account/limits (ATC-tracked), own sandbox quirks |
-| 4 | OpenClaw | Arc (openclaw:discord:*) | Discord-fronted, long-lived, different skill loading |
-| 5 | GitHub Actions CI | resolve gate (ubuntu), macOS suite | **No Fulcra credentials by design** — test hermeticity is a safety boundary, not a convenience |
-| 6 | Headless heartbeats (launchd/cron) | coord-reconcile:* hosts | Restricted PATH, no browser, no human at the keyboard — silent failure is the default failure mode |
-| 7 | ChatGPT facade (HTTP) | find-or-create / status endpoints | Per-request process economics (see the loop-2 perf audit) |
-| 8 | Claude mobile/desktop remote control | operator-driven sessions | Unreliable delivery (the reason coord-boss exists); treat as best-effort transport, never a dependency |
+| # | Harness | Typical fleet role | Traits that matter |
+|---|---------|--------------------|--------------------|
+| 1 | Claude Code, local desktop | maintainer agents on an operator's machines | Full CLI + browser auth, direct git (tags OK), OS scheduler (launchd/cron) access, persistent disk |
+| 2 | Claude Code, remote/web container | long-lived coordinators | TLS-intercepting proxy, egress allowlist, ephemeral disk, container restarts kill background loops, git **gateway** (no `gh`; GitHub via MCP), 24h token loop |
+| 3 | Codex CLI (OpenAI) | cross-model reviewers/coders | Tick-based loops, separate account/limits, own sandbox quirks |
+| 4 | OpenClaw | chat-fronted assistants | Chat-platform-fronted, long-lived, different skill loading |
+| 5 | GitHub Actions CI | test/resolve gates | **No store credentials by design** — test hermeticity is a safety boundary, not a convenience |
+| 6 | Headless heartbeats (launchd/cron) | reconcile/heartbeat hosts | Restricted PATH, no browser, no human at the keyboard — silent failure is the default failure mode |
+| 7 | HTTP facade endpoints | find-or-create / status shims | Per-request process economics |
+| 8 | Mobile/desktop remote control | operator-driven sessions | Unreliable delivery (a standing coordinator exists partly because of this); treat as best-effort transport, never a dependency |
 
 ## The wake mechanism, per harness — what actually RE-ENTERS the agent
 
@@ -60,10 +62,10 @@ that mechanism, and plumbing that does not end in the model running is not a wak
    cannot execute today — which is exactly why the two questions need separate
    answers.
 2. **Never retire a wake without naming and proving its replacement.**
-   coord-maintainer — the maintainer of this system — deleted its standing session
-   loop on 2026-07-24 to save budget, and replaced it over two weeks with a
-   notifier that woke a human, a headless invoke that could not authenticate, and
-   a `--peek` read that never consumed. Three replacements, none of which ran the
+   On one fleet, the agent maintaining this very system deleted its standing
+   session loop to save budget, and replaced it over two weeks with a notifier
+   that woke a human, a headless invoke that could not authenticate, and a
+   `--peek` read that never consumed. Three replacements, none of which ran the
    agent, each reporting success. It went unnoticed for two weeks because every
    layer's own evidence looked healthy. Prove the replacement RUNS THE AGENT
    before removing what worked.
@@ -169,10 +171,10 @@ the wall exists — not where it happened first.
     Then perform the three checks the script's claim gate performs (bus-v3 verb
     resolves; `doctor` prints a pin-currency line naming the PIN; `fulcra_common`
     imports **in the engine's own interpreter**) and only then send the claim —
-    file NO claim if any check fails. Recipe:
-    `team/fulcra/_coord/bus-v3/ADOPT-WHEN-GATED.md`, linked from the head of
-    `adopt-latest.sh` so it is found at the moment of refusal rather than
-    searched for afterwards.
+    file NO claim if any check fails. Keep the recipe (an ADOPT-WHEN-GATED doc)
+    beside `adopt-latest.sh` on the team's store, linked from the head of the
+    script, so it is found at the moment of refusal rather than searched for
+    afterwards.
     If the literal commands are ALSO refused, that is a genuine operator unlock:
     say so and stop. A blocked agent is not blocked on work — a stale pin still
     reads the bus — so it is currency, not capability, and it should keep
@@ -265,14 +267,14 @@ nobody was looking.** The monitoring vision, staged:
 
 ## Change log
 
-- 2026-07-14: initial map (coord-boss), from the 07-11..07-14 incident record.
-- 2026-07-22: wall 11 (cloud repo scoping), from Webster's handoff
-  retrospective + the Fabio session restart (BUS-79).
+- 2026-07-14: initial map, from a four-day incident record.
+- 2026-07-22: wall 11 (cloud repo scoping), from a handoff retrospective and a
+  worker session restart.
 - 2026-08-07: wall 12 (setsid reaping), from two silent `health` census
-  failures during a coord-boss watchdog sweep — both zero-byte, neither
-  reported by anything.
-- 2026-08-07: wall 13 (gated harness refuses the install script), from
-  codex-coder hitting it on the pin move to e1880da9 and adopting via the
+  failures during a watchdog sweep — both zero-byte, neither reported by
+  anything.
+- 2026-08-07: wall 13 (gated harness refuses the install script), from a
+  reviewer-harness agent hitting it on a pin move and adopting via the
   literal-commands path instead.
 - 2026-08-08: wall 14 (a fresh config file is not evidence its reader is alive;
   a coincidence in time is not a cause; a deliberate shutdown looks exactly like
@@ -281,3 +283,6 @@ nobody was looking.** The monitoring vision, staged:
   read the journal, and from a fold whose verdict became unobservable one hour
   after a merge made that verdict load-bearing. Wall 13 also moved back into the
   walls list; it shipped below the monitoring section by mistake.
+
+Incident attribution — which agent, host, and date each entry came from — lives
+in the team annex on the coordination store, not here.
