@@ -4228,6 +4228,23 @@ def _stamp_for_path(now: str, agent: str) -> str:
 FYI_TAG = "mode:fyi"
 
 
+def _directive_slug(args: argparse.Namespace, assignee: Optional[str]) -> str:
+    """THE one place a directive's durable slug is derived (codex-reviewer, 605 r3).
+
+    r3 added notification mode to the identity but left TWO post-write callers
+    recomputing the OLD four-field slug by hand: `cmd_remind` scheduled its future
+    event against a slug no document had, and `tell --fyi --closes` closed a
+    parent with evidence naming a reply that did not exist. Both wrote correctly
+    and then pointed somewhere else — a dangling ptr is worse than a failure,
+    because it reports success.
+
+    Three hand-rolled copies of one derivation is the defect; a fourth caller
+    would have reintroduced it. Everything that needs this slug asks here.
+    """
+    return (f"{tasks.slugify(args.title)}-"
+            f"{_payload_hash(_directive_payload(args.title, args.summary, args.next, assignee, fyi=bool(getattr(args, 'fyi', False))))}")
+
+
 def _directive_payload(title: Optional[str], summary: Optional[str],
                        next_action: Optional[str],
                        assignee: Optional[str],
@@ -4376,7 +4393,7 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     fyi = bool(getattr(args, "fyi", False))
     payload = _directive_payload(args.title, args.summary, args.next, assignee,
                                  fyi=fyi)
-    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    slug = _directive_slug(args, assignee)
     # NOTIFICATIONS DO NOT OPEN (2026-08-11). `tell` minted EVERY message as a
     # `proposed` row that only the recipient could close — so a report, an ack or
     # an FYI became a permanent obligation nobody could discharge, because there
@@ -4658,8 +4675,7 @@ def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
     # The reply is durable first; only then does the answered row close. If the
     # close fails the reply still stands and the row stays open — visibly wrong
     # in the safe direction, never a closed row with no answer behind it.
-    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
-    reply_slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    reply_slug = _directive_slug(args, args.assignee)
     return _close_answered_directive(transport, args, reply_slug=reply_slug)
 
 
@@ -4677,8 +4693,7 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
     # not_before. The write path itself reports which outcome happened —
     # a pre-read cannot distinguish absent from degraded (None is ambiguous),
     # so only the verified "written" outcome may emit the timer record.
-    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
-    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    slug = _directive_slug(args, args.assignee)
     rc = _create_directive(args, transport, assignee=args.assignee, not_before=when)
     if rc == 0:
         outcome = getattr(args, "_directive_outcome", None)

@@ -278,6 +278,80 @@ def test_later_WITHOUT_fyi_still_works(monkeypatch):
     assert rc == 0 and len(_rows(t)) == 1
 
 
+# --- a written doc and a ptr to it must be the SAME slug ----------------------
+
+def test_a_scheduled_FYI_points_at_a_doc_that_EXISTS(monkeypatch):
+    """codex-reviewer, 605 r3. `cmd_remind` recomputed the slug by hand without
+    notification mode, so `remind --fyi` wrote the FYI doc and then scheduled its
+    future event against the ORDINARY slug — a ptr naming a document that does
+    not exist. Due-time delivery cannot resolve a durable body that was never
+    written there, and nothing fails at send time: it reports success and dangles.
+    """
+    t = _recording()
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "alice")
+    rc = cli.main(["remind", TEAM, "bob", "10m", "a message", "-s", "body",
+                   "--from", "alice", "--fyi"], transport=t)
+    assert rc == 0
+
+    written = {p.rsplit("/", 1)[-1][:-3] for p in _rows(t)}
+    assert len(written) == 1, f"expected one doc, got {written}"
+    doc_slug = next(iter(written))
+
+    ptrs = [r for r in t.records_written if doc_slug in str(r.get("note") or "")]
+    others = [r for r in t.records_written if r not in ptrs]
+    assert ptrs, (
+        f"the scheduled event names no existing doc. written={doc_slug!r} "
+        f"records={[r.get('note') for r in t.records_written]!r}")
+    for r in others:
+        note = str(r.get("note") or "")
+        assert doc_slug in note or "slug" not in note, (
+            f"a record points at a slug no document has: {note!r}")
+
+
+def test_an_FYI_reply_CLOSES_with_evidence_naming_the_real_reply(monkeypatch, capsys):
+    """codex-reviewer, 605 r3, the other dangling ptr. `tell --fyi --closes`
+    wrote the FYI reply and then closed the parent with evidence naming the
+    ORDINARY reply slug. The close SUCCEEDS while its claimed artifact does not
+    exist — a closed row whose stated answer cannot be found, which is precisely
+    the failure the close path was built to prevent."""
+    t = _recording()
+    # A parent addressed to alice, owned by bob, so alice may answer it.
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "bob")
+    cli.main(["tell", TEAM, "alice", "the ask", "-s", "please do it",
+              "--from", "bob"], transport=t)
+    parent = next(p for p in _rows(t) if "the-ask" in p)
+    parent_slug = parent.rsplit("/", 1)[-1][:-3]
+
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "alice")
+    rc = cli.main(["tell", TEAM, "bob", "the answer", "-s", "done",
+                   "--from", "alice", "--fyi", "--closes", parent_slug],
+                  transport=t)
+    capsys.readouterr()
+    assert rc == 0, "the FYI reply failed to close its parent"
+
+    closed = okf.parse_frontmatter(t.store[parent]) or {}
+    assert closed["status"] == "done", f"parent not closed: {closed['status']!r}"
+
+    body = t.store[parent]
+    named = [s for s in (p.rsplit("/", 1)[-1][:-3] for p in _rows(t))
+             if s in body and s != parent_slug]
+    assert named, (
+        f"the close evidence names a reply slug that does not exist. "
+        f"docs={sorted(p.rsplit('/',1)[-1][:-3] for p in _rows(t))!r}\n"
+        f"parent body: {body!r}")
+
+
+def test_every_directive_slug_comes_from_ONE_derivation():
+    """The class fix, not the two instances. Three hand-rolled copies of one
+    derivation was the defect; a fourth caller would reintroduce it."""
+    import inspect
+    src = inspect.getsource(cli)
+    hand_rolled = src.count('_payload_hash(payload)')
+    assert hand_rolled <= 2, (
+        f"{hand_rolled} hand-rolled directive-slug derivations remain; the "
+        f"argparse-driven verbs must all route through _directive_slug()")
+
+
 # --- the creation-side hole this change had to close first --------------------
 
 def test_a_doc_CREATED_terminal_requires_evidence():
