@@ -124,16 +124,41 @@ def test_a_LARGE_remainder_is_NOT_retried():
         f"a large remainder was retried anyway: {t2.retried} reads for 5 slugs")
 
 
-def test_the_retry_shares_the_SAME_deadline_and_cannot_outlive_it():
-    """PR 599's lesson, applied here before anyone hits it: a retry that opens
-    its own budget is the shared-budget defect wearing a retry hat. With an
-    already-spent deadline the retry must not run at all."""
+def test_the_retry_uses_the_SAME_deadline_OBJECT_as_the_main_scan(monkeypatch):
+    """PR 599's lesson, pinned on the object rather than on a timing outcome.
+
+    My first version of this test opened the fold with an already-spent deadline
+    and asserted the section came back incomplete. It PASSED against a mutant
+    that gave the retry its own fresh 999s budget — because an expired deadline
+    trips `budget_cut` in the main loop, which blocks the retry before the
+    deadline question is ever reached. The test could not distinguish the thing
+    its name promised, which is the exact defect class this week kept producing.
+
+    The property is object identity: a retry that opens its own budget is the
+    shared-budget defect wearing a retry hat (599: one Deadline handed to two
+    consumers starved the second). So assert every scan — first pass and retry
+    alike — receives the SAME object.
+    """
+    seen = []
+    real = projection._scan_review_slug
+
+    def spy(transport, team, slug, entry, *, now, deadline):
+        seen.append((slug, id(deadline)))
+        return real(transport, team, slug, entry, now=now, deadline=deadline)
+
+    monkeypatch.setattr(projection, "_scan_review_slug", spy)
     t = _FlakyRead("pr-3")
     _seed(t, 8)
-    sec = projection.build_review_projection(
-        t, TEAM, now=_now(), prior=None, settled_index=set(),
-        deadline=Deadline.open(0.0))
-    assert sec["complete"] is False, "an expired deadline still produced a complete section"
+    sec = _build(t)
+
+    assert sec["complete"] is True, "the retry did not fire, so this proves nothing"
+    retried = [d for slug, d in seen if slug == "pr-3"]
+    assert len(retried) == 2, f"expected one retry of pr-3, got {len(retried)}"
+    assert retried[0] == retried[1], (
+        "the retry received a DIFFERENT Deadline object than the first scan — "
+        "a retry with its own budget is the 599 shared-budget defect again")
+    assert len({d for _, d in seen}) == 1, (
+        "more than one Deadline object was in play across the pass")
 
 
 def test_the_retry_cap_is_a_named_constant_not_a_literal():

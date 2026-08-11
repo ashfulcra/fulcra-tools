@@ -934,6 +934,17 @@ it (not on PyPI).
   rather than raising an alarm. **rc 3 is reserved for a WALL-CLOCK cut** — a real anomaly. Durable fix
   for full coverage is projection-side (reconcile already pays the listing cost); it does not carry
   per-reviewer verdict recency today.
+- **PRIOR FRESHNESS IS LOAD-BEARING, and it is measurable: a stale prior costs 3.3x.** Measured on the
+  live store 2026-08-10, same host, same 240s budget: a CONVERGED prior folds 223 review slugs in 154
+  ops / 84.4s and completes; a STALE prior costs 501 ops / 240.7s and cuts at 216/223. So reconcile
+  cadence is not housekeeping — a host that reconciles rarely pays triple and may never finish a pass,
+  and because the forge section's completeness follows the review fold's, one host's staleness denies
+  forge to every consumer reading that aggregate. **A SMALL unknown remainder is retried once inside the
+  same pass** (`RETRY_UNKNOWN_MAX`, bounded by the SAME deadline object): a transient converts, a
+  persistent failure stays UNKNOWN and the section stays honestly incomplete. What was explicitly
+  REJECTED is a tolerance that calls one-short complete — that manufactures the false-clear this file
+  keeps warning about. When you find a fold "stuck" at n-1 of n, check for a transient before hunting a
+  broken record: measured, every one of the 223 slugs resolved individually.
 - **The head-of-line rule applies BETWEEN sections too: never hand two builders ONE budget object.**
   `reconcile` opened a single `Deadline` and passed it to the review projection AND the forge projection.
   The review fold spent it first, so forge was not slow — it was **never built**: measured on the live
