@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from fulcra_collect.freshness import FreshnessExpectation
 from fulcra_collect.plugin import (
     Credential,
     HealthResult,
@@ -34,6 +35,36 @@ from .models import Reading
 
 PLUGIN_ID = "purpleair"
 DEFAULT_INTERVAL = timedelta(minutes=10)
+
+#: When silence from this sensor stops being normal.
+#
+# A PurpleAir sensor samples continuously, so — unlike a human-driven source
+# such as a watch or listen history — silence here is UNAMBIGUOUS. Nobody has
+# to decide whether the operator simply did not use anything today; a sensor
+# that reports nothing is a sensor that is off, unreachable, or refusing us.
+# That is what makes this the right first source to monitor.
+#
+# Twelve hours, not the poll interval. Three reasons, all about not crying wolf:
+#   * At the 10-minute default that is ~72 consecutive failed polls, so a
+#     dead sensor still surfaces within half a day — the useful range for air
+#     quality, which is a trend signal and not an alarm.
+#   * The daemon's interval is operator-configurable (`set-interval`), and a
+#     bound derived from the default would flap for anyone who widens it.
+#   * Sensor reboots, Wi-Fi drops and PurpleAir API maintenance are ordinary
+#     multi-hour events. An alert that fires on those gets switched off, and
+#     then it is not there for the real one.
+#
+# Both clocks are declared because they fail apart in one narrow case. A stuck
+# sensor clock is caught by yield silence alone: the dedup key embeds the
+# reading's timestamp, so a repeated timestamp is claimed once and every later
+# poll skips, and nothing is accepted. But a sensor whose clock jumps BACKWARD
+# (an NTP correction, a firmware reset) mints fresh dedup keys and keeps
+# writing — yields continue while the data it carries is stale. Only the
+# upstream bound sees that.
+FRESHNESS = FreshnessExpectation(
+    max_yield_silence=timedelta(hours=12),
+    max_upstream_lag=timedelta(hours=12),
+)
 
 MODE_API = "api"
 MODE_LOCAL = "local"
@@ -126,7 +157,13 @@ def _write_reading(
         # dropping it forever after a transient POST failure.
         ctx.unclaim_dedup_keys({key})
         raise
-    ctx.annotation(f"PurpleAir {reading.sensor_id}: {len(records)} measures")
+    # observed_at is the SENSOR's timestamp, not our write time — it is what
+    # lets the daemon distinguish a sensor still reporting from one whose
+    # readings have frozen while we keep accepting them.
+    ctx.annotation(
+        f"PurpleAir {reading.sensor_id}: {len(records)} measures",
+        observed_at=reading.observed_at.isoformat(),
+    )
     return len(records)
 
 
@@ -186,6 +223,7 @@ PLUGIN = Plugin(
         "every 10 minutes."
     ),
     default_interval=DEFAULT_INTERVAL,
+    freshness=FRESHNESS,
     category="other",
     required_credentials=(
         Credential(
