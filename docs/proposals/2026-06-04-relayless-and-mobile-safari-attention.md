@@ -366,11 +366,25 @@ CI job that builds this project at all.
    only `SafariWebExtensionHandler.swift`, so none of this code existed in the
    extension process at all.
 
-   **The TypeScript half does not exist yet**: as of this change nothing in
-   `chrome/src` calls `sendNativeMessage` (verified, not assumed), so this is
-   one half of a contract, and both halves must agree on the SNAKE_CASE wire
-   keys — the ones `AttentionEvent` already uses in `chrome/src/types.ts`, not
-   the Swift property names.
+   The TypeScript **transport** now exists —
+   `chrome/src/relayless/nativeTransport.ts`, sharing the SNAKE_CASE wire keys
+   `AttentionEvent` already uses in `chrome/src/types.ts` (not the Swift
+   property names). Outbox entries are handed across unchanged; a mapping layer
+   is exactly where a renamed field would go quietly missing.
+
+   **What is still NOT wired, and it is more than a transport.** Three facts,
+   each verified rather than assumed:
+
+   - `startVisibilityCapture` has **no production caller** — it is invoked only
+     from its own tests, so Safari capture runs nowhere today;
+   - there is **no Safari build variant**: no separate manifest, no vite
+     `define`, no build flag distinguishing a Safari bundle from the Chrome one;
+   - the Xcode extension target copies `chrome/dist` **verbatim**, so the Safari
+     extension currently ships the Chrome bundle.
+
+   So finishing the JS half needs a packaging decision — a separate Safari
+   bundle, or one bundle that picks its transport at runtime — and that decision
+   changes what the extension target copies. It is deliberately not made here.
 
    **Runtime is still gated on step 5's portal registration.** The extension
    process reads the token from the shared Keychain group, so until that
