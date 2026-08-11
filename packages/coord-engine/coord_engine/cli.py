@@ -4351,13 +4351,30 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     # construction; distinct payloads occupy distinct paths and can never race.
     payload = _directive_payload(args.title, args.summary, args.next, assignee)
     slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    # NOTIFICATIONS DO NOT OPEN (2026-08-11). `tell` minted EVERY message as a
+    # `proposed` row that only the recipient could close — so a report, an ack or
+    # an FYI became a permanent obligation nobody could discharge, because there
+    # was never anything to do. Measured on this bus 2026-08-11: 1239 of 1250
+    # proposed rows were dispatch, and two agents authored 79% of them doing
+    # exactly this.
+    #
+    # This is Ruling 1's sibling one plane over (PR 561: a merged PR closes its
+    # review as an ARTIFACT of the merge). Closure belongs to the terminal event,
+    # not to a separate discipline step nobody performs. A notification's
+    # terminal event IS its delivery, so it is born closed and never enters the
+    # open pile — while still writing its durable ptr doc and still emitting the
+    # companion event that puts it in the recipient's queue. Delivery is
+    # unchanged; only the false obligation goes away.
+    fyi = bool(getattr(args, "fyi", False))
     try:
         _, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
-            status="proposed", priority=args.priority,
+            status=("done" if fyi else "proposed"), priority=args.priority,
             owner=getattr(args, "sender", None) or _host(), assignee=assignee,
             summary=args.summary or "", next_action=args.next, kind="directive",
             not_before=not_before, slug=slug,
+            evidence=("notification delivered; no action was requested of the "
+                      "assignee" if fyi else None),
         )
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
@@ -10772,6 +10789,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--priority", "-p", default="P2"); sp.add_argument("--workstream", "-w")
         sp.add_argument("--summary", "-s"); sp.add_argument("--next", "-n")
         sp.add_argument("--from", dest="sender")
+        sp.add_argument("--fyi", action="store_true",
+                        help="this message asks for NOTHING: deliver it, but do "
+                             "not open an obligation the recipient can never "
+                             "discharge (reports, acks, FYIs)")
 
     tl = sub.add_parser("tell", help="direct work at an agent (directive = task w/ assignee)")
     tl.add_argument("team"); tl.add_argument("assignee"); tl.add_argument("title")
