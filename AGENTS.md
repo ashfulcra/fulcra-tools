@@ -104,6 +104,19 @@ under `skills/`, each package with its own README, build, and tests.
   `build_macos_app.sh`; `test_registry_manifest.py` fails if you do. (This
   drift shipped once: PurpleAir was in `requires` while the wheel-build loop
   and presence guard kept their own lists — caught in PR #455 review.)
+- **Shipping a new plugin: document it in the same PR.**
+  `docs/how-do-i-get-my-data.md` states that it lists *every* source Collect can
+  pull from, so an undocumented plugin makes that opening sentence false. The
+  catalogue cites plugins by id in backticks, and
+  `packages/collect/tests/test_docs_coverage.py` fails when a registered plugin
+  appears nowhere in it — so the test tells you at PR time, not a user months
+  later. A plugin that genuinely is not a user-facing source goes in that file's
+  `_NOT_USER_FACING` map **with a reason**, which is a deliberate statement, not
+  a way to quiet the test. The check is coverage only: it proves the source is
+  mentioned, never that the prose is right. (This drifted for real — `gmail` and
+  `purpleair` shipped undocumented, the Apple TV section omitted the on-device
+  `apple-tv` reader, and the Apple Music section stated no Apple Music plugin
+  existed while `apple-music-takeout` was registered.)
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the fourteen `fulcra-agent-*` skills under `skills/` are how an agent
