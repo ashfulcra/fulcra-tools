@@ -161,5 +161,44 @@ def test_the_retry_uses_the_SAME_deadline_OBJECT_as_the_main_scan(monkeypatch):
         "more than one Deadline object was in play across the pass")
 
 
+def test_a_retry_that_resolves_a_slug_as_GC_RETIRED_completes_the_pass():
+    """codex-reviewer, 602 r1.
+
+    `_scan_review_slug` returns `(None, True)` for a gc-retired review: RESOLVED
+    successfully, and deliberately omitted from rows. My first retry wrote
+    `if not ok or row is None: continue` — and even named gc-retired in the
+    comment while treating it as a failure. So a retry that conclusively retired
+    a slug left the section INCOMPLETE and kept a stale prior row.
+
+    `(None, True)` and `(None, False)` are different answers. `ok` is the whole
+    question; `row is None` is a separate fact about whether to project it.
+    """
+    class _FlakyThenRetired(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def read(self, path):
+            if path == f"team/{TEAM}/review/pr-3.md" and self.first:
+                self.first = False
+                return None                    # transient on the first read
+            return super().read(path)
+
+    t = _FlakyThenRetired()
+    _seed(t, 4)
+    # pr-3 is gc-retired: the retry resolves it and it must be OMITTED, not
+    # counted unknown.
+    t.put(f"team/{TEAM}/review/pr-3/verdicts/{projection.GC_MARKER}",
+          "---\nschema: review-gc/v1\n---\n")
+
+    sec = _build(t)
+    assert sec["complete"] is True, (
+        f"a retry that RESOLVED a slug as retired still reported the section "
+        f"incomplete: scanned={sec['scanned']}/{sec['total']}")
+    assert [r["name"] for r in sec["rows"]].count("pr-3") == 0, (
+        "the gc-retired slug was projected, or a stale prior row survived")
+    assert sec["scanned"] == sec["total"] == 4
+
+
 def test_the_retry_cap_is_a_named_constant_not_a_literal():
     assert projection.RETRY_UNKNOWN_MAX == 3

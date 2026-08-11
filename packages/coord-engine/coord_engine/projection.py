@@ -723,10 +723,20 @@ def build_review_projection(
                 break
             row, ok = _scan_review_slug(transport, team, slug, e, now=now,
                                         deadline=deadline)
-            if not ok or row is None:
-                continue          # still unknown, or gc-retired: leave the count
+            if not ok:
+                continue          # still UNKNOWN: the prior row stays as-is
+            # RESOLVED. `ok` is the whole question; `row is None` is a separate
+            # fact meaning gc-retired — resolved successfully and deliberately
+            # OMITTED from rows. My first cut wrote `if not ok or row is None`
+            # and even named gc-retired in the comment while treating it as a
+            # failure, so a retry that conclusively retired a slug left the
+            # section incomplete AND kept a stale prior row (codex-reviewer, 602
+            # r1). `(None, True)` and `(None, False)` are different answers; the
+            # tri-state lesson, one more time, in the branch I had just written
+            # to fix a different collapse.
             rows = [r for r in rows if r.get("name") != slug]
-            rows.append(row)
+            if row is not None:
+                rows.append(row)
             unknown -= 1
     rows.sort(key=lambda r: str(r.get("name")))
 
