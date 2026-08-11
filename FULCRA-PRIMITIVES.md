@@ -42,10 +42,22 @@ so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-13 on
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
-> repo**. Two releases landed inside 24 hours to produce this stamp. **This stamp
-> is 0.1.38 and has NOT been re-verified against 0.1.39, which is what is
-> installed on the fleet as of 2026-08-03** — treat any 0.1.39 delta below as
-> unknown rather than absent, and re-stamp when you next verify the surface. The
+> repo**. Two releases landed inside 24 hours to produce this stamp.
+>
+> **0.1.39 delta — VERIFIED 2026-08-11** (published-wheel diff 0.1.38→0.1.39 +
+> CLI fingerprint; this is a delta verification, not a fresh full-surface
+> sweep — the full stamp above remains 2026-07-16/0.1.38): **no verbs or
+> subcommands added or removed; signatures stable.** The change is data-type
+> RESOLUTION semantics, centralized in a new `resolve_data_type` helper (lib
+> `FulcraAPI.resolve_data_type` + a shared CLI callback):
+> `fulcra get-records` now resolves a type to **every matching API version**
+> instead of erroring on ambiguity (command bodies receive resolved catalog
+> entries, not raw strings), and — the part that fixes a real shared-read
+> gotcha — **`--user-id` now scopes shorthand/catalog resolution to the SHARE
+> OWNER's catalog**, where 0.1.38 resolved against yours even when reading
+> their data. `data-type` verbs resolve scoped to the authenticated user.
+> Catalog lib calls (`v1_catalog_data_type`, `v1_catalog_schema`) gained
+> user-id/api-version parameters accordingly. The
 > published OpenAPI is **not** a complete route list (`/ingest/v1/record/batch`
 > is live and unpublished), so absence from the spec is never evidence a route
 > is gone — probe it (404 gone, 401 exists) before concluding anything.
@@ -343,7 +355,11 @@ shared with you.
 
 - **Tier 1:** `fulcra share create|update|delete|leave|list-incoming|list-outgoing`.
   Reading shared data: `fulcra get-records <DataType> "<range>" --user-id
-  <their fulcra_userid>` (requires an active incoming share).
+  <their fulcra_userid>` (requires an active incoming share). **0.1.39:**
+  the `<DataType>` shorthand now resolves against the share OWNER's catalog
+  when `--user-id` is present (0.1.38 resolved against YOURS — a
+  `Base/<uuid>` or named type that existed only in their catalog failed or
+  mis-resolved; upgrade rather than working around).
   **Fixed in 0.1.38 — upgrade, don't work around.** 0.1.36/0.1.37 omitted the
   `fulcra_user_name` body field the server had grown a requirement for, so every
   `fulcra share create` 422'd
