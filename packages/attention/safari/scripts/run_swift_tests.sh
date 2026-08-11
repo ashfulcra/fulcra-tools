@@ -29,6 +29,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$HERE/../FulcraAttention/macOS (App)"
+EXT="$HERE/../FulcraAttention/Shared (Extension)"
 TESTS="$HERE/../FulcraAttention/FulcraAttentionTests"
 
 # Platform-agnostic logic only. Deliberately excluded:
@@ -45,6 +46,13 @@ SOURCES=(
   "Ingest.swift"
 )
 
+# Platform-agnostic sources from the shared EXTENSION folder. Excluded:
+# SafariWebExtensionHandler.swift — it subclasses an NSExtension host type and
+# is a thin adapter by design; everything decidable lives in NativeBridge.
+EXT_SOURCES=(
+  "NativeBridge.swift"
+)
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 PKG="$WORK/FulcraAttentionCore"
@@ -57,6 +65,10 @@ mkdir -p "$PKG/Sources/FulcraAttention" "$PKG/Tests/FulcraAttentionTests"
 for f in "${SOURCES[@]}"; do
   [ -f "$APP/$f" ] || { echo "ERROR: missing source $APP/$f" >&2; exit 1; }
   cp "$APP/$f" "$PKG/Sources/FulcraAttention/$f"
+done
+for f in "${EXT_SOURCES[@]}"; do
+  [ -f "$EXT/$f" ] || { echo "ERROR: missing source $EXT/$f" >&2; exit 1; }
+  cp "$EXT/$f" "$PKG/Sources/FulcraAttention/$f"
 done
 
 shopt -s nullglob
