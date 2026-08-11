@@ -114,6 +114,11 @@ DEFAULT_BUILD_BUDGET = 240.0
 #: fold cannot take away.
 DEFAULT_FORGE_BUDGET = 60.0
 
+#: How many UNKNOWN slugs may be re-scanned once within the same pass. Small by
+#: intent: a handful is a transient, a crowd is a budget cut, and only the first
+#: is worth paying for inside the same deadline.
+RETRY_UNKNOWN_MAX = 3
+
 #: Skew tolerance (hours) for a section stamped slightly in the FUTURE of the
 #: reading host's clock — the same 900s budget reconcile's fast path trusts
 #: between hosts (``reconcile.FAST_PATH_SKEW_MARGIN_SECONDS``; not imported to
@@ -669,6 +674,7 @@ def build_review_projection(
             rows.append(prior_rows[slug])
         else:
             fresh.append((slug, e))
+    retryable: list[tuple[str, dict[str, Any]]] = []
     for slug, e in fresh:
         if budget_cut or deadline.expired():
             budget_cut = True
@@ -680,6 +686,7 @@ def build_review_projection(
                                     deadline=deadline)
         if not ok:
             unknown += 1
+            retryable.append((slug, e))
             if slug in prior_rows:
                 rows.append(prior_rows[slug])
             continue
@@ -688,6 +695,39 @@ def build_review_projection(
             # Complete, not unknown: the pass DID resolve this slug.
             continue
         rows.append(row)
+
+    # IN-PASS RETRY of a SMALL unknown remainder (coord-boss direction, 2026-08-11).
+    #
+    # Measured: with 223 slugs the fold lands at 222/223 — ONE slug UNKNOWN in one
+    # pass — while every slug resolves fine when scanned on its own. That single
+    # blip is not a broken directory; it is a transient read against a fold with no
+    # headroom. But because the forge section's completeness follows this one, a
+    # single transient denies forge to the whole fleet until a later pass converges.
+    #
+    # So: re-scan just those slugs, ONCE. A transient converts and the pass
+    # completes honestly; a real failure stays UNKNOWN and the section stays
+    # honestly incomplete. Completeness SEMANTICS are untouched — this is not a
+    # tolerance that calls one-short complete, which would manufacture exactly the
+    # false-clear this codebase exists to hunt (coord-boss withdrew that option).
+    #
+    # TWO CONSTRAINTS, both learned the expensive way this week:
+    #   * bounded by the SAME `deadline` object, never a fresh one — a retry that
+    #     opens its own budget is the shared-budget defect wearing a retry hat
+    #     (PR 599: one Deadline passed to two consumers starved the second);
+    #   * only a SMALL remainder, and never after a budget cut. A large remainder
+    #     means the budget ran out, and re-scanning it would spend the next
+    #     section's time re-doing work that simply needs another pass.
+    if retryable and not budget_cut and len(retryable) <= RETRY_UNKNOWN_MAX:
+        for slug, e in retryable:
+            if deadline.expired():
+                break
+            row, ok = _scan_review_slug(transport, team, slug, e, now=now,
+                                        deadline=deadline)
+            if not ok or row is None:
+                continue          # still unknown, or gc-retired: leave the count
+            rows = [r for r in rows if r.get("name") != slug]
+            rows.append(row)
+            unknown -= 1
     rows.sort(key=lambda r: str(r.get("name")))
 
     # Dir-only slugs (a `<slug>/` with no doc): classify orphan / tombstone /
