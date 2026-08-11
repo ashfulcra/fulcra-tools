@@ -64,6 +64,7 @@ def new_task_doc(
     not_before: Optional[str] = None,
     slug: Optional[str] = None,
     evidence: Optional[str] = None,
+    fyi: bool = False,
 ) -> tuple[str, str]:
     """Return ``(slug, content)`` for a new OKF Task doc. Raises on bad enums.
 
@@ -92,6 +93,11 @@ def new_task_doc(
         tags.append(f"workstream:{workstream}")
     if kind:
         tags.append(f"kind:{kind}")
+    if fyi:
+        # EXPLICIT mode marker. The write path recomputes message identity
+        # from a stored doc, and a notification must never be mistaken for a
+        # completed ask — status alone cannot tell them apart.
+        tags.append("mode:fyi")
     fm = {
         "type": "Task", "title": title, "description": summary or "", "timestamp": now,
         "tags": tags, "id": slug, "status": status, "priority": priority,

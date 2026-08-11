@@ -98,8 +98,6 @@ def test_the_FYI_row_is_INVISIBLE_to_the_open_board(monkeypatch):
     assert row["status"] not in model.OPEN_STATUSES
 
 
-# --- the creation-side hole this change had to close first --------------------
-
 # --- delivery must be UNCHANGED, which is the whole safety of this feature ----
 
 class _RecordingTransport(FakeTransport):
@@ -168,6 +166,119 @@ def test_an_FYI_is_correctly_ABSENT_from_the_needs_attention_view(monkeypatch):
         "the control failed: an OPEN directive must still appear, or the "
         "assertion above proves nothing about status")
 
+
+# --- mode is IDENTITY: the two must never share a path ------------------------
+
+def _send_on(t, monkeypatch, *extra, title="a message"):
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "alice")
+    return cli.main(["tell", TEAM, "bob", title, "-s", "body",
+                     "--from", "alice", *extra], transport=t)
+
+
+def _rows(t):
+    return {p: v for p, v in t.store.items()
+            if p.startswith(f"team/{TEAM}/task/") and p.endswith(".md")}
+
+
+def _recording():
+    t = _RecordingTransport()
+    t.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+          json.dumps({"data_type": "X/1", "api_version": "v1alpha1"}))
+    return t
+
+
+def test_FYI_THEN_ASK_does_not_swallow_the_real_ask(monkeypatch):
+    """codex-reviewer, 605 r2 — the dangerous ordering.
+
+    `payload`/`slug` were computed BEFORE `--fyi` was consulted, so the same text
+    sent as a notification and then as a genuine ask landed on ONE path. The ask
+    deduped onto the `done` row and emitted no companion event: real work,
+    silently absent from BOTH the obligation plane and the recipient's event
+    window. That is worse than the bug this feature fixes.
+    """
+    t = _recording()
+    _send_on(t, monkeypatch, "--fyi")
+    _send_on(t, monkeypatch)                     # same text, as a real ask
+
+    docs = _rows(t)
+    assert len(docs) == 2, (
+        f"the ask collided with the notification on one path: {list(docs)}")
+    statuses = sorted((okf.parse_frontmatter(c) or {})["status"]
+                      for c in docs.values())
+    assert statuses == ["done", "proposed"], (
+        f"the two modes did not both survive: {statuses}")
+    assert len(t.records_written) == 2, (
+        "the real ask emitted no companion event — invisible to the recipient's "
+        "queue, which is silent loss of genuine work")
+
+
+def test_ASK_THEN_FYI_does_not_falsify_the_no_obligation_promise(monkeypatch):
+    """The mirror ordering: the FYI deduped onto the `proposed` row, so the
+    promise that a notification opens nothing was simply untrue."""
+    t = _recording()
+    _send_on(t, monkeypatch)
+    _send_on(t, monkeypatch, "--fyi")
+
+    docs = _rows(t)
+    assert len(docs) == 2, (
+        f"the notification collided with the open ask: {list(docs)}")
+    assert sorted((okf.parse_frontmatter(c) or {})["status"]
+                  for c in docs.values()) == ["done", "proposed"]
+
+
+def test_an_ORDINARY_directive_slug_is_UNCHANGED_by_this_feature():
+    """Only the notification case may append a marker. If ordinary hashes moved,
+    every slug already in the store would stop deduping and the whole fleet
+    would re-deliver its history."""
+    base = cli._directive_payload("t", "s", "n", "bob")
+    assert base == ("t", "s", "n", "bob"), (
+        f"the ordinary payload shape changed: {base!r}")
+    assert cli._directive_payload("t", "s", "n", "bob", fyi=True) != base
+
+
+def test_mode_is_read_from_a_TAG_not_inferred_from_status():
+    """A COMPLETED ordinary directive is terminal too. Inferring mode from status
+    would make every finished ask start reading as a notification — the same
+    two-states-into-one collapse this fix removes."""
+    _s1, fyi_doc = tasks.new_task_doc(
+        "t", now="2026-08-11T00:00:00Z", status="done", evidence="e",
+        assignee="bob", summary="s", next_action="n", kind="directive", fyi=True)
+    _s2, done_ask = tasks.new_task_doc(
+        "t", now="2026-08-11T00:00:00Z", status="done", evidence="e",
+        assignee="bob", summary="s", next_action="n", kind="directive")
+    assert cli._doc_payload(fyi_doc) != cli._doc_payload(done_ask), (
+        "a completed ASK and a notification computed the SAME identity — a "
+        "finished ask would be mistaken for an FYI")
+
+
+def test_later_REFUSES_fyi_rather_than_silently_losing_the_idea(monkeypatch, capsys):
+    """codex-reviewer, 605 r2. `later` captures to @backlog — an audience the
+    companion emitter skips — and the backlog fold shows OPEN rows. So a
+    `later --fyi` would be born terminal, hidden from the backlog view, and
+    delivered to nobody: the captured idea silently vanishes."""
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "alice")
+    t = FakeTransport()
+    t.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+          json.dumps({"data_type": "X/1", "api_version": "v1alpha1"}))
+    rc = cli.main(["later", TEAM, "an idea", "-s", "body", "--fyi"], transport=t)
+    err = capsys.readouterr().err
+    assert rc != 0, "later --fyi was accepted; the captured idea is now invisible"
+    assert "not meaningful" in err and "backlog" in err, (
+        f"the refusal does not explain itself: {err!r}")
+    assert not _rows(t), "a refused capture still wrote a doc"
+
+
+def test_later_WITHOUT_fyi_still_works(monkeypatch):
+    """The counterweight: the refusal must not break ordinary backlog capture."""
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "alice")
+    t = FakeTransport()
+    t.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+          json.dumps({"data_type": "X/1", "api_version": "v1alpha1"}))
+    rc = cli.main(["later", TEAM, "an idea", "-s", "body"], transport=t)
+    assert rc == 0 and len(_rows(t)) == 1
+
+
+# --- the creation-side hole this change had to close first --------------------
 
 def test_a_doc_CREATED_terminal_requires_evidence():
     """`apply_update` has always enforced "done requires evidence", but only on
