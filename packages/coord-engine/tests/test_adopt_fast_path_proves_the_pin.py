@@ -64,9 +64,18 @@ def _fast_path_fn() -> str:
 
 def _run(tmp_path, *, sentinel: str | None, installed: str | None,
          bus_v3: bool = True, writer: bool = True,
-         metadata: str | None = "json") -> bool:
+         metadata: str | None = "json", spaces: bool = False) -> bool:
     """Drive the real function against a stub engine. Returns whether the fast
     path was taken."""
+    if spaces:
+        # Unique per call: a test that drives BOTH directions must not collide
+        # on one directory (my first version did, and the resulting error looked
+        # exactly like the quoting failure it was meant to detect).
+        n = 0
+        while (cand := tmp_path / f"a dir with spaces {n}").exists():
+            n += 1
+        cand.mkdir()
+        tmp_path = cand
     home = tmp_path / "home"
     home.mkdir()
     bin_dir = tmp_path / "bin"
@@ -188,6 +197,24 @@ def test_a_missing_bus_v3_verb_still_falls_through(tmp_path):
     """The pre-bus-v3 snapshot case — the one check that DOES catch
     coord-opus-worker's July image today. It must survive the refactor."""
     assert not _run(tmp_path, sentinel=PIN, installed=PIN, bus_v3=False)
+
+
+def test_a_path_with_SPACES_does_not_break_the_probe(tmp_path):
+    """The build probe passes the env root into a heredoc'd python and runs it
+    under `sh`. Unquoted word-splitting there would silently truncate the path,
+    the read would fail, and the result would be UNKNOWN — which falls through
+    to a forced reinstall on EVERY wake for that host, with no error to explain
+    it. The safe direction hides this class of bug, so it needs its own test
+    rather than trusting that some other case would notice.
+
+    Both directions under the hostile path, so a mangled path cannot pass by
+    accidentally failing the comparison it was supposed to make.
+    """
+    assert _run(tmp_path, sentinel=PIN, installed=PIN, spaces=True), (
+        "a tool dir containing spaces broke the build probe — that host would "
+        "force a reinstall every wake and never say why")
+    assert not _run(tmp_path, sentinel=PIN, installed=OTHER, spaces=True), (
+        "with spaces in the path the probe stopped discriminating builds")
 
 
 def _pin_shape_block() -> str:
