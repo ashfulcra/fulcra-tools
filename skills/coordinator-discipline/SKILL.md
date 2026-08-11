@@ -34,10 +34,14 @@ organized as **gates**: before you take the named action, walk its checklist.
 
 ## Gate 2 — BEFORE MERGING reviewed work
 
-1. **Exact heads, three sources.** The approved head, the forge's head, and
-   the origin tip must be byte-identical. A merge of main into the branch —
-   even a trivial conflict resolution — is a NEW head and needs a new round:
-   a merge commit can carry a bad resolution under an honest approval.
+1. **Approval binds to one immutable artifact identity, checked across every
+   authoritative source at merge time.** Whatever your stack's identity is —
+   a commit sha, a content hash, a version id — the identity that was
+   approved, the identity the review system holds, and the identity you are
+   about to publish must be byte-identical. ANY change produces a new
+   identity and needs a new round: even a trivial conflict resolution can
+   carry a defect under an honest approval. (Git realization: approved head
+   == PR head == remote branch tip.)
 2. **A squash or rebase on a dependency destroys ancestry** for stacked
    branches; their prior approvals die with it. Re-round, don't rationalize.
 3. **Closure carries evidence.** The settle record written after a merge
@@ -60,13 +64,17 @@ organized as **gates**: before you take the named action, walk its checklist.
    dispatch is the assignee's STATE — what exists, what remains, blockers
    (especially operator-owed ones, named precisely), and an estimate — before
    any build starts. It converts "assigned" into "understood".
-4. **Batch the operator.** Humans get ONE decision-ready message with
-   consequences stated, never a drip. Re-escalate on a backoff, and match the
-   backoff to the human's actual hours — a third unanswered push at night is
-   noise, not diligence.
-5. **Multiline payloads ride files (heredoc-written), never inline shell
-   strings.** Backticks in a shell string execute; a directive that loses one
-   word to command substitution can invert its meaning.
+4. **Batch the operator — except for urgency.** Humans get ONE
+   decision-ready message with consequences stated, never a drip; re-escalate
+   on a backoff matched to their actual hours. The exception is real:
+   credential exposure, a destructive operation in progress, or a
+   time-critical outage goes out immediately and alone.
+5. **Payloads travel through serialization-safe channels.** Any transport
+   that interprets its payload — shell interpolation, template expansion,
+   markup rendering — can silently alter meaning; a directive that loses one
+   word can invert. Use a channel that carries the bytes inert (a file, a
+   structured field), and if shell is unavoidable, heredoc-write to a file
+   first.
 
 ## Gate 4 — BEFORE CLAIMING anything is done, fixed, or clean
 
@@ -78,15 +86,20 @@ organized as **gates**: before you take the named action, walk its checklist.
    watch it go red, remove it. (Incident: a CI guard whose regex engine
    silently ignored its word-boundary escapes — green on every push while
    structurally unable to match.)
-3. **The check and the checked must be in the same state.** Verifying "clean
-   tree exits 0" while the file under test is untracked verifies nothing.
-   Stage/commit first, then run the control — and stage before ANY mutation
-   step, because the reflex that reverts a control can revert your fix.
-4. **Silence is never success.** Every scheduled duty emits a line with
-   counts even when nothing was found; a leg that only speaks on findings
-   cannot be told from a dead one. Audit new automation's FIRST run against
-   its output contract — the run that proves the plumbing is the one that
-   fails silently.
+3. **Controls run against the same immutable snapshot that will be
+   published.** Verifying a state the check cannot see — a file the scanner
+   skips because it is untracked, a config not yet applied — verifies
+   nothing. Capture the exact publishable state first, then run the control;
+   and snapshot your own work before ANY mutation step, because the reflex
+   that reverts a control can revert your fix. (Git realization: stage or
+   commit before running controls or mutations.)
+4. **Silence is never success.** Every scheduled duty records a durable,
+   queryable completion result — counts, timestamp, failure signal — even
+   when nothing was found; a leg that only speaks on findings cannot be told
+   from a dead one. Recording is not notifying: a healthy duty may stay
+   quiet toward the operator while still leaving the trail. Audit new
+   automation's FIRST run against its output contract — the run that proves
+   the plumbing is the one that fails silently.
 5. **A capability claim states how it was verified, or says UNVERIFIED.**
 
 ## Gate 5 — the CORRECTION protocol
@@ -120,9 +133,11 @@ organized as **gates**: before you take the named action, walk its checklist.
   when you fixed the writer. Audit every READER of a shared artifact too:
   its meaning is fixed by everything that acts on it, not everything that
   writes it.
-- **A limit gets a workaround AND an upstream requirement, never churn.**
-  Hitting the same platform limit twice without a filed requirement is the
-  coordinator's failure, not the platform's.
+- **A limit that blocks a stated requirement, or costs you twice, gets a
+  workaround AND a filed upstream requirement — never churn.** A stable,
+  documented limit you can design around once may simply become a local
+  design constraint; the filing duty triggers when the limit blocks
+  something you need or keeps charging rent.
 
 ## Team binding
 
