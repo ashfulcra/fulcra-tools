@@ -113,3 +113,64 @@ describe("nativeAuthState", () => {
     ).resolves.toBe(false);
   });
 });
+
+describe("sendBatchViaNative — success receipts must be validated (codex r1)", () => {
+  // `kind: "ok"` is what will authorize CLEARING the snapshotted events once
+  // this is wired to the outbox. A malformed or version-skewed native reply
+  // that still says ok:true would therefore delete data. Success has to mean
+  // "the native side told me what it did", not "the native side said a word".
+  it("rejects ok:true with counts missing entirely", async () => {
+    const send = vi.fn().mockResolvedValue({ ok: true });
+    await expect(sendBatchViaNative([event()], send)).resolves.toMatchObject({
+      kind: "unreachable",
+    });
+  });
+
+  it("rejects ok:true when a count is the wrong type", async () => {
+    for (const reply of [
+      { ok: true, sent: "1", skipped: 0 },
+      { ok: true, sent: 1, skipped: null },
+      { ok: true, sent: {}, skipped: 0 },
+      { ok: true, sent: true, skipped: 0 },
+    ]) {
+      const send = vi.fn().mockResolvedValue(reply);
+      await expect(sendBatchViaNative([event()], send)).resolves.toMatchObject({
+        kind: "unreachable",
+      });
+    }
+  });
+
+  it("rejects ok:true with negative, fractional or non-finite counts", async () => {
+    for (const reply of [
+      { ok: true, sent: -1, skipped: 0 },
+      { ok: true, sent: 1.5, skipped: 0 },
+      { ok: true, sent: 0, skipped: NaN },
+      { ok: true, sent: Infinity, skipped: 0 },
+    ]) {
+      const send = vi.fn().mockResolvedValue(reply);
+      await expect(sendBatchViaNative([event()], send)).resolves.toMatchObject({
+        kind: "unreachable",
+      });
+    }
+  });
+
+  it("accepts zero counts, which are legitimate", async () => {
+    // Every event already in the native sent-set is a real, valid outcome.
+    const send = vi.fn().mockResolvedValue({ ok: true, sent: 0, skipped: 0 });
+    await expect(sendBatchViaNative([event()], send)).resolves.toEqual({
+      kind: "ok",
+      sent: 0,
+      skipped: 0,
+    });
+  });
+
+  it("does NOT require sent + skipped to equal the batch size", async () => {
+    // Duplicate source ids WITHIN one batch are deliberately claimed once and
+    // join neither count (RelaylessSender.sendBatch). Insisting on a total
+    // would reject a correct reply and stall the outbox forever.
+    const send = vi.fn().mockResolvedValue({ ok: true, sent: 1, skipped: 0 });
+    await expect(
+      sendBatchViaNative([event(), event(), event()], send),
+    ).resolves.toMatchObject({ kind: "ok", sent: 1 });
+  });
+});

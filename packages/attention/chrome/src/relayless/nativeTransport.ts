@@ -46,6 +46,13 @@ export type NativeOutcome =
  * `browser.runtime.sendNativeMessage`, which resolves with the reply. */
 export type SendNativeMessage = (message: unknown) => Promise<unknown>;
 
+/** A reported count is only usable if it is a finite, non-negative integer.
+ * The bridge always emits both; anything else is a reply we do not understand,
+ * and an unintelligible success is not a success. */
+function isCount(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0;
+}
+
 function defaultSend(): SendNativeMessage | null {
   // Safari exposes this on `browser` and on `chrome`. Absent in a plain web
   // page and in Chrome without a registered native host.
@@ -104,7 +111,26 @@ export async function sendBatchViaNative(
     return { kind: "unauthorized", detail: reply.error };
   }
   if (reply.ok === true) {
-    return { kind: "ok", sent: reply.sent ?? 0, skipped: reply.skipped ?? 0 };
+    // A success receipt must actually REPORT what happened. `kind: "ok"` is
+    // what authorizes the caller to clear the snapshotted events, so a reply
+    // that says ok while omitting or garbling its counts must not reach that
+    // path: a version-skewed or malformed native reply would otherwise delete
+    // data (codex-reviewer, PR 610 r1). Defaulting a missing count to 0 was
+    // the specific hole — it turned "the native side told me nothing" into
+    // "the native side accepted nothing", which reads as a clean flush.
+    //
+    // Deliberately NOT checking sent + skipped === events.length: duplicate
+    // source ids within one batch are claimed once and join NEITHER count
+    // (see RelaylessSender.sendBatch), so a correct reply can legitimately
+    // total less than the batch size. A total check would reject good replies
+    // and stall the outbox permanently.
+    if (isCount(reply.sent) && isCount(reply.skipped)) {
+      return { kind: "ok", sent: reply.sent, skipped: reply.skipped };
+    }
+    return {
+      kind: "unreachable",
+      detail: `native reply claimed success with unusable counts (sent=${String(reply.sent)}, skipped=${String(reply.skipped)})`,
+    };
   }
   // Anything else — ok:false, a malformed reply, or no reply at all — is a
   // failure. A missing `ok` must NOT read as success: an extension host that
