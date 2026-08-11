@@ -106,6 +106,23 @@ PYEOF
   [ -n "$BUILT" ] && [ "$BUILT" = "$PIN" ] || return 1
   return 0
 }
+# The comparison above assumes PIN is a full commit sha, which is the pin scheme
+# (`pp-<sha8>`), but nothing enforced it. uv records the RESOLVED commit in
+# `direct_url.json` — measured: fulcra-common is pinned by TAG and its metadata
+# carries the sha that tag resolved to. So a tag- or branch-shaped PIN could
+# never equal BUILT, the fast path would never fire, and every host would force
+# a reinstall every wake — forever, with nothing saying why. Forced reinstall is
+# the exact leg that stripped the store client on macOS, so that silence is
+# expensive. Take the safe path (full install) but SAY that the check is
+# disabled and why: a degraded mode nobody can see is the failure this whole
+# script keeps relearning.
+case "$PIN" in
+  *[!0-9a-f]* | "" ) PIN_IS_SHA=0 ;;
+  * ) [ "${#PIN}" -eq 40 ] && PIN_IS_SHA=1 || PIN_IS_SHA=0 ;;
+esac
+if [ "$PIN_IS_SHA" -ne 1 ]; then
+  echo "adopt: WARNING — PIN is not a 40-hex commit sha (${VER}); the build-identity check cannot apply, so the idempotency fast path is DISABLED and every run will reinstall. Pin a full commit sha to restore it." >&2
+fi
 if engine_is_current; then
   echo "adopt: engine already at pin ${VER} for this user (sentinel + verb + writer + BUILD COMMIT verified) — skipping install"
   INSTALLER="already-current"

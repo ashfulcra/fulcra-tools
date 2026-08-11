@@ -190,6 +190,56 @@ def test_a_missing_bus_v3_verb_still_falls_through(tmp_path):
     assert not _run(tmp_path, sentinel=PIN, installed=PIN, bus_v3=False)
 
 
+def _pin_shape_block() -> str:
+    """The PIN-shape classifier and its warning, verbatim from the script."""
+    text = SCRIPT.read_text()
+    start = text.index('case "$PIN" in')
+    rest = text[start:]
+    end = rest.index("\nfi\n") + len("\nfi\n")
+    return rest[:end]
+
+
+def _pin_shape(pin: str) -> tuple[int, str]:
+    """Returns (PIN_IS_SHA, stderr) for a given PIN."""
+    out = subprocess.run(
+        ["/bin/sh", "-c",
+         f'PIN="{pin}"\nVER="pp-test"\n' + _pin_shape_block()
+         + '\nprintf %s "$PIN_IS_SHA"\n'],
+        capture_output=True, text=True)
+    return int(out.stdout.strip() or -1), out.stderr
+
+
+def test_a_NON_SHA_pin_disables_the_check_LOUDLY(tmp_path):
+    """A tag- or branch-shaped PIN can never equal the recorded commit, because
+    uv records the RESOLVED sha (measured: fulcra-common is pinned by tag and
+    its metadata carries the resolved commit). Left silent, every host would
+    force a reinstall every wake forever with nothing saying why — and forced
+    reinstall is the leg that stripped the store client on macOS.
+    """
+    for pin in ("coord-engine-v1.3.0", "main", "", "10630261"):
+        is_sha, err = _pin_shape(pin)
+        assert is_sha == 0, f"{pin!r} was classified as a commit sha"
+        assert "WARNING" in err and "fast path is DISABLED" in err, (
+            f"a non-sha PIN {pin!r} disabled the fast path SILENTLY: {err!r}")
+
+
+def test_a_REAL_sha_pin_is_accepted_and_warns_about_nothing():
+    """The other direction — the classifier must not condemn the real pin
+    scheme, and a healthy run must stay quiet."""
+    is_sha, err = _pin_shape("10630261ff15ee3c03236cee01421bb13d85710d")
+    assert is_sha == 1, "the live pin shape was rejected as a non-sha"
+    assert "WARNING" not in err, f"a healthy pin produced a warning: {err!r}"
+
+
+def test_an_UPPERCASE_or_mixed_sha_is_not_silently_accepted():
+    """git emits lowercase; `direct_url.json` records lowercase. An uppercase
+    PIN would compare unequal, so it must take the loud path rather than the
+    silent-reinstall one."""
+    is_sha, err = _pin_shape("10630261FF15EE3C03236CEE01421BB13D85710D")
+    assert is_sha == 0 and "WARNING" in err, (
+        "an uppercase sha would never match BUILT, but said nothing")
+
+
 def test_a_failing_writer_import_still_falls_through(tmp_path):
     """`fulcra_common` must ride in the SAME environment as the engine or
     `annotate project` and `digest --emit-timeline` become silent no-ops (the
