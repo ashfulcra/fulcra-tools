@@ -72,10 +72,26 @@ public struct RelaylessSender: Sendable {
 
     /// Build records for `events`, skip already-sent ones, POST the rest, and
     /// record their source_ids on success.
+    ///
+    /// THROWS if any event cannot be turned into a wire record, without posting
+    /// anything. `ok` means every event handed in was either posted or already
+    /// in the sent-set, and a caller clears its outbox on `ok` — so an event
+    /// this method could neither post nor account for must NOT be reported as
+    /// success. It previously logged and skipped such an event, which returned
+    /// ok:true with the event in neither `sent` nor `skipped`: a malformed
+    /// timestamp silently and permanently deleted an attention record
+    /// (codex-reviewer, PR 601 r1).
+    ///
+    /// Failing the whole flush — rather than posting the good events and
+    /// reporting the bad one — matches the TypeScript this ports, where the
+    /// throw propagates out of the loop before any POST. The caller retries the
+    /// batch with its outbox intact; the alternative is a dead-letter contract,
+    /// which is a real design with durable-storage obligations and does not
+    /// belong smuggled into a parity port.
     public func sendBatch(
         _ events: [AttentionEvent],
         context: WireContext
-    ) async -> SendBatchResult {
+    ) async throws -> SendBatchResult {
         var skipped: [String] = []
         var toSend: [(record: WireRecord, sourceId: String)] = []
 
@@ -88,17 +104,11 @@ public struct RelaylessSender: Sendable {
         var claimed = snapshot.membership
 
         for event in events {
-            let result: WireResult
-            do {
-                result = try Wire.buildWireRecord(event: event, context: context)
-            } catch {
-                // An unparseable timestamp is a defect in ONE event. Dropping it
-                // keeps the rest of the flush deliverable; failing the batch
-                // would let a single malformed event block every other event
-                // behind it, indefinitely.
-                ingestLog.error("sendBatch: skipping unbuildable event: \(String(describing: error))")
-                continue
-            }
+            // Deliberately NOT caught. An event that cannot be built cannot be
+            // posted and cannot be accounted for, and this method's success
+            // contract is that every input was one or the other. Swallowing it
+            // here is what made a malformed timestamp delete a record.
+            let result = try Wire.buildWireRecord(event: event, context: context)
             if snapshot.membership.contains(result.sourceId) {
                 skipped.append(result.sourceId)
                 continue
