@@ -434,5 +434,7 @@ repository by `fulcra-coord` (substrate, identity, loops, human-in-loop, governa
 invariants), `fulcra-continuity` (§5), and `fulcra-prefs` (§6) — but nothing here is
 specific to those packages or to Fulcra. Where an invariant reads as freshly-won
 rather than timeless, it is: several in §7 correct failures these implementations
-actually suffered. The per-system derivation is recorded in
-[`docs/analysis/`](docs/analysis/).*
+actually suffered. The per-system derivations are team-particular
+records and live with each team's own coordination store rather than in this
+repository (they were removed from the public toolkit in the 2026-08
+separation sweep).*
