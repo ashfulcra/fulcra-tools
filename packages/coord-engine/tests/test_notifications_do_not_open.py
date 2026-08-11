@@ -100,6 +100,75 @@ def test_the_FYI_row_is_INVISIBLE_to_the_open_board(monkeypatch):
 
 # --- the creation-side hole this change had to close first --------------------
 
+# --- delivery must be UNCHANGED, which is the whole safety of this feature ----
+
+class _RecordingTransport(FakeTransport):
+    """Captures the companion bus events — the plane the recipient's queue
+    actually reads. The plain FakeTransport has no ``record_write``, so tests
+    built on it prove the DOC was written and say nothing about delivery."""
+
+    def __init__(self):
+        super().__init__()
+        self.records_written: list[dict] = []
+
+    def record_write(self, data_type, api_version, note, source,
+                     recorded_at=None, tags=None):
+        self.records_written.append({"note": note, "source": source})
+        return True
+
+
+def _send_recording(monkeypatch, *extra):
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "alice")
+    t = _RecordingTransport()
+    t.put(f"team/{TEAM}/_coord/bus-v3/records.json",
+          json.dumps({"data_type": "X/1", "api_version": "v1alpha1"}))
+    rc = cli.main(["tell", TEAM, "bob", "a message", "-s", "body",
+                   "--from", "alice", *extra], transport=t)
+    return rc, t
+
+
+def test_an_FYI_STILL_EMITS_the_companion_event_that_delivers_it(monkeypatch):
+    """THE risk this feature had to clear, and the one I could not see with the
+    plain fake transport.
+
+    `directives.inbox` — the needs-me/inbox view — filters OUT terminal
+    rows, which is correct and intended: an FYI is not work that needs
+    attention. But delivery to the recipient's QUEUE rides the companion `v:1`
+    bus event, not the board status. If closing the row also suppressed that
+    event, an FYI would become an INVISIBLE message rather than a quiet one —
+    silent loss, strictly worse than the obligation it was meant to remove.
+
+    So assert the event is emitted for an FYI exactly as for an ordinary tell.
+    """
+    _rc, fyi = _send_recording(monkeypatch, "--fyi")
+    _rc2, plain = _send_recording(monkeypatch)
+    assert len(fyi.records_written) == 1, (
+        f"an --fyi emitted no companion event — the message is not merely "
+        f"quiet, it is UNDELIVERED: {fyi.records_written!r}")
+    assert len(fyi.records_written) == len(plain.records_written), (
+        "an --fyi and an ordinary tell no longer deliver identically")
+    assert json.loads(fyi.records_written[0]["note"])["v"] == 1, (
+        "the companion note is not the v:1 shape the queue filter keeps")
+
+
+def test_an_FYI_is_correctly_ABSENT_from_the_needs_attention_view(monkeypatch):
+    """The other half of the same property, asserted rather than assumed: the
+    row must stay out of the work-that-needs-attention fold. Being delivered and
+    being an obligation are different things, and this feature separates them."""
+    from coord_engine import directives
+    _rc, docs = _send(monkeypatch, "--fyi")
+    fm, _ = _fm(docs)
+    row = {"status": fm["status"], "assignee": fm["assignee"],
+           "name": fm["id"], "priority": fm["priority"]}
+    assert directives.inbox([row], {}, "bob") == [], (
+        "an FYI showed up as work needing attention — the obligation it was "
+        "supposed to stop creating")
+    row_open = dict(row, status="proposed")
+    assert directives.inbox([row_open], {}, "bob") != [], (
+        "the control failed: an OPEN directive must still appear, or the "
+        "assertion above proves nothing about status")
+
+
 def test_a_doc_CREATED_terminal_requires_evidence():
     """`apply_update` has always enforced "done requires evidence", but only on
     the UPDATE path — a doc could be BORN terminal carrying no reason at all.
