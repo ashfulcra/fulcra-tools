@@ -18,6 +18,8 @@
 		FCA000000000000000000021 /* Sharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000020 /* Sharing.swift */; };
 		FCA00000000000000000000A /* EnsureDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000009 /* EnsureDefinition.swift */; };
 		FCA000000000000000000007 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000008 /* Wire.swift */; };
+		FCA00000000000000000000D /* Ingest.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000E /* Ingest.swift */; };
+		FCA00000000000000000000B /* SentSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000C /* SentSet.swift */; };
 		0DAEBD5D2FD5D984008ADF6D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */; };
 		0DAEBD642FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0DAEBD6E2FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -117,6 +119,8 @@
 		FCA000000000000000000020 /* Sharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sharing.swift; sourceTree = "<group>"; };
 		FCA000000000000000000009 /* EnsureDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnsureDefinition.swift; sourceTree = "<group>"; };
 		FCA000000000000000000008 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
+		FCA00000000000000000000E /* Ingest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingest.swift; sourceTree = "<group>"; };
+		FCA00000000000000000000C /* SentSet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentSet.swift; sourceTree = "<group>"; };
 		0DAEBD5C2FD5D984008ADF6D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		0DAEBD5E2FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "FulcraAttention Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -241,6 +245,8 @@
 				FCA000000000000000000020 /* Sharing.swift */,
 				FCA000000000000000000009 /* EnsureDefinition.swift */,
 				FCA000000000000000000008 /* Wire.swift */,
+				FCA00000000000000000000E /* Ingest.swift */,
+				FCA00000000000000000000C /* SentSet.swift */,
 				0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */,
 				0DAEBD5E2FD5D984008ADF6D /* Info.plist */,
 			);
@@ -491,6 +497,8 @@
 				FCA000000000000000000021 /* Sharing.swift in Sources */,
 				FCA00000000000000000000A /* EnsureDefinition.swift in Sources */,
 				FCA000000000000000000007 /* Wire.swift in Sources */,
+				FCA00000000000000000000D /* Ingest.swift in Sources */,
+				FCA00000000000000000000B /* SentSet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

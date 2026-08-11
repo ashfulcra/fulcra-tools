@@ -326,6 +326,24 @@ headlessly thereafter. Team: `CWH48N2H7F`.
 > keychain); App Groups give a shared, **unencrypted** `UserDefaults`/container,
 > so secrets belong in the shared Keychain group.
 
+### Testing gap found 2026-08-10 (blocks confidence in 7 and 8)
+
+The Xcode project has **no test target**, and every `.swift` is wired to a target
+explicitly (no synchronized folders). So `FulcraAttentionTests/*.swift` compiled
+nowhere and `EnsureDefinitionTests.swift` had never run since it landed. No CI
+workflow invokes `xcodebuild` either, so nothing in `safari/` had ever been built
+by CI.
+
+Interim fix: `safari/scripts/run_swift_tests.sh` assembles the platform-agnostic
+sources + the XCTest files into a throwaway SwiftPM package and runs
+`swift test` — no Xcode project, no signing, so it works headlessly and in CI.
+It runs 41 tests today (the previously-stranded `EnsureDefinitionTests` plus the
+new ingest/sent-set suites).
+
+Still owed: a real test target in the xcodeproj, which is the only way to cover
+what needs the app sandbox (Keychain access groups, App Group container), and a
+CI job that builds this project at all.
+
 ### Revised sequencing (native track)
 
 1. ✅ Native auth (device flow via URLSession) + device-local Keychain — **PR #91 (merged)**.
@@ -335,9 +353,12 @@ headlessly thereafter. Team: `CWH48N2H7F`.
 5. ✅ / pending profile **Sharing layer** (App Group + Keychain access group) — code landed in
    **PR #97**; still needs Ash's one-time Xcode capability/profile
    registration before signed runtime sharing is proven.
-6. ⏳ **Native ingest poster** (URLSession → `ingest/v1/record/batch`, refresh
-   on 401) — composes Wire.swift + EnsureDefinition.swift + Keychain token;
-   build on the merged #93/#94/#97 pieces.
+6. ✅ **Native ingest poster** (URLSession → `ingest/v1/record/batch`, refresh
+   on 401) — `Ingest.swift` (`RelaylessSender`) + `SentSet.swift`, ported from
+   `relaylessSender.ts` / `sentSet.ts`, composing Wire.swift +
+   EnsureDefinition.swift's `TokenProvider`/`HTTPClient` seams.
+   Claim-then-record: ids are marked sent only after a 2xx, so a failed POST
+   retries instead of dropping events.
 7. ⏳ **nativeMessaging bridge** — wire `SafariWebExtensionHandler.swift` to
    receive `AttentionEvent` batches from `visibility.ts`, ingest, return auth
    state; needs the sharing layer (5) + ingest (6).
