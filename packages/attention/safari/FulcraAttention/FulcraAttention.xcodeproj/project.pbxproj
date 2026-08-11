@@ -36,6 +36,22 @@
 		0DAEBD7D2FD5D984008ADF6D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3E2FD5D984008ADF6D /* Assets.xcassets */; };
 		0DAEBD7E2FD5D984008ADF6D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3E2FD5D984008ADF6D /* Assets.xcassets */; };
 		0DAEBD7F2FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */; };
+		FCA000000000000000000101 /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000100 /* NativeBridge.swift */; };
+		FCA000000000000000000102 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000008 /* Wire.swift */; };
+		FCA000000000000000000103 /* EnsureDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000009 /* EnsureDefinition.swift */; };
+		FCA000000000000000000104 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000002 /* KeychainStore.swift */; };
+		FCA000000000000000000105 /* Sharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000020 /* Sharing.swift */; };
+		FCA000000000000000000106 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000001 /* AuthManager.swift */; };
+		FCA000000000000000000107 /* SentSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000C /* SentSet.swift */; };
+		FCA000000000000000000108 /* Ingest.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000E /* Ingest.swift */; };
+		FCA000000000000000000109 /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000100 /* NativeBridge.swift */; };
+		FCA00000000000000000010A /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000008 /* Wire.swift */; };
+		FCA00000000000000000010B /* EnsureDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000009 /* EnsureDefinition.swift */; };
+		FCA00000000000000000010C /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000002 /* KeychainStore.swift */; };
+		FCA00000000000000000010D /* Sharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000020 /* Sharing.swift */; };
+		FCA00000000000000000010E /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000001 /* AuthManager.swift */; };
+		FCA00000000000000000010F /* SentSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000C /* SentSet.swift */; };
+		FCA000000000000000000110 /* Ingest.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000E /* Ingest.swift */; };
 		0DAEBD802FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */; };
 		0DAEBD9A2FD5D985008ADF6D /* service-worker-loader.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */; };
 		0DAEBD9B2FD5D985008ADF6D /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD932FD5D985008ADF6D /* index.html */; };
@@ -105,6 +121,7 @@
 		0DAEBD3D2FD5D983008ADF6D /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
 		0DAEBD3E2FD5D984008ADF6D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		FCA000000000000000000100 /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
 		0DAEBD452FD5D984008ADF6D /* FulcraAttention.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FulcraAttention.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0DAEBD482FD5D984008ADF6D /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		0DAEBD4A2FD5D984008ADF6D /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
@@ -208,6 +225,7 @@
 			children = (
 				0DAEBD912FD5D985008ADF6D /* Resources */,
 				0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */,
+				FCA000000000000000000100 /* NativeBridge.swift */,
 			);
 			path = "Shared (Extension)";
 			sourceTree = "<group>";
@@ -507,6 +525,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				0DAEBD7F2FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
+				FCA000000000000000000101 /* NativeBridge.swift in Sources */,
+				FCA000000000000000000102 /* Wire.swift in Sources */,
+				FCA000000000000000000103 /* EnsureDefinition.swift in Sources */,
+				FCA000000000000000000104 /* KeychainStore.swift in Sources */,
+				FCA000000000000000000105 /* Sharing.swift in Sources */,
+				FCA000000000000000000106 /* AuthManager.swift in Sources */,
+				FCA000000000000000000107 /* SentSet.swift in Sources */,
+				FCA000000000000000000108 /* Ingest.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -515,6 +541,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				0DAEBD802FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
+				FCA000000000000000000109 /* NativeBridge.swift in Sources */,
+				FCA00000000000000000010A /* Wire.swift in Sources */,
+				FCA00000000000000000010B /* EnsureDefinition.swift in Sources */,
+				FCA00000000000000000010C /* KeychainStore.swift in Sources */,
+				FCA00000000000000000010D /* Sharing.swift in Sources */,
+				FCA00000000000000000010E /* AuthManager.swift in Sources */,
+				FCA00000000000000000010F /* SentSet.swift in Sources */,
+				FCA000000000000000000110 /* Ingest.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

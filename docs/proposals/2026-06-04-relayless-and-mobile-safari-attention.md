@@ -359,8 +359,22 @@ CI job that builds this project at all.
    EnsureDefinition.swift's `TokenProvider`/`HTTPClient` seams.
    Claim-then-record: ids are marked sent only after a 2xx, so a failed POST
    retries instead of dropping events.
-7. ⏳ **nativeMessaging bridge** — wire `SafariWebExtensionHandler.swift` to
-   receive `AttentionEvent` batches from `visibility.ts`, ingest, return auth
-   state; needs the sharing layer (5) + ingest (6).
+7. ✅ / JS half pending **nativeMessaging bridge** — `NativeBridge.swift`
+   defines the wire protocol and owns every decision; the handler is a thin
+   adapter (logic inside `beginRequest` is untestable by construction). The
+   native sources are now in BOTH extension targets — they previously compiled
+   only `SafariWebExtensionHandler.swift`, so none of this code existed in the
+   extension process at all.
+
+   **The TypeScript half does not exist yet**: as of this change nothing in
+   `chrome/src` calls `sendNativeMessage` (verified, not assumed), so this is
+   one half of a contract, and both halves must agree on the SNAKE_CASE wire
+   keys — the ones `AttentionEvent` already uses in `chrome/src/types.ts`, not
+   the Swift property names.
+
+   **Runtime is still gated on step 5's portal registration.** The extension
+   process reads the token from the shared Keychain group, so until that
+   capability is registered the bridge answers `needs_sign_in` — truthfully,
+   rather than crashing or reporting a false success. That path is tested.
 8. ⏳ **iOS target** + content-script wiring + TestFlight (Ash's App Store
    Connect; paid Individual account exists).
