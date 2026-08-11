@@ -100,17 +100,30 @@ root = sys.argv[1]
 # defect. Ambiguity is not evidence: only ONE distinct commit across all records
 # is an answer. Zero records or conflicting records print nothing, which is
 # UNKNOWN, which takes the full install.
+#
+# A record that CANNOT be read is not a record that agrees (codex-reviewer, 603
+# r4). Skipping the damaged one and accepting its readable neighbour makes the
+# set look unanimous when one member never voted: a stale record naming PIN
+# beside a corrupted current record would certify the environment. UNKNOWN has
+# to cover the whole candidate set, not only the case where the damaged record
+# is the only one — and a valid stale record next to a damaged current one is a
+# natural shape in exactly the partially restored environment this probe exists
+# for.
 seen = set()
+bad = False
 for pat in ("coord_engine-*.dist-info", "coord-engine-*.dist-info"):
     for d in glob.glob(os.path.join(root, "lib", "*", "site-packages", pat)):
         try:
             with open(os.path.join(d, "direct_url.json")) as fh:
                 c = json.load(fh).get("vcs_info", {}).get("commit_id")
         except Exception:
+            bad = True          # missing, unreadable or malformed
             continue
         if c:
             seen.add(c)
-if len(seen) == 1:
+        else:
+            bad = True          # present but records no commit
+if not bad and len(seen) == 1:
     print(seen.pop())
 PYEOF
 )" || BUILT=""

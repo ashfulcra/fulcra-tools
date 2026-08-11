@@ -108,9 +108,14 @@ def _run(tmp_path, *, sentinel: str | None, installed: str | None,
     for name, commit in (extra_dists or ()):
         d = site / name
         d.mkdir(parents=True, exist_ok=True)
-        (d / "direct_url.json").write_text(json.dumps(
-            {"url": "https://github.com/ashfulcra/fulcra-tools",
-             "vcs_info": {"vcs": "git", "commit_id": commit}}))
+        if commit is None:                     # a damaged sibling record
+            (d / "direct_url.json").write_text("{not json at all")
+        elif commit == "":                     # present, but records no commit
+            (d / "direct_url.json").write_text(json.dumps({"url": "x"}))
+        else:
+            (d / "direct_url.json").write_text(json.dumps(
+                {"url": "https://github.com/ashfulcra/fulcra-tools",
+                 "vcs_info": {"vcs": "git", "commit_id": commit}}))
     if metadata == "json" and installed is not None:
         (dist / "direct_url.json").write_text(json.dumps(
             {"url": "https://github.com/ashfulcra/fulcra-tools",
@@ -232,6 +237,36 @@ def test_CONFLICTING_dist_info_records_are_ambiguous_not_evidence(tmp_path):
     assert not _run(tmp_path, sentinel=PIN, installed=OTHER,
                     extra_dists=(("coord-engine-2.0.0.dist-info", PIN),)), (
         "the conflict was tolerated when the matching record came second")
+
+
+def test_a_DAMAGED_sibling_record_makes_the_whole_set_unknown(tmp_path):
+    """codex-reviewer, 603 r4, reproduced independently.
+
+    r4 collected every readable record but SKIPPED unreadable ones. So a stale
+    record naming the pin, beside a corrupted current record, left `seen` with
+    exactly one commit and the probe said FAST. The set looked unanimous while
+    one member never voted.
+
+    The script's own contract is that malformed build metadata is UNKNOWN. That
+    has to cover the whole candidate set, not only the case where the damaged
+    record is the sole record — and a valid stale record next to a damaged
+    current one is a natural shape in exactly the partially restored
+    environment this probe exists for.
+    """
+    assert not _run(tmp_path, sentinel=PIN, installed=PIN,
+                    extra_dists=(("coord-engine-2.0.0.dist-info", None),)), (
+        "a MALFORMED sibling was skipped and its readable neighbour certified "
+        "the environment — a set is not unanimous when a member never voted")
+
+    assert not _run(tmp_path, sentinel=PIN, installed=PIN,
+                    extra_dists=(("coord-engine-2.0.0.dist-info", ""),)), (
+        "a sibling recording NO commit was skipped rather than counted unknown")
+
+    # And the mirror: the damaged record under the pattern scanned FIRST.
+    assert not _run(tmp_path, sentinel=PIN, installed=None, metadata="malformed",
+                    extra_dists=(("coord-engine-2.0.0.dist-info", PIN),)), (
+        "a readable stale record certified the environment while the primary "
+        "record was unreadable")
 
 
 def test_DUPLICATE_records_agreeing_on_the_pin_are_still_evidence(tmp_path):
