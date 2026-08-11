@@ -601,6 +601,26 @@ it (not on PyPI).
   bug cannot fire; the run-before-publish is what caught it, and it is now the named standard rather
   than a habit. One OS is not coverage when the failure is OS-specific — and you cannot know which
   failures are OS-specific in advance, which is the whole argument.
+- **A CACHED MARKER RECORDS WHAT YOU DID, NOT WHAT IS ON DISK — bind the skip to the artifact's own
+  identity (2026-08-11).** The adopt fast path skipped the install when `~/.coord-adopted-pin` matched
+  the pin and `coord-engine bus-v3 --help` succeeded. That pair proves "I once adopted X" and "some
+  bus-v3 engine is installed" — and since every pin since bus-v3 shipped carries that verb,
+  verb-presence cannot tell pin X from pin Y, so nothing proved the installed engine IS X. The state is
+  reachable because the marker and the artifact do not live together: coord-opus-worker's box restores a
+  snapshot frequently-but-not-always and NOT UNIFORMLY — a wake came up with `$HOME` intact while `/tmp`
+  was empty. The sentinel is in `$HOME`; the engine is in the uv tool dir. Once two things can revert
+  independently, "my marker survived" stops implying "the thing it describes survived". That box fails
+  safe today only because its image predates bus-v3 — a snapshot taken now would pass the verb check.
+  So compare the BUILD: `direct_url.json`'s `vcs_info.commit_id`, read from the engine's own
+  environment (the build-identity mechanism from PR 598). Generally: when a cheap marker guards an
+  expensive step, the guard must compare the EXPENSIVE THING's identity, not a capability every
+  candidate shares — and every unreadable/malformed/absent answer is UNKNOWN, which takes the
+  expensive path. A skipped install on a stale engine is silent and lasts the whole wake; a redundant
+  one costs ~30-60s.
+- **Shell control flow that cannot be driven WILL ship its gap.** Both adopt defects (the strip, and the
+  skip above) lived in top-level `if` blocks that no test could reach; both were found by reading, late.
+  When a decision in a shipped script matters, it goes in a function so a test can drive it against
+  stubs — `client_state`, `uv_store_client`, `engine_is_current`. Reading shell proves nothing.
   **A PRE-PUBLISH RUN CANNOT EXIT 0, AND rc 4 IS ITS EXPECTED GREEN.** The claim gate greps `doctor`
   for `matches the fleet pin (<candidate>`, and `doctor` compares the installed build's PEP 610
   `commit_id` against the STORE authority — which correctly still names the OLD pin, because nothing
