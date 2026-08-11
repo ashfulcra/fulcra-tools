@@ -18,6 +18,8 @@ import os
 
 #if os(macOS)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
 #endif
 
 // MARK: - Logging
@@ -396,14 +398,37 @@ public final nonisolated class AuthManager: @unchecked Sendable {
         return max(1, min(interval, remaining))
     }
 
+    /// Open the device-flow verification URL so the user can approve the
+    /// sign-in.
+    ///
+    /// This was macOS-only, with no `#else`: on iOS it logged "opening
+    /// verification URL in browser" and then did nothing, so `signIn()` would
+    /// sit polling for an approval the user was never given a chance to make.
+    /// A no-op under a log line claiming success is the worst version of this —
+    /// the one place you would look says it worked.
+    ///
+    /// The device code is ALSO surfaced through `onDeviceCode`, so the UI can
+    /// show it even when no browser opens; this is a convenience, not the only
+    /// path. That is why an unsupported platform is a loud error rather than a
+    /// thrown failure — sign-in can still complete by hand.
     private func openInBrowser(_ urlString: String) {
         guard let url = URL(string: urlString) else {
             authLog.error("cannot open verification URL: invalid \(urlString, privacy: .public)")
             return
         }
-        authLog.info("opening verification URL in browser")
         #if os(macOS)
+        authLog.info("opening verification URL in browser")
         NSWorkspace.shared.open(url)
+        #elseif canImport(UIKit)
+        authLog.info("opening verification URL in browser")
+        // UIApplication is main-actor-isolated; AuthManager is nonisolated and
+        // signIn() runs off the main thread.
+        Task { @MainActor in UIApplication.shared.open(url) }
+        #else
+        authLog.error(
+            "no way to open the verification URL on this platform — the user must "
+            + "enter the device code shown by onDeviceCode manually"
+        )
         #endif
     }
 }
