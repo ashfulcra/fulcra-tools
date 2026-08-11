@@ -57,10 +57,14 @@ under `skills/`, each package with its own README, build, and tests.
 - **`packages/gmail`** (`fulcra-gmail`) — the local, read-only Gmail relay:
   multi-account, crash-safe (append-only ledger + contiguous-frontier
   watermark), landing selected emails in Fulcra Files and relaying matches
-  over the coord bus. The OAuth model, account caps, logging rules,
-  ledger/relay/pipeline design, and the in-plugin rule builder all live in
-  [`packages/gmail/README.md`](packages/gmail/README.md) — read it before
-  touching the relay.
+  over the coord bus. The OAuth client MUST be an **External, Desktop app**
+  client: Internal excludes personal Gmail accounts, and a Web client's
+  secret is confidential and unsuitable for a shipped local relay (Google
+  treats a Desktop client's secret as non-confidential, which is what lets
+  one shared client ship to many installs). The full OAuth clickpath, account
+  caps, logging rules, ledger/relay/pipeline design, and the in-plugin rule
+  builder live in [`packages/gmail/README.md`](packages/gmail/README.md) —
+  read it before touching the relay.
 - **`packages/purpleair`** (`fulcra-purpleair`) — a `scheduled`/`live_polled`
   Collect plugin polling PurpleAir air-quality sensors (cloud API or a sensor
   on the LAN), fanning each reading out to per-measure **NumericAnnotation**
