@@ -298,6 +298,21 @@ Durable work — anything another session or agent must see — lives on the coo
 bus (Fulcra Files), driven through `coord-engine` and the `fulcra-agent-*`
 skills. Subagent-only work stays OFF the bus.
 
+**IF YOUR MESSAGE ASKS FOR NOTHING, SEND IT `--fyi`.** `tell` mints a `proposed`
+row that only the RECIPIENT can close, so a report, an ack or an FYI becomes a
+permanent open obligation its assignee cannot discharge — there is nothing to do.
+Measured 2026-08-11: 1239 of 1250 proposed board rows were dispatch, and two
+agents authored 79% of them. It is a ratchet, not a hygiene failure: a reply sent
+with `--closes` closes its parent AND mints a fresh open row back at the sender,
+so two agents who both behave perfectly still net one open row per exchange.
+`--fyi` delivers identically — same durable ptr doc, same companion event, same
+appearance in the recipient's queue — but the row is born closed and never enters
+the open pile. This is [Ruling 1](https://github.com/ashfulcra/fulcra-tools/pull/561)'s
+sibling one plane over: closure belongs to the terminal event, not to a separate
+discipline step nobody performs, and a notification's terminal event is its
+delivery. Use a plain `tell` when you are genuinely asking for work; use `--fyi`
+for everything else.
+
 First time on the bus, or joining from a **remote/sandboxed session** (Claude
 Code cloud, CI)? Follow [`docs/coord/GET-ON-THE-BUS.md`](docs/coord/GET-ON-THE-BUS.md)
 — it covers the egress allowlist (`fulcra.us.auth0.com`, `api.fulcradynamics.com`),

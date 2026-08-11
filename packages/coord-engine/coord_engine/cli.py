@@ -4225,9 +4225,30 @@ def _stamp_for_path(now: str, agent: str) -> str:
     return f"{safe_time}-{tasks.agent_key(agent)}"
 
 
+FYI_TAG = "mode:fyi"
+
+
+def _directive_slug(args: argparse.Namespace, assignee: Optional[str]) -> str:
+    """THE one place a directive's durable slug is derived (codex-reviewer, 605 r3).
+
+    r3 added notification mode to the identity but left TWO post-write callers
+    recomputing the OLD four-field slug by hand: `cmd_remind` scheduled its future
+    event against a slug no document had, and `tell --fyi --closes` closed a
+    parent with evidence naming a reply that did not exist. Both wrote correctly
+    and then pointed somewhere else — a dangling ptr is worse than a failure,
+    because it reports success.
+
+    Three hand-rolled copies of one derivation is the defect; a fourth caller
+    would have reintroduced it. Everything that needs this slug asks here.
+    """
+    return (f"{tasks.slugify(args.title)}-"
+            f"{_payload_hash(_directive_payload(args.title, args.summary, args.next, assignee, fyi=bool(getattr(args, 'fyi', False))))}")
+
+
 def _directive_payload(title: Optional[str], summary: Optional[str],
                        next_action: Optional[str],
-                       assignee: Optional[str]) -> tuple[str, str, str, str]:
+                       assignee: Optional[str],
+                       fyi: bool = False) -> tuple[str, ...]:
     """The message-identity fields — title, summary, next_action, ASSIGNEE.
 
     Identity == path: ``_create_directive`` hashes this payload into the canonical
@@ -4246,10 +4267,25 @@ def _directive_payload(title: Optional[str], summary: Optional[str],
     By design, not_before and priority are delivery metadata OUTSIDE this
     identity, so a reschedule or priority change of the same title dedupes onto
     the original doc (keeping its schedule) rather than re-delivering: to re-arm
-    with a new schedule or priority, send a new title."""
+    with a new schedule or priority, send a new title.
+
+    NOTIFICATION MODE IS IDENTITY (codex-reviewer, 605 r2). The slug was computed
+    before `--fyi` was consulted, so the same text sent as a notification and as a
+    real ask landed on ONE path — and the dedupe then resolved the collision in
+    whichever direction happened to arrive first. FYI first, ask second: the ask
+    dedupes onto a `done` row and emits no companion event, so genuine work is
+    silently absent from both the obligation plane and the recipient's event
+    window. Ask first, FYI second: the FYI dedupes onto a `proposed` row and the
+    no-obligation promise is simply false. An FYI and an ask are DIFFERENT
+    messages; they must occupy different paths.
+
+    Only the notification case appends a marker, so every ordinary directive's
+    hash — and therefore every slug already in the store — is byte-identical to
+    before."""
     def norm(x: Optional[str]) -> str:
         return "" if x is None else str(x)
-    return (norm(title), norm(summary), norm(next_action), norm(assignee))
+    base = (norm(title), norm(summary), norm(next_action), norm(assignee))
+    return base + ("fyi",) if fyi else base
 
 
 def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
@@ -4261,8 +4297,13 @@ def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
     fm = okf.parse_frontmatter(doc)
     if fm is None:
         return None
+    # Mode is read from an EXPLICIT tag, never inferred from status. A completed
+    # ordinary directive is also terminal, so inferring would make every finished
+    # ask start reading as a notification — the same two-states-into-one collapse
+    # this identity fix exists to remove.
     return _directive_payload(fm.get("title"), fm.get("description"),
-                              fm.get("next_action"), fm.get("assignee"))
+                              fm.get("next_action"), fm.get("assignee"),
+                              fyi=(FYI_TAG in (fm.get("tags") or [])))
 
 
 def _payload_hash(payload: tuple[str, str, str, str]) -> str:
@@ -4349,15 +4390,33 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     # The canonical directive path ALWAYS carries the payload hash: identical
     # payloads (any senders, any order) converge on one path and dedupe by
     # construction; distinct payloads occupy distinct paths and can never race.
-    payload = _directive_payload(args.title, args.summary, args.next, assignee)
-    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    fyi = bool(getattr(args, "fyi", False))
+    payload = _directive_payload(args.title, args.summary, args.next, assignee,
+                                 fyi=fyi)
+    slug = _directive_slug(args, assignee)
+    # NOTIFICATIONS DO NOT OPEN (2026-08-11). `tell` minted EVERY message as a
+    # `proposed` row that only the recipient could close — so a report, an ack or
+    # an FYI became a permanent obligation nobody could discharge, because there
+    # was never anything to do. Measured on this bus 2026-08-11: 1239 of 1250
+    # proposed rows were dispatch, and two agents authored 79% of them doing
+    # exactly this.
+    #
+    # This is Ruling 1's sibling one plane over (PR 561: a merged PR closes its
+    # review as an ARTIFACT of the merge). Closure belongs to the terminal event,
+    # not to a separate discipline step nobody performs. A notification's
+    # terminal event IS its delivery, so it is born closed and never enters the
+    # open pile — while still writing its durable ptr doc and still emitting the
+    # companion event that puts it in the recipient's queue. Delivery is
+    # unchanged; only the false obligation goes away.
     try:
         _, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
-            status="proposed", priority=args.priority,
+            status=("done" if fyi else "proposed"), priority=args.priority,
             owner=getattr(args, "sender", None) or _host(), assignee=assignee,
             summary=args.summary or "", next_action=args.next, kind="directive",
-            not_before=not_before, slug=slug,
+            not_before=not_before, slug=slug, fyi=fyi,
+            evidence=("notification delivered; no action was requested of the "
+                      "assignee" if fyi else None),
         )
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
@@ -4616,8 +4675,7 @@ def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
     # The reply is durable first; only then does the answered row close. If the
     # close fails the reply still stands and the row stays open — visibly wrong
     # in the safe direction, never a closed row with no answer behind it.
-    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
-    reply_slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    reply_slug = _directive_slug(args, args.assignee)
     return _close_answered_directive(transport, args, reply_slug=reply_slug)
 
 
@@ -4635,8 +4693,7 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
     # not_before. The write path itself reports which outcome happened —
     # a pre-read cannot distinguish absent from degraded (None is ambiguous),
     # so only the verified "written" outcome may emit the timer record.
-    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
-    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    slug = _directive_slug(args, args.assignee)
     rc = _create_directive(args, transport, assignee=args.assignee, not_before=when)
     if rc == 0:
         outcome = getattr(args, "_directive_outcome", None)
@@ -4696,6 +4753,19 @@ def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
 
 
 def cmd_later(args: argparse.Namespace, transport: Any) -> int:
+    # `--fyi` CANNOT MEAN ANYTHING HERE (codex-reviewer, 605 r2). `later` captures
+    # to @backlog, an audience the companion emitter deliberately skips, and the
+    # backlog fold shows open rows. So a `later --fyi` would be born terminal,
+    # excluded from the backlog view, and delivered to nobody: the captured idea
+    # silently vanishes. A flag whose only effect is to destroy the thing the verb
+    # exists to preserve must refuse, not shrug — and `later` already asks nothing
+    # of anyone, so there is no obligation for `--fyi` to remove.
+    if getattr(args, "fyi", False):
+        print("later: --fyi is not meaningful for a backlog capture — @backlog "
+              "gets no delivery event and the backlog fold shows open rows, so "
+              "an --fyi capture would be invisible to everyone. Drop the flag; "
+              "`later` already asks nothing of anyone.", file=sys.stderr)
+        return 2
     return _create_directive(args, transport, assignee=directives.BACKLOG)
 
 
@@ -10772,6 +10842,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--priority", "-p", default="P2"); sp.add_argument("--workstream", "-w")
         sp.add_argument("--summary", "-s"); sp.add_argument("--next", "-n")
         sp.add_argument("--from", dest="sender")
+        sp.add_argument("--fyi", action="store_true",
+                        help="this message asks for NOTHING: deliver it, but do "
+                             "not open an obligation the recipient can never "
+                             "discharge (reports, acks, FYIs)")
 
     tl = sub.add_parser("tell", help="direct work at an agent (directive = task w/ assignee)")
     tl.add_argument("team"); tl.add_argument("assignee"); tl.add_argument("title")
