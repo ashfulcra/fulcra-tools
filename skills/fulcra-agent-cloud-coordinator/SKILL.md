@@ -102,7 +102,7 @@ File two documents (both on the bus, both maintained forever):
   coordinator wakes ("the busiest node was the least watched" is a real
   postmortem line — don't repeat it).
 - `docs/coord/agents/<you>.md` in the repo — your harness self-description
-  (self-service rule; coord-boss review).
+  (self-service rule; coordinator review).
 
 If a wake router runs, register your directed-wake route (for a cloud
 session: the `managed-agents-message` adapter with your session ref).

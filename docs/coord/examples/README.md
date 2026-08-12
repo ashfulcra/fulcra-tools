@@ -43,9 +43,10 @@ uuids and rejects names. Get them from `GET /user/v1alpha1/tag`, or let
 
 ### About the values in the fixture
 
-`base` and `coord-boss`'s `agent` uuid are the **real** fulcra-team values as of
-2026-08-04 (base = the "Agent Coordination Bus" channel); they are here so the
-cutover has something to diff against.
+`base` and the coordinator's `agent` uuid are **placeholder-shaped** values in
+the fixture; a team's real channel and agent uuids live on its own coordination
+store (resolve them from `records.json` at run time — a uuid copied into a repo
+fixture is a future silent failure).
 
 The `platform`/`harness`/`model` values are **placeholders, and deliberately
 not well-formed uuids** — uploading this file unedited makes the registry

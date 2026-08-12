@@ -49,5 +49,5 @@ answer into future work = add the `promote` label.
 
 - Cards live in team BUS but in their own project; their titles carry no
   `[bus:…]` marker, so the (retired) coord→Linear mirror never touches them.
-- `promote` runs from the coord-boss hourly watchdog, so labels are filed within
-  the hour without a manual trigger.
+- `promote` runs from the coordinator's hourly watchdog, so labels are filed
+  within the hour without a manual trigger.
