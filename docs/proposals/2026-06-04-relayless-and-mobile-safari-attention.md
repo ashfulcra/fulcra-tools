@@ -304,10 +304,27 @@ iOS app + iOS extension). Concretely:
   (`group.com.fulcra.attention`) to both; point the resolved-id cache at
   `UserDefaults(suiteName: "group.com.fulcra.attention")`.
 
-PR #97 has wired this layer in code (`Sharing.swift`, the app/extension
-entitlements, and the opt-in `KeychainStore(accessGroup:)` path), but the
-profile/capability registration is still a human step before it can be relied on
-in a signed app build.
+PR #97 wired this layer in code (`Sharing.swift`, the app/extension
+entitlements, and the opt-in `KeychainStore(accessGroup:)` path).
+
+**RESOLVED for macOS, verified 2026-08-12 — the registration is DONE.** This was
+carried as "blocked on the operator" for days on the strength of the note below;
+checking it took one signed build. All four targets declare both entitlements,
+`DEVELOPMENT_TEAM` is `CWH48N2H7F` (matching `Sharing.teamIdentifierPrefix`), and
+a signed macOS build succeeds against a real "Mac Team Provisioning Profile".
+The signed artifacts carry, in both the app and the extension:
+
+    com.apple.security.application-groups : group.com.fulcra.attention
+    keychain-access-groups                : CWH48N2H7F.com.fulcra.attention.shared
+
+`$(AppIdentifierPrefix)` resolves to exactly the group
+`Sharing.keychainAccessGroup` computes, so the shared-keychain path is live on
+macOS rather than merely wired.
+
+**Still unproven on iOS**, and not because of the capability: this host has the
+iOS 26.5 SDK but only the 26.2 and 26.4 simulator runtimes, so the iOS app target
+cannot finish a build here at all. That is a missing platform component, not a
+signing gap.
 
 **Human step / why this can't be proven solely headless:** both identifiers must be
 registered in the Apple Developer portal. With Automatic signing, Xcode
