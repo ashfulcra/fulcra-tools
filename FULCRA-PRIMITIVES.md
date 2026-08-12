@@ -348,10 +348,20 @@ curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/tag \
 - Domain helpers in lib/CLI: sleep cycles/stages, calendars + events,
   workouts, location time series / at-time / visits.
 
-## Data sharing (tiers 1 & 2) — CLI 0.1.36, fixed in 0.1.38
+## Data sharing (tiers 1 & 2) — CLI 0.1.36, fixed in 0.1.38, widened in 0.1.40
 
 Share slices of your Fulcra data with another Fulcra user, and read data
 shared with you.
+
+**0.1.40 delta (verified 2026-08-12, wheel diff + CLI fingerprint):** one new
+subcommand, `fulcra file share PATH --to <user-id>… [--name]` — shares the
+LATEST VERSION of a file or directory with named users. And `share create`
+now composes scopes: `--data-type` (repeatable) plus `--file` (repeatable
+files/dirs) in ONE share, with optional `--start-time/--end-time` bounds.
+`--share-all` exists; scope explicitly instead. Together with the 0.1.39
+`--user-id` catalog resolution this makes cross-user record+document reads a
+complete story — the basis of the mesh peer flow
+([`docs/coord/MESH-PEER-QUICKSTART.md`](docs/coord/MESH-PEER-QUICKSTART.md)).
 
 - **Tier 1:** `fulcra share create|update|delete|leave|list-incoming|list-outgoing`.
   Reading shared data: `fulcra get-records <DataType> "<range>" --user-id
