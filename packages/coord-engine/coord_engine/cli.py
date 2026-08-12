@@ -10716,6 +10716,11 @@ def cmd_bus_v3_send(args: argparse.Namespace, transport: Any) -> int:
         print("send: no agent identity (--from or FULCRA_COORD_AGENT)",
               file=sys.stderr)
         return 2
+    if args.kind == "directive":
+        print("send: NOTE - a hand-sent directive creates NO task row, so it "
+              "will NOT appear in the recipient needs-me and no obligation "
+              "is tracked. Use tell if you are genuinely asking for work.",
+              file=sys.stderr)
     cfg, cfg_status = records.load_config_classified(transport, args.team)
     if cfg is None:
         detail = {
