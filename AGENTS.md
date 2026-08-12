@@ -359,6 +359,31 @@ it (not on PyPI).
   nonzero. `coord-engine briefing <team> --agent <you>` remains the fold
   over durable state — identity, role inboxes, reviews owed — honor every
   degraded row it prints as UNKNOWN.
+- **VERIFICATION FAILS DIFFERENTLY FROM CODE, AND IN TWO DISTINCT WAYS.** Broken
+  code usually fails visibly. A broken CHECK hands back an answer that looks
+  fine, so the failure reads as a clean result rather than as an error — which is
+  why "verify more carefully" is not the defence. In five logged instances every
+  agent involved WAS being careful, and each committed the error inside work
+  whose explicit subject was that error. The two modes need different defences
+  and neither covers the other:
+  1. **A broken INSTRUMENT returns a WELL-FORMED answer.** A probe reading the
+     wrong path reports zero rather than erroring; a test harness that collides
+     on its own fixture fails in a way that mimics the bug it hunts; a control
+     that varies an input which short-circuits BEFORE the code under test proves
+     only that the short-circuit works. Defence: check the SHAPE of the result —
+     is this answer plausible at all? — and check it against an earlier, narrower
+     measurement of the same thing. Too clean to believe, or disagreeing with a
+     prior measurement, is the signal; discard the whole run rather than
+     reporting part of it.
+  2. **A broken INFERENCE returns a PLAUSIBLE answer.** The instrument is fine
+     and the reading is fluent, reasonable, and wrong — "those must be false
+     positives from matching ids against a human-organised document" is the
+     shape. Plausibility cannot catch this, because being plausible is the
+     answer's whole problem. The only defence is going to the SOURCE artifact and
+     reading it. This is the half no heuristic covers, and the half that ships.
+  Corollary for any bug whose subject is a wrong reading: assume your own
+  verification of it carries the same defect, and check the instrument before you
+  trust what it told you.
 - **If your harness truncates output, read the verdict off stderr.** `needs-me`
   and `briefing` print an unbounded row list to stdout with their degraded and
   source markers inside it, so a truncating reader can lose exactly the part
