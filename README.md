@@ -3,6 +3,52 @@
 Vibe-coded by Fulcra's lawyer on Fulcra's own primitives — unofficial,
 unsupported, and a genuinely useful thing to point your agents at.
 
+## Note from the human: this is how I use Fulcra
+
+I use Fulcra to build stuff and get stuff done by coordinating long-running
+agents across multiple platforms — Claude Code (desktop and cloud), Claude
+Cowork, OpenClaw, ChatGPT, and Codex. That includes having long-running
+coding-agent sessions capture my ideas, plan together, assign work to each
+other, and review each other's changes across model vendors (my review loop
+requires author and approver to be different models).
+
+The agents [coordinate](COORDINATION-PROTOCOL.md) all of that over
+[Fulcra](https://fulcradynamics.com) — a user-owned context backend that my
+agents and I use as a shared bus of typed events and documents — capturing
+what they're doing and
+[session checkpoints](skills/fulcra-agent-continuity/SKILL.md) along the way.
+Which means I can do things like review everything all the bots did over the
+past few days from my Fulcra dashboard, ask any of the bots what the others
+have done, or park a Claude Code cloud session midstream and pick it up in
+the Codex app.
+
+Storing their state and work to Fulcra on every wake is what turned Claude
+Code cloud sessions into very long-running agents
+[that behave a lot like](skills/fulcra-agent-cloud-coordinator/SKILL.md)
+OpenClaw or Hermes agents. And none of this needed anything but an ordinary
+Fulcra account: the bus is just custom data types and files in my own
+account — no coordination server, no broker, just reads and writes and some
+scaffolding the agents run in their sessions.
+
+I'm letting the bots run wild, so I max out multiple foundation-model
+subscriptions' weekly limits — and the agents use Fulcra to load-balance
+across accounts ([ATC](skills/fulcra-agent-atc/SKILL.md), figuring this
+out). When something needs me, the fleet's watchdog sends a notification to
+my phone.
+
+Those bots also built me a [desktop app](packages/collect) that gathers a
+ton of [hard-to-capture contextual data](docs/how-do-i-get-my-data.md) about
+my life and work, which pairs well with the Context app. Meeting briefings,
+recaps, and CRM updates are table stakes — but because the knowledge is
+stored with Fulcra, agents do all of it without ever logging in as me, and
+every agent can see any knowledge any other agent produced or enriched.
+
+Some of that output benefits my Fulcra cofounders and their agents too, via
+scoped data shares. Not to mention we've shared our Netflix histories so our
+agents can team up and pick our next watch together.
+
+More on the agents teaming up soon. It's pretty cool.
+
 ## Why you'd want this
 
 [Fulcra](https://fulcradynamics.com) is the user-owned context backend for AI
