@@ -41,6 +41,7 @@ SOURCES=(
   "EnsureDefinition.swift"
   "KeychainStore.swift"
   "Sharing.swift"
+  "DeviceIdentity.swift"
   "AuthManager.swift"
   "SentSet.swift"
   "Ingest.swift"

@@ -16,6 +16,9 @@
 		FCA000000000000000000005 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000002 /* KeychainStore.swift */; };
 		FCA000000000000000000006 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000003 /* SignInView.swift */; };
 		FCA000000000000000000021 /* Sharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000020 /* Sharing.swift */; };
+		FCA000000000000000000031 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000030 /* DeviceIdentity.swift */; };
+		FCA000000000000000000032 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000030 /* DeviceIdentity.swift */; };
+		FCA000000000000000000033 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000030 /* DeviceIdentity.swift */; };
 		FCA00000000000000000000A /* EnsureDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000009 /* EnsureDefinition.swift */; };
 		FCA000000000000000000007 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000008 /* Wire.swift */; };
 		FCA00000000000000000000D /* Ingest.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000E /* Ingest.swift */; };
@@ -134,6 +137,7 @@
 		FCA000000000000000000002 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		FCA000000000000000000003 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
 		FCA000000000000000000020 /* Sharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sharing.swift; sourceTree = "<group>"; };
+		FCA000000000000000000030 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
 		FCA000000000000000000009 /* EnsureDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnsureDefinition.swift; sourceTree = "<group>"; };
 		FCA000000000000000000008 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
 		FCA00000000000000000000E /* Ingest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingest.swift; sourceTree = "<group>"; };
@@ -261,6 +265,7 @@
 				FCA000000000000000000002 /* KeychainStore.swift */,
 				FCA000000000000000000003 /* SignInView.swift */,
 				FCA000000000000000000020 /* Sharing.swift */,
+				FCA000000000000000000030 /* DeviceIdentity.swift */,
 				FCA000000000000000000009 /* EnsureDefinition.swift */,
 				FCA000000000000000000008 /* Wire.swift */,
 				FCA00000000000000000000E /* Ingest.swift */,
@@ -507,6 +512,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000031 /* DeviceIdentity.swift in Sources */,
 				0DAEBD7C2FD5D984008ADF6D /* ViewController.swift in Sources */,
 				0DAEBD5A2FD5D984008ADF6D /* AppDelegate.swift in Sources */,
 				FCA000000000000000000004 /* AuthManager.swift in Sources */,
@@ -524,6 +530,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000032 /* DeviceIdentity.swift in Sources */,
 				0DAEBD7F2FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
 				FCA000000000000000000101 /* NativeBridge.swift in Sources */,
 				FCA000000000000000000102 /* Wire.swift in Sources */,
@@ -540,6 +547,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000033 /* DeviceIdentity.swift in Sources */,
 				0DAEBD802FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
 				FCA000000000000000000109 /* NativeBridge.swift in Sources */,
 				FCA00000000000000000010A /* Wire.swift in Sources */,

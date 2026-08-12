@@ -41,10 +41,20 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     cache: UserDefaultsResolvedCache(defaults: Sharing.sharedDefaults())
                 )
                 let resolved = try await resolver.ensureAttentionDefinitionAndTags()
+                // The slug is hash input to source_id. It was the empty string
+                // here, which made every Safari install hash identically —
+                // an iPhone and a Mac visiting the same URL in the same second
+                // produced the same source_id and dedup dropped one. See
+                // DeviceIdentity for why this is an automatic per-install id
+                // rather than a human label.
+                //
+                // identityLabel stays nil on purpose: no human has named this
+                // device, so claiming a name would be inventing one, and the
+                // machine: tag is correctly not minted without it.
                 return WireContext(
                     definitionId: resolved.definitionId,
                     tagIds: resolved.tagIds,
-                    identitySlug: ""
+                    identitySlug: DeviceIdentity.slug()
                 )
             }
         )
