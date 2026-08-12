@@ -13,3 +13,4 @@ dist/
 .DS_Store
 chrome/node_modules/
 chrome/dist/
+chrome/dist-safari/

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:safari": "tsc --noEmit && vite build --config vite.safari.config.ts"
   },
   "dependencies": {
     "react": "^18.3.0",
