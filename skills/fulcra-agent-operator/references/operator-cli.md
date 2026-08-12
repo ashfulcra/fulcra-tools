@@ -15,7 +15,8 @@ coord-engine asks <team> [--human <handle>] [--json]
 # deliver the answer (operator / orchestrator relaying the operator):
 coord-engine answer <team> <slug> --with "<answer>"
 #   -> one write: OPERATOR ANSWER in next_action + body, blocked->active,
-#      assignee=owner (their listener fires), needs:human stripped.
+#      assignee=owner (surfaces in their next queue read or scheduled
+#      wake), needs:human stripped.
 ```
 
 Orchestrator loop skeleton:

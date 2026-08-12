@@ -284,8 +284,8 @@ shows up in Fulcra, with no machine-id suffix.
 
 ---
 
-**Last verified:** 2026-05-26 (late) against the
+**Last verified:** 2026-08-12 against the
 `fulcra_collect.plugins` entry points in
-`packages/{attention,dayone,media-helpers}/pyproject.toml` and the
+`packages/{attention,dayone,gmail,media-helpers,purpleair}/pyproject.toml` and the
 plugin definitions in `collect_plugin.py` / `collect_plugins.py`. If
 you add or remove a plugin, update this page.

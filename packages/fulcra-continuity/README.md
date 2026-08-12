@@ -57,9 +57,9 @@ Use the same identity values in both systems:
 
 Do not write a continuity checkpoint for every coord event. Coord should stay
 cheap and chatty enough for operational state. Continuity should write at durable
-pause points: before compaction, before handoff, when a session goes idle, when a
-listener has seen several task events without user action, or when the user says
-they are done for a while.
+pause points: before compaction, before handoff, when a session goes idle, when
+several task events have accumulated without user action across wakes, or when
+the user says they are done for a while.
 
 ## Agent handoff contract
 

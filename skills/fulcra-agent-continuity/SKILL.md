@@ -188,8 +188,8 @@ coord-engine briefing <team> [--agent X] [--json]                  # session sta
 
 ### Parking for a successor (handoff doctrine)
 
-A checkpoint is a promise to whoever wakes on it. One handoff (2026-07-22, the
-Webster resume) cost the successor its first hour reconciling three candidate
+A checkpoint is a promise to whoever wakes on it. One handoff (2026-07-22, an
+agent resume) cost the successor its first hour reconciling three candidate
 repo homes because the parked snapshot asserted state that was never pushed.
 Rules, each earned there:
 
