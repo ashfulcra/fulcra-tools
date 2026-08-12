@@ -1141,8 +1141,14 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   kickstart -k gui/$(id -u)/com.fulcra.collect`. Stop: `launchctl bootout
   gui/$(id -u)/com.fulcra.collect`. Logs: `~/Library/Logs/fulcra-collect/`.
 - Subcommands: `daemon install status run enable disable set-credential
-  set-interval plugin doctor`. There is **no `start`**; `doctor` runs the
-  pre-flight diagnostic.
+  set-setting set-interval plugin doctor`. There is **no `start`**; `doctor`
+  runs the pre-flight diagnostic.
+- `set-credential` (keychain) and `set-setting` (config.toml) are the headless
+  pair for configuring a plugin without the wizard. `set-setting` validates
+  against the plugin's declared `required_settings` and **refuses** any key
+  declared as a `Credential` — every mistake it could otherwise make (typo'd
+  plugin id or key, out-of-range enum) writes successfully and is then never
+  read, so it must fail loudly at the CLI or not at all.
 - Config dir `~/.config/fulcra-collect/`: `control.sock` (the UDS the menu-bar
   + CLI use), `web-url` (default `http://127.0.0.1:9292`), `web-token` (Bearer
   for the web API).

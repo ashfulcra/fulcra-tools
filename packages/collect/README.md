@@ -86,14 +86,34 @@ fulcra-collect run     <plugin-id>          trigger one run now (via the running
 fulcra-collect set-interval <plugin-id> N   override a scheduled plugin's cadence (seconds)
 fulcra-collect set-credential <plugin-id> <key>
                                             stash a secret in the OS keychain (hidden prompt)
+fulcra-collect set-setting <plugin-id> <key> <value>
+                                            set a NON-SECRET setting in config.toml
 fulcra-collect plugin reset-definition <plugin-id>
                                             clear the cached Fulcra def_id (re-resolve next run)
 ```
 
-`enable`, `disable`, `set-interval` write to `config.toml` even when
-the daemon isn't running and signal `reload` when it is. `run` and
+`enable`, `disable`, `set-interval`, `set-setting` write to `config.toml`
+even when the daemon isn't running and signal `reload` when it is. `run` and
 `status` need a running daemon; they talk to it over a Unix-domain
 control socket at `~/.config/fulcra-collect/control.sock`.
+
+`set-credential` and `set-setting` are the two halves of configuring a
+plugin without the wizard, and the split is a security boundary, not a
+convenience: secrets go to the OS keychain, everything else to a plaintext
+`config.toml`. `set-setting` therefore **refuses** a key the plugin declared
+as a `Credential` and points you at `set-credential` instead. It also
+validates against the plugin's declared contract — unknown plugin id,
+unknown setting key, a value outside an `enum`'s declared values, or a
+non-numeric `port` are all rejected rather than written, because every one
+of those writes succeeds silently and then is never read by anything.
+
+```console
+$ fulcra-collect set-credential purpleair api_key   # prompts, hidden
+$ fulcra-collect set-setting purpleair mode api
+purpleair: mode = 'api'
+$ fulcra-collect set-setting purpleair sensor_index 142559
+purpleair: sensor_index = '142559'
+```
 
 ## Module layout
 
