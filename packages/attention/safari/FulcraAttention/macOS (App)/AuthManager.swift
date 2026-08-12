@@ -18,8 +18,6 @@ import os
 
 #if os(macOS)
 import AppKit
-#elseif canImport(UIKit)
-import UIKit
 #endif
 
 // MARK: - Logging
@@ -179,6 +177,16 @@ public final nonisolated class AuthManager: @unchecked Sendable {
     /// Fired (on an arbitrary queue) once a device code is obtained, so the UI
     /// can show the `user_code` and prompt the user to approve in the browser.
     public var onDeviceCode: ((DeviceCodeResponse) -> Void)?
+
+    /// How to open the device-flow verification URL, supplied by the host.
+    ///
+    /// Injected rather than called directly because this type is compiled into
+    /// the Safari extension too, and the iOS API for opening a URL
+    /// (`UIApplication.shared`) is unavailable in app extensions. Leaving it nil
+    /// is a valid configuration: the extension never signs in, and the device
+    /// code is still surfaced through `onDeviceCode` so a user can approve by
+    /// hand.
+    public var urlOpener: ((URL) -> Void)?
 
     public nonisolated init(
         config: AuthConfig = .fulcra,
@@ -419,16 +427,24 @@ public final nonisolated class AuthManager: @unchecked Sendable {
         #if os(macOS)
         authLog.info("opening verification URL in browser")
         NSWorkspace.shared.open(url)
-        #elseif canImport(UIKit)
-        authLog.info("opening verification URL in browser")
-        // UIApplication is main-actor-isolated; AuthManager is nonisolated and
-        // signIn() runs off the main thread.
-        Task { @MainActor in UIApplication.shared.open(url) }
         #else
-        authLog.error(
-            "no way to open the verification URL on this platform — the user must "
-            + "enter the device code shown by onDeviceCode manually"
-        )
+        // iOS: NOT UIApplication.shared. This file is compiled into the Safari
+        // EXTENSION target as well as the app, and `UIApplication.shared` is
+        // unavailable in app extensions — referencing it fails the extension
+        // build outright. (It did: PR 614 added it and nothing caught it,
+        // because no CI job builds this Xcode project and a macOS-only build
+        // never compiles this branch.)
+        //
+        // So the opener is INJECTED. The containing app supplies one; the
+        // extension supplies none, which is correct — it never signs in.
+        if let open = urlOpener {
+            authLog.info("opening verification URL via the host-provided opener")
+            open(url)
+        } else {
+            // One literal: os.Logger takes an interpolation literal, not a
+            // concatenated String.
+            authLog.error("no URL opener was provided; the user must enter the device code from onDeviceCode manually")
+        }
         #endif
     }
 }

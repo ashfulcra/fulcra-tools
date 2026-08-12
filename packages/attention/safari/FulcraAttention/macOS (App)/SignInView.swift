@@ -7,6 +7,11 @@
 //
 
 import SwiftUI
+#if os(macOS)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import Combine
 import os
 
@@ -28,7 +33,23 @@ public final class SignInViewModel: ObservableObject {
     private let auth: AuthManager
     private var signInTask: Task<Void, Never>?
 
+    /// Supplies the platform's URL opener. The view is the right place for it:
+    /// it lives in the containing APP on both platforms, and AuthManager itself
+    /// must stay free of `UIApplication.shared` because it is also compiled into
+    /// the app extension, where that API is unavailable.
+    private static func hostURLOpener() -> (URL) -> Void {
+        #if os(macOS)
+        return { NSWorkspace.shared.open($0) }
+        #elseif canImport(UIKit)
+        // Main-actor-isolated, and signIn() runs off the main thread.
+        return { url in Task { @MainActor in UIApplication.shared.open(url) } }
+        #else
+        return { _ in }
+        #endif
+    }
+
     public init(auth: AuthManager = AuthManager()) {
+        auth.urlOpener = Self.hostURLOpener()
         self.auth = auth
         // Reflect any already-stored tokens on launch.
         if auth.currentTokens() != nil {

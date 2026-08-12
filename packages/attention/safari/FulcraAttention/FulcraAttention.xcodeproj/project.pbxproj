@@ -9,6 +9,11 @@
 /* Begin PBXBuildFile section */
 		0DAEBD492FD5D984008ADF6D /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD482FD5D984008ADF6D /* AppDelegate.swift */; };
 		0DAEBD4B2FD5D984008ADF6D /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD4A2FD5D984008ADF6D /* SceneDelegate.swift */; };
+		FCA000000000000000000204 /* EnsureDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000009 /* EnsureDefinition.swift */; };
+		FCA000000000000000000200 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000001 /* AuthManager.swift */; };
+		FCA000000000000000000201 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000002 /* KeychainStore.swift */; };
+		FCA000000000000000000202 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000003 /* SignInView.swift */; };
+		FCA000000000000000000203 /* Sharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000020 /* Sharing.swift */; };
 		0DAEBD4E2FD5D984008ADF6D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD4C2FD5D984008ADF6D /* LaunchScreen.storyboard */; };
 		0DAEBD512FD5D984008ADF6D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD4F2FD5D984008ADF6D /* Main.storyboard */; };
 		0DAEBD5A2FD5D984008ADF6D /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD592FD5D984008ADF6D /* AppDelegate.swift */; };
@@ -488,6 +493,11 @@
 				0DAEBD7B2FD5D984008ADF6D /* ViewController.swift in Sources */,
 				0DAEBD492FD5D984008ADF6D /* AppDelegate.swift in Sources */,
 				0DAEBD4B2FD5D984008ADF6D /* SceneDelegate.swift in Sources */,
+				FCA000000000000000000204 /* EnsureDefinition.swift in Sources */,
+				FCA000000000000000000200 /* AuthManager.swift in Sources */,
+				FCA000000000000000000201 /* KeychainStore.swift in Sources */,
+				FCA000000000000000000202 /* SignInView.swift in Sources */,
+				FCA000000000000000000203 /* Sharing.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
