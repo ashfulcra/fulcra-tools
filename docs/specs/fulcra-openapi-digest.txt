@@ -1,5 +1,5 @@
-# Fulcra OpenAPI digest — captured 2026-07-13 from api.fulcradynamics.com/openapi.json
-# info: Fulcra Life API v1.0.0 — 53 paths, 121 schemas
+# Fulcra OpenAPI digest — captured 2026-08-13 from api.fulcradynamics.com/openapi.json
+# info: Fulcra Life API v1.0.0 — 53 paths, 122 schemas
 # Diffable baseline: paths+methods sorted; regenerate with the same jq/python fold.
 
 GET                    /data/v0/metrics_catalog
@@ -117,6 +117,7 @@ GET                    /user/v1alpha1/tag/name/{tag_name}
   FulcraServiceStatus
   FulcraServiceType
   FulcraTag
+  FulcraTombstoneRecord
   FulcraUserDataAverages
   FulcraUserDataTotals
   FulcraUserPreferences

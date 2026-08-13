@@ -4,63 +4,56 @@ Fulcra helps agents know their user, know what's happening in their user's
 world, work with their user's other agents, and become more helpful over
 time. This is what the platform actually provides for that and how to use
 it, **by agent capability tier**. Written so you don't have to re-research the platform
-surface. **Full surface re-verified 2026-07-16** (`fulcra-api` CLI/lib
-**0.1.38** from PyPI, released 2026-07-16; api.fulcradynamics.com OpenAPI —
-**53 paths**; a diffable paths/schemas baseline lives at
+surface. **Full surface re-verified 2026-08-13** (`fulcra-api` CLI/lib
+**0.1.40** from PyPI — installed-CLI verb/sub-command fingerprint matched
+against the published wheel; api.fulcradynamics.com OpenAPI — **53 paths,
+122 schemas**; the diffable paths/schemas baseline at
 [`docs/specs/fulcra-openapi-digest.txt`](docs/specs/fulcra-openapi-digest.txt)
-so future drift is a `diff`, not archaeology). Prior stamps: 2026-07-13 on
-0.1.36, 2026-07-07/08 on 0.1.35.
+is refreshed to match, so future drift stays a `diff`, not archaeology).
+Prior stamps: 2026-07-16 on 0.1.38, 2026-07-13 on 0.1.36, 2026-07-07/08 on
+0.1.35.
 
-**Drift since 2026-07-13 (0.1.36 → 0.1.38) — the rewrite trigger fired:**
+**Drift since 2026-07-16 (0.1.38 → 0.1.40) — additive; no rewrite trigger:**
 
-- **`fulcra record` and `fulcra delete` shipped in 0.1.37** (2026-07-15).
-  Annotation **records** — not just definitions — now have first-class CLI
-  write and delete verbs, and the lib has `record_data_type`. `delete` is a
-  **tombstone, not an erasure**: it appends a `DeletedRecord` through the same
-  ingest path, so the data model is still append-only and there is still no
-  update or replace. What 0.1.37 changed is availability, not semantics. This
-  is the event the 07-13 stamp named as this doc's rewrite trigger;
-  §Annotations is rewritten around it. **Tier 1 no longer hand-rolls ingest
-  POSTs for records.**
-- **`fulcra data-type schema`** — new subcommand, returns a data type's JSON
-  schema (the discovery step before `record`). `data-type` is now
-  `create|archive|restore|schema`.
-- **`fulcra catalog --recordable-only`** — filters the catalog to types that
-  `record`/`delete` accept. Catalog rows also carry `related_cli_commands`
-  (which verbs work with that type).
-- **`fulcra share create` is FIXED in 0.1.38.** 0.1.36/0.1.37 omitted the
-  required `fulcra_user_name` body field and 422'd; 0.1.38 sends it. Upgrade
-  instead of applying the REST workaround the 07-15 stamp carried — it is
-  withdrawn.
-- **Lib (0.1.37):** new `record_data_type`, `validate_records`,
-  `v1_catalog_data_type`, `v1_catalog_schema`. There is **no** record-delete
-  lib method — delete is composed client-side (see §Annotations).
-- **Verb delta 0.1.36 → 0.1.38 is purely additive** (`record`, `delete`;
-  nothing removed), and 0.1.38 is 0.1.37 plus the datashare fix alone. The
-  0.1.36 `resolve_filepath` list-return contract is unchanged — see §File
-  library. MCP tools and scopes unchanged (re-verified 2026-07-16).
+- **API surface: zero path/method changes across the whole window** (53
+  paths, identical methods; re-diffed against the committed digest
+  2026-08-13). Exactly one schema was added — **`FulcraTombstoneRecord`**,
+  the published shape of the `DeletedRecord` that 0.1.37's `delete` appends.
+  The spec catching up to shipped behavior, not new behavior. Datashare
+  routes remain live-but-unpublished (see §Data sharing).
+- **0.1.39 — data-type RESOLUTION semantics** (verified 2026-08-11,
+  wheel diff + CLI fingerprint); no verbs or subcommands added or removed. A
+  new `resolve_data_type` helper (lib `FulcraAPI.resolve_data_type` + a
+  shared CLI callback) makes `fulcra get-records` resolve a type to **every
+  matching API version** instead of erroring on ambiguity, and — the fix
+  that matters for shared reads — **`--user-id` now resolves
+  shorthand/catalog lookups against the SHARE OWNER's catalog**, where
+  0.1.38 resolved against yours even when reading their data. Catalog lib
+  calls (`v1_catalog_data_type`, `v1_catalog_schema`) gained
+  user-id/api-version parameters accordingly. Detail in §Data sharing.
+- **0.1.40 — sharing widened** (verified 2026-08-12 by wheel diff;
+  installed-CLI fingerprint re-confirmed 2026-08-13): new `fulcra file share
+  PATH --to <user-id>…` shares the latest version of a file or directory,
+  and `share create` now composes scopes — repeatable `--data-type` plus
+  repeatable `--file`, with optional time bounds — in ONE share. Detail in
+  §Data sharing; together with 0.1.39's owner-catalog resolution this is the
+  substrate of the mesh peer flow
+  ([`docs/coord/MESH-PEER-QUICKSTART.md`](docs/coord/MESH-PEER-QUICKSTART.md)).
+- **MCP: not re-swept this stamp.** The tool list below was verified from
+  source 2026-07-06; `fulcra-context-mcp` has had no PyPI release since
+  0.1.5 (2026-03-25). No evidence of change, but treat the MCP section's
+  stamp as 07-06, not today's.
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
-> repo**. Two releases landed inside 24 hours to produce this stamp.
+> repo**.
 >
-> **0.1.39 delta — VERIFIED 2026-08-11** (published-wheel diff 0.1.38→0.1.39 +
-> CLI fingerprint; this is a delta verification, not a fresh full-surface
-> sweep — the full stamp above remains 2026-07-16/0.1.38): **no verbs or
-> subcommands added or removed; signatures stable.** The change is data-type
-> RESOLUTION semantics, centralized in a new `resolve_data_type` helper (lib
-> `FulcraAPI.resolve_data_type` + a shared CLI callback):
-> `fulcra get-records` now resolves a type to **every matching API version**
-> instead of erroring on ambiguity (command bodies receive resolved catalog
-> entries, not raw strings), and — the part that fixes a real shared-read
-> gotcha — **`--user-id` now scopes shorthand/catalog resolution to the SHARE
-> OWNER's catalog**, where 0.1.38 resolved against yours even when reading
-> their data. `data-type` verbs resolve scoped to the authenticated user.
-> Catalog lib calls (`v1_catalog_data_type`, `v1_catalog_schema`) gained
-> user-id/api-version parameters accordingly. The
-> published OpenAPI is **not** a complete route list (`/ingest/v1/record/batch`
-> is live and unpublished), so absence from the spec is never evidence a route
-> is gone — probe it (404 gone, 401 exists) before concluding anything.
+> The published OpenAPI is **not** a complete route list
+> (`/ingest/v1/record/batch` is live and unpublished, and the datashare routes
+> still are — re-checked 2026-08-13), so absence from the spec is never
+> evidence a route is gone — probe it (404 gone, 401 exists) before concluding
+> anything.
+>
 > Next rewrite trigger: a **write** path via MCP, or record write/delete
 > reaching tier 3 — that collapses the tier table's central asymmetry and is a
 > rewrite, not a patch. Say so on the bus.
@@ -382,7 +375,7 @@ complete story — the basis of the mesh peer flow
   that field's contents.
 - **Tier 2:** the CLI hits `GET|POST /user/v1alpha1/datashares` and
   `GET|PUT|DELETE /user/v1alpha1/datashare/{datashare_id}` — **live but NOT in
-  the published OpenAPI as of 2026-07-13** (the same
+  the published OpenAPI, re-checked 2026-08-13** (the same
   published-later pattern `/data/v1/updates` followed); read shapes off the
   CLI source (`fulcra_api/core.py`) until they publish, and treat them as
   changeable.
