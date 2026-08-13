@@ -49,6 +49,20 @@ public enum DeviceIdentity {
     /// secret, it is an opaque per-install label, and the keychain's
     /// access-group requirements would make it fail closed in exactly the
     /// contexts (the extension) that need to read it.
+    ///
+    /// WRITING FROM THE EXTENSION IS ALREADY A SHIPPED PATH, not a new
+    /// assumption: `UserDefaultsResolvedCache` persists the resolved
+    /// definition/tag ids to this same suite from this same process, and that
+    /// cache is load-bearing — if its writes did not stick, definition
+    /// resolution would re-hit the API on every batch.
+    ///
+    /// NOTE on the degraded case: `Sharing.sharedDefaults()` deliberately falls
+    /// back to `.standard` when the App Group suite cannot be opened. Identity
+    /// still behaves correctly there — the slug persists in the extension's own
+    /// container, so it stays stable and stays unique to this install. It is
+    /// simply no longer *shared* with the containing app, which nothing in this
+    /// path needs. The property that matters (two installs never collide)
+    /// survives the fallback; only cross-process visibility is lost.
     public static let defaultsKey = "deviceIdentitySlug"
 
     /// The stable slug for this installation, minting one on first use.

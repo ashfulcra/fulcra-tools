@@ -96,6 +96,26 @@ final class DeviceIdentityTests: XCTestCase {
         XCTAssertEqual(DeviceIdentity.slug(defaults: d), "already-mine")
     }
 
+    // MARK: - The degraded store
+
+    func testItStaysStableAndUniqueWhenTheAppGroupIsUnavailable() {
+        // Sharing.sharedDefaults() falls back to .standard when the App Group
+        // suite cannot be opened (entitlement not registered on a dev build).
+        // Identity must not silently degrade there: the fallback store is a
+        // DIFFERENT container, not a broken one, so the slug must still persist
+        // (stable) and must still differ per install (unique). Only
+        // cross-process sharing is lost, and nothing in this path needs it.
+        let fallbackA = freshDefaults()
+        let fallbackB = freshDefaults()
+
+        let a1 = DeviceIdentity.slug(defaults: fallbackA)
+        let a2 = DeviceIdentity.slug(defaults: fallbackA)
+        let b1 = DeviceIdentity.slug(defaults: fallbackB)
+
+        XCTAssertEqual(a1, a2, "slug must stay stable in the fallback store")
+        XCTAssertNotEqual(a1, b1, "two installs must not collide in the fallback store")
+    }
+
     // MARK: - The end-to-end property, in terms of source_id
 
     func testTwoDevicesNoLongerCollideOnTheSameUrlAndSecond() throws {
