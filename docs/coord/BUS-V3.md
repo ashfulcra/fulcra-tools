@@ -721,6 +721,12 @@ own verbs (`tell`, `respond`, `remind`), which write the durable doc as well;
 use those when there is a document. If the message needs a body, upload it first
 (`fulcra file upload ./doc.md /team/<team>/<path>`) and pass `--ptr`.
 
+**A hand-sent `--kind directive` tracks no obligation** — no task row is
+written, it never enters the recipient's `needs-me`, and delivery rests
+entirely on the recipient reading their queue. The engine warns (but does not
+refuse) at send time, because send time is the last moment you can still pick
+`tell` instead; if your message asks for anything, use `tell`.
+
 **Use the verb, not a raw `record` pipe.** The verb resolves the stream from the
 records authority (never a guessed one) and — the reason this section changed —
 attaches your identity tags. A raw pipe cannot read `tags.json`, so it writes an
