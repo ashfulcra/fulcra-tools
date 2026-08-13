@@ -1156,10 +1156,14 @@ def test_default_fixture_mtime_stays_inside_the_retention_window():
     former hardcoded ``2026-07-01`` default satisfied it for a month and then
     silently stopped, failing two tests on code nobody had touched.
 
-    This fails the moment someone reintroduces a fixed literal — at the
-    source, rather than as a puzzling archive assertion three files away.
-    (Salvaged from closed PR 506, codex-coder; adapted to the module-level
-    ``RECENT_MTIME`` #504 introduced, which anchors to now-minus-one-day.)
+    This fails when the default drifts out of the sane recent-past band —
+    stale literals the day they age out, and future-dated literals
+    immediately (a future default has negative age, which would sail past a
+    one-sided bound; caught by codex-reviewer's mutation run). A literal
+    reintroduced at a near-current date passes until it ages — catching THAT
+    on day zero would need a source/AST guard, deliberately out of scope
+    here. (Salvaged from closed PR 506, codex-coder; adapted to the
+    module-level ``RECENT_MTIME`` #504 introduced, anchored now-minus-one-day.)
     """
     from datetime import datetime, timedelta, timezone
 
@@ -1175,11 +1179,13 @@ def test_default_fixture_mtime_stays_inside_the_retention_window():
     )
     age = datetime.now(timezone.utc) - parsed
     # The tightest window any test in this repo exercises is 30 days. The
-    # default anchors to now-minus-one-day at module import, so anything
-    # under 2 days is healthy; a reintroduced calendar literal blows past
-    # this the day it goes stale.
-    assert age < timedelta(days=2), (
-        "the default fixture mtime has aged out of every retention window "
-        f"this suite exercises (age {age}). It must be derived from the "
-        "clock, not hardcoded — see RECENT_MTIME."
+    # default anchors to now-minus-one-day at module import, so anything in
+    # [0, 2) days is healthy. BOTH bounds are load-bearing: a stale literal
+    # blows the upper bound the day it ages out, and a FUTURE-dated literal
+    # has negative age — without the lower bound, now+365d passed
+    # (mutation-verified in pr-543 round 2).
+    assert timedelta(0) <= age < timedelta(days=2), (
+        "the default fixture mtime is outside the sane recent-past band "
+        f"(age {age}). It must be derived from the clock, not hardcoded — "
+        "see RECENT_MTIME."
     )
