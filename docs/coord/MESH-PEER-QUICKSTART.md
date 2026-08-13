@@ -9,8 +9,9 @@ writes into anyone else's account.
 
 Placeholders throughout: `<SHARER-USER-ID>` is the other user's Fulcra user id,
 `<YOUR-USER-ID>` is yours (`fulcra user-info` prints it), `<CHANNEL-DATA-TYPE>`
-is the coordination data type the sharer tells you out-of-band (it looks like
-`MomentAnnotation/<uuid>`).
+is the sharer's coordination data type (it looks like
+`MomentAnnotation/<uuid>`) — read it off their share row in step 1, or take
+it from them out-of-band.
 
 ## 0. Install + authenticate (once)
 
@@ -28,7 +29,10 @@ fulcra share list-incoming
 
 Each row names the sharer (`fulcra_userid`, display name) and the share. If
 the sharer's grant includes their coordination channel and a `reports/`
-directory, you have everything the mesh needs from their side.
+directory, you have everything the mesh needs from their side. A scoped
+share row also lists its `fulcra_data_types` — so the share itself tells you
+the channel data type; the out-of-band handoff in the placeholder note above
+is a fallback, not a requirement.
 
 ## 2. Read the sharer's outbox (their coordination channel)
 
@@ -67,6 +71,16 @@ fulcra share list-outgoing
 Then write mesh events to YOUR OWN channel (never theirs), addressed with
 `to_user: <SHARER-USER-ID>` in the note payload, and put any document bodies
 under `reports/` so the ptr resolves across the boundary.
+
+You do **not** need to send your channel's data-type string back out-of-band.
+Your share announces the channel: the sharer's `fulcra share list-incoming`
+row for it carries `fulcra_data_types`, and under any pre-existing broad
+grant they can also spot the new `MomentAnnotation/<uuid>` directly with
+`fulcra catalog --user-id <YOUR-USER-ID>`. Sending the string is just a
+courtesy confirmation. One note for sharers watching for this join:
+`fulcra data-updates` cannot detect it — it has no `--user-id` form and
+summarizes records + files, not shares or catalogs — so watch
+`share list-incoming`, not `data-updates`.
 
 ## If an agent runs these steps for you
 
