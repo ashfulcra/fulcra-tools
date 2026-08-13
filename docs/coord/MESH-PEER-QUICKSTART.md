@@ -68,6 +68,23 @@ Then write mesh events to YOUR OWN channel (never theirs), addressed with
 `to_user: <SHARER-USER-ID>` in the note payload, and put any document bodies
 under `reports/` so the ptr resolves across the boundary.
 
+## If an agent runs these steps for you
+
+A human running this flow in a terminal needs nothing extra. An **agent**
+running it on a classifier-gated harness (e.g. Claude Code with permission
+prompts, or any harness whose safety layer screens cross-account verbs) will
+find the cross-account steps refused in auto mode: `share create` and
+`get-records --user-id` touch another user's account boundary, which is
+exactly what those safety layers exist to screen. That refusal is correct
+behavior, not a bug — do not work around it.
+
+The fix is an **operator-granted permission rule**: the human operator
+explicitly allowlists the specific share verbs (and, ideally, the specific
+peer user id) in the harness's permission config before the agent runs steps
+2–3. The agent must never grant itself such a rule. Until the grant exists,
+treat the walled steps as an ask for your operator and report the mesh state
+as UNKNOWN rather than quietly skipping them.
+
 ## Safety rules, peer side
 
 - **Never `--share-all`.** Scope every share to the named data types and
