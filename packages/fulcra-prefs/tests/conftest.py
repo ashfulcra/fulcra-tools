@@ -28,6 +28,7 @@ VERIFIED against fulcra_api/core.py (v0.1.36):
   path (and the legacy bare path) and records both body + endpoint.
 """
 import io
+import json
 import sys
 from pathlib import Path
 import pytest
@@ -53,6 +54,7 @@ class FakeFulcraAPI:
         self.fail_read = False
         self.validation_errors = None   # set to a message string to simulate a schema error
         self.fail_validate = False      # set True to simulate a catalog/schema-fetch outage
+        self.last_v1_query = None       # {data_class,data_type,params} of the last event read
 
     @staticmethod
     def _abs(path: str) -> str:
@@ -166,6 +168,21 @@ class FakeFulcraAPI:
                         "sources": sources,
                         "note": payload})               # read side: data-or-note
         return out
+
+    # --- typed subtype read (mirrors FulcraAPI.fulcra_v1_api for event reads) ---
+    # read_signal_records reads the definition-scoped subtype
+    # (event/MomentAnnotation/<def_id>) with an explicit window. We synthesize the
+    # read from posted ingest bodies (same records the moment_annotations mirror
+    # returns) and record the query params so a test can assert an explicit window
+    # is always sent — guarding the None/None silent-degrade regression. Returns
+    # JSON bytes, matching the real fulcra_v1_api contract.
+    def fulcra_v1_api(self, data_class, data_type, params=None):
+        self.last_v1_query = {"data_class": data_class, "data_type": data_type,
+                              "params": params or {}}
+        if self.fail_read:
+            raise ConnectionError("simulated get-records outage")
+        recs = self.moment_annotations()
+        return json.dumps(recs).encode()
 
 
 @pytest.fixture
