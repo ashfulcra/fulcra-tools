@@ -13,7 +13,7 @@ import sys
 import click
 
 from . import config as config_mod
-from . import credentials, worker
+from . import credentials, registry, worker
 from .control import send_request
 from .daemon import Daemon
 
@@ -160,6 +160,109 @@ def set_interval(plugin_id: str, seconds: int) -> None:
     except ConnectionError:
         pass
     click.echo(f"{plugin_id}: interval set to {seconds}s")
+
+
+_TRUE = {"true", "yes", "on", "1"}
+_FALSE = {"false", "no", "off", "0"}
+
+
+def _coerce_setting(setting, raw: str):
+    """Turn a command-line string into the type the plugin's contract declares.
+
+    Everything arrives from argv as a string, and tomlkit will store a string
+    without complaint. A plugin doing ``int(cfg["port"])`` survives that; one
+    doing ``cfg["port"] == 9292`` or ``if cfg["verbose"]:`` does not — and
+    ``bool("false")`` is True, so a stringly-stored toggle fails in the
+    direction that silently turns things ON.
+    """
+    if setting.kind == "toggle":
+        low = raw.strip().lower()
+        if low in _TRUE:
+            return True
+        if low in _FALSE:
+            return False
+        raise click.ClickException(
+            f"{setting.key}: expected a true/false value, got {raw!r} "
+            f"(accepted: {', '.join(sorted(_TRUE | _FALSE))})"
+        )
+    if setting.kind == "port":
+        try:
+            return int(raw)
+        except ValueError:
+            raise click.ClickException(f"{setting.key}: expected a port number, got {raw!r}")
+    if setting.kind == "enum":
+        allowed = setting.enum_values or ()
+        if raw not in allowed:
+            raise click.ClickException(
+                f"{setting.key}: {raw!r} is not one of {', '.join(allowed)}"
+            )
+    return raw
+
+
+@cli.command(name="set-setting")
+@click.argument("plugin_id")
+@click.argument("key")
+@click.argument("value")
+def set_setting(plugin_id: str, key: str, value: str) -> None:
+    """Set a plugin's non-secret setting in config.toml.
+
+    The headless counterpart to the setup wizard. Until this existed, a
+    plugin's secrets could be installed from a terminal (`set-credential`)
+    but its SETTINGS could not, so configuring a plugin on a machine without
+    the UI meant hand-editing config.toml — which is how a plugin ends up
+    holding a key it has no mode set to use.
+
+    Validated against the plugin's declared contract rather than written
+    blindly, because every mistake this command can make is silent: a typo'd
+    plugin id or key lands in config.toml, prints success, and is never read
+    by anything. The operator's next signal is a plugin that inexplicably
+    ignores its configuration.
+    """
+    reg = registry.discover()
+    plugin = reg.plugins.get(plugin_id)
+    if plugin is None:
+        known = ", ".join(sorted(reg.plugins)) or "(none discovered)"
+        raise click.ClickException(f"unknown plugin {plugin_id!r}. Known: {known}")
+
+    # Checked BEFORE the settings lookup so the error names the right fix.
+    # config.toml is plaintext on disk; a credential belongs in the keychain,
+    # and the failure is unrecoverable in the sense that matters — once a key
+    # is written to a file, in shell history, and in a terminal transcript,
+    # rotating it is the only remedy. Note the value is never echoed back.
+    if any(c.key == key for c in plugin.required_credentials):
+        raise click.ClickException(
+            f"{plugin_id}/{key} is a SECRET and must not go in config.toml. "
+            f"Use: fulcra-collect set-credential {plugin_id} {key}"
+        )
+
+    setting = next((s for s in plugin.required_settings if s.key == key), None)
+    if setting is None:
+        known = ", ".join(s.key for s in plugin.required_settings) or "(none declared)"
+        raise click.ClickException(
+            f"{plugin_id} has no setting {key!r}. Declared: {known}"
+        )
+
+    coerced = _coerce_setting(setting, value)
+
+    cfg = config_mod.load()
+    cfg.plugin_settings.setdefault(plugin_id, {})[key] = coerced
+    config_mod.save(cfg)
+    try:
+        send_request(_socket_path(), {"cmd": "reload"})
+    except ConnectionError:
+        pass
+    # Prints the STORED value, not the argument: the two differ exactly when
+    # coercion happened, and that difference is the operator's only evidence
+    # that `verbose yes` became a boolean rather than the string "yes".
+    #
+    # Except for `secret`-kind settings. Those legitimately live in
+    # config.toml (the contract allows a short-lived secret there), but
+    # confirming one by echoing it copies it into the terminal scrollback,
+    # shell history, and any CI log — the same exposure the credential
+    # refusal above exists to prevent, arriving through the door that IS
+    # allowed. Confirm that it was stored, never what.
+    shown = "<set>" if setting.kind == "secret" else repr(coerced)
+    click.echo(f"{plugin_id}: {key} = {shown}")
 
 
 @cli.command(name="set-credential")
