@@ -10502,6 +10502,26 @@ def cmd_forge_unwatch(args: argparse.Namespace, transport: Any) -> int:
 
 # --- operator loop (fulcra-agent-operator): asks + answer ---
 
+_ASK_FIELD_WIDTH = 140
+
+
+def _clip(text: str, width: int = _ASK_FIELD_WIDTH) -> str:
+    """Clip to WIDTH, marking the cut. A silently-truncated ask reads as a
+    complete one, so the operator cannot tell 'that is the whole question' from
+    'the rest is in the store'."""
+    text = str(text or "").strip()
+    return text if len(text) <= width else text[: width - 1].rstrip() + "…"
+
+
+def _derived_unlock(row: dict[str, Any]) -> bool:
+    """True when `unlock` is the echo `cmd_task_block` synthesises for --on-user
+    asks (`answer from <who>`) rather than an unlock the author wrote. Printing
+    that back adds a line and no information."""
+    blocked_on = str(row.get("blocked_on") or "").strip()
+    who = blocked_on[len(query._USER_PREFIX):] if blocked_on.startswith(query._USER_PREFIX) else blocked_on
+    return str(row.get("unlock") or "").strip() == f"answer from {who}".strip()
+
+
 def cmd_asks(args: argparse.Namespace, transport: Any) -> int:
     # Public-read failure contract (see _read_degraded_row): an UNKNOWN index must
     # not read as "nothing waiting on the human".
@@ -10519,7 +10539,15 @@ def cmd_asks(args: argparse.Namespace, transport: Any) -> int:
         print(f"  [{age:>6}] [{r.get('priority')}] {r.get('title')}")
         ask = str(r.get('blocked_on') or r.get('next_action') or '').strip()
         if ask:
-            print(f"           ask: {ask[:140]}")
+            print(f"           ask: {_clip(ask)}")
+        # `unlock` gets its OWN line rather than joining the `or` chain above:
+        # `task block` requires blocked_on, so it is never falsy on a blocked row
+        # and an `ask or unlock` fallback would be unreachable for exactly the
+        # rows it is meant to rescue. The two answer different questions — who it
+        # waits on vs what clears it — so the operator needs both.
+        unlock = str(r.get('unlock') or '').strip()
+        if unlock and not _derived_unlock(r):
+            print(f"           unlock: {_clip(unlock)}")
         print(f"           slug: {r.get('name')}  owner: {r.get('owner')}")
     return 0
 
