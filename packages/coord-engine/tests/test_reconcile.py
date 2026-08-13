@@ -1145,3 +1145,47 @@ def test_retention_does_not_cry_starvation_when_the_cap_is_not_reached():
     res = _run(t)
     assert not any("cap reached" in w for w in res["warnings"]), (
         f"false starvation alarm on a healthy pass: {res['warnings']}")
+
+
+def test_default_fixture_mtime_stays_inside_the_retention_window():
+    """Guard the invariant whose violation broke clean main on 2026-08-01.
+
+    Retention tests seed a default-mtime fixture and assert it is KEPT. That
+    assertion is only meaningful while the default sits inside
+    ``--retention-days`` of the clock ``reconcile`` reads — the real one. The
+    former hardcoded ``2026-07-01`` default satisfied it for a month and then
+    silently stopped, failing two tests on code nobody had touched.
+
+    This fails when the default drifts out of the sane recent-past band —
+    stale literals the day they age out, and future-dated literals
+    immediately (a future default has negative age, which would sail past a
+    one-sided bound; caught by codex-reviewer's mutation run). A literal
+    reintroduced at a near-current date passes until it ages — catching THAT
+    on day zero would need a source/AST guard, deliberately out of scope
+    here. (Salvaged from closed PR 506, codex-coder; adapted to the
+    module-level ``RECENT_MTIME`` #504 introduced, anchored now-minus-one-day.)
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from coord_engine import router
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", "body")
+    parsed = router.parse_store_mtime(t.mtimes["team/r/task/a.md"])
+
+    assert parsed is not None, (
+        "the default fixture mtime is not in store format, so retention code "
+        f"cannot age it at all: {t.mtimes['team/r/task/a.md']!r}"
+    )
+    age = datetime.now(timezone.utc) - parsed
+    # The tightest window any test in this repo exercises is 30 days. The
+    # default anchors to now-minus-one-day at module import, so anything in
+    # [0, 2) days is healthy. BOTH bounds are load-bearing: a stale literal
+    # blows the upper bound the day it ages out, and a FUTURE-dated literal
+    # has negative age — without the lower bound, now+365d passed
+    # (mutation-verified in pr-543 round 2).
+    assert timedelta(0) <= age < timedelta(days=2), (
+        "the default fixture mtime is outside the sane recent-past band "
+        f"(age {age}). It must be derived from the clock, not hardcoded — "
+        "see RECENT_MTIME."
+    )
