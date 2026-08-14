@@ -1,5 +1,9 @@
 # fulcra-collect
 
+For the complete system model and interoperability contract across Collect,
+Coord Engine, and the Agent Coordination Bus, start with
+[`docs/coord/SYSTEM-SPEC.md`](../../docs/coord/SYSTEM-SPEC.md).
+
 The **alpha Collect app**: the capture side of Fulcra — how agents know
 what's happening in their user's world — for streams no platform hands you:
 media plays, browsing attention, mail-derived signals, landing in the one

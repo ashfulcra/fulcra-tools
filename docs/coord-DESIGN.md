@@ -1,5 +1,9 @@
 # coord — deterministic coordination add-ons for fulcra-agent-teams
 
+The canonical system-level contract, including the Bus, Coord Engine, Collect,
+interoperability rules, and shipped-versus-target boundary, is
+[`coord/SYSTEM-SPEC.md`](coord/SYSTEM-SPEC.md).
+
 Fourteen `fulcra-agent-*` skills that layer durable multi-agent coordination onto the official
 `fulcra-agent-teams` OKF-markdown convention, backed by one shared stdlib-only CLI (`coord-engine`),
 invoked as the installed binary (`coord-engine …` — it is not on PyPI, so `uv tool run` will not
