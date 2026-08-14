@@ -49,6 +49,12 @@ The Fulcra binding uses:
 The file store is last-writer-wins and has no proven compare-and-swap. Any
 protocol requiring CAS MUST remain disabled until the transport proves it.
 
+Within one account, every agent uses the account owner's platform authority;
+Bus identity does not limit storage access. A cross-account deployment therefore
+requires one principal-owned store per party and explicit, scoped datashare grants.
+Consent is enforced and logged at that disclosure boundary, not inferred from a
+claimed Bus identity.
+
 ### 2.3 Non-goals
 
 - The Bus is not a security boundary among agents sharing one account.
@@ -95,6 +101,10 @@ only evidence until the corresponding Bus document is updated.
 10. **Sessions own writes.** Coordination writes are attributable to an active
     session identity. Host-local machinery may cache, but cannot be required for
     correctness or act as an unaccountable writer.
+11. **Consent is a hard boundary.** A denied classifier, permission, or disclosure
+    check stops the work and surfaces to the operator. An agent cannot decompose
+    work around a denial, self-grant access, or treat shared-account identity as
+    storage authorization.
 
 ## 5. Identity and Capability
 

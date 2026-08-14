@@ -26,6 +26,8 @@ durable state.
   guessing.
 - Never activate cursor schema 2 on the current last-writer-wins file transport.
 - No secret may cross argv, stdout, logs, repo files, Bus notes, or task bodies.
+- Permission, classifier, and cross-account disclosure denials stop the operation;
+  tests must prove no decomposition or fallback path bypasses them.
 - Every remote operation and aggregate fold has a positive finite deadline.
 - Every task ends with focused tests and a small commit.
 - The paths below are the exact target paths in the clean-room repository. Do not
