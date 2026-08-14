@@ -23,9 +23,9 @@ kept for provenance, not written for you.
 - [`coord/wake-router-SPEC.md`](coord/wake-router-SPEC.md) and
   [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
   implementation plan for the wake router + engagement model build
-  (status **as of 2026-07-24**: implemented, shadow window running, drawdown
-  pending acceptance — the spec's own banner is the dated source, and the engine
-  is the operational truth): one fleet wake policy instead of N resident
+  (status: **shipped but unproven in deployment** — the reference deployment
+  was evaluated and retired 2026-08; the spec's own banner is the dated source,
+  and the engine is the operational truth): one fleet wake policy instead of N resident
   listeners, cloud-first hosting.
 - [`coord/wake-router-ADDENDUM-1-event-substrate.md`](coord/wake-router-ADDENDUM-1-event-substrate.md)
   — normative addendum (tasks E1–E3): the `data-updates` feed as the authoritative
@@ -33,23 +33,27 @@ kept for provenance, not written for you.
   router scan) with fail-closed full-scan fallbacks.
 - [`coord/atc-DESIGN.md`](coord/atc-DESIGN.md) — the design of ATC,
   capability-matched model routing on subscription caps.
+- [`coord/alias-resolution-DESIGN.md`](coord/alias-resolution-DESIGN.md) — how a
+  renamed agent's stranded obligations get joined to its current identity, and
+  the boundary that keeps an alias table from becoming a privilege-escalation
+  primitive: aliases resolve reads, never authority.
+- [`coord/roles/examples/`](coord/roles/examples) — five worked example roles
+  (Coordinator, Coder, Reviewer, Maintainer, LocalAgent), extracted from real
+  deployments and generalized; copy one to your team's store and fill in the
+  particulars there.
 - [`TESTING.md`](TESTING.md) — how to run the suites and install Collect as a
   launchd agent.
 
-## Internal (Fulcra-team history, roadmap, and audits)
+## Team-internal material
 
-Kept for provenance; safe to skip on a first read.
+Anything specific to one team that runs this toolkit — agent rosters, incident
+evidence, rollout records, internal pitch material, audit artifacts — lives in
+**that team's file store**, not in this repository. This repo is the tools.
 
-- [`coord/pitch/`](coord/pitch) — the internal Fulcra pitch for coord
-  (one-pager, wave-1 PR draft, live-demo script). Written for the Fulcra team,
-  not a cold recipient.
 - [`coord/COORD2-README.md`](coord/COORD2-README.md) — provenance pointer for
   the coord subtree's migration history.
 - [`coord/proposals/`](coord/proposals) and [`proposals/`](proposals) —
-  historical design proposals.
-- [`analysis/`](analysis) and [`audits/`](audits) — internal analysis and QA
-  audit artifacts.
-- [`fulcra-coord-0.13.0-rollout.md`](fulcra-coord-0.13.0-rollout.md) — rollout
-  notes for the deprecated first-generation `fulcra-coord`.
+  design proposals that shipped code still cites as its source. Historical, but
+  load-bearing: two `coord-engine` modules name them as their design.
 - [`skill-quality-pattern.md`](skill-quality-pattern.md) — the maintainer
   convention for skill quality across the `fulcra-agent-*` set.

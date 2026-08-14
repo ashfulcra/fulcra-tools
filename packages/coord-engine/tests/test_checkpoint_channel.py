@@ -457,3 +457,42 @@ def test_config_is_memoized_per_process_like_the_tag_registry():
     assert checkpoint_channel.load_config(t, TEAM)[1] == "ok"      # cached
     checkpoint_channel.cache_clear()
     assert checkpoint_channel.load_config(t, TEAM)[1] == "absent"
+
+
+def test_a_snapshot_that_did_not_persist_does_not_report_success(capsys):
+    """Found live during a bus outage: `snapshot <id>` printed and rc was 0
+    while the store was unreachable and nothing was written.
+
+    The failure was ALREADY KNOWN at that point — `transport.write` returns
+    False on a transport failure, and the code captured it into a local and
+    spent it on the cosmetic "should this cast a shadow" decision while the
+    exit code and the success line went out unchanged.
+
+    Continuity is the durability mechanism. A park that reports success without
+    reaching the store leaves a successor resuming from the PREVIOUS checkpoint
+    believing it is current, and that happens exactly when the host is in
+    trouble — which is when parking matters most."""
+    class Dark(FakeTransport):
+        def write(self, path, content):
+            return False  # transport failure, not a rejected write
+
+    t = Dark()
+    capsys.readouterr()
+    rc = cli.main(["continuity", "snapshot", "r", "agent-x", "slug",
+                   "--objective", "o", "--next", "n"], transport=t)
+    out, err = capsys.readouterr()
+    assert rc == 3, "an unpersisted snapshot is a DEGRADED answer, not success"
+    assert "snapshot CHK" not in out, "must not print the success line"
+    assert "FAILED to persist" in err and "NOTHING was saved" in err
+    assert "believe it is current" in err, "say what the successor will do"
+
+
+def test_a_persisted_snapshot_still_reports_success(capsys):
+    """The control: without it, returning 3 unconditionally would pass the test
+    above and break every healthy park in the fleet."""
+    t = FakeTransport()
+    capsys.readouterr()
+    rc = cli.main(["continuity", "snapshot", "r", "agent-y", "slug",
+                   "--objective", "o", "--next", "n"], transport=t)
+    out = capsys.readouterr().out
+    assert rc == 0 and "snapshot CHK" in out

@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import concurrent.futures
 import json
 import math
 import os
 import pathlib
 import secrets
+import re
 import socket
 import sys
 import time
@@ -32,7 +34,7 @@ from . import (
     checkpoint_channel, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, presence, projection as projection_mod,
-    query, records, review,
+    handoff, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
@@ -60,8 +62,103 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
+#: Characters an identity may contain. Matches the charset the installer already
+#: validates agent ids against — applied here at ID CONSTRUCTION, which is where
+#: the unvalidated value actually enters the keyspace.
+_IDENTITY_SAFE = re.compile(r"[^A-Za-z0-9:_.-]+")
+
+_hostname_rewrite_warned = False
+
+
+def _sanitize_hostname(raw: str) -> tuple[str, bool]:
+    """→ (safe, rewritten). Runs of unsafe characters collapse to one ``-``,
+    leading/trailing separators are stripped, and a REWRITTEN name carries a
+    short digest of the raw hostname so the mapping stays INJECTIVE.
+
+    The digest is the whole point (codex 558 r1). Collapsing alone is lossy:
+    ``bad/name``, ``bad name`` and ``bad-name`` all reduce to ``bad-name``, so
+    three distinct machines would share one fleet key and MERGE their presence,
+    lease, health and role history. That is strictly worse than the single
+    unaddressable identity this function exists to prevent — an unreachable host
+    is a hole, a merged one is corruption of two live records.
+
+    ``tasks.agent_key`` already solved this exact problem for agent ids
+    ("slugify is lossy … suffix a short hash of the raw id to make the key
+    injective"), with the same 6-hex convention used here.
+
+    An UNCHANGED hostname is returned byte-identical, with no suffix — every
+    identity currently in the fleet must survive untouched.
+
+    A hostname is whatever the OS hands back, and the fleet id built from it is
+    the KEY for presence, health, roles and leases. One host has been registered
+    as ``coord-reconcile: <control chars>`` since at least 2026-07-16: unmatched
+    by any fold that keys on name, impossible to ``tell``, invisible to a
+    version-skew audit, and permanently unaddressable — a hole in a shared
+    keyspace that nothing can now reference.
+    """
+    collapsed = _IDENTITY_SAFE.sub("-", raw).strip("-.:_")
+    if collapsed == raw:
+        return raw, False
+    if not collapsed:
+        return "", True  # nothing usable — the caller refuses rather than invents
+    digest = hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:6]
+    return f"{collapsed}-{digest}", True
+
+
+#: Ambient environment a real caller exports that the TEST SUITE must neutralise,
+#: mapped to a representative value the hermeticity wall populates. One mapping
+#: rather than a name list plus a parallel list of samples: the fixture clears
+#: these keys and the wall sets them, so there is nothing for the two to drift on.
+#:
+#: Two families, one shape — the suite reading state its caller happens to have:
+#:
+#: - **identity** (`FULCRA_COORD_AGENT`, `FULCRA_COORD_HUMAN`): 25 tests read
+#:   these as a fallback sender, so an inherited identity made a green tree
+#:   report failures for anyone following the standing wake procedure, which
+#:   opens by exporting one of them.
+#: - **channel** (`COORD_RECORDS_TYPE`): 8 tests, and every one is a test whose
+#:   PREMISE is that the records config is absent or unreadable —
+#:   `test_documented_send_fails_closed_without_a_records_config`,
+#:   `test_doctor_self_unreadable_config_is_unknown`, the `[config-absent]`
+#:   envelope case. An exported channel supplies the very thing they test the
+#:   absence of, so they do not merely fail: they stop being the tests they are
+#:   named after.
+#:
+#: A variable belongs here when the suite reading it makes the ANSWER depend on
+#: who ran it. It does NOT belong here when the variable legitimately changes
+#: behaviour a test is about — see `NOT_YET_WALLED` in the wall for
+#: `COORD_TRANSPORT_HTTP`, where a test asserting "no subprocess" SHOULD fail
+#: when you disable the HTTP path, and separating those from real leaks is work
+#: nobody has done yet.
+INHERITED_ENV: dict[str, str] = {
+    "FULCRA_COORD_AGENT": "some-other-agent",
+    "FULCRA_COORD_HUMAN": "some-other-human",
+    "COORD_RECORDS_TYPE": "some.other.channel",
+}
+
+
 def _host() -> str:
-    return os.environ.get("FULCRA_COORD_AGENT") or f"coord-reconcile:{socket.gethostname()}"
+    explicit = os.environ.get("FULCRA_COORD_AGENT")
+    if explicit:
+        return explicit
+    global _hostname_rewrite_warned
+    raw = socket.gethostname()
+    safe, rewritten = _sanitize_hostname(raw)
+    if not safe:
+        # Refuse rather than invent. A process that cannot establish WHO IT IS
+        # must not write to a shared keyspace — minting a placeholder is how the
+        # phantom-identity traps got there in the first place.
+        raise RuntimeError(
+            "cannot derive a fleet identity: this host's name contains no "
+            "usable characters (" + repr(raw) + "). Set FULCRA_COORD_AGENT to "
+            "an explicit identity before writing to the coordination store.")
+    if rewritten and not _hostname_rewrite_warned:
+        _hostname_rewrite_warned = True
+        print(f"coord-engine: hostname {raw!r} is not a usable fleet id; using "
+              f"{safe!r}. This host's presence/lease/health keys depend on it — "
+              f"set FULCRA_COORD_AGENT explicitly to pin your identity.",
+              file=sys.stderr)
+    return f"coord-reconcile:{safe}"
 
 
 def cmd_wake_queue_file(args: argparse.Namespace, transport: Any) -> int:
@@ -102,6 +199,38 @@ def _replies_breadcrumb(team: str, sender: str) -> str:
     #: not a resident watcher — `listen` was retired as the wake surface and its
     #: implementation removed, so the breadcrumb points at `queue`.
     return f"replies: coord-engine queue {team} --agent {sender}"
+
+
+def _close_on_reply_breadcrumb(team: str, owner: str, slug: str) -> str:
+    """The CLOSING move, with the slug already filled in, for the RECIPIENT.
+
+    SURFACE MATTERS AND I GOT IT WRONG FIRST (coord-opus-worker, 2026-08-08).
+    `_replies_breadcrumb` prints on the SENDER's terminal — its own comment says
+    so — and it has exactly one callsite, in the dispatch path. Putting the
+    closing command there hands it to the only agent with NO standing to close
+    the row: runnable, plausible-looking, and it would close a directive nobody
+    had answered. That is precisely the ghost-closure `cmd_respond` fails loud
+    to prevent.
+
+    The recipient's point of contact is the queue read, where the slug is
+    already on screen. That is the one place this line can be both correct and
+    addressed to someone who can act on it.
+
+    Measured 2026-08-08: 912 of 919 proposed board items were dispatch residue —
+    directives whose recipients had acted and replied, by `tell`, which opens a
+    NEW directive instead of closing the one it answers. Every exchange netted
+    +2 open items instead of 0.
+
+    `respond` has always closed, and a spread sample of 25 across eight owners
+    found ZERO response shards: nobody was failing to comply, the tool simply
+    never showed the closing move at the moment it was wanted. The old
+    breadcrumb pointed at a STREAM to read (`queue`) and carried no slug, so a
+    recipient who wanted to answer replied the way they knew how.
+
+    `--closes` is the mechanism; this line is the cure.
+    """
+    return (f"    reply+close: coord-engine tell {team} {owner} "
+            f"\"<your title>\" --closes {slug}")
 
 
 #: Read-cap for the freshness overlay: at most this many absent-from-index docs
@@ -401,7 +530,7 @@ def _load_rows_status(
     if feed_sink is not None:
         feed_sink.append({"ok": False, "reason": "data-updates feed not attempted"})
     try:
-        raw = transport.read(path)
+        raw = read_retry.read_retrying(transport, path)
     except Exception:
         return [], False, "summaries index unreadable"
     if deadline is not None and deadline.expired():
@@ -638,6 +767,31 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def print_close_hint(row: dict[str, Any], *, team: str) -> None:
+    """Show the recipient how to answer AND close, with the slug filled in.
+
+    NOT on `queue`: its text output is a BYTE-IDENTICAL contract for shell
+    consumers on BOTH streams, pinned by two golden tests.
+
+    THE PREDICATE READS `tags`, NOT `kind` (coord-opus-worker, measured against
+    939 live rows). Board/needs-me rows carry no `kind` key at all — 0 of 939 —
+    so `row.get("kind") or "task"` was always "task" and this returned before
+    printing, for every row including the 932 that ARE directives. Directive-ness
+    lives in `tags` as `kind:directive`.
+
+    `team` is a PARAMETER for the same reason: rows carry no `team` key either,
+    so recovering it from the row rendered the literal placeholder `<team>` and
+    the command could not be run. The caller has `args.team`; it is not the
+    row's to know.
+    """
+    if "kind:directive" not in (row.get("tags") or []):
+        return
+    owner, slug = row.get("owner"), row.get("id")
+    if not owner or not slug or owner == "*":
+        return
+    print(_close_on_reply_breadcrumb(team, owner, slug))
+
+
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
     doc_sink: list[Any] = []
@@ -653,6 +807,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     role_resolution: dict[str, tuple[list[str], bool]] = {}
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, args.team, args.agent, rows, now=now,
+        deadline_seconds=_role_fold_budget(),
         resolution_sink=role_resolution)
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
                          held_roles=held_roles, include_history=args.all,
@@ -684,6 +839,25 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
     seen = {r.get("id") for r in blocked}
     got = blocked + [r for r in got if r.get("id") not in seen]
+    # A bounded raw fallback is usable only when it completed.  Preserve the
+    # partial rows and the single-value JSON contract, but make the process
+    # status fail closed so unattended callers cannot mistake 0/N for a clean
+    # durable-assignment read.
+    forge_incomplete = any(r.get("type") == "forge-degraded" for r in got)
+    rc = 3 if forge_incomplete else 0
+    # The verdict, on stderr, BEFORE the unbounded payload it is a verdict about:
+    # emitted unconditionally (json mode included) and independent of whether the
+    # rows below survive the reader's context. See `emit_envelope`.
+    emit_envelope(
+        "needs-me", count=len(got), rc=rc,
+        forge=_fold_source(got, "forge-source"),
+        source=_fold_source(got, "needs-me-source"),
+        degraded=sum(1 for r in got if _is_degraded_row(r)),
+    )
+    if getattr(args, "envelope_only", False):
+        # The durable answer for a truncating harness: the verdict WITHOUT the
+        # records. Same rc, same envelope, no payload to truncate.
+        return rc
     if args.json:
         jsonutil.print_json(got)
     else:
@@ -711,7 +885,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
                 print(_source_line("needs-me", r))
             else:
                 print(_line(r))
-    return 0
+                print_close_hint(r, team=args.team)
+    return rc
 
 
 def cmd_search(args: argparse.Namespace, transport: Any) -> int:
@@ -762,6 +937,122 @@ def cmd_search(args: argparse.Namespace, transport: Any) -> int:
 
 def _role_doc_path(team: str, role: str) -> str:
     return f"team/{team}/roles/{role}.md"
+
+
+def _verdict_activity_index(
+    transport: Any, team: str, *, budget: int = 40,
+    deadline: Optional["Deadline"] = None,
+) -> tuple[dict[str, Any], int, int, bool, bool]:
+    """ONE pass over the review register -> ``{reviewer: latest verdict mtime}``.
+
+    Returns ``(index, scanned, total, undatable, cut_by_deadline)``.
+
+    ``cut_by_deadline`` rides in the RETURN, not in module state. It was a
+    module-level flag for one round and codex-reviewer caught the leak: only the
+    normal return updated it, so the two early returns inherited the PREVIOUS
+    invocation's value and an identical unreadable scan produced a different
+    `escalate` rc depending on whether some earlier scan had timed out. A
+    per-scan diagnostic belongs to the scan.
+
+    WHY THIS EXISTS. `_role_attended` used to do this scan itself, per call, and
+    `escalate` calls it once per about-to-escalate role — so a sweep re-listed
+    the review root and up to ``budget`` verdict prefixes for EVERY such role.
+    Profiled on the live store 2026-08-08: 23.6s per call, 47.3s of a 98.2s
+    `escalate`, entirely transport latency (41 sequential listings x ~0.59s).
+    The cost was never algorithmic; it was fan-out repeated per role. Hoisting
+    the scan to one shared pass makes a sweep's attendance cost constant in the
+    number of roles instead of linear.
+
+    BOUNDED BY BOTH a count (``budget``) and a WALL-CLOCK ``deadline``. The count
+    alone could not stop this: it caps how many dirs are visited and says nothing
+    about how long each takes, which is exactly how a 40-dir scan became a
+    two-minute call on a slow transport.
+    """
+    index: dict[str, Any] = {}
+    try:
+        reviews = [e for e in transport.list_dir(f"team/{team}/review/")
+                   if e.get("is_dir")]
+    except TransportError:
+        # Root listing failed: nothing was scanned, and this is NOT a deadline
+        # cut. Every return below states its own cut reason for the same reason.
+        return index, 0, 0, False, False
+    total = len(reviews)
+    scanned = 0
+    undatable = False
+    cut_by_deadline = False
+    for e in reviews[:budget]:
+        if deadline is not None and deadline.expired():
+            cut_by_deadline = True
+            break
+        slug = (e.get("name") or "").rstrip("/")
+        if not slug:
+            continue
+        scanned += 1
+        try:
+            entries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError:
+            # An unreadable prefix is UNKNOWN for the whole index: we cannot say
+            # whose work we failed to see, so the caller must not conclude "no
+            # work" from what we did see.
+            return index, scanned, total, True, cut_by_deadline
+        for v in entries:
+            name = v.get("name") or ""
+            if not name.endswith(".md") or "--" not in name:
+                continue
+            reviewer = name[:-3].split("--", 1)[1]
+            raw = v.get("mtime")
+            mt = router.parse_store_mtime(raw) or router.parse_iso(raw)
+            if mt is None:
+                undatable = True
+                continue
+            prev = index.get(reviewer)
+            if prev is None or mt > prev:
+                index[reviewer] = mt
+    return index, scanned, total, undatable, cut_by_deadline
+
+
+def _role_attended(transport: Any, team: str, holders: list[str], *,
+                   since: Any, budget: int = 40,
+                   index: Optional[tuple[dict[str, Any], int, int, bool, bool]] = None,
+                   deadline: Optional["Deadline"] = None,
+                   ) -> tuple[Optional[bool], int, int]:
+    """Did any ``holders`` file a verdict since ``since``?
+
+    Returns ``(attended, scanned, total)``. ``attended`` is None when the answer
+    could not be established — an unreadable listing or a budget cut-off — never
+    False, because "I did not look at everything" is not "nobody worked".
+
+    Verdict filenames are ``<head>--<reviewer>.md``, so the reviewer identity is
+    in the name and a listing answers the question without reading any file.
+    Bounded and reported (``scanned N/M``) per the budgeted-fold rule: an
+    unbounded scan on a big team is how a status verb becomes a two-minute call.
+    """
+    if not holders:
+        return None, 0, 0
+    # ``index`` lets a caller with MANY roles pay the scan ONCE (see
+    # `_verdict_activity_index`). Without it, behaviour is exactly as before.
+    if index is None:
+        index = _verdict_activity_index(transport, team, budget=budget,
+                                        deadline=deadline)
+    idx, scanned, total, undatable, _cut = index
+    if not total:
+        # NOTHING to scan. A complete sweep of an empty set is not evidence of
+        # absence — it is evidence we looked somewhere with no data (a wrong
+        # prefix looks exactly like this). UNKNOWN, never False.
+        return None, 0, 0
+    for h in holders:
+        if not h:
+            continue
+        mt = idx.get(str(h))
+        if mt is not None and mt >= since:
+            return True, scanned, total
+    if undatable:
+        # A verdict we could not DATE, or a prefix we could not READ. Either way
+        # we cannot rule out that a holder worked. UNKNOWN, never False.
+        return None, scanned, total
+    # Everything we were allowed to look at is clean. Only a COMPLETE sweep can
+    # say "no work"; a truncated one stays UNKNOWN.
+    return (False if scanned >= total else None), scanned, total
 
 
 def _leases_prefix(team: str, role: str) -> str:
@@ -844,18 +1135,35 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
         print(f"roles status: unparseable dormant_until for {role} in team/{team} — "
               f"treated as absent (not dormant); fix the date to park it",
               file=sys.stderr)
-    if status == roles.VACANT and dormant:
+    if status in (roles.VACANT, roles.LAPSED) and dormant:
+        # A deliberately-parked role reads DORMANT whether its last holder's
+        # lease merely lapsed or there was never one — the park is the operator's
+        # statement either way, and it outranks both.
         status = roles.DORMANT
     today = _now().strftime("%Y-%m-%d")
     marker_exists = transport.read(_escalation_marker_path(team, role, today)) is not None
+    # ATTENDANCE (opt-in): a lapsed lease is not proof nobody is doing the job.
+    # Default None = NOT CHECKED, which still escalates but must never be
+    # reported as "unattended" — see roles.escalation_due.
+    attended: Optional[bool] = None
+    att_scanned = att_total = 0
+    if getattr(args, "check_attendance", False):
+        anchor = roles._parse(now)
+        if anchor is not None:
+            attended, att_scanned, att_total = _role_attended(
+                transport, team, [l.get("agent") for l in (leases or [])],
+                since=anchor - timedelta(hours=sla))
     esc = roles.escalation_due(leases, now=now, sla_hours=sla,
-                               marker_exists_today=marker_exists, dormant=dormant)
+                               marker_exists_today=marker_exists, dormant=dormant,
+                               attended=attended)
     fresh = roles.fresh_holders(leases, now=now, sla_hours=sla) if leases else []
     result = {
         "team": team, "role": role, "status": status, "policy": policy, "sla_hours": sla,
         "holders": [l.get("agent") for l in (leases or [])],
         "fresh_holders": [l.get("agent") for l in fresh],
         "escalation_due": esc,
+        "attended": attended,
+        "attendance_scanned": f"{att_scanned}/{att_total}" if att_total else None,
     }
     if status == roles.DORMANT:
         result["dormant_until"] = reg.get("dormant_until")
@@ -867,8 +1175,19 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
         print(f"role {role} in team/{team}: {label} (policy={policy}, sla={sla:g}h)")
         if fresh:
             print("  fresh holders: " + ", ".join(str(l.get("agent")) for l in fresh))
+        if attended is True:
+            print(f"  LEASE LAPSED, ROLE IS BEING SERVED — a holder filed a verdict "
+                  f"within {sla:g}h (scanned {att_scanned}/{att_total} reviews). "
+                  f"Ask for a lease renewal; do NOT escalate as unattended.")
         if esc:
-            print("  ESCALATION DUE — vacant past SLA, no marker today")
+            if attended is False:
+                print("  ESCALATION DUE — UNATTENDED: lease lapsed past SLA and no "
+                      f"holder work product found (scanned {att_scanned}/{att_total}).")
+            else:
+                print("  ESCALATION DUE — lease not renewed past SLA, no marker "
+                      "today. ATTENDANCE NOT CHECKED: this says the LEASE lapsed, "
+                      "not that nobody is working. Re-run with --check-attendance "
+                      "before calling a role unattended.")
     if status == roles.UNKNOWN:
         # FAIL CLOSED (2026-07-11): the lease listing was unreadable, so the role's
         # state is UNKNOWN — NOT vacant. A degraded transport must not let a caller
@@ -970,9 +1289,11 @@ def cmd_task_supersede(args: argparse.Namespace, transport: Any) -> int:
     extra steps. Supersession closes the origin copy from ANY live state and
     names its successor — the dispatcher's duty made mechanical."""
     reason = args.reason or f"work re-dispatched as {args.by}"
-    return _task_apply(args, transport, status="done",
-                       superseded_by=args.by,
-                       evidence=f"superseded by {args.by} ({reason})")
+    kw: dict[str, Any] = {"status": "done", "superseded_by": args.by,
+                          "evidence": f"superseded by {args.by} ({reason})"}
+    if getattr(args, "record", None):
+        kw["superseded_record_id"] = args.record
+    return _task_apply(args, transport, **kw)
 
 
 def cmd_task_pause(args: argparse.Namespace, transport: Any) -> int:
@@ -1092,9 +1413,28 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
             }, separators=(",", ":")))
             print(f"restored review {args.slug} from reviews/{month}/")
             return 0
-        if files != ["codex-reviewer.md"]:
-            print(f"review restore failed: unexpected archived verdict shape for {args.slug}",
-                  file=sys.stderr)
+        # A doc-less archive: verdict shards with no request doc, so the family
+        # path above cannot run. Exactly ONE shard is restorable here; the count
+        # is a deliberate risk bound, not an accident, because a restore with no
+        # doc recreates an ORPHAN review dir (verdicts, no doc) and doing that
+        # for N shards at once makes a bigger claim than this verb can justify.
+        #
+        # The NAME was hardcoded to one team's reviewer (`codex-reviewer.md`),
+        # which made `review restore` work for exactly one agent on exactly one
+        # team and fail with "unexpected archived verdict shape" for everyone
+        # else. Team-particular content does not belong in this repo — the shape
+        # is "one shard", and whose shard it is was never the engine's business.
+        # APPEND-ONLY FAMILIES LAND HERE BY DESIGN (coord-boss constraint 5,
+        # ruling b99fb8da): a reviewer may now hold several shards for one head,
+        # so an archived family of >1 is legitimate rather than corrupt. This
+        # path is the COUNTED SKIP, not a failure of the new shape — it says how
+        # many it found and points at the doc-restore route, which handles a
+        # family. Stated rather than changed, deliberately.
+        if len(files) != 1:
+            print(f"review restore failed: {args.slug} has {len(files)} archived "
+                  f"verdict shard(s) and no request doc. Exactly one is "
+                  f"restorable without a doc; restore the doc alongside them to "
+                  f"take the family path.", file=sys.stderr)
             return 1
         filename = files[0]
         src = cold_prefix + filename
@@ -1105,6 +1445,10 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
             return 1
         if rec._crash_safe_move(transport, src, dst):
             print(f"restored review {args.slug} from reviews/{month}/")
+            print(f"review restore: {args.slug} came back WITHOUT a request doc, "
+                  f"so it is now an orphan (verdicts, no doc) and will surface "
+                  f"as needing maintainer repair until a doc is written.",
+                  file=sys.stderr)
             return 0
         print(f"review restore failed: verified move from reviews/{month}/ failed",
               file=sys.stderr)
@@ -1163,6 +1507,11 @@ DEFAULT_BRIEFING_BUDGET = 60.0
 #: path renders anything. 20s is a generous ~25 ops at the measured ~0.8s/op — far
 #: past the 4-7 a real team pays — while still bounding a degraded transport.
 DEFAULT_ROLE_FOLD_BUDGET = 20.0
+#: Wall-clock bound for the shared verdict-activity scan (see
+#: `_attendance_scan_budget`). 30s: the measured scan is ~24s on a slow transport
+#: and must be able to COMPLETE — a bound tighter than the honest cost would just
+#: convert a slow answer into a permanent UNKNOWN.
+DEFAULT_ATTENDANCE_SCAN_BUDGET = 30.0
 
 # The `threads` fold/window defaults (DEFAULT_THREADS_*) live with the threads
 # command in `commands_threads.py`; they are re-exported onto `cli` at module end.
@@ -1192,6 +1541,23 @@ def _review_fold_budget() -> float:
     return config.env_float("COORD_REVIEW_FOLD_BUDGET", DEFAULT_REVIEW_FOLD_BUDGET)
 
 
+#: Aggregate deadline for `presence show`'s work-evidence scan, seconds.
+#: `presence show` is a DIRECT command with no surrounding add-on stack to
+#: borrow a deadline from, so it opens its own. 20s is deliberately below the
+#: review-fold budget: this scan lists every review's `verdicts/` directory (435
+#: on the live store today) plus each agent's reports, and it is decorating a
+#: roster — a slow truthful answer is worse here than a fast one that says which
+#: part it did not reach, which the PARTIAL rendering does.
+DEFAULT_PRESENCE_WORK_BUDGET = 20.0
+
+
+def _presence_work_budget() -> float:
+    """Deadline for the `presence show` work-evidence scan, seconds. Env
+    ``COORD_PRESENCE_WORK_BUDGET`` (see DEFAULT_PRESENCE_WORK_BUDGET)."""
+    return config.env_float("COORD_PRESENCE_WORK_BUDGET",
+                            DEFAULT_PRESENCE_WORK_BUDGET)
+
+
 def _briefing_budget() -> float:
     """Shared aggregate deadline (seconds) for the briefing/needs-me add-on stack.
     Env ``COORD_BRIEFING_BUDGET`` (see the DEFAULT_BRIEFING_BUDGET rationale). One
@@ -1202,16 +1568,42 @@ def _briefing_budget() -> float:
     return config.env_float("COORD_BRIEFING_BUDGET", DEFAULT_BRIEFING_BUDGET)
 
 
-#: Aggregate deadline (seconds) for ONE obligation fold. The fold runs on every
-#: empty wake now, so its cost is fleet-wide per-wake cost — it needs a hard
-#: ceiling, not a per-component hope. Deliberately tighter than the briefing
-#: budget: a briefing is a human asking a question, a fold is a machine on a
-#: schedule. Env ``COORD_OBLIGATION_BUDGET``.
-DEFAULT_OBLIGATION_BUDGET = 20.0
+#: Deadline (seconds) for the obligation fold's PROBES. Setup is measured
+#: separately and does not draw on this, so the two can no longer starve each
+#: other. Env ``COORD_OBLIGATION_BUDGET``.
+#:
+#: 90, and the number carries a warning. At 20 the fold was measured blind on
+#: three hosts (0/7, 0/7, 1/7 components consulted) while 110, 64 and 6 owed
+#: items sat hidden behind a blanket UNKNOWN. 90 is the smallest value OBSERVED
+#: TO HELP — **it is a floor, not a proven ceiling**: at 90 `role_duties` still
+#: reports UNREADABLE on at least one host, and `role_duties` is where
+#: role-routed obligations live.
+#:
+#: So do not read 90 as "enough". The real cost is `_held_roles_for_rows` at
+#: 19.3s of a 26.1s setup; lowering that is the actual fix and it helps every
+#: caller. Raising a budget to outrun a cost is the move that produced the
+#: original collapse, and this raise is deliberately the stopgap half of a
+#: two-part ruling (coord-boss, 2026-08-07) — chosen first only because the
+#: default ships in the engine PIN, and the pin is the one channel that reaches
+#: a host whose environment is rebuilt every wake and therefore cannot hold an
+#: env-var mitigation at all.
+DEFAULT_OBLIGATION_BUDGET = 90.0
 
 
 def _obligation_budget() -> float:
     return config.env_float("COORD_OBLIGATION_BUDGET", DEFAULT_OBLIGATION_BUDGET)
+
+
+def _attendance_scan_budget() -> float:
+    """Wall-clock bound (seconds) for the ONE shared verdict-activity scan an
+    `escalate` sweep performs. Env ``COORD_ATTENDANCE_SCAN_BUDGET``.
+
+    Its own knob because the scan is transport-bound fan-out, not role
+    resolution: measured 2026-08-08, 41 sequential listings at ~0.59s each. A
+    count budget alone cannot bound that — which is how `escalate` reached 98s
+    locally and timed out at 170s+ on the watchdog."""
+    return config.env_float("COORD_ATTENDANCE_SCAN_BUDGET",
+                            DEFAULT_ATTENDANCE_SCAN_BUDGET)
 
 
 def _role_fold_budget() -> float:
@@ -1223,17 +1615,233 @@ def _role_fold_budget() -> float:
     return config.env_float("COORD_ROLE_FOLD_BUDGET", DEFAULT_ROLE_FOLD_BUDGET)
 
 
-def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
-    """Best-effort settled-cache write. Failure is swallowed: the marker only
-    speeds the fan-out fold; its absence just means the next fold recomputes."""
+#: Tri-state classification of a `.settled` marker, because the two-state answer
+#: (delete / keep) silently conflated "known cache" with "cannot tell".
+SETTLED_CACHE = "cache"      #: an APPROVED tally cache — recomputable, safe to drop
+SETTLED_MERGED = "merged"    #: merge evidence — a PR landed; nothing recomputes it
+SETTLED_UNKNOWN = "unknown"  #: unreadable or unrecognised — preserve AND say so
+
+
+def _settled_marker_present(transport: Any, team: str, slug: str) -> Optional[bool]:
+    """Does a ``.settled`` OBJECT exist? ``True`` / ``False`` / ``None`` = UNKNOWN.
+
+    `read` returning None conflates "absent" with "unreadable", and the UNKNOWN
+    branch needs them apart: an ABSENT marker is nothing to warn about, an
+    UNREADABLE one is. A listing answers presence without parsing.
+
+    TRI-STATE, because the previous two-state version returned False on a raised
+    listing — so an unreadable marker plus an unreadable listing produced a
+    silent rc 0 exactly where this code promises to fail closed. That is the
+    UNKNOWN-collapsed-to-a-definite-answer bug, inside the helper written to
+    prevent it.
+    """
     try:
+        names = {(e.get("name") or "") for e in
+                 transport.list_dir(_verdicts_prefix(team, slug))}
+    except TransportError:
+        return None
+    return SETTLED_MARKER in names
+
+
+def _classify_settled_marker(transport: Any, team: str, slug: str) -> str:
+    """``cache`` / ``merged`` / ``unknown`` for a slug's ``.settled``.
+
+    Both recognised shapes must be POSITIVELY identified — by schema AND the
+    fields that give them meaning — not by one surviving field:
+
+    - ``cache``  — ``schema: review-settled/v1`` AND ``state: APPROVED``. A
+      truncated or hand-edited marker that kept only ``state: APPROVED`` is NOT
+      a cache; treating it as one deletes a file we do not understand.
+    - ``merged`` — that SAME schema AND ``state: MERGED`` AND a well-formed
+      ``merge_sha``. MERGED without a sha is INCOMPLETE evidence: preserved like
+      any unknown, but reported, because silently accepting it would let a
+      half-written marker pass as proof a PR landed.
+    - ``unknown`` — everything else, including unreadable and absent.
+
+    The schema gate is checked ONCE, ahead of both shapes, and that placement is
+    the fix rather than a matter of style. The r3 version demanded a schema for
+    APPROVED and admitted MERGED on ``state`` plus a sha, so a truncated marker
+    that lost its schema line still classified as merge evidence and returned a
+    clean rc — the guard covered the direction I was thinking about and left its
+    neighbour. Both writers emit ``review-settled/v1``, so requiring it of both
+    rejects nothing this code produces; and an unrecognised FUTURE schema now
+    lands in ``unknown``, which preserves the file, instead of being read by
+    rules written before it existed.
+
+    Only ``cache`` is deletable. Every other answer preserves the file.
+    """
+    raw = transport.read(_settled_marker_path(team, slug))
+    if raw is None:
+        return SETTLED_UNKNOWN
+    fm = okf.parse_frontmatter(raw) or {}
+    if str(fm.get("schema") or "") != "review-settled/v1":
+        return SETTLED_UNKNOWN
+    state = str(fm.get("state") or "")
+    if state == "MERGED":
+        sha = str(fm.get("merge_sha") or "")
+        return SETTLED_MERGED if _MERGE_SHA.match(sha) else SETTLED_UNKNOWN
+    if state == review.APPROVED:
+        return SETTLED_CACHE
+    return SETTLED_UNKNOWN
+
+
+def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str,
+                          evidence: Optional[str] = None) -> str:
+    """Best-effort settled-cache write. Failure is swallowed: the marker only
+    speeds the fan-out fold; its absence just means the next fold recomputes.
+
+    NEVER overwrites MERGE EVIDENCE. PR 572 stopped `review status` from
+    DELETING a `.settled` that records a merge, and left this WRITE path
+    unguarded — so a settleable tally would happily stamp the recomputable
+    APPROVED cache straight over `state: MERGED` + `merge_sha`. Found in
+    production by coord-boss: they closed 585 with a sha at ~01:20, and the
+    `review status` I ran at ~01:22 to CHECK the closure is what destroyed it.
+    Same bug as 572 wearing a smaller hat, and my own guard covered the
+    direction I was thinking about and left its neighbour — again.
+
+    Refusing costs nothing real. The cache exists so the fan-out fold can skip
+    the slug; a MERGED marker ALREADY makes it skip. Overwriting buys no speed
+    and loses the only durable record that the PR landed.
+
+    UNBOUND EVIDENCE IS NOT WRITTEN AT ALL. An empty digest means the caller
+    could not fingerprint this directory — a mutable plain shard participates —
+    and every reader refuses such a marker, so writing one is cost with no
+    reader (codex-reviewer, 595 r5).
+    """
+    if not evidence:
+        return "unbound-evidence"
+    try:
+        # Overwrite ONLY a positively-identified CACHE, or a positively ABSENT
+        # marker. Everything else is preserved.
+        #
+        # r1 of this fix guarded MERGED and left SETTLED_UNKNOWN clobberable —
+        # even though the classifier's whole contract is that only `cache` is
+        # disposable, precisely because an unreadable / unrecognised /
+        # FUTURE-schema marker is one this build cannot prove is ours to drop.
+        # codex-reviewer reproduced it with a `review-settled/v2` marker
+        # carrying a real merge sha: classified UNKNOWN, then overwritten by the
+        # v1 APPROVED cache. Guarded the case I was thinking about and left its
+        # neighbour — the same shape as the delete-vs-write split this PR exists
+        # to close, one level in.
+        #
+        # The absence check costs ONE listing, and only when the read came back
+        # empty. A slug settles once and is skipped by the fold forever after,
+        # so that is one listing per slug lifetime, not per fold.
+        state = _classify_settled_marker(transport, team, slug)
+        if state != SETTLED_CACHE:
+            if state != SETTLED_UNKNOWN:
+                return "kept-merged"
+            if _settled_marker_present(transport, team, slug) is not False:
+                # Present-but-unclassifiable, or presence itself unknown. Either
+                # way we cannot prove it is a cache, so it stays.
+                return "kept-unknown"
         transport.write(
             _settled_marker_path(team, slug),
-            okf.render_frontmatter({"schema": "review-settled/v1",
-                                    "state": review.APPROVED, "ts": now}),
+            okf.render_frontmatter(review.settled_marker_fields(
+                state=review.APPROVED, ts=now, evidence=evidence)),
         )
+        return "written"
     except Exception:
-        pass
+        return "unknown-error"
+
+
+#: A merge sha is EVIDENCE, so it must look like one. Closure that accepts an
+#: arbitrary string is closure by assertion, which is the inference this verb
+#: exists to replace.
+_MERGE_SHA = re.compile(r"\A[0-9a-f]{40}\Z|\A[0-9a-f]{64}\Z")
+
+
+def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
+    """Close a review because its PR MERGED — an artifact of the merge, not an
+    inference about it (coord-boss ruling 1, 2026-08-07).
+
+    A merged PR leaves an immortal obligation: the register keeps asking for a
+    verdict on a head nobody will ever review again. `review gc` is deliberately
+    NOT the answer — its predicate asks whether a HEAD is still alive, 551 raised
+    that bar on purpose, and "the PR merged" is a different question that a
+    liveness probe cannot answer.
+
+    Unlike :func:`_write_settled_marker`, which is a best-effort CACHE and
+    swallows its failures, this is a DURABLE RECORD: a swallowed failure would
+    leave the row open while reporting closed, so the write is verified by
+    read-back and a failure is a non-zero exit.
+    """
+    slug = args.slug
+    sha = (args.merge_sha or "").strip().lower()
+    if not _MERGE_SHA.match(sha):
+        print(f"review close: --merge-sha must be a full 40- or 64-hex commit "
+              f"sha, got {args.merge_sha!r}. Closure carries evidence; an "
+              f"abbreviation or a branch name is an assertion.", file=sys.stderr)
+        return 2
+
+    # Refuse to close a slug that does not exist: a write into a nonexistent
+    # register entry succeeds silently and reads exactly like a closure.
+    try:
+        vnames = {(e.get("name") or "")
+                  for e in transport.list_dir(_verdicts_prefix(args.team, slug))}
+    except TransportError as e:
+        print(f"review close: cannot read the verdicts prefix for {slug} ({e}) "
+              f"— UNKNOWN, not closed. Retry.", file=sys.stderr)
+        return 1
+    doc = transport.read(_review_doc_path(args.team, slug))
+    if doc is None and not vnames:
+        print(f"review close: {slug} has no review doc and no verdicts — "
+              f"nothing to close. Check the slug.", file=sys.stderr)
+        return 2
+
+    now = _iso(_now())
+    marker = {
+        "schema": "review-settled/v1",
+        "state": "MERGED",
+        "merge_sha": sha,
+        "merged_at": args.merged_at or now,
+        "closed_by": args.sender or _host(),
+        "reason": args.reason or "PR merged; the head will not be reviewed again",
+        "ts": now,
+    }
+    payload = okf.render_frontmatter(marker)
+    path = _settled_marker_path(args.team, slug)
+    try:
+        transport.write(path, payload)
+    except Exception as e:
+        print(f"review close: write FAILED for {slug} ({type(e).__name__}) — "
+              f"the row is still open.", file=sys.stderr)
+        return 1
+    # Verify the marker IS THE ONE WE WROTE, not merely that something is
+    # there (codex 561 r1). `.settled` is very often already occupied by the
+    # fold's APPROVED cache marker — that is the NORMAL state for a terminal
+    # review, which is exactly the review a merged PR has. So a silently
+    # dropped write leaves the OLD content behind, a presence check passes, and
+    # the command reports a merge sha the durable record does not contain.
+    # Presence is not identity; that distinction is the whole point of this verb.
+    back = transport.read(path)
+    if back is None:
+        print(f"review close: wrote {slug} but the read-back was empty — "
+              f"closure UNVERIFIED, treat the row as still open and retry.",
+              file=sys.stderr)
+        return 1
+    if back != payload:
+        # Compare EVERY field we wrote, derived from the payload itself
+        # (codex 561 r2). My r1 fix hand-picked `state` and `merge_sha` and
+        # called them load-bearing — but this verb's contract records
+        # merged_at, closed_by and reason too, so re-closing the SAME sha with
+        # a corrected timestamp or reason could silently drop the write, match
+        # on the two fields I happened to check, and exit 0 while the requested
+        # evidence never landed. A hand-picked subset goes stale the moment a
+        # field is added; deriving the list from `marker` cannot.
+        got = okf.parse_frontmatter(back) or {}
+        stale = sorted(k for k, want in marker.items()
+                       if str(got.get(k) if got.get(k) is not None else "")
+                       != str(want))
+        if stale:
+            print(f"review close: {slug} read back a DIFFERENT marker — "
+                  f"{', '.join(stale)} did not match what was written. The "
+                  f"write did not land; closure UNVERIFIED and the row is "
+                  f"still open.", file=sys.stderr)
+            return 1
+    print(f"review close: {slug} closed as MERGED at {sha[:12]} "
+          f"(marker {path})")
+    return 0
 
 
 def _is_settleable(tally: dict[str, Any]) -> bool:
@@ -1251,6 +1859,47 @@ def _is_settleable(tally: dict[str, Any]) -> bool:
     return (tally.get("state") == review.APPROVED
             and not tally.get("pending_required")
             and bool(tally.get("required")))
+
+
+def _is_unattributable(name: str, *, keyed: bool) -> bool:
+    """Can this verdict filename name a reviewer on THIS review?
+
+    ``keyed`` is whether the REQUEST carries a head. That parameter is the fix
+    codex-reviewer found in r2: without it the predicate answered a question
+    about the filename alone, and a filename is only meaningful against the
+    review it sits under.
+
+    - On a KEYED review, ``<valid-head>--<reviewer>.md`` for a non-active head
+      is a superseded round: skipped deliberately and silently, because making
+      every multi-round review noisy would train everyone past the warning that
+      matters.
+    - On a HEADLESS review there are no rounds at all, so a keyed-looking shard
+      names a round that cannot exist here. It is uncounted, and the r2 build
+      said nothing: `PENDING`, `awaiting required: bob`, rc 0, with bob's
+      approve verdict present. The same silent false negative this whole change
+      exists to remove, hiding one branch deeper.
+    - A ``--`` prefix that is not a well-formed head is unattributable either
+      way: it names no round that could ever exist, under any review.
+    """
+    stem = name[:-3] if name.endswith(".md") else name
+    if "--" not in stem:
+        return False
+    if not keyed:
+        return True  # no rounds here, so nothing keyed can belong
+    return review.normalize_head(stem.split("--", 1)[0]) is None
+
+
+def _store_mtime_iso(mtime: Any) -> Optional[str]:
+    """Listing mtime -> comparable ISO, or None.
+
+    Store mtimes render on a TWELVE-HOUR clock, so comparing them as strings
+    inverts the midnight hour. Parsed through the one existing parser, never
+    compared raw.
+    """
+    if not isinstance(mtime, str):
+        return None
+    dt = aggregate._parse_store_mtime(mtime)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
 
 
 def _tally_from_verdict_entries(
@@ -1291,6 +1940,10 @@ def _tally_from_verdict_entries(
     elif isinstance(required, list):
         required = [str(r).strip() for r in required if str(r).strip()]
     verdicts: list[dict[str, Any]] = []
+    unattributable: list[str] = []
+    unrecognised: list[tuple[str, str]] = []
+    mismatched: list[tuple[str, str]] = []
+    rows: list[dict[str, Any]] = []
     reads_ok = True
     fully_scanned = True
     dl = Deadline(deadline)
@@ -1298,10 +1951,26 @@ def _tally_from_verdict_entries(
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
             continue
-        reviewer = review.reviewer_from_filename(n, head=head)
+        parsed_name = review.parse_verdict_filename(n, head=head)
+        reviewer = parsed_name[0] if parsed_name else None
+        parsed_ts = parsed_name[1] if parsed_name else None
         if reviewer is None:
             # A keyed review reads only the active head's append-only shards;
             # legacy reviews ignore keyed files. Superseded heads cost zero reads.
+            #
+            # But "skipped a superseded round" and "cannot attribute this file at
+            # all" are different facts, and collapsing them cost a real reviewer
+            # their verdict: a shard named `<date>--<reviewer>.md` on a headless
+            # review was read as a superseded head, dropped before it was opened,
+            # and `review status` then reported pending_required=[that reviewer]
+            # — not "a file here is unreadable", but the affirmative claim that
+            # they had not voted. A false negative wearing the costume of a fact,
+            # and the person who did the work is the last one who would check.
+            #
+            # A prefix that is not a well-formed head can never name a round, so
+            # it is unattributable under ANY head, not merely under this one.
+            if _is_unattributable(n, keyed=bool(head)):
+                unattributable.append(n)
             continue
         if dl.expired():
             # Budget expired mid-slug: stop reading shards. The tally built so far
@@ -1321,14 +1990,71 @@ def _tally_from_verdict_entries(
         fm = okf.parse_frontmatter(raw_v) or {}
         if head and review.normalize_head(fm.get("head")) != head:
             # The path selects the round, and the verdict must independently
-            # attest the exact reviewed head. A mismatch cannot discharge it.
+            # attest the exact reviewed head. A mismatch cannot discharge it —
+            # that rule is right and is unchanged.
+            #
+            # Doing it SILENTLY was the mistake. I left this skip alone while
+            # fixing the other two, reasoning that "the path selects the round,
+            # so a mismatch is a different claim". collect-maintainer pushed
+            # back; the user-visible failure is identical. A well-formed shard
+            # from alice sits in the directory, is read, is discarded, and
+            # `review status` reports `pending_required: [alice]` at rc 0 —
+            # the same affirmative falsehood, arrived at by a different route.
+            # By the rule this very change establishes, a verdict that cannot
+            # be counted is reported, never dropped.
+            mismatched.append((n, str(fm.get("head") or "")))
             continue
         # Key by the requirement token encoded in the ACL-controlled FILENAME,
         # not the frontmatter
         # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
         # could shadow alice's real verdict. One verdict file per reviewer.
-        verdicts.append({"reviewer": reviewer, "verdict": fm.get("verdict")})
+        token = fm.get("verdict")
+        if token is not None and review.normalize_verdict(token) is None:
+            # A reviewer who wrote `approve-with-required-changes` has
+            # unmistakably voted. Normalising that to None and moving on is the
+            # engine choosing the least informative reading of a clear intent —
+            # and it lands in the same PENDING as no verdict at all. Record it
+            # so the surface can say WHY the vote did not count.
+            unrecognised.append((n, str(token)))
+        # Collect, do not decide: with append-only shards a reviewer may have
+        # several, and only the NEWEST counts. Sorting on a ts we can defend —
+        # the name's for an append shard, the frontmatter's for a plain one,
+        # falling back to the listing mtime — keeps two hosts folding the same
+        # directory to the same answer.
+        rows.append({
+            "reviewer": reviewer,
+            "name": n,
+            "verdict": token,
+            "sort_key": (parsed_ts
+                         or str(fm.get("ts") or "")
+                         or _store_mtime_iso(e.get("mtime")) or ""),
+        })
+    kept, folded_away = review.fold_newest_per_reviewer(rows)
+    verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
+                for r in kept]
     tally = review.tally(verdicts, required=required)
+    # Computed HERE, from the same entries the fold consumed, so the cache's
+    # fingerprint provably describes what it summarises. EMPTY when a mutable
+    # plain shard participates: a name digest cannot see that shard's in-place
+    # rewrite, so there is nothing here honest enough to bind a cache to, and an
+    # empty digest is what every reader already treats as unbound (595 r5).
+    _vnames = [e.get("name") for e in entries]
+    tally["evidence"] = (review.evidence_digest(_vnames)
+                         if review.evidence_is_immutable(_vnames) else "")
+    if folded_away:
+        # NEVER SILENTLY (coord-boss constraint 4). A reader told "APPROVED"
+        # while shards were quietly discarded has the same affirmative
+        # falsehood this whole cycle was about; superseded evidence is still on
+        # disk and the count is how a reader knows to go look.
+        tally["superseded_verdicts"] = folded_away
+    if unattributable:
+        tally["unattributable"] = sorted(unattributable)
+    if unrecognised:
+        tally["unrecognised_verdicts"] = [
+            {"file": f, "verdict": v} for f, v in sorted(unrecognised)]
+    if mismatched:
+        tally["head_mismatched_verdicts"] = [
+            {"file": f, "claimed_head": h} for f, h in sorted(mismatched)]
     if head:
         tally["head"] = head
         try:
@@ -1602,9 +2328,21 @@ def _role_degraded_row(roles_unknown: "set[str] | list[str]") -> dict[str, Any]:
 
 
 def _role_degraded_line(r: dict[str, Any]) -> str:
+    # "assignee token(s)", not "roles". On the pre-budget path
+    # `_held_roles_for_rows` returns its RAW candidate set — every distinct
+    # assignee on the rows — because the budget was already spent before the
+    # roles listing that would tell us which of them are roles at all. So this
+    # line can name plain agent identities, and calling them roles states
+    # something we did not check. Mid-scan the set IS filtered to real roles;
+    # one wording that is true of both beats a second message that drifts.
+    #
+    # It over-reports UNKNOWN and never under-reports, which is the safe
+    # direction — the point of the fix is that the words match the evidence.
+    # (coord-boss, P3 fidelity note on 560.)
     return (f"  role resolution degraded: {', '.join(r.get('roles') or [])} — "
-            f"your role inbox is unknown (not empty); role-routed work may be "
-            f"missing, retry")
+            f"membership unresolved for these assignee token(s); your role "
+            f"inbox is unknown (not empty), role-routed work may be missing, "
+            f"retry")
 
 
 def _held_roles_for_rows(
@@ -1684,6 +2422,26 @@ def _held_roles_for_rows(
     # deadline cumulatively: the listing, each role's doc + lease listing, and each
     # lease shard read within a role.
     dl = Deadline.open(deadline_seconds)
+    if candidates and dl.expired():
+        # The budget was ALREADY spent when we were called (a caller passing its
+        # own remaining window, e.g. briefing after a slow earlier phase). The
+        # listing below is an unconditional blocking op and the first expiry
+        # check used to sit AFTER it, so a spent budget still paid one full
+        # transport op — under the degraded transport this bound exists for,
+        # that is one whole timeout, charged to the sections the caller was
+        # protecting. Nothing can be classified without the listing, so every
+        # candidate is UNKNOWN. Return that, having spent nothing.
+        # (Found by coord-opus-worker reviewing PR 559; it is the same
+        # pre-budget class this function's own docstring names four lines up.)
+        #
+        # NOTE the fidelity limit, deliberately accepted: these are RAW
+        # candidates — every distinct assignee on the rows — not roles. Telling
+        # them apart needs the roles listing, which is the one blocking op this
+        # branch exists to avoid paying for. So the set can include plain agent
+        # identities, it over-reports UNKNOWN and never under-reports, and the
+        # degraded LINE is worded for that ("assignee token(s)", not "roles")
+        # rather than asserting a membership nobody checked.
+        return set(), set(candidates)
     if candidates:
         # Prime the cache `_role_fresh_holders` already consults, and use it to
         # drop candidates that are affirmatively NOT roles before paying a read
@@ -2102,8 +2860,27 @@ def _pending_reviews_raw(
         slug = (e.get("name") or "")[:-3]
         try:
             ventries = transport.list_dir(_verdicts_prefix(team, slug))
-            if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
-                return "ok"  # settled -> skip entirely, zero reads beyond this listing
+            vnames = {(x.get("name") or "") for x in ventries}
+            # gc-retired entries skip for the same reason settled ones do — they
+            # can never become pending for anybody. Skipping them HERE is what
+            # makes `review gc` recover budget at all; the marker alone changed
+            # nothing (codex-reviewer, review-gc round 1).
+            if review_gc.GC_MARKER in vnames:
+                return "ok"  # terminal -> skip entirely, zero reads beyond this listing
+            if SETTLED_MARKER in vnames:
+                # A `.settled` used to skip this slug on PRESENCE ALONE, which is
+                # the same unvalidated short-circuit 595 r4 fixed in the register
+                # projection — fixed THERE and left here, one reader apart. A
+                # stale cache made this scan report an agent owed nothing while
+                # the newest verdict was CHANGES: an obligation hidden by a file.
+                #
+                # Same shared rule, so the two readers cannot drift. One read per
+                # settled slug still skips the doc and every shard.
+                if review.settle_shortcircuit(
+                        okf.parse_frontmatter(
+                            transport.read(_settled_marker_path(team, slug))) or {},
+                        vnames) != review.SETTLE_NO:
+                    return "ok"
             doc_raw = transport.read(_review_doc_path(team, slug))
             if doc_raw is None:
                 # Slug came from the listing, so its doc exists — a None read is a
@@ -2132,7 +2909,8 @@ def _pending_reviews_raw(
         if state == review.APPROVED and not pending:
             # Cache only a PROVEN settle (non-empty required + every verdict read).
             if _is_settleable(tally) and vreads_ok:
-                _write_settled_marker(transport, team, slug, now=now)
+                _write_settled_marker(transport, team, slug, now=now,
+                                      evidence=tally.get("evidence"))
             return "ok"
         if state != "PENDING" or not pending:
             return "ok"
@@ -2352,6 +3130,48 @@ def _review_row_line(r: dict[str, Any]) -> Optional[str]:
     if t == "review-source":
         return _source_line("review", r)
     return None
+
+
+#: Every degraded marker row type in this module ends in ``degraded``
+#: (``read-degraded``, ``role-degraded``, ``forge-degraded``, the four
+#: ``review-*-degraded``, ``inbox-degraded``, ``presence-degraded``,
+#: ``engagement-degraded``). ONE predicate, so a marker type added tomorrow is
+#: counted by the envelope that day rather than the day someone notices it never
+#: was.
+def _is_degraded_row(r: Any) -> bool:
+    return isinstance(r, dict) and str(r.get("type") or "").endswith("degraded")
+
+
+def _fold_source(rows: list, type_name: str) -> str:
+    """``projection`` / ``raw`` / ``absent`` for the ``*-source`` row named by
+    ``type_name`` — the envelope's one-word form of `_source_line`."""
+    for r in rows:
+        if isinstance(r, dict) and str(r.get("type") or "") == type_name:
+            return "projection" if r.get("source") == "projection" else "raw"
+    return "absent"
+
+
+def emit_envelope(verb: str, *, count: int, rc: int, **fields: Any) -> None:
+    """Write ONE compact verdict line to **stderr**.
+
+    A fold that prints an unbounded row list puts its verdict — the degraded
+    markers, the source disclosure, and the rc they imply — at the END of that
+    list. A harness whose context truncates the stream loses exactly the part
+    that says whether the read can be trusted, and a truncated read then looks
+    identical to a clean one. codex-coder hit this 2026-08-08: ``needs-me``
+    completed, stdout was truncated before the markers, and the wake could not
+    certify the durable-assignment read either way. PR 565 had just made the rc
+    load-bearing for that condition, which is what made the loss bite.
+
+    stderr is a separate, tiny stream that survives stdout truncation on every
+    harness we have. It is a DUPLICATE of the inline markers, never a
+    replacement — the inline rows stay exactly where they are for readers that
+    can see them.
+    """
+    parts = [f"{verb}: {count} item(s)"]
+    parts += [f"{k}={v}" for k, v in fields.items()]
+    parts.append(f"rc={rc}")
+    print(", ".join(parts), file=sys.stderr)
 
 
 def _source_line(label: str, r: dict[str, Any]) -> str:
@@ -2995,6 +3815,15 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # A fresh doc can carry no stale `.settled` marker, but a since-deleted-and-
     # reopened slug at the same path could; clear it best-effort (delete is
     # timeout-safe -> False, which we ignore) so the next fold recomputes.
+    #
+    # DELIBERATELY UNGUARDED, unlike the `review status` F4 delete. This clear
+    # destroys merge evidence when the slug was a closed orphan, and that is the
+    # LESSER harm: the fan-out fold SKIPS any slug carrying this marker
+    # (see `SETTLED_MARKER in vnames`), so keeping it here would make the review
+    # being requested INVISIBLE — a silently hidden obligation, versus evidence
+    # that one `review close` restores. The marker does two jobs with opposite
+    # lifetimes (durable evidence vs a fold-skip cache); separating them is the
+    # real fix, and it is a design decision rather than a local one.
     transport.delete(_settled_marker_path(team, slug))
     # Atomic notification: with the doc durably landed, deliver ONE directive per
     # required reviewer through the canonical hash-slug directive path, so a
@@ -3013,6 +3842,157 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         return 1
     _print_review_success(args, team, slug, required, recovered=False,
                           head=requested_head, round_no=1 if requested_head else None)
+    return 0
+
+
+def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
+    """File a verdict for a review round.
+
+    SUGAR OVER THE EXISTING ARTIFACT, deliberately (coord-boss constraint a):
+    this writes exactly the canonical `<head>--<reviewer>.md` shard at the path
+    `review request` already prints, with the frontmatter the tally already
+    reads. Nothing downstream — tally, settle, retention — learns that a verb
+    exists, and DIRECT shard-writing stays valid (constraint b): reviewers who
+    write the file themselves are unaffected the day this ships.
+
+    Why it exists at all: filing a verdict was the one act with NO verb, so a
+    reviewer touched no chokepoint, refreshed no presence, and left no work
+    event. Every liveness fix of this cycle could not see reviewers for that one
+    reason. As a verb it inherits all of them at once.
+
+    REFUSES TO OVERWRITE. A verdict is evidence a merge decision may already
+    rest on; replacing one silently could erase a CHANGES. A changed head is a
+    new round with its own filename, which is the supported way to revise.
+    """
+    reviewer = _known_sender(args)
+    if not reviewer:
+        print("review verdict: no reviewer identity — set FULCRA_COORD_AGENT "
+              "or pass --from", file=sys.stderr)
+        return 2
+    normalized = review.normalize_verdict(args.verdict)
+    if normalized is None:
+        print(f"review verdict: {args.verdict!r} is not a verdict — use "
+              f"approve or changes; anything else reads as unparseable to the "
+              f"tally and stalls the review silently", file=sys.stderr)
+        return 2
+
+    # THE REGISTER IS AUTHORITATIVE FOR THE ROUND (codex-reviewer, 595 r1).
+    # `--head` used to be optional and the register was never read, so omitting
+    # it wrote `<reviewer>.md`, printed success and returned 0 — while the tally
+    # ignored that headless shard and the reviewer stayed pending. A confident
+    # false success: the reviewer believes they voted, the round still waits.
+    doc_raw = transport.read(_review_doc_path(args.team, args.name))
+    if not doc_raw:
+        print(f"review verdict: cannot read the review register for "
+              f"{args.name} — a read of None is missing OR unreadable, and "
+              f"neither tells me which round you are voting in. Refusing rather "
+              f"than guessing.", file=sys.stderr)
+        return 3
+    doc_fm = okf.parse_frontmatter(doc_raw) or {}
+    active_head = review.normalize_head(doc_fm.get("head"))
+    supplied = review.normalize_head(getattr(args, "head", None))
+    if getattr(args, "head", None) and supplied is None:
+        print(f"review verdict: --head {args.head!r} is not a valid exact "
+              f"commit id", file=sys.stderr)
+        return 2
+    if active_head and supplied and supplied != active_head:
+        print(f"review verdict: {args.name} is at head {active_head}; a verdict "
+              f"pinned to {supplied} cannot discharge the current round and "
+              f"would sit unread. Re-run against the active head.",
+              file=sys.stderr)
+        return 1
+    if active_head and not supplied:
+        head = active_head          # resolved, never orphaned
+        print(f"(resolved active head {active_head} from the register)",
+              file=sys.stderr)
+    else:
+        head = supplied
+    if supplied and not active_head:
+        print(f"review verdict: {args.name} is not head-keyed, but --head was "
+              f"given; refusing rather than writing a shard the tally ignores",
+              file=sys.stderr)
+        return 1
+
+    # APPEND-ONLY (coord-boss ruling b99fb8da, after codex reproduced a
+    # concurrent CHANGES being overwritten by APPROVE at rc 0). The name is
+    # unique to this write, so it can never touch a file another writer holds —
+    # which closes verb-vs-verb AND verb-vs-hand races WITHOUT a store
+    # primitive. There is deliberately NO existence check here: the previous
+    # check-then-write could not keep the promise it printed, and a promise the
+    # code cannot keep is the false-success family one level up.
+    #
+    # A correction is therefore a NEW file, and the original evidence stays on
+    # disk — which is also the same-head correction path codex asked for.
+    # SECOND precision in the name and the shard ts. `_iso` carries
+    # microseconds, which the append-suffix pattern rejects — the filename then
+    # parsed as a reviewer literally called `codex-reviewer--2026-...-<digest>`
+    # and the tally credited a phantom while the real reviewer read as pending.
+    # Mixed precision would also misorder a plain shard against an append one
+    # when compared as strings.
+    now_iso = _now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    digest = hashlib.sha1(
+        f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}"
+        .encode()).hexdigest()[:8]
+    filename = review.verdict_filename(reviewer, head=head, ts=now_iso,
+                                       digest=digest)
+    path = _verdicts_prefix(args.team, args.name) + filename
+
+    body = okf.render_frontmatter({
+        "type": "Verdict",
+        "reviewer": reviewer,
+        "head": head,
+        "verdict": normalized,
+    }) + f"\n{getattr(args, 'note', None) or normalized}\n"
+    if not transport.write(path, body):
+        print(f"review verdict: write FAILED for {path} — the verdict did NOT "
+              f"land, so the review still awaits you", file=sys.stderr)
+        return 1
+    # A NEW VERDICT INVALIDATES THE FOLD CACHE (codex-reviewer, 595 r3).
+    # Without this the same-head correction contract is FALSE the moment a prior
+    # result has settled: APPROVE -> `review status` writes `.settled` -> a later
+    # CHANGES correction lands and is ignored, because the projection treats any
+    # marker hit as immutable approval and never reads the shards. rc 0, both
+    # shards on disk, and readers still say APPROVED.
+    #
+    # ONLY THE CACHE. `.settled` carries two meanings (572/588): `state:
+    # APPROVED` is a recomputable tally cache and is clearable; `state: MERGED`
+    # with a merge_sha is EVIDENCE that a merge happened and must never be
+    # destroyed by a late verdict. UNKNOWN is not permission either.
+    # Absent vs unreadable FIRST: `_classify_settled_marker` folds both into
+    # `unknown` (its docstring says so), and "no marker yet" is the COMMON case
+    # — treating that as ambiguous would fail every ordinary verdict. The
+    # tri-state listing separates them.
+    present = _settled_marker_present(transport, args.team, args.name)
+    if present is None:
+        print(f"review verdict: recorded at {path}, but I cannot tell whether a "
+              f"settle marker exists for {args.name}, so I cannot tell whether "
+              f"a stale cache is hiding this verdict. Verify with "
+              f"`review status`.", file=sys.stderr)
+        return 3
+    if present:
+        state = _classify_settled_marker(transport, args.team, args.name)
+        if state == SETTLED_CACHE:
+            if not _clear_settled_marker(transport, args.team, args.name):
+                print(f"review verdict: recorded at {path}, but the stale fold "
+                      f"cache for {args.name} could NOT be cleared — readers "
+                      f"may still report the previous result. Clear it before "
+                      f"trusting the tally.", file=sys.stderr)
+                return 3
+        elif state == SETTLED_MERGED:
+            print(f"review verdict: recorded at {path}, but {args.name} is "
+                  f"already closed as MERGED — that marker is EVIDENCE, not a "
+                  f"cache, so it stands. Your verdict is on disk and does not "
+                  f"change the merge record.", file=sys.stderr)
+        else:
+            print(f"review verdict: recorded at {path}, but the settle marker "
+                  f"for {args.name} is UNRECOGNISED, so I will not delete it "
+                  f"and cannot promise readers see this verdict.",
+                  file=sys.stderr)
+            return 3
+
+    # Tell the chokepoint which artifact this was, so the work event names it.
+    record_activity_artifact(args, path)
+    print(f"verdict {normalized} recorded for {args.name} at {path}")
     return 0
 
 
@@ -3066,18 +4046,53 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         return 1
     # A direct query recomputes the truth (never trusts the marker). doc_ok and
     # vreads_ok are both proven above, so the tally is trustworthy here.
+    _marker_unknown = False
     if _is_settleable(result):
         # PROVEN terminal-settled (non-empty required, every listed verdict read):
         # refresh the fold cache so the fan-out fold can skip this slug next time.
-        _write_settled_marker(transport, team, slug, now=_iso(_now()))
+        if _write_settled_marker(
+                transport, team, slug, now=_iso(_now()),
+                evidence=result.get("evidence")) == "kept-unknown":
+            # Same register as the F4 branch below: a marker this build cannot
+            # classify was PRESERVED, and the caller must not read a clean tally
+            # as "everything here is understood" (codex-reviewer, 588 r1 —
+            # report consistently with the existing unknown-marker discipline).
+            print(f"review status: {slug} carries a `.settled` marker this "
+                  f"build cannot classify — unreadable, an unrecognised "
+                  f"state:, or a FUTURE schema. PRESERVED, and the settled "
+                  f"cache was NOT refreshed over it.", file=sys.stderr)
+            _marker_unknown = True
     else:
         # F4: a full, trustworthy tally that is NOT settleable, yet a `.settled`
-        # marker may linger (e.g. a since-reopened review). It is provably stale —
-        # the marker only ever caches a terminal-APPROVED state. Best-effort
-        # delete (delete is timeout-safe -> False, ignored) so the next fan-out
-        # fold recomputes and sees the pending obligation, complementing the I2
-        # re-request delete. Self-healing on direct query.
-        transport.delete(_settled_marker_path(team, slug))
+        # marker may linger. Which of the marker's TWO meanings it carries decides
+        # what we may do — see `_classify_settled_marker`. Before PR 561 there was
+        # only one meaning and this branch deleted unconditionally, which is how
+        # `review status` came to destroy merge evidence just by being run.
+        marker_state = _classify_settled_marker(transport, team, slug)
+        if marker_state == SETTLED_CACHE:
+            # Recomputable: drop it so the next fan-out fold sees the pending
+            # obligation. Best-effort (delete is timeout-safe -> False, ignored).
+            transport.delete(_settled_marker_path(team, slug))
+        elif marker_state == SETTLED_UNKNOWN and (
+                _settled_marker_present(transport, team, slug) is not False):
+            # A marker EXISTS but this build could not classify it — unreadable
+            # under a degraded transport, or a `state:` it does not know. PRESERVE
+            # it (never delete what we failed to parse) and say so LOUDLY: a
+            # silent keep leaves a marker suppressing the fan-out fold with
+            # nothing on any surface explaining why. rc is nonzero so an
+            # unattended caller cannot read this as a clean tally.
+            # `is not False` covers BOTH "a marker is definitely there" and
+            # "we could not even determine presence". Only a POSITIVE absence
+            # (listing succeeded, no marker) is silent — anything less certain
+            # fails closed, which is the promise the two-state version broke.
+            print(f"review status: {slug} may carry a `.settled` marker this "
+                  f"build cannot classify — unreadable, an unrecognised "
+                  f"state:, or MERGED without a well-formed merge_sha. "
+                  f"PRESERVED, not deleted. The fan-out fold may skip this slug "
+                  f"until it is resolved.", file=sys.stderr)
+            _marker_unknown = True
+        # SETTLED_MERGED, or absent: nothing to do. Merge evidence is not a cache
+        # and is never dropped by a tally recompute.
     result.update({"team": team, "slug": slug})
     if args.json:
         jsonutil.print_json(result)
@@ -3089,13 +4104,66 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             print("  changes requested: " + ", ".join(result["changes"]))
         if result["pending_required"]:
             print("  awaiting required: " + ", ".join(result["pending_required"]))
-    return 0
+    # Verdicts that EXIST but could not be counted. Printed even in JSON mode's
+    # sibling branch above (they ride in the payload), and always to stderr here
+    # so a reviewer reading `awaiting required: <themselves>` is not left to
+    # conclude they forgot to vote when the file is sitting right there.
+    for name in result.get("unattributable") or []:
+        print(f"review status: {slug} carries a verdict file that names no "
+              f"round and no reviewer: {name}. It is NOT counted. RULE: the "
+              f"text before `--` is read as a commit head, and this one is not "
+              f"a 40/64-hex id, so the file can be attributed to no round and "
+              f"no reviewer. A verdict filename is either `<reviewer>.md` or "
+              f"`<head>--<reviewer>.md` — the request breadcrumb prints the "
+              f"exact path to use.", file=sys.stderr)
+    for row in result.get("unrecognised_verdicts") or []:
+        print(f"review status: {slug} has a verdict in {row['file']} whose "
+              f"`verdict: {row['verdict']}` is outside the accepted vocabulary "
+              f"[{review.accepted_vocabulary()}], so it does NOT count toward "
+              f"the tally. The file was read; only the token was unrecognised.",
+              file=sys.stderr)
+    for row in result.get("head_mismatched_verdicts") or []:
+        print(f"review status: {slug} has a verdict at {row['file']} whose own "
+              f"frontmatter claims head {row['claimed_head'] or '(none)'}, which "
+              f"is not this round's head. It is NOT counted, and that is "
+              f"deliberate — a verdict must independently attest the exact "
+              f"commit it reviewed, so a copied or stale shard cannot discharge "
+              f"a new round. Reported rather than dropped: the file exists and "
+              f"its author believes they voted.", file=sys.stderr)
+    # An unclassifiable marker is a DEGRADED answer, not a clean tally: the slug
+    # may stay invisible to the fan-out fold and this verb cannot say why. rc 3,
+    # the established UNKNOWN code, so an unattended caller fails closed.
+    #
+    # An uncounted verdict is the same register of answer: the tally is not the
+    # truth about who reviewed, and reporting `pending_required: [x]` while a
+    # file from x sits unread is a falsehood, not an omission. Same rc.
+    _uncounted = bool(result.get("unattributable")
+                      or result.get("unrecognised_verdicts")
+                      or result.get("head_mismatched_verdicts"))
+    return 3 if (_marker_unknown or _uncounted) else 0
 
 
 # --- continuity (fulcra-agent-continuity snapshots) ---
 
 def _continuity_path(team: str, agent: str, task: str) -> str:
     return f"team/{team}/member/{agent}/continuity/{task}/latest.json"
+
+
+def _continuity_latest_path(team: str, agent: str) -> str:
+    """One pointer per agent naming their newest snapshot.
+
+    Exists because a listing cannot date a COLLECTION: 0 of 161 directory
+    entries under an agent's continuity prefix carry an mtime, and task dirs are
+    slugs with no ordering, so "when did this agent last checkpoint" otherwise
+    costs one read per task. Measured: 203 reads ~149s for three agents, which
+    is why `health` was killed at 240s and again at 590s. Upstream register U8.
+
+    A write-side pointer converts that to ONE read per agent. It is a
+    convention, not an invariant — the store has no conditional write and
+    nothing forces a writer to maintain it — which is exactly why the reader
+    treats a MISSING pointer as UNKNOWN rather than as "no snapshots".
+    """
+    return f"team/{team}/member/{agent}/continuity/LATEST.json"
 
 
 def _continuity_prefix(team: str, agent: str) -> str:
@@ -3137,11 +4205,91 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
     )
     path = _continuity_path(args.team, args.agent, task)
     wrote = transport.write(path, json.dumps(snap, indent=2))
+    if wrote is False:
+        # The failure was ALREADY KNOWN here and was being spent on the
+        # cosmetic decision below while the exit code and the success line went
+        # out unchanged. A continuity snapshot is the durability mechanism: a
+        # park that reports success without reaching the store leaves the
+        # successor resuming from a stale checkpoint believing it is current —
+        # and that happens exactly when the host is in trouble, which is when
+        # parking matters most. Found live during a bus outage, where
+        # `snapshot <id>` printed and rc was 0 with the store unreachable.
+        print(f"continuity snapshot FAILED to persist: {path} was not written "
+              f"(transport failure, not a rejected write). NOTHING was saved — "
+              f"a successor resuming now would read the PREVIOUS checkpoint and "
+              f"believe it is current. Re-run when the store is reachable.",
+              file=sys.stderr)
+        return 3
     print(f"snapshot {snap['checkpoint_id']}")
+    # The pointer is written only AFTER the snapshot itself is known-persisted.
+    # A pointer to a checkpoint that does not exist is worse than no pointer: a
+    # reader would take it as evidence of a save that never happened, which is
+    # the failure this whole verb was just fixed for.
+    ptr_path = _continuity_latest_path(args.team, args.agent)
+    # MONOTONICITY, best-effort. There is no conditional write in this store
+    # (upstream register U3), so two snapshots racing can land out of order and
+    # an OLDER invocation can clobber a newer pointer. Read-then-write closes
+    # the common case; it cannot close the race, and it does not pretend to.
+    prev_ts = None
+    prev_raw = transport.read(ptr_path)
+    if prev_raw is not None:
+        try:
+            prev_ts = continuity._parse_created_at(json.loads(prev_raw).get("created_at"))
+        except (ValueError, TypeError, AttributeError):
+            prev_ts = None
+    mine_ts = continuity._parse_created_at(snap.get("created_at"))
+    if prev_ts is not None and mine_ts is not None and prev_ts > mine_ts:
+        print(f"continuity snapshot: LEFT the existing LATEST pointer alone — it "
+              f"names a NEWER checkpoint than this one, so overwriting it would "
+              f"move {args.agent}'s reported age BACKWARDS.", file=sys.stderr)
+        ptr_ok = True
+    else:
+        ptr_ok = transport.write(ptr_path, json.dumps({
+            "schema": "coord.continuity-latest.v1",
+            "agent": args.agent,
+            "task": task,
+            "checkpoint_id": snap["checkpoint_id"],
+            "created_at": snap.get("created_at"),
+            "path": path,
+        }, indent=2))
+    if ptr_ok is False:
+        # codex-reviewer, 585 r1: a FAILED pointer update does not make the
+        # pointer missing. If an older LATEST.json is already there it SURVIVES,
+        # and the audit then reads a stale timestamp as authoritative and calls
+        # an agent who just checkpointed STALE — manufacturing exactly the false
+        # finding this design claims to prevent, and making the message below
+        # ("will report UNKNOWN") a lie.
+        #
+        # With no conditional write, the only way to stop a stale cache being
+        # believed is to REMOVE it. Deleting loses nothing recoverable: the
+        # pointer is a cache, the snapshots behind it are untouched, and a
+        # missing pointer is UNKNOWN, which is the honest answer here.
+        stale_gone = True
+        if prev_raw is not None:
+            stale_gone = (transport.delete(ptr_path)
+                          if hasattr(transport, "delete") else False)
+        if stale_gone is False:
+            # Unrecoverable by this process: a stale pointer is in place and
+            # will be read as current. That is a WRONG ANSWER waiting to be
+            # given, not a degradation, so it is the loudest thing this verb
+            # says and it changes the exit code.
+            print(f"continuity snapshot: SAVED, but the LATEST pointer for "
+                  f"{args.agent} could not be updated OR removed. A STALE "
+                  f"pointer is still in place and `health` will read it as "
+                  f"current — it may report this agent stale while they are "
+                  f"actively checkpointing. Remove "
+                  f"{ptr_path} by hand, or re-run when the store is healthy.",
+                  file=sys.stderr)
+            return 3
+        print(f"continuity snapshot: saved, but the LATEST pointer for "
+              f"{args.agent} was not written"
+              + (" (the previous one was removed, so nothing stale survives)"
+                 if prev_raw is not None else "")
+              + f" — `health` will report this agent's snapshot age as UNKNOWN "
+                f"until the next successful snapshot.", file=sys.stderr)
     # Only a SUCCESSFUL save casts a shadow: a moment for a checkpoint that is
     # not in the store would be a visualization of work that does not exist.
-    if wrote is not False:
-        _checkpoint_moment(transport, args.team, snap, path)
+    _checkpoint_moment(transport, args.team, snap, path)
     return 0
 
 
@@ -3232,9 +4380,30 @@ def _stamp_for_path(now: str, agent: str) -> str:
     return f"{safe_time}-{tasks.agent_key(agent)}"
 
 
+FYI_TAG = "mode:fyi"
+
+
+def _directive_slug(args: argparse.Namespace, assignee: Optional[str]) -> str:
+    """THE one place a directive's durable slug is derived (codex-reviewer, 605 r3).
+
+    r3 added notification mode to the identity but left TWO post-write callers
+    recomputing the OLD four-field slug by hand: `cmd_remind` scheduled its future
+    event against a slug no document had, and `tell --fyi --closes` closed a
+    parent with evidence naming a reply that did not exist. Both wrote correctly
+    and then pointed somewhere else — a dangling ptr is worse than a failure,
+    because it reports success.
+
+    Three hand-rolled copies of one derivation is the defect; a fourth caller
+    would have reintroduced it. Everything that needs this slug asks here.
+    """
+    return (f"{tasks.slugify(args.title)}-"
+            f"{_payload_hash(_directive_payload(args.title, args.summary, args.next, assignee, fyi=bool(getattr(args, 'fyi', False))))}")
+
+
 def _directive_payload(title: Optional[str], summary: Optional[str],
                        next_action: Optional[str],
-                       assignee: Optional[str]) -> tuple[str, str, str, str]:
+                       assignee: Optional[str],
+                       fyi: bool = False) -> tuple[str, ...]:
     """The message-identity fields — title, summary, next_action, ASSIGNEE.
 
     Identity == path: ``_create_directive`` hashes this payload into the canonical
@@ -3253,10 +4422,25 @@ def _directive_payload(title: Optional[str], summary: Optional[str],
     By design, not_before and priority are delivery metadata OUTSIDE this
     identity, so a reschedule or priority change of the same title dedupes onto
     the original doc (keeping its schedule) rather than re-delivering: to re-arm
-    with a new schedule or priority, send a new title."""
+    with a new schedule or priority, send a new title.
+
+    NOTIFICATION MODE IS IDENTITY (codex-reviewer, 605 r2). The slug was computed
+    before `--fyi` was consulted, so the same text sent as a notification and as a
+    real ask landed on ONE path — and the dedupe then resolved the collision in
+    whichever direction happened to arrive first. FYI first, ask second: the ask
+    dedupes onto a `done` row and emits no companion event, so genuine work is
+    silently absent from both the obligation plane and the recipient's event
+    window. Ask first, FYI second: the FYI dedupes onto a `proposed` row and the
+    no-obligation promise is simply false. An FYI and an ask are DIFFERENT
+    messages; they must occupy different paths.
+
+    Only the notification case appends a marker, so every ordinary directive's
+    hash — and therefore every slug already in the store — is byte-identical to
+    before."""
     def norm(x: Optional[str]) -> str:
         return "" if x is None else str(x)
-    return (norm(title), norm(summary), norm(next_action), norm(assignee))
+    base = (norm(title), norm(summary), norm(next_action), norm(assignee))
+    return base + ("fyi",) if fyi else base
 
 
 def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
@@ -3268,8 +4452,13 @@ def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
     fm = okf.parse_frontmatter(doc)
     if fm is None:
         return None
+    # Mode is read from an EXPLICIT tag, never inferred from status. A completed
+    # ordinary directive is also terminal, so inferring would make every finished
+    # ask start reading as a notification — the same two-states-into-one collapse
+    # this identity fix exists to remove.
     return _directive_payload(fm.get("title"), fm.get("description"),
-                              fm.get("next_action"), fm.get("assignee"))
+                              fm.get("next_action"), fm.get("assignee"),
+                              fyi=(FYI_TAG in (fm.get("tags") or [])))
 
 
 def _payload_hash(payload: tuple[str, str, str, str]) -> str:
@@ -3356,21 +4545,42 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     # The canonical directive path ALWAYS carries the payload hash: identical
     # payloads (any senders, any order) converge on one path and dedupe by
     # construction; distinct payloads occupy distinct paths and can never race.
-    payload = _directive_payload(args.title, args.summary, args.next, assignee)
-    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    fyi = bool(getattr(args, "fyi", False))
+    payload = _directive_payload(args.title, args.summary, args.next, assignee,
+                                 fyi=fyi)
+    slug = _directive_slug(args, assignee)
+    # NOTIFICATIONS DO NOT OPEN (2026-08-11). `tell` minted EVERY message as a
+    # `proposed` row that only the recipient could close — so a report, an ack or
+    # an FYI became a permanent obligation nobody could discharge, because there
+    # was never anything to do. Measured on this bus 2026-08-11: 1239 of 1250
+    # proposed rows were dispatch, and two agents authored 79% of them doing
+    # exactly this.
+    #
+    # This is Ruling 1's sibling one plane over (PR 561: a merged PR closes its
+    # review as an ARTIFACT of the merge). Closure belongs to the terminal event,
+    # not to a separate discipline step nobody performs. A notification's
+    # terminal event IS its delivery, so it is born closed and never enters the
+    # open pile — while still writing its durable ptr doc and still emitting the
+    # companion event that puts it in the recipient's queue. Delivery is
+    # unchanged; only the false obligation goes away.
     try:
         _, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
-            status="proposed", priority=args.priority,
+            status=("done" if fyi else "proposed"), priority=args.priority,
             owner=getattr(args, "sender", None) or _host(), assignee=assignee,
             summary=args.summary or "", next_action=args.next, kind="directive",
-            not_before=not_before, slug=slug,
+            not_before=not_before, slug=slug, fyi=fyi,
+            evidence=("notification delivered; no action was requested of the "
+                      "assignee" if fyi else None),
         )
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
         return 1
     rc = _write_directive(transport, args, slug=slug, content=content,
                           payload=payload, assignee=assignee, not_before=not_before)
+    if (rc == 0 and not_before is None
+            and getattr(args, "_directive_outcome", None) == "written"):
+        _emit_dispatch_companion(transport, args, slug=slug, assignee=assignee)
     # On a delivered ask (not a backlog capture — @backlog awaits no reply), point
     # the sender at the reply leg: the return of `respond` surfaces in their queue.
     if rc == 0 and assignee != directives.BACKLOG:
@@ -3378,6 +4588,124 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
         if sender:
             print(_replies_breadcrumb(args.team, sender))
     return rc
+
+
+def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
+                             slug: str, assignee: str) -> None:
+    """One ``v:1`` bus event pointing at the durable directive doc.
+
+    WHY A COMPANION EVENT AND NOT A RESHAPED PROJECTION. `tell` writes a durable
+    task document and the activity projection annotates it on the timeline —
+    but that projection's note is PROSE, and the documented queue filter keeps
+    only notes that parse as JSON with ``"v":1``. So for three days every
+    dispatch was durable, correctly recorded, and invisible to the recipient's
+    queue: 2026-08-06, `queue --peek` CLEAR while two P1 tasks sat unstarted
+    (see the coord-boss RCA and its two-defects follow-up).
+
+    The alternative fix was to make the projection itself emit a ``v:1`` note.
+    Rejected, and this is the design call the RCA asked the lane holder to make
+    explicitly:
+
+    - The projection is the TIMELINE surface; prose is its product value. Making
+      it JSON to satisfy a control-plane filter subordinates the product to the
+      transport.
+    - The projection fires on EVERY transition (create/pickup/update/complete).
+      Routing all of those onto the bus would put a stream of updates nobody
+      addressed in front of every queue reader — the "non-routable noise" that
+      :mod:`coord_engine.checkpoint_channel` gave a separate stream to avoid.
+      A dispatch is the subset that has a recipient and warrants delivery.
+    - This ships on the CURRENT engine pin. The channel fix lives in
+      ``fulcra-common``, which the fleet installs from a pinned tag, so it
+      reaches nobody until that pin moves.
+
+    Fires ONLY on a verified fresh write — never on a dedupe (a second event for
+    an already-delivered slug is noise the recipient cannot distinguish from new
+    work) and never on failure. Also never for a DEFERRED directive: `remind`
+    already emits its own future-dated record timed to ``not_before``, and a
+    companion sent now would surface the reminder immediately, which is the one
+    thing a reminder must not do. Best-effort by design: the durable doc is the
+    truth and this is delivery, so a bus that is down or unconfigured degrades to
+    file-plane-only exactly as `remind`'s timer does, and NEVER fails the tell.
+    """
+    if assignee == directives.BACKLOG:
+        return  # nobody is being dispatched; @backlog awaits no reply
+    sender = _known_sender(args) or _host()
+    cfg, _status = records.load_config_classified(transport, args.team)
+    if not cfg:
+        print("record: no bus-v3 records config — dispatch rides the file "
+              "plane only (recipient must run `needs-me`)")
+        return
+    try:
+        # TRANSLATE THE EVERYONE-TOKEN AT THE PLANE BOUNDARY. The task plane
+        # says "*" and the event plane says "all" (records.BROADCAST); the
+        # reader filter is `to in (agent, BROADCAST)`, so an event addressed to
+        # "*" matches NOBODY. Passing the assignee straight through was correct
+        # for every DIRECTED dispatch -- the two strings coincide there, which
+        # is why tell worked and was tested -- and silently dropped every
+        # BROADCAST. Neither plane is wrong on its own; the defect was that
+        # nothing translated between them (coord-boss, 2026-08-07).
+        to = records.BROADCAST if assignee == directives.EVERYONE else assignee
+        ok = records.emit_event(
+            transport, cfg, sender=sender, to=to, kind="directive",
+            priority=getattr(args, "priority", None) or "P2", slug=slug,
+            ptr=_task_path(args.team, slug).split("/", 2)[-1],
+            team=args.team)
+    except Exception as e:
+        print(f"record: dispatch companion not emitted ({e}) — dispatch rides "
+              f"the file plane only", file=sys.stderr)
+        return
+    if not ok:
+        print("record: dispatch companion emission failed — dispatch rides the "
+              "file plane only (recipient must run `needs-me`)")
+
+
+def _emit_response_companion(transport: Any, team: str, *, slug: str,
+                             owner: str, responder: str, shard_ptr: str) -> bool:
+    """One ``v:1`` bus event telling the ASKER their directive was answered.
+
+    THE MIRROR OF THE DISPATCH COMPANION, and it was missing. `tell` emits a
+    companion so a dispatch reaches the recipient's queue; `respond` emitted
+    nothing, so the reply reached nobody. The queue reads EVENTS — a shard under
+    ``_coord/responses/`` is durable, correct, and cannot appear there.
+
+    What that cost on 2026-08-08: coord-boss asked at 18:15, was answered via
+    `respond` at 18:57 (task `done`, shard written), and re-asked at 20:14
+    believing nothing had come — then attributed the silence to their own
+    message rather than to the reply leg. Using the verb correctly produced
+    silence, so "answered" was indistinguishable from "ignored".
+
+    Note the asymmetry this closes: `tell --closes` already delivered, because
+    the reply IS a tell and tells emit companions. Plain `respond` did not, so
+    the two closure paths had opposite notification behaviour and the
+    recommended one was the silent one.
+
+    Returns True ONLY when an event was actually emitted, so the caller can tell
+    the truth about delivery instead of asserting it. Best-effort by design: the
+    shard is the record and this is delivery, so a bus that is down or
+    unconfigured degrades to file-plane-only and NEVER fails the respond.
+    """
+    if not owner or owner in (directives.BACKLOG, responder):
+        # Nobody to tell: unowned, parked, or you answered your own ask.
+        return False
+    cfg, _status = records.load_config_classified(transport, team)
+    if not cfg:
+        print("record: no bus-v3 records config — the response rides the file "
+              "plane only")
+        return False
+    try:
+        to = records.BROADCAST if owner == directives.EVERYONE else owner
+        ok = records.emit_event(
+            transport, cfg, sender=responder, to=to, kind="response",
+            priority="P2", slug=slug, ptr=shard_ptr, team=team)
+    except Exception as e:
+        print(f"record: response companion not emitted ({e}) — the response "
+              f"rides the file plane only", file=sys.stderr)
+        return False
+    if not ok:
+        print("record: response companion emission failed — the response rides "
+              "the file plane only")
+        return False
+    return True
 
 
 def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
@@ -3420,8 +4748,90 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
                             not_before=None)
 
 
+def _close_answered_directive(transport: Any, args: argparse.Namespace, *,
+                              reply_slug: str) -> int:
+    """Close the directive this reply answers, with the reply as the artifact.
+
+    Closure is an ARTIFACT of the recipient acting — the same shape as
+    `review close` carrying a merge sha. The reply already exists, so nothing
+    new has to be remembered by anyone.
+
+    Fails LOUD on an unresolvable slug, for the reason `respond` does: writing a
+    close against a name nobody owns GHOST-CLOSES — the record lands under a
+    slug that does not exist while the real directive stays open in the owner's
+    needs-me forever.
+    """
+    target = args.closes
+    path = _task_path(args.team, target)
+    doc = transport.read(path)
+    if doc is None:
+        print(f"tell: --closes {target!r} resolves to no directive in "
+              f"team/{args.team} (absent or unreadable) — the reply was sent, "
+              f"NOTHING was closed. Use the exact hash-suffixed slug from "
+              f"`inbox`/`briefing --json`, not the display title.",
+              file=sys.stderr)
+        return 1
+    agent = _known_sender(args) or _host()
+
+    # RELATIONSHIP GUARD (codex 564 r3). A resolvable slug is not permission to
+    # close it: a mistyped-but-valid slug would close unrelated work, and the
+    # only signal would be somebody else's row going quiet. The reply must
+    # actually answer THIS directive — it must be a directive, addressed to the
+    # agent replying, and owned by the agent being replied to.
+    fm = okf.parse_frontmatter(doc) or {}
+    recipient = getattr(args, "assignee", None)
+    problems = []
+    if "kind:directive" not in (fm.get("tags") or []):
+        problems.append("it is not a directive")
+    if str(fm.get("assignee") or "") != agent:
+        problems.append(f"it is assigned to {fm.get('assignee')!r}, not to you "
+                        f"({agent})")
+    if recipient and str(fm.get("owner") or "") != recipient:
+        problems.append(f"it is owned by {fm.get('owner')!r}, but this reply "
+                        f"goes to {recipient!r}")
+    if problems:
+        print(f"tell: --closes {target!r} is not a directive this reply "
+              f"answers — {'; '.join(problems)}. The reply was sent, NOTHING "
+              f"was closed.", file=sys.stderr)
+        return 1
+
+    evidence = f"answered by {agent} in {reply_slug}"
+    try:
+        out = tasks.apply_update(doc, now=_iso(_now()), status="done",
+                                 evidence=evidence)
+        transport.write(path, out)
+    except tasks.TaskError as e:
+        print(f"tell: reply sent; {target} NOT closed ({e})", file=sys.stderr)
+        return 1
+
+    # VERIFY THE WRITE LANDED (codex 564 r3). `review close` took three rounds
+    # to learn this and I did not carry it to the sibling verb in the same
+    # branch: a silently dropped write left the directive open while the
+    # command printed "closed" and exited 0. Read back and confirm BOTH the
+    # transition and the evidence naming this reply — status alone would pass
+    # on a row somebody else closed.
+    back = transport.read(path)
+    got = okf.parse_frontmatter(back) if back else None
+    if got is None or str(got.get("status") or "") != "done" or \
+            evidence not in (back or ""):
+        print(f"tell: reply sent, but {target} did NOT close — the write did "
+              f"not land (read-back shows status="
+              f"{(got or {}).get('status')!r}). The row is still open; retry.",
+              file=sys.stderr)
+        return 1
+    print(f"closed {target} — answered by {reply_slug}")
+    return 0
+
+
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
-    return _create_directive(args, transport, assignee=args.assignee)
+    rc = _create_directive(args, transport, assignee=args.assignee)
+    if rc != 0 or not getattr(args, "closes", None):
+        return rc
+    # The reply is durable first; only then does the answered row close. If the
+    # close fails the reply still stands and the row stays open — visibly wrong
+    # in the safe direction, never a closed row with no answer behind it.
+    reply_slug = _directive_slug(args, args.assignee)
+    return _close_answered_directive(transport, args, reply_slug=reply_slug)
 
 
 def cmd_broadcast(args: argparse.Namespace, transport: Any) -> int:
@@ -3438,8 +4848,7 @@ def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
     # not_before. The write path itself reports which outcome happened —
     # a pre-read cannot distinguish absent from degraded (None is ambiguous),
     # so only the verified "written" outcome may emit the timer record.
-    payload = _directive_payload(args.title, args.summary, args.next, args.assignee)
-    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
+    slug = _directive_slug(args, args.assignee)
     rc = _create_directive(args, transport, assignee=args.assignee, not_before=when)
     if rc == 0:
         outcome = getattr(args, "_directive_outcome", None)
@@ -3480,7 +4889,12 @@ def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
         ok = records.emit_event(
             transport, cfg,
             sender=_known_sender(args) or _host(),
-            to=args.assignee, kind="directive",
+            # Same plane boundary as the dispatch companion: the task plane's
+            # "*" is not the event plane's "all". `remind --assignee '*'` hit
+            # the identical drop, unreported only because nobody had used it.
+            to=(records.BROADCAST if args.assignee == directives.EVERYONE
+                else args.assignee),
+            kind="directive",
             priority=getattr(args, "priority", None) or "P2",
             slug=slug, ptr=f"task/{slug}.md", recorded_at=when,
             team=args.team)
@@ -3494,6 +4908,19 @@ def _emit_scheduled_record(args: argparse.Namespace, transport: Any, *,
 
 
 def cmd_later(args: argparse.Namespace, transport: Any) -> int:
+    # `--fyi` CANNOT MEAN ANYTHING HERE (codex-reviewer, 605 r2). `later` captures
+    # to @backlog, an audience the companion emitter deliberately skips, and the
+    # backlog fold shows open rows. So a `later --fyi` would be born terminal,
+    # excluded from the backlog view, and delivered to nobody: the captured idea
+    # silently vanishes. A flag whose only effect is to destroy the thing the verb
+    # exists to preserve must refuse, not shrug — and `later` already asks nothing
+    # of anyone, so there is no obligation for `--fyi` to remove.
+    if getattr(args, "fyi", False):
+        print("later: --fyi is not meaningful for a backlog capture — @backlog "
+              "gets no delivery event and the backlog fold shows open rows, so "
+              "an --fyi capture would be invisible to everyone. Drop the flag; "
+              "`later` already asks nothing of anyone.", file=sys.stderr)
+        return 2
     return _create_directive(args, transport, assignee=directives.BACKLOG)
 
 
@@ -3821,7 +5248,8 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
     ``_role_degraded_row``."""
     rows, ok, reason = _load_rows_status(transport, team)
     held, unresolved = _held_roles_for_rows(transport, team, agent, rows,
-                                            now=_iso(_now()))
+                                            now=_iso(_now()),
+                                            deadline_seconds=_role_fold_budget())
     return (_directed_inbox(transport, team, agent, rows,
                             held_roles=held or None,
                             include_backlog=include_backlog,
@@ -3851,7 +5279,16 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # can overrun the wake cadence it is supposed to ride inside. A shared
     # deadline also means an expensive earlier probe shrinks what the next gets,
     # rather than each one starting the clock fresh.
-    fold_dl = Deadline.open(_obligation_budget())
+    # THE FIX (codex/coord-boss P0): setup is accounted SEPARATELY from the
+    # probes. Previously one shared deadline opened here and the two setup calls
+    # below spent all of it (measured on the live store: 6.8s + 19.3s = 26.1s
+    # against a 20s budget), so every probe hit its expired guard and returned
+    # UNREADABLE without ever touching the store — 0 of 7 consulted, hiding 110
+    # owed items behind a blanket UNKNOWN. Setup now gets its own bounded
+    # allowance and the probe budget opens AFTER it, so a slow store degrades
+    # GRADUALLY (an expensive early probe still shrinks what later ones get)
+    # instead of collapsing to zero coverage.
+    setup_dl = Deadline.open(_obligation_budget())
     doc_sink: list[Any] = []
     feed_sink: list[Any] = []
     rows, rows_ok, rows_reason = _load_rows_status(
@@ -3860,16 +5297,37 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     agg_doc = doc_sink[0] if doc_sink else None
     feed_evidence = feed_sink[0] if feed_sink else None
     role_resolution: dict[str, tuple[list[str], bool]] = {}
+    # setup_dl now BINDS this call instead of merely timing it. Before, it
+    # opened from _obligation_budget() and the role fold fell through to
+    # COORD_ROLE_FOLD_BUDGET — so the deadline that was MEASURED was not the
+    # deadline that BOUND the work, and the warning below sent operators to a
+    # variable that governs something else (coord-boss, 2026-08-07).
     held_roles, unresolved_roles = _held_roles_for_rows(
         transport, team, agent, rows, now=now,
+        deadline_seconds=setup_dl.remaining(),
         resolution_sink=role_resolution)
+    if setup_dl.expired():
+        # Never silent: setup outrunning its own allowance is the leading
+        # indicator of the collapse this fix removed, and on a growing store it
+        # will come back. Say it while the fold still succeeds.
+        print("obligations: setup (task index + role resolution) outran "
+              "COORD_OBLIGATION_BUDGET, which now bounds it; probes still get a "
+              "full budget, but this store is near the edge. Raise "
+              "COORD_OBLIGATION_BUDGET to give setup more room. NOTE: the role "
+              "fold's own default is COORD_ROLE_FOLD_BUDGET — it applies "
+              "wherever the role resolver is called WITHOUT an enclosing "
+              "budget (needs-me, inbox, briefing), not here.", file=sys.stderr)
+    # Probes get their full allowance regardless of what setup cost.
+    fold_dl = Deadline.open(_obligation_budget())
 
     def _rows_probe(kinds: "tuple[str, ...]"):
         def probe():
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
             if fold_dl.expired():
-                return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+                return P(state=S.UNREADABLE,
+                         detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
             mine = _needs_me_rows(transport, team, agent, rows, now=now,
                                   held_roles=held_roles, include_history=False,
                                   aggregate_doc=agg_doc,
@@ -3884,7 +5342,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         if not rows_ok:
             return P(state=S.UNREADABLE, detail=rows_reason)
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
         if unresolved_roles:
             # A role whose lease could not be read might route work here. Doubt.
             return P(state=S.UNREADABLE,
@@ -3920,7 +5379,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
             # already-dead deadline can legitimately return [] without ever
             # attempting a read — and [] here would be a false CLEAR caused by
             # our own cost control, which is the worst possible source for one.
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
         sink: list[str] = []
         found = _pending_reviews_for(transport, team, agent, rows=rows,
                                      deadline=fold_dl.instant,
@@ -3941,7 +5401,8 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
         """Unacknowledged forge feedback — a durable obligation surfaced by
         needs-me and briefing, and absent from the first cut of this registry."""
         if fold_dl.expired():
-            return P(state=S.UNREADABLE, detail="obligation budget exhausted")
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise "
+                                "COORD_OBLIGATION_BUDGET")
         found = _forge_feedback_for(transport, team, agent,
                                     deadline=fold_dl.instant,
                                     aggregate_doc=agg_doc,
@@ -3984,6 +5445,7 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
             "consulted": result.consulted,
             "degraded": result.degraded,
             "malformed": result.malformed,
+            "details": result.details,
             "reason": result.reason(),
         }))
     else:
@@ -3991,9 +5453,15 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
         for row in result.owed:
             print(f"  - {row.get('slug') or row.get('id') or row}")
         for name in result.degraded:
-            print(f"  ! {name}: UNREADABLE — cannot claim clear", file=sys.stderr)
+            why = result.details.get(name)
+            suffix = f" ({why})" if why else ""
+            print(f"  ! {name}: UNREADABLE — cannot claim clear{suffix}",
+                  file=sys.stderr)
         for name in result.malformed:
-            print(f"  ! {name}: INVALID — human fix needed", file=sys.stderr)
+            why = result.details.get(name)
+            suffix = f" ({why})" if why else ""
+            print(f"  ! {name}: INVALID — human fix needed{suffix}",
+                  file=sys.stderr)
     if result.state is obligations_mod.ObligationState.UNKNOWN:
         return 3
     if result.state is obligations_mod.ObligationState.INVALID:
@@ -4060,22 +5528,98 @@ def _obligations_not_checked() -> dict[str, Any]:
     return {"state": "not-checked"}
 
 
-def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> None:
-    if json_mode:
-        for event in events:
-            jsonutil.print_json(event)
-        return
+#: Without these an event has no meaning to deliver: `kind` is what it IS and
+#: `slug` is what it is ABOUT. Everything else on the line is decoration that a
+#: `?` renders honestly.
+_REQUIRED_EVENT_FIELDS = ("kind", "slug")
+
+
+def _poison_line(event: Any, reason: Any) -> str:
+    """One unrenderable event, rendered LOUDLY rather than crashing or vanishing.
+
+    Best-effort on every field independently, so a single bad value cannot take
+    the rest of the line with it. Never raises: this is the last line of defence
+    for the delivery path, and a formatter that can fail here is the whole bug.
+    """
+    def _bit(name: str) -> str:
+        try:
+            value = event.get(name) if isinstance(event, dict) else None
+            return str(value) if value not in (None, "") else "?"
+        except Exception:
+            return "?"
+    return (f"POISON {_bit('recorded_at')} {_bit('from')} kind={_bit('kind')} "
+            f"slug={_bit('slug')} ptr={_bit('ptr')} "
+            f"id={_bit('record_id')} writer={_bit('writer')} "
+            f"[unrenderable: {reason}]")
+
+
+def _classify_queue_events(
+        events: list[Any]) -> "tuple[list[dict[str, Any]], list[tuple[Any, str]]]":
+    """Split a window into (renderable, [(event, reason), ...]).
+
+    ONE classification, consumed by BOTH output modes. Round 2 validated inside
+    the TEXT renderer, which `cmd_queue` calls only when `json_mode` is false —
+    so `--json`, the mode automation actually uses, skipped validation entirely,
+    saved the cursor, and then raised inside the envelope on `event["kind"]`.
+    The event was consumed and never appeared anywhere: a permanent wedge traded
+    for silent loss (codex-reviewer, 600 r2). Third time in this PR that a rule
+    landed on one path and its sibling went without, which is why the decision
+    now lives in one function that neither mode can bypass.
+    """
+    ok: list[dict[str, Any]] = []
+    bad: list[tuple[Any, str]] = []
     for event in events:
-        print(f"{event.get('recorded_at','')[:19]} {event.get('from') or '?'} "
-              f"{event['kind']} {event.get('priority') or '-'} "
-              f"{event['slug']} {event.get('ptr') or '-'}")
+        if not isinstance(event, dict):
+            bad.append((event, f"not an event object: {type(event).__name__}"))
+            continue
+        missing = [f for f in _REQUIRED_EVENT_FIELDS if not event.get(f)]
+        if missing:
+            bad.append((event, "missing required field(s): " + ", ".join(missing)))
+            continue
+        ok.append(event)
+    return ok, bad
+
+
+def _print_queue_events(events: list[dict[str, Any]], *, json_mode: bool) -> int:
+    """Render a window. Returns the number of UNRENDERABLE events.
+
+    PER-EVENT, and never fatal. `kind` and `slug` used to be direct subscripts
+    while every neighbouring field went through `.get()` — so an event missing
+    either raised KeyError out of here, out of `cmd_queue`, and past the cursor
+    save, which never ran. At-least-once redelivery then returned the same
+    window with the same poison event on the next read, and the one after that:
+    a permanently wedged cursor with no error path that said so. Measured live
+    on codex-reviewer's window, 9 events stuck from 08:03Z (coord-boss, 2026-08-10).
+
+    Three properties, per coord-boss's constraints:
+      * a poison event is RENDERED (as an explicit POISON line), never skipped —
+        silence would trade a wedge for a disappearance;
+      * it is COUNTED, so the caller can say the window was poisoned;
+      * nothing here can raise, so the cursor save below is always reached.
+    """
+    ok, bad = _classify_queue_events(events)
+    for event in ok:
+        try:
+            if json_mode:
+                jsonutil.print_json(event)
+            else:
+                print(f"{event.get('recorded_at') or ''}"[:19].ljust(19)
+                      + f" {event.get('from') or '?'}"
+                      f" {event.get('kind')} {event.get('priority') or '-'}"
+                      f" {event.get('slug')} {event.get('ptr') or '-'}")
+        except Exception as e:      # noqa: BLE001 — deliberate: delivery > format
+            bad.append((event, f"{type(e).__name__}: {e}"))
+    for event, reason in bad:
+        print(_poison_line(event, reason), file=sys.stderr)
+    return len(bad)
 
 
 def _queue_result_envelope(
         events: list[dict[str, Any]], *, cfg: dict[str, Any],
         cursor_path: str, advanced: bool,
         outcome_mix: Optional[dict[str, int]] = None,
-        obligations: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        obligations: Optional[dict[str, Any]] = None,
+        poisoned: "Optional[list[tuple[Any, str]]]" = None) -> dict[str, Any]:
     """The single-object ``--json`` success envelope for a queue read.
 
     Shares the ``type`` discriminator convention with the ``queue-error``
@@ -4101,20 +5645,36 @@ def _queue_result_envelope(
             "cursor_schema_version": cfg["cursor_schema_version"],
             "cursor_generation": cfg["cursor_generation"],
         }
+    poisoned = poisoned or []
     envelope = {
         "type": "queue-result",
-        "state": "DATA" if events else "CLEAR",
+        "state": "DATA" if (events or poisoned) else "CLEAR",
         "events": [{
             "id": event.get("record_id"),
             "ts": event.get("recorded_at"),
             "sender": event.get("from"),
             "to": event.get("to"),
-            "kind": event["kind"],
+            # `.get()`, not a subscript: this function must not be the thing
+            # that raises on a malformed event. Callers pass VALIDATED events,
+            # and this is the belt to that braces — a formatter on the delivery
+            # path that can throw is the whole defect this PR exists to fix.
+            "kind": event.get("kind"),
             "pri": event.get("priority"),
-            "slug": event["slug"],
+            "slug": event.get("slug"),
             "ptr": event.get("ptr"),
         } for event in events],
         "count": len(events),
+        # POISON IS DELIVERED, in the machine-readable channel too. An event
+        # this build cannot format is still an event the agent RECEIVED, so it
+        # appears here with the reason rather than vanishing between a saved
+        # cursor and an envelope that omitted it.
+        "poison": [{
+            "id": (e.get("record_id") if isinstance(e, dict) else None),
+            "ts": (e.get("recorded_at") if isinstance(e, dict) else None),
+            "sender": (e.get("from") if isinstance(e, dict) else None),
+            "reason": reason,
+        } for e, reason in poisoned],
+        "poison_count": len(poisoned),
         # respec s7: outcome_mix is ADDITIVE under the cursor block (per the
         # deputy ruling) — the agent's own durable classification mix from v2
         # `handled` rows. Absent (legacy cursor / no rows) the key is omitted,
@@ -5046,35 +6606,68 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
     seen_set = set(seen)
     fresh = [e for e in events if e.get("record_id") not in seen_set]
     json_mode = bool(getattr(args, "json", False))
-    if not json_mode:
-        # Text mode stays byte-identical for shell consumers; the JSON
-        # envelope is emitted once below, after the cursor outcome is known.
-        _print_queue_events(fresh, json_mode=False)
+    # CLASSIFIED ONCE, for BOTH modes. Doing it inside the text renderer meant
+    # `--json` — the mode automation uses — skipped validation, saved the
+    # cursor, and then raised inside the envelope: consumed and invisible
+    # (codex-reviewer, 600 r2).
+    renderable, poisoned = _classify_queue_events(fresh)
+    poison = len(poisoned)
+    # Computed BEFORE the guarded region so the `finally` below always has a
+    # valid value to persist, even if a future edit raises above it. Poison is
+    # included: it appears in the output of BOTH modes, so consuming it honours
+    # at-least-once rather than dropping it.
     new_seen = seen + [e["record_id"] for e in fresh
-                       if isinstance(e.get("record_id"), str)]
+                       if isinstance(e, dict) and isinstance(e.get("record_id"), str)]
+    try:
+        if not json_mode:
+            # Text mode stays byte-identical for shell consumers; the JSON
+            # envelope is emitted once below, after the cursor outcome is known.
+            poison = _print_queue_events(fresh, json_mode=False)
+    finally:
+        # THE INVARIANT, enforced structurally rather than by remembering.
+        # Once a window has been READ, coverage is a fact about what this
+        # process received — not contingent on our ability to render, summarise
+        # or fold anything afterwards. The wedge existed because an exception
+        # between the read and the save skipped it, and at-least-once
+        # redelivery then returned the same poison forever. A `finally` holds
+        # even for exceptions a later edit introduces; a careful ordering does
+        # not. `peek` is the ONE exit that legitimately does not advance, and it
+        # is below this block, so it cannot be reached without passing here.
+        if not peek:
+            advanced = records.save_cursor(transport, args.team, agent,
+                                           last_read=_iso(now),
+                                           seen_ids=new_seen)
+            if not advanced:
+                print("queue: cursor save failed — coverage unadvanced, next "
+                      "read re-covers this window", file=sys.stderr)
     if peek:
         obligations_fragment = _requested_obligations(args, transport, agent)
         if json_mode:
             jsonutil.print_json(_queue_result_envelope(
-                fresh, cfg=cfg,
+                renderable, cfg=cfg,
                 cursor_path=records.cursor_path(args.team, agent),
-                advanced=False, obligations=obligations_fragment))
+                advanced=False, obligations=obligations_fragment,
+                poisoned=poisoned))
         if fresh:
             print(f"queue: peek — {len(fresh)} event(s) shown, cursor NOT "
                   "advanced (the owning agent still receives them)",
                   file=sys.stderr)
         return 0
-    advanced = records.save_cursor(transport, args.team, agent,
-                                   last_read=_iso(now), seen_ids=new_seen)
-    if not advanced:
-        print("queue: cursor save failed — coverage unadvanced, next read "
-              "re-covers this window", file=sys.stderr)
+    if poison:
+        # LOUD, and after the save: a poisoned window is a delivery-integrity
+        # event someone must look at, but it is no longer a reason to stop
+        # receiving mail.
+        print(f"queue: {poison} unrenderable event(s) in this window — shown as "
+              "POISON lines above and CONSUMED; coverage advanced. Report the "
+              "POISON lines verbatim: they name a writer this build cannot "
+              "format.", file=sys.stderr)
     obligations_fragment = _requested_obligations(args, transport, agent)
     if json_mode:
         envelope = _queue_result_envelope(
-            fresh, cfg=cfg,
+            renderable, cfg=cfg,
             cursor_path=records.cursor_path(args.team, agent),
-            advanced=advanced, obligations=obligations_fragment)
+            advanced=advanced, obligations=obligations_fragment,
+            poisoned=poisoned)
         jsonutil.print_json(envelope)
     return 0
 
@@ -5149,18 +6742,47 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
         return 1
     stamp = _stamp_for_path(now, agent)
     fm = {"type": "Response", "agent": agent, "outcome": args.outcome, "timestamp": now}
-    transport.write(_response_path(args.team, args.name, stamp),
-                    okf.render_frontmatter(fm) + f"\n{args.evidence or args.outcome}\n")
+    shard = _response_path(args.team, args.name, stamp)
+    # T1 (coord-boss scope addition, 2026-08-08): `transport.write` returns False
+    # on a transport failure rather than raising, so this used to be able to lose
+    # the response, print success and exit 0 — the responder believes they
+    # answered and the asker never hears anything at all. Same family as PR 583.
+    if not transport.write(shard, okf.render_frontmatter(fm)
+                           + f"\n{args.evidence or args.outcome}\n"):
+        print(f"respond: response NOT recorded for {args.name} — the shard write "
+              f"failed (transport). NOTHING was closed; retry.", file=sys.stderr)
+        return 3
+    rc = 0
     try:
         out = tasks.apply_update(doc, now=now, status="done",
                                  evidence=f"{args.outcome} (respond by {agent})")
-        transport.write(path, out)
-        print(f"responded {args.name}: {args.outcome} (closed)")
+        if transport.write(path, out):
+            print(f"responded {args.name}: {args.outcome} (closed)")
+        else:
+            # apply_update succeeding is NOT the close landing.
+            print(f"responded {args.name}: {args.outcome} (response recorded; "
+                  f"not closed: the task write failed — the directive is still "
+                  f"OPEN)", file=sys.stderr)
+            rc = 3
     except tasks.TaskError as e:
+        # NOT an error rc: the status machine legitimately refuses some closes
+        # (already done, illegal transition), and the response IS recorded. Only
+        # a failed WRITE — a response or close that never landed — is non-zero.
         print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
-    # The reply leg: this shard is what the directive's owner sees on their queue.
-    print("response recorded — the owner's queue surfaces it")
-    return 0
+    # THE REPLY LEG. This printed an unconditional "the owner's queue surfaces
+    # it" while emitting nothing — the queue reads events and a shard cannot
+    # reach it. The line was believed, so a responded-to directive was re-asked
+    # twice at rising priority (2026-08-08). Say only what happened.
+    owner = str((okf.parse_frontmatter(doc) or {}).get("owner") or "")
+    delivered = _emit_response_companion(
+        transport, args.team, slug=args.name, owner=owner, responder=agent,
+        shard_ptr=shard.split("/", 2)[-1])
+    if delivered:
+        print("response recorded and delivered — the owner's queue surfaces it")
+    else:
+        print("response recorded (durable) — NOT delivered to the owner's queue; "
+              "they see it only by reading the task doc")
+    return rc
 
 
 # --- continuity completion (A6): role checkpoints, park, briefing ---
@@ -5278,14 +6900,31 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
               f"CHECKPOINT NOT WRITTEN because there was nothing to park",
               file=sys.stderr)
         return 2
-    for role in held:
+    def _build(role: str) -> "tuple[str, dict]":
         task_slug = f"role-{tasks.slugify(role)}"
-        snap = continuity.build_snapshot(
+        return task_slug, continuity.build_snapshot(
             agent=agent, task=task_slug,
             objective=args.objective or f"parked role {role} at session exit",
             now=now, next_actions=args.next or [],
             open_questions=args.open_question or [],
+            decisions=getattr(args, "decision", None) or [],
+            artifacts=getattr(args, "artifact", None) or [],
         )
+
+    if getattr(args, "handoff", False):
+        # Validate BEFORE writing anything. The sections are identical across
+        # held roles, so one check covers the batch — and a half-written batch
+        # is the worst outcome available here: some roles pointing at a
+        # checkpoint the successor was told to trust, others not.
+        _, probe = _build(held[0])
+        findings = handoff.validate(
+            probe, resolve=handoff.store_resolver(transport, args.team))
+        if findings:
+            print(handoff.format_findings(findings), file=sys.stderr)
+            return 3
+
+    for role in held:
+        task_slug, snap = _build(role)
         path = _continuity_path(args.team, agent, task_slug)
         if not transport.write(path, json.dumps(snap, indent=2)):
             print(f"park: snapshot write FAILED for {role}; checkpoint_ref left unchanged",
@@ -5335,7 +6974,18 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     try:
         shards, pres_degraded = _presence_shards_bounded(
             transport, args.team, deadline=add_on.instant)
-        out["presence"] = presence.roster(shards, now=now)
+        # BRIEFING MEASURES WORK (coord-boss ruling, 2026-08-09): it feeds
+        # dispatch decisions, and a false nudge is the one thing it must never
+        # emit. Bounded by the SAME add-on deadline as the shard read, and a
+        # scan that runs out of budget reports PARTIAL — which withholds the
+        # nudge rather than reverting to it. The continuity audit deliberately
+        # does NOT measure; see its own call site.
+        work_index, work_ok = _work_evidence_index(
+            transport, args.team, deadline=add_on.instant)
+        out["presence"] = presence.roster(
+            shards, now=now, work_index=work_index,
+            work_scan=(presence.WORK_SCAN_COMPLETE if work_ok
+                       else presence.WORK_SCAN_PARTIAL))
         if pres_degraded is not None:
             # Same discipline as forge: append the degraded marker to the section
             # list so partial presence knowledge stays VISIBLE (json + text).
@@ -5355,8 +7005,20 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     # UNKNOWN — surfaced below as `role_degraded`, never folded to "no roles".
     role_resolution: dict[str, tuple[list[str], bool]] = {}
     try:
+        # The role fold sits BETWEEN add_on's open (above, consumed by presence)
+        # and its later consumers (pending-reviews, forge, the resume check).
+        # add_on is an ABSOLUTE deadline, so a fold that ignores it does not
+        # merely overrun its own cap — it burns the shared window and starves the
+        # sections that DO respect it, while the comment below asserts the
+        # add-on stack is bounded. Keep the fold's own cap AND the shared
+        # ceiling: whichever arrives first wins, the composition pattern the
+        # overlay at _load_rows already uses.
+        _role_dl = _role_fold_budget()
+        _shared_left = add_on.remaining()
         held_roles, unresolved_roles = _held_roles_for_rows(
             transport, args.team, agent, rows, now=now,
+            deadline_seconds=(_role_dl if _shared_left is None
+                              else min(_role_dl, _shared_left)),
             resolution_sink=role_resolution)
     except Exception as e:
         # The resolver never raises by contract; if it somehow does, the role set is
@@ -5432,6 +7094,24 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: resume section unavailable ({type(e).__name__})", file=sys.stderr)
         out["resume"] = None
+    # Same treatment as needs-me, for the same reason: briefing's degraded markers
+    # sit INSIDE per-section lists that scale with the store, so a truncating
+    # reader loses them while the header survives. briefing always returns 0 — the
+    # envelope's degraded count is therefore the ONLY machine signal it has, which
+    # makes this more load-bearing here, not less.
+    _brief_degraded = sum(
+        1 for section in ("presence", "inbox", "needs_me", "pending_reviews",
+                          "forge_feedback")
+        for r in (out.get(section) or [])
+        if _is_degraded_row(r)
+    ) + (1 if out.get("read_degraded") else 0) + (
+        1 if out.get("role_degraded") else 0)
+    emit_envelope(
+        "briefing", count=len(out.get("needs_me") or []), rc=0,
+        inbox=len(out.get("inbox") or []),
+        reviews=len(out.get("pending_reviews") or []),
+        degraded=_brief_degraded,
+    )
     if args.json:
         jsonutil.print_json(out)
         return 0
@@ -5737,8 +7417,115 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+#: Directories whose entries are dated WORK ARTIFACTS attributable to an agent.
+#: Each is a positive finding: a file here means that agent did something at
+#: that time. Nothing here can prove the converse — an agent missing from the
+#: scan is UNKNOWN, never idle.
+def _work_evidence_index(
+    transport: Any, team: str, *, deadline: Optional[float] = None
+) -> tuple[dict[str, str], bool]:
+    """Newest work-artifact timestamp per agent, READ-DERIVED (coord-boss's
+    third guardrail: measured mtimes, never inference).
+
+    Scans the two places an agent's work lands WITHOUT passing through a verb,
+    which is exactly the blind spot a beat-only signal has:
+
+      - ``review/<slug>/verdicts/<head>--<reviewer>.md`` — filing a verdict is
+        not a verb at all; `review request` prints the path and the reviewer
+        writes the shard itself.
+      - ``_coord/agents/<agent>/reports/*`` — report docs, likewise written
+        straight to the store.
+
+    Returns ``(index, ok)``. Every entry found is a true positive regardless, but
+    ``ok`` is what licenses the ABSENCE reading: only a scan that completed can
+    say "this agent has no recent artifact" rather than "we did not see one".
+    A listing that raises or returns ``None`` sets ``ok=False`` — `list_dir`
+    cannot tell a real empty directory from an unreadable one, so a partial scan
+    that silently reported absence would nudge working agents all over again,
+    one layer down.
+    """
+    newest: dict[str, str] = {}
+    ok = True
+
+    def _note(agent: str, mtime: Any) -> None:
+        # Store mtimes render on a TWELVE-HOUR clock ("2026-08-09 01:14AM UTC"),
+        # so comparing them as strings inverts the midnight hour — 12AM sorts
+        # after every other hour, and a "newest" picked that way can be older
+        # than what it beat. Normalize to a UTC ISO instant FIRST, then compare;
+        # `aggregate._parse_store_mtime` is the existing parser and stays the
+        # single implementation.
+        if not agent or not isinstance(mtime, str):
+            return
+        dt = aggregate._parse_store_mtime(mtime)
+        if dt is None:
+            return
+        iso = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if agent not in newest or iso > newest[agent]:
+            newest[agent] = iso
+
+    def _entries(path: str) -> list[dict[str, Any]]:
+        nonlocal ok
+        if deadline is not None and time.monotonic() >= deadline:
+            ok = False          # out of budget: PARTIAL, never a false absence
+            return []
+        try:
+            rows = transport.list_dir(path)
+        except TransportError:
+            ok = False
+            return []
+        if rows is None:       # UNKNOWN, not empty — same ambiguity, no raise
+            ok = False
+            return []
+        return rows
+
+    # CHEAP HALF FIRST, and the order is load-bearing rather than tidy.
+    #
+    # Measured on the live store 2026-08-09, immediately after 591 shipped:
+    # 35 agent directories vs 438 review directories, one listing each. With the
+    # review sweep running first it consumed the ENTIRE budget every time — at
+    # 120s, six times the shipped budget, the scan was still incomplete and had
+    # attributed work to three agents. Because PARTIAL withholds the nudge, that
+    # turned the signal off fleet-wide: a fix for false nudges that produced no
+    # nudges at all.
+    #
+    # Agent reports are ~1/12th the listings and cover every agent that writes a
+    # report, so doing them first makes the common case COMPLETE instead of
+    # always-partial. The review sweep then spends whatever budget remains, and
+    # anything it does not reach is still reported honestly as PARTIAL.
+    for row in _entries(f"team/{team}/_coord/agents"):
+        name = str(row.get("name") or "").rstrip("/")
+        if not name:
+            continue
+        for r in _entries(f"team/{team}/_coord/agents/{name}/reports"):
+            _note(name, r.get("mtime"))
+
+    for row in _entries(f"team/{team}/review"):
+        name = str(row.get("name") or "")
+        if not name.endswith("/"):
+            continue
+        for v in _entries(f"team/{team}/review/{name.rstrip('/')}/verdicts"):
+            vn = str(v.get("name") or "")
+            # `<40-hex head>--<reviewer>.md` — the reviewer is the attribution.
+            if "--" in vn and vn.endswith(".md"):
+                _note(vn.rsplit("--", 1)[1][:-3], v.get("mtime"))
+
+    return newest, ok
+
+
 def cmd_presence_show(args: argparse.Namespace, transport: Any) -> int:
-    ros = presence.roster(_presence_shards(transport, args.team), now=_iso(_now()))
+    # BOUNDED (codex-reviewer, 591 r3): unbounded, this listed every review's
+    # verdicts dir — 435 on the live store — synchronously, on a command whose
+    # whole job is to print a roster. Its own deadline, since a direct command
+    # has no add-on stack to share one with; expiry degrades to PARTIAL, which
+    # withholds the nudge rather than inventing an absence.
+    work_deadline = Deadline.open(_presence_work_budget())
+    work_index, work_ok = _work_evidence_index(
+        transport, args.team, deadline=work_deadline.instant)
+    ros = presence.roster(
+        _presence_shards(transport, args.team), now=_iso(_now()),
+        work_index=work_index,
+        work_scan=(presence.WORK_SCAN_COMPLETE if work_ok
+                   else presence.WORK_SCAN_PARTIAL))
     if args.json:
         jsonutil.print_json(ros)
         return 0
@@ -6165,15 +7952,66 @@ def _router_presence(transport: Any, team: str, agent: str,
     return memo[agent]
 
 
+def _router_state_prefix(
+    args: argparse.Namespace,
+) -> "tuple[Optional[str], Optional[str]]":
+    """Resolve the router state-prefix override → ``(name, error)``.
+
+    Precedence: the ``--state-prefix`` flag beats the ``COORD_ROUTER_STATE_PREFIX``
+    env fallback (launchd-friendly); absent both ⇒ ``(None, None)`` = the
+    canonical default (byte-identical to today). A bad-charset name from EITHER
+    source returns ``(None, message)`` so the command can exit 2 — the flag and
+    the env are validated the same way, and an invalid name can never compose a
+    path (it never reaches `router.router_prefix`).
+
+    An explicitly EMPTY value from either source is invalid, not canonical: a
+    launch script expanding an unset variable (``--state-prefix "$P"``, or a
+    plist setting the env to "") must fail rc 2 rather than silently run a
+    shadow pass against the live ``router/`` cursor — the exact cursor-sharing
+    wake-loss class this override exists to prevent. Canonical requires the
+    flag ABSENT and the env UNSET."""
+    name = getattr(args, "state_prefix", None)
+    source = "--state-prefix"
+    if name is None:
+        name = os.environ.get("COORD_ROUTER_STATE_PREFIX")
+        source = "COORD_ROUTER_STATE_PREFIX"
+    if name is None:
+        return None, None
+    if not router.STATE_PREFIX_RE.match(name):
+        return None, (f"{source} {name!r} is not a valid router state prefix "
+                      f"(must match {router.STATE_PREFIX_RE.pattern})")
+    return name, None
+
+
 def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     team = args.team
-    prefix = router.router_prefix(team)
+    state, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"router: {state_err}", file=sys.stderr)
+        return 2
+    prefix = router.router_prefix(team, state=state)
+    # config.json is SHARED enablement policy — always read from the canonical
+    # prefix so a namespaced pass decides against the same config the live
+    # router uses (the override moves only the router's OWN cursor-tracked state).
+    config_prefix = router.router_prefix(team)
     task_prefix = f"team/{team}/task/"
     now = _now()
 
     cursor, cursor_reason = router.parse_cursor(transport.read(prefix + "cursor.json"))
     observe = cursor is None
     shadow = bool(getattr(args, "shadow", False))
+    # Blocking (c): a SHADOW pass under a --state-prefix override reads the
+    # delivered view from the CANONICAL prefix. The shadow plane never delivers,
+    # so its own namespaced delivered/ is eternally empty; reading it would feed
+    # empty last_delivered_at into decide() and inflate policy-divergent forever
+    # (debounce/lapsed-checkin never see live delivery recency). The read is safe
+    # by construction — shadow writes nothing to the canonical plane — and the
+    # pass SKIPS the delivered.json refold (it maintains no view it will reuse).
+    # Predicate is exactly (shadow AND override active); default and the
+    # live-namespaced pair (run --state-prefix X, no shadow) keep today's
+    # namespaced delivered/ behavior, where it is correct.
+    shadow_override = shadow and state is not None
+    delivered_prefix = config_prefix if shadow_override else prefix
     if observe:
         print(f"router: OBSERVE-ONLY pass — {cursor_reason}; decisions are "
               f"logged, nothing is enqueued, and a fresh cursor is written at "
@@ -6186,8 +8024,14 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
               "decision is logged + persisted per directed item, nothing "
               "enqueued or executed", file=sys.stderr)
 
-    agents_cfg, _executors, cfg_errors = router.validate_config(
-        transport.read(prefix + "config.json"))
+    raw_config = transport.read(config_prefix + "config.json")
+    agents_cfg, _executors, cfg_errors = router.validate_config(raw_config)
+    # Rate caps come from the SAME authoritative document as enablement, read
+    # once so the two can never disagree about which config they saw.
+    caps, caps_err = router.validate_caps(raw_config)
+    if caps_err:
+        print(f"router: rate cap {caps_err} — holding at the failsafe "
+              f"{caps}", file=sys.stderr)
     measurement_failed = bool(shadow and cfg_errors)
     if "_config" in cfg_errors:
         print(f"router: {cfg_errors['_config']} — every agent reads "
@@ -6201,7 +8045,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
     delivered_shards: list[dict] = []
     delivered_listing_ok = True
     try:
-        dl_entries = transport.list_dir(prefix + "delivered/")
+        dl_entries = transport.list_dir(delivered_prefix + "delivered/")
     except TransportError as e:
         # codex #460 fix: a listing ERROR is NOT "genuinely empty". Fold no
         # shards this pass, but do NOT refold delivered.json (that would
@@ -6213,16 +8057,27 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         print(f"router: delivered/ listing degraded ({e}) — skipping "
               f"delivered.json refold this pass (the populated view is "
               f"preserved; it regenerates next pass)", file=sys.stderr)
+    # codex 554 r3: a per-shard failure is EVIDENCE LOSS. For the delivered.json
+    # view it remains mere bookkeeping loss, but for the rate cap it means the
+    # window count is measured from an incomplete set — and a count that looks
+    # measured while part of the evidence was dropped is exactly the fail-open
+    # this cap exists to prevent.
+    shard_evidence_ok = True
     for e in dl_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
             continue
-        raw = transport.read(prefix + "delivered/" + name)
+        raw = transport.read(delivered_prefix + "delivered/" + name)
         if raw:
             try:
                 delivered_shards.append(json.loads(raw))
             except ValueError:
+                shard_evidence_ok = False
                 pass  # a corrupt record shard is bookkeeping loss, not a stop
+        else:
+            # unreadable OR genuinely empty — the transport cannot tell us
+            # which, so it counts as evidence we do not have
+            shard_evidence_ok = False
     if delivered_listing_ok:
         delivered_view = router.fold_delivered(delivered_shards)
     else:
@@ -6236,7 +8091,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
         # recreates the premature-checkin/weakened-debounce bug). Retries next
         # pass once either read recovers.
         delivered_view = None
-        prior_raw = transport.read(prefix + "delivered.json")
+        prior_raw = transport.read(delivered_prefix + "delivered.json")
         if prior_raw is not None:
             try:
                 loaded = json.loads(prior_raw)
@@ -6250,6 +8105,27 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
                   "the pass closed (nothing enqueued, cursor not advanced; "
                   "retries next pass)", file=sys.stderr)
             return 1
+
+    # Windowed wake counts for the rate cap, folded from the SAME durable
+    # delivery shards as delivered_view. When the listing degraded we hold only
+    # the persisted per-agent view, which carries no per-delivery timestamps —
+    # so the last hour is UNKNOWN, not zero, and the cap fails closed per item.
+    wake_counts, global_wakes, counts_complete = router.count_wakes_last_hour(
+        delivered_shards, now=now)
+    # Three independent ways the window can be unknown, and ALL of them must
+    # clear the flag: the directory listing failed, an individual shard was
+    # unreadable or malformed, or a shard parsed but could not be classified.
+    # r3 set this from the listing alone, so per-file loss ran the cap on
+    # incomplete evidence while reporting a confident number.
+    counts_known = delivered_listing_ok and shard_evidence_ok and counts_complete
+    if not counts_known:
+        why = ("listing degraded" if not delivered_listing_ok
+               else "a delivery shard was unreadable or malformed"
+               if not shard_evidence_ok
+               else "a delivery shard could not be classified")
+        print(f"router: {why} — last-hour wake counts are UNKNOWN; the rate "
+              f"cap fails CLOSED (items defer to the next window rather than "
+              f"ride an unmeasurable cap)", file=sys.stderr)
 
     # prior queue entries — per-agent last queued_at, for cross-pass debounce
     queue_last: dict[str, Any] = {}
@@ -6378,6 +8254,10 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             last_wake_at=queue_last.get(assignee),
             last_delivered_at=router.parse_iso(d_row.get("last_delivered_at")),
             now=now,
+            caps=caps,
+            agent_wakes_last_hour=wake_counts.get(assignee, 0),
+            global_wakes_last_hour=global_wakes,
+            counts_known=counts_known,
         )
         counts[decision] += 1
         suffix = ""
@@ -6437,7 +8317,7 @@ def _router_pass(args: argparse.Namespace, transport: Any) -> int:
             enqueued += 1
         processed[key] = router.iso(now)
 
-    if not observe and delivered_listing_ok:
+    if not observe and delivered_listing_ok and not shadow_override:
         if not transport.write(prefix + "delivered.json",
                                json.dumps(delivered_view, sort_keys=True) + "\n"):
             # observability bookkeeping only — dedup authority is the ledger
@@ -6522,10 +8402,20 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
     adapter content rule (`router.adapter_invocation`)."""
     invoke = invoke or _default_adapter_invoke
     team = args.team
-    prefix = router.router_prefix(team)
-    now = _now()
+    state, state_err = _router_state_prefix(args)
     counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
               "unconfigured": 0, "skipped": 0, "deferred": 0}
+    if state_err is not None:
+        # defensive: the command entry (cmd_router_run) validates first, so this
+        # is unreachable in normal flow — never compose a path from a bad name.
+        print(f"router: {state_err}", file=sys.stderr)
+        return counts
+    prefix = router.router_prefix(team, state=state)
+    # config.json (SHARED policy) and shadow-evidence/ (the LIVE delivery paths'
+    # canonical correlation surface) stay at the canonical prefix; only the
+    # router's own queue/delivered/dead-letter state moves under an override.
+    canon_prefix = router.router_prefix(team)
+    now = _now()
 
     try:
         q_entries = transport.list_dir(prefix + "queue/")
@@ -6535,7 +8425,7 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
         return counts
 
     agents_cfg, _executors, _errs = router.validate_config(
-        transport.read(prefix + "config.json"))
+        transport.read(canon_prefix + "config.json"))
 
     for e in q_entries:
         name = e.get("name") or ""
@@ -6603,7 +8493,7 @@ def _router_execute_cloud(args: argparse.Namespace, transport: Any,
                 try:
                     if _shadow_window_active(transport, team):
                         transport.write(
-                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            canon_prefix + router.SHADOW_EVIDENCE_SUBPATH
                             + router.shadow_evidence_filename(
                                 str(entry.get("agent")), key),
                             json.dumps(router.shadow_evidence_record(
@@ -6665,6 +8555,10 @@ def _run_fixed_rate(pass_fn: Any, *, label: str,
 def cmd_router_run(args: argparse.Namespace, transport: Any) -> int:
     # W7 shadow mode is READ-ONLY: log + persist decisions, never enqueue OR
     # execute (the pass suppresses the enqueue; the executor is skipped here).
+    _, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"router run: {state_err}", file=sys.stderr)
+        return 2
     shadow = bool(getattr(args, "shadow", False))
     json_mode = bool(getattr(args, "json", False))
     if json_mode and not getattr(args, "once", False):
@@ -6760,15 +8654,29 @@ def cmd_router_shadow_status(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
-    """Fold the armed W7 window into one fail-closed acceptance report."""
-    prefix = router.router_prefix(args.team)
+    """Fold the armed W7 window into one fail-closed acceptance report.
+
+    Under a ``--state-prefix`` override the router's own decision state
+    (shadow-decisions/, shadow-marks/) is read from the sibling namespace, while
+    the window marker and the delivery evidence stay CANONICAL: evidence is
+    produced by the live delivery paths (the `listen` tick and cloud-adapter
+    execution), which carry no override, so a namespaced shadow measurement
+    correlates its own decisions against the fleet's canonical evidence."""
+    state, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"shadow report: {state_err}", file=sys.stderr)
+        return 2
+    prefix = router.router_prefix(args.team, state=state)      # own decision state
+    canon_prefix = router.router_prefix(args.team)             # shared window + evidence
     unknown: list[str] = []
 
     def _rows(subpath: str, *, timestamp: Optional[str],
-              required: tuple[str, ...]) -> list[dict[str, Any]]:
+              required: tuple[str, ...],
+              base: Optional[str] = None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
+        root = base if base is not None else prefix
         try:
-            entries = transport.list_dir(prefix + subpath)
+            entries = transport.list_dir(root + subpath)
         except TransportError as e:
             unknown.append(f"{subpath} listing unreadable: {e}")
             return rows
@@ -6777,7 +8685,7 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
             if entry.get("is_dir") or not name.endswith(".json"):
                 continue
             try:
-                raw = transport.read(prefix + subpath + name)
+                raw = transport.read(root + subpath + name)
                 doc = json.loads(raw) if raw else None
             except (TransportError, ValueError) as e:
                 unknown.append(f"{subpath}{name} unreadable: {e}")
@@ -6792,7 +8700,7 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
         return rows
 
     try:
-        raw = transport.read(prefix + "shadow-window.json")
+        raw = transport.read(canon_prefix + "shadow-window.json")
         window = json.loads(raw) if raw else None
     except (TransportError, ValueError) as e:
         window = None
@@ -6811,7 +8719,8 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
         required=("key", "agent", "decision", "decided_at"))
     evidence = _rows(
         router.SHADOW_EVIDENCE_SUBPATH, timestamp="delivered_at",
-        required=("key", "agent", "path", "delivered_at"))
+        required=("key", "agent", "path", "delivered_at"),
+        base=canon_prefix)
     for row in decisions:
         if (not isinstance(row.get("key"), str)
                 or not isinstance(row.get("agent"), str)
@@ -6991,6 +8900,55 @@ def _claim_owner(executor_id: str) -> str:
     return f"{executor_id}#pid{os.getpid()}"
 
 
+#: Bounded fan-out for queue-entry prefetch. Small on purpose: enough to hide
+#: per-request latency, low enough not to hammer the store or burn file handles.
+QUEUE_PREFETCH_WORKERS = 8
+
+
+def _read_queue_entries(transport: Any, prefix: str,
+                        q_entries: "list[dict]") -> "dict[str, Optional[str]]":
+    """Prefetch every candidate queue entry body CONCURRENTLY.
+
+    Why: the executor read each entry SERIALLY, one network round trip apiece,
+    on every pass — including the entries belonging to other executors, which it
+    then skipped. Measured 2026-08-05 against the live store: 112 queue entries
+    at ~0.7-0.96s per read = 78-107s for a pass on a 60s cadence, which is
+    exactly the `cadence overrun by ~22s — skipped 1 tick(s)` the VPS executor
+    logged continuously. The cost scaled with FLEET-WIDE queue depth, not with
+    this host's share of it, so a busy fleet silently halved every executor's
+    delivery rate.
+
+    These reads are independent and side-effect-free, so only the READ phase is
+    parallel; claim/invoke/write stays strictly serial and in listing order, and
+    the per-entry semantics are unchanged — a read returning None still means
+    UNKNOWN and is skipped by the caller, never executed on.
+    """
+    paths = [prefix + "queue/" + (e.get("name") or "")
+             for e in q_entries
+             if not e.get("is_dir") and (e.get("name") or "").endswith(".json")]
+    if not paths:
+        return {}
+    out: "dict[str, Optional[str]]" = {}
+    first_error: "list[BaseException]" = []
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(QUEUE_PREFETCH_WORKERS, len(paths))) as pool:
+        futures = {pool.submit(transport.read, p): p for p in paths}
+        for fut in concurrent.futures.as_completed(futures):
+            path = futures[fut]
+            try:
+                out[path] = fut.result()
+            except BaseException as e:            # noqa: BLE001
+                # Preserve serial behaviour: a raising read is not swallowed
+                # into a false "nothing here". Record it and re-raise after the
+                # pool drains so the caller's degraded path still fires.
+                out[path] = None
+                if not first_error:
+                    first_error.append(e)
+    if first_error:
+        raise first_error[0]
+    return out
+
+
 def _router_execute_host(args: argparse.Namespace, transport: Any,
                          invoke: Any = None,
                          claim_owner: Optional[str] = None, *,
@@ -7022,12 +8980,21 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
     executor_id = getattr(args, "host", None) or _host()
     claim_owner = claim_owner or _claim_owner(executor_id)
     dry_run = getattr(args, "dry_run", False)
-    prefix = router.router_prefix(args.team)
-    now = _now()
     counts = {"delivered": 0, "dead_lettered": 0, "retried": 0,
               "unconfigured": 0, "skipped": 0, "deferred": 0,
               "already_delivered": 0, "would_execute": 0,
               "claim_unpersisted": 0, "degraded": 0}
+    state, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        # defensive: cmd_router_execute validates first (clean rc 2).
+        print(f"router execute [{executor_id}]: {state_err}", file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
+    prefix = router.router_prefix(args.team, state=state)
+    # config.json (SHARED) is read for the host-resolved adapter_args target only
+    # — always canonical; the queue/delivered state moves under an override.
+    canon_prefix = router.router_prefix(args.team)
+    now = _now()
 
     try:
         q_entries = transport.list_dir(prefix + "queue/")
@@ -7056,13 +9023,25 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
     # config.json is read ONLY for the host-resolved adapter_args routing target
     # (thread_id/endpoint_name) — not for policy. No config authority here.
     agents_cfg, _executors, _errs = router.validate_config(
-        transport.read(prefix + "config.json"))
+        transport.read(canon_prefix + "config.json"))
+
+    # Prefetch bodies concurrently; the pass then walks them in listing order.
+    # Serial reads made pass time scale with FLEET-WIDE queue depth and pushed
+    # the resident executor past its own cadence (see _read_queue_entries).
+    try:
+        bodies = _read_queue_entries(transport, prefix, q_entries)
+    except TransportError as e:
+        print(f"router execute [{executor_id}]: queue entry prefetch degraded "
+              f"({e}) — UNKNOWN, no execution this pass; wakes stay visibly "
+              f"queued", file=sys.stderr)
+        counts["degraded"] = 1
+        return counts
 
     for e in q_entries:
         name = e.get("name") or ""
         if e.get("is_dir") or not name.endswith(".json"):
             continue
-        raw = transport.read(prefix + "queue/" + name)
+        raw = bodies.get(prefix + "queue/" + name)
         try:
             entry = json.loads(raw) if raw else None
         except ValueError:
@@ -7172,8 +9151,13 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
                 # failure never affects execution.
                 try:
                     if _shadow_window_active(transport, args.team):
+                        # W7 evidence is CANONICAL by design (like the cloud
+                        # executor): only cursor/queue/delivered/dead-letter/marks
+                        # move under a --state-prefix override. Writing evidence to
+                        # the namespaced sibling would hide it from the canonical
+                        # shadow report → the delivery reads no-probe-evidence/missed.
                         transport.write(
-                            prefix + router.SHADOW_EVIDENCE_SUBPATH
+                            canon_prefix + router.SHADOW_EVIDENCE_SUBPATH
                             + router.shadow_evidence_filename(
                                 str(entry.get("agent")), key),
                             json.dumps(router.shadow_evidence_record(
@@ -7216,6 +9200,10 @@ def _router_execute_host(args: argparse.Namespace, transport: Any,
 
 
 def cmd_router_execute(args: argparse.Namespace, transport: Any) -> int:
+    _, state_err = _router_state_prefix(args)
+    if state_err is not None:
+        print(f"router execute: {state_err}", file=sys.stderr)
+        return 2
     json_mode = bool(getattr(args, "json", False))
     if json_mode and not (
             getattr(args, "once", False) or getattr(args, "dry_run", False)):
@@ -7416,16 +9404,59 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     now_dt = _now()
     pres_rows: list[dict[str, Any]] = []
     snap_rows: list[dict[str, Any]] = []
+    unknown_snapshot_agents: list[str] = []
+    # DELIBERATELY UNMEASURED (coord-boss ruling, 2026-08-09). This audit's
+    # product is CHECKPOINT staleness, not activity: "this agent is working but
+    # not snapshotting" is exactly the finding it exists to make, and folding
+    # work evidence in here would mask it. `presence show` and `briefing` do
+    # measure; this asymmetry is chosen, not an omission.
     for r in presence.roster(_presence_shards(transport, args.team), now=_iso(now_dt)):
         pts = roles._parse(r.get("last_seen"))
         if pts is None:
             continue
         pres_rows.append({"agent": r["agent"], "ts": pts})
-        for snap in _agent_snapshots(transport, args.team, r["agent"]):
-            sts = continuity._parse_created_at(snap.get("created_at"))
-            if sts is not None:
-                snap_rows.append({"agent": r["agent"], "ts": sts})
+        # ONE read per agent via the LATEST pointer. The previous shape read
+        # EVERY snapshot document of every agent to find the newest, because a
+        # directory listing carries no mtime (upstream register U8) — measured
+        # at 203 reads / ~149s for three agents, which is why this verb was
+        # killed at 240s and again at 590s on a live store.
+        raw = transport.read(_continuity_latest_path(args.team, r["agent"]))
+        sts = None
+        if raw is not None:
+            try:
+                sts = continuity._parse_created_at(json.loads(raw).get("created_at"))
+            except (ValueError, TypeError, AttributeError):
+                sts = None
+        if sts is not None:
+            snap_rows.append({"agent": r["agent"], "ts": sts})
+            continue
+        # No usable pointer. Two very different cases hide here, and collapsing
+        # them is how this audit would start lying:
+        #
+        #   - the agent has NEVER checkpointed -> a real finding, and the one
+        #     this audit exists for;
+        #   - the agent HAS snapshots this build cannot date (pre-pointer
+        #     history, or a pointer write that failed) -> UNKNOWN, and flagging
+        #     it would manufacture a false accusation against someone who is
+        #     working.
+        #
+        # ONE listing separates them, with no reads. It is paid only for agents
+        # without a pointer, so the common path stays one read per agent.
+        try:
+            has_any = any(e.get("is_dir") for e in
+                          transport.list_dir(_continuity_prefix(args.team, r["agent"])))
+        except TransportError:
+            has_any = True   # cannot prove absence -> UNKNOWN, never a finding
+        if has_any:
+            unknown_snapshot_agents.append(r["agent"])
+            pres_rows.pop()  # undatable: it must not reach the staleness fold
+
     flagged_agents = continuity_audit.stale_agents(pres_rows, snap_rows, now=now_dt)
+    # Coverage, stated. "No stale agents" and "we could not tell for N of them"
+    # must not look the same — that equivalence is behind most of the incidents
+    # this layer has logged.
+    if unknown_snapshot_agents:
+        view["continuity_unknown"] = sorted(unknown_snapshot_agents)
     # Same row fields stale_agents returns: agent/presence_age_h/snapshot_age_h.
     view["continuity_stale"] = flagged_agents
     if args.json:
@@ -7494,6 +9525,376 @@ def _report_writer_presence() -> None:
               "--with 'git+…#subdirectory=packages/fulcra-common'")
 
 
+def _report_pin_currency(transport: Any, team: Optional[str]) -> None:
+    """One doctor line for engine-vs-fleet-pin currency. WARN, never unhealthy.
+
+    See :mod:`coord_engine.pin_currency` for why this exists and why an
+    unprovable answer must print as a warning rather than a tick. Wrapped
+    defensively: a preflight that CRASHES teaches even less than one that lied,
+    and no currency question is worth taking doctor down over.
+    """
+    try:
+        print(pin_currency.report(transport, team))
+    except Exception as e:  # pragma: no cover - defense in depth
+        print(f"  ! fleet pin currency check failed to run "
+              f"({type(e).__name__}) — currency unknown")
+
+
+_UNSET = object()
+_REMOTE_TIPS: Any = _UNSET
+
+
+def _remote_ref_tips() -> "Optional[set]":
+    """SHAs advertised by ``git ls-remote origin``, or None if it could not run.
+
+    Cached for the process: ONE network call, not one per register entry.
+    GitHub advertises ``refs/pull/*/head`` here — 553 of 863 refs on this repo —
+    which is precisely why a PR head missing from a local clone is still
+    visible at the source.
+    """
+    global _REMOTE_TIPS
+    if _REMOTE_TIPS is not _UNSET:
+        return _REMOTE_TIPS
+    import shutil as _shutil
+    import subprocess as _subprocess
+    git = _shutil.which("git")
+    root = handoff.repo_root()
+    tips = None
+    if git and root is not None:
+        try:
+            cp = _subprocess.run([git, "ls-remote", "origin"], cwd=str(root),
+                                 capture_output=True, text=True, timeout=120)
+            if cp.returncode == 0:
+                tips = {ln.split()[0] for ln in cp.stdout.splitlines() if ln.strip()}
+        except Exception:
+            tips = None
+    _REMOTE_TIPS = tips
+    return tips
+
+
+def _forge_head_exists(sha: str) -> "Optional[bool]":
+    """Authoritative existence check via the forge API, or None if unavailable.
+
+    The ONLY source permitted to answer False, because it is the only one that
+    distinguishes "does not exist" from "I cannot see it".
+    """
+    import re as _re
+    import shutil as _shutil
+    import subprocess as _subprocess
+    gh = _shutil.which("gh")
+    root = handoff.repo_root()
+    if not gh or root is None:
+        return None
+    try:
+        url = _subprocess.run(["git", "remote", "get-url", "origin"],
+                              cwd=str(root), capture_output=True, text=True,
+                              timeout=30)
+        if url.returncode != 0:
+            return None
+        # THE ORIGIN MUST BE GITHUB. An earlier round parsed owner/repo out of
+        # ANY host and then asked github.com about it — so a self-hosted or
+        # GitLab origin got answered by a same-named GitHub repo, or by a 404
+        # meaning "no such repo here" that read as "commit is gone"
+        # (codex-reviewer, round 1). A wrong authority is worse than no answer.
+        raw = (url.stdout or "").strip()
+        m = _re.match(
+            r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+            r"([^/]+)/([^/]+?)(?:\.git)?$", raw)
+        if not m:
+            return None
+        cp = _subprocess.run(
+            [gh, "api", f"repos/{m.group(1)}/{m.group(2)}/commits/{sha}",
+             "--jq", ".sha"], cwd=str(root), capture_output=True, text=True,
+            timeout=60)
+    except Exception:
+        return None
+    if cp.returncode == 0 and (cp.stdout or "").strip():
+        return True
+    # ABSENCE IS EXACTLY ONE RESPONSE. Measured against the live API:
+    #   missing commit      -> 422 "No commit found for SHA: <sha>"
+    #   inaccessible repo   -> 404 "Not Found"
+    # A bare status match would read the second as absence, which is this whole
+    # P0 one layer down: inability to SEE becoming proof of ABSENCE. So match
+    # the commit endpoint's own no-commit message and nothing else. Auth
+    # failure, rate limit, network error, 404: all UNKNOWN.
+    err = (cp.stderr or "").lower()
+    if "no commit found for sha" in err:
+        return False
+    return None
+
+
+def _fetch_probe_head_exists(sha: str) -> "Optional[bool]":
+    """Ask the remote whether it can serve this object. PRESENCE ONLY.
+
+    Forge-agnostic, and measured against GitHub:
+
+        full sha, alive       -> rc 0                       -> True
+        full sha, fabricated  -> "upload-pack: not our ref"
+        ABBREVIATED sha       -> "couldn't find remote ref"  -- ALWAYS, either way
+
+    TWO THINGS THIS DELIBERATELY DOES NOT DO, both from coord-boss on round 3:
+
+    1. **It never answers False.** "not our ref" is only absence if ``origin``
+       is the CANONICAL repository. In a fork checkout origin is the fork, and
+       an upstream ``refs/pull`` head returns exactly that string while being
+       perfectly alive. Since this layer runs FIRST, a False here would
+       short-circuit the origin-verified forge path that would have answered
+       correctly -- the same wrong-authority shape round 2 existed to fix,
+       reintroduced one layer above it. So presence is the whole contribution;
+       absence stays with the authority that proves which repo it is asking.
+
+    2. **It runs in a THROWAWAY repository**, because ``--dry-run`` DOES write
+       to the object store. Verified: fetching a reachable non-tip into a
+       ``--depth 1`` clone with ``--dry-run`` left the object present and took
+       .git from 4.0M to 12M. Probing in the working repo would therefore
+       mutate it, pay a pack per unknown head, and make the classifier
+       HISTORY-DEPENDENT -- a second run answering True locally from what the
+       first downloaded. An earlier docstring here claimed the opposite, which
+       is worse than saying nothing: the next person would have trusted it.
+    """
+    if len(sha or "") != 40:
+        return None
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    git = _shutil.which("git")
+    root = handoff.repo_root()
+    if not git or root is None:
+        return None
+    try:
+        url = _subprocess.run([git, "remote", "get-url", "origin"], cwd=str(root),
+                              capture_output=True, text=True, timeout=30)
+        if url.returncode != 0 or not (url.stdout or "").strip():
+            return None
+        origin = url.stdout.strip()
+        with _tempfile.TemporaryDirectory() as td:
+            for args in (["init", "-q"], ["remote", "add", "origin", origin]):
+                if _subprocess.run([git, *args], cwd=td, capture_output=True,
+                                   timeout=30).returncode != 0:
+                    return None
+            cp = _subprocess.run(
+                [git, "fetch", "--dry-run", "--depth=1", "origin", sha],
+                cwd=td, capture_output=True, text=True, timeout=120)
+    except Exception:
+        return None
+    return True if cp.returncode == 0 else None
+
+
+def _remote_head_exists(sha: str) -> "Optional[bool]":
+    """Does this sha exist AT THE SOURCE? True / False / None(unknown).
+
+    Layered, and the layering is MEASURED rather than assumed:
+
+    * an advertised ref tip proves PRESENCE — cheap, one cached call;
+    * a MISS proves nothing. ``ls-remote`` sees ref TIPS only, and 2 of the 6
+      live heads in this register are reachable-but-not-tips; treating a miss
+      as absence would still have destroyed them;
+    * so a miss falls through to the forge API, the only authoritative answer;
+    * and when that cannot speak, the answer is None.
+    """
+    tips = _remote_ref_tips()
+    if tips and any(t.startswith(sha) or sha.startswith(t) for t in tips):
+        return True
+    # A tips MISS proves nothing (ref tips only). Ask the remote directly --
+    # forge-agnostic, so a GitLab or self-hosted origin gets a real answer
+    # instead of the None the GitHub-only path is obliged to return.
+    fetched = _fetch_probe_head_exists(sha)
+    if fetched is not None:
+        return fetched
+    return _forge_head_exists(sha)
+
+
+def _git_head_probe() -> "Callable[[str], Optional[bool]]":
+    """``sha -> True | False | None`` via ``git cat-file -e``.
+
+    None whenever the answer is not TRUSTWORTHY: no git, no repository, a
+    non-sha argument, or any error. Only ``git`` speaking clearly about an
+    object it looked for produces a bool — the whole gc contract rests on this
+    function refusing to guess.
+    """
+    import re as _re
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    sha_re = _re.compile(r"^[0-9a-fA-F]{7,64}$")
+    git = _shutil.which("git")
+    root = handoff.repo_root()
+
+    def _git_out(*args: str) -> Optional[str]:
+        """stdout of a successful git call, else None."""
+        if not git or root is None:
+            return None
+        try:
+            cp = _subprocess.run([git, *args], cwd=str(root),
+                                 capture_output=True, timeout=15)
+        except Exception:
+            return None
+        if cp.returncode != 0:
+            return None
+        return (cp.stdout or b"").decode("utf-8", "replace").strip()
+
+    def _can_prove_absence() -> bool:
+        """Is THIS repository able to say an object does not exist?
+
+        `git cat-file -e` answers "is this object HERE", not "does this object
+        EXIST". In a clone that legitimately does not hold all history those are
+        different questions, and the gc treats a False as authoritative grounds
+        to retire a review. So absence is trustworthy only in a repository that
+        has everything:
+
+        * **shallow** — history truncated by `--depth`; live commits outside the
+          cut are simply not present. Verified live: `git cat-file -e` on a
+          merged, current-main commit in a `--depth 1` clone exits 128 with
+          "fatal: Not a valid object name", which the classifier below reads as
+          FALSE. That is a live head reported affirmatively dead.
+        * **partial / promisor** — objects are fetched lazily, so absence is
+          "not fetched yet", not "gone".
+
+        Anything we cannot determine counts as cannot-prove. This is the
+        destructive path; the cost of an unnecessary None is a review that stays
+        open one more cycle, and the cost of a wrong False is a review destroyed.
+        """
+        if _git_out("rev-parse", "--is-shallow-repository") != "false":
+            return False
+        # PARTIAL CLONE, detected as a CAPABILITY rather than at one remote.
+        # An earlier round of this fix checked `remote.origin.*` only; git does
+        # not require the promisor remote to be named origin, so a clone whose
+        # promisor is `upstream` passed the guard and kept the destructive path
+        # open (codex-reviewer, round 1 — verified with
+        # remote.upstream.promisor=true). Checking one instance of a thing
+        # instead of the thing itself is the same mistake this whole P0 is
+        # about: asking "is it HERE" rather than "does it EXIST".
+        if _git_out("config", "--get", "extensions.partialclone"):
+            return False
+        if _git_out("config", "--get-regexp",
+                    r"^remote\..*\.(promisor|partialclonefilter)$"):
+            return False
+        return True
+
+    absence_is_trustworthy = _can_prove_absence()
+
+    def _probe(sha: str) -> Optional[bool]:
+        if not git or root is None or not sha_re.match(sha or ""):
+            return None
+        try:
+            cp = _subprocess.run(
+                [git, "cat-file", "-e", f"{sha}^{{commit}}"],
+                cwd=str(root), capture_output=True, timeout=15)
+        except Exception:
+            return None
+        if cp.returncode == 0:
+            return True
+        # git says "not a valid object name" / "could not get object info" on a
+        # genuinely absent object. Any OTHER stderr is an error we cannot read
+        # as absence — a broken repo must not retire a review.
+        err = (cp.stderr or b"").decode("utf-8", "replace").lower()
+        if "not a valid object" in err or "could not get object" in err or not err:
+            # LOCAL ABSENCE IS NOT ABSENCE. A standard clone fetches branches,
+            # not refs/pull/*, and a review register is full of PR heads.
+            # Measured on this register: 6 of 6 entries this classifier called
+            # dead were ALIVE at the source, from a full, non-shallow,
+            # non-partial clone. So the question moves to the REMOTE, and this
+            # branch never returns False on its own again.
+            if not absence_is_trustworthy:
+                return None
+            return _remote_head_exists(sha)
+        return None
+
+    # Published so callers on the DESTRUCTIVE path can tell "found nothing"
+    # from "could not look". Without it a blind run is indistinguishable from
+    # a clean register — safe, but silently wrong to a reader.
+    _probe.absence_is_trustworthy = absence_is_trustworthy  # type: ignore[attr-defined]
+    return _probe
+
+
+def _gc_entries(transport: Any, team: str) -> "tuple[list, list[str]]":
+    """Read the register into :class:`review_gc.Entry` values.
+
+    Returns ``(entries, unreadable_slugs)``. A slug whose doc cannot be read is
+    NOT an entry: it is reported and skipped, because an unreadable doc is the
+    one case where we know least and could destroy the most.
+    """
+    entries: list = []
+    unreadable: list[str] = []
+    prefix = f"team/{team}/review/"
+    for row in transport.list_dir(prefix):
+        name = row.get("name") or ""
+        if not name.endswith(".md"):
+            continue
+        slug = name[:-3]
+        raw = transport.read(prefix + name)
+        if raw is None:
+            unreadable.append(slug)
+            continue
+        fm = okf.parse_frontmatter(raw) or {}
+        vprefix = _verdicts_prefix(team, slug)
+        try:
+            vnames = {e.get("name") for e in transport.list_dir(vprefix)}
+        except Exception:
+            unreadable.append(slug)
+            continue
+        entries.append(review_gc.Entry(
+            slug=slug,
+            # v2 docs carry `head:`; v1 docs hide it in the `of:` prose.
+            head=(review.normalize_head(fm.get("head"))
+                  or review_gc.head_from_prose(fm.get("of"))),
+            superseded_by=(fm.get(review_gc.SUPERSEDED_KEY) or None),
+            settled=SETTLED_MARKER in vnames,
+            gc_closed=review_gc.GC_MARKER in vnames,
+        ))
+    return entries, unreadable
+
+
+def cmd_review_gc(args: argparse.Namespace, transport: Any) -> int:
+    """Retire register entries that can never settle. DRY RUN unless --apply."""
+    try:
+        entries, unreadable = _gc_entries(transport, args.team)
+    except TransportError as e:
+        print(f"review gc: register unreadable ({e}) — nothing scanned, "
+              f"nothing retired", file=sys.stderr)
+        return 2
+    probe = _git_head_probe()
+    # BLINDNESS MUST BE LOUD. With the shallow/partial guard in place gc is
+    # SAFE in such a clone -- every head reads UNKNOWN, so nothing is
+    # classified dead and nothing is retired. It is also SILENT: the run
+    # reports "retired 0", which reads exactly like a clean register. That is
+    # the same failure this whole P0 is about, one layer up -- absence of a
+    # finding standing in for a finding of absence.
+    blind = not getattr(probe, "absence_is_trustworthy", True)
+    if blind:
+        print("review gc: this checkout CANNOT PROVE ABSENCE (shallow or "
+              "partial clone), so no entry can be classified dead here. A "
+              "'nothing retirable' result from this clone is BLIND, not clean. "
+              "Re-run from a full checkout (git fetch --unshallow).",
+              file=sys.stderr)
+        if args.apply:
+            print("review gc: refusing --apply from a clone that cannot prove "
+                  "absence -- nothing was written", file=sys.stderr)
+            return 2
+    verdicts = review_gc.plan(entries, head_exists=probe)
+    print(review_gc.render_plan(verdicts, applying=bool(args.apply)))
+    for slug in unreadable:
+        print(f"  keep {slug} — UNREADABLE: doc or verdicts dir could not be "
+              f"read; skipped", file=sys.stderr)
+    if not args.apply:
+        return 0
+    now = _iso(_now())
+    by = getattr(args, "sender", None) or _host()
+    failed = 0
+    for v in verdicts:
+        if not v.retirable:
+            continue
+        path = _verdicts_prefix(args.team, v.slug) + review_gc.GC_MARKER
+        if not transport.write(path, review_gc.marker_body(v, now=now, by=by)):
+            print(f"review gc: marker write FAILED for {v.slug} — entry stays "
+                  f"live", file=sys.stderr)
+            failed += 1
+    retired = sum(1 for v in verdicts if v.retirable) - failed
+    print(f"review gc: retired {retired} entr(ies)"
+          + (f", {failed} write(s) failed" if failed else ""))
+    return 1 if failed else 0
+
+
 def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     """Local preflight: tooling on PATH + store reachable. Exit 0 = healthy."""
     if getattr(args, "self", False):
@@ -7520,6 +9921,7 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
     from . import __version__ as _v
     print(f"  ✓ coord-engine v{_v}")
     _report_writer_presence()
+    _report_pin_currency(transport, args.team)
     if args.team:
         cfg, cfg_status = records.load_config_classified(transport, args.team)
         if cfg_status == "error":
@@ -7603,8 +10005,38 @@ def cmd_doctor(args: argparse.Namespace, transport: Any) -> int:
                             outcomes = {}
                         for h in cur["committed"]["handled"]:
                             outcomes[h["record_id"]] = h["outcome"]
+            # s7 verb-channel link: gather `task supersede --record` evidence
+            # from HOT task docs (frontmatter `superseded_record_id`). Gated
+            # with the outcomes read — explicit ids refine a measured window
+            # and never override the UNKNOWN precedence, so scanning a
+            # pre-activation fleet would buy nothing. A failed listing/read
+            # degrades LOUDLY to stream-only evidence — affected
+            # supersessions land in the unknown bucket, never a fabricated
+            # count and never silence.
+            explicit_ids: Optional[set] = None
+            if outcomes is not None:
+                task_scan_degraded = False
+                try:
+                    task_fms = []
+                    task_prefix = f"team/{args.team}/task/"
+                    for entry in transport.list_dir(task_prefix):
+                        name = entry.get("name") or ""
+                        if entry.get("is_dir") or not name.endswith(".md"):
+                            continue
+                        raw = transport.read(task_prefix + name)
+                        if raw is None:
+                            task_scan_degraded = True
+                            continue
+                        task_fms.append(okf.parse_frontmatter(raw))
+                    explicit_ids = records.explicit_supersessions(task_fms)
+                except Exception:
+                    task_scan_degraded = True
+                if task_scan_degraded:
+                    print("  ! Supersession adoption: task-verb evidence "
+                          "unreadable (explicit `task supersede --record` "
+                          "channel degraded to stream-only this run)")
             adoption = records.supersession_adoption(
-                fleet_ev or [], outcomes)
+                fleet_ev or [], outcomes, explicit_ids=explicit_ids)
             if adoption["status"] == "unknown":
                 print("  ! Supersession adoption: UNKNOWN (no v2 "
                       "classification evidence this window — not 0%)")
@@ -7808,7 +10240,7 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
         except Exception:
             pass
     emit_timeline = getattr(args, "emit_timeline", False)
-    if args.store or emit_timeline:
+    if _digest_persists(args):
         day = now[:10]
         window = digest_mod.window_for(now)
         marker = f"team/{args.team}/_coord/digests/{day}-{window}.md"
@@ -7852,12 +10284,48 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _is_self_addressed_vacancy(maintainer: str, leases: Any) -> bool:
+    """Would this role's vacancy notice be addressed to the party who lapsed?
+
+    A closed loop with no exit: the notice about someone's absence lands in the
+    absent one's own unread bucket. Observed live — three daily ROLE VACANT
+    directives for a role whose registered `maintainer:` was its own retired
+    holder.
+
+    The predicate is deliberately NARROW: the maintainer is one of THIS role's
+    lease holders. Decidable from data already in hand, with no judgement about
+    whether an identity is alive. The obvious wider rule — "refuse to address a
+    notice to anyone who looks stale in presence" — would be wrong AND dangerous
+    here: presence staleness is not death (a reviewer on this bus read 5 days
+    stale while filing verdicts hourly), so it would misroute alarms for
+    live-but-quiet maintainers. That is this function's own failure, inverted.
+
+    REPORTS, does not redirect. My first version rerouted to ``_human()`` and an
+    existing test caught it doing harm: a role legitimately maintained by the
+    human operator, who also appears as a lease agent, got its notice moved off
+    a real person onto the bare ``"human"`` default — an address nobody reads.
+    The engine cannot know a better addressee than the registry does, and a
+    silent rewrite to a worse one is the same class of bug as the loop itself.
+    Same rule we just agreed for alias resolution: warn and let a human fix the
+    field, never silently rewrite the destination.
+    """
+    # No carve-out for the human operator. I tried one — exempting `_human()` —
+    # and it does not survive contact: `_human()` is whatever
+    # FULCRA_COORD_HUMAN happens to say, so a role naming a person the engine
+    # has not been told is the operator looks exactly like the ArcBot case, and
+    # a role naming the configured human would be exempted without the engine
+    # knowing anything more than the string matched. FLAGGING is safe in a way
+    # REROUTING was not: nothing moves, we only say what we see, and a human who
+    # really is reachable loses nothing but one accurate stderr line.
+    return maintainer in {str(l.get("agent") or "") for l in (leases or [])}
+
+
 def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     """Role-vacancy sweep: for every role doc, if vacancy past SLA and no marker
     today, write the marker + a P1 directive to the role's maintainer.
     Heartbeat-safe (idempotent per day)."""
     now = _iso(_now()); today = _now().strftime("%Y-%m-%d")
-    escalated = checked = 0
+    escalated = checked = undelivered = 0
     try:
         entries = transport.list_dir(f"team/{args.team}/roles/")
     except TransportError:
@@ -7873,6 +10341,13 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     # only when the gate passes (a BLOCKED fleet pays nothing new).
     gate_passes = _engagement_gate_passes(transport, args.team, now=now)
     pres_shards = _presence_shards(transport, args.team) if gate_passes else []
+    # ONE shared verdict-activity scan for the whole sweep, bounded by wall-clock
+    # as well as count. Built here rather than per role: see
+    # `_verdict_activity_index` for the measurement that motivated it.
+    att_dl = Deadline.open(_attendance_scan_budget())
+    att_index = _verdict_activity_index(transport, args.team, deadline=att_dl)
+    _att_scanned, _att_total, _att_cut = att_index[1], att_index[2], att_index[4]
+
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
@@ -7962,25 +10437,138 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                       f"session has lapsed (declared window ended; role retained, "
                       f"not gone-dark); escalation suppressed", file=sys.stderr)
                 continue
+        # ATTENDANCE on the ACTING path, answered from the ONE shared scan built
+        # before this loop. It used to rebuild that scan per role — 41 sequential
+        # listings each — so a sweep with N acting roles paid N x ~24s. The cost
+        # is now constant in the number of roles.
+        #
+        # Wiring this into `roles status` alone was the round-1 defect: that
+        # improved what an operator READS while the sweep kept emitting the same
+        # false "unattended" P1s. The diagnostic is not the actuator.
+        anchor = roles._parse(now)
+        attended, a_scanned, a_total = None, 0, 0
+        if anchor is not None:
+            attended, a_scanned, a_total = _role_attended(
+                transport, args.team,
+                [str(l.get("agent")) for l in (leases or [])],
+                since=anchor - timedelta(hours=sla), index=att_index)
+        if not roles.escalation_due(leases, now=now, sla_hours=sla,
+                                    marker_exists_today=marker_exists,
+                                    attended=attended):
+            print(f"escalate: {role} vacancy explained — a holder filed a verdict "
+                  f"within {sla:g}h (scanned {a_scanned}/{a_total}); the LEASE "
+                  f"lapsed, the job did not. Escalation suppressed — ask for a "
+                  f"lease renewal.", file=sys.stderr)
+            continue
+        # The `ROLE VACANT ...` slug family is a CONTRACT (dedupe key, existing
+        # queries, day-over-day re-notify). Keep it; change only the claim made
+        # after it, which is the part that was false.
+        if attended is False:
+            title = (f"ROLE VACANT {today}: {role} UNATTENDED past {sla:g}h SLA "
+                     f"— no holder work found")
+            evidence = (f"A COMPLETE verdict sweep ({a_scanned}/{a_total}) found no "
+                        f"work by any holder inside the window.")
+        else:
+            title = (f"ROLE VACANT {today}: {role} lease lapsed past {sla:g}h SLA "
+                     f"(attendance UNVERIFIED)")
+            evidence = (f"Attendance could NOT be established (scanned "
+                        f"{a_scanned}/{a_total}). This says the LEASE lapsed — NOT "
+                        f"that nobody is working. Verify before treating it as absence.")
         maintainer = str(reg.get("maintainer") or _human())
-        transport.write(marker_path, okf.render_frontmatter(
-            {"type": "Escalation", "role": role, "timestamp": now}) + "\nescalated\n")
+        self_addressed = _is_self_addressed_vacancy(maintainer, leases)
+        if not self_addressed:
+            # The daily marker is a SUPPRESSOR: it stops tomorrow's sweep from
+            # re-notifying. Writing it for a notice that reached nobody would
+            # record a delivery that did not happen and then silence the only
+            # mechanism that would try again (codex-reviewer, 577 r1). A
+            # closed-loop role therefore keeps re-surfacing every sweep until
+            # its `maintainer:` field is fixed. It does not spam: the directive
+            # write below is guarded on the task not already existing, so the
+            # repeat is one stderr line and one "suppressed" note, not a new
+            # document per run.
+            transport.write(marker_path, okf.render_frontmatter(
+                {"type": "Escalation", "role": role, "timestamp": now})
+                + "\nescalated\n")
         slug, content = tasks.new_task_doc(
-            f"ROLE VACANT {today}: {role} unattended past {sla:g}h SLA",
+            title,
             now=now, status="proposed", priority="P1", owner=_host(),
             assignee=maintainer, kind="directive",
             summary=f"Role {role} in team/{args.team} has no fresh lease past its SLA. "
-                    f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
+                    f"{evidence} "
+                    + (f"CLOSED LOOP: this notice is addressed to {maintainer}, "
+                       f"who is also this role's lapsed holder — an alarm about "
+                       f"an absence, delivered to the absent party. It was NOT "
+                       f"rerouted, because nothing here knows a better addressee "
+                       f"than the registry does. Fix the `maintainer:` field in "
+                       f"the role doc. " if self_addressed else "")
+                    + f"Claim it (coord-engine roles claim {args.team} {role}) or reassign.",
         )
+        # Counted OUTSIDE the write branch. codex-reviewer, 577 r1: the first
+        # sweep was correctly degraded, and the SECOND one went clean — run 2
+        # found the existing directive, skipped the whole branch, and reported
+        # undelivered=0, degraded=0, rc 0 while the notice was still sitting
+        # undeliverable in the absent party's bucket. The delivery failure is a
+        # property of WHO the notice is addressed to, not of whether this
+        # particular sweep wrote a new document, so a retry must not launder it.
+        if self_addressed:
+            undelivered += 1
         dst = _task_path(args.team, slug)
         if transport.read(dst) is None:
             transport.write(dst, content)
             escalated += 1
-            print(f"escalated {role} -> {maintainer}")
+            print(f"escalated {role} -> {maintainer}"
+                  + (" (UNDELIVERED: closed loop)" if self_addressed else ""))
+            if self_addressed:
+                print(f"escalate: {role}'s maintainer ({maintainer}) IS its own "
+                      f"lapsed holder — this notice lands in the absent party's "
+                      f"bucket and has no exit. NOT rerouted: the engine does "
+                      f"not know a better addressee, and a silent rewrite to a "
+                      f"worse one is the same bug pointed the other way. Fix "
+                      f"the role doc's `maintainer:` field. The daily marker "
+                      f"was NOT written, so this re-surfaces every sweep until "
+                      f"it is — an undelivered notice must not be recorded as "
+                      f"a delivery.", file=sys.stderr)
         else:
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
-    print(f"escalate: {checked} role(s) checked, {escalated} escalated")
-    return 0
+            if self_addressed:
+                print(f"escalate: {role} still has an UNDELIVERED notice — its "
+                      f"maintainer ({maintainer}) is its own lapsed holder, and "
+                      f"today's directive is sitting in that unread bucket. The "
+                      f"retry is suppressed because the document exists, NOT "
+                      f"because anyone received it. Fix the role doc's "
+                      f"`maintainer:` field.", file=sys.stderr)
+    # The verdict, on stderr, so a vacancy check that could not finish is not
+    # mistaken for one that found nothing. escalate returned rc 0 after a 98s
+    # run that printed 136 bytes — indistinguishable from a clean sweep, which is
+    # exactly what let a DEGRADED watchdog read as "0 escalated" for 12 hours.
+    # An INCOMPLETE attendance scan means every "unattended" call this sweep made
+    # was made on partial evidence, so it fails closed with rc 3.
+    # COVERAGE IS ALWAYS PARTIAL BY DESIGN and must not read as an incident: the
+    # register holds 412 review dirs on the live store and the scan is capped at
+    # `budget` (40), because a complete fan-out is ~243s of transport. So rc 3 is
+    # reserved for the scan being cut by its WALL-CLOCK deadline — a real anomaly
+    # — and the ordinary count cap is reported as coverage, not as degradation.
+    # An alarm that fires on every run is worth exactly as much as no alarm.
+    att_cut = _att_cut
+    # UNDELIVERED is degradation in the same register as a cut scan: the sweep
+    # ran, but a notice it counted reached nobody. rc 0 there would report a
+    # clean vacancy check while an alarm sat in an absent party's bucket —
+    # stderr is transient observability, not durable delivery, and an unattended
+    # caller keys on the rc (codex-reviewer, 577 r1).
+    rc = 3 if (att_cut or undelivered) else 0
+    emit_envelope("escalate", count=checked, rc=rc, escalated=escalated,
+                  undelivered=undelivered,
+                  attendance=f"{_att_scanned}/{_att_total}",
+                  degraded=1 if (att_cut or undelivered) else 0)
+    print(f"escalate: {checked} role(s) checked, {escalated} escalated"
+          + (f", {undelivered} UNDELIVERED (closed loop)" if undelivered else ""))
+    if att_cut:
+        print(f"escalate: DEGRADED — the attendance scan was cut by its "
+              f"wall-clock budget (COORD_ATTENDANCE_SCAN_BUDGET) after "
+              f"{_att_scanned}/{_att_total} review dirs, so every vacancy call "
+              f"above rests on less evidence than even the count cap allows. "
+              f"UNKNOWN, not clear.", file=sys.stderr)
+    return rc
 
 
 # --- forge (fulcra-agent-forge) ---
@@ -8294,6 +10882,11 @@ def cmd_bus_v3_send(args: argparse.Namespace, transport: Any) -> int:
         print("send: no agent identity (--from or FULCRA_COORD_AGENT)",
               file=sys.stderr)
         return 2
+    if args.kind == "directive":
+        print("send: NOTE - a hand-sent directive creates NO task row, so it "
+              "will NOT appear in the recipient needs-me and no obligation "
+              "is tracked. Use tell if you are genuinely asking for work.",
+              file=sys.stderr)
     cfg, cfg_status = records.load_config_classified(transport, args.team)
     if cfg is None:
         detail = {
@@ -8348,6 +10941,11 @@ def build_parser() -> argparse.ArgumentParser:
     nm.add_argument("team"); nm.add_argument("--agent", required=True)
     nm.add_argument("--all", action="store_true",
                     help="include acknowledged, closed, and future history")
+    nm.add_argument("--envelope-only", action="store_true",
+                    help="print ONLY the stderr verdict envelope (count, fold "
+                         "sources, degraded count, rc) and no records — for a "
+                         "harness whose context truncates an unbounded payload "
+                         "before its trailing markers")
     add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
 
@@ -8366,6 +10964,10 @@ def build_parser() -> argparse.ArgumentParser:
     rlsub = rl.add_subparsers(dest="roles_command", required=True)
     rst = rlsub.add_parser("status", help="HELD/VACANT/CONTESTED + escalation-due")
     rst.add_argument("team"); rst.add_argument("role"); add_json(rst)
+    rst.add_argument("--check-attendance", action="store_true",
+                     help="scan verdicts for holder work inside the SLA window; a "
+                          "lapsed lease alone never proves a role is unattended "
+                          "(opt-in: it costs one listing per review)")
     rst.set_defaults(func=cmd_roles_status)
     rcl = rlsub.add_parser("claim", help="claim/refresh a lease on a role")
     rcl.add_argument("team"); rcl.add_argument("role"); rcl.add_argument("--agent", "-a")
@@ -8411,9 +11013,16 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--priority", "-p", default="P2"); sp.add_argument("--workstream", "-w")
         sp.add_argument("--summary", "-s"); sp.add_argument("--next", "-n")
         sp.add_argument("--from", dest="sender")
+        sp.add_argument("--fyi", action="store_true",
+                        help="this message asks for NOTHING: deliver it, but do "
+                             "not open an obligation the recipient can never "
+                             "discharge (reports, acks, FYIs)")
 
     tl = sub.add_parser("tell", help="direct work at an agent (directive = task w/ assignee)")
     tl.add_argument("team"); tl.add_argument("assignee"); tl.add_argument("title")
+    tl.add_argument("--closes", metavar="SLUG",
+                    help="the directive this reply ANSWERS — closes it with this "
+                         "reply as the artifact (exact hash-suffixed slug)")
     add_directive_flags(tl); tl.set_defaults(func=cmd_tell)
     bc = sub.add_parser("broadcast", help="direct work at every agent (*)")
     bc.add_argument("team"); bc.add_argument("title")
@@ -8697,6 +11306,7 @@ def build_parser() -> argparse.ArgumentParser:
     tsp = tksub.add_parser("supersede", help="close a re-dispatched task's origin copy, naming its successor (legal from any live state)")
     tsp.add_argument("team"); tsp.add_argument("name")
     tsp.add_argument("--by", required=True, help="the successor task slug (or PR/artifact) that replaces this copy")
+    tsp.add_argument("--record", help="EVENT record id of the superseded predecessor dispatch — joins this supersession to the bus stream so the doctor supersession-adoption metric counts the explicit verb directly")
     tsp.add_argument("--reason", "-r")
     tsp.set_defaults(func=cmd_task_supersede, verb="supersede")
 
@@ -8717,6 +11327,34 @@ def build_parser() -> argparse.ArgumentParser:
     rvs = rvsub.add_parser("status", help="APPROVED/CHANGES/PENDING from reviewers' verdicts")
     rvs.add_argument("team"); rvs.add_argument("slug"); add_json(rvs)
     rvs.set_defaults(func=cmd_review_status)
+    rvg = rvsub.add_parser("gc", help="retire register entries that can never settle (DRY RUN by default)")
+    rvg.add_argument("team")
+    rvg.add_argument("--apply", action="store_true",
+                     help="actually write the .gc-closed markers; without it "
+                          "gc only prints what it would retire")
+    rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
+    rvg.set_defaults(func=cmd_review_gc)
+    rvv = rvsub.add_parser(
+        "verdict", help="file YOUR verdict for a review round (writes the same "
+                        "canonical shard `review request` prints)")
+    rvv.add_argument("team")
+    rvv.add_argument("name", help="review slug")
+    rvv.add_argument("--head", help="exact head this verdict is pinned to")
+    rvv.add_argument("--verdict", required=True,
+                     help="approve | changes")
+    rvv.add_argument("--note", help="the body of the verdict")
+    rvv.add_argument("--from", dest="sender", help="reviewer identity")
+    rvv.set_defaults(func=cmd_review_verdict)
+
+    rvc = rvsub.add_parser("close", help="close a review because its PR MERGED (evidence, not inference)")
+    rvc.add_argument("team"); rvc.add_argument("slug")
+    rvc.add_argument("--merge-sha", required=True,
+                     help="the FULL 40- or 64-hex merge commit sha — closure "
+                          "carries evidence; an abbreviation is an assertion")
+    rvc.add_argument("--merged-at", help="ISO timestamp of the merge (defaults to now)")
+    rvc.add_argument("--reason", help="why this row is closed")
+    rvc.add_argument("--from", dest="sender", help="acting agent (for the marker)")
+    rvc.set_defaults(func=cmd_review_close)
     rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)
@@ -8738,6 +11376,7 @@ def build_parser() -> argparse.ArgumentParser:
              "cadence compatible with the duty gate, while externally "
              "scheduled --once inherits that scheduler's throttle semantics")
     ror.add_argument("--shadow", action="store_true", help="W7 read-only shadow mode: log + persist a decision per directed item, enqueue and execute NOTHING (the >=48h acceptance measurement)")
+    ror.add_argument("--state-prefix", default=None, metavar="NAME", help="relocate the router's own cursor-tracked state to the sibling team/<team>/_coord/router-<NAME>/ (default: canonical router/; env COORD_ROUTER_STATE_PREFIX is the fallback). Lets one host run live delivery and a shadow measurement in parallel without a shared-cursor collision. Config stays shared/canonical. Charset [A-Za-z0-9_.-]+.")
     add_json(ror)
     ror.set_defaults(func=cmd_router_run)
     rosh = rosub.add_parser("shadow", help="W7 shadow-window control (arm/status the >=48h read-only acceptance window)")
@@ -8753,6 +11392,7 @@ def build_parser() -> argparse.ArgumentParser:
         "report",
         help="fold the armed W7 window into a fail-closed acceptance verdict")
     roshr.add_argument("team")
+    roshr.add_argument("--state-prefix", default=None, metavar="NAME", help="read the router's own decision state (shadow-decisions/, shadow-marks/) from the sibling router-<NAME>/ namespace; the window marker and delivery evidence stay canonical (env COORD_ROUTER_STATE_PREFIX is the fallback)")
     add_json(roshr)
     roshr.set_defaults(func=cmd_router_shadow_report)
     roe = rosub.add_parser("execute", help="W5.5 thin host executor: fire host-local adapters for queue entries resolved to THIS host (policy-free; --once for one pass)")
@@ -8760,6 +11400,7 @@ def build_parser() -> argparse.ArgumentParser:
     roe.add_argument("--host", default=None, help="executor id to drain (default: this host's own id)")
     roe.add_argument("--once", action="store_true", help="one pass then exit (default: resident loop)")
     roe.add_argument("--dry-run", action="store_true", help="select + report only; invoke nothing, write nothing")
+    roe.add_argument("--state-prefix", default=None, metavar="NAME", help="drain the queue from the sibling router-<NAME>/ namespace (pairs with a namespaced `router run`; env COORD_ROUTER_STATE_PREFIX is the fallback). Config stays shared/canonical.")
     add_json(roe)
     roe.set_defaults(func=cmd_router_execute)
 
@@ -8812,6 +11453,14 @@ def build_parser() -> argparse.ArgumentParser:
     ctp.add_argument("team"); ctp.add_argument("--agent", "-a"); ctp.add_argument("--objective")
     ctp.add_argument("--role", help="snapshot only this role (must have a fresh lease)")
     ctp.add_argument("--next", action="append"); ctp.add_argument("--open-question", action="append", dest="open_question")
+    ctp.add_argument("--decision", action="append", dest="decision")
+    ctp.add_argument("--artifact", action="append", dest="artifact",
+                     help="cold-start reading list entry; 'path#anchor' or "
+                          "'path (Anchor section)' has its anchor checked too")
+    ctp.add_argument("--handoff", action="store_true",
+                     help="enforce the five-section handoff form "
+                          "(docs/coord/CHECKPOINT-HANDOFF.md) and REFUSE to "
+                          "write anything if it is not resumable")
     ctp.set_defaults(func=cmd_continuity_park)
 
     ctr = ctsub.add_parser("resume", help="print a resume brief from the latest snapshot")
@@ -8883,16 +11532,256 @@ def build_parser() -> argparse.ArgumentParser:
 # Every engine bus WRITE verb refreshes the ACTOR's presence timestamp at the
 # single dispatch chokepoint below, so no verb can be missed and none has to
 # opt in. The set is keyed on the command FUNCTIONS themselves (not on parsed
-# subcommand strings) — read verbs (status/board/search/needs-me/briefing,
-# presence show, review status) and the W1 ``presence beat`` are deliberately
-# absent. See AGENTS.md, "Activity implies liveness".
-_ACTIVITY_WRITE_FUNCS = frozenset({
-    cmd_tell, cmd_respond,
-    cmd_task_start, cmd_task_update, cmd_task_block, cmd_task_pause,
-    cmd_task_abandon, cmd_task_assign, cmd_task_restore, cmd_task_done,
-    cmd_review_request, cmd_review_restore,
-    cmd_reconcile,
+# subcommand strings). See AGENTS.md, "Activity implies liveness".
+# THIS IS A DENYLIST, and it must stay one. It was an ALLOWLIST of thirteen
+# functions, which cannot keep the promise the paragraph above makes: a verb
+# added later is simply absent, silently, and absence here is indistinguishable
+# from "this agent is not working". Twenty write verbs had accumulated outside
+# it — `review close`, `escalate`, `continuity snapshot`/`park`, `roles claim`/
+# `release`, `answer`, `bus-v3 send` and `stash push` among them.
+#
+# Measured cost (2026-08-09, live store): codex-reviewer rendered
+# "stale 6d — nudge" having filed a verdict 3.5h earlier; coord-opus-worker
+# rendered "stale 42h — nudge" having filed a report 4.8h earlier. An agent
+# whose job IS reviewing — file a verdict, close a review, claim its role, save
+# continuity — performs none of the thirteen blessed verbs, so it rendered dark
+# while working. The roster attaches an IMPERATIVE to that judgement ("nudge"),
+# so the failure does not merely mislabel: it dispatches people.
+#
+# Inverting makes the default SAFE. A new write verb counts as activity without
+# anyone remembering; a new READ verb has to be named here, which is a decision
+# someone makes on purpose rather than an omission nobody notices. Reads must
+# stay out — looking at the board is not evidence that any work happened.
+#: Read verbs DEFINED IN THIS MODULE. The set is completed at module end, once
+#: the extracted command modules are imported — see the note down there; that
+#: ordering is load-bearing, not cosmetic.
+_ACTIVITY_READ_FUNCS: frozenset = frozenset({
+    cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_briefing,
+    cmd_presence_show, cmd_review_status, cmd_health, cmd_doctor,
+    cmd_obligations, cmd_roles_status, cmd_continuity_resume,
+    cmd_agents, cmd_asks, cmd_engagement_gate, cmd_stash_list,
+    cmd_router_shadow_status,
+    # `presence beat` is W1's own write of this very shard; routing it through
+    # the activity path would double-write and let the throttle memo suppress a
+    # deliberate beat.
+    cmd_presence_beat,
 })
+
+
+#: Handlers that serve BOTH a read and a write operation, so the function alone
+#: cannot classify the invocation. Each maps to a predicate over the PARSED
+#: ARGS: true when this particular invocation wrote something.
+#:
+#: codex-reviewer, 590 r2: classification keyed only by handler silently
+#: mis-answered three real commands — `queue commit` (a durable classification
+#: record) did not count as activity, while `inbox` and `digest` refreshed
+#: presence merely by being VIEWED. Both directions wrong, in the same table,
+#: for the same structural reason: one function object, two operations.
+#:
+#: `queue --consume` is here too, and codex did not name it. It deliberately
+#: advances ANOTHER agent's cursor — a mutation of someone else's state, not
+#: bookkeeping of your own read — so it belongs on the write side. Shipping the
+#: three that were reported while leaving its neighbour is the exact habit that
+#: produced this review round.
+_MIXED_MODE_ACTIVITY: dict[Any, Any] = {
+    # `queue TEAM` reads (its own cursor advance is bookkeeping of that read);
+    # `queue commit TEAM` records classifications; `--consume` moves another
+    # agent's cursor.
+    cmd_queue: lambda a: (getattr(a, "commit_team", None) is not None
+                          or bool(getattr(a, "consume", False))),
+    # `inbox TEAM` views; `inbox TEAM --ack SLUG` acknowledges.
+    cmd_inbox: lambda a: bool(getattr(a, "ack", None)),
+    # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
+    # defers to the same `_digest_persists` the command branches on.
+    cmd_digest: lambda a: _digest_persists(a),
+}
+
+
+def _digest_persists(args: Any) -> bool:
+    """Does this `digest` invocation enter the PERSISTENT branch?
+
+    ONE definition, called by `cmd_digest` itself and by the activity
+    classifier. It was two: the command branched on `store or emit_timeline`
+    while `_MIXED_MODE_ACTIVITY` checked only `store`, so `digest --emit-timeline`
+    wrote the digest marker (and possibly the emitted marker) while classifying
+    as a READ — the actor did durable work and rendered dark for it
+    (codex-reviewer, 590 r3). Two copies of one condition is how that drift
+    happened, so there is now one copy and both callers read it.
+    """
+    return bool(getattr(args, "store", False)
+                or getattr(args, "emit_timeline", False))
+
+
+def record_activity_artifact(args: Any, path: str) -> None:
+    """Tell the chokepoint which document this invocation wrote.
+
+    Attached to the PARSED ARGS, not a module-global map keyed by ``id(args)``.
+    That map leaked on the exception path — `main` returns from its handler
+    before any cleanup, so a failed command left its entry behind and a later
+    object at the same id could inherit the wrong artifact path
+    (codex-reviewer, 594 r1). State that lives on the object dies with it; there
+    is no cleanup to forget.
+    """
+    if path:
+        setattr(args, "_activity_artifact_path", path)
+
+
+#: Per-agent work EVENTS. One immutable file per event, never overwritten.
+#:
+#: This was a single mutable `LATEST-work.json` with a read-compare-write
+#: "monotonic" guard, and codex-reviewer reproduced two races against it (594
+#: r1): two hosts both read the old value and the OLDER timestamp could land
+#: last; worse, the failed-write branch deleted the shared path unconditionally
+#: and could erase a NEWER pointer another host had just written. The store
+#: offers no conditional or versioned write, so there is no safe way to mutate
+#: one shared path — the fix is not to have one.
+#:
+#: Immutable events have no race to lose: a writer only ever CREATES its own
+#: event, a failed write leaves every prior event intact and still true, and
+#: "newest" is a deterministic fold over names rather than a value someone must
+#: defend. The filename leads with the ISO instant, so lexical max IS newest
+#: (our own naming, so unlike the store's 12-hour mtimes it sorts correctly).
+WORK_EVENTS_DIR = "work"
+
+#: Keep the newest few events per agent; older ones are unreachable by the fold.
+#: Pruning only ever removes entries STRICTLY OLDER than one just written, which
+#: is safe concurrently — the worst case is that another host already removed it.
+WORK_EVENTS_KEEP = 5
+
+
+def _work_events_prefix(team: str, agent: str) -> str:
+    """Events live under the RAW agent name — NOT `tasks.agent_key()`, which
+    appends a hash (`coord-maintainer` -> `coord-maintainer-f68406`). That is
+    right for the PRESENCE namespace and wrong here: `_coord/agents/<agent>/`
+    uses raw names on the live store. Keying by the hashed form would file every
+    event where no reader lists — a silent no-op that fixtures written with the
+    same helper would happily agree with."""
+    return f"team/{team}/_coord/agents/{agent}/{WORK_EVENTS_DIR}/"
+
+
+def _work_event_name(now_iso: str, kind: str, path: str) -> str:
+    """`<iso>-<digest>.json`. The digest makes concurrent DISTINCT events at the
+    same instant distinct files, while two hosts recording the SAME event write
+    the same name with the same bytes — idempotent rather than conflicting."""
+    digest = hashlib.sha1(f"{kind}|{path}".encode()).hexdigest()[:8]
+    return f"{now_iso}-{digest}.json"
+
+
+def _read_work_pointer(transport: Any, team: str, agent: str) -> Optional[dict]:
+    """Newest work event for one agent, or ``None`` meaning UNKNOWN.
+
+    UNKNOWN covers no events yet (the whole fleet on day one), an unreadable
+    listing, and a corrupt newest event. None of them licenses "this agent did
+    nothing" — the caller falls back to the sweep. Never raises: one bad agent
+    must not break the fold for the rest.
+    """
+    try:
+        rows = transport.list_dir(_work_events_prefix(team, agent))
+    except TransportError:
+        return None
+    names = sorted(str(r.get("name") or "") for r in (rows or [])
+                   if str(r.get("name") or "").endswith(".json"))
+    if not names:
+        return None
+    try:
+        raw = transport.read(_work_events_prefix(team, agent) + names[-1])
+    except TransportError:
+        return None
+    if not raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) and doc.get("ts") else None
+
+
+def _prune_work_events(transport: Any, team: str, agent: str) -> None:
+    """Best-effort: drop all but the newest ``WORK_EVENTS_KEEP`` events.
+
+    Only ever deletes entries strictly older than ones being kept, so a
+    concurrent writer's newest event is never at risk. Failure is ignored —
+    stale extra events cost storage, never correctness.
+    """
+    try:
+        rows = transport.list_dir(_work_events_prefix(team, agent)) or []
+        names = sorted(str(r.get("name") or "") for r in rows
+                       if str(r.get("name") or "").endswith(".json"))
+        for stale in names[:-WORK_EVENTS_KEEP]:
+            transport.delete(_work_events_prefix(team, agent) + stale)
+    except Exception:
+        pass
+
+
+def _stamp_work_pointer(transport: Any, team: str, agent: str, *, kind: str,
+                        path: str, now_iso: str) -> bool:
+    """Record one work event. True iff it persisted.
+
+    Called only after the command succeeded (588): an event for work that did
+    not land would be a lie. There is NO delete-on-failure — the old design
+    removed a shared mutable pointer and could erase another host's newer one.
+    A failed write here simply leaves the previous events, which are all still
+    true; the reader sees slightly stale rather than wrong, and that is the
+    right way to be wrong.
+    """
+    prefix = _work_events_prefix(team, agent)
+    body = json.dumps({"schema": "work-event/v1", "agent": agent,
+                       "kind": kind, "path": path, "ts": now_iso},
+                      sort_keys=True)
+    try:
+        wrote = transport.write(prefix + _work_event_name(now_iso, kind, path),
+                                body)
+    except TransportError:
+        wrote = False
+    if not wrote:
+        print(f"work event not recorded for {agent} — earlier events stand and "
+              f"remain true; the reader will read slightly stale, never wrong",
+              file=sys.stderr)
+        return False
+    _prune_work_events(transport, team, agent)
+    return True
+
+
+def _is_activity_invocation(args: Any) -> bool:
+    """Does THIS invocation count as evidence the actor is working?
+
+    Classification is per-OPERATION, not per-function: a mixed handler is
+    resolved by its parsed args before the read/write default applies. The
+    default remains "counts", because its failure mode is an agent rendered dark
+    while doing exactly its job — but a declared read, or the read branch of a
+    mixed command, must never manufacture liveness out of looking at a view.
+    """
+    func = getattr(args, "func", None)
+    if func is None:
+        return False
+    predicate = _MIXED_MODE_ACTIVITY.get(func)
+    if predicate is not None:
+        return bool(predicate(args))
+    return func not in _ACTIVITY_READ_FUNCS
+
+
+def _is_activity_refresh_func(func: Any) -> bool:
+    """Function-only view of the rule, for callers with no parsed args.
+
+    UNSAFE for a mixed handler — it cannot see which operation ran — so it
+    answers False for those rather than guessing a direction.
+    """
+    if func is None or func in _MIXED_MODE_ACTIVITY:
+        return False
+    return func not in _ACTIVITY_READ_FUNCS
+
+
+class _ActivityRefreshFuncs:
+    """Membership seam for the coverage regression, so a test can ask "does this
+    verb refresh?" without reaching into dispatch. Membership is COMPUTED from
+    the denylist rather than curated — a curated answer here would re-create the
+    very bug the test exists to catch."""
+
+    def __contains__(self, func: Any) -> bool:
+        return _is_activity_refresh_func(func)
+
+
+ACTIVITY_REFRESH_FUNCS = _ActivityRefreshFuncs()
 
 #: Process-global throttle memo: actor -> monotonic time of its last activity
 #: refresh. Module state by design (one process = one live agent); the test
@@ -9002,13 +11891,32 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
     # ``_known_sender`` — never a target assignee); the anonymous host fallback
     # is not a presence identity, so a missing actor/team skips silently. The
     # whole step is best-effort and cannot change ``rc``.
-    if rc == 0 and args.func in _ACTIVITY_WRITE_FUNCS:
+    if rc == 0 and _is_activity_invocation(args):
         actor = _known_sender(args)
         team = getattr(args, "team", None)
         if actor and team:
+            now_iso = _iso(_now())
             _refresh_activity_presence(
                 transport, team, actor,
-                now_monotonic=_now_monotonic(), now_iso=_iso(_now()))
+                now_monotonic=_now_monotonic(), now_iso=now_iso)
+            # ONE WRITE SITE for the work pointer (coord-boss constraint 1,
+            # 2026-08-09). Stamped HERE rather than beside each artifact write,
+            # so pointer coverage INHERITS the classification the chokepoint
+            # already computes: a newly added write verb stamps by default, and
+            # "someone forgot the stamp" is designed out instead of tested for.
+            # Same argument that made the classifier a denylist.
+            #
+            # rc == 0 is the persistence gate (588): we are past the command,
+            # and it succeeded. Best-effort, exactly like the presence bump —
+            # it can never change rc.
+            try:
+                _stamp_work_pointer(
+                    transport, team, actor,
+                    kind=str(getattr(args, "command", "") or "write"),
+                    path=str(getattr(args, "_activity_artifact_path", "") or ""),
+                    now_iso=now_iso)
+            except Exception as exc:                      # never break a write
+                print(f"work pointer stamp failed: {exc}", file=sys.stderr)
     return rc
 
 
@@ -9061,6 +11969,24 @@ cmd_threads = commands_threads.cmd_threads
 from . import commands_acceptance  # noqa: E402
 
 cmd_acceptance_pair = commands_acceptance.cmd_acceptance_pair
+
+
+# --- activity denylist: the EXTRACTED read verbs -----------------------------
+#
+# Completed HERE, after the extracted command modules are bound, because a
+# denylist assembled earlier in this file can only name what `cli.py` itself
+# defines. That was the hole codex-reviewer found (590 r1): `headroom`, `route`,
+# `atc report`, `annotate status` and `threads` live in extracted modules, so the
+# default-true predicate treated them as activity and merely READING one of those
+# views refreshed the reader's presence. Manufacturing liveness out of someone
+# looking at a dashboard is the worse direction to be wrong in — it suppresses
+# the nudge for an agent who really is gone.
+_ACTIVITY_READ_FUNCS = _ACTIVITY_READ_FUNCS | frozenset({
+    cmd_headroom, cmd_route, cmd_atc_report,   # commands_atc
+    cmd_dash,                                  # commands_atc — serves a view
+    cmd_annotate_status,                       # commands_annotate
+    cmd_threads,                               # commands_threads
+})
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,12 +1,19 @@
-# Wake-router addendum 1 — feed-driven folds (normative)
+# Wake-router addendum 1 — feed-driven folds
 
-**Owner:** Tycho (`coord-boss`). **Authorization:** Ash, 2026-07-23 ("green light given" —
-first-principles redesign of the bus read path; simplified same day by operator direction:
-"there has to be a better way … than bloating and reconciling by combining a time series you
-define, data-updates, and files"). **Gate:** dual-green codex-reviewer + coord-maintainer
-ratification (coord-boss authors, so recuses its own gate per the W1-r3 precedent).
-**Amends:** `wake-router-SPEC.md` and `wake-router-PLAN.md`; where this addendum speaks, it is
-normative over both. **ATC untouched.**
+**STATUS (2026-08-12): executed; historical record.** The feed-driven fold work
+this addendum ordered shipped in the engine; the `listen` verb it extends was
+subsequently REMOVED (2026-08-03) when the resident-listener stack was retired,
+and the wake router itself is **shipped but unproven in deployment** (reference
+deployment evaluated and retired 2026-08). Per-task detail below is historical.
+Where it conflicts with the engine, the engine is the truth.
+
+**Authorization:** operator, 2026-07-23 ("green light given" — first-principles
+redesign of the bus read path; simplified same day by operator direction:
+"there has to be a better way … than bloating and reconciling by combining a
+time series you define, data-updates, and files"). **Gate:** dual-green
+cross-model review with maintainer ratification (the author recuses its own
+gate). Authoring roster: team annex on the coordination store.
+**Amends:** `wake-router-SPEC.md` and `wake-router-PLAN.md`. **ATC untouched.**
 
 ## 1. Evidence (why the read model was wrong)
 

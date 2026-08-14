@@ -15,6 +15,7 @@ from . import okf
 from .model import (
     DEFAULT_PRIORITY,
     DEFAULT_STATUS,
+    TERMINAL_STATUSES,
     VALID_PRIORITIES,
     VALID_STATUSES,
     is_valid_transition,
@@ -62,6 +63,8 @@ def new_task_doc(
     kind: Optional[str] = None,
     not_before: Optional[str] = None,
     slug: Optional[str] = None,
+    evidence: Optional[str] = None,
+    fyi: bool = False,
 ) -> tuple[str, str]:
     """Return ``(slug, content)`` for a new OKF Task doc. Raises on bad enums.
 
@@ -69,24 +72,43 @@ def new_task_doc(
     ``id`` frontmatter field) — the directive path passes a payload-hash-suffixed
     slug so identical messages dedupe onto one id and distinct messages get
     distinct, non-racing ids.
+
+    ``evidence`` is REQUIRED when a doc is created directly in a terminal state.
+    ``apply_update`` has always enforced "done requires evidence", but that rule
+    lived only on the update path — a doc could be BORN terminal carrying no
+    reason at all, and nothing said so. Creating terminal rows is exactly what
+    the notification path does, so the rule has to hold at both entry points or
+    it does not hold.
     """
     if status not in VALID_STATUSES:
         raise TaskError(f"invalid status {status!r}")
     if priority not in VALID_PRIORITIES:
         raise TaskError(f"invalid priority {priority!r}")
+    if status in TERMINAL_STATUSES and not (evidence or "").strip():
+        label = "reason" if status == "abandoned" else "evidence"
+        raise TaskError(f"a doc created as {status} requires {label}")
     slug = slug or slugify(title)
     tags = []
     if workstream:
         tags.append(f"workstream:{workstream}")
     if kind:
         tags.append(f"kind:{kind}")
+    if fyi:
+        # EXPLICIT mode marker. The write path recomputes message identity
+        # from a stored doc, and a notification must never be mistaken for a
+        # completed ask — status alone cannot tell them apart.
+        tags.append("mode:fyi")
     fm = {
         "type": "Task", "title": title, "description": summary or "", "timestamp": now,
         "tags": tags, "id": slug, "status": status, "priority": priority,
         "owner": owner, "assignee": assignee, "next_action": next_action,
         "not_before": not_before,
     }
-    return slug, okf.render_frontmatter(fm) + f"\n\n# {title}\n"
+    body = f"\n\n# {title}\n"
+    if status in TERMINAL_STATUSES:
+        label = "reason" if status == "abandoned" else "evidence"
+        body += f"\n- {now}: created {status} ({label}: {evidence})\n"
+    return slug, okf.render_frontmatter(fm) + body
 
 
 def apply_update(
@@ -105,6 +127,7 @@ def apply_update(
     remove_tags: Optional[list[str]] = None,
     unlock: Optional[str] = None,
     superseded_by: Optional[str] = None,
+    superseded_record_id: Optional[str] = None,
 ) -> str:
     """Read-modify-write a task doc, enforcing the status machine. Raises
     ``TaskError`` on a missing doc, unparseable frontmatter, or illegal transition."""
@@ -155,6 +178,12 @@ def apply_update(
         fm["unlock"] = unlock
     if superseded_by is not None:
         fm["superseded_by"] = superseded_by
+    if superseded_record_id is not None:
+        # s7 verb-channel link: the superseded predecessor's EVENT record id,
+        # the join the supersession-adoption fold's explicit channel keys on.
+        # Optional — a supersession with no known event id stays legal and
+        # reads as unmeasured, never guessed.
+        fm["superseded_record_id"] = superseded_record_id
     if checkpoint_ref is not None:
         fm["checkpoint_ref"] = checkpoint_ref
     if add_tags:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Clean up the attention duplicate-record storm residue.
 
-Background (docs/audits/2026-06-09-collect-attention-real-data-audit.md):
+Background, measured on a live account during the 2026-06 audit:
 the pre-relayless attention pipeline ingested the SAME visit record up to
 2,729 times — 144,664 of 149,789 attention records (97%) in the Apr 10 –
 Jun 1 2026 window are exact identical-timestamp clones of 5,125 real

@@ -18,6 +18,12 @@ from .model import OPEN_STATUSES, sort_rows
 
 BACKLOG = "@backlog"
 
+#: The TASK plane's word for everyone. The EVENT plane's is
+#: ``records.BROADCAST`` ("all"), and they have never been the same string.
+#: Anything crossing between the planes must translate — see
+#: ``cli._emit_dispatch_companion``.
+EVERYONE = "*"
+
 
 def parse_when(when: str, *, now: str) -> Optional[str]:
     """``remind`` schedule: ISO-8601 passthrough, or relative ``5d``/``36h``/``10m``.
@@ -51,7 +57,7 @@ def is_directed_at(
     held_roles: "Optional[set[str] | list[str]]" = None,
 ) -> bool:
     a = row.get("assignee")
-    if a == agent or a == "*":
+    if a == agent or a == EVERYONE:
         return True
     # Role routing: a directive assigned to a ROLE is directed at whoever holds a
     # fresh lease on it. The caller resolves holders (a lease read) and passes the

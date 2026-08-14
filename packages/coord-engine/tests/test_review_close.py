@@ -1,0 +1,483 @@
+"""`review close` — closure as an ARTIFACT of merging, not an inference.
+
+A merged PR leaves an immortal obligation: the register keeps asking for a
+verdict on a head nobody will ever review again. `review gc` is deliberately NOT
+the answer -- its predicate asks whether a HEAD is still alive, PR 551 raised
+that bar on purpose, and "the PR merged" is a different question a liveness
+probe cannot answer (coord-boss ruling 1, 2026-08-07).
+
+The distinguishing property from `_write_settled_marker`: that one is a CACHE
+and swallows its failures. This is a DURABLE RECORD, so a swallowed failure
+would leave the row open while reporting closed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+
+import pytest
+
+from coord_engine import cli, okf
+from coord_engine.transport import TransportError
+from coord_engine_test_helpers import FakeTransport
+
+TEAM = "t"
+SLUG = "some-pr-1a2b3c"
+SHA = "a" * 40
+PINNED = "2026-08-08T00:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _pin(monkeypatch):
+    import datetime as _dt
+    monkeypatch.setattr(cli, "_now", lambda: _dt.datetime(
+        2026, 8, 8, 0, 0, tzinfo=_dt.timezone.utc))
+
+
+def _args(**kw):
+    ns = argparse.Namespace(team=TEAM, slug=SLUG, merge_sha=SHA,
+                            merged_at=None, reason=None, sender="tester")
+    for k, v in kw.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _with_review(t):
+    t.put(cli._review_doc_path(TEAM, SLUG),
+          okf.render_frontmatter({"type": "Review", "title": SLUG}) + "\n")
+    t.put(cli._verdicts_prefix(TEAM, SLUG) + f"{SHA}--codex-reviewer.md", "x")
+    return t
+
+
+def test_a_merged_review_is_closed_with_its_evidence():
+    t = _with_review(FakeTransport())
+    assert cli.cmd_review_close(_args(), t) == 0
+    fm = okf.parse_frontmatter(t.store[cli._settled_marker_path(TEAM, SLUG)])
+    assert fm["state"] == "MERGED"
+    assert fm["merge_sha"] == SHA, "the marker must carry the evidence, not just a flag"
+    assert fm["merged_at"] and fm["closed_by"] == "tester"
+    assert fm["reason"], "a closure with no recorded reason is an inference"
+
+
+@pytest.mark.parametrize("bad", ["a1b2c3d", "main", "", "ZZ" * 20, "a" * 39])
+def test_closure_refuses_anything_that_is_not_a_full_sha(bad):
+    """An abbreviation or a branch name is an assertion, not evidence."""
+    t = _with_review(FakeTransport())
+    assert cli.cmd_review_close(_args(merge_sha=bad), t) == 2
+    assert cli._settled_marker_path(TEAM, SLUG) not in t.store
+
+
+def test_closing_a_slug_that_does_not_exist_is_refused():
+    """A write into a nonexistent entry succeeds silently and reads exactly
+    like a closure."""
+    assert cli.cmd_review_close(_args(slug="never-existed"), FakeTransport()) == 2
+
+
+def test_an_unreadable_verdicts_prefix_is_UNKNOWN_not_closed():
+    class Blind(FakeTransport):
+        def list_dir(self, prefix):
+            raise TransportError("listing down")
+    rc = cli.cmd_review_close(_args(), Blind())
+    assert rc == 1, "a fold that cannot look must not report a closure"
+
+
+def test_a_swallowed_write_failure_must_not_report_success():
+    """The property that separates this from the settled CACHE."""
+    class WriteDrops(FakeTransport):
+        def write(self, path, body):
+            return None            # silently does nothing
+    t = _with_review(WriteDrops())
+    rc = cli.cmd_review_close(_args(), t)
+    assert rc == 1, (
+        "the write vanished and close reported success — the row is open and "
+        "the register says otherwise"
+    )
+
+
+# --- the stale-marker case (codex 561 r1) -----------------------------------
+#
+# `.settled` is very often ALREADY occupied by the fold's APPROVED cache marker
+# -- that is the normal state for a terminal review, which is exactly the review
+# a merged PR has. So a presence-only read-back passes on the OLD content and
+# the command reports a merge sha the durable record does not contain.
+#
+# Presence is not identity. That distinction is the whole point of this verb.
+
+class WriteSilentlyDrops(FakeTransport):
+    def write(self, path, body):
+        if path.endswith(cli.SETTLED_MARKER):
+            return None           # the write vanishes; everything else works
+        return super().write(path, body)
+
+
+def _preexisting_approved_marker(t):
+    t.put(cli._settled_marker_path(TEAM, SLUG),
+          okf.render_frontmatter({"schema": "review-settled/v1",
+                                  "state": "APPROVED", "ts": "2026-08-01T00:00:00Z"}))
+
+
+def test_a_dropped_write_over_an_APPROVED_cache_marker_is_caught():
+    """The exact shape codex named: the marker exists, so presence passes."""
+    t = _with_review(WriteSilentlyDrops())
+    _preexisting_approved_marker(t)
+    rc = cli.cmd_review_close(_args(), t)
+    assert rc == 1, (
+        "the write vanished, the stale APPROVED marker satisfied a presence "
+        "check, and close reported success with a merge sha that is not in the "
+        "durable record"
+    )
+
+
+def test_a_dropped_write_over_an_OLDER_merged_closure_is_caught():
+    """Same defect one step subtler: state already says MERGED, so a
+    state-only check would pass while the SHA is somebody else's."""
+    t = _with_review(WriteSilentlyDrops())
+    t.put(cli._settled_marker_path(TEAM, SLUG),
+          okf.render_frontmatter({"schema": "review-settled/v1",
+                                  "state": "MERGED", "merge_sha": "b" * 40,
+                                  "ts": "2026-08-01T00:00:00Z"}))
+    assert cli.cmd_review_close(_args(), t) == 1, (
+        "state matched but the merge sha did not — the closure names the wrong "
+        "commit"
+    )
+
+
+def test_closing_over_a_stale_marker_SUCCEEDS_when_the_write_lands():
+    """Non-vacuity: a pre-existing marker must not itself block a real close,
+    or the verb would be unusable on precisely the reviews it targets."""
+    t = _with_review(FakeTransport())
+    _preexisting_approved_marker(t)
+    assert cli.cmd_review_close(_args(), t) == 0
+    fm = okf.parse_frontmatter(t.store[cli._settled_marker_path(TEAM, SLUG)])
+    assert fm["state"] == "MERGED" and fm["merge_sha"] == SHA
+
+
+# --- same-SHA stale provenance (codex 561 r2) -------------------------------
+#
+# My r1 fix hand-picked `state` and `merge_sha`. But the verb's contract records
+# merged_at, closed_by and reason too, so re-closing the SAME sha with corrected
+# provenance could silently drop the write, match on the two fields I happened
+# to check, and exit 0 while the requested evidence never landed.
+#
+# A hand-picked subset goes stale the moment a field is added. The comparison is
+# now derived from the payload; these pin that.
+
+@pytest.mark.parametrize("stale_field, stale_value", [
+    ("merged_at", "2001-01-01T00:00:00Z"),
+    ("closed_by", "somebody-else"),
+    ("reason", "an older reason"),
+])
+def test_same_sha_but_stale_provenance_is_caught(stale_field, stale_value):
+    """state and merge_sha both MATCH — only the provenance differs."""
+    t = _with_review(WriteSilentlyDrops())
+    marker = {"schema": "review-settled/v1", "state": "MERGED",
+              "merge_sha": SHA, "merged_at": PINNED, "closed_by": "tester",
+              "reason": "PR merged; the head will not be reviewed again",
+              "ts": PINNED}
+    marker[stale_field] = stale_value
+    t.put(cli._settled_marker_path(TEAM, SLUG), okf.render_frontmatter(marker))
+
+    rc = cli.cmd_review_close(_args(reason="PR merged; the head will not be "
+                                           "reviewed again"), t)
+    assert rc == 1, (
+        f"{stale_field} was stale but state and merge_sha matched, so the "
+        f"closure reported success with evidence that never landed"
+    )
+
+
+def test_the_check_is_derived_from_the_payload_not_a_hardcoded_list():
+    """Non-staleness: every field the verb writes must be compared.
+
+    If someone adds a field to the marker and the comparison keeps its own
+    list, this verb silently stops verifying it — which is precisely how r1's
+    fix was already incomplete when it shipped.
+    """
+    import inspect
+    src = inspect.getsource(cli.cmd_review_close)
+    assert "marker.items()" in src, (
+        "the read-back comparison must enumerate the payload's own fields"
+    )
+
+
+# --- `review status` must not delete MERGE EVIDENCE -------------------------
+# Found 2026-08-08 by controlled reproduction, chasing what looked like a store
+# durability fault: close a review, confirm the marker, run `review status`,
+# marker GONE. The read-only-looking diagnostic was the deleter.
+#
+# Root cause is mine. Before PR 561, `.settled` only ever cached a terminal
+# APPROVED tally, so `cmd_review_status` deleting it on a non-settleable tally
+# was correct and self-healing. 561 gave the same path a SECOND meaning —
+# `state: MERGED` + a merge sha, evidence that a PR landed — and I did not audit
+# the existing deleters when I added the new writer. A merged-but-never-verdicted
+# review tallies PENDING forever, so EVERY ruling-1 retroactive closure was
+# erasable by anyone merely LOOKING at it.
+
+def _closed_by_merge(t, slug="pr-x", sha="a" * 40):
+    cli.main(["review", "close", "r", slug, "--merge-sha", sha,
+              "--reason", "merged"], transport=t)
+    return cli._settled_marker_path("r", slug)
+
+
+def test_review_status_does_not_delete_a_MERGE_marker(capsys):
+    t = FakeTransport()
+    t.put("team/r/review/pr-x.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    path = _closed_by_merge(t)
+    assert t.read(path), "precondition: review close wrote the marker"
+    capsys.readouterr()
+    # The tally is PENDING — nobody verdicted, and nobody ever will on a merged PR.
+    cli.main(["review", "status", "r", "pr-x"], transport=t)
+    assert "PENDING" in capsys.readouterr().out
+    assert t.read(path), (
+        "`review status` deleted MERGE EVIDENCE — a read-only diagnostic must "
+        "never destroy the record that a PR landed")
+
+
+def test_review_status_still_clears_a_stale_TALLY_CACHE(capsys):
+    """The original F4 behaviour must survive: an APPROVED-tally cache on a
+    review that no longer tallies APPROVED is stale and should go."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-y.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    path = cli._settled_marker_path("r", "pr-y")
+    cli._write_settled_marker(t, "r", "pr-y", now="2026-08-08T00:00:00Z",
+                              evidence="deadbeefdeadbeef")
+    assert t.read(path) and "MERGED" not in (t.read(path) or "")
+    capsys.readouterr()
+    cli.main(["review", "status", "r", "pr-y"], transport=t)
+    assert not t.read(path), "a stale tally cache should still be cleared"
+
+
+def test_classification_is_TRI_state_not_two(capsys):
+    """codex-reviewer, PR 572 r1: two states conflated "known cache" with
+    "cannot tell". Only a POSITIVELY identified cache may be deleted."""
+    t = FakeTransport()
+    t.put(cli._settled_marker_path("r", "a"),
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    # codex-reviewer r3: a truncated marker keeping ONLY `state:` is NOT a cache
+    t.put(cli._settled_marker_path("r", "trunc"), "---\nstate: APPROVED\n---\n")
+    # ...and MERGED without a well-formed sha is INCOMPLETE evidence, not merged
+    t.put(cli._settled_marker_path("r", "nosha"),
+          "---\nschema: review-settled/v1\nstate: MERGED\n---\n")
+    t.put(cli._settled_marker_path("r", "b"),
+          "---\nschema: review-settled/v1\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    t.put(cli._settled_marker_path("r", "c"),
+          "---\nschema: review-settled/v1\nstate: SOMETHING_NEW\n---\n")
+    t.put(cli._settled_marker_path("r", "d"), "not frontmatter at all")
+    # codex-reviewer r4: the schema demand was ASYMMETRIC — APPROVED needed it,
+    # MERGED got in on `state` + a sha. A marker that lost only its schema line
+    # therefore still passed as merge evidence.
+    t.put(cli._settled_marker_path("r", "noschema"),
+          "---\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    # ...and a schema this build has never heard of is not ours to interpret
+    t.put(cli._settled_marker_path("r", "future"),
+          "---\nschema: review-settled/v9\nstate: MERGED\nmerge_sha: " + "a"*40 + "\n---\n")
+    assert cli._classify_settled_marker(t, "r", "a") == cli.SETTLED_CACHE
+    assert cli._classify_settled_marker(t, "r", "b") == cli.SETTLED_MERGED
+    assert cli._classify_settled_marker(t, "r", "noschema") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "future") == cli.SETTLED_UNKNOWN
+    # an unrecognised state is NOT a cache — a future writer must not be deleted
+    assert cli._classify_settled_marker(t, "r", "c") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "d") == cli.SETTLED_UNKNOWN
+    # absent is UNKNOWN too, and deleting nothing costs nothing
+    assert cli._classify_settled_marker(t, "r", "missing") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "trunc") == cli.SETTLED_UNKNOWN
+    assert cli._classify_settled_marker(t, "r", "nosha") == cli.SETTLED_UNKNOWN
+
+
+def test_an_unclassifiable_marker_is_preserved_AND_reported_AND_rc3(capsys):
+    """The visibility path codex asked for: preserving silently would leave a
+    marker suppressing the fold with nothing on any surface to explain it."""
+    class T(FakeTransport):
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None                      # exists (listed) but unreadable
+            return super().read(path)
+
+    t = T()
+    t.put("team/r/review/pr-u.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    t.put(cli._settled_marker_path("r", "pr-u"), "unreadable-by-this-transport")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-u"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 3, "an unclassifiable marker is a DEGRADED answer, not a clean tally"
+    assert "cannot classify" in err and "PRESERVED" in err
+    # and it is still there
+    assert cli._settled_marker_present(t, "r", "pr-u") is True
+
+
+def test_an_ABSENT_marker_is_silent_and_rc0(capsys):
+    """Absent is not a degradation. `read` cannot tell absent from unreadable, so
+    the listing is what separates them — without it every clean slug would warn."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-v.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-v"], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 0 and "cannot classify" not in err
+
+
+def test_a_listing_failure_after_an_unknown_read_still_fails_closed(capsys):
+    """codex-reviewer, PR 572 r3: the two-state presence helper returned False on
+    a raised listing, so unreadable-marker + unreadable-listing produced a SILENT
+    rc 0 exactly where this code promises to fail closed.
+
+    r4: the first version of this test asserted only that the HELPER returns
+    None. That pins a diagnostic, not the behaviour — the command could stop
+    calling the helper entirely and this would still pass. `review status` lists
+    the verdicts prefix TWICE (once for the tally, once for presence), so the
+    transport below lets the first listing through and fails the second: that is
+    the only shape that reaches the presence check with an unknown read already
+    in hand, which is the state the promise is about.
+    """
+    class T(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.verdict_listings = 0
+
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None                       # UNKNOWN read
+            return super().read(path)
+
+        def list_dir(self, prefix):
+            if prefix.endswith("/verdicts/"):
+                self.verdict_listings += 1
+                if self.verdict_listings > 1:     # the PRESENCE listing
+                    raise TransportError("listing unavailable")
+            return super().list_dir(prefix)
+
+    t = T()
+    t.put("team/r/review/pr-w.md",
+          "---\ntype: Review\nschema: review-request/v2\nrequired:\n  - bob\n---\nr")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-w"], transport=t)
+    err = capsys.readouterr().err
+    assert t.verdict_listings >= 2, (
+        "the tally listing must have SUCCEEDED — otherwise this exercises the "
+        "listing-failure guard upstream and never reaches the presence check")
+    assert rc == 3, "unknown read + unknown presence is a DEGRADED answer, not rc 0"
+    assert "cannot classify" in err and "PRESERVED" in err
+    assert cli._settled_marker_present(t, "r", "pr-w") is None, "presence is TRI-state"
+
+
+def test_presence_is_tri_state_not_boolean():
+    class Raises(FakeTransport):
+        def list_dir(self, prefix):
+            raise TransportError("boom")
+
+    t = FakeTransport()
+    assert cli._settled_marker_present(t, "r", "absent") is False   # positively absent
+    t.put(cli._settled_marker_path("r", "there"), "x")
+    assert cli._settled_marker_present(t, "r", "there") is True
+    assert cli._settled_marker_present(Raises(), "r", "any") is None
+
+
+def test_review_status_does_not_stamp_the_cache_over_MERGE_EVIDENCE(capsys):
+    """Found in PRODUCTION by coord-boss, and I caused it: they closed a review
+    with a merge sha, and the `review status` I ran two minutes later TO CHECK
+    the closure overwrote it with the recomputable APPROVED cache.
+
+    PR 572 stopped this verb DELETING merge evidence and left the WRITE path
+    unguarded — the same bug wearing a smaller hat, and the same
+    guarded-one-direction-left-the-neighbour shape.
+
+    Refusing costs nothing: the cache exists so the fan-out fold can skip the
+    slug, and a MERGED marker already makes it skip."""
+    t = FakeTransport()
+    # a review that tallies APPROVED — so `review status` WANTS to cache it
+    _settleable(t, "pr-m")
+    # ...and it has ALREADY been closed with real merge evidence.
+    sha = "b" * 40
+    t.put(cli._settled_marker_path("r", "pr-m"),
+          "---\nschema: review-settled/v1\nstate: MERGED\n"
+          f"merge_sha: {sha}\nmerged_at: 2026-08-09T01:20:00Z\n---\n")
+
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-m"], transport=t) == 0
+    after = cli._classify_settled_marker(t, "r", "pr-m")
+    assert after == cli.SETTLED_MERGED, \
+        "a tally recompute must not stamp its cache over the merge record"
+    assert sha in (t.read(cli._settled_marker_path("r", "pr-m")) or ""), \
+        "the sha is the whole point of the evidence — it must survive"
+
+
+def test_the_cache_IS_written_when_no_evidence_is_there(capsys):
+    """The control. Refusing unconditionally would break the fold's fast path,
+    which is the reason the cache exists at all."""
+    t = FakeTransport()
+    _settleable(t, "pr-n")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-n"], transport=t) == 0
+    assert cli._classify_settled_marker(t, "r", "pr-n") == cli.SETTLED_CACHE
+
+
+#: A settle cache binds only to APPEND-ONLY evidence — a plain shard can be
+#: rewritten in place and a name digest cannot see it (595 r5) — so every
+#: fixture that expects a CACHE files its verdict in the append form.
+_HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_APPEND = f"{_HEAD}--alice--2026-08-09T01:00:00Z-aaaaaaaa.md"
+
+
+def _settleable(t, slug):
+    t.put(f"team/r/review/{slug}.md",
+          "---\ntype: Review\nschema: review-request/v2\n"
+          f"head: {_HEAD}\nrequired:\n  - alice\n---\nr")
+    t.put(f"team/r/review/{slug}/verdicts/{_APPEND}",
+          f"---\ntype: Verdict\nreviewer: alice\nhead: {_HEAD}\n"
+          "verdict: approve\n---\nlgtm")
+
+
+def test_a_FUTURE_schema_marker_is_preserved_not_overwritten(capsys):
+    """codex-reviewer, 588 r1, reproduced exactly. r1 guarded MERGED and left
+    SETTLED_UNKNOWN clobberable — even though the classifier's whole contract is
+    that only `cache` is disposable, precisely because an unrecognised or
+    future-schema marker is one this build cannot prove is ours to drop.
+
+    A `review-settled/v2` marker carrying a real merge sha classified UNKNOWN
+    and was then replaced by the v1 APPROVED cache: evidence written by a NEWER
+    build, destroyed by an older one."""
+    t = FakeTransport()
+    _settleable(t, "pr-fut")
+    sha = "c" * 40
+    t.put(cli._settled_marker_path("r", "pr-fut"),
+          f"---\nschema: review-settled/v2\nstate: MERGED\nmerge_sha: {sha}\n---\n")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-fut"], transport=t)
+    err = capsys.readouterr().err
+    raw = t.read(cli._settled_marker_path("r", "pr-fut")) or ""
+    assert "review-settled/v2" in raw and sha in raw, \
+        "a future-schema marker must survive an older build's cache refresh"
+    assert rc == 3 and "cannot classify" in err and "PRESERVED" in err
+
+
+def test_an_unreadable_existing_marker_is_preserved_not_overwritten(capsys):
+    """The other UNKNOWN shape: the marker exists and this build cannot read it.
+    Absence is unprovable, so the cache must not be stamped over it."""
+    class NoMarkerRead(FakeTransport):
+        def read(self, path):
+            if path.endswith("/.settled"):
+                return None            # unreadable, NOT absent
+            return super().read(path)
+
+    t = NoMarkerRead()
+    _settleable(t, "pr-unr")
+    t.put(cli._settled_marker_path("r", "pr-unr"), "opaque-to-this-build")
+    capsys.readouterr()
+    rc = cli.main(["review", "status", "r", "pr-unr"], transport=t)
+    assert rc == 3
+    assert t.read.__self__.store[cli._settled_marker_path("r", "pr-unr")] \
+        == "opaque-to-this-build", "the unreadable marker must be untouched"
+
+
+def test_a_positively_absent_marker_is_still_written(capsys):
+    """The control: preserving UNKNOWN must not break the first settle, which is
+    the whole reason the cache exists."""
+    t = FakeTransport()
+    _settleable(t, "pr-new")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-new"], transport=t) == 0
+    assert cli._classify_settled_marker(t, "r", "pr-new") == cli.SETTLED_CACHE

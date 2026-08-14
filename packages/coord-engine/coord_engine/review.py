@@ -7,6 +7,7 @@ here; the I/O wrapper + CLI live in ``cli.py``.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Optional
 
@@ -19,6 +20,18 @@ _CHANGES = {"changes", "request-changes", "reject", "rejected"}
 _EXACT_HEAD = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
+def accepted_vocabulary() -> str:
+    """The verdict tokens that count, rendered for an error message.
+
+    Public because a caller that has to reach into ``_APPROVE`` to tell a
+    reviewer why their verdict was ignored will eventually drift from it — and
+    a stale list in that message is worse than none, since it sends the reviewer
+    to re-file with another token that also does not count.
+    """
+    return (f"{'|'.join(sorted(_APPROVE))} (approve) / "
+            f"{'|'.join(sorted(_CHANGES))} (changes)")
+
+
 def normalize_head(value: Any) -> Optional[str]:
     """Return a canonical exact commit id, or ``None``.
 
@@ -29,16 +42,45 @@ def normalize_head(value: Any) -> Optional[str]:
     return head if _EXACT_HEAD.fullmatch(head) else None
 
 
-def verdict_filename(reviewer: str, *, head: Optional[str] = None) -> str:
-    """Filename for one requirement's verdict in the active review round."""
+#: The APPEND-ONLY verdict suffix: `--<iso>-<digest>` before `.md`.
+#:
+#: Two forms are first-class, forever (coord-boss ruling b99fb8da):
+#:   PLAIN   `<head>--<reviewer>.md`                  — hand-writers, unchanged
+#:   APPEND  `<head>--<reviewer>--<iso>-<digest>.md`  — the verb
+#:
+#: The verb uses the append form because this store has no create-if-absent and
+#: no versioned write, so writing a SHARED name is check-then-write and cannot
+#: protect evidence: codex-reviewer reproduced a concurrent CHANGES being
+#: overwritten by APPROVE with rc 0 (595 r2). A unique name never touches an
+#: existing file, which closes verb-vs-verb AND verb-vs-hand races without any
+#: store primitive. The plain form keeps working untouched — no migration, and
+#: nobody writing shards by hand breaks on ship day.
+_APPEND_SUFFIX = re.compile(
+    r"--(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)-(?P<digest>[0-9a-f]{6,16})$")
+
+
+def verdict_filename(reviewer: str, *, head: Optional[str] = None,
+                     ts: Optional[str] = None,
+                     digest: Optional[str] = None) -> str:
+    """Filename for one requirement's verdict in the active review round.
+
+    With ``ts``+``digest`` this is the APPEND-ONLY form — a name no other writer
+    can be holding. Without them it is the historical plain form, which stays
+    valid for hand-writers.
+    """
+    if head and ts and digest:
+        return f"{head}--{reviewer}--{ts}-{digest}.md"
     return f"{head}--{reviewer}.md" if head else f"{reviewer}.md"
 
 
-def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional[str]:
-    """Decode the requirement token from a verdict filename for ``head``.
+def parse_verdict_filename(
+    name: str, *, head: Optional[str] = None
+) -> Optional[tuple[str, Optional[str]]]:
+    """``(reviewer, ts_or_None)`` for a verdict filename, or ``None``.
 
-    Head-keyed reviews ignore every superseded head before reading its shard.
-    Legacy unkeyed reviews retain the historical ``<reviewer>.md`` layout.
+    ``ts`` is present only for the append-only form; a plain shard carries its
+    time in frontmatter (or, failing that, the listing mtime), because it was
+    written before the name had anywhere to put it.
     """
     if not name.endswith(".md"):
         return None
@@ -47,8 +89,53 @@ def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional
         prefix = f"{head}--"
         if not stem.startswith(prefix):
             return None
-        return stem[len(prefix):] or None
-    return stem if "--" not in stem else None
+        rest = stem[len(prefix):]
+        if not rest:
+            return None
+        m = _APPEND_SUFFIX.search(rest)
+        if m:
+            reviewer = rest[:m.start()]
+            return (reviewer, m.group("ts")) if reviewer else None
+        return (rest, None)
+    # Legacy unkeyed review: the historical `<reviewer>.md` layout only.
+    return (stem, None) if "--" not in stem else None
+
+
+def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional[str]:
+    """Decode the requirement token from a verdict filename for ``head``.
+
+    Head-keyed reviews ignore every superseded head before reading its shard.
+    Legacy unkeyed reviews retain the historical ``<reviewer>.md`` layout.
+    """
+    parsed = parse_verdict_filename(name, head=head)
+    return parsed[0] if parsed else None
+
+
+def fold_newest_per_reviewer(
+    rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep the newest shard per reviewer; return ``(kept, folded_away)``.
+
+    Rows carry ``reviewer``, ``name``, and ``sort_key``. Newest wins, ties break
+    deterministically on the name so two hosts folding the same directory always
+    agree.
+
+    The count is returned rather than swallowed because SUPERSESSION MUST BE
+    AUDITABLE (coord-boss constraint 4): a reader who is told "APPROVED" while
+    three shards were silently discarded has been handed the same affirmative
+    falsehood this whole cycle has been about. `review status` says how many it
+    folded away, which is also the reviewer's correction path — a correction is
+    a new file, and the original evidence stays on disk.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    folded = 0
+    for row in sorted(rows, key=lambda r: (r.get("sort_key") or "",
+                                           r.get("name") or "")):
+        prior = best.get(row["reviewer"])
+        if prior is not None:
+            folded += 1
+        best[row["reviewer"]] = row
+    return [best[k] for k in sorted(best)], folded
 
 
 def normalize_verdict(v: Optional[str]) -> Optional[str]:
@@ -107,3 +194,105 @@ def is_pending_for(pending_required: list, agent: str,
         if agent in (role_holders or {}).get(r, ()):
             return True
     return False
+
+def evidence_digest(names: Any) -> str:
+    """Fingerprint the verdict shards a cache summarises.
+
+    THE CACHE IS BOUND TO ITS EVIDENCE (codex-reviewer, 595 r4). Deleting a
+    mutable cache cannot stop another writer recreating it: a `review status`
+    that read the old tally, paused, and resumed AFTER a correction landed
+    rewrote `.settled` from its stale snapshot, and every reader that
+    short-circuits on the marker then answered APPROVED while the newest verdict
+    was CHANGES. No delete ordering fixes that — the loser of the race is
+    whoever writes last, and correctness cannot depend on who that is.
+
+    So the cache carries the digest of the shard names it folded, and a reader
+    recomputes it from the CURRENT listing. A cache written from a stale
+    snapshot carries a stale digest and is ignored by construction, whenever it
+    was written. Validation replaces ordering.
+
+    Names are sorted, so two hosts fingerprinting one directory always agree.
+    """
+    items = sorted(str(n) for n in (names or []) if str(n).endswith(".md"))
+    return hashlib.sha1("\n".join(items).encode()).hexdigest()[:16]
+
+
+def evidence_is_immutable(names: Any) -> bool:
+    """May a NAME digest fingerprint this evidence at all?
+
+    Only if every shard carries an APPEND-ONLY name. The plain
+    ``<head>--<reviewer>.md`` form is permanently supported and hand-writable,
+    so it can be REWRITTEN IN PLACE: its content changes and its name does not.
+    A name digest cannot detect that, so a cache bound to one answers APPROVED
+    from a shard that now reads CHANGES (codex-reviewer, 595 r5).
+
+    This store exposes no etag, no version and no content hash, and its listing
+    renders mtimes at one-minute resolution on a 12-hour clock — there is no
+    identity here strong enough to bind a mutable shard. The honest answer is to
+    not bind one: append-only directories keep the fast path, and a directory
+    holding any mutable shard is folded for real, every time. Failing closed
+    costs reads; failing open costs a wrong verdict.
+
+    An EMPTY directory is not immutable-safe either: a cache claiming APPROVED
+    over zero shards summarises nothing this build can re-derive.
+    """
+    mds = [str(n) for n in (names or []) if str(n).endswith(".md")]
+    return bool(mds) and all(_APPEND_SUFFIX.search(n[:-3]) for n in mds)
+
+
+#: :func:`settle_shortcircuit` answers.
+SETTLE_NO = "no"
+SETTLE_CACHE = "cache"
+SETTLE_MERGED = "merged"
+
+
+def settle_shortcircuit(marker_fm: Any, names: Any) -> str:
+    """May a reader skip the fold on this ``.settled``, given these shard names?
+
+    ONE decision function, because there is more than one reader: the register
+    projection and the fan-out obligation scan both short-circuit on this marker,
+    and a rule that lives in one of them is a rule the other silently lacks.
+
+    - ``merged`` — ``state: MERGED`` is merge EVIDENCE, not a recomputable
+      tally. It records that a PR landed, which no verdict set can contradict,
+      so it short-circuits unconditionally.
+    - ``cache``  — ``state: APPROVED`` whose ``evidence`` digest both EXISTS and
+      matches a recomputation over the current listing, in a directory where a
+      name digest is a valid fingerprint at all.
+    - ``no``     — everything else: pre-binding markers carrying no digest,
+      stale digests, unreadable markers, and any directory with a mutable shard.
+    """
+    fm = marker_fm if isinstance(marker_fm, dict) else {}
+    state = str(fm.get("state") or "")
+    if state == "MERGED":
+        return SETTLE_MERGED
+    if state != APPROVED:
+        return SETTLE_NO
+    stamped = str(fm.get("evidence") or "")
+    if not stamped or not evidence_is_immutable(names):
+        return SETTLE_NO
+    return SETTLE_CACHE if stamped == evidence_digest(names) else SETTLE_NO
+
+
+def settled_marker_fields(*, state: str, ts: str,
+                          evidence: Optional[str] = None,
+                          merge_sha: Optional[str] = None) -> dict:
+    """The ``.settled`` frontmatter, composed in ONE place.
+
+    Both writers — the read fold's cache and the projection's — render through
+    here. The projection used to compose its own dict and omit ``evidence``, so
+    every marker it wrote was untrusted by its own reader on the very next pass:
+    the cache could never hit, and the write was pure cost (codex-reviewer,
+    595 r5). A field one reader requires cannot be optional at one of two write
+    sites.
+    """
+    fields: dict = {"schema": "review-settled/v1", "state": state, "ts": ts}
+    if merge_sha:
+        fields["merge_sha"] = merge_sha
+    else:
+        # BINDS THE CACHE TO ITS EVIDENCE. A reader recomputes this from the
+        # CURRENT listing, so a cache written from a stale snapshot carries a
+        # stale digest and is ignored by construction, whenever it was written.
+        fields["evidence"] = evidence or ""
+    return fields
+

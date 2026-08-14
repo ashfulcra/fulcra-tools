@@ -170,10 +170,12 @@ directives before reporting, never conclude "no work" off a degraded read.
 For push-capable harnesses and the fleet security contract, see
 [`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). The bundled
 `wake/openclaw.sh` and `wake/codex.sh` adapters were removed with the listener stack (cleanup
-slice 1); directed wakes are now the wake router's job — its adapters are **host-local**
-(`$COORD_WAKE_ADAPTER_DIR/<adapter>.sh` on the executor host, e.g. `codex-exec-resume` still using
-`codex exec resume <thread-id>` without bypassing approvals or sandboxing), registered per agent in
-`_coord/router/config.json`. `wake/macos-notify.sh` remains in-repo as a live router adapter.
+slice 1). Directed wakes via the optional wake router are **shipped but unproven in deployment**
+(the reference deployment was evaluated and retired, 2026-08 — see
+[`BUS-V3.md`](../../docs/coord/BUS-V3.md) "Latency, and the router"); scheduled wakes + queue
+reads are the standing pattern. Where a router IS deployed, its adapters are host-local
+(`$COORD_WAKE_ADAPTER_DIR/<adapter>.sh`, registered per agent in `_coord/router/config.json`),
+and `wake/macos-notify.sh` remains in-repo as an adapter example.
 
 **Single-flight remains an efficiency rule, not a correctness assumption.**
 The listener-era cursor could lose work when two same-agent wakes overlapped.

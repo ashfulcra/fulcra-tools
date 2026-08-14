@@ -13,6 +13,17 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 HELD = "HELD"
+#: The role HAS a holder whose lease has gone stale. Distinct from VACANT on
+#: purpose: until 2026-08-07 both folded to VACANT, so `roles status` reported
+#: ``{"status": "VACANT", "holders": ["codex-reviewer"]}`` — a claim the same
+#: JSON object contradicts — and the vacancy alarm read "nobody is doing this
+#: job" while codex-reviewer was filing exact-head verdicts hourly. The record
+#: already knew who held the role; the classifier discarded it.
+#:
+#: "The lease lapsed" and "nobody holds this" are different facts and need
+#: different names. Answering the second when you only measured the first is
+#: how a responsive agent gets escalated to the operator as absent.
+LAPSED = "LAPSED"
 VACANT = "VACANT"
 CONTESTED = "CONTESTED"
 UNKNOWN = "UNKNOWN"
@@ -56,19 +67,29 @@ def classify(
     sla_hours: float = DEFAULT_SLA_HOURS,
     policy: str = "shared",
 ) -> str:
-    """Fold lease freshness into HELD / VACANT / CONTESTED / UNKNOWN.
+    """Fold lease freshness into HELD / LAPSED / VACANT / CONTESTED / UNKNOWN.
 
     - UNKNOWN: leases could not be read (None).
     - CONTESTED: policy is ``exclusive`` and two or more holders are fresh.
     - HELD: at least one fresh holder.
-    - VACANT: no fresh holder.
+    - LAPSED: holders exist, none fresh — the lease went stale, somebody still
+      holds the role.
+    - VACANT: no holders at all.
+
+    LAPSED vs VACANT is the whole point (see the constant). This function only
+    ever measures lease FRESHNESS; it cannot see whether the work is being done.
+    Reporting VACANT for a role with a named holder claimed something it had not
+    measured, and the alarm built on it escalated a working reviewer to the
+    operator as unattended for four days.
     """
     if leases is None:
         return UNKNOWN
     fresh = fresh_holders(leases, now=now, sla_hours=sla_hours)
     if policy == "exclusive" and len(fresh) >= 2:
         return CONTESTED
-    return HELD if fresh else VACANT
+    if fresh:
+        return HELD
+    return LAPSED if leases else VACANT
 
 
 def parse_sla_hours(value: Any) -> Optional[float]:
@@ -152,10 +173,34 @@ def escalation_due(
     sla_hours: float = DEFAULT_SLA_HOURS,
     marker_exists_today: bool = False,
     dormant: bool = False,
+    attended: Optional[bool] = None,
 ) -> bool:
     """Engine DECIDES escalation (the SKILL prose ACTS): true iff the role is
-    vacant past its SLA, not deliberately parked (``dormant``), and today's dedupe
-    marker isn't already present."""
-    if dormant or marker_exists_today:
+    vacant past its SLA, not deliberately parked (``dormant``), today's dedupe
+    marker isn't already present, and the role is not demonstrably being served.
+
+    ``attended`` is TRI-STATE and the distinction is the point:
+
+    * ``True``  — a role holder produced work inside the SLA window. The lease
+      lapsed; the JOB did not. Escalating "unattended" here is false.
+    * ``False`` — checked, and no work product found. A real vacancy.
+    * ``None``  — NOT CHECKED (the default). Escalate, because an unchecked
+      window is not evidence of absence — but callers must say "attendance not
+      checked" rather than assert nobody is working.
+
+    WHY THIS EXISTS. Escalation used to key on lease timestamps alone, so the
+    predicate was "has a lease been renewed lately" while the alarm it raised
+    read "is anybody doing this job." Those diverged for four days:
+    codex-reviewer's lease went stale while it filed verdicts hourly, and the
+    detector filed a P1 per role per day, every one of them false. A standing
+    alarm that is always wrong is worse than no alarm — it trains readers to
+    ignore the one that is real."""
+    if dormant or marker_exists_today or attended is True:
         return False
-    return classify(leases, now=now, sla_hours=sla_hours) == VACANT
+    # BOTH lapsed-and-unheld states escalate, deliberately. The 2026-08-07 split
+    # of VACANT into LAPSED/VACANT is about honest REPORTING — the JSON no longer
+    # says "VACANT" while naming a holder — and it must not quietly change WHO
+    # gets alarmed on. A stale lease on a held role is still an SLA breach
+    # somebody has to answer for; whether it *should* alarm differently is a
+    # separate ruling with a real cost, not a side effect of renaming a state.
+    return classify(leases, now=now, sla_hours=sla_hours) in (VACANT, LAPSED)

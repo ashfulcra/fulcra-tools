@@ -33,6 +33,8 @@ import json
 import re
 from typing import Any, Optional
 
+from . import read_retry
+
 #: Payload schema version. Bump only for incompatible shape changes; readers
 #: must ignore payloads whose version they do not know rather than guess.
 PAYLOAD_VERSION = 1
@@ -567,7 +569,7 @@ def load_config_classified(
     if reader is None:
         cfg = load_config(transport, team)
         return cfg, ("ok" if cfg is not None else "absent")
-    raw, status = reader(config_path(team))
+    raw, status = read_retry.read_classified_retrying(reader, config_path(team))
     if status == "error":
         return None, "error"
     if raw is None:
@@ -662,7 +664,10 @@ def authority_currency(config: Optional[dict], *,
         _version_tuple(current) if isinstance(current, str) else None)
     if own is None or cur is None or own >= cur:
         return None
-    return (f"this engine is v{engine_version} but the fleet authority is "
+    # Says "minimum", never "pin": the word `pin` is already taken by the COMMIT
+    # in `adopt-latest.sh`, and this is the semver FLOOR in `records.json`. An
+    # operator told they are "below the pin" goes and reads the wrong file.
+    return (f"this engine is v{engine_version}, below the fleet minimum engine "
             f"v{current} — a stale snapshot likely restored it; run the "
             f"store adopt-latest.sh before writing anything")
 
@@ -685,16 +690,18 @@ def authority_currency_state(config: Optional[dict], *,
     if not isinstance(config, dict):
         return "unknown", (
             "the bus-v3 records config is absent or unreadable, so this "
-            "engine cannot be compared with the fleet pin")
+            "engine cannot be compared with the fleet minimum")
     current = config.get(CURRENT_ENGINE_FIELD)
     if current is None:
         return "unknown", (
-            f"the fleet authority declares no {CURRENT_ENGINE_FIELD}; "
-            "comparison is impossible, which is not the same as current")
+            f"the fleet authority declares no minimum engine "
+            f"({CURRENT_ENGINE_FIELD}); comparison is impossible, which is not "
+            "the same as current")
     if not isinstance(current, str) or _version_tuple(current) is None:
         return "unknown", (
-            f"the fleet authority's {CURRENT_ENGINE_FIELD} is {current!r}, "
-            "which is not a parseable version; comparison is impossible")
+            f"the fleet authority's minimum engine ({CURRENT_ENGINE_FIELD}) is "
+            f"{current!r}, which is not a parseable version; comparison is "
+            "impossible")
     if _version_tuple(engine_version) is None:
         return "unknown", (
             f"this engine reports version {engine_version!r}, which is not a "
@@ -702,9 +709,15 @@ def authority_currency_state(config: Optional[dict], *,
     warning = authority_currency(config, engine_version=engine_version)
     if warning:
         return "stale", warning
+    # "minimum", not "pin". `current_engine_version` is a FLOOR — the check is
+    # at-or-above — while "the pin" means the COMMIT in adopt-latest.sh. The two
+    # authorities wore the same word until 2026-08-09, and it cost a real
+    # exchange: a pin was cut and adopted, this line still read v1.10.0, and the
+    # obvious inference (the pin did not take) was wrong — adoption cannot move
+    # this field at all. Naming the field in the sentence keeps the two apart.
     return "current", (
-        f"this engine is v{engine_version}; the fleet authority pin is "
-        f"v{current}")
+        f"this engine is v{engine_version}; the fleet minimum engine "
+        f"({CURRENT_ENGINE_FIELD}) is v{current}")
 
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
@@ -1163,6 +1176,7 @@ def commit_v2_delivery(
 def supersession_adoption(
     events: list[Any],
     outcomes: Optional[dict[str, str]],
+    explicit_ids: Optional[set] = None,
 ) -> dict[str, Any]:
     """Fold the supersession-adoption metric over a window of bus events.
 
@@ -1173,14 +1187,15 @@ def supersession_adoption(
     fleet) — the whole metric is then UNKNOWN, never 0% (absence of data is
     not evidence of non-adoption).
 
-    Scope (narrowed, pr-503 round 1): the explicit signal this fold counts
-    directly is the record-level ``superseded`` classification
-    (``queue commit --result <id>=superseded``). The ``task supersede`` verb
-    (D3) writes its ``superseded_by`` evidence into TASK documents keyed by
-    task slug, and no identity mapping from task slugs to event record ids
-    exists in the data model — so that channel is out of scope here rather
-    than exposed as a parameter no production caller can fill. Wiring it
-    requires a schema-level task→record link first.
+    ``explicit_ids``: EVENT record ids whose supersession went through the
+    explicit ``task supersede --record`` verb — the task→record join added by
+    the s7 verb-channel link (the pr-503 narrowing held only while no such
+    mapping existed; :func:`explicit_supersessions` gathers it from task-doc
+    frontmatter and ``cmd_doctor`` is the production caller). An explicit id
+    counts its candidate directly (deputy rule 3) even when no cursor
+    classified the predecessor. Precedence is unchanged: with ``outcomes``
+    ``None`` the whole metric stays UNKNOWN — explicit ids refine within a
+    measured window, they never conjure one.
 
     Returns ``{"status", "counted", "superseded", "unknown", "ratio"}``:
     ratio is ``None`` when nothing was countable — an empty denominator must
@@ -1189,6 +1204,7 @@ def supersession_adoption(
     if outcomes is None:
         return {"status": "unknown", "counted": 0, "superseded": 0,
                 "unknown": 0, "ratio": None}
+    explicit = explicit_ids or set()
 
     directives: list[dict[str, Any]] = []
     for event in events:
@@ -1211,7 +1227,7 @@ def supersession_adoption(
         earlier = by_key.get(key)
         if earlier is not None:
             outcome = outcomes.get(earlier["record_id"])
-            if outcome == "superseded":
+            if earlier["record_id"] in explicit or outcome == "superseded":
                 counted += 1
                 superseded += 1
             elif outcome in ("completed", "blocked"):
@@ -1225,6 +1241,26 @@ def supersession_adoption(
     ratio = (superseded / counted) if counted else None
     return {"status": "ok", "counted": counted, "superseded": superseded,
             "unknown": unknown, "ratio": ratio}
+
+
+def explicit_supersessions(frontmatters: list[Any]) -> set:
+    """EVENT record ids evidenced by ``task supersede --record`` — the
+    task→record join for :func:`supersession_adoption`'s explicit channel.
+
+    Pure fold over parsed task-doc frontmatter dicts: keeps every non-empty
+    string ``superseded_record_id``, dedupes, and tolerates malformed rows
+    (a task doc that is not a dict, or whose field is not a usable string,
+    contributes nothing — the fold's unknown bucket already covers
+    supersessions without a usable join, so silence here is honest, not
+    lossy)."""
+    out: set = set()
+    for fm in frontmatters:
+        if not isinstance(fm, dict):
+            continue
+        rid = fm.get("superseded_record_id")
+        if isinstance(rid, str) and rid.strip():
+            out.add(rid.strip())
+    return out
 
 
 def outcome_mix(cursor: Optional[dict[str, Any]]) -> Optional[dict[str, int]]:

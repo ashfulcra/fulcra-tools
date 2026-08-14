@@ -152,9 +152,13 @@ def test_cli_roles_escalate_absent_sla_still_escalates(capsys):
     # And the over-correction guard: a doc that omits `sla_hours` is well-formed, so
     # a genuinely vacant role must STILL escalate under the default.
     t = FakeTransport()
+    # The lapsed holder is deliberately NOT the maintainer: this test is about
+    # the missing-`sla_hours` default, and a fixture where the maintainer holds
+    # its own lapsed lease would also trip the closed-loop check and muddle
+    # which property failed.
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\nmaintainer: ash\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",
-          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    t.put("team/r/roles/reviewer/leases/holder.md",
+          "---\ntype: Lease\nagent: holder\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
     assert "escalated reviewer -> ash" in capsys.readouterr().out
     assert [p for p in t.store if "/task/" in p], "absent SLA must not suppress"
@@ -168,7 +172,12 @@ def test_cli_roles_status_vacant_escalation_due(capsys):
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
     import json as _json
     res = _json.loads(capsys.readouterr().out)
-    assert res["status"] == "VACANT"
+    # LAPSED, not VACANT: the role HAS a holder whose lease went stale, and the
+    # same object names it. Escalation is unchanged — the split renamed a state,
+    # it did not decide to stop alarming.
+    assert res["status"] == "LAPSED"
+    assert res["holders"] == ["ash"]
+    assert res["fresh_holders"] == []
     assert res["escalation_due"] is True
 
 
@@ -618,7 +627,14 @@ def test_cli_respond_closes_and_records(capsys):
     assert cli.main(["respond", "r", slug, "-o", "answered", "-a", "amy"], transport=t) == 0
     out = capsys.readouterr().out
     assert "closed" in out
-    assert "response recorded — the owner's queue surfaces it" in out  # reply-leg breadcrumb
+    # THE REPLY-LEG LINE MUST MATCH REALITY. This asserted the unconditional
+    # "the owner's queue surfaces it" — pinning a guarantee the code never
+    # delivered, since `respond` emitted no event and the queue reads events.
+    # The test made the false line load-bearing, which is how it survived long
+    # enough to cost a re-asked directive (2026-08-08). This fixture has no bus
+    # config, so the honest output is NOT-delivered; the delivered branch is
+    # pinned in test_respond_companion.py.
+    assert "NOT delivered to the owner's queue" in out
     assert okf.parse_frontmatter(t.store[f"team/r/task/{slug}.md"])["status"] == "done"
     assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
@@ -1122,19 +1138,22 @@ def test_retention_archives_old_proposed_but_never_active_or_waiting(capsys):
     assert "team/r/task/old-waiting.md" in t.store
 
 
-def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
+def test_retention_archives_single_orphan_verdict_any_reviewer(capsys):
     t = FakeTransport()
-    # Eligible: no review doc, exactly one old codex-reviewer verdict.
+    # Eligible: no review doc, exactly one old verdict, any reviewer name.
     t.put("team/r/review/settled/verdicts/codex-reviewer.md",
           _old_verdict("codex-reviewer"), mtime="2020-01-16 12:00PM UTC")
+    t.put("team/r/review/other/verdicts/coord-maintainer.md",
+          _old_verdict("coord-maintainer"), mtime="2020-01-16 12:00PM UTC")
+    # Head-keyed shard names attribute via their `--<reviewer>` suffix.
+    t.put("team/r/review/keyed/verdicts/" + "a" * 40 + "--alice.md",
+          _old_verdict("alice"), mtime="2020-01-16 12:00PM UTC")
     t.put("team/r/review/recent/verdicts/codex-reviewer.md",
           _old_verdict("codex-reviewer"))
-    # Multi-reviewer and non-codex singletons are never settled-single reviews.
+    # Multi-shard dirs are out of the single-shard sweep's scope, counted once.
     t.put("team/r/review/multi/verdicts/codex-reviewer.md",
           _old_verdict("codex-reviewer"))
     t.put("team/r/review/multi/verdicts/coord-maintainer.md",
-          _old_verdict("coord-maintainer"))
-    t.put("team/r/review/other/verdicts/coord-maintainer.md",
           _old_verdict("coord-maintainer"))
     # A live review doc excludes the directory even when its verdict shape matches.
     t.put("team/r/review/live.md", "---\ntype: Review\nrequired: codex-reviewer\n---\n")
@@ -1143,15 +1162,46 @@ def test_retention_archives_only_single_codex_reviewer_orphan(capsys):
 
     assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
 
-    src = "team/r/review/settled/verdicts/codex-reviewer.md"
-    dst = ("team/r/_coord/archive/reviews/2020-01/settled/verdicts/"
-           "codex-reviewer.md")
-    assert src not in t.store and dst in t.store
+    for slug, filename in [("settled", "codex-reviewer.md"),
+                           ("other", "coord-maintainer.md"),
+                           ("keyed", "a" * 40 + "--alice.md")]:
+        src = f"team/r/review/{slug}/verdicts/{filename}"
+        dst = f"team/r/_coord/archive/reviews/2020-01/{slug}/verdicts/{filename}"
+        assert src not in t.store and dst in t.store
     assert "team/r/review/recent/verdicts/codex-reviewer.md" in t.store
     assert "team/r/review/multi/verdicts/codex-reviewer.md" in t.store
     assert "team/r/review/multi/verdicts/coord-maintainer.md" in t.store
-    assert "team/r/review/other/verdicts/coord-maintainer.md" in t.store
     assert "team/r/review/live/verdicts/codex-reviewer.md" in t.store
+    err = capsys.readouterr().err
+    assert "1 orphan review dir(s) kept hot without exactly one verdict shard" in err
+
+
+def test_retention_keeps_orphan_with_noncanonical_keyed_prefix(capsys):
+    t = FakeTransport()
+    # The prefix before `--` must be a canonical exact head; `garbage--alice.md`
+    # is unattributable to the tally and must stay hot, not be archived away.
+    t.put("team/r/review/malformed/verdicts/garbage--alice.md",
+          _old_verdict("alice"), mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    assert "team/r/review/malformed/verdicts/garbage--alice.md" in t.store
+    err = capsys.readouterr().err
+    assert "does not attribute to its filename (reviewer='alice')" in err
+
+
+def test_retention_keeps_orphan_whose_verdict_disowns_its_filename(capsys):
+    t = FakeTransport()
+    # The shard is named alice.md but claims reviewer bob: attribution rides the
+    # ACL-controlled filename, so the mismatch is an anomaly, kept hot and loud.
+    t.put("team/r/review/mismatch/verdicts/alice.md",
+          _old_verdict("bob"), mtime="2020-01-16 12:00PM UTC")
+
+    assert cli.main(["reconcile", "r", "--retention-days", "30"], transport=t) == 0
+
+    assert "team/r/review/mismatch/verdicts/alice.md" in t.store
+    err = capsys.readouterr().err
+    assert "does not attribute to its filename (reviewer='bob')" in err
 
 
 def test_retention_archives_settled_review_wholesale_and_indexes_slug(capsys):
@@ -2252,14 +2302,14 @@ def test_briefing_forge_degraded_exits_zero_other_sections_intact(capsys, monkey
     assert "board" in doc and "needs_me" in doc and "presence" in doc
 
 
-def test_needs_me_forge_degraded_exits_zero(capsys, monkeypatch):
+def test_needs_me_forge_degraded_exits_nonzero(capsys, monkeypatch):
     monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
     t = _SlowFeedbackTransport(delay=0.03)
     _seed_forge(t, agent="bob")
     capsys.readouterr()
-    assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 0
+    assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 3
     assert "forge fold degraded" in capsys.readouterr().out
-    assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
+    assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 3
     got = json.loads(capsys.readouterr().out)
     assert any(r.get("type") == "forge-degraded" for r in got)
 
@@ -2859,3 +2909,60 @@ def test_toplevel_unexpected_error_is_registered(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "error:" in err and "command=status" in err and "RuntimeError" in err
+
+
+# --- the verdict must not live only at the end of the payload ---------------
+# codex-coder 2026-08-08: `needs-me` completed, its stdout exceeded the harness
+# context and was truncated BEFORE the degraded/source markers and the rc they
+# imply. PR 565 had just made that rc load-bearing, so the wake could not certify
+# the durable-assignment read either way. stderr is a separate, tiny stream that
+# survives stdout truncation, so the verdict rides there too.
+
+def test_needs_me_emits_the_verdict_envelope_on_stderr(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/a.md",
+          "---\ntype: Task\ntitle: A\nid: a\nstatus: active\nassignee: amy\n---\n")
+    assert cli.main(["needs-me", "r", "--agent", "amy"], transport=t) == 0
+    cap = capsys.readouterr()
+    assert "needs-me:" in cap.err and "rc=0" in cap.err, cap.err
+    assert "degraded=" in cap.err, cap.err
+    # a DUPLICATE, never a replacement: the payload still goes to stdout
+    assert "item(s) need amy" in cap.out
+
+
+def test_needs_me_envelope_rides_stderr_in_json_mode_too(capsys):
+    """JSON mode is where a truncating reader is MOST likely to be a machine.
+
+    stdout must stay exactly one parseable object, so the envelope cannot go
+    there — which is the argument for stderr rather than an extra stdout line."""
+    import json as _j
+    t = FakeTransport()
+    t.put("team/r/task/a.md",
+          "---\ntype: Task\ntitle: A\nid: a\nstatus: active\nassignee: amy\n---\n")
+    cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
+    cap = capsys.readouterr()
+    assert "needs-me:" in cap.err
+    _j.loads(cap.out)          # stdout is still ONE object, unpolluted
+
+
+def test_needs_me_envelope_only_prints_no_records_and_keeps_the_rc(capsys):
+    t = FakeTransport()
+    for i in range(5):
+        t.put(f"team/r/task/a{i}.md",
+              f"---\ntype: Task\ntitle: A{i}\nid: a{i}\nstatus: active\n"
+              f"assignee: amy\n---\n")
+    rc = cli.main(["needs-me", "r", "--agent", "amy", "--envelope-only"],
+                  transport=t)
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "needs-me:" in cap.err and "rc=0" in cap.err
+    assert cap.out == "", f"envelope-only still printed a payload: {cap.out!r}"
+
+
+def test_briefing_emits_the_verdict_envelope_on_stderr(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/a.md",
+          "---\ntype: Task\ntitle: A\nid: a\nstatus: active\nassignee: amy\n---\n")
+    cli.main(["briefing", "r", "--agent", "amy"], transport=t)
+    cap = capsys.readouterr()
+    assert "briefing:" in cap.err and "degraded=" in cap.err, cap.err

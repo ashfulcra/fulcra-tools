@@ -18,7 +18,7 @@ The skill composes three existing pieces rather than reinventing them:
 
 `fulcra-api` (0.1.35) has no record-write command — `data-type create` makes definitions, but records only land via `POST /ingest/v1/record[/batch]` with a bearer token. The alternatives were:
 
-1. **Vendored script** (chosen): `scripts/netflix_import.py`, PEP 723 inline deps, run via `uv run`. Every user's agent executes identical, tested code → identical schema across the pool, which the future group-recommendation work depends on.
+1. **Vendored script** (chosen): `skills/fulcra-netflix/scripts/netflix_import.py` (package-relative), PEP 723 inline deps, run via `uv run`. Every user's agent executes identical, tested code → identical schema across the pool, which the future group-recommendation work depends on.
 2. Prompt-only (ingest-beta style, each agent writes its own parser): zero code to maintain but N users → N parsers and schema drift. Rejected.
 3. `fulcra-media` CLI: battle-tested but requires cloning this monorepo (not on PyPI, sibling deps). Rejected for stranger-friendliness.
 

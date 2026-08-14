@@ -73,8 +73,14 @@ worth a look when nothing else matches.
   scrobble to Last.fm (via a third-party helper such as NepTunes or
   the Marvis Pro integration). Once it's scrobbling, the `lastfm`
   plugin captures it like any other source.
-- **[Not yet supported]** Direct on-device read — there's no dedicated Apple
-  Music plugin in the registry today.
+- **One-shot historical (Apple Data & Privacy takeout)** — plugin
+  `apple-music-takeout`, manual. Request your data at `privacy.apple.com`
+  and pick **Apple Media Services information**. Upload
+  `Apple Music Play Activity.csv` (or the folder, or the whole takeout —
+  we search recursively); each listen becomes a Listened annotation.
+  `since` / `until` settings narrow the window on re-import.
+- **[Not yet supported]** Direct on-device read — there is no live Apple
+  Music reader; the takeout importer above is the only first-party pathway.
 
 ## Deezer
 
@@ -132,8 +138,17 @@ worth a look when nothing else matches.
   Apple emails a download link within a few days. Unzip and upload
   `Playback Activity.csv` (or the folder containing it — the importer
   searches recursively). Each PLAY event becomes a Watched annotation.
+- **Live (on-device cache read)** — plugin `apple-tv`, scheduled every
+  6 hours. Reads the Apple TV app's local Watch Now cache, so no sign-in
+  or export is needed. Requires a one-time macOS **Full Disk Access**
+  grant for the daemon (the cache sits in a protected group container).
+  Caveat worth knowing: the TV app only writes that cache when it is
+  opened, so plays can sit invisible for days until you launch the app —
+  a quiet stretch here is usually an unopened app, not a broken importer.
 - **Live (via Trakt)** — Apple TV+ can be scrobbled through Trakt's
-  apps for iOS/tvOS. Run `trakt` to capture it.
+  apps for iOS/tvOS. Run `trakt` to capture it. Trakt lags the on-device
+  reader, so running both is normal; source-id dedup makes the overlap
+  safe.
 
 ## YouTube / YouTube Music
 
@@ -206,6 +221,29 @@ worth a look when nothing else matches.
   entry in Fulcra Collect is now just a pointer to these steps; nothing
   is configured there.
 
+## Gmail
+
+- **Scheduled (read-only polling)** — plugin `gmail`, polls every 15
+  minutes. Authorises your Gmail account(s) read-only, applies **local**
+  filter rules, lands the emails a rule selects in your Fulcra Files, and
+  relays matches to an agent on your coord bus. Multi-account. Needs an
+  OAuth client id + secret; the `rules` setting holds the filters and
+  `relay_team` names the bus team to relay into.
+- Nothing leaves the machine except the artifacts your rules select — the
+  filtering happens locally, before anything is uploaded, so an unmatched
+  message is never sent anywhere.
+
+## Air quality (PurpleAir)
+
+- **Scheduled (cloud API)** — plugin `purpleair`, polls every 10 minutes.
+  Set `mode` to `api` and give a `sensor_index` plus a read key from
+  `develop.purpleair.com`. Captures PM2.5, PM10, EPA AQI, temperature,
+  humidity and pressure as separate Fulcra tracks.
+- **Scheduled (local network)** — same plugin with `mode` set to `local`
+  and `sensor_ips` pointing at a sensor on your LAN. No API key needed:
+  the sensor answers directly, so readings keep flowing even when the
+  PurpleAir cloud is unreachable.
+
 ## Generic RSS / Atom feed
 
 - **Scheduled (RSS poll)** — plugin `generic-rss`, every 6 hours.
@@ -246,8 +284,8 @@ shows up in Fulcra, with no machine-id suffix.
 
 ---
 
-**Last verified:** 2026-05-26 (late) against the
+**Last verified:** 2026-08-12 against the
 `fulcra_collect.plugins` entry points in
-`packages/{attention,dayone,media-helpers}/pyproject.toml` and the
+`packages/{attention,dayone,gmail,media-helpers,purpleair}/pyproject.toml` and the
 plugin definitions in `collect_plugin.py` / `collect_plugins.py`. If
 you add or remove a plugin, update this page.

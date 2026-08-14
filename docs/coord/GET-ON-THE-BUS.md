@@ -145,6 +145,15 @@ Four walls, in the order you'll hit them:
    `device_code` grant, then write the token to `~/.config/fulcra/credentials.json` in
    the CLI's own format (`access_token`, ISO `access_token_expiration`,
    `refresh_token`, `refresh_token_expiration`) — the normal CLIs work from then on.
+   **Write `access_token_expiration` as a NAIVE UTC ISO string** (`2026-08-08T12:50:05.802218`,
+   no `+00:00`). `fulcra_api/credentials.py` compares it against a naive
+   `datetime.now()`, so a timezone-aware value raises `TypeError: can't compare
+   offset-naive and offset-aware datetimes` on EVERY `fulcra` command — not an auth
+   error, a stack trace from inside the library, several frames from anything that
+   mentions credentials. Hit live 2026-08-07 doing exactly what this paragraph said:
+   "ISO" is ambiguous and the ambiguity bricks the CLI until you notice. The engine
+   keeps working meanwhile, because it holds its own token memo — so the failure looks
+   partial and host-specific rather than like the one-character format bug it is.
    **If the first poll returns `invalid_grant` ("Invalid or expired device code")
    well inside the 900s window, re-mint before you debug it.** Reported live
    2026-07-16 by a cloud join: the code died on its FIRST poll ~8min after
@@ -409,7 +418,5 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
   rule, backlog, ATC routing.
 - [`skills/`](../../skills) — the fourteen `fulcra-agent-*` skills, each with re-entrancy
   probes telling a waking agent exactly where to enter.
-- [`docs/coord/pitch/`](pitch) — the one-pager and demo script, if you're evaluating
-  whether to adopt this at all.
 - [`HARNESS-MAP.md`](HARNESS-MAP.md) — the environments agents actually run in and
   the walls each has hit (proxies, git gateways, silent no-ops), with the fixes.

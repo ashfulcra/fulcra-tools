@@ -780,9 +780,15 @@ plane; records are the control plane. What ended: walking the file tree to
 
 Pull is the floor: any agent on any harness reads its queue at its next wake
 with nothing installed beyond the CLI. The wake router
-([`wake-router-SPEC.md`](wake-router-SPEC.md)) is the optional ceiling: an
-always-on process that notices new work and deadline expiry and wakes the
-right agent, turning next-wake latency into seconds. The bus works without it.
+([`wake-router-SPEC.md`](wake-router-SPEC.md)) is an optional always-on
+process intended to turn next-wake latency into seconds. **Status: shipped
+but unproven in deployment** — the one reference deployment was evaluated
+and retired (2026-08): measured across its whole deployed life it never
+delivered a wake that listener cadence didn't already cover, and the
+evaluation concluded that without a store-side push primitive any router is
+polling with extra steps. The bus works without it, and scheduled wakes +
+queue reads are the standing pattern; deploy a router only if your fleet has
+a measured wake-the-dead need and the isolation the spec requires.
 
 ## Rules
 

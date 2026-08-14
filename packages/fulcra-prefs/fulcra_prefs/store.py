@@ -42,8 +42,21 @@ import io
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone, timedelta
+from urllib.error import HTTPError
 from .schema import (Signal, canonical_json, parse_record, temp_signal_id,
                      CAPTURE_SOURCE_PREFIX, ANNOTATION_SOURCE_PREFIX)
+
+# The event read endpoint requires an explicit [start, end) window. Fulcra
+# predates no user's preference history, so 2020-01-01 is a safe floor that
+# spans "every signal ever" without the caller needing to know the account age;
+# the read is definition-scoped server-side, so a wide window stays cheap.
+SIGNAL_HISTORY_FLOOR = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+
+def _iso(t) -> str:
+    """Accept a datetime or an already-formatted string; emit an ISO string."""
+    return t.isoformat() if hasattr(t, "isoformat") else str(t)
 
 
 def build_record(sig: Signal, data_type: str) -> dict:
@@ -247,25 +260,57 @@ class FulcraStore:
 
     def read_signal_records(self, definition_id: str | None,
                             start_time=None, end_time=None) -> list[Signal]:
-        """Authoritative signal read via get-records, so captures from ANY
-        platform are visible to compile — including shell-less tier-2 agents
-        that only POST to /ingest and never write a cache shard. Records are
-        matched to our definition by the annotation-linkage source.
+        """Authoritative signal read, so captures from ANY platform are visible
+        to compile — including shell-less tier-2 agents that only POST to
+        /ingest and never write a cache shard.
 
-        Resilient by design: a transport error returns [] so compile can still
-        proceed from the shard cache (never worse than the cache-only path this
-        augments). Records that don't parse as our signals are skipped, not
-        fatal. The payload field is read defensively (`data` then `note`):
-        the live get-records shape for ingested DataRecordV1 records is pinned
-        by the live-smoke round-trip, not assumed here.
+        Reads the DEFINITION-SCOPED subtype (event/MomentAnnotation/<definition_id>)
+        so the server returns only our signals, not every MomentAnnotation on the
+        account — verified live: an account with ~44k unrelated annotations returns
+        just the handful of prefs records, so a wide window stays cheap.
+
+        The event endpoint REQUIRES an explicit [start, end) window; when the
+        caller passes none we span the full signal history (SIGNAL_HISTORY_FLOOR
+        -> now + 1d buffer, the buffer covering clock skew since `end` is
+        exclusive) because preferences accumulate and an old signal still carries
+        decayed weight. Passing None/None here was the original silent-degrade
+        bug: the endpoint 422s, and urllib's HTTPError is an OSError subclass, so
+        the resilience `except` below swallowed it as [] on EVERY compile — the
+        live read contributed nothing and tier-2 captures were invisible.
+
+        Resilient by design: a TRANSPORT error returns [] so compile still
+        proceeds from the shard cache (never worse than the cache-only path this
+        augments). An HTTP error (4xx/5xx) is NOT a transport blip — it is
+        surfaced loudly on stderr instead of being masked as "no records", then
+        still returns [] so a misconfigured read can never crash compile. Records
+        that don't parse as our signals are skipped. The payload field is read
+        defensively (`data` then `note`); the live shape is pinned by live-smoke.
         """
         if not definition_id:
             return []
-        linkage = f"{ANNOTATION_SOURCE_PREFIX}{definition_id}"
+        if end_time is None:
+            end_time = datetime.now(timezone.utc) + timedelta(days=1)
+        if start_time is None:
+            start_time = SIGNAL_HISTORY_FLOOR
+        data_type = f"MomentAnnotation/{definition_id}"
+        params = {"start_time": _iso(start_time), "end_time": _iso(end_time),
+                  "filter": []}
         try:
-            records = self._api.moment_annotations(start_time, end_time)
-        except (OSError, ConnectionError, TimeoutError):
+            raw = self._api.fulcra_v1_api("event", data_type, params)
+        except HTTPError as e:
+            # A 4xx/5xx is a bug/misconfig, not an outage — do not let it hide as
+            # an empty read (that was the silent-degrade). Warn, but stay non-fatal.
+            print(f"fulcra-prefs: live signal read failed (HTTP {e.code}) for "
+                  f"{data_type} — compiling from the shard cache only",
+                  file=sys.stderr)
             return []
+        except (OSError, ConnectionError, TimeoutError):
+            return []   # genuine transport blip: quiet cache-only fallback
+        try:
+            records = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        linkage = f"{ANNOTATION_SOURCE_PREFIX}{definition_id}"
         out: list[Signal] = []
         for rec in (records or []):
             sources = rec.get("sources") or []
@@ -274,10 +319,13 @@ class FulcraStore:
             payload = rec.get("data")
             if payload is None:
                 payload = rec.get("note")
+            if payload is None:
+                continue   # no payload => not one of our signals (e.g. a stray
+                           # annotation sharing our definition with an empty note)
             env = {"id": rec.get("id"), "recorded_at": rec.get("recorded_at"),
                    "sources": sources, "data": payload}
             try:
                 out.append(parse_record(env))
-            except (KeyError, ValueError, TypeError):
+            except (KeyError, ValueError, TypeError, AttributeError):
                 continue   # not one of our signals / unexpected shape
         return out

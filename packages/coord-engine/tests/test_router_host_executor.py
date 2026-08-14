@@ -539,3 +539,92 @@ def test_host_probe_not_written_on_failed_delivery():
     t2.fail_write_containing.add("delivered/")
     cli._router_execute_host(_args(), t2, invoke=_invoke("delivered"))
     assert _shards_under(t2, "shadow-evidence/") == {}
+
+
+def test_host_probe_evidence_is_canonical_under_state_prefix_override():
+    """Blocking (b): under a namespaced live pair (`run` + `execute
+    --state-prefix X`) the host executor moves its cursor/queue/delivered state to
+    the sibling `router-X/`, but the W7 evidence shard MUST stay at the CANONICAL
+    prefix. The canonical shadow report reads only the canonical shadow-evidence/
+    dir, so an evidence shard written under `router-X/` would leave the delivery
+    classified no-probe-evidence/missed. Mirrors the cloud executor, which already
+    writes evidence at `canon_prefix`."""
+    t = FlakyTransport()
+    _hbase(t)                                    # config is canonical (shared)
+    t.put(RP + "shadow-window.json",
+          json.dumps({"started_at": NOW_ISO, "min_hours": 48}))
+    # queue/cursor/delivered move under the sibling; seed the wake there.
+    RP_X = f"team/{TEAM}/_coord/router-x/"
+    entry = _host_entry(source="s-30")
+    key = router.idempotency_key(entry["source_shard"], entry["agent"])
+    t.put(RP_X + "queue/" + router.queue_filename(entry["agent"], key),
+          json.dumps(entry))
+
+    counts = cli._router_execute_host(_args(state_prefix="x"), t,
+                                      invoke=_invoke("delivered"))
+    assert counts["delivered"] == 1
+    # evidence lands under the CANONICAL prefix, never under the sibling namespace
+    canon_ev = _shards_under(t, "shadow-evidence/")
+    assert len(canon_ev) == 1
+    (s,) = canon_ev.values()
+    assert (s["path"], s["agent"], s["key"]) == ("adapter", AGENT, key)
+    sib_ev = {p: c for p, c in t.store.items()
+              if p.startswith(RP_X + "shadow-evidence/")}
+    assert sib_ev == {}
+    # the delivered RECORD, by contrast, DID move to the sibling (namespaced state)
+    assert any(p.startswith(RP_X + "delivered/") for p in t.store)
+
+
+class ReadFailTransport(FlakyTransport):
+    """FlakyTransport whose per-entry READS can be made to raise."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_read_containing: set = set()
+
+    def read(self, path):
+        if any(s in path for s in self.fail_read_containing):
+            raise TransportError("read boom")
+        return super().read(path)
+
+
+def test_prefetch_read_failure_is_degraded_not_silent_empty():
+    """The concurrent queue prefetch must FAIL CLOSED exactly as the serial
+    reads did: a raising entry read is UNKNOWN, so the pass reports degraded and
+    executes nothing, leaving wakes visibly queued. A pool that swallowed the
+    exception would turn a blind executor into a clean '0 delivered' — the
+    silent-success failure this codebase keeps rediscovering."""
+    t = ReadFailTransport()
+    _hbase(t)
+    entry = _host_entry(source="s-40")
+    key = router.idempotency_key(entry["source_shard"], entry["agent"])
+    t.put(RP + "queue/" + router.queue_filename(entry["agent"], key),
+          json.dumps(entry))
+    t.fail_read_containing.add("queue/")
+
+    counts = cli._router_execute_host(_args(), t, invoke=_invoke("delivered"))
+    assert counts["degraded"] == 1, "a raising entry read must be degraded"
+    assert counts["delivered"] == 0, "nothing may execute on an UNKNOWN read"
+    # the wake is still queued: nothing was moved to delivered/
+    assert not any(p.startswith(RP + "delivered/") for p in t.store)
+
+
+def test_prefetch_reads_every_candidate_entry_once():
+    """Parallel prefetch must cover every .json candidate exactly once — same
+    set the serial loop would have read, no more (no duplicate round trips) and
+    no fewer (a missed entry is a lost wake)."""
+    t = ReadFailTransport()
+    _hbase(t)
+    names = []
+    for i in range(5):
+        e = _host_entry(source=f"s-5{i}")
+        k = router.idempotency_key(e["source_shard"], e["agent"])
+        n = router.queue_filename(e["agent"], k)
+        t.put(RP + "queue/" + n, json.dumps(e))
+        names.append(RP + "queue/" + n)
+    t.put(RP + "queue/not-json.txt", "ignored")
+
+    q = t.list_dir(RP + "queue/")
+    bodies = cli._read_queue_entries(t, RP, q)
+    assert set(bodies) == set(names), "must read exactly the .json candidates"
+    assert all(bodies[n] for n in names), "every candidate body must be present"

@@ -200,3 +200,28 @@ def test_unknown_mode_raises():
     ctx = _make_ctx(config={"mode": "banana"})
     with pytest.raises(RuntimeError, match="unknown mode"):
         collect_plugin.run(ctx)
+
+
+def test_run_reports_the_sensor_timestamp_on_its_annotation_receipt(monkeypatch):
+    """The source clock has to be FED, not merely declared.
+
+    Declaring a FreshnessExpectation buys nothing if the plugin never reports
+    a source timestamp: newest_item_at stays NULL, the upstream dimension
+    reports UNKNOWN forever, and a sensor whose readings freeze while writes
+    continue is invisible. Drop `observed_at=` from ctx.annotation and this
+    test must fail — it was added after a negative control showed that
+    deletion broke nothing at all.
+    """
+    monkeypatch.setattr(collect_plugin, "fetch_api", lambda idx, key, **kw: _reading())
+    monkeypatch.setattr(collect_plugin, "post_records", lambda client, records: None)
+
+    ctx = _make_ctx(config={"mode": "api", "sensor_index": "90210"},
+                    credentials={"api_key": "k"})
+    collect_plugin.run(ctx)
+
+    receipts = [e for e in ctx._kv["_events"] if e.get("type") == "annotation"]
+    assert receipts, "no annotation receipt emitted"
+    assert receipts[0].get("observed_at") == _reading().observed_at.isoformat(), (
+        "annotation receipt carries no sensor timestamp — the upstream "
+        "freshness clock would never advance"
+    )

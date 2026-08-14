@@ -1,0 +1,23 @@
+name: no-team-internals
+# Phase 0 of the team/tool separation (operator-ordered 2026-08-07): the rules
+# "no host address, machine name, session ref or credential-holder fact in the
+# repo" and "team content lives on the team's store" are enforced here, because
+# a rule enforced by care is a rule already broken — one branch carried a live
+# VPS address paired with a named root-holder for two hours before review
+# caught it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: prove the scan can fail, then run it
+        # The self-test runs FIRST and gates the scan. The first version of this
+        # guard used `\b` in a POSIX ERE, so its IP arm could never match: it
+        # went green on every PR while being incapable of finding the class of
+        # leak it was written for. A guard's green is only evidence if its red
+        # is reachable, so we demonstrate red on every run.
+        run: sh scripts/no-team-internals.sh

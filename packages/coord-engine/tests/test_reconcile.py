@@ -1090,3 +1090,102 @@ class TestAggregateRoundTrip:
         _reconciled(t, now="2026-07-01T16:15:00Z")
         # No anchor -> full fold. Our incremental path is dead until the fleet moves.
         assert _ack_lists(calls), "expected the full fold a wiped anchor forces"
+
+
+# --- retention cap starvation must be VISIBLE -------------------------------
+# `_run_retention` spends ONE per-pass counter across two loops: tasks first,
+# then settled reviews. On the live fleet 1024 tasks were retention-eligible
+# against a cap of 20, so the review loop broke on iteration ZERO every day and
+# no review had EVER been archived — while the pass reported nothing at all. A
+# starved loop was indistinguishable from "nothing to archive".
+#
+# These tests pin the SIGNAL, not the allocation: how the cap should be split
+# between tasks and reviews is a separate decision. What must never recur is the
+# silence.
+
+def _cap_saturating_tasks(t, n):
+    """n old terminal tasks — enough to spend the whole per-pass cap."""
+    for i in range(n):
+        t.put(f"team/r/task/old{i}.md",
+              f"---\ntype: Task\ntitle: Old{i}\nid: old{i}\nstatus: done\n"
+              f"timestamp: 2020-01-15T00:00:00Z\n---\nbody",
+              mtime="2020-01-15 04:00PM UTC")
+
+
+def _settled_review(t, slug):
+    """A review whose `.settled` marker is old enough to archive."""
+    t.put(f"team/r/review/{slug}.md",
+          "---\ntype: Review\nschema: review-request/v2\n---\nbody")
+    t.put(f"team/r/review/{slug}/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: MERGED\n---\n",
+          mtime="2020-01-15 04:00PM UTC")
+
+
+def test_retention_warns_when_the_cap_starves_the_review_loop():
+    t = FakeTransport()
+    _cap_saturating_tasks(t, reconcile.RETENTION_CAP_PER_PASS)
+    _settled_review(t, "starved-review")
+    res = _run(t)
+    # The review is still not archived — this change does not reallocate the cap.
+    assert "team/r/review/starved-review.md" in t.store
+    # But the pass must SAY so, and it must reach the caller's warnings.
+    assert any("cap reached" in w and "review" in w for w in res["warnings"]), (
+        f"starvation was silent; warnings were {res['warnings']}")
+
+
+def test_retention_does_not_cry_starvation_when_the_cap_is_not_reached():
+    """Adversarial twin: the warning must not fire on a healthy pass.
+
+    A note that appears every run is as useless as no note at all — this is the
+    direction the fix could plausibly make WORSE, so it is pinned before the
+    fix, not after."""
+    t = FakeTransport()
+    _cap_saturating_tasks(t, 2)          # nowhere near the cap
+    _settled_review(t, "roomy-review")
+    res = _run(t)
+    assert not any("cap reached" in w for w in res["warnings"]), (
+        f"false starvation alarm on a healthy pass: {res['warnings']}")
+
+
+def test_default_fixture_mtime_stays_inside_the_retention_window():
+    """Guard the invariant whose violation broke clean main on 2026-08-01.
+
+    Retention tests seed a default-mtime fixture and assert it is KEPT. That
+    assertion is only meaningful while the default sits inside
+    ``--retention-days`` of the clock ``reconcile`` reads — the real one. The
+    former hardcoded ``2026-07-01`` default satisfied it for a month and then
+    silently stopped, failing two tests on code nobody had touched.
+
+    This fails when the default drifts out of the sane recent-past band —
+    stale literals the day they age out, and future-dated literals
+    immediately (a future default has negative age, which would sail past a
+    one-sided bound; caught by codex-reviewer's mutation run). A literal
+    reintroduced at a near-current date passes until it ages — catching THAT
+    on day zero would need a source/AST guard, deliberately out of scope
+    here. (Salvaged from closed PR 506, codex-coder; adapted to the
+    module-level ``RECENT_MTIME`` #504 introduced, anchored now-minus-one-day.)
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from coord_engine import router
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", "body")
+    parsed = router.parse_store_mtime(t.mtimes["team/r/task/a.md"])
+
+    assert parsed is not None, (
+        "the default fixture mtime is not in store format, so retention code "
+        f"cannot age it at all: {t.mtimes['team/r/task/a.md']!r}"
+    )
+    age = datetime.now(timezone.utc) - parsed
+    # The tightest window any test in this repo exercises is 30 days. The
+    # default anchors to now-minus-one-day at module import, so anything in
+    # [0, 2) days is healthy. BOTH bounds are load-bearing: a stale literal
+    # blows the upper bound the day it ages out, and a FUTURE-dated literal
+    # has negative age — without the lower bound, now+365d passed
+    # (mutation-verified in pr-543 round 2).
+    assert timedelta(0) <= age < timedelta(days=2), (
+        "the default fixture mtime is outside the sane recent-past band "
+        f"(age {age}). It must be derived from the clock, not hardcoded — "
+        "see RECENT_MTIME."
+    )

@@ -1,6 +1,9 @@
 # ATC — model & cap routing for agent fleets
 
-**Status:** approved direction (Ash, 2026-07-07 night); v1 in build.
+**Status:** SHIPPED (alpha) as of 2026-08-12 — v1 is live: the skill is
+[`skills/fulcra-agent-atc/SKILL.md`](../../skills/fulcra-agent-atc/SKILL.md)
+and the engine carries `usage`, `headroom`, `route`, `atc`, and `dash`. This
+document is the design record; the skill is the operational truth.
 **Name:** working name **ATC** (air-traffic control) — skill `fulcra-agent-atc`. Alternatives Ash floated: Dispatcher, Traffic Cop. "ATC" wins on metaphor fit (assign the right runway/tier, keep traffic inside capacity) and doesn't collide with directives' tell/dispatch vocabulary. One-word rename possible at any time before upstream pitch.
 
 ## Problem

@@ -124,17 +124,27 @@ class ObligationResult:
     #: Components successfully consulted, sorted. Present so a caller can prove
     #: coverage rather than infer it from the absence of complaints.
     consulted: list[str] = field(default_factory=list)
+    #: component name -> WHY it degraded or was malformed. A report that names
+    #: which components failed but not why is one nobody can act on: an
+    #: exhausted budget and an unreachable store render identically without it,
+    #: and they have opposite remedies.
+    details: dict[str, str] = field(default_factory=dict)
 
     @property
     def can_claim_clear(self) -> bool:
         """True only when every component was consulted and none owed work."""
         return self.state is ObligationState.CLEAR
 
+    def _labelled(self, name: str) -> str:
+        why = self.details.get(name)
+        return f"{name} ({why})" if why else name
+
     def reason(self) -> str:
         """One line a human or a log can act on."""
         if self.state is ObligationState.UNKNOWN:
+            names = self.degraded or ["(unnamed component)"]
             return ("cannot prove anything about: "
-                    + ", ".join(self.degraded or ["(unnamed component)"]))
+                    + ", ".join(self._labelled(n) for n in names))
         if self.state is ObligationState.INVALID:
             return "malformed component data: " + ", ".join(self.malformed)
         if self.state is ObligationState.DATA:
@@ -167,18 +177,23 @@ def fold(components: list[Component], *,
     degraded: list[str] = []
     malformed: list[str] = []
     owed: list[dict[str, Any]] = []
+    details: dict[str, str] = {}
 
     for component in components:
         try:
             result = component.probe()
         except Exception as exc:  # a probe that raises is a probe that failed
             degraded.append(component.name)
-            del exc
+            details[component.name] = f"probe raised {type(exc).__name__}"
             continue
         if result.state is ProbeState.UNREADABLE:
             degraded.append(component.name)
+            if result.detail:
+                details[component.name] = result.detail
         elif result.state is ProbeState.MALFORMED:
             malformed.append(component.name)
+            if result.detail:
+                details[component.name] = result.detail
         else:
             consulted.append(component.name)
         owed.extend(result.owed)
@@ -189,6 +204,8 @@ def fold(components: list[Component], *,
         present = {c.name for c in components}
         missing = sorted(set(expected) - present)
         degraded.extend(missing)
+        for name in missing:
+            details.setdefault(name, "component was never offered to the fold")
 
     degraded, malformed = sorted(set(degraded)), sorted(set(malformed))
 
@@ -202,4 +219,5 @@ def fold(components: list[Component], *,
         state = ObligationState.CLEAR
 
     return ObligationResult(state=state, owed=owed, degraded=degraded,
-                            malformed=malformed, consulted=sorted(consulted))
+                            malformed=malformed, consulted=sorted(consulted),
+                            details=details)

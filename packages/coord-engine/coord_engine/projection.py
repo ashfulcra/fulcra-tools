@@ -70,9 +70,13 @@ functions never raise (reconcile wraps them best-effort anyway).
 
 from __future__ import annotations
 
+import hashlib
+
 from typing import Any, Optional
 
-from . import config, forge, okf, review
+from datetime import timezone
+
+from . import aggregate, config, forge, okf, review
 from .budget import Deadline
 from .log import get_logger
 from .roles import age_hours
@@ -104,6 +108,16 @@ DEFAULT_MAX_AGE_HOURS = 24.0
 #: ``complete: false`` (readers keep raw-scanning, loudly) and the next pass
 #: resumes converging — carried rows cost nothing, so each pass reaches further.
 DEFAULT_BUILD_BUDGET = 240.0
+#: The FORGE section's own budget, seconds. Deliberately smaller than the review
+#: budget: the forge fold is one listing per watched PR over a far smaller
+#: population, so it does not need parity — it needs a floor that a busy review
+#: fold cannot take away.
+DEFAULT_FORGE_BUDGET = 60.0
+
+#: How many UNKNOWN slugs may be re-scanned once within the same pass. Small by
+#: intent: a handful is a transient, a crowd is a budget cut, and only the first
+#: is worth paying for inside the same deadline.
+RETRY_UNKNOWN_MAX = 3
 
 #: Skew tolerance (hours) for a section stamped slightly in the FUTURE of the
 #: reading host's clock — the same 900s budget reconcile's fast path trusts
@@ -115,6 +129,23 @@ _FUTURE_SKEW_HOURS = 0.25
 #: — defined there first; duplicated here because ``cli`` imports this module).
 SETTLED_MARKER = ".settled"
 
+#: ``review gc``'s terminal marker (mirrors ``review_gc.GC_MARKER``). A retired
+#: entry is terminal but was never reviewed, so it is folded as RETIRED rather
+#: than APPROVED — and, crucially, it is skipped HERE, in the reader. Writing the
+#: marker without teaching the readers would have retired nothing: the entry
+#: would still be scanned, still tallied pending, and still consume the exact
+#: projection budget the verb exists to recover (codex-reviewer, review-gc r1).
+VFP_KEY = "vfp"   #: verdicts-listing fingerprint recorded on each scanned row
+#: Did this row's evidence admit a cache binding at all — i.e. was every verdict
+#: shard append-only (or the row backed by merge evidence)? Tier 1 carries a
+#: settled row at ZERO ops, which is only sound when nothing under the slug can
+#: change without changing the review DOC. A hand-written plain shard can be
+#: rewritten in place, touching neither the doc nor its metadata, so a row built
+#: over one may never take that tier (codex-reviewer, 595 r6). A row from a
+#: build before this key existed lacks it and is demoted — fail closed.
+BINDABLE_KEY = "ev_bindable"
+GC_MARKER = ".gc-closed"
+
 
 def max_age_hours() -> float:
     """Serve-threshold for projection sections, hours. Env
@@ -123,9 +154,31 @@ def max_age_hours() -> float:
 
 
 def build_budget() -> float:
-    """Per-pass projection build budget, seconds. Env
+    """Per-pass REVIEW projection build budget, seconds. Env
     ``COORD_PROJECTION_BUILD_BUDGET`` (see DEFAULT_BUILD_BUDGET)."""
     return config.env_float("COORD_PROJECTION_BUILD_BUDGET", DEFAULT_BUILD_BUDGET)
+
+
+def forge_budget() -> float:
+    """Per-pass FORGE projection build budget, seconds — its OWN, not a remainder.
+
+    Both sections used to share one `Deadline` object, and the review fold spent
+    it first. That is not a slow-forge problem, it is a never-forge one: measured
+    on the live store 2026-08-10, the review fold cut at 192/219 and the forge
+    section came back `scanned=None, total=None, rows=0` — never built at all, on
+    every pass, so every consumer paid a 74.8s raw fallback to discover it.
+
+    A section that always runs last inside a shared budget does not degrade
+    gracefully; it starves deterministically. AGENTS.md already says a budget cut
+    may only truncate the tail — this is the same rule one level up, applied
+    between sections rather than within one.
+
+    The cost is honest and worth stating: worst-case pass duration is now the SUM
+    of the two budgets rather than one shared cap. Starving a section to keep a
+    wall-clock bound was never the trade anyone chose; it was an accident of
+    passing one object twice.
+    """
+    return config.env_float("COORD_FORGE_BUILD_BUDGET", DEFAULT_FORGE_BUDGET)
 
 
 def fresh_section(
@@ -283,16 +336,105 @@ def _normalize_required(required: Any) -> list[str]:
     return []
 
 
+def _verdicts_fingerprint(ventries: list[dict[str, Any]]) -> str:
+    """Order-independent fingerprint of a verdicts listing.
+
+    A review's tally is a function of (required set from the doc) x (verdict
+    files). Tier 3 below carries an UNSETTLED row when the doc is unchanged AND
+    this fingerprint is unchanged — which is the same immutability argument
+    tier 1 already makes, extended over the one input tier 1 does not cover.
+    Name+size+mtime per shard, sorted, so listing order cannot perturb it."""
+    parts = sorted(
+        f"{e.get('name') or ''}\x1f{e.get('size')}\x1f{e.get('mtime')}"
+        for e in ventries if not e.get("is_dir"))
+    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _shards_minutes_closed(ventries: list[dict[str, Any]],
+                           prior_generated_at: Any) -> bool:
+    """True iff EVERY verdict shard's mtime-minute closed before the prior pass.
+
+    The fingerprint alone is not enough, and this is the half I got wrong in the
+    first cut: I applied the same-minute guard to the review DOC and left the
+    shards unguarded, in a change whose own description named minute-granular
+    mtime as the hazard. codex-reviewer reproduced it at the exact head — an
+    unsettled row projected at 15:00:30Z, its `approve` shard rewritten to an
+    equal-length `changes` inside the same clock-minute, and the second build
+    carried the stale PENDING row because name+size+mtime were all identical.
+
+    A verdict flipping approve->changes at equal length inside one minute is not
+    a contrived case: it is a reviewer correcting themselves, and carrying it
+    would freeze a CHANGES review as PENDING durably. So: any shard whose minute
+    is not provably closed forces a full rescan. Correct beats cheap, and only
+    the recently-touched slugs pay."""
+    from . import reconcile as rec  # lazy: reconcile imports projection
+    for v in ventries:
+        if v.get("is_dir"):
+            continue
+        if rec._same_minute_reuse_safe(v.get("mtime"), prior_generated_at) is not True:
+            return False   # ambiguous or unprovable -> rescan, never carry
+    return True
+
+
+def _unsettled_carry_safe(prior_row: Any, entry: dict[str, Any],
+                          prior_generated_at: Any) -> bool:
+    """Doc-side half of the TIER-3 carry: is this row *eligible* for a
+    one-listing carry? The verdicts fingerprint is compared separately, because
+    obtaining it costs the one op tier 3 is budgeted for.
+
+    Why tier 3 exists: unsettled rows never carry under tier 1, so a
+    permanently-unsettleable entry sits in the FRESH set on every pass forever,
+    consuming a full scan each time. That is a non-converging tax which breaks
+    the convergence property this module documents — and it cannot be cleared by
+    gc alone, which only retires entries it can *prove* dead (9 of 158 measured
+    on 2026-08-07, against a 129/158 budget cut). Tier 3 fixes the cost
+    structurally instead of trying to decide which entries are dead.
+
+    Same guards as tier 1: doc mtime+size identical, and the same-minute reuse
+    guard — mtime granularity is ONE MINUTE, so a same-minute edit at identical
+    size is invisible and must not be trusted."""
+    if not isinstance(prior_row, dict):
+        return False
+    if prior_row.get("settled") is True and prior_row.get(BINDABLE_KEY) is True:
+        return False                      # tier 1's business, and it may have it
+    # A SETTLED row whose evidence is not bindable lands HERE rather than in
+    # tier 1: its plain shard can be rewritten in place, so it needs the one
+    # listing this tier pays for. That is the demotion 595 r6 owed — and it is a
+    # listing, not a full rescan, because the fingerprint compares name+size+
+    # mtime per shard and `_shards_minutes_closed` refuses any unclosed minute,
+    # which is strictly more than a name digest could ever see.
+    if not prior_row.get(VFP_KEY):
+        return False                      # no fingerprint recorded: cannot compare
+    entry_mtime = entry.get("mtime")
+    if not entry_mtime or prior_row.get("mtime") != entry_mtime:
+        return False
+    if prior_row.get("size") is None or prior_row.get("size") != entry.get("size"):
+        return False
+    from . import reconcile as rec  # lazy: reconcile imports projection
+    return rec._same_minute_reuse_safe(entry_mtime, prior_generated_at) is not False
+
+
 def _settled_carry_safe(prior_row: Any, entry: dict[str, Any],
                         prior_generated_at: Any) -> bool:
     """True iff ``prior_row`` may be carried WITHOUT re-reading its review.
 
-    Only a SETTLED prior row qualifies: a settled round is immutable, and
-    re-opening the slug rewrites the review doc — so an unchanged listed
-    mtime+size proves the carried tally still holds. Unsettled rows never carry
-    (their verdict shards can change without touching the doc). The same-minute
-    guard is reconcile's (imported lazily; ``reconcile`` imports this module)."""
+    Only a SETTLED prior row with BINDABLE evidence qualifies. The old rule
+    stopped at "settled", on the argument that a settled round is immutable and
+    re-opening the slug rewrites the review doc — true of re-opening at a new
+    head, and false of the one case this PR is about: a hand-written plain shard
+    rewritten IN PLACE at the same head touches neither the doc nor its
+    metadata, so this tier carried a stale APPROVED forever without ever
+    reaching `review.settle_shortcircuit` (codex-reviewer, 595 r6). Fixing the
+    two readers below it left the tier ABOVE them untouched — the third time in
+    this PR that a rule landed one layer away from a sibling that needed it.
+
+    Unsettled rows never carry here (their verdict shards can change without
+    touching the doc), and neither do settled rows over mutable evidence: both
+    fall to tier 3's one listing. The same-minute guard is reconcile's (imported
+    lazily; ``reconcile`` imports this module)."""
     if not isinstance(prior_row, dict) or prior_row.get("settled") is not True:
+        return False
+    if prior_row.get(BINDABLE_KEY) is not True:
         return False
     entry_mtime = entry.get("mtime")
     if not entry_mtime or prior_row.get("mtime") != entry_mtime:
@@ -344,6 +486,18 @@ def _feed_carry_safe(prior_row: Any, entry: dict[str, Any], *,
     return True
 
 
+def _store_mtime_iso(mtime: Any) -> Optional[str]:
+    """Listing mtime -> comparable ISO, or None.
+
+    Store mtimes render on a TWELVE-HOUR clock, so comparing them as strings
+    inverts the midnight hour. Parsed through the one existing parser.
+    """
+    if not isinstance(mtime, str):
+        return None
+    dt = aggregate._parse_store_mtime(mtime)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+
+
 def _scan_review_slug(
     transport: Any, team: str, slug: str, entry: dict[str, Any], *,
     now: str, deadline: Deadline,
@@ -372,18 +526,60 @@ def _scan_review_slug(
         "mtime": entry.get("mtime"),
         "size": entry.get("size"),
     }
-    if any((v.get("name") or "") == SETTLED_MARKER for v in ventries):
-        # Settled-cache hit: the round is terminal-APPROVED and immutable — the
-        # doc read above already gave us the forge-relevant identity fields.
-        return {**base, "state": review.APPROVED, "pending_required": [],
-                "settled": True}, True
+    base[VFP_KEY] = _verdicts_fingerprint(ventries)
+    vnames = {(v.get("name") or "") for v in ventries}
+    # Recorded on EVERY row this function returns, because the zero-op tier-1
+    # carry never lists this directory and so can never recompute it. Only a row
+    # that says True here may skip straight past both readers below.
+    base[BINDABLE_KEY] = review.evidence_is_immutable(vnames)
+    if GC_MARKER in vnames:
+        # Retired by gc: OMITTED from the projection, and the scan counts as
+        # COMPLETE. Round 2 of this review emitted a `state: RETIRED,
+        # settled: true` row instead, and `_validated_review_projection` accepts
+        # only PENDING/APPROVED/CHANGES and rejects any settled row that is not
+        # APPROVED — so the first retired entry invalidated the WHOLE section and
+        # every consumer fell back to the raw scan. Omission needs no new state
+        # in a validated schema, and a retired entry carries no review
+        # information a consumer wants: it owes nobody a verdict.
+        return None, True
+    marker_fm: dict = {}
+    if SETTLED_MARKER in vnames:
+        # A cache is only trustworthy if it still describes THIS directory.
+        #
+        # Deleting a stale cache cannot stop another writer recreating it: a
+        # `review status` that read the old tally, paused, and resumed AFTER a
+        # correction landed rewrote `.settled` from its stale snapshot, and this
+        # short-circuit then answered APPROVED while the newest verdict was
+        # CHANGES (codex-reviewer, 595 r4). No delete ordering fixes that.
+        #
+        # So VALIDATE rather than order — in the SHARED decision function, so
+        # the fan-out obligation scan applies the identical rule. That rule now
+        # also refuses any directory holding a mutable plain shard, whose
+        # in-place rewrite a name digest cannot see (595 r5).
+        marker_raw = transport.read(_verdicts_prefix(team, slug) + SETTLED_MARKER)
+        marker_fm = okf.parse_frontmatter(marker_raw) or {}
+        short = review.settle_shortcircuit(marker_fm, vnames)
+        if short != review.SETTLE_NO:
+            row = {**base, "state": review.APPROVED, "pending_required": [],
+                   "settled": True}
+            if short == review.SETTLE_MERGED:
+                # MERGE EVIDENCE is bindable whatever the shards look like: it
+                # records that a PR landed, and no later verdict can make that
+                # untrue, so no rewrite under this slug can move the row. That
+                # keeps terminal reviews — most of the register — at the zero-op
+                # tier even when their shards are hand-written.
+                row[BINDABLE_KEY] = True
+            return row, True
+        # Otherwise fall through and fold the shards for real.
     head = review.normalize_head(fm.get("head"))
     verdicts: list[dict[str, Any]] = []
     for v in ventries:
         n = v.get("name") or ""
         if v.get("is_dir") or not n.endswith(".md"):
             continue
-        reviewer = review.reviewer_from_filename(n, head=head)
+        parsed_name = review.parse_verdict_filename(n, head=head)
+        reviewer = parsed_name[0] if parsed_name else None
+        parsed_ts = parsed_name[1] if parsed_name else None
         if reviewer is None:
             continue  # superseded head / foreign filename: zero reads
         if deadline.expired():
@@ -396,18 +592,58 @@ def _scan_review_slug(
         vfm = okf.parse_frontmatter(raw_v) or {}
         if head and review.normalize_head(vfm.get("head")) != head:
             continue  # the verdict must independently attest the exact head
-        verdicts.append({"reviewer": reviewer, "verdict": vfm.get("verdict")})
+        verdicts.append({
+            "reviewer": reviewer,
+            "verdict": vfm.get("verdict"),
+            "name": n,
+            # SAME fallback chain as `_tally_from_verdict_entries` — filename
+            # ts, then frontmatter ts, then the LISTING MTIME. Projection used
+            # to stop at frontmatter, so a plain hand-written shard with no `ts`
+            # sorted as empty and lost to an older append shard: the direct
+            # tally said CHANGES while the projection said APPROVED for the same
+            # directory (codex-reviewer, 595 r3). Two readers disagreeing about
+            # the same evidence is worse than either answer alone.
+            "sort_key": (parsed_ts
+                         or str(vfm.get("ts") or "")
+                         or _store_mtime_iso(v.get("mtime")) or ""),
+        })
+    # FOLD NEWEST PER REVIEWER (coord-boss constraint 5, ruling b99fb8da).
+    # Append-only verdicts mean one reviewer can have several shards, and this
+    # projection built ONE ENTRY PER FILE — so a superseded CHANGES and its
+    # newer APPROVE both reached `review.tally`, where a single blocker
+    # dominates, and the stale CHANGES would have blocked the review forever.
+    # Every register reader learns the fold, not just `review status`.
+    kept, folded_away = review.fold_newest_per_reviewer(verdicts)
+    verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
+                for r in kept]
     tally = review.tally(verdicts, required=base["required"])
+    if folded_away:
+        tally["superseded_verdicts"] = folded_away
     settled = (tally["state"] == review.APPROVED
                and not tally["pending_required"] and bool(base["required"]))
-    if settled:
-        # Same proven-settle cache the read fold writes — accelerates BOTH the
-        # raw fold's settled-skip and this build's own convergence. Best-effort.
+    # Same proven-settle cache the read fold writes — accelerates BOTH the raw
+    # fold's settled-skip and this build's own convergence. Best-effort.
+    #
+    # It goes through the SHARED field builder, and only when the evidence can
+    # actually be bound. This write used to emit schema/state/ts alone, so the
+    # marker it produced failed its own reader's validation on the very next
+    # pass — a cache that could never hit, written every time (codex-reviewer,
+    # 595 r5). And a directory holding a mutable plain shard gets no cache at
+    # all: one whose digest a reader must refuse is cost without benefit.
+    #
+    # An EXISTING marker is overwritten only when this build can positively
+    # identify it as a cache. Unreadable or unrecognised means it may be the
+    # merge evidence a `review close` wrote, and that is never ours to clobber.
+    evidence = (review.evidence_digest(vnames)
+                if review.evidence_is_immutable(vnames) else "")
+    prior_state = str(marker_fm.get("state") or "")
+    may_write = (SETTLED_MARKER not in vnames) or prior_state == review.APPROVED
+    if settled and evidence and may_write:
         try:
             transport.write(
                 _verdicts_prefix(team, slug) + SETTLED_MARKER,
-                okf.render_frontmatter({"schema": "review-settled/v1",
-                                        "state": review.APPROVED, "ts": now}))
+                okf.render_frontmatter(review.settled_marker_fields(
+                    state=review.APPROVED, ts=now, evidence=evidence)))
         except Exception:
             pass
     return {**base, "state": tally["state"],
@@ -459,13 +695,33 @@ def build_review_projection(
     # Zero-op carries first, budgeted fresh scans second — so a budget cut always
     # lands on the scan frontier and each pass converges further than the last.
     fresh: list[tuple[str, dict[str, Any]]] = []
+    maybe: list[tuple[str, dict[str, Any]]] = []
     for slug, e in doc_entries:
         if _feed_carry_safe(prior_rows.get(slug), e, slug=slug,
                             changed_slugs=changed_slugs,
                             prior_generated_at=prior_generated_at):
             rows.append(prior_rows[slug])
+        elif _unsettled_carry_safe(prior_rows.get(slug), e, prior_generated_at):
+            maybe.append((slug, e))
         else:
             fresh.append((slug, e))
+    # TIER 3: one listing each. If no verdict shard was added, removed or
+    # modified AND the doc is unchanged, the tally provably cannot have moved,
+    # so carry instead of re-reading every shard. A listing failure or any
+    # mismatch demotes the slug to a full scan — never to a guess.
+    for slug, e in maybe:
+        if deadline.expired():
+            fresh.append((slug, e)); continue
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError:
+            fresh.append((slug, e)); continue
+        if (_verdicts_fingerprint(ventries) == prior_rows[slug].get(VFP_KEY)
+                and _shards_minutes_closed(ventries, prior_generated_at)):
+            rows.append(prior_rows[slug])
+        else:
+            fresh.append((slug, e))
+    retryable: list[tuple[str, dict[str, Any]]] = []
     for slug, e in fresh:
         if budget_cut or deadline.expired():
             budget_cut = True
@@ -477,10 +733,58 @@ def build_review_projection(
                                     deadline=deadline)
         if not ok:
             unknown += 1
+            retryable.append((slug, e))
             if slug in prior_rows:
                 rows.append(prior_rows[slug])
             continue
+        if row is None:
+            # Scanned successfully and deliberately not projected (gc-retired).
+            # Complete, not unknown: the pass DID resolve this slug.
+            continue
         rows.append(row)
+
+    # IN-PASS RETRY of a SMALL unknown remainder (coord-boss direction, 2026-08-11).
+    #
+    # Measured: with 223 slugs the fold lands at 222/223 — ONE slug UNKNOWN in one
+    # pass — while every slug resolves fine when scanned on its own. That single
+    # blip is not a broken directory; it is a transient read against a fold with no
+    # headroom. But because the forge section's completeness follows this one, a
+    # single transient denies forge to the whole fleet until a later pass converges.
+    #
+    # So: re-scan just those slugs, ONCE. A transient converts and the pass
+    # completes honestly; a real failure stays UNKNOWN and the section stays
+    # honestly incomplete. Completeness SEMANTICS are untouched — this is not a
+    # tolerance that calls one-short complete, which would manufacture exactly the
+    # false-clear this codebase exists to hunt (coord-boss withdrew that option).
+    #
+    # TWO CONSTRAINTS, both learned the expensive way this week:
+    #   * bounded by the SAME `deadline` object, never a fresh one — a retry that
+    #     opens its own budget is the shared-budget defect wearing a retry hat
+    #     (PR 599: one Deadline passed to two consumers starved the second);
+    #   * only a SMALL remainder, and never after a budget cut. A large remainder
+    #     means the budget ran out, and re-scanning it would spend the next
+    #     section's time re-doing work that simply needs another pass.
+    if retryable and not budget_cut and len(retryable) <= RETRY_UNKNOWN_MAX:
+        for slug, e in retryable:
+            if deadline.expired():
+                break
+            row, ok = _scan_review_slug(transport, team, slug, e, now=now,
+                                        deadline=deadline)
+            if not ok:
+                continue          # still UNKNOWN: the prior row stays as-is
+            # RESOLVED. `ok` is the whole question; `row is None` is a separate
+            # fact meaning gc-retired — resolved successfully and deliberately
+            # OMITTED from rows. My first cut wrote `if not ok or row is None`
+            # and even named gc-retired in the comment while treating it as a
+            # failure, so a retry that conclusively retired a slug left the
+            # section incomplete AND kept a stale prior row (codex-reviewer, 602
+            # r1). `(None, True)` and `(None, False)` are different answers; the
+            # tri-state lesson, one more time, in the branch I had just written
+            # to fix a different collapse.
+            rows = [r for r in rows if r.get("name") != slug]
+            if row is not None:
+                rows.append(row)
+            unknown -= 1
     rows.sort(key=lambda r: str(r.get("name")))
 
     # Dir-only slugs (a `<slug>/` with no doc): classify orphan / tombstone /

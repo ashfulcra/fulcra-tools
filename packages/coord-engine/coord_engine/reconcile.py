@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import aggregate, config, health as health_mod, jsonutil, model, okf
+from . import aggregate, config, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .log import get_logger
@@ -722,8 +722,22 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             for e in review_entries if e.get("is_dir")
         } - doc_slugs)
         settled_index = _load_settled_index(transport, team)
-        for slug in sorted(doc_slugs):
+        # `archived` is spent by the TASK loop above before this one begins, so a
+        # busy task backlog silently starves review retention: the break below
+        # can fire on iteration zero, every pass, forever. Measured on the live
+        # fleet 2026-08-08: 1024 retention-eligible tasks against a cap of 20, and
+        # ZERO reviews archived in the store's whole history while 13 sat eligible
+        # (oldest 16 days). Count what we never looked at so the starvation is
+        # visible on the FIRST pass instead of the fifty-first.
+        #
+        # Deliberately "not examined", never "eligible": establishing eligibility
+        # costs the per-slug verdict listing this break exists to avoid, so the
+        # honest report is the size of the unexamined remainder.
+        reviews_unexamined = 0
+        orphans_not_single = 0
+        for i, slug in enumerate(sorted(doc_slugs)):
             if archived >= RETENTION_CAP_PER_PASS:
+                reviews_unexamined += len(doc_slugs) - i
                 break
             verdict_prefix = f"{review_prefix}{slug}/verdicts/"
             try:
@@ -760,8 +774,9 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
         transport.write(settled_index_path(team), json.dumps({
             "schema": "coord.settled-reviews.v1", "reviews": sorted(settled_index)
         }, separators=(",", ":")))
-        for slug in dir_slugs:
+        for i, slug in enumerate(dir_slugs):
             if archived >= RETENTION_CAP_PER_PASS:
+                reviews_unexamined += len(dir_slugs) - i
                 break
             verdict_prefix = f"{review_prefix}{slug}/verdicts/"
             try:
@@ -774,7 +789,10 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 str(e.get("name") or "") for e in verdict_entries
                 if not e.get("is_dir") and str(e.get("name") or "").endswith(".md")
             )
-            if verdict_files != ["codex-reviewer.md"]:
+            if len(verdict_files) != 1:
+                # 0 or >1 shards is out of scope for the single-shard sweep, not
+                # an anomaly; counted once below so the skips stay visible.
+                orphans_not_single += 1
                 continue
             filename = verdict_files[0]
             src = verdict_prefix + filename
@@ -783,7 +801,21 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
             if fm is None:
                 notes.append(f"retention: review {slug} verdict unreadable; kept hot")
                 continue
-            if fm.get("type") != "Verdict" or fm.get("reviewer") != "codex-reviewer":
+            stem = filename[:-3]
+            reviewer = str(fm.get("reviewer") or "")
+            # Attribution accepts exactly the tally's canonical filename forms:
+            # plain `<reviewer>.md`, or `<exact-head>--<reviewer>.md` with a
+            # canonical 40/64-hex head. A looser prefix (garbage--alice.md) is
+            # unattributable to the tally and must stay hot as the anomaly it is.
+            keyed_prefix = (
+                stem[:-(len(reviewer) + 2)]
+                if stem != reviewer and stem.endswith(f"--{reviewer}") else None)
+            if fm.get("type") != "Verdict" or not reviewer or (
+                    stem != reviewer
+                    and review.normalize_head(keyed_prefix) is None):
+                notes.append(
+                    f"retention: review {slug} verdict {filename} does not "
+                    f"attribute to its filename (reviewer={reviewer!r}); kept hot")
                 continue
             verdict_entry = next(e for e in verdict_entries if e.get("name") == filename)
             if not _quiet_mtime_old_enough(
@@ -805,6 +837,20 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 notes.append(f"retention: archived review {slug} -> reviews/{month}/")
             else:
                 notes.append(f"retention: review move FAILED for {slug}; kept")
+
+        if orphans_not_single:
+            notes.append(
+                f"retention: {orphans_not_single} orphan review dir(s) kept hot "
+                f"without exactly one verdict shard; the single-shard sweep "
+                f"does not judge them")
+        if reviews_unexamined:
+            notes.append(
+                f"retention: cap reached ({RETENTION_CAP_PER_PASS}/pass) before "
+                f"the review sweep finished; {reviews_unexamined} review slug(s) "
+                f"not examined this pass. Tasks and reviews share one per-pass "
+                f"cap and tasks are swept first, so a task backlog defers review "
+                f"archiving indefinitely."
+            )
 
     # Presence is ephemeral liveness state, not history. Prune agents that have
     # been dead for seven days; undatable/unreadable shards fail closed.
@@ -1322,9 +1368,13 @@ def reconcile(
     if days > 0:
         rows, notes, archived_map = _run_retention(
             transport, team, rows, now=now, today=today, days=days, log=log)
+        # `notes` that match none of these are DISCARDED — nothing else reads the
+        # list. "cap reached" is here because a note the caller never sees is the
+        # same silence the note exists to end.
         warnings.extend(
             n for n in notes
             if "FAILED" in n or "kept hot" in n or "UNKNOWN" in n
+            or "cap reached" in n
         )
 
     # --- ack fold + shard-GC sub-pass ---
@@ -1362,18 +1412,34 @@ def reconcile(
                 rows, now=now, complete=fold.conclusive),
     }
     try:
+        # SEPARATE DEADLINES, opened independently. These used to share ONE
+        # Deadline object, and the review fold spent it first — so forge was not
+        # slow, it was NEVER BUILT: measured on the live store 2026-08-10, reviews
+        # cut at 192/219 and forge came back scanned=None/total=None/rows=0 on
+        # every pass, costing every consumer a 74.8s raw fallback to discover it.
+        # A section that always runs last in a shared budget starves
+        # deterministically; the head-of-line rule in AGENTS.md, applied BETWEEN
+        # sections instead of within one. Worst-case pass duration is now the sum
+        # of the two budgets — the honest cost, and a trade nobody actually chose
+        # before, since it came from passing one object twice.
+        #
+        # Forge's COMPLETENESS still follows the review fold's, and that coupling
+        # is correct: its responsibility map is derived from review rows, so a
+        # partial review set cannot yield a complete forge view. Only the budget
+        # was ever wrong.
         proj_dl = Deadline.open(projection_mod.build_budget())
         reviews_section = projection_mod.build_review_projection(
             transport, team, now=now,
             prior=(prior_agg or {}).get(projection_mod.REVIEWS_KEY),
             settled_index=_load_settled_index(transport, team),
             deadline=proj_dl, log=log, feed_changes=projection_changes)
+        forge_dl = Deadline.open(projection_mod.forge_budget())
         forge_section = projection_mod.build_forge_projection(
             transport, team, now=now,
             review_rows=reviews_section.get("rows") or [],
             reviews_complete=bool(reviews_section.get("complete")),
             prior=(prior_agg or {}).get(projection_mod.FORGE_KEY),
-            deadline=proj_dl, log=log)
+            deadline=forge_dl, log=log)
         proj_state[projection_mod.REVIEWS_KEY] = reviews_section
         proj_state[projection_mod.FORGE_KEY] = forge_section
         if not reviews_section.get("complete"):
