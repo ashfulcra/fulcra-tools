@@ -252,9 +252,10 @@ evidence.
 
 ### 4. Agent-to-agent file transfer
 
-Use the Fulcra File Store as the data plane and Bus V3 as the notification plane.
-The Bus carries no file bytes. Its existing `ptr` field points to one immutable,
-content-addressed transfer manifest.
+Use the Fulcra File Store as the data plane, a durable Task as the obligation
+plane, and Bus V3 as the notification plane. The Bus carries no file bytes. Its
+existing `ptr` field points to the canonical recipient Task; that Task points to
+one immutable, content-addressed transfer manifest.
 
 #### 4.1 Store layout
 
@@ -290,8 +291,8 @@ The manifest is UTF-8 JSON with schema `coord.file-transfer.v1`:
   "files": [
     {
       "name": "evidence.zip",
-      "path": "_coord/transfers/018f4f4e-0000-7000-8000-000000000000/payload/0123abcd-evidence.zip",
-      "sha256": "0123abcd...",
+      "path": "_coord/transfers/018f4f4e-0000-7000-8000-000000000000/payload/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-evidence.zip",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "size": 1048576,
       "media_type": "application/zip"
     }
@@ -316,7 +317,14 @@ receiver hashes the downloaded manifest before trusting any field.
 3. upload each content-addressed payload;
 4. read back or download each payload and verify size and SHA-256;
 5. upload the content-addressed manifest last and verify its hash;
-6. emit one pointer-backed Bus `directive` event to the recipient.
+6. create and verify one canonical Task assigned to the recipient, carrying the
+   immutable manifest pointer and a receive/acknowledge next action;
+7. deliver that Task through the shared directive primitive, which emits one
+   pointer-backed Bus `directive` event to the recipient.
+
+The task slug is derived from the transfer ID, manifest hash, and recipient. It
+is owned by the sender, remains open until a valid receipt is filed, and is the
+durable recovery surface for `inbox` and `needs-me` after a crashed queue wake.
 
 The event uses:
 
@@ -326,34 +334,43 @@ The event uses:
   "to": "review-agent",
   "kind": "directive",
   "pri": "P2",
-  "slug": "file-transfer-018f4f4e-0000-7000-8000-000000000000",
-  "ptr": "_coord/transfers/018f4f4e-0000-7000-8000-000000000000/manifest-<sha256>.json"
+  "slug": "file-transfer-018f4f4e-0000-7000-8000-000000000000-<payload-hash>",
+  "ptr": "task/file-transfer-018f4f4e-0000-7000-8000-000000000000-<payload-hash>.md"
 }
 ```
 
-The manifest is the publication boundary. Payloads uploaded before a failed
-manifest write are unreachable staging artifacts, not delivered transfers. A Bus
-event is emitted only after the complete manifest and every payload are proven.
+The verified Task is the obligation boundary and the manifest is the data
+publication boundary. Payloads uploaded before a failed manifest write are
+unreachable staging artifacts, not delivered transfers. A Bus event is emitted
+only after the complete manifest, every payload, and the canonical Task are
+proven. Advancing the queue cursor cannot orphan the work because the Task remains
+open and discoverable until receipt.
 
 #### 4.4 Receipt sequence
 
-`coord-engine transfer receive <team> <transfer-id> --dest <directory>`:
+`coord-engine transfer receive <team> <task-slug> --dest <directory>`:
 
-1. resolves the event pointer without advancing another identity's cursor;
-2. verifies manifest path, hash, schema, sender, and intended recipient;
-3. rejects absolute paths, `..`, duplicate output names, and hash/size mismatch;
-4. downloads into a temporary directory;
-5. verifies every completed file before atomically moving it into the destination;
-6. writes a content-addressed receipt and sends a pointer-backed Bus `response`
-   event to the sender.
+1. resolves the event pointer to the canonical Task without advancing another
+   identity's cursor;
+2. verifies that the Task is open, assigned to the receiver, and points to the
+   expected content-addressed manifest;
+3. verifies manifest path, hash, schema, sender, and intended recipient;
+4. rejects absolute paths, `..`, duplicate output names, and hash/size mismatch;
+5. downloads into a temporary directory;
+6. verifies every completed file before atomically moving it into the destination;
+7. writes a content-addressed receipt and sends a pointer-backed Bus `response`
+   event to the sender; an accepted receipt closes the Task with that receipt as
+   evidence, while a rejected receipt leaves the Task open with its rejection
+   reason and recovery action.
 
 Receipt schema `coord.file-transfer-receipt.v1` records `transfer_id`, sender,
 recipient, manifest hash, status (`accepted` or `rejected`), verified file hashes,
 timestamp, and a human-readable reason. It never records the recipient's local
 absolute path.
 
-An acknowledgement is evidence of integrity and acceptance, not evidence that a
-subsequent task using the files is complete.
+An acknowledgement is evidence of integrity and acceptance and discharges the
+transfer Task. It is not evidence that a subsequent task using the files is
+complete.
 
 #### 4.5 Security and limits
 
@@ -376,9 +393,9 @@ emit a duplicate Bus event because the File Store and annotation write are not o
 transaction. Receivers deduplicate by `transfer_id` plus manifest hash. Different
 bytes under an existing transfer ID fail closed.
 
-If the event write fails after manifest publication, the command returns
-`FILE_READY_EVENT_FAILED` and prints an exact `bus-v3 send` recovery command using
-the immutable manifest pointer. It never re-uploads or invents a new transfer ID.
+If the event write fails after Task and manifest publication, the command returns
+`TASK_READY_EVENT_FAILED` and prints an exact `bus-v3 send` recovery command using
+the canonical Task pointer. It never re-uploads or invents a new transfer ID.
 
 ### 5. Guardrails on `--from`
 
@@ -435,9 +452,11 @@ This introduces a safe path without breaking repair and bootstrap workflows.
 ### File transfer
 
 - One and multiple-file transfers produce canonical manifests and stable paths.
+- Every transfer writes and verifies a canonical recipient Task before emitting
+  its Bus event; the event points to the Task and the Task points to the manifest.
 - Payload corruption, truncation, or manifest hash mismatch fails before receipt.
-- A payload or manifest upload failure emits no Bus event.
-- An event failure preserves the proven manifest and prints a deterministic
+- A payload, manifest, or Task write failure emits no Bus event.
+- An event failure preserves the proven Task and manifest and prints a deterministic
   recovery command.
 - Re-sending identical content is idempotent; changed content under the same
   transfer ID fails closed.
@@ -445,7 +464,10 @@ This introduces a safe path without breaking repair and bootstrap workflows.
   are rejected before destination mutation.
 - Receive stages in a temporary directory and moves files only after all hashes
   pass.
-- Accepted and rejected receipts are pointer-backed Bus responses to the sender.
+- A cursor advance followed by a receiver crash leaves the open Task visible in
+  `inbox` and `needs-me`.
+- Accepted and rejected receipts are pointer-backed Bus responses to the sender;
+  accepted receipts close the transfer Task with evidence.
 - Manifests and receipts contain no local absolute paths or team-specific policy.
 
 ## Rollout
@@ -470,8 +492,9 @@ status remain on the Bus throughout rollout.
 - A fresh `review request` is visible in the required reviewer's Bus V3 queue
   without a second manual message.
 - The queue event points to the same durable task surfaced by `needs-me`.
-- An agent can send one or more files by publishing verified File Store payloads
-  and one content-addressed manifest pointer, and the recipient can verify and
-  acknowledge them without trusting filenames or local paths.
+- An agent can send one or more files by publishing verified File Store payloads,
+  one content-addressed manifest, and a durable recipient Task; the Bus points to
+  the Task, and the recipient can verify and acknowledge the transfer without
+  trusting filenames or local paths.
 - Exact-head approval remains the only merge-discharge evidence.
 - No team-specific identity or machine mapping is added to the repository.
