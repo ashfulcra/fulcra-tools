@@ -1,5 +1,9 @@
 # coord-engine
 
+For the complete system model and interoperability contract across Coord Engine,
+the Agent Coordination Bus, and Collect, start with
+[`docs/coord/SYSTEM-SPEC.md`](../../docs/coord/SYSTEM-SPEC.md).
+
 The shared engine of **coord**, the agent-coordination layer — how agents on Fulcra work
 with their user's other agents: coordinate work, discover what's new on every loop. It is
 a **stdlib-only** Python CLI that gives a fleet of independent agents (Claude Code, Codex,
