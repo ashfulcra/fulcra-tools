@@ -1980,7 +1980,51 @@ def test_roles_claim_warns_on_foreign_nonce(capsys, tmp_path, monkeypatch):
     fm["nonce"] = "f" * 16
     t.put(path, okf.render_frontmatter(fm) + "\nHolding reviewer.\n")
     assert _claim(t) == 0                       # still claims (never-raise), but loudly
-    assert "nonce mismatch" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "nonce mismatch" in err
+    assert "ago" in err                         # the mismatch age is surfaced
+
+
+def test_roles_claim_foreign_nonce_warning_surfaces_stale_age(capsys, tmp_path, monkeypatch):
+    """A 17-day-dead predecessor and a live intruder produce the same nonce
+    mismatch; the warning must carry the shard write's AGE so the reader can
+    tell them apart (nonce-forensics follow-up, approved P3)."""
+    from coord_engine import okf
+    from coord_engine.tasks import agent_key
+    monkeypatch.setenv("COORD_ENGINE_STATE_DIR", str(tmp_path))
+    t = FakeTransport()
+    assert _claim(t) == 0
+    capsys.readouterr()
+    path = f"team/r/roles/reviewer/leases/{agent_key('coord-maintainer')}.md"
+    fm = okf.parse_frontmatter(t.read(path))
+    fm["nonce"] = "f" * 16
+    from datetime import datetime, timedelta, timezone
+    stale = datetime.now(timezone.utc) - timedelta(days=17)
+    fm["timestamp"] = stale.strftime("%Y-%m-%dT%H:%M:%SZ")
+    t.put(path, okf.render_frontmatter(fm) + "\nHolding reviewer.\n")
+    assert _claim(t) == 0
+    err = capsys.readouterr().err
+    assert "nonce mismatch" in err
+    assert "17d ago" in err                     # age, not just the fact of a mismatch
+    assert "dead predecessor" in err            # the read-it-right hint
+
+
+def test_roles_claim_foreign_nonce_warning_unparseable_timestamp(capsys, tmp_path, monkeypatch):
+    from coord_engine import okf
+    from coord_engine.tasks import agent_key
+    monkeypatch.setenv("COORD_ENGINE_STATE_DIR", str(tmp_path))
+    t = FakeTransport()
+    assert _claim(t) == 0
+    capsys.readouterr()
+    path = f"team/r/roles/reviewer/leases/{agent_key('coord-maintainer')}.md"
+    fm = okf.parse_frontmatter(t.read(path))
+    fm["nonce"] = "f" * 16
+    fm["timestamp"] = "not-a-time"
+    t.put(path, okf.render_frontmatter(fm) + "\nHolding reviewer.\n")
+    assert _claim(t) == 0
+    err = capsys.readouterr().err
+    assert "nonce mismatch" in err
+    assert "at an UNKNOWN time" in err          # unparseable never crashes the claim
 
 
 def test_roles_release_clears_nonce_state(tmp_path, monkeypatch):

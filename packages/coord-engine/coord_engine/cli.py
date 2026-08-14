@@ -7697,9 +7697,16 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     shard_nonce = existing.get("nonce")  # absent for pre-nonce shards: overwrites by
     # old-engine sessions are undetectable by design — nothing to compare against.
     if stored and shard_nonce and shard_nonce != stored:
-        print(f"WARNING: nonce mismatch on {slug}.md — another session has been acting "
-              f"as {agent} since your last claim (same-id double-acting). Give each "
-              f"session its own FULCRA_COORD_AGENT identity, or stop one.", file=sys.stderr)
+        # Surface the AGE of the mismatching write: a 17-day-dead predecessor
+        # lineage and a live intruder produce the same nonce mismatch, and only
+        # the shard timestamp (already in hand) tells them apart.
+        age = presence._ago_label(existing.get("timestamp"), _iso(_now()))
+        when = "at an UNKNOWN time" if age == "unknown" else f"{age} ago"
+        print(f"WARNING: nonce mismatch on {slug}.md — another session last claimed "
+              f"as {agent} {when} (same-id double-acting). A large age means a dead "
+              f"predecessor lineage, not a live intruder — check it before escalating. "
+              f"Give each session its own FULCRA_COORD_AGENT identity, or stop one.",
+              file=sys.stderr)
     elif stored is None and shard_nonce:
         print(f"note: taking over an existing lease shard for {agent} written by another "
               f"session (no local nonce state to compare)", file=sys.stderr)
