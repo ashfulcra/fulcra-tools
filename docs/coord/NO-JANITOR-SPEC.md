@@ -94,8 +94,44 @@ spec re-homes the duties and retires the host class.
 - **Typed records, `v:1` JSON in `note`:** `kind: pin` (engine pin + rc,
   replaces `adopt-latest.sh` as the distribution signal), `kind: fence`
   (fleet minimum version, §4), `kind: config` (fleet-wide settings). Records
-  are append-only; latest-by-kind wins; every record names its author
-  identity and the authorizing directive slug.
+  are append-only; every record names its author identity and the
+  authorizing directive slug.
+- **Authority model (review round 1, P1).** A claimed identity in JSON is
+  not an authorization boundary — any session holding the account's
+  credentials can write any record, so the channel by itself must not be
+  trusted to steer the fleet. Trust is anchored in what IS server-enforced
+  today, and every verification failure refuses (§3a):
+  - *Account boundary (server-enforced):* readers accept records only from
+    the fleet account's own registered channel (`records.json`), never from
+    a shared/foreign catalog. Writing it at all requires the account's
+    credentials — the same trust root as the store the fleet already runs
+    on. The channel adds no NEW writer surface; it inherits the existing
+    one.
+  - *Content-addressed pins (server-enforced by the forge):* a `pin` record
+    carries the FULL 40-hex commit SHA of the canonical repo. Adoption
+    installs `git+<canonical-repo>@<sha>` — git object identity is the
+    artifact hash, so a pin can only ever point at code that exists in the
+    repo, and publishing runnable code requires repo push access: a second,
+    independently server-authenticated boundary (the forge's, not
+    Fulcra's). The channel conveys WHICH commit; the repo remains the root
+    of trust for code. Records carrying abbreviated SHAs, branch names, or
+    foreign repo URLs are invalid and refused.
+  - *Publisher allowlist (claim-based today, attested later):* only the
+    named release role (coord-boss, or a successor named in a `config`
+    record that itself passed verification) publishes pin/fence/rollback
+    records. Readers check the author claim AND that the named authorizing
+    directive row exists on the bus. This is defense-in-depth, not a
+    boundary, and the spec says so: until the platform attests record
+    authorship server-side (upstream register **U10** — the same primitive
+    the mesh needs), the allowlist is honest-majority hardening on top of
+    the two real boundaries above. When U10 lands, the allowlist check
+    upgrades from claim to attestation with no protocol change.
+- **Deterministic ordering.** Latest-by-kind is decided by the server-side
+  change ledger (`data-updates` processing order), with record id as the
+  lexicographic tiebreak for equal timestamps — never by client-supplied
+  time fields, which are forgeable. Two conflicting same-instant records
+  therefore resolve identically on every reader; a reader that cannot
+  establish the order refuses (§3a).
 - **The tick-time catch-up check:** every agent tick/wake runs
   `fulcra data-updates "<since last tick>"` — ONE cheap call, no store
   scan — and looks for the channel's data type in the result. Nonzero →
@@ -103,6 +139,12 @@ spec re-homes the duties and retires the host class.
   the fence, apply config) before processing other work. Zero → nothing to
   catch up on, proceed. The same call's file-change rows feed the fold
   cursors of §2, so the check is free when folds already run.
+- **§3a Refuse-on-uncertainty.** If publisher verification, directive
+  cross-check, ordering, or SHA validity is uncertain for the latest record
+  of a kind, the agent KEEPS its current pin/fence/config, surfaces the
+  refusal loudly in its fold's degraded line and its next claim to
+  coord-boss, and does not fall back to an older record of that kind
+  (an attacker must not be able to force a downgrade by appending garbage).
 - **Bootstrap:** a NEW agent still reads `adopt-latest.sh` once to get an
   engine; from first tick onward the channel is authoritative and the file
   is a mirror the pin-record author updates for bootstrap only.
@@ -114,6 +156,19 @@ spec re-homes the duties and retires the host class.
 
 - A `kind: fence` record carries `fleet_min_version` (an engine version) and
   the authorizing directive. Agents cache the latest fence at tick time.
+- **The fence is monotonic.** A record whose `fleet_min_version` is LOWER
+  than the cached fence is ignored and reported, never applied — a later
+  record must not be able to lower the minimum and re-admit stale writers.
+  Lowering requires an explicit `kind: rollback` record that (a) names the
+  fence value it lowers to and the operator-authorized directive ordering
+  it, and (b) is mirrored by a repo commit updating the bootstrap mirror —
+  so a rollback needs BOTH the account credentials and repo push access,
+  the same two boundaries as a pin (§3). Absent either leg, readers keep
+  the higher fence. Note the review's structural point stands and is
+  answered by scope: the fence never defends against a compromised channel
+  (the channel's own §3 boundaries do that); it defends against stale
+  writers, and monotonicity keeps the channel from being turned against
+  that purpose.
 - **Below the fence: reads stay legal, writes refuse** — the transport write
   wrapper checks `engine_version >= fleet_min_version` and fails loudly with
   the adopt instruction. An agent that cannot tick (and so cannot know the
@@ -156,7 +211,12 @@ Steps, in order:
   check, publish the first pin record, then the first fence record (§4
   rollout note). *Acceptance:* every fleet agent's tick log shows the
   catch-up check; a test pin record reaches all agents within one tick
-  cycle each; a below-fence write attempt refuses in a live test.
+  cycle each; a below-fence write attempt refuses in a live test; AND the
+  authority tests pass live: a record with a non-allowlisted claimed
+  author is refused; a pin carrying an abbreviated SHA, branch name, or
+  SHA absent from the canonical repo is refused; a fence-lowering record
+  without the two-leg rollback is ignored and reported; two same-instant
+  conflicting records resolve identically on two independent readers.
 - **Phase 3 — janitor retirement.** §5 steps 1–3. *Acceptance:* 14 days
   with zero store writes from any non-session identity (auditable from
   shard `agent`/authorship fields + presence absence), retention batch
