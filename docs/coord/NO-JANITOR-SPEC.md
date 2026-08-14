@@ -58,10 +58,11 @@ spec re-homes the duties and retires the host class.
 4. **Version fence.** A writer whose engine version is below the fleet
    minimum refuses to write (§4). This converts "stale out-of-session
    writer" from an incident class into a refused operation.
-5. **Distribution rides the platform, not host config.** Fleet-wide facts
-   (pins, fences, config) are typed records on a dedicated annotation
-   channel (§3), caught up on every tick via `data-updates` — never
-   distributed by editing files on hosts.
+5. **Authority rides the review gate; the platform rings the doorbell.**
+   Fleet-wide facts (pins, fences, config) live in ONE review-gated manifest
+   in the repo (§3); a dedicated annotation channel plus the `data-updates`
+   tick check distributes only the "something changed" signal — never the
+   facts themselves, and never by editing files on hosts.
 
 ## 2. Mechanism: in-session folds with bounded read-repair
 
@@ -91,97 +92,77 @@ spec re-homes the duties and retires the host class.
 - **One dedicated annotation data type** (working name `FleetDirective`,
   a `MomentAnnotation/<uuid>`) registered in `_coord/bus-v3/records.json`
   beside the bus channel — resolved from the registry, never hardcoded.
-- **Typed records, `v:1` JSON in `note`:** `kind: pin` (engine pin + rc,
-  replaces `adopt-latest.sh` as the distribution signal), `kind: fence`
-  (fleet minimum version, §4), `kind: config` (fleet-wide settings). Records
-  are append-only; every record names its author identity and the
-  authorizing directive slug.
-- **Authority model (review round 1, P1).** A claimed identity in JSON is
-  not an authorization boundary — any session holding the account's
-  credentials can write any record, so the channel by itself must not be
-  trusted to steer the fleet. Trust is anchored in what IS server-enforced
-  today, and every verification failure refuses (§3a):
-  - *Account boundary (server-enforced):* readers accept records only from
-    the fleet account's own registered channel (`records.json`), never from
-    a shared/foreign catalog. Writing it at all requires the account's
-    credentials — the same trust root as the store the fleet already runs
-    on. The channel adds no NEW writer surface; it inherits the existing
-    one.
-  - *Content-addressed pins (server-enforced by the forge):* a `pin` record
-    carries the FULL 40-hex commit SHA of the canonical repo. Adoption
-    installs `git+<canonical-repo>@<sha>` — git object identity is the
-    artifact hash, so a pin can only ever point at code that exists in the
-    repo, and publishing runnable code requires repo push access: a second,
-    independently server-authenticated boundary (the forge's, not
-    Fulcra's). The channel conveys WHICH commit; the repo remains the root
-    of trust for code. Records carrying abbreviated SHAs, branch names, or
-    foreign repo URLs are invalid and refused.
-  - *Publisher allowlist (claim-based today, attested later):* only the
-    named release role (coord-boss, or a successor named in a `config`
-    record that itself passed verification) publishes pin/fence/rollback
-    records. Readers check the author claim AND that the named authorizing
-    directive row exists on the bus. This is defense-in-depth, not a
-    boundary, and the spec says so: until the platform attests record
-    authorship server-side (upstream register **U10** — the same primitive
-    the mesh needs), the allowlist is honest-majority hardening on top of
-    the two real boundaries above. When U10 lands, the allowlist check
-    upgrades from claim to attestation with no protocol change.
-- **Deterministic ordering.** Latest-by-kind is decided by the server-side
-  change ledger (`data-updates` processing order), with record id as the
-  lexicographic tiebreak for equal timestamps — never by client-supplied
-  time fields, which are forgeable. Two conflicting same-instant records
-  therefore resolve identically on every reader; a reader that cannot
-  establish the order refuses (§3a).
+- **The channel carries ZERO authority (review rounds 1–2; ruled
+  2026-08-14).** A channel record is a WAKE HINT — "go check the manifest" —
+  never an order. No state transition ever binds to a record's content, so
+  publisher identity and record ordering stop being trust questions: the
+  worst a forged, duplicate, or garbage record can cause is one wasted
+  manifest fetch. This is the operator's original design read precisely —
+  the channel was always the doorbell, not the order. (Appendix A preserves
+  why the claim-based-authority alternative was rejected.)
+- **Authority lives in ONE review-gated manifest in the repo:**
+  `docs/coord/fleet-manifest.json` on the canonical repo's main branch,
+  carrying the pin (engine version + FULL 40-hex commit SHA), the fence
+  value (§4), and fleet config. It changes only via the normal review-gated
+  merge to main — the existing merge process plus the operator's forge
+  account control IS the protected publisher boundary: server-authenticated,
+  audit-trailed, and already how every other fleet-behavior change ships.
+  Ordering is git history on main; rollback is a reviewed revert; the audit
+  trail is `git log` on one file.
+- **Readers fetch, verify, act.** On a wake hint (and before any write, §4),
+  the agent fetches the manifest from canonical origin over authenticated
+  HTTPS and reconciles to its content in-session: self-adopt the pin, apply
+  the fence and config. Adoption stays content-addressed — the manifest pins
+  a full commit SHA, so the installed artifact is immutable by git object
+  identity, and a manifest naming an abbreviated SHA, branch, or foreign
+  repo is invalid (§3a).
+- **Records need no schema trust:** any record of the channel's type
+  triggers the same idempotent action — fetch the manifest once this tick.
+  Conflicting records converge to identical state on every reader because
+  the state never comes from the records.
 - **The tick-time catch-up check:** every agent tick/wake runs
   `fulcra data-updates "<since last tick>"` — ONE cheap call, no store
   scan — and looks for the channel's data type in the result. Nonzero →
-  read the directive records → act in-session (self-adopt the pin, update
-  the fence, apply config) before processing other work. Zero → nothing to
-  catch up on, proceed. The same call's file-change rows feed the fold
-  cursors of §2, so the check is free when folds already run.
-- **§3a Refuse-on-uncertainty.** If publisher verification, directive
-  cross-check, ordering, or SHA validity is uncertain for the latest record
-  of a kind, the agent KEEPS its current pin/fence/config, surfaces the
-  refusal loudly in its fold's degraded line and its next claim to
-  coord-boss, and does not fall back to an older record of that kind
-  (an attacker must not be able to force a downgrade by appending garbage).
-- **Bootstrap:** a NEW agent still reads `adopt-latest.sh` once to get an
-  engine; from first tick onward the channel is authoritative and the file
-  is a mirror the pin-record author updates for bootstrap only.
+  fetch the manifest and reconcile to it before processing other work.
+  Zero → nothing to catch up on, proceed. The same call's file-change rows
+  feed the fold cursors of §2, so the check is free when folds already run.
+- **§3a Refuse-on-uncertainty.** If the manifest cannot be fetched from
+  canonical origin, fails to parse, or names an invalid pin (abbreviated
+  SHA, branch name, foreign repo), the agent KEEPS its current
+  pin/fence/config, surfaces the refusal loudly in its fold's degraded line
+  and its next claim to coord-boss, and never substitutes a cached or
+  third-party copy of the manifest — unfetchable means hold state, not
+  downgrade.
+- **Bootstrap:** a NEW agent fetches the same manifest from canonical
+  origin — bootstrap and steady-state read one artifact. `adopt-latest.sh`
+  becomes a transitional mirror and is retired at Phase 2 acceptance.
 - **Non-goal:** this channel does not detect datashare joins — `data-updates`
   has no `--user-id` form and covers records + files, not shares or catalogs
   (documented in `MESH-PEER-QUICKSTART.md`; watch `share list-incoming`).
 
 ## 4. The version fence
 
-- A `kind: fence` record carries `fleet_min_version` (an engine version) and
-  the authorizing directive. Agents cache the latest fence at tick time.
-- **The fence is monotonic.** A record whose `fleet_min_version` is LOWER
-  than the cached fence is ignored and reported, never applied — a later
-  record must not be able to lower the minimum and re-admit stale writers.
-  Lowering requires an explicit `kind: rollback` record that (a) names the
-  fence value it lowers to and the operator-authorized directive ordering
-  it, and (b) is mirrored by a repo commit updating the bootstrap mirror —
-  so a rollback needs BOTH the account credentials and repo push access,
-  the same two boundaries as a pin (§3). Absent either leg, readers keep
-  the higher fence. Note the review's structural point stands and is
-  answered by scope: the fence never defends against a compromised channel
-  (the channel's own §3 boundaries do that); it defends against stale
-  writers, and monotonicity keeps the channel from being turned against
-  that purpose.
+- The manifest carries `fleet_min_version` (an engine version). Agents cache
+  the fence from the manifest at tick time.
+- **Fence changes ride the merge gate.** Raising the fence is a normal
+  reviewed manifest change; lowering it is a reviewed revert — the review
+  process is the rollback authorization, and git history is the ordering.
+  No channel record can move the fence in either direction (§3: records
+  carry zero authority), which is what makes the fence safe: the mechanism
+  that distributes it cannot be turned against it.
 - **Below the fence: reads stay legal, writes refuse** — the transport write
   wrapper checks `engine_version >= fleet_min_version` and fails loudly with
   the adopt instruction. An agent that cannot tick (and so cannot know the
   fence moved) is exactly the stale writer the fence exists to stop: its
-  next write attempt re-reads the fence record before writing (one targeted
-  read, fail-closed to refuse if unreadable).
+  next write attempt re-fetches the manifest before writing (one targeted
+  fetch, fail-closed to refuse the write if the manifest is unreadable).
 - The legacy `coord-reconcile:<host>` identity prefix is **denied writes
   outright** regardless of version — the class is retired (§5), and the
   fence is where the refusal lives.
-- Rollout note: the fence distributes over the channel it gates. The first
-  fence record is therefore set only after the fleet is on a channel-aware
-  pin (Phase 2 acceptance), and the fence's first value is that same pin —
-  no agent can be fenced out by a mechanism it cannot yet see.
+- Rollout note: the fence's first value is the first manifest-aware pin —
+  set only after the fleet is on a manifest-aware engine (Phase 2
+  acceptance), so no agent can be fenced out by a mechanism it cannot yet
+  see.
 
 ## 5. Retirement of the `coord-reconcile:*` class
 
@@ -207,16 +188,16 @@ Steps, in order:
   7 days with zero fail-closed fallbacks attributable to the flip (degraded
   lines quote the feed cursor, not listing staleness). Operator flips per
   the standing parked row — this spec does not bypass that gate.
-- **Phase 2 — channel + fence.** Register the data type, ship the tick
-  check, publish the first pin record, then the first fence record (§4
-  rollout note). *Acceptance:* every fleet agent's tick log shows the
-  catch-up check; a test pin record reaches all agents within one tick
-  cycle each; a below-fence write attempt refuses in a live test; AND the
-  authority tests pass live: a record with a non-allowlisted claimed
-  author is refused; a pin carrying an abbreviated SHA, branch name, or
-  SHA absent from the canonical repo is refused; a fence-lowering record
-  without the two-leg rollback is ignored and reported; two same-instant
-  conflicting records resolve identically on two independent readers.
+- **Phase 2 — manifest + channel + fence.** Merge the first manifest,
+  register the channel data type, ship the tick check, then set the first
+  fence value (§4 rollout note); retire `adopt-latest.sh` on acceptance.
+  *Acceptance:* every fleet agent's tick log shows the catch-up check; a
+  manifest change reaches all agents within one tick cycle each, signalled
+  by a hint record; the zero-authority tests pass live: a forged/garbage
+  channel record causes at most one manifest fetch and ZERO state change;
+  a manifest naming an abbreviated SHA, branch, or foreign repo is refused
+  with state held (§3a); an unfetchable-origin drill holds state and
+  surfaces the degraded line; a below-fence write attempt refuses.
 - **Phase 3 — janitor retirement.** §5 steps 1–3. *Acceptance:* 14 days
   with zero store writes from any non-session identity (auditable from
   shard `agent`/authorship fields + presence absence), retention batch
@@ -226,7 +207,7 @@ Steps, in order:
 ## 7. What this kills, what it deliberately keeps
 
 Kills: the cron reconciler and its class; out-of-session store writers;
-`adopt-latest.sh` as the distribution mechanism (demoted to bootstrap
+`adopt-latest.sh` as the distribution mechanism (retired at Phase 2; transitional
 mirror); the assumption that fold freshness requires a warm daemon.
 
 Keeps: `send_later`/Routine self-wakes (the session wakes ITSELF — the
@@ -234,8 +215,9 @@ writer is the woken session, in-session by definition); the wake router as
 shipped (unproven in deployment; nothing here depends on it); presence,
 lease, and nonce semantics unchanged; addendum-1's cut of the CoordEvent
 second ledger stays cut — the directives channel is not a coordination
-event mirror, it carries fleet-scope facts only, at fleet-directive rates
-(a handful of records a week, not per-task traffic).
+event mirror, it carries wake hints only, at fleet-directive rates
+(a handful of records a week, not per-task traffic — and the facts those
+hints point at live in the manifest, not in any record).
 
 ## 8. Open questions for review
 
@@ -248,4 +230,31 @@ event mirror, it carries fleet-scope facts only, at fleet-directive rates
    warm path, or does fail-closed full scan cover cold-start forever?
 3. Fence granularity: engine version only, or per-capability fences (e.g.
    cursor-v2 activation is already forbidden by a version warning today —
-   should that become the first fence record instead of a hardcoded check)?
+   should that become a fenced capability in the manifest instead of a
+   hardcoded check)?
+
+## Appendix A — why claim-based publisher authority was rejected (review history)
+
+Two review rounds shaped §3, and the reasoning is preserved so it is not
+re-litigated:
+
+- **Round 1** proposed typed pin/fence/config records applied directly from
+  the channel, with author identity named in the record. Rejected: a claimed
+  identity in JSON is not an authorization boundary — any session holding
+  the shared account credentials can write any record, so the channel could
+  steer the fleet.
+- **Round 2** anchored pins in content-addressed full-SHA installs (real,
+  and retained in §3) and demoted the publisher allowlist to
+  "defense-in-depth until platform-attested authorship (U10)". Rejected on
+  two grounds: (1) a full SHA proves object identity, not release approval —
+  any object present in the repo could be selected by a forged record; and
+  (2) the ordering the spec assigned to `data-updates` does not exist — the
+  command returns an aggregate summary, not a per-record server sequence, so
+  latest-by-kind could not be established from data readers actually have.
+- **Resolution (r3, ruled by coord-boss 2026-08-14):** move ALL authority
+  out of the records and into the review-gated repo manifest; the channel
+  is a wake hint. Both P1s dissolve — publisher trust becomes the merge
+  gate (already server-authenticated), and ordering becomes git history.
+  Server-attested record authorship (U10) remains the upgrade path that
+  could one day move authority into the channel itself; until then no
+  record content is trusted for anything.
