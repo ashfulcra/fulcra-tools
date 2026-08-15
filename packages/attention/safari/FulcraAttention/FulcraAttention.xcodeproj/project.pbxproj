@@ -57,20 +57,16 @@
 		FCA000000000000000000110 /* Ingest.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000E /* Ingest.swift */; };
 		0DAEBD802FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */; };
 		0DAEBD9A2FD5D985008ADF6D /* service-worker-loader.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */; };
-		0DAEBD9B2FD5D985008ADF6D /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD932FD5D985008ADF6D /* index.html */; };
-		0DAEBD9C2FD5D985008ADF6D /* wizard.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD942FD5D985008ADF6D /* wizard.html */; };
+		0DAEBD9B2FD5D985008ADF6D /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD932FD5D985008ADF6D /* safari.html */; };
 		0DAEBD9D2FD5D985008ADF6D /* heartbeat.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD952FD5D985008ADF6D /* heartbeat.js */; };
 		0DAEBD9E2FD5D985008ADF6D /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD962FD5D985008ADF6D /* icons */; };
 		0DAEBD9F2FD5D985008ADF6D /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD972FD5D985008ADF6D /* manifest.json */; };
-		0DAEBDA02FD5D985008ADF6D /* options.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD982FD5D985008ADF6D /* options.html */; };
 		0DAEBDA12FD5D985008ADF6D /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD992FD5D985008ADF6D /* assets */; };
 		0DAEBDA22FD5D985008ADF6D /* service-worker-loader.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */; };
-		0DAEBDA32FD5D985008ADF6D /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD932FD5D985008ADF6D /* index.html */; };
-		0DAEBDA42FD5D985008ADF6D /* wizard.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD942FD5D985008ADF6D /* wizard.html */; };
+		0DAEBDA32FD5D985008ADF6D /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD932FD5D985008ADF6D /* safari.html */; };
 		0DAEBDA52FD5D985008ADF6D /* heartbeat.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD952FD5D985008ADF6D /* heartbeat.js */; };
 		0DAEBDA62FD5D985008ADF6D /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD962FD5D985008ADF6D /* icons */; };
 		0DAEBDA72FD5D985008ADF6D /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD972FD5D985008ADF6D /* manifest.json */; };
-		0DAEBDA82FD5D985008ADF6D /* options.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD982FD5D985008ADF6D /* options.html */; };
 		0DAEBDA92FD5D985008ADF6D /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD992FD5D985008ADF6D /* assets */; };
 /* End PBXBuildFile section */
 
@@ -148,14 +144,12 @@
 		0DAEBD682FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "FulcraAttention Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0DAEBD722FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "service-worker-loader.js"; path = "../../../chrome/dist/service-worker-loader.js"; sourceTree = "<group>"; };
-		0DAEBD932FD5D985008ADF6D /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = index.html; path = ../../../chrome/dist/index.html; sourceTree = "<group>"; };
-		0DAEBD942FD5D985008ADF6D /* wizard.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = wizard.html; path = ../../../chrome/dist/wizard.html; sourceTree = "<group>"; };
-		0DAEBD952FD5D985008ADF6D /* heartbeat.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = heartbeat.js; path = ../../../chrome/dist/heartbeat.js; sourceTree = "<group>"; };
-		0DAEBD962FD5D985008ADF6D /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = ../../../chrome/dist/icons; sourceTree = "<group>"; };
-		0DAEBD972FD5D985008ADF6D /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = ../../../chrome/dist/manifest.json; sourceTree = "<group>"; };
-		0DAEBD982FD5D985008ADF6D /* options.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = options.html; path = ../../../chrome/dist/options.html; sourceTree = "<group>"; };
-		0DAEBD992FD5D985008ADF6D /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = assets; path = ../../../chrome/dist/assets; sourceTree = "<group>"; };
+		0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "service-worker-loader.js"; path = "../../../chrome/dist-safari/service-worker-loader.js"; sourceTree = "<group>"; };
+		0DAEBD932FD5D985008ADF6D /* safari.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = safari.html; path = ../../../chrome/dist-safari/safari.html; sourceTree = "<group>"; };
+		0DAEBD952FD5D985008ADF6D /* heartbeat.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = heartbeat.js; path = ../../../chrome/dist-safari/heartbeat.js; sourceTree = "<group>"; };
+		0DAEBD962FD5D985008ADF6D /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = ../../../chrome/dist-safari/icons; sourceTree = "<group>"; };
+		0DAEBD972FD5D985008ADF6D /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = ../../../chrome/dist-safari/manifest.json; sourceTree = "<group>"; };
+		0DAEBD992FD5D985008ADF6D /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = assets; path = ../../../chrome/dist-safari/assets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -296,12 +290,10 @@
 			isa = PBXGroup;
 			children = (
 				0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */,
-				0DAEBD932FD5D985008ADF6D /* index.html */,
-				0DAEBD942FD5D985008ADF6D /* wizard.html */,
+				0DAEBD932FD5D985008ADF6D /* safari.html */,
 				0DAEBD952FD5D985008ADF6D /* heartbeat.js */,
 				0DAEBD962FD5D985008ADF6D /* icons */,
 				0DAEBD972FD5D985008ADF6D /* manifest.json */,
-				0DAEBD982FD5D985008ADF6D /* options.html */,
 				0DAEBD992FD5D985008ADF6D /* assets */,
 			);
 			name = Resources;
@@ -469,9 +461,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				0DAEBDA82FD5D985008ADF6D /* options.html in Resources */,
 				0DAEBDA92FD5D985008ADF6D /* assets in Resources */,
-				0DAEBDA42FD5D985008ADF6D /* wizard.html in Resources */,
 				0DAEBDA22FD5D985008ADF6D /* service-worker-loader.js in Resources */,
 				0DAEBDA32FD5D985008ADF6D /* index.html in Resources */,
 				0DAEBDA62FD5D985008ADF6D /* icons in Resources */,
@@ -484,9 +474,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				0DAEBDA02FD5D985008ADF6D /* options.html in Resources */,
 				0DAEBDA12FD5D985008ADF6D /* assets in Resources */,
-				0DAEBD9C2FD5D985008ADF6D /* wizard.html in Resources */,
 				0DAEBD9A2FD5D985008ADF6D /* service-worker-loader.js in Resources */,
 				0DAEBD9B2FD5D985008ADF6D /* index.html in Resources */,
 				0DAEBD9E2FD5D985008ADF6D /* icons in Resources */,

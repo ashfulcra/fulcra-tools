@@ -372,8 +372,29 @@ CI job that builds this project at all.
    property names). Outbox entries are handed across unchanged; a mapping layer
    is exactly where a renamed field would go quietly missing.
 
-   **What is still NOT wired, and it is more than a transport.** Three facts,
-   each verified rather than assumed:
+   **RESOLVED 2026-08-12 — separate Safari bundle** (operator decision; the
+   criterion was standalone distribution, not build tidiness). `vite.safari.config.ts`
+   + `manifest.safari.config.json` emit `chrome/dist-safari`, and the Xcode
+   extension target copies THAT instead of `chrome/dist`. Measured on the
+   emitted manifests: permissions **11 -> 3** (`storage`, `alarms`,
+   `nativeMessaging`), host_permissions **2 -> 0**, and the all-URLs
+   `optional_host_permissions` is gone. The bundle contains no reference to
+   `api.fulcradynamics.com`, Auth0, the daemon port, `chrome.history`, or the
+   ingest endpoint — verified by scanning both bundles, with the same scan
+   finding them in the Chrome one.
+
+   Honest caveat: capture must observe pages, so `content_scripts` still matches
+   `http://*/*` and `https://*/*`. That is broad injection access granted at
+   install. The reduction is real but it is 11 -> 3 permissions, not "no
+   permissions".
+
+   The entry points are `src/safari/{content,background,outbox,popup}.ts(x)`.
+   The content script is the first production caller of
+   `startVisibilityCapture`; it forwards visits to the background worker because
+   content scripts cannot call `sendNativeMessage`.
+
+   **Superseded below** — the three facts that forced this decision, kept for
+   the record:
 
    - `startVisibilityCapture` has **no production caller** — it is invoked only
      from its own tests, so Safari capture runs nowhere today;

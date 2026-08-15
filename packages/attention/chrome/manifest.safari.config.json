@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Fulcra Attention",
+  "version": "0.1.0",
+  "description": "Capture browsing attention into your Fulcra account.",
+  "permissions": [
+    "storage",
+    "alarms",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "src/safari/background.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "src/safari/content.ts"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "icons": {
+    "16": "icons/icon-active-16.png",
+    "32": "icons/icon-active-32.png",
+    "48": "icons/icon-active-48.png",
+    "128": "icons/icon-active-128.png"
+  },
+  "action": {
+    "default_popup": "safari.html",
+    "default_title": "Fulcra Attention",
+    "default_icon": {
+      "16": "icons/icon-active-16.png",
+      "32": "icons/icon-active-32.png",
+      "48": "icons/icon-active-48.png",
+      "128": "icons/icon-active-128.png"
+    }
+  }
+}
