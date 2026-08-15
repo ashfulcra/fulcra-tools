@@ -124,4 +124,50 @@ describe("safari outbox retention", () => {
     expect(left[left.length - 1].start_time).toBe("2026-07-01T00:00:00.000Z");
     expect(left[0].start_time).not.toBe(many[0].start_time);
   });
+
+  it("retains BOTH events when two adds race (pr-617 r1 regression)", async () => {
+    // Pre-lock, each add read the same array at its first await, pushed its
+    // own visit, and the second set erased the first — deterministic 1-of-2
+    // loss with nothing but microtask interleaving.
+    const area = memArea();
+    await Promise.all([
+      addSafariEvent(event("2026-06-01T00:00:00.000Z", "https://a.example/1"), area),
+      addSafariEvent(event("2026-06-01T00:01:00.000Z", "https://a.example/2"), area),
+    ]);
+    const left = await loadSafariOutbox(area);
+    expect(left).toHaveLength(2);
+  });
+
+  it("retains a visit that lands while a flush is mid-send", async () => {
+    const area = memArea();
+    await addSafariEvent(event("2026-06-01T00:00:00.000Z"), area);
+
+    let release!: (o: { kind: "ok"; sent: number; skipped: number }) => void;
+    const gate = new Promise<{ kind: "ok"; sent: number; skipped: number }>((r) => {
+      release = r;
+    });
+    const send = vi.fn(async () => gate);
+
+    const flushing = flushSafariOutbox(area, send);
+    await addSafariEvent(event("2026-06-01T00:05:00.000Z", "https://a.example/mid"), area);
+    release({ kind: "ok", sent: 1, skipped: 0 });
+    await flushing;
+
+    const left = await loadSafariOutbox(area);
+    expect(left).toHaveLength(1);
+    expect(left[0].url).toBe("https://a.example/mid");
+  });
+
+  it("a rejected mutation does not wedge later adds", async () => {
+    const area = memArea();
+    const broken = {
+      get: async () => {
+        throw new Error("storage down");
+      },
+      set: async () => {},
+    };
+    await expect(addSafariEvent(event("2026-06-01T00:00:00.000Z"), broken)).rejects.toThrow();
+    await addSafariEvent(event("2026-06-01T00:01:00.000Z"), area);
+    expect(await loadSafariOutbox(area)).toHaveLength(1);
+  });
 });

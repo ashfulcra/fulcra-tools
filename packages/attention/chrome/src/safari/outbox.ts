@@ -35,6 +35,35 @@ function defaultArea(): Area {
   return chrome.storage.local as unknown as Area;
 }
 
+/**
+ * Every outbox MUTATION goes through this lock (pr-617 r1, codex-coder).
+ *
+ * `add` and the flush cleanup are both read-modify-write over the same
+ * storage key, and every `await` between the read and the write is a yield
+ * point: two tab events arriving together each read the same array, each
+ * push their own visit, and the second `set` erases the first — the
+ * deterministic 1-of-2 loss the review reproduced. Retention is the whole
+ * contract of this module, so mutations are serialized through a promise
+ * chain: each critical section starts only after the previous one's write
+ * has landed. Reads stay lock-free — a stale read is harmless (flush
+ * re-reads under the lock before it deletes anything), and blocking reads
+ * on a long native send would stall the capture path for nothing.
+ *
+ * One chain per JS context is enough: background is the only writer of this
+ * key, and a rejected section must not wedge the chain (the tail swallows,
+ * the next caller still runs — its own failure surfaces to its own caller).
+ */
+let outboxTail: Promise<void> = Promise.resolve();
+
+function withOutboxLock<T>(op: () => Promise<T>): Promise<T> {
+  const run = outboxTail.then(op);
+  outboxTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 export async function loadSafariOutbox(area: Area = defaultArea()): Promise<AttentionEvent[]> {
   const r = await area.get(KEY);
   const v = r[KEY];
@@ -45,10 +74,12 @@ export async function addSafariEvent(
   event: AttentionEvent,
   area: Area = defaultArea(),
 ): Promise<void> {
-  const cur = await loadSafariOutbox(area);
-  cur.push(event);
-  if (cur.length > SAFARI_OUTBOX_CAP) cur.splice(0, cur.length - SAFARI_OUTBOX_CAP);
-  await area.set({ [KEY]: cur });
+  return withOutboxLock(async () => {
+    const cur = await loadSafariOutbox(area);
+    cur.push(event);
+    if (cur.length > SAFARI_OUTBOX_CAP) cur.splice(0, cur.length - SAFARI_OUTBOX_CAP);
+    await area.set({ [KEY]: cur });
+  });
 }
 
 /** Value identity for an event. These four fields are what the wire layer
@@ -90,8 +121,10 @@ export async function flushSafariOutbox(
   // and the same visits would be re-sent forever while every flush reported
   // success. Server-side dedup would hide it; the buffer growing without bound
   // would not.
-  const now = await loadSafariOutbox(area);
   const handed = new Set(batch.map(eventKey));
-  await area.set({ [KEY]: now.filter((e) => !handed.has(eventKey(e))) });
+  await withOutboxLock(async () => {
+    const now = await loadSafariOutbox(area);
+    await area.set({ [KEY]: now.filter((e) => !handed.has(eventKey(e))) });
+  });
   return outcome;
 }
