@@ -4566,7 +4566,15 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
 
     Distinct (slug, head, reviewer) tuples produce distinct payloads -> distinct
     paths, so reviewers and rounds never collide while a same-head re-request
-    idempotently dedupes."""
+    idempotently dedupes.
+
+    A verified FRESH write also emits the same ``v:1`` companion event ``tell``
+    emits (pr-630 root cause #2, bitten live 2026-08-14 on agent-skills pr-176:
+    this path wrote the durable task but no event, so a raw queue read had
+    nothing to deliver and the reviewer learned of the request only from a
+    ``needs-me`` fold — or from the operator). Same contract as the tell path:
+    fresh-write-only (never on dedupe), best-effort (a down or unconfigured bus
+    degrades to file-plane-only and never fails the request)."""
     verdict_file = (
         f"{_verdicts_prefix(team, slug)}"
         f"{review.verdict_filename(reviewer, head=head)}"
@@ -4587,10 +4595,16 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
     except tasks.TaskError as e:
         print(f"review-request directive for {reviewer} failed: {e}", file=sys.stderr)
         return 1
-    # `_write_directive` only needs args.team; a minimal namespace carries it.
-    return _write_directive(transport, argparse.Namespace(team=team), slug=dslug,
-                            content=content, payload=payload, assignee=reviewer,
-                            not_before=None)
+    # The namespace carries team for `_write_directive` plus sender/priority for
+    # the companion emit (`_known_sender` reads .sender; review dispatch is P1
+    # per the pr-630 design).
+    ns = argparse.Namespace(team=team, sender=sender, priority="P1")
+    rc = _write_directive(transport, ns, slug=dslug,
+                          content=content, payload=payload, assignee=reviewer,
+                          not_before=None)
+    if rc == 0 and getattr(ns, "_directive_outcome", None) == "written":
+        _emit_dispatch_companion(transport, ns, slug=dslug, assignee=reviewer)
+    return rc
 
 
 def _close_answered_directive(transport: Any, args: argparse.Namespace, *,
