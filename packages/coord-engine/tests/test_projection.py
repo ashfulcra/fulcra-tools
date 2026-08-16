@@ -312,6 +312,61 @@ def test_reconcile_budget_cut_marks_projection_incomplete():
     assert forge_sec["complete"] is False  # a review floor floors forge too
 
 
+def test_review_projection_budget_cuts_resume_monotonically_with_feed():
+    """A clean feed turns prior unresolved rows into a durable scan frontier."""
+    class CallBudget:
+        def __init__(self, allowed):
+            self.allowed = allowed
+            self.calls = 0
+
+        def expired(self):
+            self.calls += 1
+            return self.calls > self.allowed
+
+    t = CountingTransport()
+    for i in range(5):
+        _put_review(t, f"open-{i}", "alice")
+
+    first = projection.build_review_projection(
+        t, TEAM, now="2026-08-04T20:00:00Z", prior=None,
+        settled_index=set(), deadline=CallBudget(4))
+    assert first["complete"] is False
+    assert first["scanned"] == 2
+
+    t.reset_counts()
+    second = projection.build_review_projection(
+        t, TEAM, now="2026-08-04T20:05:00Z", prior=first,
+        settled_index=set(), deadline=CallBudget(4), feed_changes=[])
+    assert second["complete"] is False
+    assert second["scanned"] == 4
+    assert f"team/{TEAM}/review/open-0.md" not in t.reads
+    assert f"team/{TEAM}/review/open-1.md" not in t.reads
+
+    third = projection.build_review_projection(
+        t, TEAM, now="2026-08-04T20:10:00Z", prior=second,
+        settled_index=set(), deadline=CallBudget(4), feed_changes=[])
+    assert third["complete"] is True
+    assert third["scanned"] == third["total"] == 5
+
+
+def test_review_projection_feed_change_reopens_only_changed_slug():
+    t = CountingTransport()
+    _put_review(t, "open-a", "alice")
+    _put_review(t, "open-b", "alice")
+    first = projection.build_review_projection(
+        t, TEAM, now="2026-08-04T20:00:00Z", prior=None,
+        settled_index=set(), deadline=budget.Deadline(None))
+    t.reset_counts()
+    changes = [{"path": f"team/{TEAM}/review/open-b/verdicts/bob.md"}]
+    second = projection.build_review_projection(
+        t, TEAM, now="2026-08-04T20:05:00Z", prior=first,
+        settled_index=set(), deadline=budget.Deadline(None),
+        feed_changes=changes)
+    assert second["complete"] is True
+    assert f"team/{TEAM}/review/open-a.md" not in t.reads
+    assert f"team/{TEAM}/review/open-b.md" in t.reads
+
+
 def test_reconcile_unreadable_verdict_shard_is_unknown_not_frozen():
     class ShardHidingTransport(FakeTransport):
         def read(self, path):
@@ -477,6 +532,41 @@ def test_review_fold_stale_projection_falls_back_loudly():
     assert "stale" in src[0]["reason"]
 
 
+def test_review_fold_clean_feed_serves_stale_projection_and_changed_head_only():
+    t = CountingTransport()
+    _put_review(t, "pr-a", "alice")
+    _put_review(t, "pr-b", "alice")
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=48))
+    _reconcile(t, now=old)
+    agg = _agg(t)
+    change = {"path": f"team/{TEAM}/review/pr-b/verdicts/bob.md"}
+    t.reset_counts()
+    out = cli._pending_reviews_for(
+        t, TEAM, "alice", rows=[], aggregate_doc=agg,
+        feed_evidence={"ok": True, "changes": [change]})
+    assert [r["name"] for r in out if r.get("type") == "review-pending"] == [
+        "pr-a", "pr-b"]
+    assert f"team/{TEAM}/review/pr-a.md" not in t.reads
+    assert f"team/{TEAM}/review/pr-b.md" in t.reads
+    assert f"team/{TEAM}/review/" not in t.listed
+    assert any(r.get("type") == "review-source"
+               and r["source"] == "projection" for r in out)
+
+
+def test_review_fold_unreadable_feed_is_loud_raw_fallback():
+    t = CountingTransport()
+    _put_review(t, "pr-a", "alice")
+    _reconcile(t)
+    agg = _agg(t)
+    t.reset_counts()
+    out = cli._pending_reviews_for(
+        t, TEAM, "alice", rows=[], aggregate_doc=agg,
+        feed_evidence={"ok": False, "reason": "feed down"})
+    assert f"team/{TEAM}/review/" in t.listed
+    src = [r for r in out if r.get("type") == "review-source"]
+    assert src[-1]["source"] == "raw-scan" and src[-1]["reason"] == "feed down"
+
+
 def test_review_fold_missing_projection_behaves_exactly_as_today():
     t = FakeTransport()
     _put_review(t, "pr-1", "alice")
@@ -532,6 +622,23 @@ def test_review_fold_head_slug_newer_than_projection_is_raw_scanned():
     out = cli._pending_reviews_for(t, TEAM, "alice", rows=rows,
                                    aggregate_doc=agg)
     assert [r["name"] for r in out if r.get("type") == "review-pending"] == ["fresh-pr"]
+
+
+def test_review_fold_clean_feed_serves_unchanged_caller_head_from_projection():
+    t = CountingTransport()
+    _put_review(t, "pr-mine", "alice")
+    _reconcile(t)
+    rows = [{"id": "rr-mine", "name": "rr-mine",
+             "title": "REVIEW REQUEST: pr-mine", "status": "proposed",
+             "assignee": "alice", "priority": "P2", "tags": []}]
+    t.reset_counts()
+    out = cli._pending_reviews_for(
+        t, TEAM, "alice", rows=rows, aggregate_doc=_agg(t),
+        feed_evidence={"ok": True, "changes": []})
+    assert [r["name"] for r in out
+            if r.get("type") == "review-pending"] == ["pr-mine"]
+    assert f"team/{TEAM}/review/pr-mine.md" not in t.reads
+    assert f"team/{TEAM}/review/pr-mine/verdicts/" not in t.listed
 
 
 def test_review_fold_head_slug_covered_by_stale_settled_row_still_surfaces():
@@ -780,6 +887,42 @@ def test_forge_fold_consumes_fresh_projection_without_scanning():
     assert t.reads == [cli._ack_path(TEAM, "review-1", "bob")]
 
 
+def test_forge_fold_clean_feed_serves_stale_tail_and_changed_pr_head():
+    t = CountingTransport()
+    _seed_forge_team(t)
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=48))
+    _reconcile(t, now=old)
+    agg = _agg(t)
+    change = {"path": f"team/{TEAM}/_coord/forge/feedback/o-r-9/review-2.md"}
+    t.reset_counts()
+    out = cli._forge_feedback_for(
+        t, TEAM, "bob", aggregate_doc=agg,
+        feed_evidence={"ok": True, "changes": [change]})
+    assert [r["pr_slug"] for r in out if r.get("type") == "forge-feedback"] == [
+        "o-r-9"]
+    assert f"team/{TEAM}/_coord/forge/feedback/o-r-9/" in t.listed
+    assert f"team/{TEAM}/_coord/forge/watch/" not in t.listed
+    assert f"team/{TEAM}/review/" not in t.listed
+    assert any(r.get("type") == "forge-source"
+               and r["source"] == "projection" for r in out)
+
+
+def test_forge_responsibility_change_falls_back_loudly():
+    t = CountingTransport()
+    _seed_forge_team(t)
+    _reconcile(t)
+    agg = _agg(t)
+    change = {"path": f"team/{TEAM}/_coord/forge/watch/o-r-9.md"}
+    t.reset_counts()
+    out = cli._forge_feedback_for(
+        t, TEAM, "bob", aggregate_doc=agg,
+        feed_evidence={"ok": True, "changes": [change]})
+    assert f"team/{TEAM}/_coord/forge/watch/" in t.listed
+    src = [r for r in out if r.get("type") == "forge-source"]
+    assert src[-1]["source"] == "raw-scan"
+    assert "responsibility changed" in src[-1]["reason"]
+
+
 def test_forge_fold_projection_hides_acked_items():
     t = FakeTransport()
     _seed_forge_team(t)
@@ -965,7 +1108,7 @@ def test_needs_me_task_projection_malformed_falls_back_loudly(capsys):
 
 
 def test_needs_me_text_discloses_fold_source(capsys):
-    t = FakeTransport()
+    t = CountingTransport()
     _put_review(t, "pr-txt", "alice")
     _reconcile(t)
     assert cli.main(["needs-me", TEAM, "--agent", "alice"], transport=t) == 0
