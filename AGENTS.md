@@ -14,6 +14,13 @@ rules — MUST update this file in the same PR. Reviewers: treat a stale
 `AGENTS.md` as a blocking finding. If your change doesn't alter what an agent
 needs to know, say so in the PR body ("AGENTS.md: no change needed").
 
+**No one-off fixes on coordination or continuity surfaces** (operator law,
+2026-08-14; earned by twelve strict-consumer incidents,
+[`OUTPUT-CONTRACT.md`](docs/coord/OUTPUT-CONTRACT.md)). Root-cause every
+incident and fix it upstream at the surface that produced it, not with a
+defensive patch at the consumer. The models reading these surfaces are smart;
+what they need from us is surfaces that are durable.
+
 ## Where to start
 
 **Zero state — never installed `coord-engine`, or joining from a fresh / remote /
