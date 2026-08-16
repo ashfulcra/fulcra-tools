@@ -8,11 +8,12 @@ incidents (C01–C12) are representation-boundary failures — a consumer that
 parses less strictly turns UNKNOWN into false CLEAR, which is the class this
 fleet keeps killing.
 
-ENFORCED clauses fail CI. TARGET clauses live in ``PENDING_FIXTURES`` below:
-each names its contract clause and the behavior it awaits, and skips loudly —
-flipping one to enforced belongs in the SAME PR as the behavior change
-(contract doc, "enforcement ladder"). A pending entry silently passing is
-itself a failure: that means the behavior landed without its flip.
+ENFORCED clauses fail CI. TARGET clauses come in two kinds (pr-633 r1):
+probeable targets are EXECUTABLE tests marked ``xfail(strict=True)`` — the
+moment their behavior lands, strict XPASS fails CI, forcing the same-PR
+flip the contract's enforcement ladder demands; unprobeable targets sit in
+``UNPROBEABLE_TARGETS``, a documentation-only registry that asserts nothing
+and says so.
 """
 from __future__ import annotations
 
@@ -62,18 +63,21 @@ def test_json_stdout_is_json_only_one_parse(argv, capsys):
     strict_parse(out)  # raises if any prose shares stdout with the value
 
 
-def test_diagnostics_ride_stderr_not_stdout(capsys):
-    # The C07 incident was a stream-MERGING harness; the engine's side of the
-    # contract is purity per stream. The queue version warning is the exact
-    # line from the incident: prove it lands on stderr while stdout stays
-    # parseable, so any consumer handed stdout alone gets clean JSON.
+def test_queue_version_warning_rides_stderr_never_stdout(capsys):
+    # The C07 incident verb and the exact line: `queue --json` against a
+    # legacy authority emits the VERSION WARNING. The engine's side of the
+    # contract is purity per stream — the warning must be ON stderr and must
+    # never share stdout. (FakeTransport carries no records API, so the read
+    # itself errors after the warning; full queue-payload purity gets its
+    # fixture when a records-capable stub lands with the OC2 flip.)
     t = FakeTransport()
     t.put("team/r/_coord/bus-v3/records.json",
           '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
-    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    cli.main(["queue", "r", "--agent", "alice", "--json"], transport=t)
     captured = capsys.readouterr()
-    strict_parse(captured.out)
-    assert "{" not in (captured.err.splitlines()[0] if captured.err else "")
+    assert "VERSION WARNING" in captured.err, "warning must be emitted, on stderr"
+    assert "VERSION WARNING" not in captured.out
+    assert not captured.out.strip() or strict_parse(captured.out) is not None
 
 
 # --- OC10: typed degradation markers (ENFORCED vocabulary; C05, C06) -------
@@ -127,32 +131,70 @@ def test_blocked_ask_renders_unlock_independent_of_blocked_on(
         "unlock must render independently of blocked_on (C12; pr-625)")
 
 
-# --- TARGET registry: written, visible, deliberately pending ----------------
+# --- TARGET probes and registry -------------------------------------------
 #
-# One entry per adversarial fixture from the evidence pack whose clause has
-# not landed. Skipping (not xfail) keeps intent unmistakable in CI output;
-# the reason strings name the clause so a ladder flip greps its fixture.
+# Finding from pr-633 r1 (codex-reviewer): a descriptions-only registry cannot
+# detect target behavior landing WITHOUT its fixture flip. So: every target
+# that can be probed against today's behavior is an EXECUTABLE test marked
+# xfail(strict=True) — it is expected to fail now, and the moment the
+# behavior lands the xfail turns into XPASS which strict mode reports as a
+# hard CI FAILURE, forcing the same-PR flip the contract demands. Targets
+# that cannot be probed without infrastructure that does not exist yet stay
+# in the registry below, which is explicitly documentation-only.
 
-PENDING_FIXTURES = [
-    ("OC2 envelope-first: degradation after the 8KiB boundary is invisible "
-     "to a strict reader until the envelope leads stdout (C03/C05/C06)"),
-    ("OC3 rc-early: yielded read must emit an operation token envelope "
-     "before the harness budget (C04)"),
-    ("OC4 bounded rows: oversized folds paginate with a continuation token "
-     "instead of an unbounded array (C03)"),
-    ("OC5 review rows: review-pending rows carry of + exact head + "
-     "canonical slug (C01) — FIRST LADDER FLIP"),
-    ("OC6 canonical writer: a bus-only verdict must not satisfy the review "
-     "fold; register shard is constitutive (C02/C11)"),
-    ("OC7 capability identity: envelope carries full build pin + contract "
-     "version + capability set; same-semver subtraction fails CI (C08)"),
-    ("OC8 artifact identity: duplicate live registers for one "
-     "(repo, PR, head) are refused or explicitly superseded (C09)"),
-    ("OC9 cadence liveness: batch-worker presence declares cadence class; "
-     "liveness grace scales to it (C10)"),
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="OC2 TARGET (C03/C05/C06): stdout must lead with an envelope "
+           "object carrying state/source/contract; today it is a bare array. "
+           "When this XPASSes, flip OC2 to ENFORCED in the same PR.")
+def test_oc2_target_envelope_leads_stdout(capsys):
+    t = FakeTransport()
+    _seed_rows(t)
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    value = strict_parse(capsys.readouterr().out)
+    assert isinstance(value, dict), "envelope object must be the first value"
+    assert "state" in value and "contract" in value
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="OC5 TARGET (C01): review-pending rows must carry of + exact "
+           "head; today they carry only name/state/pending_required. "
+           "FIRST LADDER FLIP — when this XPASSes, flip OC5-review to "
+           "ENFORCED in the same PR.")
+def test_oc5_target_review_row_carries_of_and_head(capsys):
+    t = FakeTransport()
+    head = "a" * 40
+    cli.main(["review", "request", "r", "pr-9", "--of", "https://x/pr/9",
+              "--reviewer", "alice", "--from", "boss", "--head", head],
+             transport=t)
+    capsys.readouterr()
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    rows = strict_parse(capsys.readouterr().out)
+    pending = [r for r in rows if isinstance(r, dict)
+               and r.get("type") == "review-pending"]
+    assert pending, "reviewer must see the pending review"
+    assert pending[0].get("of") == "https://x/pr/9"
+    assert pending[0].get("head") == head
+
+
+# Documentation-only registry: targets whose probe needs infrastructure that
+# does not exist yet (yield tokens, capability stamps, cadence classes, a
+# records-capable test transport). These entries assert nothing and say so.
+
+UNPROBEABLE_TARGETS = [
+    "OC3 rc-early / yield token (C04) — needs the token envelope design",
+    "OC4 bounded rows / pagination (C03) — needs the continuation token",
+    "OC6 canonical writer vs bus-only verdict (C02/C11) — needs a "
+    "records-capable test transport",
+    "OC7 capability identity (C08) — needs build/capability stamps",
+    "OC8 artifact identity (C09) — needs register identity keys",
+    "OC9 cadence-declared liveness (C10) — needs cadence classes in "
+    "presence",
 ]
 
 
-@pytest.mark.parametrize("reason", PENDING_FIXTURES)
-def test_target_clause_pending(reason):
-    pytest.skip(f"TARGET (not yet enforced): {reason}")
+@pytest.mark.parametrize("reason", UNPROBEABLE_TARGETS)
+def test_target_registry_documentation_only(reason):
+    pytest.skip(f"TARGET registry (documentation-only, no probe yet): {reason}")

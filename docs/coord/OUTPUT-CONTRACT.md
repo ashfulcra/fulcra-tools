@@ -6,9 +6,10 @@ event, never a silent shape change).
 
 **Status:** clauses marked **ENFORCED** are pinned by
 `packages/coord-engine/tests/test_output_contract.py` and CI-failing;
-clauses marked **TARGET** are the ratified direction with fixtures already
-written and registered as pending — flipping one to ENFORCED is a one-line
-registry change in that test file, made in the same PR as the behavior.
+clauses marked **TARGET** are the ratified direction: probeable targets are
+executable `xfail(strict=True)` tests in that file (behavior landing without
+its flip fails CI via strict XPASS); unprobeable ones are documentation-only
+registry entries. The flip is made in the same PR as the behavior.
 
 **Provenance:** every clause below kills a named incident from the codex
 strict-consumer evidence pack
@@ -91,13 +92,17 @@ A conforming consumer:
 ## Enforcement ladder
 
 1. **This PR**: contract doc; strict-consumer harness; ENFORCED fixtures
-   (OC1 stream purity for `queue`/`needs-me`/`board` `--json`; OC5 review
-   and blocked-row field presence; OC10 marker vocabulary), plus the full
-   TARGET fixture set registered pending — the adversarial cases from the
-   pack (missing `of`, bus-only verdict, degradation beyond the 8 KiB
-   boundary, merged-stream warning, yield-with-empty-body, same-semver
-   capability subtraction, duplicate aliases, batch-liveness trace) exist
-   in the file and are flipped on as their clauses land.
+   (OC1 stream purity for `needs-me`/`board`/`inbox` `--json` plus the
+   exact C07 queue-warning shape proven onto stderr; OC5 blocked-row field
+   presence; OC10 marker vocabulary). Probeable TARGETS are executable
+   tests marked `xfail(strict=True)` — OC2 envelope-first and the OC5
+   review-row `of`+`head` enrichment — so behavior landing without its
+   flip is a hard CI failure, not a silent pass. The remaining pack cases
+   (yield token, pagination, bus-only verdict, capability subtraction,
+   duplicate aliases, batch-liveness trace) sit in a documentation-only
+   registry until their probes have infrastructure to stand on; full
+   queue-payload purity joins OC1 when a records-capable test transport
+   lands.
 2. **Next**: OC2/OC3 envelope-first on the read verbs (one verb per PR,
    fixture flipped in the same PR).
 3. **Then**: OC6 canonical-writer enforcement, OC7 capability stamps, OC8
