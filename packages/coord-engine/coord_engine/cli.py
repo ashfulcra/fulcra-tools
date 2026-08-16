@@ -2055,6 +2055,11 @@ def _tally_from_verdict_entries(
     if mismatched:
         tally["head_mismatched_verdicts"] = [
             {"file": f, "claimed_head": h} for f, h in sorted(mismatched)]
+    # OC5/C01: the artifact pointer rides the tally so every consumer of this
+    # fold can serve it without a second doc read. None when the register doc
+    # genuinely lacks it — the doc is the honest source, never a guess.
+    _of = req_doc.get("of")
+    tally["of"] = str(_of) if _of else None
     if head:
         tally["head"] = head
         try:
@@ -2596,9 +2601,11 @@ def _validated_review_projection(
     Returns ``(rows_by_name, orphans, orphans_unknown, tombstones)`` only when
     EVERY served row and slug list matches the schema exactly: ``name`` a
     non-empty str, ``state`` one of ``review.tally``'s states, ``settled`` a real
-    bool (a truthy ``"false"`` string must never suppress a pending row), and
-    ``pending_required`` a list of non-empty strs; the three slug lists are lists
-    of non-empty strs (absent -> empty). Producer INVARIANTS are enforced too
+    bool (a truthy ``"false"`` string must never suppress a pending row),
+    ``pending_required`` a list of non-empty strs, and ``of``/``head`` PRESENT
+    keys whose value is a non-empty str or None (v2's act-on-it fields — an
+    absent key is a pre-v2 row and the section is malformed); the three slug
+    lists are lists of non-empty strs (absent -> empty). Producer INVARIANTS are enforced too
     (round-3 P1b) — reconcile can produce neither a duplicate ``name`` (rows key
     on the listing) nor ``settled: true`` outside a terminal
     APPROVED-with-nothing-pending tally — so a duplicate row (last-write-wins
@@ -2626,6 +2633,16 @@ def _validated_review_projection(
         if not isinstance(pending, list) or not all(
                 isinstance(x, str) and x for x in pending):
             return None
+        for key in ("of", "head"):
+            # v2 act-on-it fields (OC5/C01): the KEY must exist on every row —
+            # None is the honest "the register doc lacks it" value, but an
+            # ABSENT key means a pre-v2 row leaked into a v2 section, and
+            # serving it would re-open the second-lookup gap this schema closed.
+            if key not in r:
+                return None
+            val = r[key]
+            if val is not None and not (isinstance(val, str) and val):
+                return None
         if r["settled"] and (r["state"] != review.APPROVED or pending):
             return None  # settled is ONLY a terminal APPROVED-nothing-pending
         if name in by_name:
@@ -2713,7 +2730,8 @@ def _pending_reviews_from_projection(
             continue
         if _match_pending(pending):
             out.append({"type": "review-pending", "name": slug,
-                        "state": "PENDING", "pending_required": list(pending)})
+                        "state": "PENDING", "pending_required": list(pending),
+                        "of": r.get("of"), "head": r.get("head")})
 
     head_scanned = head_skipped = 0
     for slug in head_slugs:
@@ -2737,7 +2755,8 @@ def _pending_reviews_from_projection(
                 [str(x) for x in pending if str(x)]):
             out.append({"type": "review-pending", "name": slug,
                         "state": "PENDING",
-                        "pending_required": [str(x) for x in pending]})
+                        "pending_required": [str(x) for x in pending],
+                        "of": tally.get("of"), "head": tally.get("head")})
     if head_skipped:
         out.append(budget_mod.degraded_row(
             "review-head-degraded", head_scanned, len(head_slugs), head_skipped))
@@ -2926,7 +2945,8 @@ def _pending_reviews_raw(
                         degraded_roles.add(r)
         if review.is_pending_for(pending, agent, role_holders):
             out.append({"type": "review-pending", "name": slug,
-                        "state": "PENDING", "pending_required": pending})
+                        "state": "PENDING", "pending_required": pending,
+                        "of": tally.get("of"), "head": tally.get("head")})
         return "ok"
 
     # --- HEAD: the caller's OWN reviews, on a dedicated (un-starvable) budget ----

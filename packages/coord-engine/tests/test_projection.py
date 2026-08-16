@@ -692,7 +692,10 @@ def test_review_fold_malformed_nested_row_falls_back_loud():
     t = FakeTransport()
     _put_review(t, "pr-1", "alice")
     good = {"name": "pr-1", "state": "PENDING",
-            "pending_required": ["alice"], "settled": False}
+            "pending_required": ["alice"], "settled": False,
+            "of": "url", "head": None}
+    absent_of = dict(good); del absent_of["of"]
+    absent_head = dict(good); del absent_head["head"]
     for bad_row in (
         dict(good, settled="false"),          # bool field as a (truthy) string
         dict(good, settled=0),                # bool field as an int
@@ -702,6 +705,10 @@ def test_review_fold_malformed_nested_row_falls_back_loud():
         dict(good, pending_required=[1]),      # non-str reviewer
         dict(good, pending_required=[""]),     # empty reviewer
         dict(good, name=""),
+        absent_of,                             # pre-v2 row: of KEY missing
+        absent_head,                           # pre-v2 row: head KEY missing
+        dict(good, of=""),                     # of neither None nor non-empty
+        dict(good, head=17),                   # head neither None nor str
         "not-a-dict",
     ):
         agg = {projection.REVIEWS_KEY: _fresh_reviews_section(rows=[bad_row])}
@@ -759,9 +766,9 @@ def test_review_fold_duplicate_row_names_are_malformed():
     _put_review(t, "pr-1", "alice")
     dup_rows = [
         {"name": "pr-1", "state": "PENDING", "pending_required": ["alice"],
-         "settled": False},
+         "settled": False, "of": "url", "head": None},
         {"name": "pr-1", "state": "APPROVED", "pending_required": [],
-         "settled": True},
+         "settled": True, "of": "url", "head": None},
     ]
     agg = {projection.REVIEWS_KEY: _fresh_reviews_section(rows=dup_rows)}
     out = cli._pending_reviews_for(t, TEAM, "alice", rows=[], aggregate_doc=agg)
@@ -781,11 +788,11 @@ def test_review_fold_inconsistent_settled_rows_are_malformed():
     _put_review(t, "pr-1", "alice")
     for bad_row in (
         {"name": "pr-1", "state": "PENDING", "pending_required": ["alice"],
-         "settled": True},
+         "settled": True, "of": "url", "head": None},
         {"name": "pr-1", "state": "CHANGES", "pending_required": [],
-         "settled": True},
+         "settled": True, "of": "url", "head": None},
         {"name": "pr-1", "state": "APPROVED", "pending_required": ["alice"],
-         "settled": True},
+         "settled": True, "of": "url", "head": None},
     ):
         agg = {projection.REVIEWS_KEY: _fresh_reviews_section(rows=[bad_row])}
         out = cli._pending_reviews_for(t, TEAM, "alice", rows=[],
@@ -979,7 +986,8 @@ def test_projection_states_match_raw_review_status_end_to_end():
     want = [r for r in raw_out if r.get("type") == "review-pending"]
     got = [r for r in proj_out if r.get("type") == "review-pending"]
     assert got == want == [{"type": "review-pending", "name": "half-pr",
-                            "state": "PENDING", "pending_required": ["bob"]}]
+                            "state": "PENDING", "pending_required": ["bob"],
+                            "of": None, "head": _HEAD}]
 
 
 def test_needs_me_end_to_end_serves_projection(capsys):
