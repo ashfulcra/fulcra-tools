@@ -1,0 +1,101 @@
+name: Xcode (Safari app + extension)
+
+# Builds the Safari container app and its web extension on macOS.
+#
+# WHY THIS EXISTS: nothing built this Xcode project in CI, on any platform.
+# That is not a theoretical gap — it is how PR #614 reached main with the iOS
+# EXTENSION target broken. That change added `UIApplication.shared` to a file
+# compiled into the extension, where the API is unavailable in app extensions.
+# It could never have compiled; a macOS build never reaches that branch, and no
+# job ever built for iOS. It was found days later, by hand.
+#
+# So this job builds ALL FOUR targets, and both platforms, because the bug
+# class it exists to catch is "compiles on the platform the author used".
+#
+# COST: macOS runners bill at 10x on this repo and Xcode builds are slow, so the
+# triggers are path-filtered to the two directories that can actually change the
+# result — the Xcode project and the JS bundles it copies in. A change elsewhere
+# skips this job; workflow_dispatch reruns it on demand.
+#
+# NO CODE SIGNING: builds pass CODE_SIGNING_ALLOWED=NO. Signing needs the team's
+# certificates, which a public runner must not have. That is a real limit worth
+# stating: this job proves the code COMPILES and links for every target; it
+# cannot prove entitlements or provisioning, which stay a local/manual check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/attention/safari/**'
+      - 'packages/attention/chrome/**'
+      - '.github/workflows/xcode.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/attention/safari/**'
+      - 'packages/attention/chrome/**'
+      - '.github/workflows/xcode.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: xcode-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build all four targets
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/attention/chrome/package-lock.json
+
+      # The extension targets copy a BUILT bundle as resources, so the Xcode
+      # build fails with "no such file" unless both dists exist first. The
+      # Safari target copies dist-safari (its own reduced-permission bundle);
+      # the Chrome dist is still built because the repo ships both.
+      - name: Build the web extension bundles
+        working-directory: packages/attention/chrome
+        run: |
+          npm ci
+          npm run build
+          npx vite build --config vite.safari.config.ts
+
+      # Built per TARGET rather than per scheme: `-target ... -sdk ...` does not
+      # go through xcodebuild's destination resolver, which is what intermittently
+      # reports "Unable to find a destination matching the provided specifier"
+      # even with a matching simulator booted.
+      - name: Build macOS app + extension
+        working-directory: packages/attention/safari/FulcraAttention
+        run: |
+          for t in "FulcraAttention (macOS)" "FulcraAttention Extension (macOS)"; do
+            echo "::group::$t"
+            xcodebuild -project FulcraAttention.xcodeproj -target "$t" \
+              -sdk macosx -configuration Debug \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+            echo "::endgroup::"
+          done
+
+      # The iOS EXTENSION target is the one that matters most here: it is the
+      # target PR #614 broke, and the only one that compiles the shared auth
+      # code under app-extension API restrictions.
+      - name: Build iOS app + extension
+        working-directory: packages/attention/safari/FulcraAttention
+        run: |
+          for t in "FulcraAttention (iOS)" "FulcraAttention Extension (iOS)"; do
+            echo "::group::$t"
+            xcodebuild -project FulcraAttention.xcodeproj -target "$t" \
+              -sdk iphonesimulator -configuration Debug \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+            echo "::endgroup::"
+          done
+
+      # The xcodeproj has no test target, so these run through a throwaway
+      # SwiftPM package instead. Without this they execute nowhere.
+      - name: Run the Swift test suites
+        run: bash packages/attention/safari/scripts/run_swift_tests.sh
