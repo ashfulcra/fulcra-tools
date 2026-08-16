@@ -12,6 +12,7 @@ import os
 private let appLog = Logger(subsystem: "com.fulcra.attention", category: "AppDelegate")
 
 @main
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
