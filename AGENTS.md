@@ -461,7 +461,11 @@ it (not on PyPI).
   --reviewer <role>` opens a durable obligation that sits in the reviewer's
   `needs-me` until their verdict file exists at the exact path the command
   echoes (the required token is the role passed to `--reviewer`; that token is
-  what the tally credits). **One PR has one review slug (`pr-N`), across every
+  what the tally credits). The pending row itself carries the artifact: in
+  `needs-me --json` every `review-pending` row serves `of` and the exact
+  `head` (explicit `null` when a legacy register genuinely lacks the field),
+  so a reviewer dispatches from the row alone — no second lookup
+  (OUTPUT-CONTRACT OC5). **One PR has one review slug (`pr-N`), across every
   push**: pass the PR URL as `--of` and the full 40- or 64-hex commit id as
   `--head`; re-requesting the same slug with a NEW head advances the same doc
   to the next round, verdicts append at `verdicts/<head>--<required-token>.md`

@@ -157,13 +157,13 @@ def test_oc2_target_envelope_leads_stdout(capsys):
     assert "state" in value and "contract" in value
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="OC5 TARGET (C01): review-pending rows must carry of + exact "
-           "head; today they carry only name/state/pending_required. "
-           "FIRST LADDER FLIP — when this XPASSes, flip OC5-review to "
-           "ENFORCED in the same PR.")
-def test_oc5_target_review_row_carries_of_and_head(capsys):
+# --- OC5: act-on-it fields, review rows (ENFORCED — ladder flip 1; C01) ----
+
+
+def test_oc5_review_row_carries_of_and_head(capsys):
+    # LADDER FLIP 1 (was the strict-xfail probe): review-pending rows carry
+    # the artifact URL and exact head, so the strict consumer can dispatch a
+    # review with zero further lookups — C01's stall, closed.
     t = FakeTransport()
     head = "a" * 40
     cli.main(["review", "request", "r", "pr-9", "--of", "https://x/pr/9",
@@ -177,6 +177,24 @@ def test_oc5_target_review_row_carries_of_and_head(capsys):
     assert pending, "reviewer must see the pending review"
     assert pending[0].get("of") == "https://x/pr/9"
     assert pending[0].get("head") == head
+
+
+def test_oc5_review_row_keys_present_even_on_legacy_headless_register(capsys):
+    # The register doc is the honest source: a legacy review with no `head:`
+    # serves an EXPLICIT null, never an absent key — the strict consumer can
+    # distinguish "register predates head-pinning" from "field dropped".
+    t = FakeTransport()
+    t.put("team/r/review/pr-old.md",
+          "---\ntype: Review\nof: https://x/pr/old\nrequired: [alice]\n"
+          "requested_by: boss\n---\nReview requested\n")
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    rows = strict_parse(capsys.readouterr().out)
+    pending = [r for r in rows if isinstance(r, dict)
+               and r.get("type") == "review-pending"]
+    assert pending, "reviewer must see the pending review"
+    assert "of" in pending[0] and "head" in pending[0]
+    assert pending[0]["of"] == "https://x/pr/old"
+    assert pending[0]["head"] is None
 
 
 # Documentation-only registry: targets whose probe needs infrastructure that

@@ -22,11 +22,14 @@ passthrough carries them across mixed-fleet hosts; a host too old to preserve
 them merely wipes them, which readers treat as "projection absent" and fall back
 to the raw scan — fail-closed, never wrong):
 
-``reviews`` — ``coord.reviews.projection.v1``::
+``reviews`` — ``coord.reviews.projection.v2`` (v2 adds ``of`` + ``head``,
+the OC5/C01 act-on-it fields; both are always present, None when the register
+doc genuinely lacks them — a legacy headless review has no head to serve)::
 
     {"schema", "generated_at", "complete", "scanned", "total",
      "rows": [{"name", "state", "pending_required", "required",
-               "requested_by", "artifact", "settled", "mtime", "size"}],
+               "requested_by", "artifact", "of", "head", "settled",
+               "mtime", "size"}],
      "orphans": [slug], "orphans_unknown": [slug], "tombstones": [slug]}
 
 ``forge`` — ``coord.forge.projection.v1``::
@@ -87,7 +90,7 @@ REVIEWS_KEY = "reviews"
 FORGE_KEY = "forge"
 NEEDS_ME_KEY = "needs_me"
 
-REVIEWS_SCHEMA = "coord.reviews.projection.v1"
+REVIEWS_SCHEMA = "coord.reviews.projection.v2"
 FORGE_SCHEMA = "coord.forge.projection.v1"
 NEEDS_ME_SCHEMA = "coord.needs-me.projection.v1"
 
@@ -518,11 +521,18 @@ def _scan_review_slug(
         return None, False
     fm = okf.parse_frontmatter(doc_raw) or {}
     requested_by = fm.get("requested_by")
+    head = review.normalize_head(fm.get("head"))
+    of = fm.get("of")
     base: dict[str, Any] = {
         "name": slug,
         "required": _normalize_required(fm.get("required")),
         "requested_by": str(requested_by) if requested_by else None,
         "artifact": forge.pr_slug(forge.review_artifact(fm)),
+        # OC5/C01 act-on-it fields: served on every row so a strict consumer
+        # can act without a second lookup. None is the honest value when the
+        # register doc itself lacks the field (legacy headless reviews).
+        "of": str(of) if of else None,
+        "head": head or None,
         "mtime": entry.get("mtime"),
         "size": entry.get("size"),
     }
@@ -571,7 +581,6 @@ def _scan_review_slug(
                 row[BINDABLE_KEY] = True
             return row, True
         # Otherwise fall through and fold the shards for real.
-    head = review.normalize_head(fm.get("head"))
     verdicts: list[dict[str, Any]] = []
     for v in ventries:
         n = v.get("name") or ""
@@ -668,6 +677,14 @@ def build_review_projection(
     honestly rather than re-stamping unknown state as current)."""
     log = log or get_logger("projection")
     prior = prior if isinstance(prior, dict) else {}
+    if prior and prior.get("schema") != REVIEWS_SCHEMA:
+        # A schema bump changes what a row must carry (v2 added of/head), so a
+        # prior-era row can never be carried into a section stamped with the
+        # new schema — that would sign rows the schema's own validator rejects.
+        # One full fresh scan re-derives every row under the current schema.
+        log.warn("review projection: prior schema superseded; full rescan",
+                 team=team, prior_schema=str(prior.get("schema")))
+        prior = {}
     prior_rows = {str(r.get("name")): r for r in (prior.get("rows") or [])
                   if isinstance(r, dict) and r.get("name")}
     prior_generated_at = prior.get("generated_at")

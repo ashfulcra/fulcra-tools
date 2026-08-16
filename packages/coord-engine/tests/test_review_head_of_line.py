@@ -287,7 +287,8 @@ def test_unreadable_head_no_tail_emits_only_head_marker(capsys):
         f"a head-only incident must NOT emit a tail-truncation marker: {out}"
     pend = [r for r in out if r.get("type") == "review-pending"]
     assert pend == [{"type": "review-pending", "name": "pr-mine-b",
-                     "state": "PENDING", "pending_required": ["alice"]}], out
+                     "state": "PENDING", "pending_required": ["alice"],
+                     "of": "url", "head": None}], out
     head = [r for r in out if r.get("type") == "review-head-degraded"]
     assert head == [{"type": "review-head-degraded", "scanned": 2, "total": 2,
                      "skipped": 1}], out
