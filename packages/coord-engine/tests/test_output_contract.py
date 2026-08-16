@@ -1,0 +1,200 @@
+"""The strict-consumer harness — the codex canary, moved into CI.
+
+Every fixture here reads engine output the way the least-forgiving real
+consumer does (the evidence pack's reader model,
+`docs/coord/OUTPUT-CONTRACT.md`): at most 8 KiB of stdout, exactly ONE JSON
+parse, no prose stripping, no history, no second lookup. The pack's twelve
+incidents (C01–C12) are representation-boundary failures — a consumer that
+parses less strictly turns UNKNOWN into false CLEAR, which is the class this
+fleet keeps killing.
+
+ENFORCED clauses fail CI. TARGET clauses come in two kinds (pr-633 r1):
+probeable targets are EXECUTABLE tests marked ``xfail(strict=True)`` — the
+moment their behavior lands, strict XPASS fails CI, forcing the same-PR
+flip the contract's enforcement ladder demands; unprobeable targets sit in
+``UNPROBEABLE_TARGETS``, a documentation-only registry that asserts nothing
+and says so.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from coord_engine import cli
+from coord_engine_test_helpers import FakeTransport
+
+STRICT_READ_CAP = 8 * 1024
+
+
+def strict_parse(stdout: str):
+    """One parse over a capped read, no prefix/suffix tolerance (OC1).
+
+    Raises on prose before or after the JSON value — the merged-stream C07
+    failure shape — and on output whose FIRST 8 KiB does not contain the
+    complete value (C03's tail-verdict shape; until OC4 pagination lands the
+    fixtures keep payloads under the cap deliberately).
+    """
+    capped = stdout[:STRICT_READ_CAP]
+    return json.loads(capped)
+
+
+def _seed_rows(t: FakeTransport) -> None:
+    t.put(
+        "team/r/task/one-live-task.md",
+        "---\ntype: Task\ntitle: One\nstatus: active\nowner: boss\n"
+        "assignee: alice\ntimestamp: 2026-08-15T00:00:00Z\n---\n",
+    )
+
+
+# --- OC1: stream purity (ENFORCED; C07) -----------------------------------
+
+
+@pytest.mark.parametrize("argv", [
+    ["needs-me", "r", "--agent", "alice", "--json"],
+    ["board", "r", "--json"],
+    ["inbox", "r", "--agent", "alice", "--json"],
+])
+def test_json_stdout_is_json_only_one_parse(argv, capsys):
+    t = FakeTransport()
+    _seed_rows(t)
+    cli.main(argv, transport=t)
+    out = capsys.readouterr().out
+    strict_parse(out)  # raises if any prose shares stdout with the value
+
+
+def test_queue_version_warning_rides_stderr_never_stdout(capsys):
+    # The C07 incident verb and the exact line: `queue --json` against a
+    # legacy authority emits the VERSION WARNING. The engine's side of the
+    # contract is purity per stream — the warning must be ON stderr and must
+    # never share stdout. (FakeTransport carries no records API, so the read
+    # itself errors after the warning; full queue-payload purity gets its
+    # fixture when a records-capable stub lands with the OC2 flip.)
+    t = FakeTransport()
+    t.put("team/r/_coord/bus-v3/records.json",
+          '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
+    cli.main(["queue", "r", "--agent", "alice", "--json"], transport=t)
+    captured = capsys.readouterr()
+    assert "VERSION WARNING" in captured.err, "warning must be emitted, on stderr"
+    assert "VERSION WARNING" not in captured.out
+    assert not captured.out.strip() or strict_parse(captured.out) is not None
+
+
+# --- OC10: typed degradation markers (ENFORCED vocabulary; C05, C06) -------
+
+
+def test_degraded_rows_carry_type_and_coverage(capsys):
+    # A transport whose listings fail must produce TYPED degradation the
+    # strict parser can classify — never a clean-looking empty answer.
+    t = FakeTransport()
+    _seed_rows(t)
+    t.fail_list = True
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    rows = strict_parse(capsys.readouterr().out)
+    assert isinstance(rows, list)
+    markers = [r for r in rows if isinstance(r, dict)
+               and str(r.get("type", "")).endswith(("-degraded", "-source"))
+               or isinstance(r, dict) and "degraded" in str(r.get("type", ""))]
+    assert markers, "no typed degradation marker on a failing transport"
+    for m in markers:
+        assert m.get("type"), "marker rows must be typed"
+
+
+# --- OC5: act-on-it fields, blocked rows (ENFORCED via pr-625; asserted
+# here as a contract-level canary so the fixture family lives in one file) --
+
+
+def test_blocked_ask_renders_unlock_independent_of_blocked_on(
+        capsys, monkeypatch):
+    # The C12 shape: blocked asks ALWAYS have blocked_on, so a fold that
+    # renders `blocked_on or unlock` makes unlock unreachable. pr-625 fixed
+    # the asks fold (tests/test_asks_render.py owns the full family); this
+    # canary pins the JSON surface at the contract level, driven row-level
+    # in the same style as that file.
+    import argparse
+    from types import SimpleNamespace
+
+    row = {"name": "slug-1", "owner": "coord-boss", "priority": "P1",
+           "title": "A blocked thing", "status": "blocked",
+           "blocked_on": "user:ash", "unlock": "grant the permission"}
+    args = argparse.Namespace(team="r", json=True, human="ash")
+    monkeypatch.setattr(cli, "_load_rows_status",
+                        lambda transport, team: ([row], True, ""))
+    monkeypatch.setattr(
+        cli.query, "asks",
+        lambda rows, *, now, human: [dict(r, age_hours=1.0) for r in rows])
+    cli.cmd_asks(args, SimpleNamespace())
+    rows = strict_parse(capsys.readouterr().out)
+    rendered = json.dumps(rows)
+    assert "user:ash" in rendered
+    assert "grant the permission" in rendered, (
+        "unlock must render independently of blocked_on (C12; pr-625)")
+
+
+# --- TARGET probes and registry -------------------------------------------
+#
+# Finding from pr-633 r1 (codex-reviewer): a descriptions-only registry cannot
+# detect target behavior landing WITHOUT its fixture flip. So: every target
+# that can be probed against today's behavior is an EXECUTABLE test marked
+# xfail(strict=True) — it is expected to fail now, and the moment the
+# behavior lands the xfail turns into XPASS which strict mode reports as a
+# hard CI FAILURE, forcing the same-PR flip the contract demands. Targets
+# that cannot be probed without infrastructure that does not exist yet stay
+# in the registry below, which is explicitly documentation-only.
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="OC2 TARGET (C03/C05/C06): stdout must lead with an envelope "
+           "object carrying state/source/contract; today it is a bare array. "
+           "When this XPASSes, flip OC2 to ENFORCED in the same PR.")
+def test_oc2_target_envelope_leads_stdout(capsys):
+    t = FakeTransport()
+    _seed_rows(t)
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    value = strict_parse(capsys.readouterr().out)
+    assert isinstance(value, dict), "envelope object must be the first value"
+    assert "state" in value and "contract" in value
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="OC5 TARGET (C01): review-pending rows must carry of + exact "
+           "head; today they carry only name/state/pending_required. "
+           "FIRST LADDER FLIP — when this XPASSes, flip OC5-review to "
+           "ENFORCED in the same PR.")
+def test_oc5_target_review_row_carries_of_and_head(capsys):
+    t = FakeTransport()
+    head = "a" * 40
+    cli.main(["review", "request", "r", "pr-9", "--of", "https://x/pr/9",
+              "--reviewer", "alice", "--from", "boss", "--head", head],
+             transport=t)
+    capsys.readouterr()
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    rows = strict_parse(capsys.readouterr().out)
+    pending = [r for r in rows if isinstance(r, dict)
+               and r.get("type") == "review-pending"]
+    assert pending, "reviewer must see the pending review"
+    assert pending[0].get("of") == "https://x/pr/9"
+    assert pending[0].get("head") == head
+
+
+# Documentation-only registry: targets whose probe needs infrastructure that
+# does not exist yet (yield tokens, capability stamps, cadence classes, a
+# records-capable test transport). These entries assert nothing and say so.
+
+UNPROBEABLE_TARGETS = [
+    "OC3 rc-early / yield token (C04) — needs the token envelope design",
+    "OC4 bounded rows / pagination (C03) — needs the continuation token",
+    "OC6 canonical writer vs bus-only verdict (C02/C11) — needs a "
+    "records-capable test transport",
+    "OC7 capability identity (C08) — needs build/capability stamps",
+    "OC8 artifact identity (C09) — needs register identity keys",
+    "OC9 cadence-declared liveness (C10) — needs cadence classes in "
+    "presence",
+]
+
+
+@pytest.mark.parametrize("reason", UNPROBEABLE_TARGETS)
+def test_target_registry_documentation_only(reason):
+    pytest.skip(f"TARGET registry (documentation-only, no probe yet): {reason}")
