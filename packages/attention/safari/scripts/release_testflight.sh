@@ -39,8 +39,28 @@ TEAM_ID="CWH48N2H7F"
 WORK="${TMPDIR:-/tmp}/fulcra-attention-testflight"
 ARCHIVE="$WORK/FulcraAttention-iOS.xcarchive"
 EXPORT_DIR="$WORK/export"
+# Argument parsing is strict on purpose. The last step of this script is
+# irreversible in the way that matters — an upload consumes a build number that
+# App Store Connect will never accept again — so an argument this script does
+# not understand must NOT be treated as "no arguments". A typo like `--dryrun`
+# silently falling through to a real upload is exactly the failure a release
+# script must not have.
 DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+case $# in
+  0) ;;
+  1)
+    if [ "$1" = "--dry-run" ]; then
+      DRY_RUN=1
+    else
+      printf 'unknown argument: %s\n\nusage: %s [--dry-run]\n' "$1" "$(basename "$0")" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    printf 'too many arguments (%s)\n\nusage: %s [--dry-run]\n' "$#" "$(basename "$0")" >&2
+    exit 2
+    ;;
+esac
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31mBLOCKED: %s\033[0m\n' "$*" >&2; exit 1; }

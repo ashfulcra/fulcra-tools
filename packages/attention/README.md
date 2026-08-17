@@ -61,7 +61,14 @@ The Safari app and extension live under [`safari/`](safari/). Four Xcode targets
 runs the 72 Swift tests:
 
 ```bash
-cd packages/attention/safari/FulcraAttention
+# Build BOTH extension bundles first. The test scheme builds the macOS app,
+# which embeds the extension, which copies a built bundle as resources — so
+# from a clean checkout the test fails on missing files that have nothing to
+# do with the tests themselves.
+cd packages/attention/chrome
+npm ci && npm run build && npx vite build --config vite.safari.config.ts
+
+cd ../safari/FulcraAttention
 xcodebuild -project FulcraAttention.xcodeproj \
   -scheme FulcraAttentionTests -destination 'platform=macOS' test
 ```
