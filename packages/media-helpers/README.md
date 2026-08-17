@@ -94,7 +94,8 @@ Watermarks (per-importer high-water marks) live in `~/.config/fulcra-media/state
 
 - **Watermark layer** (`fulcra_media/watermarks.py`) — API-poll importers fetch only what's new
 - **Cross-batch twin cache** (`fulcra_media/twin_cache.py`) — high-confidence events from prior imports inform new-batch dedup of same-content-different-timestamp twins
-- **Cluster preprocessing** (Trakt) — synthetic backfill timestamps get dropped, sentinel-dated, or kept per user choice
+- **Cluster preprocessing** (Trakt) — synthetic backfill timestamps get dropped, sentinel-dated, or kept per user choice (default: **keep**)
+- **Low-confidence timestamps are labelled in the note** — when a cluster is kept, every event in it gets `[bulk import — time unreliable]` appended to its note. The importers compute `timestamp_confidence` correctly, but the typed ingest path has no slot for that field and drops it on the wire, so `note` is the only channel that reaches a human reading their own timeline. Without the label, a bulk mark-as-watched is indistinguishable from real viewing: on 2026-08-14 Trakt sent 128 items, 91 sharing one identical timestamp, which landed as 110 hours of television inside a 2h50m window. The label does **not** correct the timestamp — the true time is unknown, and a confidently invented one would be worse than a labelled wrong one.
 - **Source-id idempotency** — every event has a deterministic SHA-derived ID, so re-imports are silent no-ops at the Fulcra layer
 - **JSON envelope** — agent-parseable output across every importer
 

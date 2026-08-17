@@ -13,6 +13,42 @@ VALID_CATEGORIES = {"watched", "listened", "activity", "read"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 
 
+#: Appended to the note of any event whose timestamp we already know not to
+#: trust. Human-readable on purpose — the only reader that matters here is a
+#: person looking at their own timeline.
+#:
+#: THE BUG THIS EXISTS FOR. Importers detect bulk timestamps well: any
+#: `watched_at` shared by >= 5 items is treated as a synthetic
+#: signup/service-link/mark-as-watched stamp and the whole cluster is set to
+#: `timestamp_confidence: "low"`. But the typed ingest path has no slot for
+#: that field and drops it on the wire, on the documented reasoning that
+#: "nothing reads those back from the server". That was true of code and false
+#: of the user: on 2026-08-14 Trakt sent 128 items, 91 sharing one identical
+#: timestamp, and they landed in Fulcra as 110 hours of television inside a
+#: 2h50m window — indistinguishable from things actually watched.
+#:
+#: `note` is the only free-form slot the typed schema offers, so the signal
+#: rides there. This does NOT correct the timestamp: we do not know the true
+#: time, and a confidently invented one would be worse than a labelled wrong
+#: one.
+LOW_CONFIDENCE_NOTE_MARKER = " [bulk import — time unreliable]"
+
+
+def _mark_if_low_confidence(note: str, confidence: str) -> str:
+    """Append the marker to `note` when the timestamp is untrustworthy.
+
+    Idempotent: re-imports are routine (the watermark can replay a window, a
+    user can re-run a backfill), and appending on every pass would grow the
+    note without bound and make the same row render differently on each sync.
+
+    Only `low` is marked. Marking the ordinary majority would teach the reader
+    to ignore the marker, which is worse than having none.
+    """
+    if confidence != "low" or LOW_CONFIDENCE_NOTE_MARKER in note:
+        return note
+    return f"{note}{LOW_CONFIDENCE_NOTE_MARKER}"
+
+
 @dataclass
 class NormalizedEvent:
     importer: str
@@ -54,7 +90,7 @@ class NormalizedEvent:
             extra_source_ids=tuple(self.extra_source_ids),
             tags=tuple(tags),
             external_ids=dict(self.external_ids),
-            note=self.note,
+            note=_mark_if_low_confidence(self.note, self.timestamp_confidence),
             title=self.title,
             service=self.service,
             timestamp_confidence=self.timestamp_confidence,

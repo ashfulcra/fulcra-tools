@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from fulcra_media.fulcra import FulcraClient
-from fulcra_media.importers.base import NormalizedEvent
+from fulcra_media.importers.base import LOW_CONFIDENCE_NOTE_MARKER, NormalizedEvent
 from fulcra_media.state import State
 
 
@@ -64,7 +64,10 @@ def test_ingest_batch_posts_jsonl_with_correct_shape(recording_transport):
     assert "com.fulcradynamics.annotation.def-watched" in md["source"]
 
     data_inner = json.loads(first["data"])
-    assert data_inner["note"] == "Note 1"
+    # timestamp_confidence="low" fixture: the note carries the marker. The
+    # legacy path ALSO still carries the structured field (asserted below) —
+    # the marker is an addition for the typed path, not a replacement.
+    assert data_inner["note"] == f"Note 1{LOW_CONFIDENCE_NOTE_MARKER}"
     assert data_inner["title"] == "Title 1"
     assert data_inner["service"] == "netflix"
     assert data_inner["timestamp_confidence"] == "low"
