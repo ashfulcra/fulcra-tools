@@ -102,8 +102,16 @@ say "Building extension bundles (chrome + safari)"
 # ------------------------------------------------------------------ archive
 say "Archiving $SCHEME"
 rm -rf "$WORK"; mkdir -p "$WORK"
+# -allowProvisioningUpdates is REQUIRED and easy to omit: Xcode.app silently
+# creates and refreshes provisioning profiles as capabilities change, but
+# xcodebuild does NOT — without this flag it signs with whatever profile is
+# already cached. When an App ID gains a capability (or, as here, an extension's
+# App ID is registered for the first time), the cached wildcard
+# "iOS Team Provisioning Profile: *" cannot carry App Groups and the archive
+# fails with an error that names the capability rather than the stale profile.
 xcodebuild -project "$PROJ" -scheme "$SCHEME" -sdk iphoneos -configuration Release \
   -archivePath "$ARCHIVE" \
+  -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$TEAM_ID" \
   archive
 
@@ -137,7 +145,7 @@ cat > "$WORK/ExportOptions.plist" <<PLIST
 </plist>
 PLIST
 
-xcodebuild -exportArchive -archivePath "$ARCHIVE" \
+xcodebuild -exportArchive -archivePath "$ARCHIVE" -allowProvisioningUpdates \
   -exportPath "$EXPORT_DIR" -exportOptionsPlist "$WORK/ExportOptions.plist"
 
 IPA="$(find "$EXPORT_DIR" -name '*.ipa' | head -1)"
