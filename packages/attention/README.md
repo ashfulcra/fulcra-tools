@@ -53,6 +53,32 @@ python -m venv .venv
 
 The browser extension is built and tested under [`chrome/`](chrome/) — see [chrome/README.md](chrome/README.md).
 
+### Safari (macOS + iOS)
+
+The Safari app and extension live under [`safari/`](safari/). Four Xcode targets
+(app + extension, each for macOS and iOS) are built on every change by
+[`.github/workflows/xcode.yml`](../../.github/workflows/xcode.yml). Swift suites
+run via `safari/scripts/run_swift_tests.sh` (a throwaway SwiftPM package — the
+xcodeproj still has no test target).
+
+**Shipping to TestFlight:** `safari/scripts/release_testflight.sh` does the whole
+mechanical path — builds both JS bundles, archives, verifies the archive really
+contains the embedded extension *with* its bundle inside, exports for App Store
+Connect, validates, and uploads. Run it with `--dry-run` to exercise everything
+except the upload.
+
+It cannot run unattended yet, and it fails in preflight naming exactly what is
+missing rather than part-way through:
+
+| Needed | Why it is not automatable here |
+|---|---|
+| **Apple Distribution** certificate | Requires the Apple ID. This Mac has only *Apple Development* and *Developer ID Application* — and Developer ID signs a notarised `.dmg` for direct download, **not** an App Store build. Different certificate, common confusion. |
+| App record for `com.fulcra.attention` | Created once by hand in App Store Connect. |
+| App Store Connect API key (`.p8`) | Downloadable exactly once, by the account holder. Pass via `ASC_KEY_ID` / `ASC_ISSUER_ID`. |
+
+The build number (`CURRENT_PROJECT_VERSION`) must increase on every upload —
+App Store Connect rejects a repeat.
+
 ## Status
 
 - **Relayless extension:** shipped, lives under [chrome/](chrome/). Direct-to-Fulcra ingest via Auth0 device flow. Foreground-only attention, AFK detection, pause control, onboarding wizard, right-click context menu, branded UI.
