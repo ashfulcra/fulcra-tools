@@ -31,11 +31,38 @@ VALID_CONFIDENCE = {"high", "medium", "low"}
 #: rides there. This does NOT correct the timestamp: we do not know the true
 #: time, and a confidently invented one would be worse than a labelled wrong
 #: one.
-LOW_CONFIDENCE_NOTE_MARKER = " [bulk import — time unreliable]"
+LOW_CONFIDENCE_NOTE_MARKER = " [time unreliable]"
+
+#: The stronger wording, used ONLY where we can prove the timestamp came from a
+#: bulk event — i.e. the event carries `timestamp_cluster_size`, which the Trakt
+#: importer sets when >= N items share one `watched_at`.
+#:
+#: This distinction is not cosmetic. `timestamp_confidence: "low"` is set by
+#: several importers for genuinely different reasons: Netflix's slim date-only
+#: rows get a synthetic noon ("we know the day, not the time"), Apple TV's
+#: Recently Watched snapshot rows get a fetch-time upper bound ("it happened
+#: some time before this"), and Trakt clusters get one shared import instant
+#: ("dozens of these were stamped together"). Labelling all three "bulk import"
+#: would state something false about two of them, which is worse than the
+#: unlabelled status quo — a reader who catches one wrong label stops trusting
+#: every label.
+BULK_IMPORT_NOTE_MARKER = " [bulk import — time unreliable]"
+
+#: Every marker this module can append. Membership — not equality with one
+#: marker — is what makes marking idempotent: a record already carrying the
+#: bulk marker must not also collect the generic one on a later pass.
+_ALL_MARKERS = (BULK_IMPORT_NOTE_MARKER, LOW_CONFIDENCE_NOTE_MARKER)
 
 
-def _mark_if_low_confidence(note: str, confidence: str) -> str:
-    """Append the marker to `note` when the timestamp is untrustworthy.
+def _mark_if_low_confidence(
+    note: str, confidence: str, external_ids: dict | None = None,
+) -> str:
+    """Append a marker to `note` when the timestamp is untrustworthy.
+
+    The wording follows PROVENANCE, not just confidence: only an event that
+    actually carries cluster evidence gets the bulk wording. Everything else
+    low-confidence gets the source-agnostic marker, which is true regardless of
+    which importer produced it and why.
 
     Idempotent: re-imports are routine (the watermark can replay a window, a
     user can re-run a backfill), and appending on every pass would grow the
@@ -44,9 +71,11 @@ def _mark_if_low_confidence(note: str, confidence: str) -> str:
     Only `low` is marked. Marking the ordinary majority would teach the reader
     to ignore the marker, which is worse than having none.
     """
-    if confidence != "low" or LOW_CONFIDENCE_NOTE_MARKER in note:
+    if confidence != "low" or any(m in note for m in _ALL_MARKERS):
         return note
-    return f"{note}{LOW_CONFIDENCE_NOTE_MARKER}"
+    clustered = bool((external_ids or {}).get("timestamp_cluster_size"))
+    marker = BULK_IMPORT_NOTE_MARKER if clustered else LOW_CONFIDENCE_NOTE_MARKER
+    return f"{note}{marker}"
 
 
 @dataclass
@@ -90,7 +119,9 @@ class NormalizedEvent:
             extra_source_ids=tuple(self.extra_source_ids),
             tags=tuple(tags),
             external_ids=dict(self.external_ids),
-            note=_mark_if_low_confidence(self.note, self.timestamp_confidence),
+            note=_mark_if_low_confidence(
+                self.note, self.timestamp_confidence, self.external_ids,
+            ),
             title=self.title,
             service=self.service,
             timestamp_confidence=self.timestamp_confidence,

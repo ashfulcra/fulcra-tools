@@ -24,14 +24,20 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from fulcra_media.importers.base import (
+    BULK_IMPORT_NOTE_MARKER,
     LOW_CONFIDENCE_NOTE_MARKER,
     NormalizedEvent,
 )
 
 
-def _event(confidence: str = "low", note: str = "Letterkenny S07E03 – Nut") -> NormalizedEvent:
+def _event(
+    confidence: str = "low",
+    note: str = "Letterkenny S07E03 – Nut",
+    external_ids: dict | None = None,
+) -> NormalizedEvent:
     start = datetime(2026, 8, 14, 6, 51, tzinfo=timezone.utc)
     return NormalizedEvent(
+        external_ids=dict(external_ids or {}),
         importer="trakt",
         service="trakt",
         category="watched",
@@ -48,6 +54,49 @@ def _wire(ev: NormalizedEvent):
     return ev.to_duration_event(definition_id="def-watched")
 
 
+class TestProvenanceDecidesTheWording:
+    """`timestamp_confidence: "low"` is set by several importers for genuinely
+    different reasons, so the wording follows evidence rather than confidence:
+
+      * Trakt cluster  — many rows share one `watched_at`; carries
+        `timestamp_cluster_size`. "bulk import" is literally true.
+      * Netflix slim   — date-only row given a synthetic noon. We know the DAY.
+      * Apple TV snap  — Recently Watched row stamped with fetch time, an upper
+        bound. It happened some time BEFORE this.
+
+    Calling the last two "bulk import" states something false about them, which
+    is worse than no label: a reader who catches one wrong label stops
+    trusting every label."""
+
+    def test_a_trakt_cluster_gets_the_BULK_wording(self):
+        ev = _event("low", external_ids={"timestamp_cluster_size": 91})
+        assert BULK_IMPORT_NOTE_MARKER in _wire(ev).note
+
+    def test_a_netflix_date_only_row_does_NOT_claim_bulk_import(self):
+        # No cluster evidence — synthetic noon on a date-only row.
+        note = _wire(_event("low", external_ids={})).note
+        assert BULK_IMPORT_NOTE_MARKER not in note
+        assert LOW_CONFIDENCE_NOTE_MARKER in note
+
+    def test_an_apple_tv_snapshot_row_does_NOT_claim_bulk_import(self):
+        # Fetch-time upper bound, no cluster evidence.
+        note = _wire(_event("low", external_ids={"apple_tv_snapshot": True})).note
+        assert BULK_IMPORT_NOTE_MARKER not in note
+        assert LOW_CONFIDENCE_NOTE_MARKER in note
+
+    def test_a_zero_cluster_size_is_not_treated_as_cluster_evidence(self):
+        # Absence and 0 must behave alike; a falsy count is not proof of a bulk
+        # event, and truthiness is the whole gate.
+        note = _wire(_event("low", external_ids={"timestamp_cluster_size": 0})).note
+        assert BULK_IMPORT_NOTE_MARKER not in note
+        assert LOW_CONFIDENCE_NOTE_MARKER in note
+
+    def test_the_generic_marker_is_a_substring_of_nothing_misleading(self):
+        # The generic marker must not accidentally appear inside the bulk one in
+        # a way that makes membership checks ambiguous.
+        assert LOW_CONFIDENCE_NOTE_MARKER.strip("[] ") == "time unreliable"
+
+
 class TestTheMarkerIsVisible:
     def test_low_confidence_note_carries_the_marker(self):
         assert LOW_CONFIDENCE_NOTE_MARKER in _wire(_event("low")).note
@@ -57,11 +106,16 @@ class TestTheMarkerIsVisible:
         # skimming the timeline still needs to see WHAT the row is.
         assert "Letterkenny S07E03 – Nut" in _wire(_event("low")).note
 
-    def test_the_marker_is_human_readable_not_a_code(self):
-        # This string is read by a person in a UI, not parsed by us. If it
+    @pytest.mark.parametrize(
+        "marker", [LOW_CONFIDENCE_NOTE_MARKER, BULK_IMPORT_NOTE_MARKER]
+    )
+    def test_every_marker_is_human_readable_not_a_code(self, marker):
+        # These strings are read by a person in a UI, not parsed by us. If one
         # ever becomes an opaque token, this test should fail and be argued.
-        assert LOW_CONFIDENCE_NOTE_MARKER.strip().startswith("[")
-        assert "bulk" in LOW_CONFIDENCE_NOTE_MARKER.lower()
+        assert marker.startswith(" ")           # separated from the title
+        assert marker.strip().startswith("[")   # visibly an annotation
+        assert "time" in marker.lower()         # says what is doubtful
+        assert marker.strip("[] ").islower()    # not a SCREAMING_TOKEN
 
 
 class TestItDoesNotTouchGoodData:
@@ -90,6 +144,15 @@ class TestIdempotence:
     def test_and_the_note_is_byte_identical_on_the_second_pass(self):
         once = _wire(_event("low")).note
         assert _wire(_event("low", note=once)).note == once
+
+    def test_a_bulk_marked_note_does_not_also_collect_the_generic_marker(self):
+        # The regression the two-marker split introduces: idempotence must be
+        # membership across ALL markers, not equality with one. Otherwise a
+        # cluster row re-imported without its external_ids grows a second tag.
+        bulk = _wire(_event("low", external_ids={"timestamp_cluster_size": 91})).note
+        again = _wire(_event("low", note=bulk, external_ids={})).note
+        assert again == bulk
+        assert LOW_CONFIDENCE_NOTE_MARKER not in again.replace(BULK_IMPORT_NOTE_MARKER, "")
 
 
 class TestDedupIdentityIsUntouched:
