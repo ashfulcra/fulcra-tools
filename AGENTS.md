@@ -78,6 +78,29 @@ under `skills/`, each package with its own README, build, and tests.
   tracks with EPA AQI derived locally from PM2.5; idempotency is per-reading
   via the daemon's `claim_dedup_keys`. Details:
   [`packages/purpleair`](packages/purpleair).
+- **Shipping the Safari app to TestFlight** — `packages/attention/safari/scripts/release_testflight.sh`
+  does the whole mechanical path (both JS bundles → archive → payload check →
+  export → validate → upload) and refuses to start without three things a
+  runner must never hold: an **Apple Distribution** certificate, an App Store
+  Connect app record for `com.fulcra.attention`, and an ASC API key passed as
+  `ASC_KEY_ID` / `ASC_ISSUER_ID` with the `.p8` at
+  `~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8`. **`Developer ID
+  Application` is not a substitute** — that signs the notarised `.dmg` for
+  direct download, not an App Store build; they are different certificates for
+  different channels and assuming otherwise fails late, looking like a
+  provisioning problem. `--dry-run` stops after export; any other argument is
+  rejected with exit 2 rather than falling through to an upload, because a
+  consumed build number is not recoverable. `CURRENT_PROJECT_VERSION` must
+  increase on every upload.
+- **Running the Safari Swift tests** — `xcodebuild -scheme FulcraAttentionTests
+  -destination 'platform=macOS' test`, but **build both JS bundles first**
+  (`npm ci && npm run build && npx vite build --config vite.safari.config.ts`
+  in `packages/attention/chrome`): the scheme builds the macOS app, which
+  embeds the extension, which copies a built bundle as resources, so a clean
+  checkout fails on missing files unrelated to the tests. Platform-agnostic
+  logic belongs in the **macOS app target** even when only the extension uses
+  it at runtime — that is what makes it reachable by `@testable import
+  FulcraAttention`.
 - **Shipping a new plugin in the frozen macOS app** — the menubar Briefcase
   `requires` is the ONLY list you edit, but it is not sufficient on its own: a
   monorepo package isn't on PyPI, so the release build must also build a local
