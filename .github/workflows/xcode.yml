@@ -95,7 +95,21 @@ jobs:
             echo "::endgroup::"
           done
 
-      # The xcodeproj has no test target, so these run through a throwaway
-      # SwiftPM package instead. Without this they execute nowhere.
+      # Runs the real FulcraAttentionTests target (macOS, hosted by the macOS
+      # app so `@testable import FulcraAttention` reaches the app module).
+      #
+      # This replaced a throwaway-SwiftPM shim that existed only because the
+      # project had no test target. Keeping both would mean maintaining the
+      # shim's hand-written source list in parallel with real target
+      # membership — and that drift is not hypothetical: NativeBridge.swift
+      # was in the shim's list but compiled into neither app target, which is
+      # exactly the mismatch that surfaced when the real target was added.
+      #
+      # Signing stays off: these are pure-logic suites, and a runner must not
+      # hold signing identities.
       - name: Run the Swift test suites
-        run: bash packages/attention/safari/scripts/run_swift_tests.sh
+        run: |
+          cd packages/attention/safari/FulcraAttention
+          xcodebuild -project FulcraAttention.xcodeproj \
+            -scheme FulcraAttentionTests -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test

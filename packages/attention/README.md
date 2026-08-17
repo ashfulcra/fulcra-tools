@@ -57,9 +57,19 @@ The browser extension is built and tested under [`chrome/`](chrome/) — see [ch
 
 The Safari app and extension live under [`safari/`](safari/). Four Xcode targets
 (app + extension, each for macOS and iOS) are built on every change by
-[`.github/workflows/xcode.yml`](../../.github/workflows/xcode.yml). Swift suites
-run via `safari/scripts/run_swift_tests.sh` (a throwaway SwiftPM package — the
-xcodeproj still has no test target).
+[`.github/workflows/xcode.yml`](../../.github/workflows/xcode.yml), which also
+runs the 72 Swift tests:
+
+```bash
+cd packages/attention/safari/FulcraAttention
+xcodebuild -project FulcraAttention.xcodeproj \
+  -scheme FulcraAttentionTests -destination 'platform=macOS' test
+```
+
+`FulcraAttentionTests` is hosted by the macOS app, so `@testable import
+FulcraAttention` reaches the app module. Platform-agnostic logic therefore
+belongs in the **macOS app target** even when only the extension uses it at
+runtime — that is what makes it testable.
 
 **Shipping to TestFlight:** `safari/scripts/release_testflight.sh` does the whole
 mechanical path — builds both JS bundles, archives, verifies the archive really

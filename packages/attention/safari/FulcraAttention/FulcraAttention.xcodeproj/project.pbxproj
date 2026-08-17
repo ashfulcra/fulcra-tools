@@ -73,6 +73,11 @@
 		0DAEBDA62FD5D985008ADF6D /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD962FD5D985008ADF6D /* icons */; };
 		0DAEBDA72FD5D985008ADF6D /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD972FD5D985008ADF6D /* manifest.json */; };
 		0DAEBDA92FD5D985008ADF6D /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD992FD5D985008ADF6D /* assets */; };
+		FCA00000000000000000004F /* DeviceIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000004B /* DeviceIdentityTests.swift */; };
+		FCA000000000000000000050 /* EnsureDefinitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000004C /* EnsureDefinitionTests.swift */; };
+		FCA000000000000000000051 /* IngestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000004D /* IngestTests.swift */; };
+		FCA000000000000000000052 /* NativeBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000004E /* NativeBridgeTests.swift */; };
+		FCA000000000000000000053 /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000100 /* NativeBridge.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -89,6 +94,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 0DAEBD6C2FD5D984008ADF6D;
 			remoteInfo = "FulcraAttention Extension (macOS)";
+		};
+		FCA000000000000000000049 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0DAEBD322FD5D983008ADF6D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0DAEBD562FD5D984008ADF6D;
+			remoteInfo = "FulcraAttention (macOS)";
 		};
 /* End PBXContainerItemProxy section */
 
@@ -155,6 +167,11 @@
 		0DAEBD962FD5D985008ADF6D /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = ../../../chrome/dist-safari/icons; sourceTree = "<group>"; };
 		0DAEBD972FD5D985008ADF6D /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = ../../../chrome/dist-safari/manifest.json; sourceTree = "<group>"; };
 		0DAEBD992FD5D985008ADF6D /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = assets; path = ../../../chrome/dist-safari/assets; sourceTree = "<group>"; };
+		FCA00000000000000000004B /* DeviceIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentityTests.swift; sourceTree = "<group>"; };
+		FCA00000000000000000004C /* EnsureDefinitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnsureDefinitionTests.swift; sourceTree = "<group>"; };
+		FCA00000000000000000004D /* IngestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IngestTests.swift; sourceTree = "<group>"; };
+		FCA00000000000000000004E /* NativeBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeTests.swift; sourceTree = "<group>"; };
+		FCA000000000000000000040 /* FulcraAttentionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FulcraAttentionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -198,6 +215,7 @@
 				0DAEBD582FD5D984008ADF6D /* macOS (App) */,
 				0DAEBD672FD5D984008ADF6D /* iOS (Extension) */,
 				0DAEBD712FD5D984008ADF6D /* macOS (Extension) */,
+				FCA00000000000000000004A /* FulcraAttentionTests */,
 				0DAEBD462FD5D984008ADF6D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -240,6 +258,7 @@
 				0DAEBD572FD5D984008ADF6D /* FulcraAttention.app */,
 				0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */,
 				0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */,
+				FCA000000000000000000040 /* FulcraAttentionTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -304,6 +323,17 @@
 			name = Resources;
 			path = "Shared (Extension)";
 			sourceTree = SOURCE_ROOT;
+		};
+		FCA00000000000000000004A /* FulcraAttentionTests */ = {
+			isa = PBXGroup;
+			children = (
+				FCA00000000000000000004B /* DeviceIdentityTests.swift */,
+				FCA00000000000000000004C /* EnsureDefinitionTests.swift */,
+				FCA00000000000000000004D /* IngestTests.swift */,
+				FCA00000000000000000004E /* NativeBridgeTests.swift */,
+			);
+			path = FulcraAttentionTests;
+			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
@@ -388,6 +418,22 @@
 			productReference = 0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		FCA000000000000000000041 /* FulcraAttentionTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FCA000000000000000000045 /* Build configuration list for PBXNativeTarget "FulcraAttentionTests" */;
+			buildPhases = (
+				FCA000000000000000000042 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FCA000000000000000000048 /* PBXTargetDependency */,
+			);
+			name = FulcraAttentionTests;
+			productName = FulcraAttentionTests;
+			productReference = FCA000000000000000000040 /* FulcraAttentionTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -426,6 +472,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				FCA000000000000000000041 /* FulcraAttentionTests */,
 				0DAEBD442FD5D984008ADF6D /* FulcraAttention (iOS) */,
 				0DAEBD562FD5D984008ADF6D /* FulcraAttention (macOS) */,
 				0DAEBD622FD5D984008ADF6D /* FulcraAttention Extension (iOS) */,
@@ -510,6 +557,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000053 /* NativeBridge.swift in Sources */,
 				FCA000000000000000000031 /* DeviceIdentity.swift in Sources */,
 				0DAEBD7C2FD5D984008ADF6D /* ViewController.swift in Sources */,
 				0DAEBD5A2FD5D984008ADF6D /* AppDelegate.swift in Sources */,
@@ -558,6 +606,17 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FCA000000000000000000042 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FCA00000000000000000004F /* DeviceIdentityTests.swift in Sources */,
+				FCA000000000000000000050 /* EnsureDefinitionTests.swift in Sources */,
+				FCA000000000000000000051 /* IngestTests.swift in Sources */,
+				FCA000000000000000000052 /* NativeBridgeTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -570,6 +629,11 @@
 			isa = PBXTargetDependency;
 			target = 0DAEBD6C2FD5D984008ADF6D /* FulcraAttention Extension (macOS) */;
 			targetProxy = 0DAEBD6F2FD5D984008ADF6D /* PBXContainerItemProxy */;
+		};
+		FCA000000000000000000048 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0DAEBD562FD5D984008ADF6D /* FulcraAttention (macOS) */;
+			targetProxy = FCA000000000000000000049 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1039,6 +1103,46 @@
 			};
 			name = Release;
 		};
+		FCA000000000000000000046 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FulcraAttention.app/Contents/MacOS/FulcraAttention";
+			};
+			name = Debug;
+		};
+		FCA000000000000000000047 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FulcraAttention.app/Contents/MacOS/FulcraAttention";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1083,6 +1187,15 @@
 			buildConfigurations = (
 				0DAEBD8F2FD5D984008ADF6D /* Debug */,
 				0DAEBD902FD5D984008ADF6D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FCA000000000000000000045 /* Build configuration list for PBXNativeTarget "FulcraAttentionTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FCA000000000000000000046 /* Debug */,
+				FCA000000000000000000047 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
