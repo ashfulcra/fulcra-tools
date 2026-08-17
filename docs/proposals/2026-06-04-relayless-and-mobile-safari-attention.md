@@ -351,11 +351,17 @@ nowhere and `EnsureDefinitionTests.swift` had never run since it landed. No CI
 workflow invokes `xcodebuild` either, so nothing in `safari/` had ever been built
 by CI.
 
-Interim fix: `safari/scripts/run_swift_tests.sh` assembles the platform-agnostic
-sources + the XCTest files into a throwaway SwiftPM package and runs
-`swift test` — no Xcode project, no signing, so it works headlessly and in CI.
-It runs 41 tests today (the previously-stranded `EnsureDefinitionTests` plus the
-new ingest/sent-set suites).
+Interim fix (2026-08, now **superseded**): `safari/scripts/run_swift_tests.sh`
+assembled the platform-agnostic sources + the XCTest files into a throwaway
+SwiftPM package and ran `swift test` — no Xcode project, no signing, so it
+worked headlessly and in CI.
+
+**Resolved:** the project now has a real `FulcraAttentionTests` target, hosted
+by the macOS app, running all 72 tests under `xcodebuild test` in CI. The shim
+was deleted rather than kept: its hand-written source list had to be maintained
+in parallel with real target membership, and it had already diverged —
+`NativeBridge.swift` was in the shim's list but compiled into neither app
+target, so those tests were passing against a module no shipping binary had.
 
 Still owed: a real test target in the xcodeproj, which is the only way to cover
 what needs the app sandbox (Keychain access groups, App Group container), and a
