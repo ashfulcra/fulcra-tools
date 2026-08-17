@@ -3129,8 +3129,23 @@ def _review_row_line(r: dict[str, Any]) -> Optional[str]:
     ``None`` for a non-review row so the caller falls back to its own default."""
     t = r.get("type")
     if t == "review-pending":
-        return (f"  [REVIEW] pending verdict: {r['name']} "
+        # PR 634 made every emit path carry `of` + `head` on these dicts, so the
+        # reviewer's artifact is already in hand — it just was not rendered, and a
+        # reviewer who cannot search SHAs had no way from this line to the thing
+        # under review (codex-coder sat blocked 20h on exactly that). `head` rides
+        # along because review is exact-head: the verdict filename is
+        # `<head>--<reviewer>.md`, so the slug alone does not say which head to
+        # file against. Both are omitted cleanly when absent — legacy rows and
+        # rows whose register entry predates 634 render exactly as before.
+        line = (f"  [REVIEW] pending verdict: {r['name']} "
                 f"(required: {', '.join(r['pending_required'])})")
+        of = str(r.get("of") or "").strip()
+        head = str(r.get("head") or "").strip()
+        if of:
+            line += f" — of: {_clip(of)}"
+        if head:
+            line += f" @ {head[:12]}"
+        return line
     if t == "review-fold-degraded":
         return _review_degraded_line(r)
     if t == "review-head-degraded":
