@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from fulcra_media.fulcra import FulcraClient, ImportResult
-from fulcra_media.importers.base import NormalizedEvent
+from fulcra_media.importers.base import LOW_CONFIDENCE_NOTE_MARKER, NormalizedEvent
 from fulcra_media.state import State
 from media_test_helpers import json_response
 
@@ -436,7 +436,13 @@ def test_run_import_posts_typed_jsonl_to_base_type_endpoint(recording_transport)
         assert set(rec["recorded_at"]) == {"start_time", "end_time"}
         assert _DEF_WATCHED in rec["sources"]
     notes = {rec["note"] for rec in recs}
-    assert notes == {"N1", "N2"}
+    # Both fixtures are timestamp_confidence="low", so both notes carry the
+    # bulk-import marker — the typed path drops the structured confidence
+    # field, and the note is the only slot that reaches the user.
+    assert notes == {
+        f"N1{LOW_CONFIDENCE_NOTE_MARKER}",
+        f"N2{LOW_CONFIDENCE_NOTE_MARKER}",
+    }
 
 
 def _delayed_verify_setup(recording_transport, poll_rows_fn):
