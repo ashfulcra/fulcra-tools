@@ -411,6 +411,12 @@ it (not on PyPI).
      shape. Plausibility cannot catch this, because being plausible is the
      answer's whole problem. The only defence is going to the SOURCE artifact and
      reading it. This is the half no heuristic covers, and the half that ships.
+  The trigger is behavioural, not scheduled: **the moment you find yourself
+  explaining a result away** — reconciling an inconvenient reading with what you
+  expected, ruling a mismatch to be noise, or narrating why a source need not be
+  opened — is the moment to run both defences. That impulse precedes the wrong
+  conclusion in every logged instance, which is what makes it useful: it is
+  available while the answer can still change.
   Corollary for any bug whose subject is a wrong reading: assume your own
   verification of it carries the same defect, and check the instrument before you
   trust what it told you.
