@@ -38,24 +38,44 @@ coord-mesh --channel "$CH" init "$PEER" --name mesh-smoke --reports reports/
 mesh init: granted <CH> -> <PEER> (data type read-back verified in share 'mesh-smoke'; reports prefix verified as 'file:/reports/')
 ```
 
-**What changed since the 2026-08-18 run, and why.** That run died here in
-argparse: `transport.py` appended `--file <prefix>`, an option `fulcra-api
-share create` has never had. The live surface says a file grant is not a flag
-at all — it is a **data type**, `file:/reports/`, riding the repeatable
-`--data-type`. Two consequences for this leg:
+### Before you run anything: your client version decides the outcome
 
-  - the command now sends `--data-type "file:/reports/"`, and
-  - the prefix is **verified**, not disclaimed. The previous version of this
-    document told you a stderr caveat about an unverifiable prefix was correct
-    and expected. It was neither: the prefix sits in the same
-    `fulcra_data_types` list as the channel. If you see that caveat, you are
-    running pre-fix code.
+This leg is **version-sensitive**, and two rounds were lost to not knowing it.
+
+| installed `fulcra-api` | what a reports prefix can do |
+|---|---|
+| ≤ 0.1.39 | **Impossible by any path.** No `--file` option, and `--data-type file:/reports/` is refused by the client's own validation (`Invalid data type(s)`). |
+| ≥ 0.1.40 | Works. `--data-type file:/reports/` is proven end-to-end; `--file` also exists as sugar and is deliberately not used. |
+
+`fulcra-api` exposes **no version surface** — no `--version`, no `version`
+subcommand — so you cannot ask the binary what it is, and three hosts each
+believed they ran 0.1.40 while two of them did not. Check the installer:
+
+```
+uv tool list | grep fulcra-api
+```
+
+`coord-mesh init` does not trust you on this. It probes the installed client and
+**refuses** a reports prefix it cannot deliver, rather than quietly minting a
+channel-only share and calling it granted.
+
+**What changed since the first 2026-08-18 run, and why.** That run died here in
+argparse: `transport.py` appended `--file <prefix>` to a 0.1.39 client that had
+no such option. The fix routes the prefix through the repeatable `--data-type`
+as `file:/reports/` — the form it actually takes on a real share row. The
+prefix is also now **verified** rather than disclaimed: an earlier version of
+this document said a stderr caveat about an unverifiable prefix was correct and
+expected. It was a 0.1.39 artifact. If you see that caveat, you are running
+pre-fix code.
 
 **Failure modes and what they mean:**
 
 | output | meaning |
 |---|---|
 | `REFUSED: named-uid rail` | `$PEER` is not UUID-shaped. The rail is working; fix the input. |
+| rc 2 `the installed fulcra-api cannot express a file grant` | Your client is ≤ 0.1.39. The fence is working. Upgrade (watch it) and re-run; nothing was created. |
+| rc 3 `could not establish what the installed fulcra-api can do` | The capability probe itself failed. Not a share failure and not a client-too-old verdict — nothing was created. Record the probe's error. |
+| rc 2 `--reports is whitespace only` | A typo, refused rather than crashed. Pass a path or omit the flag. |
 | `No such option '--file'` | Pre-fix code. You are not running this document's package head. |
 | rc 3 `create returned 0 but no share named 'mesh-smoke' ... is in list-outgoing` | The platform accepted the create but the share is not visible. **This is the interesting failure** — record the full `fulcra-api share list-outgoing` output. |
 | rc 3 `CHANNEL is granted, the REPORTS PREFIX is not confirmed` | The share exists and carries the channel, but no `file:` data type came back. Events will flow and every `ptr` body will 404. **Record the row verbatim** — it would mean outgoing rows do not echo file grants the way the captured incoming row does, which is a platform fact this package has not yet measured directly. |

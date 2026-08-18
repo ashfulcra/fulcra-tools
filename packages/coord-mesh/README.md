@@ -46,7 +46,7 @@ author wished for. The tests measured the author's belief about the CLI, then
 reported it as knowledge of the CLI.
 
 The fix is the same one `wire.py` already applies to `get-records`, extended to
-a second surface: `tests/fixtures/` now also holds a verbatim
+a second surface: `tests/fixtures/` now also holds a captured
 `share create --help` and a real share row carrying a file grant, and
 `test_share_create_contract.py` asserts that **every flag in the argv we execute
 exists in the captured help**. A wished-for flag now fails a unit test instead
@@ -54,6 +54,24 @@ of a live leg. The same round retired a disclaimer that was itself an
 over-claim in the other direction — r3 had concluded a reports prefix was
 unobservable from a share row, and the live surface shows it plainly as the
 data type `file:/reports/`.
+
+**Instance ten is the fix for instance nine getting it wrong.** The capture that
+closed the `--file` defect was labelled 0.1.40 and came from 0.1.38, so a test
+asserting "`--file` does not exist" passed here and was refuted on a reviewer's
+genuine 0.1.40. Three hosts each believed they ran 0.1.40; two were wrong. The
+version had never been measured, only assumed — and an assumption written into a
+docstring is indistinguishable from a measurement afterwards. The lesson is one
+layer deeper than "test against a real surface": **a capture must record its own
+provenance, measured at capture time.** `tools/capture_fixtures.py` writes the
+fixture and stamps it with the installed version it read from the installer;
+nothing writes that fixture by hand, and the tests assert against the version it
+recorded rather than one a person typed.
+
+The runtime learned the same lesson. `fulcra-api` has no version surface at all
+— no `--version`, no `version` subcommand — so `init` does not ask the client
+what it *is*; it asks what it can *do*, by probing the help of the binary it is
+about to invoke, and **refuses** a reports prefix it cannot deliver instead of
+minting a smaller share and reporting success.
 
 Live legs are documented in [SMOKE.md](SMOKE.md); the role charter is
 [docs/coord/MESH-MAINTAINER.md](../../docs/coord/MESH-MAINTAINER.md).

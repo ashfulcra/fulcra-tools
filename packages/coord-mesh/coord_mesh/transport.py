@@ -96,6 +96,62 @@ def file_data_type(prefix: str) -> str:
     return FILE_TYPE_PREFIX + "/" + raw.strip("/") + "/"
 
 
+#: The client release that made file grants possible AT ALL. Measured live by
+#: coord-boss on 2026-08-18: a 0.1.39 client has no `--file` option AND rejects
+#: `--data-type file:/reports/` in its own validation ("Invalid data type(s)"),
+#: so there is no path to a file grant from below this version. 0.1.40 accepts
+#: both.
+MIN_FILE_GRANT_VERSION = "0.1.40"
+
+
+class CapabilityUnknown(Exception):
+    """We could not establish what the installed client can do.
+
+    Distinct from "it cannot": narrowing what we ask for on the strength of a
+    failed probe would be silently degrading, which is the one thing the fence
+    exists to prevent.
+    """
+
+
+def share_create_help(*, timeout: float = DEFAULT_TIMEOUT) -> str:
+    """The help text of the binary we are ACTUALLY about to invoke.
+
+    Not the version of the Python package this module lives in, and not a
+    string a human typed into a fixture. The r5 round turned on exactly that
+    gap: three hosts each held a client they described as 0.1.40 and two of
+    them were wrong, because nobody asked the binary.
+    """
+    try:
+        rc, out, err = run(["share", "create", "--help"], timeout=timeout)
+    except TransportError as exc:
+        raise CapabilityUnknown(f"could not run `share create --help`: {exc}") from exc
+    if rc != 0:
+        raise CapabilityUnknown(
+            f"`share create --help` exited {rc}: {(err or out).strip()[:200]}")
+    return out or ""
+
+
+def supports_file_grants(help_text: Optional[str] = None, *,
+                         timeout: float = DEFAULT_TIMEOUT) -> bool:
+    """CAPABILITY probe, deliberately not a version check.
+
+    `fulcra-api` exposes no version surface at all — no `--version` flag and no
+    `version` subcommand (measured on 0.1.40, 2026-08-18) — so the installed
+    client cannot be asked what release it is. Even if it could, r5 is the
+    argument against trusting the answer: the label was what went wrong, on
+    three hosts at once. What the client can DO is answerable, so we ask that.
+
+    `--file` and `--no-validate` both arrive in 0.1.40, the same release that
+    stops rejecting `file:` data types, so their presence is a sound proxy for
+    "file grants are possible here". It is a proxy, and it is named as one:
+    if the platform ever ships `--file` without lifting the data-type
+    validation, this returns True and `init` fails on the create instead — a
+    loud failure, not a silent narrowing.
+    """
+    text = share_create_help(timeout=timeout) if help_text is None else help_text
+    return "--file" in text
+
+
 def share_create(*, name: str, data_type: str, user_id: str,
                  file_prefix: Optional[str] = None,
                  timeout: float = DEFAULT_TIMEOUT):

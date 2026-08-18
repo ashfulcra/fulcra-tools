@@ -21,6 +21,25 @@ MINE = "d64bbe9b-4902-42e9-a607-7db51ebc6379"
 CH = "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
 
 
+@pytest.fixture(autouse=True)
+def capable_client(monkeypatch):
+    """Stand the capability fence down for the read-back tests BY DEFAULT.
+
+    `init --reports` probes the installed `fulcra-api` before it will mint a
+    file grant, and that probe is a real subprocess: without this, every
+    read-back test below would depend on which client happens to be installed
+    on the test host — which is precisely the coupling r5 punished.
+
+    It is autouse and therefore easy to miss, so: the fence itself is NOT left
+    untested by it. `test_init_refuses_when_the_client_cannot_do_file_grants`
+    and `test_init_is_unknown_when_the_capability_probe_fails` override this
+    fixture and assert the refusals, and neither can pass if the fence stops
+    being consulted.
+    """
+    monkeypatch.setattr(cli.transport, "supports_file_grants",
+                        lambda *a, **k: True)
+
+
 def test_declared_entry_point_resolves_and_is_callable():
     """THE REGRESSION: pyproject's console target must import and be callable.
 
@@ -283,3 +302,65 @@ def test_init_is_unknown_when_the_channel_landed_but_the_prefix_did_not(capsys, 
     # Distinct from the nothing-was-granted message, which would send the
     # operator to re-run init instead of chasing the file grant.
     assert "not evidence that ours exists" not in err
+
+
+# --- the capability fence (coord-boss r6 shape, item 2) --------------------
+
+def test_init_refuses_when_the_client_cannot_do_file_grants(capsys, monkeypatch):
+    """A client below 0.1.40 cannot express a file grant by ANY path — no
+    `--file` option, and `--data-type file:/reports/` refused by its own
+    validation. Minting the channel-only share anyway would tell the operator
+    "granted" about something smaller than they asked for."""
+    monkeypatch.setattr(cli.transport, "supports_file_grants",
+                        lambda *a, **k: False)
+    minted = []
+    monkeypatch.setattr(cli.transport, "share_create",
+                        lambda **k: minted.append(k) or (0, "", ""))
+    rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test",
+                   "--reports", "reports/"])
+    assert rc == cli.RC_REFUSED
+    err = capsys.readouterr().err
+    assert "0.1.40" in err and "uv tool install" in err
+    assert not minted, "refused, so NOTHING may have been created"
+
+
+def test_init_is_unknown_when_the_capability_probe_fails(capsys, monkeypatch):
+    """A failed probe is UNKNOWN, not "assume capable" and not "assume not".
+    Narrowing on a failed read is the silent-degrade this fence exists to stop."""
+    def boom(*a, **k):
+        raise cli.transport.CapabilityUnknown("help exited 2")
+    monkeypatch.setattr(cli.transport, "supports_file_grants", boom)
+    minted = []
+    monkeypatch.setattr(cli.transport, "share_create",
+                        lambda **k: minted.append(k) or (0, "", ""))
+    rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test",
+                   "--reports", "reports/"])
+    assert rc == cli.RC_UNKNOWN
+    assert not minted
+
+
+def test_a_channel_only_init_never_probes(monkeypatch):
+    """No prefix asked for, no capability needed — the fence must not make
+    channel-only shares depend on a client feature they do not use."""
+    def boom(*a, **k):
+        raise AssertionError("probed the client for a channel-only share")
+    monkeypatch.setattr(cli.transport, "supports_file_grants", boom)
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "list_outgoing",
+                        lambda *a, **k: cli.transport.Result(
+                            cli.transport.OK, rows=[_share("mesh-m2-test", UID, [CH])]))
+    assert cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test",
+                     "--reports", ""]) == cli.RC_OK
+
+
+# --- the r5 secondary: a crash is not one of the three answers -------------
+
+def test_whitespace_reports_is_refused_not_a_traceback(capsys, monkeypatch):
+    """codex-coder r5 secondary: `--reports "   "` escaped as a bare ValueError.
+    A caller cannot tell a crash from a refusal, and a traceback is not one of
+    this CLI's three exit codes."""
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test",
+                   "--reports", "   "])
+    assert rc == cli.RC_REFUSED
+    assert "whitespace only" in capsys.readouterr().err

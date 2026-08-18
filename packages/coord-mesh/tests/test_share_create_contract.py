@@ -1,33 +1,34 @@
-"""`share create`'s argv, pinned to the REAL CLI surface.
+"""`share create`'s argv, pinned to the REAL CLI surface — and to a MEASURED one.
 
-THE DEFECT THIS FILE EXISTS FOR (coord-boss's two-account live run, 2026-08-18):
-`transport.share_create` appended ``--file <prefix>``. `fulcra-api share create`
-has never had that option, so leg 1 of SMOKE.md died in argparse:
+This file has been wrong once, and how it was wrong is the point.
 
-    Error: No such option '--file'.
+ROUND 1 (the live defect). `transport.share_create` appended ``--file <prefix>``
+and coord-boss's two-account smoke died in argparse: `No such option '--file'`.
+Eighty-five unit tests were green and could not have caught it — every test drove
+a fake that accepted whatever flag the caller passed, so the suite asserted the
+flag its author WISHED for.
 
-Eighty-five unit tests were green at the time. They could not have caught it:
-the author's host cannot run cross-account share verbs, and every test drove a
-fake that accepted whatever flag the caller passed — so the suite asserted the
-flag its author WISHED for, not the one the platform has.
+ROUND 2 (this file's own defect, codex-coder r5). The fixture written to fix
+that was labelled "fulcra-api 0.1.40" and was captured from 0.1.38. A test
+asserting "`--file` does not exist on the real CLI" therefore passed here and was
+refuted on a reviewer's genuine 0.1.40, where `--file` exists. Three hosts each
+believed they ran 0.1.40; two were wrong. Nobody lied — the version was never
+measured, only assumed, and an assumption written into a docstring is
+indistinguishable from a measurement afterwards.
 
-That is the same failure mode `test_wire_contract.py` was written to kill for
-`get-records` (a fake emitting `record_id` while the transport emits `id`), and
-it is the package thesis restated: every defect found here so far was a
-verification surface claiming more than it measured.
+So the fixture is now JSON carrying its own MEASURED provenance
+(`tests/fixtures/real_share_create_help.json`, written by
+`tools/capture_fixtures.py`, never by hand), and these tests assert against the
+version it records rather than a version anyone typed. Re-capture with:
 
-So this file measures. Two captured live surfaces, neither hand-written:
+    python tools/capture_fixtures.py            # rewrite from installed client
+    python tools/capture_fixtures.py --check    # fail if it has drifted
 
-  - ``fixtures/real_share_create_help.txt`` — verbatim ``fulcra-api share
-    create --help`` (0.1.40). It is the authority on which options exist.
-  - ``fixtures/real_share_row.json`` — a real share row carrying a file grant,
-    captured from ``fulcra-api share list-incoming`` on 2026-08-18, uids
-    replaced with placeholders and the SHAPE untouched. It is the authority on
-    how a file prefix is expressed: a data-type id, ``file:/reports/`` — not a
-    flag, not a separate field.
-
-If the platform renames an option or moves the file grant off `fulcra_data_types`,
-these fail rather than the next live run.
+WHAT IS AND IS NOT PINNED HERE. `--file` exists on 0.1.40 and this package does
+not use it: coord-boss's live bench proved the `--data-type file:/reports/` path
+verbatim-green with read-back verification, and the sugar flag has not been
+proven. That is a deliberate choice, recorded so the next maintainer knows it
+was made rather than missed.
 """
 import json
 import os
@@ -37,16 +38,20 @@ import pytest
 from coord_mesh import safety, transport
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
-HELP = os.path.join(FIXTURES, "real_share_create_help.txt")
+HELP = os.path.join(FIXTURES, "real_share_create_help.json")
 SHARE_ROW = os.path.join(FIXTURES, "real_share_row.json")
 
 PEER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 CHANNEL = "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
 
 
-def real_help():
+def capture():
     with open(HELP, "r", encoding="utf-8") as fh:
-        return fh.read()
+        return json.load(fh)
+
+
+def real_help():
+    return capture()["help"]
 
 
 def real_share_row():
@@ -55,11 +60,7 @@ def real_share_row():
 
 
 def captured_argv(monkeypatch, **kw):
-    """Run share_create against a recorder, returning the argv it would execute.
-
-    Deliberately NOT a fake that accepts anything: the point of this file is
-    that the argv is then checked against the captured real help text.
-    """
+    """The argv share_create would execute, recorded rather than faked-away."""
     seen = {}
 
     def fake_run(args, **_):
@@ -71,20 +72,37 @@ def captured_argv(monkeypatch, **kw):
     return seen["argv"]
 
 
-# --- the real CLI surface -------------------------------------------------
+# --- provenance: the r5 regression ---------------------------------------
 
-def test_the_file_flag_does_not_exist_on_the_real_cli():
-    """THE regression, stated as the platform states it."""
-    assert "--file" not in real_help(), (
-        "captured `share create --help` grew a --file option — re-derive the "
-        "file-grant mechanism from the live CLI before changing transport.py"
+def test_the_capture_records_which_client_it_came_from():
+    """THE r5 regression. An unlabelled capture is how this file got it wrong."""
+    prov = capture().get("distribution_version")
+    assert prov, ("the help fixture carries no measured version — re-run "
+                  "tools/capture_fixtures.py; a capture without provenance is "
+                  "exactly what r5 refuted")
+
+
+def test_the_capture_is_from_a_client_that_can_do_file_grants():
+    """Pinning argv to a client too old to express the feature is meaningless."""
+    prov = capture()["distribution_version"]
+    assert prov >= transport.MIN_FILE_GRANT_VERSION, (
+        f"fixture captured from fulcra-api {prov}, which cannot express a file "
+        f"grant at all; re-capture from >= {transport.MIN_FILE_GRANT_VERSION}"
     )
 
 
+def test_the_capture_names_the_surface_and_the_binary():
+    cap = capture()
+    assert cap["surface"] == "fulcra-api share create --help"
+    assert cap["captured_from"]
+
+
+# --- the real CLI surface -------------------------------------------------
+
 def test_the_options_share_create_actually_has():
     help_text = real_help()
-    for opt in ("--name", "--data-type", "--user-id", "--share-all"):
-        assert opt in help_text, f"{opt} vanished from the real CLI"
+    for opt in ("--name", "--data-type", "--user-id", "--share-all", "--file"):
+        assert opt in help_text, f"{opt} vanished from the captured CLI"
 
 
 def test_data_type_is_repeatable_which_is_why_a_file_grant_can_ride_it():
@@ -92,15 +110,30 @@ def test_data_type_is_repeatable_which_is_why_a_file_grant_can_ride_it():
     assert "can be specified multiple times" in real_help()
 
 
+def test_the_capability_probe_agrees_with_the_captured_surface():
+    """`supports_file_grants` is what the runtime fence trusts; it must read the
+    same surface these tests read, not a second opinion about it."""
+    assert transport.supports_file_grants(real_help()) is True
+
+
+def test_the_probe_says_no_for_a_client_without_the_marker():
+    """A 0.1.39-shaped help text must not read as capable."""
+    old = real_help().replace("--file", "--no-such-flag")
+    assert transport.supports_file_grants(old) is False
+
+
 # --- the real share row ---------------------------------------------------
 
 def test_a_file_grant_is_a_data_type_id_on_a_real_row():
     """The mechanism, measured — not inferred from the CLI's shape."""
-    row = real_share_row()
-    types = row["fulcra_data_types"]
+    types = real_share_row()["fulcra_data_types"]
     assert "file:/reports/" in types, (
         "the captured row no longer expresses a file grant as a data type"
     )
+
+
+def test_the_captured_row_has_no_dedicated_file_field():
+    row = real_share_row()
     assert "file_prefix" not in row and "files" not in row, (
         "a real share row grew a dedicated file field — find_share must be "
         "re-derived rather than keep reading fulcra_data_types"
@@ -113,24 +146,26 @@ def test_the_captured_row_is_scoped_not_share_all():
 
 # --- the argv we actually execute ----------------------------------------
 
-def test_argv_never_contains_the_flag_that_broke_the_live_run(monkeypatch):
-    argv = captured_argv(monkeypatch, name="mesh-smoke", data_type=CHANNEL,
-                         user_id=PEER, file_prefix="reports/")
-    assert "--file" not in argv, "the r4 defect is back"
-
-
 def test_argv_expresses_the_prefix_exactly_as_the_real_row_does(monkeypatch):
     """The argv value and the live row's value must be the same string."""
     argv = captured_argv(monkeypatch, name="mesh-smoke", data_type=CHANNEL,
                          user_id=PEER, file_prefix="reports/")
     assert "file:/reports/" in argv
     assert argv.count("--data-type") == 2, argv
-    # …and it is the value of a --data-type, not a bare positional.
     assert argv[argv.index("file:/reports/") - 1] == "--data-type"
 
 
-def test_every_flag_in_the_argv_exists_in_the_real_help(monkeypatch):
-    """The whole-argv version of the regression: no wished-for flags at all."""
+def test_we_use_the_proven_path_not_the_sugar_flag(monkeypatch):
+    """`--file` exists on 0.1.40 but has never been proven end-to-end here;
+    the --data-type path has. Changing this is a decision, not a cleanup."""
+    argv = captured_argv(monkeypatch, name="mesh-smoke", data_type=CHANNEL,
+                         user_id=PEER, file_prefix="reports/")
+    assert "--file" not in argv
+
+
+def test_every_flag_in_the_argv_exists_in_the_captured_help(monkeypatch):
+    """The whole-argv check: no wished-for flags, measured against a client
+    whose version is recorded rather than assumed."""
     argv = captured_argv(monkeypatch, name="mesh-smoke", data_type=CHANNEL,
                          user_id=PEER, file_prefix="reports/")
     help_text = real_help()
@@ -138,12 +173,12 @@ def test_every_flag_in_the_argv_exists_in_the_real_help(monkeypatch):
     assert flags, argv
     for flag in flags:
         assert flag in help_text, (
-            f"{flag} is not an option of the real `share create` — this is the "
-            "exact class of defect that killed leg 1 of the live smoke"
+            f"{flag} is not an option of the captured `share create` — this is "
+            "the class of defect that killed leg 1 of the live smoke"
         )
 
 
-def test_channel_still_granted_and_uid_still_last(monkeypatch):
+def test_channel_still_granted_and_uid_present(monkeypatch):
     argv = captured_argv(monkeypatch, name="mesh-smoke", data_type=CHANNEL,
                          user_id=PEER, file_prefix="reports/")
     assert argv[:2] == ["share", "create"]
@@ -173,7 +208,6 @@ def test_all_the_ways_an_operator_writes_the_path_normalize_to_the_live_value(gi
 
 
 def test_an_already_namespaced_value_passes_through():
-    """Someone who read the id off a live row and pasted it gets it back."""
     assert transport.file_data_type("file:/reports/") == "file:/reports/"
 
 

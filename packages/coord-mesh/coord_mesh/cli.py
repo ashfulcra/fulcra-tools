@@ -32,11 +32,55 @@ def _channel(args) -> str:
 
 def cmd_init(args) -> int:
     """Create the OUTBOUND share (channel + reports prefix) at a named uid."""
+    # `--reports "   "` is a typo, not a request for a prefix named whitespace.
+    # It used to reach file_data_type() and escape as a bare ValueError with a
+    # traceback (codex-coder, r5 secondary): a crash is not one of this CLI's
+    # three answers, and a caller cannot tell a crash from a refusal.
+    reports = (args.reports or "").strip()
+    if args.reports and not reports:
+        print("mesh init REFUSED: --reports is whitespace only. Pass a real "
+              "path (e.g. reports/) or omit the flag to mint a channel-only "
+              "share.", file=sys.stderr)
+        return RC_REFUSED
+
+    # THE CAPABILITY FENCE (coord-boss's r6 shape, item 2). A client older than
+    # 0.1.40 cannot express a file grant by ANY path — no `--file` option, and
+    # `--data-type file:/reports/` refused by its own validation. Minting the
+    # channel-only share anyway would be a silent narrowing: the operator asked
+    # for reports and would be told "granted" about something smaller.
+    if reports:
+        try:
+            capable = transport.supports_file_grants()
+        except transport.CapabilityUnknown as exc:
+            print(f"mesh init UNKNOWN: could not establish what the installed "
+                  f"fulcra-api can do ({exc}) — refusing rather than guessing, "
+                  f"because a file grant is impossible below "
+                  f"{transport.MIN_FILE_GRANT_VERSION} and a share minted "
+                  f"without it would report reports/ as granted when it is not",
+                  file=sys.stderr)
+            return RC_UNKNOWN
+        if not capable:
+            print(f"mesh init REFUSED: the installed fulcra-api cannot express "
+                  f"a file grant, so {reports!r} could not be granted by any "
+                  f"path. This needs >= {transport.MIN_FILE_GRANT_VERSION}; run "
+                  f"`uv tool install --force fulcra-api=="
+                  f"{transport.MIN_FILE_GRANT_VERSION}` (watch it — an "
+                  f"unattended client upgrade is hard to roll back) and re-run. "
+                  f"Refusing rather than minting a channel-only share, which "
+                  f"would report success for less than you asked for.",
+                  file=sys.stderr)
+            return RC_REFUSED
+
     try:
         rc, out, err = transport.share_create(
             name=args.name, data_type=_channel(args), user_id=args.peer,
-            file_prefix=args.reports)
+            file_prefix=reports or None)
     except safety.SafetyViolation as exc:
+        print(f"mesh init REFUSED: {exc}", file=sys.stderr)
+        return RC_REFUSED
+    except ValueError as exc:
+        # file_data_type() rejects a prefix that normalizes to nothing. Caught
+        # here so the CLI answers with a code instead of a traceback.
         print(f"mesh init REFUSED: {exc}", file=sys.stderr)
         return RC_REFUSED
     except transport.TransportError as exc:
@@ -62,15 +106,15 @@ def cmd_init(args) -> int:
     # before the mesh created anything (codex-coder, r2 on 3c1c78d).
     granted = transport.find_share(back.rows, peer_uid=args.peer,
                                    data_type=_channel(args), name=args.name,
-                                   file_prefix=args.reports or None)
+                                   file_prefix=reports or None)
     if not granted:
         # Two different failures wear the same "no match" here, and telling the
         # operator which one they have is the difference between a re-run and a
         # platform bug report. Re-match WITHOUT the prefix to find out.
         partial = transport.find_share(back.rows, peer_uid=args.peer,
                                        data_type=_channel(args), name=args.name)
-        if partial is not None and args.reports:
-            want = transport.file_data_type(args.reports)
+        if partial is not None and reports:
+            want = transport.file_data_type(reports)
             print(f"mesh init: share {args.name!r} exists and grants "
                   f"{_channel(args)} to {args.peer}, but {want!r} is NOT among "
                   f"its data types {list(partial.get('fulcra_data_types') or [])} "
@@ -89,8 +133,8 @@ def cmd_init(args) -> int:
     # real row), so it is in the same `fulcra_data_types` list and is now
     # verified rather than disclaimed.
     detail = f"data type read-back verified in share {args.name!r}"
-    if args.reports:
-        detail += f"; reports prefix verified as {transport.file_data_type(args.reports)!r}"
+    if reports:
+        detail += f"; reports prefix verified as {transport.file_data_type(reports)!r}"
     print(f"mesh init: granted {_channel(args)} -> {args.peer} ({detail})")
     return RC_OK
 
