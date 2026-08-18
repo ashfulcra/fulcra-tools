@@ -26,10 +26,18 @@ from coord_engine_test_helpers import FakeTransport
 from coord_engine import cli, review_gc
 
 
+#: The repository these fixtures pretend to live in. Entries default to naming
+#: it, so every pre-existing test keeps testing what it was written to test —
+#: the head-liveness contract — rather than accidentally exercising the new
+#: cross-repo guard.
+HERE = "acme/widgets"
+
+
 def entry(slug="s", head="a" * 40, superseded_by=None, settled=False,
-          gc_closed=False):
+          gc_closed=False, repos=(HERE,)):
     return review_gc.Entry(slug=slug, head=head, superseded_by=superseded_by,
-                           settled=settled, gc_closed=gc_closed)
+                           settled=settled, gc_closed=gc_closed,
+                           repos=frozenset(repos))
 
 
 ALIVE = lambda sha: True          # noqa: E731
@@ -40,7 +48,7 @@ CANNOT_TELL = lambda sha: None    # noqa: E731
 # --- the two retirable classes --------------------------------------------
 
 def test_a_head_that_affirmatively_does_not_exist_is_retirable():
-    v = review_gc.classify(entry(), head_exists=ABSENT)
+    v = review_gc.classify(entry(), head_exists=ABSENT, local_repo=HERE)
     assert v.state == review_gc.DEAD_HEAD and v.retirable
 
 
@@ -49,7 +57,7 @@ def test_a_declared_supersession_is_retirable_even_with_a_LIVE_head():
     never settle, because the register refuses to mutate a required set on an
     existing slug."""
     v = review_gc.classify(
-        entry(superseded_by="pr-538-...-independent"), head_exists=ALIVE)
+        entry(superseded_by="pr-538-...-independent"), head_exists=ALIVE, local_repo=HERE)
     assert v.state == review_gc.SUPERSEDED and v.retirable
     assert "can never verdict" in v.reason
 
@@ -58,27 +66,27 @@ def test_supersession_is_declared_never_inferred():
     """Nothing in the register distinguishes re-routed from still-waiting, so a
     doc that does not SAY it was superseded is left alone — guessing here
     retires reviews whose reviewer is merely slow."""
-    v = review_gc.classify(entry(superseded_by=None), head_exists=ALIVE)
+    v = review_gc.classify(entry(superseded_by=None), head_exists=ALIVE, local_repo=HERE)
     assert not v.retirable
 
 
 # --- the refusals ----------------------------------------------------------
 
 def test_an_unresolvable_head_is_UNKNOWN_and_never_retired():
-    v = review_gc.classify(entry(), head_exists=CANNOT_TELL)
+    v = review_gc.classify(entry(), head_exists=CANNOT_TELL, local_repo=HERE)
     assert v.state == review_gc.UNKNOWN and not v.retirable
     assert "keeps it alive" in v.reason
 
 
 def test_a_live_head_is_never_retired():
-    v = review_gc.classify(entry(), head_exists=ALIVE)
+    v = review_gc.classify(entry(), head_exists=ALIVE, local_repo=HERE)
     assert v.state == review_gc.LIVE and not v.retirable
 
 
 def test_a_doc_with_no_head_is_malformed_not_dead():
     """A human wrote these bytes; an engine that 'cleans up' unparseable
     evidence destroys the only record of what went wrong."""
-    v = review_gc.classify(entry(head=None), head_exists=ABSENT)
+    v = review_gc.classify(entry(head=None), head_exists=ABSENT, local_repo=HERE)
     assert v.state == review_gc.UNKNOWN and not v.retirable
     assert "malformed" in v.reason
 
@@ -86,12 +94,12 @@ def test_a_doc_with_no_head_is_malformed_not_dead():
 def test_a_settled_review_is_left_alone_even_with_a_dead_head():
     """Settled is a real outcome. Overwriting its marker would erase it, and it
     is not what is taxing the projection budget."""
-    v = review_gc.classify(entry(settled=True), head_exists=ABSENT)
+    v = review_gc.classify(entry(settled=True), head_exists=ABSENT, local_repo=HERE)
     assert v.state == review_gc.SETTLED and not v.retirable
 
 
 def test_an_already_retired_entry_is_not_retired_twice():
-    v = review_gc.classify(entry(gc_closed=True), head_exists=ABSENT)
+    v = review_gc.classify(entry(gc_closed=True), head_exists=ABSENT, local_repo=HERE)
     assert v.state == review_gc.ALREADY_CLOSED and not v.retirable
 
 
@@ -106,7 +114,7 @@ def test_the_terminal_marker_is_NOT_settled():
 
 
 def test_the_marker_carries_its_own_evidence():
-    v = review_gc.classify(entry(), head_exists=ABSENT)
+    v = review_gc.classify(entry(), head_exists=ABSENT, local_repo=HERE)
     doc = json.loads(review_gc.marker_body(v, now="2026-08-07T00:00:00Z",
                                            by="coord-opus-worker"))
     assert doc["schema"] == review_gc.GC_SCHEMA
@@ -121,33 +129,33 @@ def test_the_plan_reports_unknowns_explicitly():
     """A pass that quietly skipped what it could not classify would look
     identical to one with nothing to skip."""
     out = review_gc.render_plan(
-        review_gc.plan([entry(slug="a")], head_exists=CANNOT_TELL),
+        review_gc.plan([entry(slug="a")], head_exists=CANNOT_TELL, local_repo=HERE),
         applying=False)
     assert "keep a" in out and "UNKNOWN" in out
 
 
 def test_the_dry_run_says_it_is_a_dry_run():
     out = review_gc.render_plan(
-        review_gc.plan([entry(slug="a")], head_exists=ABSENT), applying=False)
+        review_gc.plan([entry(slug="a")], head_exists=ABSENT, local_repo=HERE), applying=False)
     assert "would retire" in out and "--apply" in out
 
 
 def test_applying_drops_the_dry_run_language():
     out = review_gc.render_plan(
-        review_gc.plan([entry(slug="a")], head_exists=ABSENT), applying=True)
+        review_gc.plan([entry(slug="a")], head_exists=ABSENT, local_repo=HERE), applying=True)
     assert "RETIRE a" in out and "--apply" not in out
 
 
 def test_a_clean_register_says_nothing_retirable():
     out = review_gc.render_plan(
-        review_gc.plan([entry(slug="a")], head_exists=ALIVE), applying=False)
+        review_gc.plan([entry(slug="a")], head_exists=ALIVE, local_repo=HERE), applying=False)
     assert "nothing retirable" in out
 
 
 def test_summarize_counts_every_state():
     verdicts = review_gc.plan(
         [entry(slug="dead"), entry(slug="settled", settled=True)],
-        head_exists=ABSENT)
+        head_exists=ABSENT, local_repo=HERE)
     counts = review_gc.summarize(verdicts)
     assert counts == {review_gc.DEAD_HEAD: 1, review_gc.SETTLED: 1}
 
@@ -288,7 +296,8 @@ class RegisterTransport:
 
 
 DOC = ("---\ntype: Review\nschema: review-request/v2\nrequested_by: boss\n"
-       "of: PR 1\nrequired:\n  - codex-reviewer\nhead: {head}\n---\nbody\n")
+       "of: acme/widgets PR 1\nrequired:\n  - codex-reviewer\nhead: {head}\n"
+       "---\nbody\n")
 
 
 def test_a_retired_slug_leaves_the_projection_scan():
@@ -349,6 +358,11 @@ def test_apply_writes_the_marker_where_the_readers_look(monkeypatch):
     retires nothing and the assertion fails. CI hid that behind `--maxfail=1`
     (it aborted on an earlier failure in this file, so this test never ran).
     What is under test is the marker's PATH, not the host's clone shape.
+
+    The VANTAGE POINT is pinned for the same reason. Unpinned, this test asked
+    the ambient checkout which repository it speaks for, so the result depended
+    on where the suite happened to be run from — the identical ambient
+    dependency this docstring was already written about, one field over.
     """
     import argparse
     from coord_engine import cli
@@ -356,7 +370,8 @@ def test_apply_writes_the_marker_where_the_readers_look(monkeypatch):
     monkeypatch.setattr(cli, "_git_head_probe", lambda: (lambda sha: False))
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
-    args = argparse.Namespace(team="fulcra", apply=True, sender="tester")
+    args = argparse.Namespace(team="fulcra", apply=True, sender="tester",
+                              repo=HERE)
     cli.cmd_review_gc(args, t)
     assert any(p.endswith("/review/dead-slug/verdicts/.gc-closed")
                for p in t.written), t.written
@@ -626,7 +641,8 @@ def test_apply_refuses_from_a_blind_clone_and_writes_nothing(monkeypatch, capsys
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
     rc = cli.cmd_review_gc(
-        argparse.Namespace(team="fulcra", apply=True, sender="tester"), t)
+        argparse.Namespace(team="fulcra", apply=True, sender="tester",
+                           repo=HERE), t)
     assert rc == 2, "refusal must be a distinct non-zero rc, not a quiet 0"
     assert "refusing --apply" in capsys.readouterr().err
     assert not t.written, t.written
@@ -642,7 +658,8 @@ def test_a_seeing_clone_is_unaffected(monkeypatch, capsys):
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
     rc = cli.cmd_review_gc(
-        argparse.Namespace(team="fulcra", apply=True, sender="tester"), t)
+        argparse.Namespace(team="fulcra", apply=True, sender="tester",
+                           repo=HERE), t)
     err = capsys.readouterr().err
     assert "CANNOT PROVE ABSENCE" not in err
     assert "refusing --apply" not in err
@@ -961,3 +978,93 @@ def test_restore_refuses_multiple_doc_less_shards_and_says_why(capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "2 archived verdict shard(s)" in err and "no request doc" in err
+
+
+# --- the vantage point: WHICH repository the probe can speak for -------------
+
+def test_a_FOREIGN_repo_head_is_never_retired_even_when_absent_here():
+    """THE P0. gc probed `git cat-file -e` in whatever checkout it was invoked
+    from. Run from a fulcra-tools clone, it called an agent-skills review dead
+    at a head that existed in its own checkout AND on the forge — one hour
+    after that review was approved and shipped.
+
+    The shallow/partial guards ask whether HERE is COMPLETE. This asks the
+    other half: whether HERE is the RIGHT here. A complete clone of the wrong
+    repository proves absence exactly as poorly as an incomplete clone of the
+    right one.
+    """
+    foreign = entry(slug="pr-175-reduction", repos=("fulcradynamics/agent-skills",))
+
+    v = review_gc.classify(foreign, head_exists=ABSENT, local_repo=HERE)
+
+    assert v.state == review_gc.UNKNOWN, (
+        f"a foreign-repo head was classified {v.state} — {v.reason}")
+    assert not v.retirable
+    assert "foreign repo cannot witness absence" in v.reason
+
+
+def test_a_genuinely_dead_SAME_repo_head_still_retires():
+    """The other half of the guard, and the one that keeps gc useful: this must
+    not become a fix that simply stops retiring anything."""
+    v = review_gc.classify(entry(repos=(HERE,)), head_exists=ABSENT,
+                           local_repo=HERE)
+
+    assert v.state == review_gc.DEAD_HEAD and v.retirable, v.reason
+
+
+def test_a_review_naming_BOTH_upstream_and_fork_is_witnessable_from_either():
+    """A PR names the upstream repo and the fork its branch lives in, and the
+    head legitimately exists in either. Membership, not uniqueness."""
+    both = entry(repos=("fulcradynamics/agent-skills", "ashfulcra/agent-skills"))
+
+    for vantage in ("fulcradynamics/agent-skills", "ashfulcra/agent-skills"):
+        v = review_gc.classify(both, head_exists=ABSENT, local_repo=vantage)
+        assert v.state == review_gc.DEAD_HEAD, f"{vantage}: {v.reason}"
+
+
+def test_a_review_that_names_NO_repository_is_UNKNOWN_by_construction():
+    """51 of 278 live register rows name no repo in `of:`. They are malformed,
+    not dead — and gc must not guess a vantage point on their behalf."""
+    v = review_gc.classify(entry(repos=()), head_exists=ABSENT, local_repo=HERE)
+
+    assert v.state == review_gc.UNKNOWN and not v.retirable
+    assert "does not name the repository" in v.reason
+
+
+def test_an_UNIDENTIFIABLE_checkout_witnesses_nothing():
+    """No origin, or an origin we cannot parse. An unknown vantage point is not
+    a permissive one."""
+    v = review_gc.classify(entry(), head_exists=ABSENT, local_repo=None)
+
+    assert v.state == review_gc.UNKNOWN and not v.retirable
+    assert "could not be identified" in v.reason
+
+
+def test_a_BRANCH_that_looks_like_owner_slash_repo_is_not_read_as_one():
+    """`of: branch claude/fulcra-worker-setup-6zxa8l` is a real register value.
+    Reading that as a repository would invent the identity the guard exists to
+    check — so the prose form is accepted only next to a PR marker."""
+    assert review_gc.repos_from_of(
+        "branch claude/fulcra-worker-setup-6zxa8l; see team/fulcra/review/x") == frozenset()
+    assert review_gc.repos_from_of(
+        "https://github.com/fulcradynamics/agent-skills/pull/176"
+    ) == frozenset({"fulcradynamics/agent-skills"})
+    assert review_gc.repos_from_of(
+        "fulcradynamics/agent-skills PR 175 — branch ashfulcra/agent-skills:reduce"
+    ) == frozenset({"fulcradynamics/agent-skills"})
+
+
+def test_the_gc_verb_SAYS_which_repository_it_is_witnessing_from(monkeypatch, capsys):
+    """A run that silently skips foreign reviews reads exactly like a run that
+    found none — the same absence-of-a-finding-standing-in-for-a-finding the
+    blindness warning already covers, one field over."""
+    import argparse
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_git_head_probe", lambda: (lambda sha: False))
+    t = RegisterTransport({"dead-slug": {
+        "doc": DOC.format(head="a" * 40), "verdicts": []}})
+    cli.cmd_review_gc(argparse.Namespace(
+        team="fulcra", apply=False, sender="tester", repo=HERE), t)
+
+    assert f"witnessing from {HERE}" in capsys.readouterr().err

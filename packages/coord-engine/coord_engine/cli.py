@@ -9863,6 +9863,25 @@ def _git_head_probe() -> "Callable[[str], Optional[bool]]":
     return _probe
 
 
+def _local_repo_identity() -> "Optional[str]":
+    """``owner/repo`` for the checkout we are standing in, or None.
+
+    None is a real answer and the safe one: an unidentifiable vantage point
+    cannot witness the absence of anything.
+    """
+    import subprocess as _subprocess
+    try:
+        cp = _subprocess.run(["git", "remote", "get-url", "origin"],
+                             capture_output=True, timeout=10)
+    except (OSError, _subprocess.SubprocessError):
+        return None
+    if cp.returncode != 0:
+        return None
+    url = (cp.stdout or b"").decode("utf-8", "replace").strip()
+    found = review_gc.repos_from_of(url)
+    return sorted(found)[0] if len(found) == 1 else None
+
+
 def _gc_entries(transport: Any, team: str) -> "tuple[list, list[str]]":
     """Read the register into :class:`review_gc.Entry` values.
 
@@ -9897,6 +9916,7 @@ def _gc_entries(transport: Any, team: str) -> "tuple[list, list[str]]":
             superseded_by=(fm.get(review_gc.SUPERSEDED_KEY) or None),
             settled=SETTLED_MARKER in vnames,
             gc_closed=review_gc.GC_MARKER in vnames,
+            repos=review_gc.repos_from_of(fm.get("of")),
         ))
     return entries, unreadable
 
@@ -9927,7 +9947,17 @@ def cmd_review_gc(args: argparse.Namespace, transport: Any) -> int:
             print("review gc: refusing --apply from a clone that cannot prove "
                   "absence -- nothing was written", file=sys.stderr)
             return 2
-    verdicts = review_gc.plan(entries, head_exists=probe)
+    local_repo = getattr(args, "repo", None) or _local_repo_identity()
+    if not local_repo:
+        print("review gc: cannot identify this checkout's repository (no origin "
+              "remote, or an unparseable one), so no head can be witnessed here "
+              "— every entry reads UNKNOWN. This result is BLIND, not clean. "
+              "Pass --repo owner/repo to assert it.", file=sys.stderr)
+    else:
+        print(f"review gc: witnessing from {local_repo} — reviews whose head "
+              f"lives in another repository are UNKNOWN here, never dead.",
+              file=sys.stderr)
+    verdicts = review_gc.plan(entries, head_exists=probe, local_repo=local_repo)
     print(review_gc.render_plan(verdicts, applying=bool(args.apply)))
     for slug in unreadable:
         print(f"  keep {slug} — UNREADABLE: doc or verdicts dir could not be "
@@ -11416,6 +11446,11 @@ def build_parser() -> argparse.ArgumentParser:
     rvg.add_argument("--apply", action="store_true",
                      help="actually write the .gc-closed markers; without it "
                           "gc only prints what it would retire")
+    rvg.add_argument("--repo", default=None, metavar="OWNER/REPO",
+                     help="assert which repository this checkout speaks for. "
+                          "Only reviews whose head lives in THIS repo can be "
+                          "witnessed absent; everything else is UNKNOWN and is "
+                          "never retired. Defaults to the origin remote.")
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
     rvv = rvsub.add_parser(
