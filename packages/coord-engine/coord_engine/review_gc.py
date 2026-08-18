@@ -51,6 +51,16 @@ from typing import Any, Callable, NamedTuple, Optional
 #: which is the one outcome worse than leaving the rot in place.
 _PROSE_HEAD = re.compile(r"\bhead\s+([0-9a-fA-F]{40})\b")
 
+#: The repositories an ``of:`` field names. A forge URL is unambiguous; bare
+#: ``owner/repo`` prose is only accepted when a PR marker follows it, because
+#: ``of: branch claude/fulcra-worker-setup-6zxa8l`` is a real register value and
+#: is a BRANCH, not a repository. Reading that as a repo would be inventing an
+#: identity — the same move this guard exists to stop.
+_OF_URL = re.compile(
+    r"github\.com[/:]([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?(?=[/\s\"'#]|$)")
+_OF_PROSE = re.compile(
+    r"\b([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)\s+(?:PR|pull)\b", re.I)
+
 #: Terminal marker for a gc-retired entry. Deliberately NOT ``.settled``.
 GC_MARKER = ".gc-closed"
 
@@ -72,6 +82,21 @@ SETTLED = "settled"
 RETIRABLE = (DEAD_HEAD, SUPERSEDED)
 
 
+def repos_from_of(text: Any) -> frozenset:
+    """Every ``owner/repo`` the ``of:`` field names, lowercased.
+
+    A SET, not one value: a PR routinely names both the upstream repo and the
+    fork the branch lives in, and either is a repository in which that head
+    legitimately exists. Empty means the review does not say where its work
+    lives — which is not a repo match, and therefore not grounds to retire it.
+    """
+    if not isinstance(text, str):
+        return frozenset()
+    found = {f"{o}/{r}".lower() for o, r in _OF_URL.findall(text)}
+    found |= {f"{o}/{r}".lower() for o, r in _OF_PROSE.findall(text)}
+    return frozenset(found)
+
+
 def head_from_prose(text: Any) -> Optional[str]:
     """The head named in a v1 ``of:`` string, or None unless it is unambiguous."""
     if not isinstance(text, str):
@@ -87,6 +112,9 @@ class Entry(NamedTuple):
     superseded_by: Optional[str]
     settled: bool
     gc_closed: bool
+    #: Repositories this review's head could live in, from ``of:``. Empty means
+    #: the review never says, which is UNKNOWN — never an invitation to guess.
+    repos: frozenset = frozenset()
 
 
 class Verdict(NamedTuple):
@@ -106,8 +134,16 @@ class Verdict(NamedTuple):
 HeadProbe = Callable[[str], Optional[bool]]
 
 
-def classify(entry: Entry, *, head_exists: HeadProbe) -> Verdict:
-    """Decide one entry. Retires only on affirmative evidence."""
+def classify(entry: Entry, *, head_exists: HeadProbe,
+             local_repo: Optional[str]) -> Verdict:
+    """Decide one entry. Retires only on affirmative evidence.
+
+    ``local_repo`` is the ``owner/repo`` the probe can actually speak for — the
+    invoking checkout's origin, or an operator's explicit assertion. It has no
+    default ON PURPOSE: every caller on the destructive path must state which
+    repository its evidence comes from, and a default would let a caller keep
+    the old behaviour silently.
+    """
     if entry.gc_closed:
         return Verdict(entry.slug, ALREADY_CLOSED, "already retired by gc")
     if entry.settled:
@@ -126,6 +162,27 @@ def classify(entry: Entry, *, head_exists: HeadProbe) -> Verdict:
         return Verdict(entry.slug, UNKNOWN,
                        "no active head in the review doc — malformed, not dead; "
                        "a human reads this one")
+    # WHICH repository the probe is standing in. `git cat-file -e` answers "is
+    # this object HERE", and the shallow/partial guards ask whether HERE is
+    # complete — but a COMPLETE clone of the WRONG repository proves absence
+    # exactly as poorly as an incomplete clone of the right one. Measured: a
+    # scan from a fulcra-tools checkout called an agent-skills review dead at a
+    # head that existed in its own checkout AND on the forge, one hour after it
+    # shipped. So HERE has to include WHICH here.
+    if not local_repo:
+        return Verdict(entry.slug, UNKNOWN,
+                       "the invoking repository could not be identified — "
+                       "absence is unprovable from an unknown vantage point")
+    if not entry.repos:
+        return Verdict(entry.slug, UNKNOWN,
+                       "the review does not name the repository its head lives "
+                       "in — malformed, not dead")
+    if local_repo.lower() not in entry.repos:
+        return Verdict(entry.slug, UNKNOWN,
+                       f"head belongs to {'/'.join(sorted(entry.repos)[:1])}, "
+                       f"but this checkout is {local_repo} — a foreign repo "
+                       f"cannot witness absence")
+
     present = head_exists(entry.head)
     if present is None:
         return Verdict(entry.slug, UNKNOWN,
@@ -137,9 +194,11 @@ def classify(entry: Entry, *, head_exists: HeadProbe) -> Verdict:
                    f"head {entry.head[:12]} does not exist as an object")
 
 
-def plan(entries: list[Entry], *, head_exists: HeadProbe) -> list[Verdict]:
+def plan(entries: list[Entry], *, head_exists: HeadProbe,
+         local_repo: Optional[str]) -> list[Verdict]:
     """Classify every entry, in register order. Pure: writes nothing."""
-    return [classify(e, head_exists=head_exists) for e in entries]
+    return [classify(e, head_exists=head_exists, local_repo=local_repo)
+            for e in entries]
 
 
 def summarize(verdicts: list[Verdict]) -> dict[str, int]:
