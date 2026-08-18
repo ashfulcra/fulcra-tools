@@ -1068,3 +1068,75 @@ def test_the_gc_verb_SAYS_which_repository_it_is_witnessing_from(monkeypatch, ca
         team="fulcra", apply=False, sender="tester", repo=HERE), t)
 
     assert f"witnessing from {HERE}" in capsys.readouterr().err
+
+
+# --- the second terminal marker: concluded-without-evidence -----------------
+
+def test_concluded_is_terminal_for_every_reader_that_asks_the_SET():
+    """`.gc-closed` was written and the readers still only knew `.settled`, so a
+    retired row was still scanned, still tallied pending, still consuming the
+    budget the verb existed to recover. That happened because each reader
+    hard-coded ONE filename. Readers now ask the set, so a second terminal
+    marker cannot repeat it."""
+    assert review_gc.is_terminal({review_gc.CONCLUDED_MARKER})
+    assert review_gc.is_terminal({review_gc.GC_MARKER})
+    assert review_gc.is_terminal({review_gc.CONCLUDED_MARKER, "codex-reviewer.md"})
+    assert not review_gc.is_terminal(set())
+
+
+def test_SETTLED_is_deliberately_NOT_in_the_terminal_set():
+    """`.settled` asserts APPROVED-with-bound-evidence and some readers act on
+    that claim rather than merely skipping the row. Folding it in here would
+    make an evidence-free row indistinguishable from an evidence-bearing one —
+    which is the exact laundering the second marker exists to avoid."""
+    assert ".settled" not in review_gc.TERMINAL_MARKERS
+    assert not review_gc.is_terminal({".settled"})
+
+
+def test_a_CONCLUDED_row_leaves_the_projection_scan(monkeypatch):
+    """The round-1 blocker, re-run for the new marker: writing a terminal marker
+    that no reader recognises changes nothing at all."""
+    from coord_engine import projection
+    vnames = {review_gc.CONCLUDED_MARKER}
+    assert review_gc.is_terminal(vnames), (
+        "projection would still scan a concluded row")
+    import inspect
+    src = inspect.getsource(projection)
+    assert "review_gc.is_terminal(vnames)" in src, (
+        "the projection fold still keys on a single marker name")
+
+
+def test_conclude_REFUSES_a_row_nobody_reviewed():
+    """Concluding an unreviewed row is abandonment wearing a completion label.
+    The two acts need different words, and this verb owns only one of them."""
+    import argparse
+    from coord_engine import cli
+
+    class T:
+        def __init__(self, names): self.names = names; self.written = {}
+        def list_dir(self, p): return [{"name": n} for n in self.names]
+        def write(self, p, b): self.written[p] = b; return True
+
+    t = T([])                                   # no verdict on file
+    rc = cli.cmd_review_conclude(
+        argparse.Namespace(team="fulcra", slug="s", reason=None, sender="t"), t)
+
+    assert rc == 2 and not t.written, "it concluded a row nobody had reviewed"
+
+
+def test_conclude_never_overwrites_a_settled_row():
+    """`.settled` carries a merge sha. Replacing it with an evidence-free marker
+    would destroy the only durable record that the PR landed."""
+    import argparse
+    from coord_engine import cli
+
+    class T:
+        def __init__(self, names): self.names = names; self.written = {}
+        def list_dir(self, p): return [{"name": n} for n in self.names]
+        def write(self, p, b): self.written[p] = b; return True
+
+    t = T([".settled", "codex-reviewer.md"])
+    rc = cli.cmd_review_conclude(
+        argparse.Namespace(team="fulcra", slug="s", reason=None, sender="t"), t)
+
+    assert rc == 0 and not t.written, "it overwrote a settled row's evidence"

@@ -1751,6 +1751,53 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str,
 _MERGE_SHA = re.compile(r"\A[0-9a-f]{40}\Z|\A[0-9a-f]{64}\Z")
 
 
+def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
+    """Mark a row CONCLUDED: its review finished, but no merge evidence exists.
+
+    The row this exists for has a verdict on file and an unbound head — the
+    reviewer did the work, and there is no merge sha to bind a closure to. Such
+    rows sat in the register forever, and `unknown=82` beside `live=41` made the
+    board read twice as busy as it was, in the fold reviewers use to decide what
+    they owe.
+
+    IT IS NOT `.settled`, AND MUST NEVER BECOME IT. `.settled` asserts
+    APPROVED-with-bound-evidence. Widening it to swallow these rows would launder
+    evidence-free rows into evidence-bearing state — the busy-register problem
+    does not justify weakening the one marker that carries a claim.
+
+    A verdict must actually be on file. Concluding a row nobody reviewed is
+    abandonment wearing a completion label, and that is a different act needing a
+    different word.
+    """
+    prefix = _verdicts_prefix(args.team, args.slug)
+    try:
+        names = {(e.get("name") or "") for e in transport.list_dir(prefix)}
+    except TransportError:
+        print(f"review conclude: cannot list {args.slug} — refusing to write a "
+              f"terminal marker on an unreadable row", file=sys.stderr)
+        return 3
+    if review_gc.is_terminal(names) or SETTLED_MARKER in names:
+        print(f"review conclude: {args.slug} is already terminal — left alone")
+        return 0
+    verdicts = [n for n in names if n.endswith(".md")]
+    if not verdicts:
+        print(f"review conclude: {args.slug} has NO verdict on file — that is "
+              f"abandonment, not conclusion; refusing", file=sys.stderr)
+        return 2
+    body = okf.render_frontmatter({
+        "schema": "review-concluded/v1",
+        "state": "CONCLUDED",
+        "verdicts": sorted(verdicts),
+        "closed_by": args.sender or _human(),
+        "reason": args.reason or ("review concluded; head unbound and no merge "
+                                  "evidence available to bind a closure to"),
+        "ts": _iso(_now()),
+    })
+    transport.write(prefix + review_gc.CONCLUDED_MARKER, body)
+    print(f"review conclude: {args.slug} CONCLUDED on {len(verdicts)} verdict(s)")
+    return 0
+
+
 def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
     """Close a review because its PR MERGED — an artifact of the merge, not an
     inference about it (coord-boss ruling 1, 2026-08-07).
@@ -2884,7 +2931,7 @@ def _pending_reviews_raw(
             # can never become pending for anybody. Skipping them HERE is what
             # makes `review gc` recover budget at all; the marker alone changed
             # nothing (codex-reviewer, review-gc round 1).
-            if review_gc.GC_MARKER in vnames:
+            if review_gc.is_terminal(vnames):
                 return "ok"  # terminal -> skip entirely, zero reads beyond this listing
             if SETTLED_MARKER in vnames:
                 # A `.settled` used to skip this slug on PRESENCE ALONE, which is
@@ -9915,7 +9962,7 @@ def _gc_entries(transport: Any, team: str) -> "tuple[list, list[str]]":
                   or review_gc.head_from_prose(fm.get("of"))),
             superseded_by=(fm.get(review_gc.SUPERSEDED_KEY) or None),
             settled=SETTLED_MARKER in vnames,
-            gc_closed=review_gc.GC_MARKER in vnames,
+            gc_closed=review_gc.is_terminal(vnames),
             repos=review_gc.repos_from_of(fm.get("of")),
         ))
     return entries, unreadable
@@ -11474,6 +11521,13 @@ def build_parser() -> argparse.ArgumentParser:
     rvc.add_argument("--reason", help="why this row is closed")
     rvc.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvc.set_defaults(func=cmd_review_close)
+    rvn = rvsub.add_parser(
+        "conclude",
+        help="mark a reviewed row terminal when no merge evidence exists (NOT .settled)")
+    rvn.add_argument("team"); rvn.add_argument("slug")
+    rvn.add_argument("--reason", help="why this row concluded without merge evidence")
+    rvn.add_argument("--from", dest="sender", help="acting agent (for the marker)")
+    rvn.set_defaults(func=cmd_review_conclude)
     rvr = rvsub.add_parser("restore", help="move an archived settled-single review back to the hot path")
     rvr.add_argument("team"); rvr.add_argument("slug")
     rvr.set_defaults(func=cmd_review_restore)

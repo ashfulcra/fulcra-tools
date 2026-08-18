@@ -64,6 +64,36 @@ _OF_PROSE = re.compile(
 #: Terminal marker for a gc-retired entry. Deliberately NOT ``.settled``.
 GC_MARKER = ".gc-closed"
 
+#: Terminal marker for a row whose review DID conclude — a verdict is on file —
+#: but which cannot be closed with bound merge evidence, because its head is
+#: unbound (no parseable 40-hex head) and no merge sha exists to name.
+#:
+#: DELIBERATELY NOT ``.settled``. ``.settled`` asserts APPROVED-with-evidence and
+#: must never be written without it; weakening it to absorb these rows would
+#: launder evidence-free rows into evidence-bearing state, which is the whole
+#: reason this second marker exists rather than a looser first one.
+CONCLUDED_MARKER = ".concluded"
+
+#: Every marker that means "this row is finished; no reader owes it anything".
+#:
+#: A SET, because the reason `.gc-closed` was invisible for a whole round is that
+#: each reader hard-coded one filename: the marker was written and the row was
+#: still scanned, still tallied pending, still consuming the budget the verb
+#: existed to recover. Readers must ask this set, never a single name, so the
+#: next terminal marker cannot repeat that.
+#:
+#: ``.settled`` is NOT here: it carries an APPROVED claim, and some readers act
+#: on that claim rather than merely skipping the row.
+TERMINAL_MARKERS = frozenset({GC_MARKER, CONCLUDED_MARKER})
+
+
+def is_terminal(names: Any) -> bool:
+    """True if any terminal marker is present in a verdicts-directory listing."""
+    try:
+        return any(m in names for m in TERMINAL_MARKERS)
+    except TypeError:
+        return False
+
 #: Marker schema, so a reader can tell a retirement from a fold cache.
 GC_SCHEMA = "coord.review-gc-closed.v1"
 

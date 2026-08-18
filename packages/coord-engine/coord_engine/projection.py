@@ -79,7 +79,7 @@ from typing import Any, Optional
 
 from datetime import timezone
 
-from . import aggregate, config, forge, okf, review
+from . import aggregate, config, forge, okf, review, review_gc
 from .budget import Deadline
 from .log import get_logger
 from .roles import age_hours
@@ -542,7 +542,7 @@ def _scan_review_slug(
     # carry never lists this directory and so can never recompute it. Only a row
     # that says True here may skip straight past both readers below.
     base[BINDABLE_KEY] = review.evidence_is_immutable(vnames)
-    if GC_MARKER in vnames:
+    if review_gc.is_terminal(vnames):
         # Retired by gc: OMITTED from the projection, and the scan counts as
         # COMPLETE. Round 2 of this review emitted a `state: RETIRED,
         # settled: true` row instead, and `_validated_review_projection` accepts
