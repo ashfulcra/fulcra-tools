@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "coord-engine",
+    "coord-mesh",
     "coord-tracker-bridge",
     "fde-engine",
     "fulcra-attention",
@@ -144,6 +145,19 @@ wheels = [
 [[package]]
 name = "coord-engine"
 source = { editable = "packages/coord-engine" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'" }]
+provides-extras = ["dev"]
+
+[[package]]
+name = "coord-mesh"
+source = { editable = "packages/coord-mesh" }
 
 [package.optional-dependencies]
 dev = [

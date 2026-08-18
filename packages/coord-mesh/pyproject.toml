@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coord-mesh"
+dynamic = ["version"]
+description = "L2 of coord — cross-user coordination as a mesh of per-user outboxes read across scoped datashare boundaries"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+# stdlib-only runtime, same discipline as coord-engine (transport is a
+# CLI-subprocess call to `fulcra-api`); no runtime deps.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+coord-mesh = "coord_mesh.cli:main"
+
+[tool.hatch.version]
+path = "coord_mesh/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["coord_mesh"]

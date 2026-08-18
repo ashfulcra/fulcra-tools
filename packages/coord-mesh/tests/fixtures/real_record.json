@@ -1,0 +1,18 @@
+{
+  "id": "db8404f4-6ca1-05a0-5852-8cd7f86b3a6b",
+  "metadata": {
+    "redacted": true
+  },
+  "note": "REDACTED \u2014 shape fixture only; see test_wire_contract.py",
+  "recorded_at": "2026-08-18T03:38:31+00:00",
+  "source_id": "com.fulcradynamics.annotation.d04f357e-b556-4298-ad1e-4ce307d54041",
+  "source_name": "Annotation",
+  "sources": [
+    "com.fulcradynamics.fulcra-coord.projection.10a50e2f-41a4-48dd-bc30-0a890495379c",
+    "com.fulcradynamics.annotation.d04f357e-b556-4298-ad1e-4ce307d54041"
+  ],
+  "tags": [
+    "abc5acdd-a3ae-4b52-813b-3ed217cc1424",
+    "6c75c54b-9738-4170-982a-e2df300a4559"
+  ]
+}
