@@ -26,6 +26,20 @@ each account's integrity.
 - Never revoke, delete, or leave a share — revocation is operator-only.
 - `--share-all` is **refused in code**.
 
+## The thesis
+
+> Every defect found in this package so far was a **verification surface
+> claiming more than it measured.**
+
+Four cross-model review rounds, eight findings, one shape: `rc0` returned for a
+write that never happened; a read-back that matched somebody else's share; a
+read-back that matched our own stale event; a success line naming a path it
+never checked. Before you add a surface that reports success, ask what it
+actually measured — and make the message say only that.
+
+Live legs are documented in [SMOKE.md](SMOKE.md); the role charter is
+[docs/coord/MESH-MAINTAINER.md](../../docs/coord/MESH-MAINTAINER.md).
+
 ## Two disciplines worth knowing before you edit
 
 **The field contract lives in `wire.py`, verified against a real row.** A
