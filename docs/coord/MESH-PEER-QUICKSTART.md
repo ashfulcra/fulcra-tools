@@ -1,11 +1,25 @@
 # Mesh peer quickstart — join a cross-user coordination mesh with today's CLI
 
-You are the **peer**: another Fulcra user's agent has (or will) share their
-coordination channel with your user, and you want to read it and reciprocate.
-Everything below uses the stock [`fulcra-api` CLI](https://pypi.org/project/fulcra-api/)
+You are the **peer**: another Fulcra user's agent has (or will) share a
+**dedicated mesh outbox channel** with your user, and you want to read it and
+reciprocate. Everything below uses the stock
+[`fulcra-api` CLI](https://pypi.org/project/fulcra-api/)
 (≥ 0.1.40) — no extra packages. The mesh model is **outboxes**: each user
 writes ONLY their own data; peers read across the share boundary. Nobody ever
 writes into anyone else's account.
+
+**The dedicated-outbox rule (both sides, non-negotiable).** The channel you
+share into a mesh must be a fresh `MomentAnnotation` created FOR the mesh,
+carrying only mesh-addressed events — never a channel your own agents already
+coordinate on. A share grants the whole channel's history and future: sharing
+a working bus hands the peer your entire operational event stream, and event
+*metadata* is not harmless — descriptive slugs alone narrate an operation
+even when the pointed documents stay walled. This rule was earned live
+(2026-08-18): the first two meshes here were minted against an internal team
+bus and had to be migrated — new dedicated channel, move-notice events to
+every peer on the old channel, THEN revoke — after a peer had already read
+the internal stream. Migration order matters: notify on the old channel
+before you revoke it, or the move strands your peers.
 
 Placeholders throughout: `<SHARER-USER-ID>` is the other user's Fulcra user id,
 `<YOUR-USER-ID>` is yours (`fulcra user-info` prints it), `<CHANNEL-DATA-TYPE>`
@@ -53,13 +67,31 @@ keep your own cursor (last-seen timestamp + seen record ids) on YOUR side.
 
 ## 3. Reciprocate — share your outbox back
 
+First create your own **dedicated** outbox if you have not already (see the
+rule above — never reuse an internal channel):
+
+```bash
+fulcra data-type create MomentAnnotation "<YOUR-AGENT> Mesh Outbox" \
+  -d "Dedicated mesh outbox; carries only mesh-addressed events"
+```
+
+Then share exactly that channel (and optionally a `reports/` prefix) to the
+named peer:
+
 ```bash
 fulcra share create \
-  --data-type <CHANNEL-DATA-TYPE> \
+  --data-type <YOUR-NEW-CHANNEL-DATA-TYPE> \
   --file reports/ \
   --user-id <SHARER-USER-ID> \
   --name "mesh outbox for <SHARER-NAME>"
 ```
+
+**Client-version note (measured 2026-08-18):** `--file` exists on CLI 0.1.40;
+0.1.39 has no `--file` and also *rejects* `file:/reports/` passed as a
+`--data-type` (catalog validation) — on ≤0.1.39 a file-prefix grant is not
+expressible at all. Probe your installed client's `share create --help`
+before promising the reports leg, and say so plainly if your client cannot
+do it; do not silently narrow the share.
 
 One share carries both your channel data type and your `reports/` directory
 (where your ptr documents live). Verify it took:
@@ -102,7 +134,19 @@ as UNKNOWN rather than quietly skipping them.
 ## Safety rules, peer side
 
 - **Never `--share-all`.** Scope every share to the named data types and
-  paths above — a mesh needs your coordination channel, not your life data.
+  paths above — a mesh needs your mesh outbox, not your life data.
+- **Never share a working bus channel** (the dedicated-outbox rule above).
+  If you catch a mesh share pointing at an internal channel, migrate: mint
+  the dedicated channel, send move-notices to every peer ON THE OLD CHANNEL
+  naming the new id and the new share, then revoke the old share. Notify
+  before revoke, always — a revoked share cannot carry its own forwarding
+  address — and leave the old share up for at least one full poll cadence of
+  every peer, because a notice is only delivered when it is READ: a revoke
+  two minutes after the notice strands any peer that did not poll in the
+  window. The self-heal if you get this wrong: the new share's own
+  `list-incoming` row carries the new channel id (step 1), so a peer whose
+  reads start failing can rediscover the mesh — but that is a recovery path,
+  not a plan.
 - **Never modify or revoke a share you did not create.** Reading an incoming
   share is fine; `share leave` on it is YOUR side of ending participation —
   do that only when your user says so.
@@ -112,7 +156,10 @@ as UNKNOWN rather than quietly skipping them.
 
 ## What this becomes
 
-This raw-CLI flow is the manual v1. A `coord-mesh` package (peer registry,
-`mesh send`/`mesh queue`/`mesh doctor`) is in progress in this repo and will
-wrap these exact primitives; nothing you set up here is throwaway — the
+This raw-CLI flow is the manual v1. The `coord-mesh` package in this repo
+(`packages/coord-mesh`: `init`/`peers`/`send`/`queue`/`doctor`, stdlib-only)
+wraps these exact primitives with the rails in code — named-uid-only,
+`--share-all` refused on the argv, send verified by NEW-record read-back,
+cursor-based cross-account queue reads — and its `SMOKE.md` is the live
+two-account acceptance procedure. Nothing you set up here is throwaway — the
 shares ARE the mesh.
