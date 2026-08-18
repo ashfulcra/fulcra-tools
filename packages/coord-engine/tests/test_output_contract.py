@@ -216,6 +216,19 @@ def test_oc2_envelope_source_enum_and_coverage():
         "no source row = the pre-projection raw path; the enum stays closed")
 
 
+def test_oc2_invalid_source_token_is_not_promoted_to_provenance():
+    # pr-641 r2, the remaining finding: a present source row with a token
+    # OUTSIDE the closed enum is corrupt provenance — it must contribute
+    # source-invalid (health UNKNOWN, rc 3) and emit an explicit null, never
+    # be silently promoted to a clean raw-scan.
+    env, rc = cli.class_a_envelope(
+        [{"type": "needs-me-source", "source": "corrupt"}],
+        source_type="needs-me-source")
+    assert (env["health"], rc) == ("UNKNOWN", 3)
+    assert "source-invalid" in env["basis"]
+    assert env["source"] is None
+
+
 def test_oc2_unclassified_degraded_marker_fails_closed():
     # pr-641 r1 finding 1: a degraded type the basis map does not know may be
     # an unreadable/invalid authority — it must become UNKNOWN (rows not

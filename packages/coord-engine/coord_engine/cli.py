@@ -3224,6 +3224,20 @@ def class_a_envelope(
         b = _CLASS_A_BASIS.get(t, "source-invalid")
         if b not in basis:
             basis.append(b)
+    # `source` implements the normative enum, VALIDATED, never trusted verbatim
+    # (pr-641 r2, the remaining finding): a present source row whose token is
+    # outside the closed enum is corrupt PROVENANCE — promoting it to a clean
+    # `raw-scan` would manufacture trust exactly where it is least earned. An
+    # invalid token contributes `source-invalid` (forcing UNKNOWN below) and
+    # the field goes out as an explicit null. The documented raw-scan fallback
+    # applies ONLY when no source row exists at all (the pre-projection raw
+    # path, which genuinely is a raw scan).
+    src_row = next((r for r in rows if isinstance(r, dict)
+                    and str(r.get("type") or "") == source_type), None)
+    src_token = src_row.get("source") if src_row is not None else None
+    if src_row is not None and src_token not in ("projection", "raw-scan"):
+        if "source-invalid" not in basis:
+            basis.append("source-invalid")
     if any(b in _UNKNOWN_BASIS for b in basis):
         health = "UNKNOWN"
     elif degraded_types:
@@ -3235,18 +3249,13 @@ def class_a_envelope(
             for r in rows)
         health = "DATA" if actionable else "CLEAR"
     envelope: dict[str, Any] = {"contract": 2, "health": health}
-    # `source` implements the normative enum VERBATIM (pr-641 r1, finding 2):
-    # `projection` | `raw-scan`, exactly as the source row records it — never
-    # `_fold_source`'s compact stderr vocabulary. A fold that emitted no source
-    # row consulted no projection at all (the pre-projection raw path), which
-    # IS a raw scan, so the enum stays closed.
-    src_row = next((r for r in rows if isinstance(r, dict)
-                    and str(r.get("type") or "") == source_type), None)
-    if src_row is not None and src_row.get("source") == "projection":
+    if src_token == "projection":
         envelope["source"] = "projection"
         envelope["as_of"] = src_row.get("as_of")
-    else:
+    elif src_token == "raw-scan" or src_row is None:
         envelope["source"] = "raw-scan"
+    else:
+        envelope["source"] = None  # corrupt provenance: null under UNKNOWN
     # Coverage (pr-641 r1, finding 3): where bounded work ran, the marker rows
     # carry per-fold scanned/total — the envelope aggregates them (sums across
     # every marker carrying BOTH numbers) so a strict consumer reads coverage

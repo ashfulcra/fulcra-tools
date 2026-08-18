@@ -26,8 +26,12 @@ token preserved byte-for-byte.
 The FIRST and ONLY JSON value on stdout: `{"contract": 2, "health":
 DATA|CLEAR|DEGRADED|UNKNOWN, "source": "projection"|"raw-scan", "as_of"?,
 "scanned"?/"total"?, "degraded": [marker types], "basis": [failure classes],
-"rows": [...]}`. `source` is that closed enum verbatim (a fold that
-consulted no projection ran raw). `scanned`/`total` appear where bounded
+"rows": [...]}`. `source` is that closed enum, VALIDATED: a present source
+row is checked against it, and an unrecognized token is corrupt provenance —
+it contributes `source-invalid` (health UNKNOWN) and the field emits an
+explicit `null`, never a promoted `raw-scan`; the `raw-scan` fallback
+applies only when no source row exists (a fold that consulted no projection
+ran raw). `scanned`/`total` appear where bounded
 work ran, aggregated as the SUMS across every marker row carrying both
 numbers. `health` is transport/fold health ONLY (never a domain state; rows
 keep their own fields). Ordered selection: **UNKNOWN** — the authority
