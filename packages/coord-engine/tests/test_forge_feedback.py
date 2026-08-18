@@ -11,7 +11,7 @@ import json
 
 from coord_engine import cli, forge, okf
 from coord_engine.cli import build_parser
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 NOW = "2026-07-08T12:00:00Z"
 
@@ -185,7 +185,7 @@ def test_needs_me_surfaces_unacked_ack_clears_and_new_item_resurfaces(capsys):
     forge.feedback_sweep(t, "r", runner=_runner_for(fx))
 
     assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     fb = [r for r in got if r.get("type") == "forge-feedback"]
     assert len(fb) == 1 and fb[0]["count"] == 2 and fb[0]["pr_slug"] == "o-r-42"
     assert set(fb[0]["authors"]) == {"rev", "bob2"}
@@ -197,7 +197,7 @@ def test_needs_me_surfaces_unacked_ack_clears_and_new_item_resurfaces(capsys):
     capsys.readouterr()
 
     assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
-    got2 = json.loads(capsys.readouterr().out)
+    got2 = needs_me_rows(json.loads(capsys.readouterr().out))
     fb2 = [r for r in got2 if r.get("type") == "forge-feedback"]
     assert len(fb2) == 1 and fb2[0]["count"] == 1  # acked item dropped
 
@@ -207,7 +207,7 @@ def test_needs_me_surfaces_unacked_ack_clears_and_new_item_resurfaces(capsys):
                                          "body": "new note", "createdAt": NOW}])
     forge.feedback_sweep(t, "r", runner=_runner_for(fx2))
     assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
-    got3 = json.loads(capsys.readouterr().out)
+    got3 = needs_me_rows(json.loads(capsys.readouterr().out))
     fb3 = [r for r in got3 if r.get("type") == "forge-feedback"][0]
     assert fb3["count"] == 2 and "review-PRR_1" not in fb3["items"]
     assert "comment-IC_2" in fb3["items"]
@@ -218,12 +218,12 @@ def test_needs_me_surfaces_to_review_requester_for_artifact_pr(capsys):
     _review_doc(t, requested_by="alice")  # not watched; requester = alice
     forge.feedback_sweep(t, "r", runner=_runner_for(_fixtures(reviews=[_REVIEW])))
     assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     fb = [r for r in got if r.get("type") == "forge-feedback"]
     assert len(fb) == 1 and fb[0]["count"] == 1
     # an unrelated agent sees nothing
     assert cli.main(["needs-me", "r", "--agent", "nobody", "--json"], transport=t) == 0
-    got2 = json.loads(capsys.readouterr().out)
+    got2 = needs_me_rows(json.loads(capsys.readouterr().out))
     assert [r for r in got2 if r.get("type") == "forge-feedback"] == []
 
 
@@ -257,7 +257,7 @@ def test_of_keyed_review_is_discovered_by_mirror_swept_and_surfaces_to_requester
 
     # the requester (alice) gets the needs-me item
     assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
-    fb = [r for r in json.loads(capsys.readouterr().out)
+    fb = [r for r in needs_me_rows(json.loads(capsys.readouterr().out))
           if r.get("type") == "forge-feedback"]
     assert len(fb) == 1 and fb[0]["count"] == 1 and fb[0]["pr_slug"] == "o-r-42"
 
@@ -274,7 +274,7 @@ def test_legacy_artifact_keyed_review_doc_is_still_discovered(capsys):
     fres = forge.feedback_sweep(t, "r", runner=_runner_for(_fixtures(reviews=[_REVIEW])))
     assert fres["prs"] == 1 and fres["items"] == 1
     assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
-    fb = [r for r in json.loads(capsys.readouterr().out)
+    fb = [r for r in needs_me_rows(json.loads(capsys.readouterr().out))
           if r.get("type") == "forge-feedback"]
     assert len(fb) == 1 and fb[0]["count"] == 1
 

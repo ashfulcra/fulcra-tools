@@ -22,7 +22,7 @@ import json
 import pytest
 
 from coord_engine import cli
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 STRICT_READ_CAP = 8 * 1024
 
@@ -90,7 +90,7 @@ def test_degraded_rows_carry_type_and_coverage(capsys):
     _seed_rows(t)
     t.fail_list = True
     cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
-    rows = strict_parse(capsys.readouterr().out)
+    rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     assert isinstance(rows, list)
     markers = [r for r in rows if isinstance(r, dict)
                and str(r.get("type", "")).endswith(("-degraded", "-source"))
@@ -143,18 +143,49 @@ def test_blocked_ask_renders_unlock_independent_of_blocked_on(
 # in the registry below, which is explicitly documentation-only.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="OC2 TARGET (C03/C05/C06): stdout must lead with an envelope "
-           "object carrying state/source/contract; today it is a bare array. "
-           "When this XPASSes, flip OC2 to ENFORCED in the same PR.")
-def test_oc2_target_envelope_leads_stdout(capsys):
+# --- OC2: envelope first, needs-me (ENFORCED — ladder PR 1; C03, C05, C06) --
+
+
+def test_oc2_needs_me_envelope_leads_stdout(capsys):
+    # LADDER PR 1 (was the strict-xfail probe): needs-me's stdout is ONE
+    # envelope object — contract stamp, transport health, source, rows inside.
+    # One parse decides everything; a truncated read becomes a loud parse
+    # failure instead of a silently complete-looking array.
     t = FakeTransport()
     _seed_rows(t)
-    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    rc = cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
     value = strict_parse(capsys.readouterr().out)
     assert isinstance(value, dict), "envelope object must be the first value"
-    assert "state" in value and "contract" in value
+    assert value["contract"] == 2
+    assert value["health"] in ("DATA", "CLEAR", "DEGRADED", "UNKNOWN")
+    assert isinstance(value["rows"], list)
+    assert rc == (3 if value["health"] in ("DEGRADED", "UNKNOWN") else 0), (
+        "rc must be a pure function of envelope health (OC3/E4)")
+
+
+def test_oc2_health_rules_and_rc(capsys):
+    # The r2 design's ordered health rules, driven end-to-end:
+    # complete scan + rows -> DATA rc0; failing transport -> partial coverage
+    # -> DEGRADED rc3 with a named basis (rows stay served as a floor).
+    t = FakeTransport()
+    head = "b" * 40
+    cli.main(["review", "request", "r", "pr-hz", "--of", "https://x/pr/hz",
+              "--reviewer", "alice", "--from", "boss", "--head", head],
+             transport=t)
+    capsys.readouterr()
+    rc = cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    v = strict_parse(capsys.readouterr().out)
+    assert (v["health"], rc) == ("DATA", 0)
+    assert v["degraded"] == [] and v["basis"] == []
+
+    t2 = FakeTransport()
+    _seed_rows(t2)
+    t2.fail_list = True
+    rc2 = cli.main(["needs-me", "r", "--agent", "alice", "--json"],
+                   transport=t2)
+    v2 = strict_parse(capsys.readouterr().out)
+    assert v2["health"] in ("DEGRADED", "UNKNOWN") and rc2 == 3
+    assert v2["basis"], "a non-clean health must name its failure classes"
 
 
 # --- OC5: act-on-it fields, review rows (ENFORCED — ladder flip 1; C01) ----
@@ -171,7 +202,7 @@ def test_oc5_review_row_carries_of_and_head(capsys):
              transport=t)
     capsys.readouterr()
     cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
-    rows = strict_parse(capsys.readouterr().out)
+    rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     pending = [r for r in rows if isinstance(r, dict)
                and r.get("type") == "review-pending"]
     assert pending, "reviewer must see the pending review"
@@ -188,7 +219,7 @@ def test_oc5_review_row_keys_present_even_on_legacy_headless_register(capsys):
           "---\ntype: Review\nof: https://x/pr/old\nrequired: [alice]\n"
           "requested_by: boss\n---\nReview requested\n")
     cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
-    rows = strict_parse(capsys.readouterr().out)
+    rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     pending = [r for r in rows if isinstance(r, dict)
                and r.get("type") == "review-pending"]
     assert pending, "reviewer must see the pending review"

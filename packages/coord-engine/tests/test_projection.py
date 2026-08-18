@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from coord_engine import budget, cli, projection, reconcile
 from coord_engine.transport import TransportError
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 TEAM = "r"
 
@@ -997,7 +997,7 @@ def test_needs_me_end_to_end_serves_projection(capsys):
     t.reset_counts()
     assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
                     transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert [r["name"] for r in got
             if r.get("type") == "review-pending"] == ["pr-e2e"]
     assert any(r.get("type") == "review-source"
@@ -1023,7 +1023,7 @@ def test_needs_me_task_projection_hit_skips_ack_fanout(capsys):
 
     assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
                     transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert [r["name"] for r in got if r.get("name") == "mine"] == ["mine"]
     assert {"type": "needs-me-source", "source": "projection",
             "as_of": agg[projection.NEEDS_ME_KEY]["generated_at"]} in got
@@ -1041,7 +1041,7 @@ def test_needs_me_task_projection_stale_falls_back_loudly(capsys):
 
     assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
                     transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     src = [r for r in got if r.get("type") == "needs-me-source"]
     assert len(src) == 1 and src[0]["source"] == "raw-scan"
     assert "stale" in src[0]["reason"]
@@ -1064,7 +1064,7 @@ def test_needs_me_task_projection_stale_but_feed_clean_is_current(
 
     assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
                     transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     src = [r for r in got if r.get("type") == "needs-me-source"]
     assert len(src) == 1 and src[0]["source"] == "projection"
     assert not [p for p in t.reads if "/_coord/acks/" in p]
@@ -1087,7 +1087,7 @@ def test_needs_me_feed_delta_raw_tallies_only_changed_ack_slug(capsys):
 
     assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
                     transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert {r["name"] for r in got if r.get("name") in {"changed", "stable"}} == {
         "changed", "stable"}
     ack_reads = [p for p in t.reads if "/_coord/acks/" in p]
@@ -1108,7 +1108,7 @@ def test_needs_me_task_projection_malformed_falls_back_loudly(capsys):
 
     assert cli.main(["needs-me", TEAM, "--agent", "alice", "--json"],
                     transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     src = [r for r in got if r.get("type") == "needs-me-source"]
     assert src == [{"type": "needs-me-source", "source": "raw-scan",
                     "reason": "needs-me projection malformed"}]

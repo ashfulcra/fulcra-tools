@@ -1,7 +1,7 @@
 import json
 
 from coord_engine import cli, tasks
-from coord_engine_test_helpers import FakeTransport, _task
+from coord_engine_test_helpers import FakeTransport, _task, needs_me_rows
 
 
 def _dslug(title, *, summary=None, next=None, assignee):
@@ -2051,7 +2051,7 @@ def test_needs_me_surfaces_pending_required_review(capsys):
     _seed_review(t, "pr-9", "rev1")
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     assert cli.main(["needs-me", "r", "--agent", "rev1", "--json"], transport=t) == 0
-    got = _j.loads(capsys.readouterr().out)
+    got = needs_me_rows(_j.loads(capsys.readouterr().out))
     revs = [g for g in got if g.get("type") == "review-pending"]
     assert [r["name"] for r in revs] == ["pr-9"]
 
@@ -2068,10 +2068,10 @@ def test_needs_me_review_role_aware(capsys):
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     for who in ("codex-reviewer", "workbook"):        # role id itself AND lease holder
         cli.main(["needs-me", "r", "--agent", who, "--json"], transport=t)
-        got = _j.loads(capsys.readouterr().out)
+        got = needs_me_rows(_j.loads(capsys.readouterr().out))
         assert any(g.get("name") == "pr-7" for g in got if g.get("type") == "review-pending"), who
     cli.main(["needs-me", "r", "--agent", "bystander", "--json"], transport=t)
-    got = _j.loads(capsys.readouterr().out)
+    got = needs_me_rows(_j.loads(capsys.readouterr().out))
     assert not [g for g in got if g.get("type") == "review-pending"]
 
 
@@ -2083,7 +2083,7 @@ def test_needs_me_settled_reviews_not_surfaced(capsys):
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     for who in ("rev1", "rev2"):
         cli.main(["needs-me", "r", "--agent", who, "--json"], transport=t)
-        got = _j.loads(capsys.readouterr().out)
+        got = needs_me_rows(_j.loads(capsys.readouterr().out))
         assert not [g for g in got if g.get("type") == "review-pending"], who
 
 
@@ -2172,7 +2172,7 @@ def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):
           "---\ntype: Lease\nagent: sleeper\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     cli.main(["needs-me", "r", "--agent", "sleeper", "--json"], transport=t)
-    got = _j.loads(capsys.readouterr().out)
+    got = needs_me_rows(_j.loads(capsys.readouterr().out))
     assert not [g for g in got if g.get("type") == "review-pending"]  # stale lease != holder
 
 
@@ -2189,7 +2189,7 @@ def test_needs_me_review_honors_role_doc_sla(capsys):
           f"---\ntype: Lease\nagent: tortoise\ntimestamp: {ts}\n---\n")
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     cli.main(["needs-me", "r", "--agent", "tortoise", "--json"], transport=t)
-    got = _j.loads(capsys.readouterr().out)
+    got = needs_me_rows(_j.loads(capsys.readouterr().out))
     assert any(g.get("name") == "pr-slow" for g in got if g.get("type") == "review-pending")
 
 
@@ -2354,7 +2354,7 @@ def test_needs_me_forge_degraded_exits_nonzero(capsys, monkeypatch):
     assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 3
     assert "forge fold degraded" in capsys.readouterr().out
     assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 3
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert any(r.get("type") == "forge-degraded" for r in got)
 
 
@@ -2895,7 +2895,7 @@ def test_needs_me_degraded_transport_marker(capsys):
     _degrade_summaries(t)
     capsys.readouterr()
     cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert any(r.get("type") == "read-degraded" for r in got), \
         f"degraded needs-me must announce the core fold before add-ons: {got}"
 
@@ -2932,7 +2932,7 @@ def test_public_reads_healthy_no_degraded_marker(capsys):
                    for r in json.loads(capsys.readouterr().out))
     cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
     assert not any(r.get("type") == "read-degraded"
-                   for r in json.loads(capsys.readouterr().out))
+                   for r in needs_me_rows(json.loads(capsys.readouterr().out)))
 
 
 # --- ENG-1-6: registered top-level error envelope --------------------------

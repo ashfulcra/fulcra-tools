@@ -839,19 +839,20 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
     seen = {r.get("id") for r in blocked}
     got = blocked + [r for r in got if r.get("id") not in seen]
-    # A bounded raw fallback is usable only when it completed.  Preserve the
-    # partial rows and the single-value JSON contract, but make the process
-    # status fail closed so unattended callers cannot mistake 0/N for a clean
-    # durable-assignment read.
-    forge_incomplete = any(r.get("type") == "forge-degraded" for r in got)
-    rc = 3 if forge_incomplete else 0
+    # Contract 2 (OC2/OC3, ladder PR 1): the envelope is sealed FIRST and rc is
+    # a pure function of its health — UNKNOWN/DEGRADED exit 3 even when partial
+    # rows were served (this widens the old forge-only rc: a degraded role or
+    # review fold now fails closed too, which is the clause's whole point).
+    envelope, rc = class_a_envelope(got, source_type="needs-me-source")
     # The verdict, on stderr, BEFORE the unbounded payload it is a verdict about:
     # emitted unconditionally (json mode included) and independent of whether the
-    # rows below survive the reader's context. See `emit_envelope`.
+    # rows below survive the reader's context. See `emit_envelope`. Under OC2
+    # this line is the courtesy DUPLICATE; the stdout envelope is the authority.
     emit_envelope(
         "needs-me", count=len(got), rc=rc,
+        health=envelope["health"],
         forge=_fold_source(got, "forge-source"),
-        source=_fold_source(got, "needs-me-source"),
+        source=envelope["source"],
         degraded=sum(1 for r in got if _is_degraded_row(r)),
     )
     if getattr(args, "envelope_only", False):
@@ -859,7 +860,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         # records. Same rc, same envelope, no payload to truncate.
         return rc
     if args.json:
-        jsonutil.print_json(got)
+        jsonutil.print_json(envelope)
     else:
         print(f"{len(got)} item(s) need {args.agent}:")
         for r in got:
@@ -3169,6 +3170,76 @@ def _fold_source(rows: list, type_name: str) -> str:
         if isinstance(r, dict) and str(r.get("type") or "") == type_name:
             return "projection" if r.get("source") == "projection" else "raw"
     return "absent"
+
+
+# OC2 contract-2 basis vocabulary: every Class A degraded-marker type maps to
+# the failure class the design's health rules key on. `read-degraded` is the
+# one UNKNOWN class today — the authority itself (task fold) could not be
+# trusted, so served rows may describe a world that does not exist. Everything
+# else is partial COVERAGE over a readable authority: rows are a floor.
+_CLASS_A_BASIS: dict[str, str] = {
+    "read-degraded": "source-unreadable",
+    "role-degraded": "role-resolution-partial",
+    "review-role-degraded": "role-resolution-partial",
+    "forge-degraded": "budget-cut",
+    "review-fold-degraded": "budget-cut",
+    "review-head-degraded": "subset-unreadable",
+    "review-orphan-degraded": "subset-unreadable",
+}
+_UNKNOWN_BASIS = {"source-unreadable"}
+
+
+def class_a_envelope(
+    rows: list, *, source_type: str,
+) -> tuple[dict[str, Any], int]:
+    """Seal the contract-2 envelope for a Class A (bare-array-fold) verb.
+
+    Returns ``(envelope, rc)``. The envelope is the SINGLE JSON value the verb
+    prints on stdout under ``--json``: ``health`` is transport/fold health only
+    (never a domain state — rows keep their own fields untouched), selected by
+    the design's ordered rules (oc2-oc3-envelope-design-r2, APPROVED
+    2026-08-18): UNKNOWN when the authority itself could not be trusted (rows
+    MUST NOT be acted on), DEGRADED when coverage is partial over a readable
+    authority (rows are a usable FLOOR; absence-inference forbidden), DATA /
+    CLEAR on a complete scan — CLEAR is the only health that licenses "there
+    is nothing for me". rc is a pure function of health (UNKNOWN|DEGRADED → 3,
+    DATA|CLEAR → 0), sealed HERE, before row serialization, so a later
+    serializer failure can never flip a dirty rc clean (OC3/E4).
+
+    Marker and source rows stay inside ``rows`` exactly as before — derived
+    duplicates for greppability, never the only carrier (OC10 unchanged)."""
+    degraded_types: list[str] = []
+    for r in rows:
+        if _is_degraded_row(r):
+            t = str(r.get("type") or "")
+            if t not in degraded_types:
+                degraded_types.append(t)
+    basis: list[str] = []
+    for t in degraded_types:
+        b = _CLASS_A_BASIS.get(t, "budget-cut")
+        if b not in basis:
+            basis.append(b)
+    if any(b in _UNKNOWN_BASIS for b in basis):
+        health = "UNKNOWN"
+    elif degraded_types:
+        health = "DEGRADED"
+    else:
+        actionable = any(
+            isinstance(r, dict)
+            and not str(r.get("type") or "").endswith(("degraded", "-source"))
+            for r in rows)
+        health = "DATA" if actionable else "CLEAR"
+    envelope: dict[str, Any] = {"contract": 2, "health": health}
+    src_row = next((r for r in rows if isinstance(r, dict)
+                    and str(r.get("type") or "") == source_type), None)
+    envelope["source"] = _fold_source(rows, source_type)
+    if src_row is not None and src_row.get("source") == "projection":
+        envelope["as_of"] = src_row.get("as_of")
+    envelope["degraded"] = degraded_types
+    envelope["basis"] = basis
+    envelope["rows"] = rows
+    rc = 3 if health in ("UNKNOWN", "DEGRADED") else 0
+    return envelope, rc
 
 
 def emit_envelope(verb: str, *, count: int, rc: int, **fields: Any) -> None:

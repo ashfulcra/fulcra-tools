@@ -19,7 +19,7 @@ import pytest
 
 from coord_engine import budget, cli, okf, reconcile, tasks
 from coord_engine.transport import TransportError
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 TEAM = "r"
 NOW = "2026-07-10T00:00:00Z"
@@ -102,12 +102,12 @@ def test_role_directive_surfaces_in_inbox_and_needs_me_verbs(capsys):
     assert cli.main(["inbox", TEAM, "-a", "bob", "--json"], transport=t) == 0
     assert [r["name"] for r in json.loads(capsys.readouterr().out)] == ["role-do-1"]
     assert cli.main(["needs-me", TEAM, "--agent", "bob", "--json"], transport=t) == 0
-    assert [r["name"] for r in _work_rows(json.loads(capsys.readouterr().out))] == ["role-do-1"]
+    assert [r["name"] for r in _work_rows(needs_me_rows(json.loads(capsys.readouterr().out)))] == ["role-do-1"]
     # non-holder sees neither
     assert cli.main(["inbox", TEAM, "-a", "carol", "--json"], transport=t) == 0
     assert json.loads(capsys.readouterr().out) == []
     assert cli.main(["needs-me", TEAM, "--agent", "carol", "--json"], transport=t) == 0
-    assert _work_rows(json.loads(capsys.readouterr().out)) == []
+    assert _work_rows(needs_me_rows(json.loads(capsys.readouterr().out))) == []
 
 
 def test_stale_lease_hides_role_directive(capsys):
@@ -157,11 +157,11 @@ def test_briefing_role_resolution_failure_is_loud_text(capsys):
 
 def test_needs_me_role_resolution_failure_is_loud(capsys):
     t = _team_with_role_directive(LeaseListFails)
-    assert cli.main(["needs-me", TEAM, "--agent", "bob", "--json"], transport=t) == 0
-    rows = json.loads(capsys.readouterr().out)
+    assert cli.main(["needs-me", TEAM, "--agent", "bob", "--json"], transport=t) == 3  # contract 2: rc follows health (OC3/E4)
+    rows = needs_me_rows(json.loads(capsys.readouterr().out))
     assert any(r.get("type") == "role-degraded" and r.get("roles") == ["reviewer"]
                for r in rows)
-    assert cli.main(["needs-me", TEAM, "--agent", "bob"], transport=t) == 0
+    assert cli.main(["needs-me", TEAM, "--agent", "bob"], transport=t) == 3  # contract 2: rc follows health (OC3/E4)
     assert "role resolution degraded: reviewer" in capsys.readouterr().out
 
 
@@ -430,7 +430,7 @@ def test_role_budget_cut_is_loud_on_inbox_and_needs_me(capsys, monkeypatch):
     t = _slow_role_team(monkeypatch, 0.5)
     assert cli.main(["inbox", TEAM, "-a", "bob"], transport=t) == 0
     assert "role resolution degraded: reviewer" in capsys.readouterr().out
-    assert cli.main(["needs-me", TEAM, "--agent", "bob"], transport=t) == 0
+    assert cli.main(["needs-me", TEAM, "--agent", "bob"], transport=t) == 3  # contract 2: rc follows health (OC3/E4)
     assert "role resolution degraded: reviewer" in capsys.readouterr().out
 
 

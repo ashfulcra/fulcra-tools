@@ -12,7 +12,7 @@ this section is noise; a hidden human-blocked item is the incident).
 import json
 
 from coord_engine import cli, okf, query, reconcile
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 
 class CountingTransport(FakeTransport):
@@ -180,7 +180,7 @@ def test_needs_me_surfaces_blocked_on_human_first(capsys, monkeypatch):
     capsys.readouterr()
     rc = cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
     assert rc == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert got[0].get("type") == "blocked-on-human", got[0]
     assert got[0]["name"] == "t1"
 
