@@ -60,7 +60,7 @@ def cmd_init(args) -> int:
                   file=sys.stderr)
             return RC_UNKNOWN
         if not capable:
-            print(f"mesh init REFUSED: the installed fulcra-api cannot express "
+            print(f"mesh init REFUSED: {transport.which_client()} cannot express "
                   f"a file grant, so {reports!r} could not be granted by any "
                   f"path. This needs >= {transport.MIN_FILE_GRANT_VERSION}; run "
                   f"`uv tool install --force fulcra-api=="

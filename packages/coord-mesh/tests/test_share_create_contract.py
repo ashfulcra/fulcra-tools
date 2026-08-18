@@ -218,3 +218,33 @@ def test_a_nested_prefix_keeps_its_interior_slashes():
 def test_an_empty_prefix_is_an_error_not_a_silent_grant():
     with pytest.raises(ValueError):
         transport.file_data_type("   ")
+
+
+# --- naming WHICH client answered (two-binary hosts) ----------------------
+
+def test_which_client_names_a_path_not_just_a_word(monkeypatch):
+    """A host can carry two `fulcra-api` binaries with DIFFERENT surfaces —
+    measured on two hosts 2026-08-18: the uv tool has `share create`, the
+    workspace venv one has no `share` command at all, and under `uv run` the
+    venv one wins. "the installed fulcra-api" is not an actionable phrase on
+    such a host; the path is."""
+    monkeypatch.setattr(transport.shutil, "which", lambda n: "/somewhere/" + n)
+    named = transport.which_client()
+    assert "/somewhere/fulcra-api" in named
+
+
+def test_which_client_says_so_when_the_binary_is_not_on_path(monkeypatch):
+    monkeypatch.setattr(transport.shutil, "which", lambda n: None)
+    assert "not on PATH" in transport.which_client()
+
+
+def test_capability_unknown_names_the_binary_it_probed(monkeypatch):
+    """The r6 message said "the installed fulcra-api" and left the reader to
+    guess which one had failed."""
+    def boom(args, **_):
+        return 2, "", "Error: No such command 'share'."
+    monkeypatch.setattr(transport, "run", boom)
+    with pytest.raises(transport.CapabilityUnknown) as exc:
+        transport.share_create_help()
+    assert "fulcra-api" in str(exc.value)
+    assert "No such command" in str(exc.value)

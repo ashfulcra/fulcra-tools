@@ -157,10 +157,30 @@ def test_send_refuses_to_write_when_the_pre_snapshot_is_unknown(capsys, monkeypa
 
 
 def test_send_write_failure_is_unknown_not_success(capsys, monkeypatch):
+    """A write that returns non-zero is UNKNOWN, never success.
+
+    HERMETICITY (coord-boss's diagnosis of CI job 95745650060 at 7e4aae59):
+    this test used to patch `record` alone and leave the pre-write snapshot
+    unpatched, so the snapshot shelled out to the real fulcra-api. With
+    credentials that read succeeded and the test passed — having performed a
+    live network read inside a unit test. Without them the r3 refuse-on-UNKNOWN
+    guard fired first and stderr said "refusing to write", not "failed", so CI
+    went red. The test was measuring the network, not the path it names.
+
+    The snapshot is therefore explicit and GOOD here, which is the only state
+    that lets execution reach the failing write at all.
+    """
+    monkeypatch.setattr(cli.transport, "get_records",
+                        lambda *a, **k: cli.transport.Result(cli.transport.EMPTY))
     monkeypatch.setattr(cli.transport, "record", lambda *a, **k: (1, "", "denied"))
     rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
     assert rc == cli.RC_UNKNOWN
-    assert "failed" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "failed" in err
+    # The distinction CI exposed: this is a WRITE failure, not the snapshot
+    # guard refusing beforehand. If this line ever trips, the test has drifted
+    # back to asserting the wrong branch.
+    assert "refusing to write" not in err, err
 
 
 def test_verbs_needing_a_channel_refuse_without_one(capsys):

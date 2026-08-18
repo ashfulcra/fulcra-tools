@@ -67,6 +67,19 @@ fixture and stamps it with the installed version it read from the installer;
 nothing writes that fixture by hand, and the tests assert against the version it
 recorded rather than one a person typed.
 
+**Instance eleven was a test measuring the network's cooperation.** CI caught it:
+one test patched the write and left the pre-write snapshot unpatched, so the
+snapshot shelled out to the real client. On a host with credentials that read
+succeeded, execution reached the patched write, and the test passed — having
+made a live network call inside a unit test. On a credential-less runner the
+read failed, an earlier guard correctly refused, and the assertion looked at the
+wrong branch. Auditing the rest of the suite by eye would have been the same
+mistake one level up, so `tests/conftest.py` stubs both routes out of this
+package — `transport.run` and `transport.record` — to RAISE. A test that wants
+transport behaviour patches it explicitly; a test that reaches the network by
+omission gets a named failure. The guard found exactly one offender, which is
+also the sweep's result.
+
 The runtime learned the same lesson. `fulcra-api` has no version surface at all
 — no `--version`, no `version` subcommand — so `init` does not ask the client
 what it *is*; it asks what it can *do*, by probing the help of the binary it is

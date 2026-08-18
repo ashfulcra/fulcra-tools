@@ -57,7 +57,27 @@ uv tool list | grep fulcra-api
 
 `coord-mesh init` does not trust you on this. It probes the installed client and
 **refuses** a reports prefix it cannot deliver, rather than quietly minting a
-channel-only share and calling it granted.
+channel-only share and calling it granted. Its messages name the binary path
+they probed, because of the next paragraph.
+
+### Which `fulcra-api` are you actually running?
+
+More than one can be installed, **with different command surfaces**. Measured on
+two separate hosts:
+
+| binary | has `share create`? |
+|---|---|
+| `/root/.local/bin/fulcra-api` (uv tool) | yes |
+| `<workspace>/.venv/bin/fulcra-api` | **no `share` command at all** |
+
+Under `uv run` the workspace one wins, so driving these legs through
+`uv run coord-mesh` probes and would invoke a client that cannot do shares —
+`init` refuses with rc 3 and the message names the path. Run the installed
+console script, and check first:
+
+```
+which fulcra-api && uv tool list | grep fulcra-api
+```
 
 **What changed since the first 2026-08-18 run, and why.** That run died here in
 argparse: `transport.py` appended `--file <prefix>` to a 0.1.39 client that had

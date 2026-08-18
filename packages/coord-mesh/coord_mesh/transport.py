@@ -11,6 +11,7 @@ Two contracts this module keeps:
 """
 import json
 import os
+import shutil
 import signal
 import subprocess
 from dataclasses import dataclass, field
@@ -113,6 +114,21 @@ class CapabilityUnknown(Exception):
     """
 
 
+def which_client() -> str:
+    """The client we invoke, named as precisely as we can name it.
+
+    A host can carry more than one `fulcra-api` WITH DIFFERENT COMMAND
+    SURFACES, and which one answers depends on PATH. Measured 2026-08-18 on two
+    separate hosts: `/root/.local/bin/fulcra-api` (uv tool) has `share create`,
+    while `<workspace>/.venv/bin/fulcra-api` has no `share` command at all — and
+    under `uv run` the venv one wins. A message that says "the installed
+    fulcra-api" is therefore missing the one fact the reader needs to act.
+    """
+    name = _command()[0]
+    path = shutil.which(name)
+    return f"{name} ({path})" if path else f"{name} (not on PATH)"
+
+
 def share_create_help(*, timeout: float = DEFAULT_TIMEOUT) -> str:
     """The help text of the binary we are ACTUALLY about to invoke.
 
@@ -124,10 +140,12 @@ def share_create_help(*, timeout: float = DEFAULT_TIMEOUT) -> str:
     try:
         rc, out, err = run(["share", "create", "--help"], timeout=timeout)
     except TransportError as exc:
-        raise CapabilityUnknown(f"could not run `share create --help`: {exc}") from exc
+        raise CapabilityUnknown(
+            f"could not run `share create --help` via {which_client()}: {exc}") from exc
     if rc != 0:
         raise CapabilityUnknown(
-            f"`share create --help` exited {rc}: {(err or out).strip()[:200]}")
+            f"`share create --help` via {which_client()} exited {rc}: "
+            f"{(err or out).strip()[:200]}")
     return out or ""
 
 
