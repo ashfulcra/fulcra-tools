@@ -36,6 +36,20 @@ def _agg(t):
     return json.loads(t.store[f"team/{TEAM}/_coord/summaries.json"])
 
 
+def _incomplete_reviews(*args, **kwargs):
+    return {
+        "schema": projection.REVIEWS_SCHEMA,
+        "generated_at": kwargs["now"],
+        "complete": False,
+        "scanned": 187,
+        "total": 290,
+        "rows": [],
+        "orphans": [],
+        "orphans_unknown": [],
+        "tombstones": [],
+    }
+
+
 _HEAD = "a" * 40
 
 
@@ -93,6 +107,136 @@ class CountingTransport(FakeTransport):
 
 
 # --- write side: reconcile builds the sections -------------------------------
+
+def test_incomplete_projection_refuses_first_aggregate_publication(monkeypatch):
+    """A budget-cut first pass must not create an aggregate that advertises a
+    partial generation.  Removing the publication gate makes this fail by
+    writing summaries.json with complete=false."""
+    monkeypatch.setattr(
+        projection, "build_review_projection", _incomplete_reviews)
+    t = FakeTransport()
+
+    result = _reconcile(t, now="2026-08-18T21:05:53Z")
+
+    assert result["degraded"] is True
+    assert "publication refused" in result["reason"]
+    assert f"team/{TEAM}/_coord/summaries.json" not in t.store
+
+
+def test_incomplete_projection_never_replaces_complete_generation(monkeypatch):
+    """A later pass that exhausts its review budget must leave the last complete
+    aggregate byte-for-byte intact.  Writing the partial aggregate is the live
+    187/290 regression this test catches."""
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+    _reconcile(t, now="2026-08-17T20:00:00Z")
+    path = f"team/{TEAM}/_coord/summaries.json"
+    complete_generation = t.store[path]
+    monkeypatch.setattr(
+        projection, "build_review_projection", _incomplete_reviews)
+
+    result = _reconcile(t, now="2026-08-18T21:05:53Z")
+
+    assert result["degraded"] is True
+    assert t.store[path] == complete_generation
+
+
+def test_same_second_root_failure_cannot_rebind_carried_projection():
+    """Two fleet hosts can reconcile in the same second.  A root-listing failure
+    returns the prior review dict untouched; timestamp equality must not let the
+    second host claim those carried bytes as its own generation."""
+    class ReviewRootDown(FakeTransport):
+        fail_reviews = False
+
+        def list_dir(self, prefix):
+            if self.fail_reviews and prefix == f"team/{TEAM}/review/":
+                raise TransportError("down")
+            return super().list_dir(prefix)
+
+    now = "2026-08-18T21:05:53Z"
+    t = ReviewRootDown()
+    _put_review(t, "pr-1", "alice")
+    reconcile.reconcile(t, TEAM, now=now, today=now[:10], host="h1")
+    path = f"team/{TEAM}/_coord/summaries.json"
+    complete_generation = t.store[path]
+    t.fail_reviews = True
+
+    result = reconcile.reconcile(
+        t, TEAM, now=now, today=now[:10], host="h2")
+
+    assert result["degraded"] is True
+    assert t.store[path] == complete_generation
+
+
+def test_same_second_builder_exception_cannot_rebind_carried_projection(
+        monkeypatch):
+    """The exception carry path needs the same explicit current-pass proof as the
+    root-listing carry path; a shared second is not provenance."""
+    now = "2026-08-18T21:05:53Z"
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+    reconcile.reconcile(t, TEAM, now=now, today=now[:10], host="h1")
+    path = f"team/{TEAM}/_coord/summaries.json"
+    complete_generation = t.store[path]
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(projection, "build_review_projection", explode)
+
+    result = reconcile.reconcile(
+        t, TEAM, now=now, today=now[:10], host="h2")
+
+    assert result["degraded"] is True
+    assert t.store[path] == complete_generation
+
+
+def test_projection_fence_rejects_section_republished_by_older_writer():
+    """A preserving-but-unaware old writer carries the top-level fence while
+    rebuilding sections without its binding.  New readers must raw-fallback
+    loudly instead of serving that incompatible republish."""
+    generated_at = "2026-08-18T21:05:53Z"
+    aggregate_doc = {
+        projection.PUBLICATION_FENCE_KEY: {
+            "schema": projection.PUBLICATION_FENCE_SCHEMA,
+            "generation": "new-writer-generation",
+            "minimum_writer_version": "1.11.0",
+        },
+        projection.REVIEWS_KEY: {
+            "schema": projection.REVIEWS_SCHEMA,
+            "generated_at": generated_at,
+            "complete": True,
+            "scanned": 290,
+            "total": 290,
+            "rows": [],
+        },
+    }
+
+    section, reason = projection.fresh_section(
+        aggregate_doc, projection.REVIEWS_KEY, projection.REVIEWS_SCHEMA,
+        now=generated_at)
+
+    assert section is None
+    assert "compatibility fence" in reason
+
+
+def test_complete_publish_binds_every_required_section_to_one_generation():
+    """A complete reconcile mints one token and binds all projection sections;
+    omitting a section binding would let an old writer's replacement pass the
+    compatibility check."""
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+
+    _reconcile(t, now="2026-08-18T21:05:53Z")
+
+    aggregate_doc = _agg(t)
+    fence = aggregate_doc[projection.PUBLICATION_FENCE_KEY]
+    assert fence["schema"] == projection.PUBLICATION_FENCE_SCHEMA
+    assert fence["generation"]
+    for key, _schema in projection.REQUIRED_SECTIONS:
+        assert (aggregate_doc[key][projection.FENCE_GENERATION_KEY]
+                == fence["generation"])
+
 
 def test_reconcile_writes_review_projection():
     t = FakeTransport()
@@ -369,17 +513,25 @@ def test_review_projection_feed_change_reopens_only_changed_slug():
 
 def test_reconcile_unreadable_verdict_shard_is_unknown_not_frozen():
     class ShardHidingTransport(FakeTransport):
+        hide = False
+
         def read(self, path):
-            if "/verdicts/" in path and "--bob--" in path:
+            if self.hide and "/verdicts/" in path and "--bob--" in path:
                 return None  # listed but unreadable: a floor, never projected
             return super().read(path)
 
     t = ShardHidingTransport()
-    _put_review(t, "flaky", "bob", verdicts=[("bob", "changes")])
+    _put_review(t, "stable", "alice")
     _reconcile(t)
-    sec = _agg(t)[projection.REVIEWS_KEY]
-    assert sec["complete"] is False
-    assert sec["rows"] == []  # no row is better than a false APPROVED/PENDING
+    path = f"team/{TEAM}/_coord/summaries.json"
+    complete_generation = t.store[path]
+    _put_review(t, "flaky", "bob", verdicts=[("bob", "changes")])
+    t.hide = True
+
+    result = _reconcile(t)
+
+    assert result["degraded"] is True
+    assert t.store[path] == complete_generation
 
 
 def test_fast_path_declines_on_review_change():

@@ -89,15 +89,27 @@ from .transport import TransportError
 REVIEWS_KEY = "reviews"
 FORGE_KEY = "forge"
 NEEDS_ME_KEY = "needs_me"
+PUBLICATION_FENCE_KEY = "projection_publication_fence"
+FENCE_GENERATION_KEY = "publication_generation"
 
 REVIEWS_SCHEMA = "coord.reviews.projection.v2"
 FORGE_SCHEMA = "coord.forge.projection.v1"
 NEEDS_ME_SCHEMA = "coord.needs-me.projection.v1"
+PUBLICATION_FENCE_SCHEMA = "coord.projection-publication-fence.v1"
 
 REQUIRED_SECTIONS = (
     (REVIEWS_KEY, REVIEWS_SCHEMA),
     (FORGE_KEY, FORGE_SCHEMA),
     (NEEDS_ME_KEY, NEEDS_ME_SCHEMA),
+)
+
+# Review is the expensive source fold and forge is derived from its rows, so
+# they form one atomic publication unit. needs_me has a separate retry-safety
+# contract: an inconclusive ack fold must publish its held anchor and
+# ``complete: false`` so the next quiet pass cannot fast-path past owed work.
+ATOMIC_PUBLICATION_SECTIONS = (
+    (REVIEWS_KEY, REVIEWS_SCHEMA),
+    (FORGE_KEY, FORGE_SCHEMA),
 )
 
 #: Maximum age (hours) a projection section may have and still be served by a
@@ -127,6 +139,30 @@ RETRY_UNKNOWN_MAX = 3
 #: between hosts (``reconcile.FAST_PATH_SKEW_MARGIN_SECONDS``; not imported to
 #: keep this module import-cycle-free under ``reconcile -> projection``).
 _FUTURE_SKEW_HOURS = 0.25
+
+
+def _publication_fence_reason(
+    aggregate_doc: dict[str, Any], section: dict[str, Any], key: str,
+) -> str:
+    """Why ``section`` is incompatible with the aggregate's writer fence.
+
+    No fence means a legacy aggregate and remains readable during rollout. Once
+    a new writer publishes a fence, preserving old writers carry that unknown
+    top-level key but cannot stamp rebuilt sections with its generation. New
+    readers therefore reject the republish instead of trusting mixed-version
+    bytes as one generation.
+    """
+    if PUBLICATION_FENCE_KEY not in aggregate_doc:
+        return ""
+    fence = aggregate_doc.get(PUBLICATION_FENCE_KEY)
+    if (not isinstance(fence, dict)
+            or fence.get("schema") != PUBLICATION_FENCE_SCHEMA
+            or not isinstance(fence.get("generation"), str)
+            or not fence.get("generation")):
+        return f"{key} projection compatibility fence invalid"
+    if section.get(FENCE_GENERATION_KEY) != fence["generation"]:
+        return f"{key} projection compatibility fence mismatch"
+    return ""
 
 #: The review fold's settled-cache marker filename (mirrors ``cli.SETTLED_MARKER``
 #: — defined there first; duplicated here because ``cli`` imports this module).
@@ -206,6 +242,9 @@ def fresh_section(
     section = aggregate_doc.get(key)
     if not isinstance(section, dict) or section.get("schema") != schema:
         return None, f"{key} projection unrecognized"
+    fence_reason = _publication_fence_reason(aggregate_doc, section, key)
+    if fence_reason:
+        return None, fence_reason
     age = age_hours(section.get("generated_at"), now)
     if age == float("inf"):
         return None, f"{key} projection stamp unreadable"
@@ -241,6 +280,9 @@ def feed_fresh_section(
     section = aggregate_doc.get(key)
     if not isinstance(section, dict) or section.get("schema") != schema:
         return None, f"{key} projection unrecognized"
+    fence_reason = _publication_fence_reason(aggregate_doc, section, key)
+    if fence_reason:
+        return None, fence_reason
     age = age_hours(section.get("generated_at"), now)
     if age == float("inf"):
         return None, f"{key} projection stamp unreadable"
@@ -267,6 +309,12 @@ def sections_owing_pass(aggregate_doc: Any) -> list[str]:
     """
     if not isinstance(aggregate_doc, dict):
         return [key for key, _schema in REQUIRED_SECTIONS]
+    fence = aggregate_doc.get(PUBLICATION_FENCE_KEY)
+    if (not isinstance(fence, dict)
+            or fence.get("schema") != PUBLICATION_FENCE_SCHEMA
+            or not isinstance(fence.get("generation"), str)
+            or not fence.get("generation")):
+        return [key for key, _schema in REQUIRED_SECTIONS]
     generated_at = aggregate_doc.get("generated_at")
     owed: list[str] = []
     for key, schema in REQUIRED_SECTIONS:
@@ -274,7 +322,8 @@ def sections_owing_pass(aggregate_doc: Any) -> list[str]:
         if (not isinstance(section, dict)
                 or section.get("schema") != schema
                 or section.get("complete") is not True
-                or section.get("generated_at") != generated_at):
+                or section.get("generated_at") != generated_at
+                or section.get(FENCE_GENERATION_KEY) != fence["generation"]):
             owed.append(key)
     return owed
 
