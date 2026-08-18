@@ -96,5 +96,23 @@ Live legs are documented in [SMOKE.md](SMOKE.md); the role charter is
 stayed green, because the fake emitted what the code wanted. `tests/fixtures/`
 holds a real captured record; the contract tests assert against its shape.
 
+**Cursors anchor to the NEWEST row, and the platform returns the OLDEST first.**
+`get-records` yields rows in ascending `recorded_at` order. A cursor is a
+position in that stream, so it advances to the LAST row of the read, not the
+first. Getting this backwards cost a real incident: the cursor sat on the oldest
+row, every subsequent read stopped at row 0 and printed "0 event(s)" while
+addressed events sat unshown below it, and when that row aged out of the window
+the entire window replayed. The replay is what got noticed; the silence is what
+it cost. Two consequences worth keeping in mind as a consumer:
+
+- **Expect occasional full-window re-delivery.** If a cursor ages out of the
+  read window — a peer goes unpolled longer than `--window` — the window is
+  replayed. This is legal under at-least-once and your handling should be
+  idempotent. `mesh queue` now says so on stderr when it happens, naming the
+  cursor and the window, so a replay never costs an investigation again.
+- **A read that cannot identify a row degrades the whole peer**, not just that
+  row. Position in an ordered stream is unknowable past an unidentifiable
+  record, so a partial slice would be a claim we cannot support.
+
 **UNKNOWN is never quiet.** A failed peer read is UNKNOWN, not empty — a mesh
 that reports "no messages" when it could not read is worse than one that fails.

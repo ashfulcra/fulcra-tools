@@ -254,18 +254,39 @@ def cmd_queue(args) -> int:
             degraded.append(uid)
             continue
         cursor = peers.get_cursor(reg, space, uid)
-        newest: Optional[str] = None
-        for row in res.rows:
-            rid = wire.record_id(row)
-            if not rid:
-                # Unidentifiable row: cannot dedupe it, so cannot advance past it.
-                print("  row with no id — position UNKNOWN, not advancing cursor",
+
+        # ROW ORDER IS ASCENDING — oldest first. Measured on a 203-row, 12-hour
+        # read of the live channel, strictly ascending. The first version of
+        # this loop did `newest = newest or rid`, taking rows[0], and so
+        # anchored the cursor to the OLDEST row in the window. Two symptoms,
+        # and the quiet one was the dangerous one: every later read broke at
+        # rows[0] (the cursor WAS rows[0]) and printed "0 event(s)" while real
+        # addressed events sat unshown below it; then, when that row aged out
+        # of the window, nothing matched and the whole window replayed. The
+        # replay is what got noticed; the silence is what it cost.
+        ids = [wire.record_id(row) for row in res.rows]
+        if any(rid is None for rid in ids):
+            # Unidentifiable row: we cannot say where we are in the stream, so
+            # we do not claim a position. Show nothing rather than guess.
+            print("  row with no id — position UNKNOWN, not advancing cursor",
+                  file=sys.stderr)
+            degraded.append(uid)
+            continue
+
+        start = 0
+        if cursor:
+            if cursor in ids:
+                start = ids.index(cursor) + 1
+            else:
+                # At-least-once re-delivery is LEGAL, and this is it. Saying so
+                # is not optional: a replay nobody can explain costs an
+                # investigation every time it happens.
+                print(f"  peer {uid}: cursor {cursor} is not in the {args.window} "
+                      f"window (aged out) — replaying the window; re-delivery is "
+                      f"expected under at-least-once, handle events idempotently",
                       file=sys.stderr)
-                degraded.append(uid)
-                continue
-            newest = newest or rid
-            if cursor and rid == cursor:
-                break
+
+        for row in res.rows[start:]:
             note = envelope.parse(wire.note_text(row))
             if not note or not envelope.addressed_to(note, args.me):
                 continue
@@ -273,8 +294,10 @@ def cmd_queue(args) -> int:
             print(f"  [{note.get('pri')}] {note.get('kind')} {note.get('slug')} "
                   f"from {wire.sender(row) or 'UNKNOWN-author'} "
                   f"ptr={note.get('ptr') or '-'}")
-        if newest and not args.no_advance and uid not in degraded:
-            peers.set_cursor(reg, space, uid, newest)
+
+        # The LAST row is the newest one; that is the position we have reached.
+        if ids and not args.no_advance and uid not in degraded:
+            peers.set_cursor(reg, space, uid, ids[-1])
     if not args.no_advance:
         peers.save(reg)
 
