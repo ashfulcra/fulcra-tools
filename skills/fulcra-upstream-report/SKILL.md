@@ -1,6 +1,10 @@
 ---
 name: fulcra-upstream-report
-description: File an upstream bug report from the Webster site agent. Use whenever site work uncovers a defect in an upstream artefact (fulcra-api CLI/wheel, Fulcra API endpoints or served OpenAPI spec, docs-site pages, agent-skills repo content) that Webster cannot fix or file directly. Formats the report to Ash's issue-body convention and delivers it over the agent mesh to coord-boss (Tycho), who routes it to an agent with fulcradynamics push access.
+description: "File an upstream bug report from the Webster site agent. Use whenever site work uncovers a defect in an upstream artefact (fulcra-api CLI/wheel, Fulcra API endpoints or served OpenAPI spec, docs-site pages, agent-skills repo content) that Webster cannot fix or file directly. Formats the report to Ash's issue-body convention and delivers it over the agent mesh to coord-boss (Tycho), who routes it to an agent with fulcradynamics push access."
+homepage: "https://github.com/ashfulcra/fulcra-tools"
+license: "MIT"
+user-invocable: true
+metadata: { "openclaw": { "emoji": "📮" } }
 ---
 
 # fulcra-upstream-report — deliver an upstream bug over the mesh

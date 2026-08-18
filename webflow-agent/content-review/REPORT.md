@@ -1,6 +1,6 @@
 # Content-review skill — first test run (2026-08-18)
 
-Skill: `webflow-agent/.claude/skills/fulcra-content-review/SKILL.md`
+Skill: `skills/fulcra-content-integration/SKILL.md`
 Targets: 2 most recent Cookbook recipes + 2 most recent Blog items.
 Originals untouched (no update calls were made against them). Each copy was
 created as a **new draft item** (`isDraft: true`, never published), named

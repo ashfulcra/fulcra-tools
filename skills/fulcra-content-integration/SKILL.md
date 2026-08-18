@@ -1,9 +1,13 @@
 ---
-name: fulcra-content-review
-description: Rework a piece of site content (Recipe, Blog post, docs page, landing section) so that Fulcra is integral to achieving that content's own goal rather than bolted on. Use when reviewing, improving, or drafting any fulcradynamics.com content that mentions Fulcra, or when asked whether a piece of content "sells" Fulcra well. Verifies every Fulcra claim against delivered artefacts before writing.
+name: fulcra-content-integration
+description: "Rework a piece of site content (Recipe, Blog post, docs page, landing section) so that Fulcra is integral to achieving that content's own goal rather than bolted on. Use when reviewing, improving, or drafting any fulcradynamics.com content that mentions Fulcra, or when asked whether a piece of content \"sells\" Fulcra well. Verifies every Fulcra claim against delivered artefacts before writing. (Distinct from fulcra-content-review, which covers prose voice/claims discipline.)"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
+license: "MIT"
+user-invocable: true
+metadata: { "openclaw": { "emoji": "🧲" } }
 ---
 
-# fulcra-content-review — make Fulcra integral, not bolted on
+# fulcra-content-integration — make Fulcra integral, not bolted on
 
 The test of good Fulcra content: **if you deleted every Fulcra mention, would
 the piece fail at its own goal?** If it would still work fine, Fulcra is
