@@ -67,9 +67,18 @@ def cmd_init(args) -> int:
               "treat as NOT granted (a pre-existing share to the same uid is "
               "not evidence that ours exists)", file=sys.stderr)
         return RC_UNKNOWN
-    print(f"mesh init: granted {_channel(args)}"
-          + (f" + {args.reports}" if args.reports else "")
-          + f" -> {args.peer} (read-back verified)")
+    # Say exactly what the read-back proves and no more. `share list-outgoing`
+    # rows carry datashare_name / fulcra_data_types / permissions — there is NO
+    # file-prefix field, so the reports path is NOT observable from this surface
+    # and claiming it verified would be a claim beyond the evidence
+    # (codex-coder, r3 on 472a8c6).
+    print(f"mesh init: granted {_channel(args)} -> {args.peer} "
+          f"(data type read-back verified in share {args.name!r})")
+    if args.reports:
+        print(f"mesh init: reports prefix {args.reports!r} was REQUESTED but is "
+              "not observable in `share list-outgoing` — unverified from here; "
+              "confirm from the peer side before relying on ptr docs",
+              file=sys.stderr)
     return RC_OK
 
 
@@ -118,6 +127,20 @@ def cmd_send(args) -> int:
         print("mesh send: DRY RUN — nothing written", file=sys.stderr)
         return RC_UNKNOWN
 
+    # Snapshot the channel BEFORE writing. Matching on slug+to_user alone
+    # verifies a STALE same-slug event from an earlier run — a re-send of the
+    # same slug would "verify" instantly without writing anything
+    # (codex-coder, r3 on 472a8c6). Comparing against the pre-write id set
+    # identifies the NEW record exactly, with no dependence on clock skew
+    # between this process and the platform.
+    before = transport.get_records(_channel(args), args.verify_window)
+    if before.unknown:
+        print(f"mesh send: pre-write snapshot UNKNOWN ({before.detail}) — "
+              "refusing to write, because without it a read-back cannot tell a "
+              "new event from an old one", file=sys.stderr)
+        return RC_UNKNOWN
+    seen_before = {wire.record_id(r) for r in before.rows if wire.record_id(r)}
+
     try:
         rc, out, err = transport.record(_channel(args), payload,
                                         source=args.source)
@@ -138,13 +161,16 @@ def cmd_send(args) -> int:
               "cannot confirm the event landed", file=sys.stderr)
         return RC_UNKNOWN
     for row in back.rows:
+        rid = wire.record_id(row)
+        if not rid or rid in seen_before:
+            continue          # pre-existing: not evidence of THIS write
         got = envelope.parse(wire.note_text(row))
         if got and got.get("slug") == note["slug"] and got.get("to_user") == note["to_user"]:
             print(f"mesh send: {note['kind']} {note['slug']} -> {note['to_user']} "
-                  f"(read-back verified, id {wire.record_id(row)})")
+                  f"(read-back verified, new record {rid})")
             return RC_OK
-    print("mesh send: write returned 0 but the event is NOT in my channel on "
-          "read-back — treat as NOT sent", file=sys.stderr)
+    print("mesh send: write returned 0 but NO NEW record matching this event is "
+          "in my channel on read-back — treat as NOT sent", file=sys.stderr)
     return RC_UNKNOWN
 
 

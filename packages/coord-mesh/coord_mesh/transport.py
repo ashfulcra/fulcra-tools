@@ -217,6 +217,12 @@ def find_share(rows: list, *, peer_uid: str, data_type: str,
                    for p in (r.get("permissions") or []) if isinstance(p, dict)}
         if peer_uid not in allowed:
             continue
+        if r.get("share_all_data"):
+            # A share-all grants everything, so it can satisfy any data-type
+            # test — which makes it useless as evidence that OUR scoped share
+            # exists. The mesh never mints one, so a share-all match means we
+            # matched somebody else's grant (codex-coder, r3 on 472a8c6).
+            continue
         types = [str(t) for t in (r.get("fulcra_data_types") or [])]
         if data_type not in types:
             continue

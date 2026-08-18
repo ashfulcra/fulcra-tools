@@ -86,18 +86,55 @@ def test_send_that_writes_but_cannot_read_back_is_not_success(capsys, monkeypatc
     assert "NOT sent" in capsys.readouterr().err
 
 
-def test_send_succeeds_only_when_the_event_is_read_back(capsys, monkeypatch):
+def _event_row(rid, slug="m"):
     import json as _json
     from coord_mesh import envelope as _env
-    note = _env.build(to_user=UID, kind="response", slug="m")
-    row = {"id": "rec-1", "recorded_at": "t", "note": _json.dumps(note),
-           "sources": ["coord-mesh"]}
+    return {"id": rid, "recorded_at": "t", "sources": ["coord-mesh"],
+            "note": _json.dumps(_env.build(to_user=UID, kind="response", slug=slug))}
+
+
+def test_send_succeeds_only_when_a_NEW_event_is_read_back(capsys, monkeypatch):
+    calls = {"n": 0}
+
+    def reads(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:          # pre-write snapshot: empty
+            return cli.transport.Result(cli.transport.EMPTY)
+        return cli.transport.Result(cli.transport.OK, rows=[_event_row("rec-new")])
+
     monkeypatch.setattr(cli.transport, "record", lambda *a, **k: (0, "", ""))
-    monkeypatch.setattr(cli.transport, "get_records",
-                        lambda *a, **k: cli.transport.Result(cli.transport.OK, rows=[row]))
+    monkeypatch.setattr(cli.transport, "get_records", reads)
     rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
     assert rc == cli.RC_OK
-    assert "read-back verified" in capsys.readouterr().out
+    assert "new record rec-new" in capsys.readouterr().out
+
+
+def test_send_does_not_verify_against_a_STALE_same_slug_event(capsys, monkeypatch):
+    """THE r3 REGRESSION: re-sending a slug that already exists would otherwise
+    'verify' instantly against the old record, even if the write did nothing."""
+    stale = _event_row("rec-old")
+    monkeypatch.setattr(cli.transport, "record", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "get_records",
+                        lambda *a, **k: cli.transport.Result(cli.transport.OK,
+                                                             rows=[stale]))
+    rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
+    assert rc == cli.RC_UNKNOWN
+    assert "NO NEW record" in capsys.readouterr().err
+
+
+def test_send_refuses_to_write_when_the_pre_snapshot_is_unknown(capsys, monkeypatch):
+    """Without a baseline a read-back cannot tell new from old, so writing
+    would produce an unverifiable claim."""
+    monkeypatch.setattr(cli.transport, "get_records",
+                        lambda *a, **k: cli.transport.Result(cli.transport.ERROR,
+                                                             detail="denied"))
+    wrote = {"n": 0}
+    monkeypatch.setattr(cli.transport, "record",
+                        lambda *a, **k: (wrote.__setitem__("n", 1), (0, "", ""))[1])
+    rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
+    assert rc == cli.RC_UNKNOWN
+    assert wrote["n"] == 0, "must not write without a baseline"
+    assert "refusing to write" in capsys.readouterr().err
 
 
 def test_send_write_failure_is_unknown_not_success(capsys, monkeypatch):
@@ -185,3 +222,29 @@ def test_init_readback_rejects_right_name_wrong_data_type(capsys, monkeypatch):
                             cli.transport.OK,
                             rows=[_share("mesh-m2-test", UID, ["StepCount"])]))
     assert cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test"]) == cli.RC_UNKNOWN
+
+
+def test_init_refuses_share_all_even_when_it_lists_our_data_type(capsys, monkeypatch):
+    """r3: a share-all grants everything, so it satisfies any data-type test —
+    which makes it useless as evidence that OUR scoped share exists."""
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "list_outgoing",
+                        lambda *a, **k: cli.transport.Result(
+                            cli.transport.OK,
+                            rows=[_share("mesh-m2-test", UID, [CH], share_all=True)]))
+    assert cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test"]) == cli.RC_UNKNOWN
+
+
+def test_init_does_not_claim_the_reports_prefix_was_verified(capsys, monkeypatch):
+    """r3: `share list-outgoing` has no file-prefix field, so the reports path
+    is unobservable — the success line must not imply otherwise."""
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "list_outgoing",
+                        lambda *a, **k: cli.transport.Result(
+                            cli.transport.OK, rows=[_share("mesh-m2-test", UID, [CH])]))
+    rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test",
+                   "--reports", "reports/"])
+    assert rc == cli.RC_OK
+    cap = capsys.readouterr()
+    assert "reports/" not in cap.out, "success line must not claim the reports path"
+    assert "not observable" in cap.err and "unverified" in cap.err
