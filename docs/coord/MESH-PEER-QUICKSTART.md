@@ -140,7 +140,13 @@ as UNKNOWN rather than quietly skipping them.
   the dedicated channel, send move-notices to every peer ON THE OLD CHANNEL
   naming the new id and the new share, then revoke the old share. Notify
   before revoke, always — a revoked share cannot carry its own forwarding
-  address.
+  address — and leave the old share up for at least one full poll cadence of
+  every peer, because a notice is only delivered when it is READ: a revoke
+  two minutes after the notice strands any peer that did not poll in the
+  window. The self-heal if you get this wrong: the new share's own
+  `list-incoming` row carries the new channel id (step 1), so a peer whose
+  reads start failing can rediscover the mesh — but that is a recovery path,
+  not a plan.
 - **Never modify or revoke a share you did not create.** Reading an incoming
   share is fine; `share leave` on it is YOUR side of ending participation —
   do that only when your user says so.
