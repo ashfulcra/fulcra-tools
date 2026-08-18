@@ -1137,19 +1137,32 @@ def test_conclude_never_overwrites_a_settled_row():
     assert rc == 0 and not t.written, "it overwrote a settled row's evidence"
 
 
-class _ConcT:
-    """Transport faithful enough to exercise conclude's real contract: it has a
-    review doc, a verdicts listing, and a write that can REFUSE."""
+#: A real verdict shard. The verb reads and parses these now, so the fake must
+#: serve bodies rather than filenames — a fake that serves only names is exactly
+#: what let `notes.md` pass for review evidence.
+VERDICT_DOC = ("---\ntype: ReviewVerdict\nreviewer: codex-reviewer\n"
+               "verdict: APPROVED\n---\nlgtm\n")
 
-    def __init__(self, names, doc, write_ok=True, readback=True):
+
+class _ConcT:
+    """Transport faithful enough to exercise conclude's real contract: a review
+    doc, a verdicts listing, per-shard bodies, and a write that can REFUSE."""
+
+    def __init__(self, names, doc, write_ok=True, readback=True, shards=None):
         self.names, self.doc = names, doc
         self.write_ok, self.readback = write_ok, readback
+        # default: every listed .md is a well-formed verdict
+        self.shards = shards if shards is not None else {
+            n: VERDICT_DOC for n in names if n.endswith(".md")}
         self.written = {}
 
     def list_dir(self, p): return [{"name": n} for n in self.names]
     def read(self, p):
         if p.endswith(".concluded"):
             return self.written.get(p) if self.readback else None
+        for n, body in self.shards.items():
+            if p.endswith("/" + n):
+                return body
         return self.doc
     def write(self, p, b):
         if not self.write_ok:
@@ -1221,3 +1234,35 @@ def test_conclude_ACCEPTS_the_row_it_exists_for():
     t = _ConcT(["codex-reviewer.md"], V1_DOC)
     assert _conclude(t) == 0
     assert any(k.endswith(".concluded") for k in t.written)
+
+
+def test_conclude_REFUSES_an_unrelated_markdown_file_as_evidence():
+    """codex-reviewer, 643 r2 P1, and the third round of one shape in my code:
+    r1 checked nothing, r2 checked the NAME, and an unrelated `notes.md` still
+    authorized a terminal marker on a row nobody had reviewed. A filename is not
+    review evidence."""
+    t = _ConcT(["notes.md"], V1_DOC,
+               shards={"notes.md": "---\ntitle: scratch\n---\njust notes\n"})
+    assert _conclude(t) == 2 and not t.written, (
+        "an unrelated markdown file passed for a verdict")
+
+
+def test_conclude_REFUSES_a_MALFORMED_verdict_shard():
+    """Right name, no parseable verdict. Fails closed: this is the write that
+    ends a row's life."""
+    t = _ConcT(["codex-reviewer.md"], V1_DOC,
+               shards={"codex-reviewer.md": "not frontmatter at all"})
+    assert _conclude(t) == 2 and not t.written
+
+
+def test_conclude_REFUSES_when_a_candidate_shard_cannot_be_READ():
+    """UNKNOWN is not evidence — and it is certainly not evidence of review."""
+    t = _ConcT(["codex-reviewer.md"], V1_DOC,
+               shards={"codex-reviewer.md": None})
+    assert _conclude(t) == 3 and not t.written
+
+
+def test_conclude_still_ACCEPTS_a_real_verdict_shard():
+    """The guard must not become a fix that refuses everything."""
+    t = _ConcT(["codex-reviewer.md"], V1_DOC)
+    assert _conclude(t) == 0 and any(k.endswith(".concluded") for k in t.written)

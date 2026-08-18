@@ -1799,16 +1799,44 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 2
 
-    # A `<sha>--<reviewer>.md` shard is scoped to a head THIS ROW DOES NOT HAVE,
-    # so it cannot be the verdict that concluded it. Counting it would let an
-    # old-head shard stand in for work nobody did at the active head.
-    verdicts = sorted(n for n in names
-                      if n.endswith(".md") and "--" not in n)
+    # A FILENAME IS NOT REVIEW EVIDENCE (codex-reviewer, 643 r2).
+    #
+    # Round 1 checked nothing. Round 2 checked the NAME — rejecting head-scoped
+    # shards but accepting every other `*.md`, so an unrelated `notes.md`
+    # authorized a terminal marker on a row nobody had reviewed; codex
+    # reproduced exactly that. Each candidate is now READ and PARSED: it must
+    # carry a recognized verdict and name a reviewer, under the legacy
+    # unbound-head naming rule.
+    #
+    # Fails CLOSED. A candidate we cannot read or parse is not evidence of a
+    # review, and this is the write that ends a row's life.
+    verdicts: list[str] = []
+    unreadable: list[str] = []
+    for name in sorted(n for n in names if n.endswith(".md")):
+        parsed = review.parse_verdict_filename(name)
+        if parsed is None:
+            continue                      # head-scoped, or not a verdict name
+        reviewer = parsed[0]
+        raw = transport.read(prefix + name)
+        if raw is None:
+            unreadable.append(name)
+            continue
+        vfm = okf.parse_frontmatter(raw) or {}
+        if review.normalize_verdict(vfm.get("verdict")) is None:
+            continue                      # not a verdict document
+        if not (vfm.get("reviewer") or reviewer):
+            continue                      # no reviewer identity to credit
+        verdicts.append(name)
+
+    if unreadable:
+        print(f"review conclude: {len(unreadable)} candidate shard(s) in "
+              f"{args.slug} could not be READ ({', '.join(unreadable)}) — "
+              f"UNKNOWN is not evidence; refusing", file=sys.stderr)
+        return 3
     if not verdicts:
-        head_scoped = sorted(n for n in names
-                             if n.endswith(".md") and "--" in n)
-        detail = (f" ({len(head_scoped)} head-scoped shard(s) present, none "
-                  f"applicable to an unbound head)" if head_scoped else "")
+        others = sorted(n for n in names if n.endswith(".md"))
+        detail = (f" ({len(others)} .md file(s) present, none a parseable "
+                  f"verdict for an unbound head)" if others else "")
         print(f"review conclude: {args.slug} has NO applicable verdict on file"
               f"{detail} — that is abandonment, not conclusion; refusing",
               file=sys.stderr)
