@@ -92,6 +92,12 @@ under `skills/`, each package with its own README, build, and tests.
   rejected with exit 2 rather than falling through to an upload, because a
   consumed build number is not recoverable. `CURRENT_PROJECT_VERSION` must
   increase on every upload.
+- **The Safari destination step is a requirement.** The containing app must
+  show which "Attention" definition this device writes into and let the user
+  change it (`DestinationView.swift`). `EnsureAttention`'s oldest-first
+  auto-adopt is a DEFAULT, not intent — with two definitions it silently takes
+  the older one and the data lands in the wrong place while validating fine. Do
+  not remove the picker on the grounds that auto-resolution "already works".
 - **Running the Safari Swift tests** — `xcodebuild -scheme FulcraAttentionTests
   -destination 'platform=macOS' test`, but **build both JS bundles first**
   (`npm ci && npm run build && npx vite build --config vite.safari.config.ts`
