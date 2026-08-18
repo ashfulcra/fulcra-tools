@@ -24,17 +24,23 @@ token preserved byte-for-byte.
 ## The Class A envelope
 
 The FIRST and ONLY JSON value on stdout: `{"contract": 2, "health":
-DATA|CLEAR|DEGRADED|UNKNOWN, "source", "as_of"?, "degraded": [marker types],
-"basis": [failure classes], "rows": [...]}`. `health` is transport/fold
-health ONLY (never a domain state; rows keep their own fields). Ordered
-selection: **UNKNOWN** — the authority itself untrusted (`source-unreadable`
-/ `source-invalid` / `fallback-failed`): rows MUST NOT be acted on;
-**DEGRADED** — readable authority, partial coverage (`budget-cut`,
-`subset-unreadable`, `role-resolution-partial`): rows are a usable FLOOR,
-absence-inference forbidden; **DATA** / **CLEAR** — complete scan; CLEAR is
-the only health licensing "there is nothing for me". rc is a pure function
-of health (UNKNOWN|DEGRADED → 3, DATA|CLEAR → 0), sealed with the envelope
-BEFORE row serialization, and applies in text mode too.
+DATA|CLEAR|DEGRADED|UNKNOWN, "source": "projection"|"raw-scan", "as_of"?,
+"scanned"?/"total"?, "degraded": [marker types], "basis": [failure classes],
+"rows": [...]}`. `source` is that closed enum verbatim (a fold that
+consulted no projection ran raw). `scanned`/`total` appear where bounded
+work ran, aggregated as the SUMS across every marker row carrying both
+numbers. `health` is transport/fold health ONLY (never a domain state; rows
+keep their own fields). Ordered selection: **UNKNOWN** — the authority
+itself untrusted (`source-unreadable` / `source-invalid` /
+`fallback-failed`): rows MUST NOT be acted on — and a degradation marker
+whose type is not yet classified in the basis map fails CLOSED into this
+state, never into a coverage class; **DEGRADED** — readable authority,
+partial coverage (`budget-cut`, `subset-unreadable`,
+`role-resolution-partial`): rows are a usable FLOOR, absence-inference
+forbidden; **DATA** / **CLEAR** — complete scan; CLEAR is the only health
+licensing "there is nothing for me". rc is a pure function of health
+(UNKNOWN|DEGRADED → 3, DATA|CLEAR → 0), sealed with the envelope BEFORE
+row serialization, and applies in text mode too.
 
 ## Consumer guidance
 

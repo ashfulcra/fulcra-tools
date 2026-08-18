@@ -3186,7 +3186,7 @@ _CLASS_A_BASIS: dict[str, str] = {
     "review-head-degraded": "subset-unreadable",
     "review-orphan-degraded": "subset-unreadable",
 }
-_UNKNOWN_BASIS = {"source-unreadable"}
+_UNKNOWN_BASIS = {"source-unreadable", "source-invalid", "fallback-failed"}
 
 
 def class_a_envelope(
@@ -3216,7 +3216,12 @@ def class_a_envelope(
                 degraded_types.append(t)
     basis: list[str] = []
     for t in degraded_types:
-        b = _CLASS_A_BASIS.get(t, "budget-cut")
+        # FAIL CLOSED on an unclassified marker (pr-641 r1, finding 1): a
+        # degraded type this map does not know may be an unreadable or invalid
+        # authority, so defaulting it to a coverage class would license
+        # consumers to act on rows as a trustworthy floor. Until a human
+        # classifies the new marker here, it is `source-invalid` -> UNKNOWN.
+        b = _CLASS_A_BASIS.get(t, "source-invalid")
         if b not in basis:
             basis.append(b)
     if any(b in _UNKNOWN_BASIS for b in basis):
@@ -3230,11 +3235,33 @@ def class_a_envelope(
             for r in rows)
         health = "DATA" if actionable else "CLEAR"
     envelope: dict[str, Any] = {"contract": 2, "health": health}
+    # `source` implements the normative enum VERBATIM (pr-641 r1, finding 2):
+    # `projection` | `raw-scan`, exactly as the source row records it — never
+    # `_fold_source`'s compact stderr vocabulary. A fold that emitted no source
+    # row consulted no projection at all (the pre-projection raw path), which
+    # IS a raw scan, so the enum stays closed.
     src_row = next((r for r in rows if isinstance(r, dict)
                     and str(r.get("type") or "") == source_type), None)
-    envelope["source"] = _fold_source(rows, source_type)
     if src_row is not None and src_row.get("source") == "projection":
+        envelope["source"] = "projection"
         envelope["as_of"] = src_row.get("as_of")
+    else:
+        envelope["source"] = "raw-scan"
+    # Coverage (pr-641 r1, finding 3): where bounded work ran, the marker rows
+    # carry per-fold scanned/total — the envelope aggregates them (sums across
+    # every marker carrying BOTH numbers) so a strict consumer reads coverage
+    # without scanning rows. Omitted entirely when no bounded fold reported.
+    scanned = total = 0
+    bounded = False
+    for r in rows:
+        if (_is_degraded_row(r) and isinstance(r.get("scanned"), int)
+                and isinstance(r.get("total"), int)):
+            scanned += r["scanned"]
+            total += r["total"]
+            bounded = True
+    if bounded:
+        envelope["scanned"] = scanned
+        envelope["total"] = total
     envelope["degraded"] = degraded_types
     envelope["basis"] = basis
     envelope["rows"] = rows

@@ -158,6 +158,8 @@ def test_oc2_needs_me_envelope_leads_stdout(capsys):
     assert isinstance(value, dict), "envelope object must be the first value"
     assert value["contract"] == 2
     assert value["health"] in ("DATA", "CLEAR", "DEGRADED", "UNKNOWN")
+    assert value["source"] in ("projection", "raw-scan"), (
+        "the normative source enum, verbatim (pr-641 r1 finding 2)")
     assert isinstance(value["rows"], list)
     assert rc == (3 if value["health"] in ("DEGRADED", "UNKNOWN") else 0), (
         "rc must be a pure function of envelope health (OC3/E4)")
@@ -186,6 +188,43 @@ def test_oc2_health_rules_and_rc(capsys):
     v2 = strict_parse(capsys.readouterr().out)
     assert v2["health"] in ("DEGRADED", "UNKNOWN") and rc2 == 3
     assert v2["basis"], "a non-clean health must name its failure classes"
+
+
+def test_oc2_envelope_source_enum_and_coverage():
+    # pr-641 r1 findings 2+3: `source` is the NORMATIVE enum verbatim
+    # (projection | raw-scan — never `raw`/`absent`), and coverage aggregates
+    # marker scanned/total into the envelope where bounded work ran.
+    env, rc = cli.class_a_envelope(
+        [{"type": "review-fold-degraded", "scanned": 2, "total": 7},
+         {"type": "forge-degraded", "scanned": 0, "total": 3},
+         {"type": "needs-me-source", "source": "raw-scan", "reason": "stale"}],
+        source_type="needs-me-source")
+    assert env["source"] == "raw-scan"
+    assert (env["scanned"], env["total"]) == (2, 10)
+    assert (env["health"], rc) == ("DEGRADED", 3)
+
+    env2, _rc2 = cli.class_a_envelope(
+        [{"type": "needs-me-source", "source": "projection",
+          "as_of": "2026-08-18T00:00:00Z"}],
+        source_type="needs-me-source")
+    assert env2["source"] == "projection"
+    assert env2["as_of"] == "2026-08-18T00:00:00Z"
+    assert "scanned" not in env2 and "total" not in env2
+
+    env3, _rc3 = cli.class_a_envelope([], source_type="needs-me-source")
+    assert env3["source"] == "raw-scan", (
+        "no source row = the pre-projection raw path; the enum stays closed")
+
+
+def test_oc2_unclassified_degraded_marker_fails_closed():
+    # pr-641 r1 finding 1: a degraded type the basis map does not know may be
+    # an unreadable/invalid authority — it must become UNKNOWN (rows not
+    # actable), never default into a coverage class that licenses a floor.
+    env, rc = cli.class_a_envelope(
+        [{"type": "future-source-degraded", "reason": "authority unreadable"}],
+        source_type="needs-me-source")
+    assert env["health"] == "UNKNOWN" and rc == 3
+    assert "source-invalid" in env["basis"]
 
 
 # --- OC5: act-on-it fields, review rows (ENFORCED — ladder flip 1; C01) ----
