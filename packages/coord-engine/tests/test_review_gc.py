@@ -1108,20 +1108,15 @@ def test_a_CONCLUDED_row_leaves_the_projection_scan(monkeypatch):
 
 def test_conclude_REFUSES_a_row_nobody_reviewed():
     """Concluding an unreviewed row is abandonment wearing a completion label.
-    The two acts need different words, and this verb owns only one of them."""
-    import argparse
-    from coord_engine import cli
+    The two acts need different words, and this verb owns only one of them.
 
-    class T:
-        def __init__(self, names): self.names = names; self.written = {}
-        def list_dir(self, p): return [{"name": n} for n in self.names]
-        def write(self, p, b): self.written[p] = b; return True
-
-    t = T([])                                   # no verdict on file
-    rc = cli.cmd_review_conclude(
-        argparse.Namespace(team="fulcra", slug="s", reason=None, sender="t"), t)
-
-    assert rc == 2 and not t.written, "it concluded a row nobody had reviewed"
+    The fake here started out with only `list_dir` and `write`. When the verb
+    grew a doc read to check eligibility, that stub stopped representing the
+    transport — so it now uses the faithful one, for the same reason the
+    contract widened."""
+    t = _ConcT([], V1_DOC)                      # no verdict on file
+    assert _conclude(t) == 2 and not t.written, (
+        "it concluded a row nobody had reviewed")
 
 
 def test_conclude_never_overwrites_a_settled_row():
@@ -1140,3 +1135,89 @@ def test_conclude_never_overwrites_a_settled_row():
         argparse.Namespace(team="fulcra", slug="s", reason=None, sender="t"), t)
 
     assert rc == 0 and not t.written, "it overwrote a settled row's evidence"
+
+
+class _ConcT:
+    """Transport faithful enough to exercise conclude's real contract: it has a
+    review doc, a verdicts listing, and a write that can REFUSE."""
+
+    def __init__(self, names, doc, write_ok=True, readback=True):
+        self.names, self.doc = names, doc
+        self.write_ok, self.readback = write_ok, readback
+        self.written = {}
+
+    def list_dir(self, p): return [{"name": n} for n in self.names]
+    def read(self, p):
+        if p.endswith(".concluded"):
+            return self.written.get(p) if self.readback else None
+        return self.doc
+    def write(self, p, b):
+        if not self.write_ok:
+            return False
+        self.written[p] = b
+        return True
+
+
+def _conclude(t):
+    import argparse
+    from coord_engine import cli
+    return cli.cmd_review_conclude(
+        argparse.Namespace(team="fulcra", slug="s", reason=None, sender="t"), t)
+
+
+V1_DOC = "---\ntype: Review\nof: some prose with no head\n---\n"
+V2_DOC = ("---\ntype: Review\nof: acme/widgets PR 9\nhead: " + "a" * 40 +
+          "\n---\n")
+
+
+def test_conclude_REFUSES_a_row_whose_head_is_BOUND():
+    """codex-reviewer, 643 r1 P1. The marker means 'head unbound' and the first
+    cut never read the review doc — so it asserted the one condition that
+    defines it, and an ACTIVE v2 review could be hidden behind a terminal
+    marker."""
+    t = _ConcT(["codex-reviewer.md"], V2_DOC)
+    assert _conclude(t) == 2 and not t.written, "it concluded a bound-head row"
+
+
+def test_conclude_REFUSES_when_only_an_OLD_HEAD_shard_exists():
+    """The reproduction codex ran: `old-head--codex-reviewer.md` is scoped to a
+    head this row does not have, so it cannot be the verdict that concluded it.
+    Counting it lets a stale shard stand in for work nobody did."""
+    t = _ConcT([("b" * 40) + "--codex-reviewer.md"], V1_DOC)
+    assert _conclude(t) == 2 and not t.written, "an old-head shard was counted"
+
+
+def test_conclude_REFUSES_when_the_review_doc_cannot_be_READ():
+    """Eligibility unverifiable is not eligibility met."""
+    t = _ConcT(["codex-reviewer.md"], None)
+    assert _conclude(t) == 3 and not t.written
+
+
+def test_conclude_FAILS_LOUD_when_the_transport_refuses_the_write(capsys):
+    """codex-reviewer, 643 r1 P1. A durable state transition is not a print
+    statement: the first cut ignored the return and reported CONCLUDED with rc 0
+    while storing nothing.
+
+    Asserting only the rc did NOT prove this guard — a refused write also leaves
+    nothing to read back, so the read-back check produced the same rc and the
+    mutant survived. The two guards are defence in depth; this one is pinned by
+    WHICH branch reports, which is the only thing that distinguishes them."""
+    t = _ConcT(["codex-reviewer.md"], V1_DOC, write_ok=False)
+
+    assert _conclude(t) == 3, "a refused write reported success"
+    assert "REFUSED the marker write" in capsys.readouterr().err, (
+        "the refusal was reported as a read-back failure, so the write return "
+        "is not actually being checked")
+
+
+def test_conclude_FAILS_LOUD_when_the_marker_cannot_be_READ_BACK():
+    """Written-and-unreadable is not recorded."""
+    t = _ConcT(["codex-reviewer.md"], V1_DOC, readback=False)
+    assert _conclude(t) == 3, "an unverifiable write reported success"
+
+
+def test_conclude_ACCEPTS_the_row_it_exists_for():
+    """Unbound head, an applicable verdict on file, a working transport."""
+    t = _ConcT(["codex-reviewer.md"], V1_DOC)
+    assert _conclude(t) == 0
+    assert any(k.endswith(".concluded") for k in t.written)

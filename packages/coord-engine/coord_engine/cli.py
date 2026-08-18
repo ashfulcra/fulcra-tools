@@ -1779,10 +1779,39 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
     if review_gc.is_terminal(names) or SETTLED_MARKER in names:
         print(f"review conclude: {args.slug} is already terminal — left alone")
         return 0
-    verdicts = [n for n in names if n.endswith(".md")]
+
+    # ELIGIBILITY IS CHECKED, NOT ASSUMED (codex-reviewer, 643 r1).
+    # The marker's entire meaning is "head unbound". The first cut never read the
+    # review doc, so it asserted the one condition that defines it — and an
+    # ACTIVE v2 review could be hidden behind a terminal marker.
+    doc = transport.read(_review_doc_path(args.team, args.slug))
+    if doc is None:
+        print(f"review conclude: cannot read the review doc for {args.slug} — "
+              f"eligibility unverifiable, refusing", file=sys.stderr)
+        return 3
+    fm = okf.parse_frontmatter(doc) or {}
+    head = (review.normalize_head(fm.get("head"))
+            or review_gc.head_from_prose(fm.get("of")))
+    if head:
+        print(f"review conclude: {args.slug} has a BOUND head ({head[:12]}) — "
+              f"this verb is only for rows no closure can bind evidence to; "
+              f"use `review close` with the merge sha, or leave it to gc",
+              file=sys.stderr)
+        return 2
+
+    # A `<sha>--<reviewer>.md` shard is scoped to a head THIS ROW DOES NOT HAVE,
+    # so it cannot be the verdict that concluded it. Counting it would let an
+    # old-head shard stand in for work nobody did at the active head.
+    verdicts = sorted(n for n in names
+                      if n.endswith(".md") and "--" not in n)
     if not verdicts:
-        print(f"review conclude: {args.slug} has NO verdict on file — that is "
-              f"abandonment, not conclusion; refusing", file=sys.stderr)
+        head_scoped = sorted(n for n in names
+                             if n.endswith(".md") and "--" in n)
+        detail = (f" ({len(head_scoped)} head-scoped shard(s) present, none "
+                  f"applicable to an unbound head)" if head_scoped else "")
+        print(f"review conclude: {args.slug} has NO applicable verdict on file"
+              f"{detail} — that is abandonment, not conclusion; refusing",
+              file=sys.stderr)
         return 2
     body = okf.render_frontmatter({
         "schema": "review-concluded/v1",
@@ -1793,7 +1822,20 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
                                   "evidence available to bind a closure to"),
         "ts": _iso(_now()),
     })
-    transport.write(prefix + review_gc.CONCLUDED_MARKER, body)
+    # A DURABLE STATE TRANSITION IS NOT A PRINT STATEMENT (codex-reviewer, 643
+    # r1). The first cut ignored the write's return and never read it back, so a
+    # transport returning False printed CONCLUDED with rc 0 and stored nothing —
+    # a terminal state that exists only in the log.
+    path = prefix + review_gc.CONCLUDED_MARKER
+    if transport.write(path, body) is False:
+        print(f"review conclude: the transport REFUSED the marker write for "
+              f"{args.slug} — nothing was recorded", file=sys.stderr)
+        return 3
+    if transport.read(path) is None:
+        print(f"review conclude: wrote the marker for {args.slug} but could not "
+              f"read it back — treat this row as NOT concluded and retry",
+              file=sys.stderr)
+        return 3
     print(f"review conclude: {args.slug} CONCLUDED on {len(verdicts)} verdict(s)")
     return 0
 
