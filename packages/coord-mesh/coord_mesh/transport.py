@@ -161,3 +161,66 @@ def list_outgoing(*, timeout: float = DEFAULT_TIMEOUT) -> Result:
     if bad:
         return Result(ERROR, rows=rows, detail=f"{bad} unparseable line(s)")
     return Result(OK if rows else EMPTY, rows=rows)
+
+
+def record(data_type: str, note_json: str, *, source: str,
+           api_version: str = "v1alpha1", timeout: float = DEFAULT_TIMEOUT):
+    """Write ONE record to MY OWN channel. Never cross-account.
+
+    The mesh never writes into a peer's space (plan v1.1 §b: no
+    ingest-into-someone-else's primitive), so this takes no user id — there is
+    no argument that could make it write elsewhere.
+
+    The payload is piped on stdin because `fulcra-api record` takes the note
+    that way; a flag-only invocation fails in a non-TTY.
+    """
+    argv = [*_command(), "record", data_type, "--api-version", api_version,
+            f"--source={source}"]
+    payload = json.dumps({"note": note_json})
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+    except OSError as exc:
+        raise TransportError(f"exec failed: record: {exc}") from exc
+    try:
+        out, err = proc.communicate(payload, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        raise TransportError(f"timeout after {timeout}s: record") from exc
+    return proc.returncode, out, err
+
+
+def find_share(rows: list, *, peer_uid: str, data_type: str,
+               name: Optional[str] = None) -> Optional[dict]:
+    """Find the share we just minted — SPECIFICALLY, not "a share to this uid".
+
+    codex-coder, r2 on 3c1c78d: a uid-only match verifies an UNRELATED existing
+    share. Not hypothetical here — the first mesh peer already holds a 2024
+    share-all from the operator, so a uid-only read-back passes before the mesh
+    has created anything at all.
+
+    A match therefore requires all three: this peer in the permissions, this
+    data type actually granted, and (when given) this share name. A
+    ``share_all_data`` grant is deliberately NOT accepted as evidence: it
+    grants everything, but the mesh never mints one, so matching it means we
+    matched somebody else's share.
+    """
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        allowed = {str(p.get("allowed_fulcra_userid"))
+                   for p in (r.get("permissions") or []) if isinstance(p, dict)}
+        if peer_uid not in allowed:
+            continue
+        types = [str(t) for t in (r.get("fulcra_data_types") or [])]
+        if data_type not in types:
+            continue
+        if name and str(r.get("datashare_name") or "") != name:
+            continue
+        return r
+    return None

@@ -55,11 +55,17 @@ def cmd_init(args) -> int:
               f"verify with `fulcra-api share list-outgoing` before relying on it",
               file=sys.stderr)
         return RC_UNKNOWN
-    granted = [r for r in back.rows
-               if args.peer in str(r.get("permissions") or r)]
+    # Match the share we actually minted — peer AND data type AND name.
+    # A uid-only match verifies an UNRELATED existing share: the first mesh peer
+    # already holds a 2024 share-all from the operator, so uid-only would pass
+    # before the mesh created anything (codex-coder, r2 on 3c1c78d).
+    granted = transport.find_share(back.rows, peer_uid=args.peer,
+                                   data_type=_channel(args), name=args.name)
     if not granted:
-        print("mesh init: create returned 0 but the share is NOT in "
-              "list-outgoing — treat as NOT granted", file=sys.stderr)
+        print(f"mesh init: create returned 0 but no share named {args.name!r} "
+              f"granting {_channel(args)} to {args.peer} is in list-outgoing — "
+              "treat as NOT granted (a pre-existing share to the same uid is "
+              "not evidence that ours exists)", file=sys.stderr)
         return RC_UNKNOWN
     print(f"mesh init: granted {_channel(args)}"
           + (f" + {args.reports}" if args.reports else "")
@@ -105,11 +111,41 @@ def cmd_send(args) -> int:
     except (safety.SafetyViolation, ValueError) as exc:
         print(f"mesh send REFUSED: {exc}", file=sys.stderr)
         return RC_REFUSED
-    print(envelope.encode(note))
-    print("mesh send: envelope built (writing is the next increment — this verb "
-          "currently prints the exact payload for a hand-run `fulcra-api record`)",
-          file=sys.stderr)
-    return RC_OK
+    payload = envelope.encode(note)
+    if args.dry_run:
+        # Explicit, opt-in, and NOT reported as sent.
+        print(payload)
+        print("mesh send: DRY RUN — nothing written", file=sys.stderr)
+        return RC_UNKNOWN
+
+    try:
+        rc, out, err = transport.record(_channel(args), payload,
+                                        source=args.source)
+    except transport.TransportError as exc:
+        print(f"mesh send UNKNOWN: {exc}", file=sys.stderr)
+        return RC_UNKNOWN
+    if rc != 0:
+        print(f"mesh send failed: {(err or out).strip()[:400]}", file=sys.stderr)
+        return RC_UNKNOWN
+
+    # Read-back verify. A write that returned 0 is a CLAIM; the record appearing
+    # in my own channel is the evidence. "A green command is not a delivered
+    # message" — the principle this verb was violating by returning rc0 for a
+    # write it never attempted (codex-coder, r2 on 3c1c78d).
+    back = transport.get_records(_channel(args), args.verify_window)
+    if back.unknown:
+        print(f"mesh send: wrote, but read-back UNKNOWN ({back.detail}) — "
+              "cannot confirm the event landed", file=sys.stderr)
+        return RC_UNKNOWN
+    for row in back.rows:
+        got = envelope.parse(wire.note_text(row))
+        if got and got.get("slug") == note["slug"] and got.get("to_user") == note["to_user"]:
+            print(f"mesh send: {note['kind']} {note['slug']} -> {note['to_user']} "
+                  f"(read-back verified, id {wire.record_id(row)})")
+            return RC_OK
+    print("mesh send: write returned 0 but the event is NOT in my channel on "
+          "read-back — treat as NOT sent", file=sys.stderr)
+    return RC_UNKNOWN
 
 
 def cmd_queue(args) -> int:
@@ -225,6 +261,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--slug", required=True)
     s.add_argument("--priority", default="P2")
     s.add_argument("--ptr", default=None)
+    s.add_argument("--source", default="coord-mesh",
+                   help="writer identity stamped on the record")
+    s.add_argument("--verify-window", default="1 hour",
+                   help="window used for the read-back check")
+    s.add_argument("--dry-run", action="store_true",
+                   help="print the payload and write NOTHING (exits UNKNOWN, "
+                        "never success — a printed envelope is not a sent one)")
     s.set_defaults(fn=cmd_send)
 
     q = sub.add_parser("queue", help="poll peer outboxes into one inbox")
@@ -246,7 +289,7 @@ def main(argv=None) -> int:
     if not getattr(args, "fn", None):
         build_parser().print_help()
         return RC_REFUSED
-    if getattr(args, "channel", None) is None and args.cmd in ("init", "queue", "doctor"):
+    if getattr(args, "channel", None) is None and args.cmd in ("init", "send", "queue", "doctor"):
         print("--channel is required (MomentAnnotation/<uuid>)", file=sys.stderr)
         return RC_REFUSED
     return args.fn(args)

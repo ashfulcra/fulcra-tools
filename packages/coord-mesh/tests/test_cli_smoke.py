@@ -55,17 +55,56 @@ def test_every_planned_verb_is_registered(verb):
     assert verb in help_text
 
 
-def test_send_builds_an_envelope_without_touching_the_network(capsys):
-    rc = cli.main(["send", "--to-user", UID, "--slug", "mesh-m2", "--kind", "response"])
-    assert rc == cli.RC_OK
-    out = capsys.readouterr().out
-    assert '"to_user":"' + UID + '"' in out.replace(" ", "")
+def test_send_dry_run_prints_but_never_reports_success(capsys):
+    """A printed envelope is NOT a sent one.
+
+    r2 on 3c1c78d: `mesh send` returned rc0 without writing, which reads as
+    delivered. Dry run is now explicit, opt-in, and exits UNKNOWN.
+    """
+    rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m",
+                   "--dry-run"])
+    assert rc == cli.RC_UNKNOWN
+    cap = capsys.readouterr()
+    assert '"to_user":"' + UID + '"' in cap.out.replace(" ", "")
+    assert "DRY RUN" in cap.err
 
 
 def test_send_refuses_a_named_peer_rather_than_a_uid(capsys):
     """The rail reaches the CLI surface, not just the library."""
-    assert cli.main(["send", "--to-user", "michael", "--slug", "s"]) == cli.RC_REFUSED
+    rc = cli.main(["--channel", CH, "send", "--to-user", "michael", "--slug", "s"])
+    assert rc == cli.RC_REFUSED
     assert "REFUSED" in capsys.readouterr().err
+
+
+def test_send_that_writes_but_cannot_read_back_is_not_success(capsys, monkeypatch):
+    """THE r2 REGRESSION: a write returning 0 is a claim, not evidence."""
+    monkeypatch.setattr(cli.transport, "record", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "get_records",
+                        lambda *a, **k: cli.transport.Result(cli.transport.EMPTY))
+    rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
+    assert rc == cli.RC_UNKNOWN
+    assert "NOT sent" in capsys.readouterr().err
+
+
+def test_send_succeeds_only_when_the_event_is_read_back(capsys, monkeypatch):
+    import json as _json
+    from coord_mesh import envelope as _env
+    note = _env.build(to_user=UID, kind="response", slug="m")
+    row = {"id": "rec-1", "recorded_at": "t", "note": _json.dumps(note),
+           "sources": ["coord-mesh"]}
+    monkeypatch.setattr(cli.transport, "record", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "get_records",
+                        lambda *a, **k: cli.transport.Result(cli.transport.OK, rows=[row]))
+    rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
+    assert rc == cli.RC_OK
+    assert "read-back verified" in capsys.readouterr().out
+
+
+def test_send_write_failure_is_unknown_not_success(capsys, monkeypatch):
+    monkeypatch.setattr(cli.transport, "record", lambda *a, **k: (1, "", "denied"))
+    rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
+    assert rc == cli.RC_UNKNOWN
+    assert "failed" in capsys.readouterr().err
 
 
 def test_verbs_needing_a_channel_refuse_without_one(capsys):
@@ -103,3 +142,46 @@ def test_doctor_reports_unknown_when_a_check_is_unreadable(capsys, monkeypatch):
                         lambda *a, **k: cli.transport.Result(cli.transport.EMPTY))
     assert cli.main(["--channel", CH, "doctor"]) == cli.RC_UNKNOWN
     assert "UNREADABLE" in capsys.readouterr().err
+
+
+# --- mesh init read-back must identify OUR share (r2 on 3c1c78d) -------------
+
+def _share(name, uid, types, share_all=False):
+    return {"datashare_name": name, "share_all_data": share_all,
+            "fulcra_data_types": list(types),
+            "permissions": [{"allowed_fulcra_userid": uid}]}
+
+
+def test_init_readback_rejects_a_preexisting_share_to_the_same_uid(capsys, monkeypatch):
+    """THE r2 REGRESSION, and it is not hypothetical: the first mesh peer
+    already holds a 2024 share-all from the operator, so a uid-only read-back
+    passes before the mesh has created anything."""
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "list_outgoing",
+                        lambda *a, **k: cli.transport.Result(
+                            cli.transport.OK, rows=[_share("MJJT share", UID, [], True)]))
+    rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test"])
+    assert rc == cli.RC_UNKNOWN
+    assert "not evidence that ours exists" in capsys.readouterr().err
+
+
+def test_init_readback_accepts_the_share_we_actually_minted(capsys, monkeypatch):
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "list_outgoing",
+                        lambda *a, **k: cli.transport.Result(
+                            cli.transport.OK,
+                            rows=[_share("MJJT share", UID, [], True),
+                                  _share("mesh-m2-test", UID, [CH])]))
+    rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test"])
+    assert rc == cli.RC_OK
+    assert "read-back verified" in capsys.readouterr().out
+
+
+def test_init_readback_rejects_right_name_wrong_data_type(capsys, monkeypatch):
+    """Name alone is not identity either — the grant must actually carry our channel."""
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "list_outgoing",
+                        lambda *a, **k: cli.transport.Result(
+                            cli.transport.OK,
+                            rows=[_share("mesh-m2-test", UID, ["StepCount"])]))
+    assert cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test"]) == cli.RC_UNKNOWN
