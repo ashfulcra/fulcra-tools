@@ -70,18 +70,54 @@ def run(args: list, *, timeout: float = DEFAULT_TIMEOUT):
     return proc.returncode, out, err
 
 
+#: A file grant is not a flag on `share create` — it is a DATA TYPE whose id is
+#: namespaced `file:`. Measured on a real incoming row 2026-08-18 (captured at
+#: tests/fixtures/real_share_row.json): a peer's outbox share carries
+#: ``fulcra_data_types: ["MomentAnnotation/<uuid>", "file:/reports/"]``.
+FILE_TYPE_PREFIX = "file:"
+
+
+def file_data_type(prefix: str) -> str:
+    """Normalize a caller's reports path into the platform's data-type id.
+
+    The live value is ``file:/reports/`` — leading slash, trailing slash — but
+    callers write it the way a path is usually written (``reports/``,
+    ``/reports``, ``reports``). Normalizing HERE rather than at each call site
+    means the argv can be asserted against the captured real value in one place.
+
+    An already-namespaced value is passed through, so a caller who read the id
+    off a live share row and handed it back verbatim gets what they asked for.
+    """
+    raw = (prefix or "").strip()
+    if not raw:
+        raise ValueError("file_data_type: empty prefix")
+    if raw.startswith(FILE_TYPE_PREFIX):
+        return raw
+    return FILE_TYPE_PREFIX + "/" + raw.strip("/") + "/"
+
+
 def share_create(*, name: str, data_type: str, user_id: str,
                  file_prefix: Optional[str] = None,
                  timeout: float = DEFAULT_TIMEOUT):
     """Mint ONE scoped outbound share at a named uid.
 
     Both rails run on the argv actually about to execute, not on intent.
+
+    THE LIVE DEFECT (coord-boss's two-account run, 2026-08-18): this function
+    used to append ``--file <prefix>``, an option `fulcra-api share create` has
+    never had, so leg 1 of the smoke died in argparse before reaching the
+    platform. Eighty-five unit tests stayed green because the transport fake
+    accepted the flag its author wished for — the same defect class the
+    real-row contract test kills for `get-records`, which is why
+    `tests/test_share_create_contract.py` now pins this argv against a captured
+    `share create --help` and a captured real share row.
     """
     uid = safety.require_named_uid(user_id)
-    args = ["share", "create", "--name", name, "--data-type", data_type,
-            "--user-id", uid]
+    args = ["share", "create", "--name", name, "--data-type", data_type]
     if file_prefix:
-        args += ["--file", file_prefix]
+        # `--data-type` is repeatable; a file grant is one more value on it.
+        args += ["--data-type", file_data_type(file_prefix)]
+    args += ["--user-id", uid]
     safety.refuse_destructive("create")
     safety.refuse_share_all(args)
     return run(args, timeout=timeout)
@@ -196,7 +232,8 @@ def record(data_type: str, note_json: str, *, source: str,
 
 
 def find_share(rows: list, *, peer_uid: str, data_type: str,
-               name: Optional[str] = None) -> Optional[dict]:
+               name: Optional[str] = None,
+               file_prefix: Optional[str] = None) -> Optional[dict]:
     """Find the share we just minted — SPECIFICALLY, not "a share to this uid".
 
     codex-coder, r2 on 3c1c78d: a uid-only match verifies an UNRELATED existing
@@ -209,6 +246,11 @@ def find_share(rows: list, *, peer_uid: str, data_type: str,
     ``share_all_data`` grant is deliberately NOT accepted as evidence: it
     grants everything, but the mesh never mints one, so matching it means we
     matched somebody else's share.
+
+    ``file_prefix``, when given, must ALSO be present as its `file:` data type.
+    r3 dropped this check on the belief that a file grant is not observable in
+    a share row; the live run disproved that — the prefix is a data-type id in
+    the same ``fulcra_data_types`` list, so it is observable and is checked.
     """
     for r in rows:
         if not isinstance(r, dict):
@@ -225,6 +267,8 @@ def find_share(rows: list, *, peer_uid: str, data_type: str,
             continue
         types = [str(t) for t in (r.get("fulcra_data_types") or [])]
         if data_type not in types:
+            continue
+        if file_prefix and file_data_type(file_prefix) not in types:
             continue
         if name and str(r.get("datashare_name") or "") != name:
             continue

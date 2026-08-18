@@ -37,6 +37,24 @@ read-back that matched our own stale event; a success line naming a path it
 never checked. Before you add a surface that reports success, ask what it
 actually measured — and make the message say only that.
 
+**Instance nine came from the live run, and it is the one worth reading.** The
+first two-account smoke died in argparse: `share_create` sent `--file <prefix>`,
+an option `fulcra-api share create` has never had. Eighty-five tests were green.
+They *could not* have caught it — the author's host cannot run cross-account
+share verbs, so every test drove a fake, and the fake accepted the flag its
+author wished for. The tests measured the author's belief about the CLI, then
+reported it as knowledge of the CLI.
+
+The fix is the same one `wire.py` already applies to `get-records`, extended to
+a second surface: `tests/fixtures/` now also holds a verbatim
+`share create --help` and a real share row carrying a file grant, and
+`test_share_create_contract.py` asserts that **every flag in the argv we execute
+exists in the captured help**. A wished-for flag now fails a unit test instead
+of a live leg. The same round retired a disclaimer that was itself an
+over-claim in the other direction — r3 had concluded a reports prefix was
+unobservable from a share row, and the live surface shows it plainly as the
+data type `file:/reports/`.
+
 Live legs are documented in [SMOKE.md](SMOKE.md); the role charter is
 [docs/coord/MESH-MAINTAINER.md](../../docs/coord/MESH-MAINTAINER.md).
 

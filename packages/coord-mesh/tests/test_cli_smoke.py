@@ -203,12 +203,16 @@ def test_init_readback_rejects_a_preexisting_share_to_the_same_uid(capsys, monke
 
 
 def test_init_readback_accepts_the_share_we_actually_minted(capsys, monkeypatch):
+    # `--reports` defaults to reports/, so the minted share carries BOTH the
+    # channel and the file grant — as a real row does (see
+    # tests/fixtures/real_share_row.json, captured live 2026-08-18).
     monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
     monkeypatch.setattr(cli.transport, "list_outgoing",
                         lambda *a, **k: cli.transport.Result(
                             cli.transport.OK,
                             rows=[_share("MJJT share", UID, [], True),
-                                  _share("mesh-m2-test", UID, [CH])]))
+                                  _share("mesh-m2-test", UID,
+                                         [CH, "file:/reports/"])]))
     rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test"])
     assert rc == cli.RC_OK
     assert "read-back verified" in capsys.readouterr().out
@@ -235,16 +239,47 @@ def test_init_refuses_share_all_even_when_it_lists_our_data_type(capsys, monkeyp
     assert cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test"]) == cli.RC_UNKNOWN
 
 
-def test_init_does_not_claim_the_reports_prefix_was_verified(capsys, monkeypatch):
-    """r3: `share list-outgoing` has no file-prefix field, so the reports path
-    is unobservable — the success line must not imply otherwise."""
+# The r3 test that stood here asserted the OPPOSITE of these two, on the belief
+# that `share list-outgoing` has no file-prefix field and the reports path is
+# therefore unobservable. That belief was measured and is wrong: a file grant is
+# a DATA TYPE (`file:/reports/`) sitting in the same `fulcra_data_types` list as
+# the channel — see tests/fixtures/real_share_row.json, a real row captured on
+# 2026-08-18. So the disclaimer is retired and the prefix is verified. Retiring
+# it is a behavior change, deliberate and recorded here rather than dropped: the
+# r3 CONCERN (never claim more than the read-back proves) is not retired at all,
+# it is enforced harder — an absent prefix is now rc3 UNKNOWN instead of a
+# success line with a caveat on stderr.
+
+def test_init_verifies_the_reports_prefix_when_the_row_carries_it(capsys, monkeypatch):
+    """The prefix IS observable, so a success line may name it."""
+    monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "list_outgoing",
+                        lambda *a, **k: cli.transport.Result(
+                            cli.transport.OK,
+                            rows=[_share("mesh-m2-test", UID,
+                                         [CH, "file:/reports/"])]))
+    rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test",
+                   "--reports", "reports/"])
+    assert rc == cli.RC_OK
+    out = capsys.readouterr().out
+    assert "reports prefix verified as 'file:/reports/'" in out, out
+
+
+def test_init_is_unknown_when_the_channel_landed_but_the_prefix_did_not(capsys, monkeypatch):
+    """The partial grant — and the message must say WHICH half is missing.
+
+    A share that grants the channel but not the reports prefix is the case where
+    events flow and every `ptr` body 404s. Reporting that as success is how a
+    reader ends up blocked on a document that was never shared."""
     monkeypatch.setattr(cli.transport, "share_create", lambda **k: (0, "", ""))
     monkeypatch.setattr(cli.transport, "list_outgoing",
                         lambda *a, **k: cli.transport.Result(
                             cli.transport.OK, rows=[_share("mesh-m2-test", UID, [CH])]))
     rc = cli.main(["--channel", CH, "init", UID, "--name", "mesh-m2-test",
                    "--reports", "reports/"])
-    assert rc == cli.RC_OK
-    cap = capsys.readouterr()
-    assert "reports/" not in cap.out, "success line must not claim the reports path"
-    assert "not observable" in cap.err and "unverified" in cap.err
+    assert rc == cli.RC_UNKNOWN
+    err = capsys.readouterr().err
+    assert "CHANNEL is granted" in err and "REPORTS PREFIX is not confirmed" in err
+    # Distinct from the nothing-was-granted message, which would send the
+    # operator to re-run init instead of chasing the file grant.
+    assert "not evidence that ours exists" not in err

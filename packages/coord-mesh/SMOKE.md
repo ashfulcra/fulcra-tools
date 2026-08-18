@@ -35,18 +35,30 @@ coord-mesh --channel "$CH" init "$PEER" --name mesh-smoke --reports reports/
 
 **Expect (rc 0):**
 ```
-mesh init: granted <CH> -> <PEER> (data type read-back verified in share 'mesh-smoke')
+mesh init: granted <CH> -> <PEER> (data type read-back verified in share 'mesh-smoke'; reports prefix verified as 'file:/reports/')
 ```
-plus, on stderr, a line saying the `reports/` prefix is **unverifiable from
-here**. That line is correct and expected — `share list-outgoing` has no
-file-prefix field. Do not treat its absence as success.
+
+**What changed since the 2026-08-18 run, and why.** That run died here in
+argparse: `transport.py` appended `--file <prefix>`, an option `fulcra-api
+share create` has never had. The live surface says a file grant is not a flag
+at all — it is a **data type**, `file:/reports/`, riding the repeatable
+`--data-type`. Two consequences for this leg:
+
+  - the command now sends `--data-type "file:/reports/"`, and
+  - the prefix is **verified**, not disclaimed. The previous version of this
+    document told you a stderr caveat about an unverifiable prefix was correct
+    and expected. It was neither: the prefix sits in the same
+    `fulcra_data_types` list as the channel. If you see that caveat, you are
+    running pre-fix code.
 
 **Failure modes and what they mean:**
 
 | output | meaning |
 |---|---|
 | `REFUSED: named-uid rail` | `$PEER` is not UUID-shaped. The rail is working; fix the input. |
+| `No such option '--file'` | Pre-fix code. You are not running this document's package head. |
 | rc 3 `create returned 0 but no share named 'mesh-smoke' ... is in list-outgoing` | The platform accepted the create but the share is not visible. **This is the interesting failure** — record the full `fulcra-api share list-outgoing` output. |
+| rc 3 `CHANNEL is granted, the REPORTS PREFIX is not confirmed` | The share exists and carries the channel, but no `file:` data type came back. Events will flow and every `ptr` body will 404. **Record the row verbatim** — it would mean outgoing rows do not echo file grants the way the captured incoming row does, which is a platform fact this package has not yet measured directly. |
 | rc 3 `read-back UNKNOWN` | The roster read failed. Not a share failure; retry before concluding. |
 
 **Note:** if `$PEER` already holds a broad share from this account, leg 1 must

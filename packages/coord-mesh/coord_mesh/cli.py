@@ -55,30 +55,43 @@ def cmd_init(args) -> int:
               f"verify with `fulcra-api share list-outgoing` before relying on it",
               file=sys.stderr)
         return RC_UNKNOWN
-    # Match the share we actually minted — peer AND data type AND name.
+    # Match the share we actually minted — peer AND data type AND name AND, when
+    # a reports prefix was asked for, its `file:` data type too.
     # A uid-only match verifies an UNRELATED existing share: the first mesh peer
     # already holds a 2024 share-all from the operator, so uid-only would pass
     # before the mesh created anything (codex-coder, r2 on 3c1c78d).
     granted = transport.find_share(back.rows, peer_uid=args.peer,
-                                   data_type=_channel(args), name=args.name)
+                                   data_type=_channel(args), name=args.name,
+                                   file_prefix=args.reports or None)
     if not granted:
+        # Two different failures wear the same "no match" here, and telling the
+        # operator which one they have is the difference between a re-run and a
+        # platform bug report. Re-match WITHOUT the prefix to find out.
+        partial = transport.find_share(back.rows, peer_uid=args.peer,
+                                       data_type=_channel(args), name=args.name)
+        if partial is not None and args.reports:
+            want = transport.file_data_type(args.reports)
+            print(f"mesh init: share {args.name!r} exists and grants "
+                  f"{_channel(args)} to {args.peer}, but {want!r} is NOT among "
+                  f"its data types {list(partial.get('fulcra_data_types') or [])} "
+                  "— the CHANNEL is granted, the REPORTS PREFIX is not "
+                  "confirmed. Treat ptr docs as unreachable until you verify "
+                  "from the peer side.", file=sys.stderr)
+            return RC_UNKNOWN
         print(f"mesh init: create returned 0 but no share named {args.name!r} "
               f"granting {_channel(args)} to {args.peer} is in list-outgoing — "
               "treat as NOT granted (a pre-existing share to the same uid is "
               "not evidence that ours exists)", file=sys.stderr)
         return RC_UNKNOWN
-    # Say exactly what the read-back proves and no more. `share list-outgoing`
-    # rows carry datashare_name / fulcra_data_types / permissions — there is NO
-    # file-prefix field, so the reports path is NOT observable from this surface
-    # and claiming it verified would be a claim beyond the evidence
-    # (codex-coder, r3 on 472a8c6).
-    print(f"mesh init: granted {_channel(args)} -> {args.peer} "
-          f"(data type read-back verified in share {args.name!r})")
+    # Say exactly what the read-back proves and no more. r3 said the reports
+    # path was unobservable from `share list-outgoing`; the live run disproved
+    # that — a file grant IS a data-type id (`file:/reports/`, measured on a
+    # real row), so it is in the same `fulcra_data_types` list and is now
+    # verified rather than disclaimed.
+    detail = f"data type read-back verified in share {args.name!r}"
     if args.reports:
-        print(f"mesh init: reports prefix {args.reports!r} was REQUESTED but is "
-              "not observable in `share list-outgoing` — unverified from here; "
-              "confirm from the peer side before relying on ptr docs",
-              file=sys.stderr)
+        detail += f"; reports prefix verified as {transport.file_data_type(args.reports)!r}"
+    print(f"mesh init: granted {_channel(args)} -> {args.peer} ({detail})")
     return RC_OK
 
 
