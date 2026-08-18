@@ -96,7 +96,7 @@ Live legs are documented in [SMOKE.md](SMOKE.md); the role charter is
 stayed green, because the fake emitted what the code wanted. `tests/fixtures/`
 holds a real captured record; the contract tests assert against its shape.
 
-**Cursors anchor to the NEWEST row, and the platform returns the OLDEST first.**
+**Cursors anchor to the NEWEST row, and the order is PROVEN on every read.**
 `get-records` yields rows in ascending `recorded_at` order. A cursor is a
 position in that stream, so it advances to the LAST row of the read, not the
 first. Getting this backwards cost a real incident: the cursor sat on the oldest
@@ -113,6 +113,13 @@ it cost. Two consequences worth keeping in mind as a consumer:
 - **A read that cannot identify a row degrades the whole peer**, not just that
   row. Position in an ordered stream is unknowable past an unidentifiable
   record, so a partial slice would be a claim we cannot support.
+- **An order we cannot prove is UNKNOWN.** Every row must carry a parseable
+  `recorded_at` and the window must be monotonic, or the peer degrades and the
+  cursor does not move. The first fix for the anchoring bug took one measured
+  ascending response as a permanent transport contract — the same unverified
+  assumption with the sign flipped, and a descending response would have
+  restored the silent-loss half of the very bug it removed. One measurement is
+  an observation; a contract is something you re-check on every read.
 
 **UNKNOWN is never quiet.** A failed peer read is UNKNOWN, not empty — a mesh
 that reports "no messages" when it could not read is worse than one that fails.

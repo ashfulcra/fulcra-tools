@@ -273,6 +273,23 @@ def cmd_queue(args) -> int:
             degraded.append(uid)
             continue
 
+        # ORDER IS PROVEN PER READ, NOT ASSUMED (codex-coder on 051109f). The
+        # previous commit fixed a cursor anchored to the wrong end of the window
+        # — and then took ONE measured ascending response as a permanent
+        # transport contract, which is the same unverified-assumption defect
+        # wearing the opposite sign. If a response ever comes back descending or
+        # disordered, `ids[-1]` is not the newest row, and the silent-loss half
+        # of that bug returns. So: every row must carry a parseable time and the
+        # sequence must be monotonic, or this peer is UNKNOWN.
+        if res.rows and not wire.ascending(res.rows):
+            print(f"  peer {uid}: rows are not provably in ascending "
+                  f"recorded_at order (missing or unparseable timestamps, or "
+                  f"out-of-order rows) — position UNKNOWN, not advancing "
+                  f"cursor and not claiming this window was read",
+                  file=sys.stderr)
+            degraded.append(uid)
+            continue
+
         start = 0
         if cursor:
             if cursor in ids:

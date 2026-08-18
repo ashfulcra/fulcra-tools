@@ -79,3 +79,43 @@ def missing_fields(row: dict[str, Any]) -> list[str]:
     instead of folding a wall of silent Nones.
     """
     return [f for f in REQUIRED_FIELDS if f not in row]
+
+
+def parse_time(value: Optional[str]) -> Optional["datetime.datetime"]:
+    """Parse a row's ``recorded_at`` into an aware UTC datetime, or None.
+
+    None means UNPARSEABLE and callers must treat it as UNKNOWN — never as
+    "sorts first" or "sorts last", both of which are silent guesses about
+    position. Real values seen live carry either microseconds or not, and end
+    in ``+00:00``; a trailing ``Z`` is accepted too.
+    """
+    import datetime as _dt
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = _dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def ascending(rows: list) -> bool:
+    """True only when every row carries a parseable time AND the sequence is
+    monotonically non-decreasing.
+
+    codex-coder on 051109f: one measured ascending response is an observation,
+    not a transport contract. A cursor that advances to ``rows[-1]`` on faith
+    anchors to a non-newest row the moment the platform returns descending or
+    disordered data, recreating exactly the loss-and-replay defect the ordering
+    fix removed. So the order is PROVEN per read, or the read is UNKNOWN.
+    """
+    times = [parse_time(recorded_at(r) if isinstance(r, dict) else None)
+             for r in rows]
+    if any(t is None for t in times):
+        return False
+    return all(times[i] <= times[i + 1] for i in range(len(times) - 1))

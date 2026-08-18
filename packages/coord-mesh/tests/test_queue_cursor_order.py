@@ -36,15 +36,28 @@ MINE = "d64bbe9b-4902-42e9-a607-7db51ebc6379"
 CH = "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
 
 
-def _row(rid, slug):
+def _row(rid, slug, when):
+    """A row with a REAL timestamp.
+
+    The first version of this file passed ``recorded_at=rid`` — "r1", "r2",
+    "r3". codex-coder caught it on 051109f: those fixtures hard-code the order
+    the author wanted and encode no time at all, so they could not have caught
+    transport-order drift, which is the very thing the cursor depends on. The
+    fixtures now carry the shape the platform actually emits.
+    """
     import json
-    return {"id": rid, "recorded_at": rid, "sources": ["peer"],
+    return {"id": rid, "recorded_at": when, "sources": ["peer"],
             "note": json.dumps(envelope.build(to_user=MINE, kind="response",
                                               slug=slug))}
 
 
-#: Ascending, oldest first — the order the platform actually returns.
-ROWS = [_row("r1", "oldest"), _row("r2", "middle"), _row("r3", "newest")]
+T1 = "2026-08-18T20:00:00+00:00"
+T2 = "2026-08-18T21:00:00.500000+00:00"   # microseconds: both forms occur live
+T3 = "2026-08-18T22:00:00+00:00"
+
+#: Ascending, oldest first — the order the platform returned when measured.
+ROWS = [_row("r1", "oldest", T1), _row("r2", "middle", T2),
+        _row("r3", "newest", T3)]
 
 
 @pytest.fixture
@@ -136,3 +149,51 @@ def test_advance_lands_on_the_last_row_after_a_replay(monkeypatch, registry):
     cli.peers.set_cursor(registry, "default", UID, "aged-out-id")
     _run(monkeypatch, ROWS)
     assert cli.peers.get_cursor(registry, "default", UID) == "r3"
+
+
+# --- the order is PROVEN per read, never assumed (codex-coder on 051109f) ----
+
+def test_a_descending_response_is_UNKNOWN_not_silently_anchored(capsys, monkeypatch, registry):
+    """THE r2 REGRESSION on this fix. 051109f fixed a cursor anchored to the
+    wrong end of the window by taking one measured ascending response as a
+    permanent transport contract — the same unverified assumption with the sign
+    flipped. If the platform ever returns newest-first, `ids[-1]` is the OLDEST
+    row, and the silent-loss half of the original bug comes straight back."""
+    cli.peers.set_cursor(registry, "default", UID, "r1")
+    assert _run(monkeypatch, list(reversed(ROWS))) == cli.RC_UNKNOWN
+    assert "ascending" in capsys.readouterr().err
+    assert cli.peers.get_cursor(registry, "default", UID) == "r1", \
+        "must not advance on a window whose order we cannot prove"
+
+
+def test_an_internally_disordered_response_is_UNKNOWN(capsys, monkeypatch, registry):
+    """Not just reversed — one row out of place is enough to make position
+    unknowable, and a mostly-sorted window is the case a spot check misses."""
+    scrambled = [ROWS[0], ROWS[2], ROWS[1]]
+    assert _run(monkeypatch, scrambled) == cli.RC_UNKNOWN
+    assert "ascending" in capsys.readouterr().err
+
+
+def test_a_row_with_no_timestamp_is_UNKNOWN(capsys, monkeypatch, registry):
+    """An absent recorded_at must not sort first or last; both are guesses."""
+    rows = [ROWS[0], {"id": "r2", "sources": ["peer"], "note": "{}"}, ROWS[2]]
+    assert _run(monkeypatch, rows) == cli.RC_UNKNOWN
+
+
+def test_an_unparseable_timestamp_is_UNKNOWN(capsys, monkeypatch, registry):
+    rows = [ROWS[0], _row("r2", "middle", "not-a-time"), ROWS[2]]
+    assert _run(monkeypatch, rows) == cli.RC_UNKNOWN
+    assert "ascending" in capsys.readouterr().err
+
+
+def test_equal_timestamps_are_allowed(capsys, monkeypatch, registry):
+    """Two records can share a second; monotonic NON-DECREASING is the contract,
+    and rejecting ties would degrade a healthy read."""
+    rows = [_row("r1", "a", T1), _row("r2", "b", T1), _row("r3", "c", T2)]
+    assert _run(monkeypatch, rows) == cli.RC_OK
+    assert cli.peers.get_cursor(registry, "default", UID) == "r3"
+
+
+def test_a_single_row_window_is_trivially_ordered(monkeypatch, registry):
+    assert _run(monkeypatch, [ROWS[0]]) == cli.RC_OK
+    assert cli.peers.get_cursor(registry, "default", UID) == "r1"
