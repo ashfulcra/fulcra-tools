@@ -626,3 +626,70 @@ def test_the_scalar_tables_match_what_the_query_asks_for():
     validates must be one the query actually selects."""
     for field in (*_REQUIRED_SCALARS, *_OPTIONAL_SCALARS):
         assert field in INBOX_QUERY, f"{field} is validated but not selected"
+
+
+# --- the invariant inside pageInfo: codex-coder at 41eaa87e ----------------
+# Sixth site, and the one that answers my own question about what made a breach
+# invisible: I had "done" pageInfo in an earlier round by fixing its SHAPE, so I
+# never asked the same question of its CONTENTS. A scope already visited reads
+# as a scope already finished.
+
+@pytest.mark.parametrize("bad", [0, "", [], {}, None, "true", 1])
+def test_a_falsy_or_non_bool_hasNextPage_is_UNKNOWN_not_the_last_page(bad):
+    """The dangerous half: a falsy malformed value stopped pagination early and
+    reported a partial board as complete — no error, no missing rows visible,
+    just fewer of them than exist."""
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+                                  "pageInfo": {"hasNextPage": bad, "endCursor": "c1"}}}}]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.unknown, (bad, result)
+    assert "hasNextPage" in result.detail
+
+
+@pytest.mark.parametrize("bad", [7, ["c1"], {"c": 1}, True, "", "   "])
+def test_a_non_string_endCursor_is_UNKNOWN_not_coerced(bad):
+    """str([1]) == "[1]" would have sent fabricated pagination back to the
+    platform and paged from a cursor nobody issued."""
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+                                  "pageInfo": {"hasNextPage": True, "endCursor": bad}}}}]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.unknown, (bad, result)
+    assert "endCursor" in result.detail
+
+
+def test_a_present_but_hollow_pageInfo_is_UNKNOWN():
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")], "pageInfo": {}}}}]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
+
+
+def test_an_absent_pageInfo_is_still_simply_the_last_page():
+    """The guard must not overshoot: absent has a default, and making a missing
+    pageInfo raise would trade a silent-pass defect for a silent-fail one."""
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")]}}}]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.state == OK and len(result.items) == 1
+
+
+def test_hasNextPage_false_with_no_endCursor_is_the_last_page():
+    """endCursor is only required when we are actually continuing."""
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+                                  "pageInfo": {"hasNextPage": False}}}}]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).state == OK
+
+
+def test_a_whitespace_endCursor_does_not_become_a_real_cursor():
+    pages = [{"data": {"issues": {"nodes": [],
+                                  "pageInfo": {"hasNextPage": True, "endCursor": "  "}}}}]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
+
+
+def test_the_bad_pagination_case_exits_3_through_the_CLI(monkeypatch, capsys):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+                                  "pageInfo": {"hasNextPage": 0, "endCursor": "c1"}}}}]
+    transport = FakeTransport(pages)
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    assert "UNKNOWN" in capsys.readouterr().out

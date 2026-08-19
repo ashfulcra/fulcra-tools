@@ -291,15 +291,37 @@ def _paginate_preserving(client: LinearClient, team_id: str) -> list[Any]:
         # shape is checked positively; nothing is assumed from truthiness.
         page_info = page.get("pageInfo")
         if page_info is None:
-            page_info = {}
+            # ABSENT pageInfo defaults to "no more pages". Present-but-hollow
+            # does NOT — that distinction is the whole invariant, and coercing
+            # absent into {} here would have made a missing pageInfo raise,
+            # trading a silent-pass defect for a silent-fail one.
+            return nodes
         if not isinstance(page_info, Mapping):
             raise LinearError("CoordInbox: issues.pageInfo is not an object")
-        if not page_info.get("hasNextPage"):
+        # THE INVARIANT INSIDE pageInfo (codex-coder on 41eaa87e). Fixing the
+        # SHAPE of pageInfo in an earlier round is what made this scope
+        # invisible to me: I had already "done" pageInfo, so I never asked the
+        # same question of its contents. A falsy malformed hasNextPage — 0, "",
+        # [] — read as "no more pages", stopping early and reporting a partial
+        # board as complete; and a truthy non-string endCursor was coerced by
+        # str(), sending fabricated pagination back to the platform.
+        has_next = page_info.get("hasNextPage")
+        if not isinstance(has_next, bool):
+            raise LinearError(
+                "CoordInbox: issues.pageInfo.hasNextPage is missing or not a "
+                "boolean — pagination state is unreadable, and a partial board "
+                "reported as complete is the failure this verb exists to avoid")
+        if not has_next:
             return nodes
         next_cursor = page_info.get("endCursor")
-        if not next_cursor or next_cursor == cursor:
-            raise LinearError("CoordInbox: invalid pagination cursor")
-        cursor = str(next_cursor)
+        if not isinstance(next_cursor, str) or not next_cursor.strip():
+            raise LinearError(
+                "CoordInbox: issues.pageInfo.endCursor is missing or not a "
+                "usable string while hasNextPage is true")
+        next_cursor = next_cursor.strip()
+        if next_cursor == cursor:
+            raise LinearError("CoordInbox: pagination cursor did not advance")
+        cursor = next_cursor
 
 
 def fetch_inbox(client: LinearClient, team_id: str) -> Result:

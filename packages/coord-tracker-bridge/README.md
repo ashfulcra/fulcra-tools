@@ -141,8 +141,11 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
 - **The invariant: every value read is either ABSENT WITH A DEFAULT or
   VALIDATED WHOLE.** There is no third state, and "present but unusable" is
   never quietly promoted into one of the first two. It holds at four scopes —
-  the node list, top-level scalars, optional sub-objects, and the fields inside
-  them — because it was broken at each one in turn across five review rounds.
+  the node list, top-level scalars, optional sub-objects and the fields inside
+  them, and the pagination metadata and the fields inside THAT — because it was
+  broken at each one in turn across six review rounds. Fixing a scope's shape is
+  not the same as fixing its contents: `pageInfo` was corrected once and the
+  round that corrected it is what made its internals invisible for four more.
   Watch fallbacks especially: `identifier or id` used to mask a present-but-
   malformed identifier, so a row we could not identify rendered as one we could.
 - **Absent has a default; malformed never does — including inside an object.**
