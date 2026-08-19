@@ -1,5 +1,12 @@
 """`linear-inbox` — read Ash's Linear board into a coord fold. Never writes.
 
+STATUS: REVIEWED, NOT VERIFIED. Every fixture behind this module is synthetic,
+its field-name contract test is skipped, and no line of it has ever met the real
+Linear API. Eight review rounds found seven real defects, so the logic survives
+adversarial reading — which is what "reviewed" buys and is not the same as
+"works". It becomes verified when `tools/capture_inbox.py` runs against a real
+key, the stamped fixture lands, and the contract test un-skips.
+
 THE RAIL IS IN THE CODE, NOT IN THE INTENT. coord-boss's order is that this
 lane performs zero Linear writes of any kind until Ash approves a write plan in
 his own words, and the reason it is non-negotiable is a near-miss: an earlier

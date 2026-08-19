@@ -124,6 +124,15 @@ from a partial enumeration.
 
 ## `linear-inbox` — read Ash's board, never touch it
 
+> **STATUS: REVIEWED, NOT VERIFIED.** Every fixture behind this verb is
+> synthetic, the field-name contract test is skipped, and no line of this code
+> has ever met the real Linear API. Eight review rounds found seven real defects
+> and the logic now survives adversarial reading — that is what "reviewed"
+> buys, and it is not the same as "works". The honest status is *ready to try*.
+> It becomes verified when someone runs `tools/capture_inbox.py` against a real
+> key, the stamped fixture lands, and the contract test un-skips.
+
+
 `coord-tracker-bridge linear-inbox --linear-team-id <TEAM>` performs one
 paginated GraphQL read of a Linear team's issues and prints them as a coord
 fold. It is the only verb that runs in the read direction, and it is fenced:
