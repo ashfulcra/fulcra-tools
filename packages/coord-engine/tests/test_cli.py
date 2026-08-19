@@ -1317,9 +1317,9 @@ def test_task_restore_and_search_archived(capsys):
     capsys.readouterr()
     # archived doc findable only with --archived
     cli.main(["search", "r", "olddone", "--json"], transport=t)
-    assert _j.loads(capsys.readouterr().out) == []
+    assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []
     cli.main(["search", "r", "olddone", "--archived", "--json"], transport=t)
-    got = _j.loads(capsys.readouterr().out)
+    got = needs_me_rows(_j.loads(capsys.readouterr().out))
     assert len(got) == 1 and got[0]["archived"] == "2020-01"
     # restore brings it back
     assert cli.main(["task", "restore", "r", "olddone"], transport=t) == 0
@@ -1342,8 +1342,11 @@ def test_search_archived_surfaces_partial_cold_archive_as_degraded(capsys):
     t.put("team/r/task/archive/2020-01/target.md", _old_done_task("Target"))
     t.put("team/r/task/archive/2020-02/other.md", _old_done_task("Other"))
 
-    assert cli.main(["search", "r", "target", "--archived", "--json"], transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    # contract 2: the partial cold archive folds into the shared read-degraded
+    # marker, which classifies UNKNOWN (fail-closed) -> rc 3 (OC3/E4; splitting
+    # archive-partial into a DEGRADED floor needs its own marker, deferred)
+    assert cli.main(["search", "r", "target", "--archived", "--json"], transport=t) == 3
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
 
     assert got[0] == {
         "type": "read-degraded",
@@ -2906,7 +2909,7 @@ def test_search_degraded_transport_marker(capsys):
     _degrade_summaries(t)
     capsys.readouterr()
     cli.main(["search", "r", "charter", "--json"], transport=t)
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert any(r.get("type") == "read-degraded" for r in got)
 
 

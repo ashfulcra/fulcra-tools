@@ -922,8 +922,15 @@ def cmd_search(args: argparse.Namespace, transport: Any) -> int:
     degraded_reason = "; ".join(dict.fromkeys(filter(None, degraded_reasons)))
     if degraded_reason:
         got = [_read_degraded_row(degraded_reason)] + got
+    # Contract 2 (OC2/OC3, ladder PR 4): envelope seals first, rc follows its
+    # health in BOTH modes. Both failure legs currently fold into the shared
+    # read-degraded marker, so an unreadable hot index AND a partial archive
+    # both classify UNKNOWN (fail-closed) — splitting the archive-partial leg
+    # into a DEGRADED floor needs its own marker type and is deferred to the
+    # marker's owner rather than smuggled into this migration.
+    envelope, rc = class_a_envelope(got, source_type="search-source")
     if args.json:
-        jsonutil.print_json(got)
+        jsonutil.print_json(envelope)
     else:
         if degraded_reason:
             _surface_read_degraded(degraded_reason, json_mode=False)
@@ -931,7 +938,7 @@ def cmd_search(args: argparse.Namespace, transport: Any) -> int:
         print(f"{len(real)} match(es) for {args.query!r}:")
         for r in real:
             print(_line(r))
-    return 0
+    return rc
 
 
 # --- roles (fulcra-agent-roles fold) ---

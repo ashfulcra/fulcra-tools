@@ -265,6 +265,27 @@ def test_oc2_asks_unreadable_index_is_unknown_rc3(capsys):
     assert "source-unreadable" in v["basis"]
 
 
+def test_oc2_search_envelope_leads_stdout(capsys):
+    # LADDER PR 4: search joins contract 2 — same envelope, same health->rc law.
+    t = FakeTransport()
+    _seed_rows(t)
+    rc = cli.main(["search", "r", "One", "--json"], transport=t)
+    value = strict_parse(capsys.readouterr().out)
+    assert isinstance(value, dict) and value["contract"] == 2
+    assert isinstance(value["rows"], list)
+    assert rc == (3 if value["health"] in ("DEGRADED", "UNKNOWN") else 0)
+
+
+def test_oc2_search_unreadable_index_is_unknown_rc3(capsys):
+    # An unreadable index must never return a confident match set at rc 0.
+    t = FakeTransport()
+    t.put("team/r/_coord/summaries.json", "{not json")
+    rc = cli.main(["search", "r", "anything", "--json"], transport=t)
+    v = strict_parse(capsys.readouterr().out)
+    assert (v["health"], rc) == ("UNKNOWN", 3)
+    assert "source-unreadable" in v["basis"]
+
+
 def test_oc2_invalid_source_token_is_not_promoted_to_provenance():
     # pr-641 r2, the remaining finding: a present source row with a token
     # OUTSIDE the closed enum is corrupt provenance — it must contribute
