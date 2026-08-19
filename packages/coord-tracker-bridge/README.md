@@ -138,6 +138,13 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
   harmless for a mirror that skips what it cannot project, fatal for a verb
   promising never to render a partial board as a whole one. A `null` in a page
   used to arrive as a clean empty board.
+- **The invariant: every value read is either ABSENT WITH A DEFAULT or
+  VALIDATED WHOLE.** There is no third state, and "present but unusable" is
+  never quietly promoted into one of the first two. It holds at four scopes —
+  the node list, top-level scalars, optional sub-objects, and the fields inside
+  them — because it was broken at each one in turn across five review rounds.
+  Watch fallbacks especially: `identifier or id` used to mask a present-but-
+  malformed identifier, so a row we could not identify rendered as one we could.
 - **Absent has a default; malformed never does — including inside an object.**
   A present-but-hollow `state` or `assignee` is malformed, not absent, so it
   degrades the row rather than rendering as "unknown" or "unassigned". Which

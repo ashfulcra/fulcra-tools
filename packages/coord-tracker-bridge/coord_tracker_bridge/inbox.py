@@ -140,6 +140,52 @@ _REQUIRED_SUBFIELDS: Mapping[str, tuple[str, ...]] = {
 }
 
 
+#: Top-level scalars this module reads. REQUIRED ones must be present and
+#: usable; OPTIONAL ones may be absent, but a present value must still be a
+#: usable string. `identifier` is handled separately because it has a fallback,
+#: and a fallback is exactly where absent and malformed get confused.
+_REQUIRED_SCALARS: tuple[str, ...] = ("title",)
+_OPTIONAL_SCALARS: tuple[str, ...] = ("url", "updatedAt")
+
+
+def _usable_str(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _scalar(node: Mapping[str, Any], key: str, *, required: bool) -> str | None:
+    """THE INVARIANT, at scalar scope: every value is either ABSENT WITH A
+    DEFAULT or VALIDATED WHOLE. There is no third state, and 'present but
+    unusable' is never quietly turned into one of the first two."""
+    if key not in node or node[key] is None:
+        if required:
+            raise _Malformed(f"{key} is absent and is required")
+        return None
+    usable = _usable_str(node[key])
+    if usable is None:
+        raise _Malformed(f"{key} is present but is not a usable string")
+    return usable
+
+
+def _identity(node: Mapping[str, Any]) -> str:
+    """`identifier`, falling back to `id` ONLY when identifier is truly absent.
+
+    codex-coder at 81858fd6: `node.get("identifier") or node.get("id")` fell
+    back for a PRESENT-but-malformed identifier too — `identifier=[]` silently
+    became the id, so a row we could not identify rendered as a row we could.
+    A fallback is exactly where absent and malformed get confused, which is why
+    this one is written out rather than expressed with `or`.
+    """
+    if "identifier" in node and node["identifier"] is not None:
+        usable = _usable_str(node["identifier"])
+        if usable is None:
+            raise _Malformed("identifier is present but is not a usable string")
+        return usable
+    usable = _usable_str(node.get("id"))
+    if usable is None:
+        raise _Malformed("neither identifier nor id is a usable string")
+    return usable
+
+
 def _required_object(node: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
     """The sub-object, validated inside. None only when genuinely absent."""
     obj = _optional_object(node, key)
@@ -187,27 +233,19 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
     mentions is the same lie as an empty board, and a row missing labels it
     never mentions is the same lie one level down.
     """
-    identifier = node.get("identifier") or node.get("id")
-    title = node.get("title")
-    if not isinstance(identifier, str) or not identifier.strip():
-        return None
-    if not isinstance(title, str):
-        return None
     try:
+        identifier = _identity(node)
+        title = _scalar(node, "title", required=True)
+        url = _scalar(node, "url", required=False)
+        updated = _scalar(node, "updatedAt", required=False)
         state = _required_object(node, "state")
         assignee_obj = _required_object(node, "assignee")
         labels = _labels(node)
     except _Malformed:
         return None
-    url = node.get("url")
-    updated = node.get("updatedAt")
-    if url is not None and not isinstance(url, str):
-        return None
-    if updated is not None and not isinstance(updated, str):
-        return None
     return InboxItem(
-        identifier=identifier.strip(),
-        title=title.strip(),
+        identifier=identifier,
+        title=title,
         # `state` is either absent — a genuine unknown — or validated whole.
         state=_name(state) if state else "unknown",
         state_type=(str(state["type"]).strip() if state else "unknown"),

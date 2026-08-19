@@ -531,3 +531,98 @@ def test_the_required_subfield_spec_matches_what_the_query_asks_for():
     # And the reverse: a selected sub-object with no spec is an unguarded field.
     for parent in ("state", "assignee"):
         assert parent in _REQUIRED_SUBFIELDS, f"{parent} is queried but unspecced"
+
+
+# --- the invariant at scalar scope: codex-coder at 81858fd6 ----------------
+# Fifth site, and the first one they named as an INVARIANT rather than a field,
+# which is what I asked for: every value this module reads is either ABSENT WITH
+# A DEFAULT or VALIDATED WHOLE. No third state, and no quiet promotion into one
+# of the first two.
+
+from coord_tracker_bridge.inbox import _OPTIONAL_SCALARS, _REQUIRED_SCALARS  # noqa: E402
+
+
+@pytest.mark.parametrize("bad", [[], {}, 7, True, "", "   "])
+def test_a_present_malformed_identifier_is_not_masked_by_the_id_fallback(bad):
+    """codex's control: identifier=[] fell through `or` to `id`, so a row we
+    could not identify rendered as one we could. A fallback is exactly where
+    absent and malformed get confused."""
+    node = _node("ASH-1", "one")
+    node["identifier"] = bad
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+def test_the_id_fallback_still_works_when_identifier_is_genuinely_absent():
+    """The other half: absent is not malformed, and the fallback exists for it."""
+    node = _node("ASH-1", "one")
+    node.pop("identifier")
+    result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
+    assert result.state == OK
+    assert result.items[0].identifier == "issue-ASH-1"
+
+
+def test_a_null_identifier_falls_back_rather_than_degrading():
+    node = _node("ASH-1", "one")
+    node["identifier"] = None
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).state == OK
+
+
+def test_neither_identifier_nor_id_usable_degrades():
+    node = _node("ASH-1", "one")
+    node["identifier"] = None
+    node["id"] = "   "
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, [], {}])
+def test_a_blank_or_non_string_title_degrades(bad):
+    """A blank title rendered a row with an empty label — present, unusable,
+    and shown anyway."""
+    node = _node("ASH-1", "one")
+    node["title"] = bad
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+def test_an_absent_title_degrades_because_title_is_required():
+    node = _node("ASH-1", "one")
+    node.pop("title")
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+@pytest.mark.parametrize("field", _OPTIONAL_SCALARS)
+@pytest.mark.parametrize("bad", ["   ", 7, [], {}])
+def test_a_present_unusable_optional_scalar_degrades(field, bad):
+    node = _node("ASH-1", "one")
+    node[field] = bad
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+@pytest.mark.parametrize("field", _OPTIONAL_SCALARS)
+def test_an_absent_or_null_optional_scalar_is_simply_absent(field):
+    for value in (None, "__POP__"):
+        node = _node("ASH-1", "one")
+        if value == "__POP__":
+            node.pop(field)
+        else:
+            node[field] = value
+        result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
+        assert result.state == OK, (field, value)
+
+
+def test_the_malformed_identifier_case_exits_3_through_the_CLI(monkeypatch, capsys):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    node = _node("ASH-1", "one")
+    node["identifier"] = []
+    transport = FakeTransport([_page([node])])
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    assert "UNKNOWN" in capsys.readouterr().out
+
+
+def test_the_scalar_tables_match_what_the_query_asks_for():
+    """Anti-drift, same shape as the sub-object pin: a scalar this module
+    validates must be one the query actually selects."""
+    for field in (*_REQUIRED_SCALARS, *_OPTIONAL_SCALARS):
+        assert field in INBOX_QUERY, f"{field} is validated but not selected"
