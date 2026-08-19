@@ -343,12 +343,16 @@ def test_a_truthy_non_mapping_pageInfo_is_UNKNOWN_not_a_crash(bad):
     assert "pageInfo" in result.detail
 
 
-def test_a_missing_pageInfo_is_simply_the_last_page():
-    """Absent is not malformed: a response that omits pageInfo has no next page,
-    and treating that as an error would degrade a healthy read."""
+def test_a_missing_pageInfo_is_UNKNOWN_because_completeness_must_be_STATED():
+    """BELIEF RETIRED, deliberately (codex-coder on 4e79e089). This test used to
+    assert the opposite, on my argument that absent-has-a-default. The rule is
+    narrower than I had it: absent may default only when the default ASSERTS
+    NOTHING. No labels asserts nothing; "no pagination metadata" would be read
+    as "this is the last page", which is a claim of COMPLETENESS — the one claim
+    this verb exists never to fake."""
     result = fetch_inbox(LinearClient(FakeTransport([_page_with(None, [_node("ASH-1", "one")])])), TEAM)
-    assert result.state == OK
-    assert [i.identifier for i in result.items] == ["ASH-1"]
+    assert result.unknown, result
+    assert "pageInfo" in result.detail
 
 
 def test_the_malformed_pageInfo_case_exits_3_through_the_CLI(monkeypatch, capsys):
@@ -662,12 +666,13 @@ def test_a_present_but_hollow_pageInfo_is_UNKNOWN():
     assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
 
 
-def test_an_absent_pageInfo_is_still_simply_the_last_page():
-    """The guard must not overshoot: absent has a default, and making a missing
-    pageInfo raise would trade a silent-pass defect for a silent-fail one."""
+def test_an_omitted_pageInfo_key_is_UNKNOWN_too():
+    """Same retirement, for the omitted-key spelling rather than the null one.
+    I argued in the r6 reply that making this raise would trade a silent-pass
+    defect for a silent-fail one. That was wrong: a silent PASS here asserts the
+    board is whole, and there is no honest default for that."""
     pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")]}}}]
-    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
-    assert result.state == OK and len(result.items) == 1
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
 
 
 def test_hasNextPage_false_with_no_endCursor_is_the_last_page():
@@ -688,6 +693,70 @@ def test_the_bad_pagination_case_exits_3_through_the_CLI(monkeypatch, capsys):
     monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
     pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
                                   "pageInfo": {"hasNextPage": 0, "endCursor": "c1"}}}}]
+    transport = FakeTransport(pages)
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    assert "UNKNOWN" in capsys.readouterr().out
+
+
+# --- completeness must be stated, and cycles must be caught ---------------
+# codex-coder at 4e79e089, seventh round: two ways a walk can end while
+# claiming more than it measured.
+
+def test_an_explicit_terminal_page_is_the_only_clean_ending():
+    """The positive control for the retirement above: hasNextPage=false is
+    evidence of a last page. Nothing else is."""
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+                                  "pageInfo": {"hasNextPage": False}}}}]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.state == OK and len(result.items) == 1
+
+
+def test_a_two_step_cursor_cycle_is_detected():
+    """THE REGRESSION. Comparing only against the PREVIOUS cursor catches
+    c1 -> c1 and misses c1 -> c2 -> c1, which walks until the platform tires."""
+    pages = [
+        _page([_node("ASH-1", "one")], has_next=True, cursor="c1"),
+        _page([_node("ASH-2", "two")], has_next=True, cursor="c2"),
+        _page([_node("ASH-3", "three")], has_next=True, cursor="c1"),
+    ]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.unknown, result
+    assert "already" in result.detail or "cyclic" in result.detail
+
+
+def test_a_longer_cycle_is_detected_too():
+    pages = [
+        _page([], has_next=True, cursor="c1"),
+        _page([], has_next=True, cursor="c2"),
+        _page([], has_next=True, cursor="c3"),
+        _page([], has_next=True, cursor="c2"),
+    ]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
+
+
+def test_the_immediate_repeat_is_still_caught():
+    pages = [_page([], has_next=True, cursor="c1"),
+             _page([], has_next=True, cursor="c1")]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
+
+
+def test_a_long_acyclic_walk_still_completes():
+    """The guard must not overshoot: distinct cursors across many pages are a
+    healthy read, however many there are."""
+    pages = [_page([_node(f"ASH-{i}", str(i))], has_next=True, cursor=f"c{i}")
+             for i in range(1, 6)]
+    pages.append(_page([_node("ASH-6", "six")]))
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.state == OK
+    assert len(result.items) == 6
+
+
+def test_the_missing_pageInfo_case_exits_3_through_the_CLI(monkeypatch, capsys):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")]}}}]
     transport = FakeTransport(pages)
     monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
     monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)

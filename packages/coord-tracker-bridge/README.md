@@ -138,6 +138,11 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
   harmless for a mirror that skips what it cannot project, fatal for a verb
   promising never to render a partial board as a whole one. A `null` in a page
   used to arrive as a clean empty board.
+- **Absent may default only when the default ASSERTS NOTHING.** No labels
+  asserts nothing; no assignee asserts nothing. But absent pagination metadata
+  would be read as "this is the last page" — a claim of completeness, which is
+  the one claim this verb exists never to fake. A terminal page must be stated
+  (`hasNextPage: false`), never inferred from silence.
 - **The invariant: every value read is either ABSENT WITH A DEFAULT or
   VALIDATED WHOLE.** There is no third state, and "present but unusable" is
   never quietly promoted into one of the first two. It holds at four scopes —

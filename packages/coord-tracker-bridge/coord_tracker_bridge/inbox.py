@@ -275,6 +275,7 @@ def _paginate_preserving(client: LinearClient, team_id: str) -> list[Any]:
     """
     nodes: list[Any] = []
     cursor: str | None = None
+    seen_cursors: set[str] = set()
     while True:
         data = client.execute("CoordInbox", INBOX_QUERY, {"team": team_id, "after": cursor})
         page = data.get("issues")
@@ -291,11 +292,18 @@ def _paginate_preserving(client: LinearClient, team_id: str) -> list[Any]:
         # shape is checked positively; nothing is assumed from truthiness.
         page_info = page.get("pageInfo")
         if page_info is None:
-            # ABSENT pageInfo defaults to "no more pages". Present-but-hollow
-            # does NOT — that distinction is the whole invariant, and coercing
-            # absent into {} here would have made a missing pageInfo raise,
-            # trading a silent-pass defect for a silent-fail one.
-            return nodes
+            # ABSENT-HAS-A-DEFAULT DOES NOT REACH HERE, and last round I argued
+            # it did (codex-coder on 4e79e089). The rule is narrower than I had
+            # it: absent may default only when the default ASSERTS NOTHING. No
+            # labels asserts nothing. No assignee asserts nothing. But "no
+            # pagination metadata" would be read as "this is the last page",
+            # which is a claim of COMPLETENESS — the single claim this verb
+            # exists never to fake. Absence of evidence is not evidence of a
+            # terminal page, so it is UNKNOWN.
+            raise LinearError(
+                "CoordInbox: issues.pageInfo is absent — a terminal page must "
+                "be stated, not inferred; without it we cannot say the board is "
+                "complete")
         if not isinstance(page_info, Mapping):
             raise LinearError("CoordInbox: issues.pageInfo is not an object")
         # THE INVARIANT INSIDE pageInfo (codex-coder on 41eaa87e). Fixing the
@@ -319,8 +327,17 @@ def _paginate_preserving(client: LinearClient, team_id: str) -> list[Any]:
                 "CoordInbox: issues.pageInfo.endCursor is missing or not a "
                 "usable string while hasNextPage is true")
         next_cursor = next_cursor.strip()
-        if next_cursor == cursor:
-            raise LinearError("CoordInbox: pagination cursor did not advance")
+        # EVERY cursor, not just the previous one. Comparing against the last
+        # cursor alone catches c1 -> c1 and misses c1 -> c2 -> c1, which loops
+        # until the platform tires of us (codex-coder on 4e79e089).
+        if next_cursor in seen_cursors or next_cursor == cursor:
+            raise LinearError(
+                f"CoordInbox: pagination cursor {next_cursor!r} was already "
+                "visited — the page sequence is cyclic and cannot be walked to "
+                "completion")
+        if cursor is not None:
+            seen_cursors.add(cursor)
+        seen_cursors.add(next_cursor)
         cursor = next_cursor
 
 
