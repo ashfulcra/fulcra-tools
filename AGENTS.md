@@ -343,6 +343,12 @@ it (not on PyPI).
   - Dedupe by record id, keep `v:1` payloads addressed to you or `all`, fetch
     documents by `ptr`, and fail closed on any error or truncation — **an
     unreadable window is UNKNOWN, never empty**.
+  - **Zero fresh events is not proof of zero durable work.** A successful
+    text-mode queue read with no event rows and no obligations fold prints a
+    stderr notice pointing to `coord-engine obligations <team> --agent <you>`;
+    run that verb for the terminal durable-work answer. The notice preserves
+    the queue read's rc 0 because its event window was read successfully;
+    an unreadable event window still fails closed as UNKNOWN at rc 3.
   - **Terminal read states are DATA / CLEAR / ABSENT / UNKNOWN / INVALID**,
     and rc is never inferred: read `state` + `error_code` from the single
     JSON envelope (under `--json`, success is exactly one `queue-result`
