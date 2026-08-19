@@ -264,31 +264,30 @@ def cmd_queue(args) -> int:
         # addressed events sat unshown below it; then, when that row aged out
         # of the window, nothing matched and the whole window replayed. The
         # replay is what got noticed; the silence is what it cost.
-        ids = [wire.record_id(row) for row in res.rows]
-        if any(rid is None for rid in ids):
-            # Unidentifiable row: we cannot say where we are in the stream, so
-            # we do not claim a position. Show nothing rather than guess.
-            print("  row with no id — position UNKNOWN, not advancing cursor",
-                  file=sys.stderr)
+        # WE COMPUTE THE ORDER; THE TRANSPORT DOES NOT CHOOSE IT FOR US.
+        # This line has been wrong twice. First it assumed rows[0] was newest.
+        # Then it proved the transport's order was ascending — but accepted
+        # equal timestamps, and timestamps alone are a PARTIAL order, so any
+        # permutation of a tied group passed and the last of that group was an
+        # arbitrary cursor anchor (codex-coder on bd747f37). The fix is not a
+        # stricter check on someone else's ordering: it is to sort by a total
+        # key we own, (recorded_at, id), and take the last element of THAT.
+        ordered = wire.total_order(res.rows)
+        if ordered is None:
+            print(f"  peer {uid}: a row cannot be placed in the stream — "
+                  f"missing id, or a recorded_at that is absent, unparseable, "
+                  f"or timezone-naive — position UNKNOWN, not advancing cursor "
+                  f"and not claiming this window was read", file=sys.stderr)
             degraded.append(uid)
             continue
-
-        # ORDER IS PROVEN PER READ, NOT ASSUMED (codex-coder on 051109f). The
-        # previous commit fixed a cursor anchored to the wrong end of the window
-        # — and then took ONE measured ascending response as a permanent
-        # transport contract, which is the same unverified-assumption defect
-        # wearing the opposite sign. If a response ever comes back descending or
-        # disordered, `ids[-1]` is not the newest row, and the silent-loss half
-        # of that bug returns. So: every row must carry a parseable time and the
-        # sequence must be monotonic, or this peer is UNKNOWN.
-        if res.rows and not wire.ascending(res.rows):
-            print(f"  peer {uid}: rows are not provably in ascending "
-                  f"recorded_at order (missing or unparseable timestamps, or "
-                  f"out-of-order rows) — position UNKNOWN, not advancing "
-                  f"cursor and not claiming this window was read",
-                  file=sys.stderr)
-            degraded.append(uid)
-            continue
+        if ordered != res.rows:
+            # Not a failure: we sorted, so the cursor is still correct. Worth
+            # saying, because a transport whose order changed is worth knowing
+            # about before something else in the fleet assumes the old one.
+            print(f"  peer {uid}: transport order differs from canonical "
+                  f"(recorded_at, id) order — sorted locally; cursor is "
+                  f"unaffected", file=sys.stderr)
+        ids = [wire.record_id(row) for row in ordered]
 
         start = 0
         if cursor:
@@ -303,7 +302,7 @@ def cmd_queue(args) -> int:
                       f"expected under at-least-once, handle events idempotently",
                       file=sys.stderr)
 
-        for row in res.rows[start:]:
+        for row in ordered[start:]:
             note = envelope.parse(wire.note_text(row))
             if not note or not envelope.addressed_to(note, args.me):
                 continue

@@ -137,7 +137,7 @@ def test_an_unidentifiable_row_stops_the_whole_peer_not_just_that_row(capsys, mo
     rows = [ROWS[0], {"recorded_at": "r2", "sources": [], "note": "{}"}, ROWS[2]]
     assert _run(monkeypatch, rows) == cli.RC_UNKNOWN
     cap = capsys.readouterr()
-    assert "row with no id" in cap.err
+    assert "cannot be placed" in cap.err and "missing id" in cap.err
     assert "UNREADABLE" in cap.err and "not empty" in cap.err
     # And the cursor must not have moved past a stream we could not read.
     assert cli.peers.get_cursor(registry, "default", UID) == "r1"
@@ -153,25 +153,50 @@ def test_advance_lands_on_the_last_row_after_a_replay(monkeypatch, registry):
 
 # --- the order is PROVEN per read, never assumed (codex-coder on 051109f) ----
 
-def test_a_descending_response_is_UNKNOWN_not_silently_anchored(capsys, monkeypatch, registry):
-    """THE r2 REGRESSION on this fix. 051109f fixed a cursor anchored to the
-    wrong end of the window by taking one measured ascending response as a
-    permanent transport contract — the same unverified assumption with the sign
-    flipped. If the platform ever returns newest-first, `ids[-1]` is the OLDEST
-    row, and the silent-loss half of the original bug comes straight back."""
+# DELIBERATE CHANGE OF CONTRACT (codex-coder on bd747f37). The previous round
+# degraded a descending or disordered window to UNKNOWN. That was still letting
+# the transport decide the order and merely refusing when it looked wrong — and
+# it did not help at all for TIED timestamps, where every permutation looked
+# fine and the last of the tied group was an arbitrary anchor. We now sort by a
+# total key we own, (recorded_at, id), so a transport-order change cannot
+# choose the cursor. These tests assert the new contract.
+
+def test_a_descending_response_is_sorted_not_silently_anchored(capsys, monkeypatch, registry):
     cli.peers.set_cursor(registry, "default", UID, "r1")
-    assert _run(monkeypatch, list(reversed(ROWS))) == cli.RC_UNKNOWN
-    assert "ascending" in capsys.readouterr().err
-    assert cli.peers.get_cursor(registry, "default", UID) == "r1", \
-        "must not advance on a window whose order we cannot prove"
+    assert _run(monkeypatch, list(reversed(ROWS))) == cli.RC_OK
+    out, err = capsys.readouterr().out, capsys.readouterr().err
+    assert cli.peers.get_cursor(registry, "default", UID) == "r3", \
+        "cursor must anchor to the true newest row regardless of transport order"
 
 
-def test_an_internally_disordered_response_is_UNKNOWN(capsys, monkeypatch, registry):
-    """Not just reversed — one row out of place is enough to make position
-    unknowable, and a mostly-sorted window is the case a spot check misses."""
-    scrambled = [ROWS[0], ROWS[2], ROWS[1]]
-    assert _run(monkeypatch, scrambled) == cli.RC_UNKNOWN
-    assert "ascending" in capsys.readouterr().err
+def test_a_descending_response_is_reported_even_though_it_is_handled(capsys, monkeypatch, registry):
+    """Handled is not the same as unremarkable: a transport whose order changed
+    is worth knowing about before something else in the fleet assumes the old
+    one."""
+    _run(monkeypatch, list(reversed(ROWS)))
+    assert "transport order differs" in capsys.readouterr().err
+
+
+def test_an_internally_disordered_response_is_sorted(capsys, monkeypatch, registry):
+    """One row out of place — the case a spot check misses."""
+    assert _run(monkeypatch, [ROWS[0], ROWS[2], ROWS[1]]) == cli.RC_OK
+    assert cli.peers.get_cursor(registry, "default", UID) == "r3"
+
+
+def test_tied_timestamps_get_a_deterministic_anchor(capsys, monkeypatch, registry):
+    """THE r2 FINDING. Equal timestamps are a PARTIAL order: every permutation
+    of a tied group passed the old monotonic check, so the last row of that
+    group — and therefore the cursor — was whatever the transport happened to
+    emit last. The id breaks the tie deterministically, so both orderings of the
+    same tied pair must anchor to the same record."""
+    a = _row("id-aaa", "first", T2)
+    b = _row("id-bbb", "second", T2)      # same instant, different id
+    _run(monkeypatch, [a, b])
+    one = cli.peers.get_cursor(registry, "default", UID)
+    registry["spaces"] = {}
+    _run(monkeypatch, [b, a])             # transport emits the tie the other way
+    two = cli.peers.get_cursor(registry, "default", UID)
+    assert one == two == "id-bbb", (one, two)
 
 
 def test_a_row_with_no_timestamp_is_UNKNOWN(capsys, monkeypatch, registry):
@@ -183,12 +208,21 @@ def test_a_row_with_no_timestamp_is_UNKNOWN(capsys, monkeypatch, registry):
 def test_an_unparseable_timestamp_is_UNKNOWN(capsys, monkeypatch, registry):
     rows = [ROWS[0], _row("r2", "middle", "not-a-time"), ROWS[2]]
     assert _run(monkeypatch, rows) == cli.RC_UNKNOWN
-    assert "ascending" in capsys.readouterr().err
+    assert "cannot be placed" in capsys.readouterr().err
 
 
-def test_equal_timestamps_are_allowed(capsys, monkeypatch, registry):
-    """Two records can share a second; monotonic NON-DECREASING is the contract,
-    and rejecting ties would degrade a healthy read."""
+def test_a_timezone_naive_timestamp_is_UNKNOWN(capsys, monkeypatch, registry):
+    """codex-coder on bd747f37: a naive timestamp does not identify an absolute
+    instant, and the old parse assumed UTC — a silent guess that reorders rows
+    against a peer running anywhere else."""
+    rows = [ROWS[0], _row("r2", "middle", "2026-08-18T21:00:00"), ROWS[2]]
+    assert _run(monkeypatch, rows) == cli.RC_UNKNOWN
+    assert "timezone-naive" in capsys.readouterr().err
+
+
+def test_equal_timestamps_do_not_degrade_a_healthy_read(capsys, monkeypatch, registry):
+    """Ties are ordered, not refused: two records really can share a second, and
+    refusing them would degrade a healthy read."""
     rows = [_row("r1", "a", T1), _row("r2", "b", T1), _row("r3", "c", T2)]
     assert _run(monkeypatch, rows) == cli.RC_OK
     assert cli.peers.get_cursor(registry, "default", UID) == "r3"

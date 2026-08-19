@@ -119,6 +119,7 @@ bundle this produces, it is compatible.
 ```python
 import base64, json, os, hashlib
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.exceptions import InvalidTag
 
 b64  = lambda b: base64.b64encode(b).decode()
 # validate=True: silently discarding non-alphabet bytes turns a corrupted or
@@ -150,21 +151,53 @@ class WrongPassphrase(Exception):
 class BundleRejected(Exception):
     """The bundle is not the one the caller asked for, or is malformed."""
 
-# Bounds on KDF parameters read from an ATTACKER-INFLUENCED document. n=2**22
-# would demand 4 GiB and hang the host; n=2 would cost nothing to brute-force.
+# Bounds on KDF parameters read from an ATTACKER-INFLUENCED document. Per
+# parameter AND on the product, because scrypt's cost is 128*n*r and bounding
+# the factors separately does not bound it: n=2**20 with r=32 is inside every
+# per-parameter limit below and still demands 4 GiB — the exact
+# resource-exhaustion this guard exists to prevent (codex-coder on f43e214b).
 KDF_MIN_N, KDF_MAX_N, KDF_MAX_R, KDF_MAX_P = 2**14, 2**20, 32, 4
+KDF_MAX_MEMORY = 512 * 1024 * 1024        # the ceiling that actually binds
 
 def _check_kdf(k):
     if k.get("name") != "scrypt":
         raise BundleRejected(f"unsupported kdf {k.get('name')!r}")
     n, r, p = k.get("n"), k.get("r"), k.get("p")
-    if not all(isinstance(v, int) for v in (n, r, p)):
+    if not all(isinstance(v, int) and not isinstance(v, bool)
+               for v in (n, r, p)):
         raise BundleRejected("kdf parameters must be integers")
     if not (KDF_MIN_N <= n <= KDF_MAX_N) or n & (n - 1):
         raise BundleRejected(f"kdf n={n} out of bounds or not a power of two")
     if not (1 <= r <= KDF_MAX_R) or not (1 <= p <= KDF_MAX_P):
         raise BundleRejected(f"kdf r={r}/p={p} out of bounds")
+    cost = 128 * n * r
+    if cost > KDF_MAX_MEMORY:
+        raise BundleRejected(
+            f"kdf would need {cost // (1 << 20)} MiB, over the "
+            f"{KDF_MAX_MEMORY // (1 << 20)} MiB ceiling — refusing to let a "
+            "document choose this host's memory budget")
     return n, r, p
+
+
+def _field(bundle_or_wrap, name, *, size=None):
+    """Decode one base64 field as STRUCTURE, not as a decryption attempt.
+
+    Malformed base64, an absent field, or a nonce of the wrong length are facts
+    about the DOCUMENT. Letting them fall into the wrap loop's except-clause
+    reports them as "wrong passphrase", which is the same conflation this
+    document spends a section warning about (codex-coder on f43e214b).
+    """
+    raw = bundle_or_wrap.get(name)
+    if not isinstance(raw, str):
+        raise BundleRejected(f"field {name!r} missing or not a string")
+    try:
+        blob = ub64(raw)
+    except Exception as e:
+        raise BundleRejected(f"field {name!r} is not valid base64: {e}") from e
+    if size is not None and len(blob) != size:
+        raise BundleRejected(
+            f"field {name!r} is {len(blob)} bytes, expected {size}")
+    return blob
 
 def unseal(bundle, passphrase, *, expected_role, expected_version=None,
            expected_schema="sealed-bundle/v1"):
@@ -204,15 +237,25 @@ def unseal(bundle, passphrase, *, expected_role, expected_version=None,
             # passphrase is the failure this document warns about two sections
             # down; do not let the code do what the prose forbids.
             raise BundleRejected(f"cannot run this bundle's KDF here: {e}") from e
+        # Structure first, as BundleRejected. Only the AEAD tag check below may
+        # mean "not your wrap".
+        w_nonce = _field(w, "nonce", size=12)
+        w_dek = _field(w, "wrapped_dek")
         try:
-            dek = ChaCha20Poly1305(kek).decrypt(
-                      ub64(w["nonce"]), ub64(w["wrapped_dek"]), A)
-        except Exception:
+            dek = ChaCha20Poly1305(kek).decrypt(w_nonce, w_dek, A)
+        except InvalidTag:
             tried += 1
-            continue                            # wrong passphrase for THIS wrap
-        pt = ChaCha20Poly1305(dek).decrypt(
-                 ub64(bundle["payload"]["nonce"]),
-                 ub64(bundle["payload"]["ct"]), A)
+            continue                # THE one error that means: not this wrap
+        p_nonce = _field(bundle["payload"], "nonce", size=12)
+        p_ct = _field(bundle["payload"], "ct")
+        try:
+            pt = ChaCha20Poly1305(dek).decrypt(p_nonce, p_ct, A)
+        except InvalidTag as e:
+            # The wrap opened, so the passphrase was right and the PAYLOAD did
+            # not authenticate. That is tampering or corruption, never a typo,
+            # and it must not be retried against the next wrap.
+            raise BundleRejected("payload failed authentication after the wrap "
+                                 "opened — bundle altered or corrupt") from e
         return json.loads(pt)
     # AEAD cannot tell a wrong key from a tampered ciphertext — both are just
     # "tag did not verify". Say all three possibilities rather than the one that

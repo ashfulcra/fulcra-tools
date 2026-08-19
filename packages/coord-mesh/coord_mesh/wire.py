@@ -100,22 +100,48 @@ def parse_time(value: Optional[str]) -> Optional["datetime.datetime"]:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        # A naive timestamp does not identify an absolute instant, and assuming
+        # UTC is a silent guess that can reorder rows against a peer running in
+        # any other zone (codex-coder on bd747f37). UNKNOWN, not "probably UTC".
+        return None
     return parsed.astimezone(_dt.timezone.utc)
 
 
-def ascending(rows: list) -> bool:
-    """True only when every row carries a parseable time AND the sequence is
-    monotonically non-decreasing.
+def sort_key(row) -> Optional[tuple]:
+    """The TOTAL order key for a row: ``(recorded_at, id)``.
 
-    codex-coder on 051109f: one measured ascending response is an observation,
-    not a transport contract. A cursor that advances to ``rows[-1]`` on faith
-    anchors to a non-newest row the moment the platform returns descending or
-    disordered data, recreating exactly the loss-and-replay defect the ordering
-    fix removed. So the order is PROVEN per read, or the read is UNKNOWN.
+    None when the row cannot be placed — no id, or a timestamp that is absent,
+    unparseable, or timezone-naive.
+
+    WHY A SECONDARY KEY (codex-coder on bd747f37). An earlier version accepted
+    equal timestamps as "monotonic non-decreasing", reasoning that two records
+    can share a second and that rejecting ties would degrade a healthy read.
+    Both halves were true and the conclusion was still wrong: timestamps alone
+    are a PARTIAL order, so any permutation of a tied group passes the check,
+    and the last row of a tied group is an arbitrary choice of cursor anchor —
+    which is the loss-and-replay defect all over again, just narrowed to ties.
+
+    The record id breaks ties deterministically. It is ours to compute, so the
+    order does not depend on the platform sorting ties any particular way — an
+    assumption this package has now been burned by twice.
     """
-    times = [parse_time(recorded_at(r) if isinstance(r, dict) else None)
-             for r in rows]
-    if any(t is None for t in times):
-        return False
-    return all(times[i] <= times[i + 1] for i in range(len(times) - 1))
+    when = parse_time(recorded_at(row) if isinstance(row, dict) else None)
+    rid = record_id(row) if isinstance(row, dict) else None
+    if when is None or not rid:
+        return None
+    return (when, rid)
+
+
+def total_order(rows: list) -> Optional[list]:
+    """Rows in canonical ``(recorded_at, id)`` order, or None if any row cannot
+    be placed.
+
+    Returning a canonical order rather than merely checking the transport's is
+    the point: a cursor advanced to the last element of THIS list anchors to the
+    newest record by an order we computed, so a descending or disordered
+    response can no longer choose the anchor for us.
+    """
+    keys = [sort_key(r) for r in rows]
+    if any(k is None for k in keys):
+        return None
+    return [r for _, r in sorted(zip(keys, rows), key=lambda pair: pair[0])]
