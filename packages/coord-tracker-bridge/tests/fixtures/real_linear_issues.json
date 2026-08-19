@@ -1,0 +1,1919 @@
+{
+  "captured_at": "2026-08-19T22:41:22.451612+00:00",
+  "captured_from": "linear.app",
+  "node_count": 100,
+  "operation": "CoordInbox",
+  "query": "query CoordInbox($team:ID!,$after:String){issues(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id identifier title url updatedAt state{name type} assignee{displayName} labels(first:10){nodes{name}}} pageInfo{hasNextPage endCursor}}}",
+  "redacted_fields": [
+    "title",
+    "description",
+    "url",
+    "assignee.displayName"
+  ],
+  "response": {
+    "data": {
+      "issues": {
+        "nodes": [
+          {
+            "assignee": null,
+            "id": "97cd42b8-0c21-48ec-88eb-14b25cc7335c",
+            "identifier": "BUS-126",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-29T22:32:27.089Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "a6702a9d-ab30-4b72-90ae-7a7530d46b8d",
+            "identifier": "BUS-125",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-29T12:32:26.417Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "8a125c78-f5f1-41be-88a1-227592d68b0d",
+            "identifier": "BUS-124",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-29T10:31:59.896Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "ec4021e3-9679-4dcb-9c9d-bedf23cc9762",
+            "identifier": "BUS-123",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-29T10:31:58.719Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "eac224bc-7669-45fa-a85d-3126e58f46ca",
+            "identifier": "BUS-122",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-28T15:32:22.000Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "b9797cae-8b76-4841-9362-92e5dcf88819",
+            "identifier": "BUS-121",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-28T13:32:17.429Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "54403a69-5c5f-44e7-b42f-5f6d67af5a61",
+            "identifier": "BUS-120",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-28T10:40:39.818Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "63a55f44-6af4-47ae-9128-f1a1a8151677",
+            "identifier": "BUS-119",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-28T03:31:59.594Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "60192e40-779d-48a9-84fc-0ca86574ca36",
+            "identifier": "BUS-118",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-27T23:32:24.109Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "ad55defa-0804-416d-b2d8-89e20d36e64d",
+            "identifier": "BUS-117",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-27T18:32:02.576Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "cbc7d79a-c1b5-4d8a-84e2-cb98100d9204",
+            "identifier": "BUS-116",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-27T17:32:03.108Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "95019ae1-7015-4bf5-9da6-27d158274363",
+            "identifier": "BUS-115",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-27T01:31:50.503Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "3647dfdf-212c-4ba7-bdcf-67b8558c301c",
+            "identifier": "BUS-114",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-26T21:32:50.798Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "f4fff5a3-0190-4e7d-99fe-290538d6f673",
+            "identifier": "BUS-113",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-26T19:31:55.625Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "2ed069f4-ec0f-411c-9783-489d076da13a",
+            "identifier": "BUS-112",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-26T05:31:36.778Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "c5a9d571-8f1a-42f5-a4a8-9ba7d3ad7682",
+            "identifier": "BUS-111",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-26T05:31:35.980Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "7b67a4c4-6fdc-42d0-9833-0b04d88081ba",
+            "identifier": "BUS-110",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-31T09:32:30.321Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "bf70ae03-e5c1-41da-a9c9-dcb01944ca83",
+            "identifier": "BUS-109",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-25T12:32:29.517Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "1e135134-58eb-4461-9608-8fe0878a32c0",
+            "identifier": "BUS-108",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-25T12:32:28.062Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "da92ca65-aadd-471a-9826-7358ef5f0cc2",
+            "identifier": "BUS-107",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-25T01:31:28.715Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "404fbf0b-5592-40f2-9a5a-668efcb5cfc9",
+            "identifier": "BUS-106",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T18:40:07.344Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "b0d0394e-e835-4f4c-a896-fabb5e6a7171",
+            "identifier": "BUS-105",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:task"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T12:31:55.720Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "534f144c-fb89-4135-aaa3-5c0a99d139d4",
+            "identifier": "BUS-104",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T11:31:53.117Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "3c96cf55-084c-424a-b937-9b1f6b056a85",
+            "identifier": "BUS-103",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:18.721Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "a5a85eb6-6ae1-4378-8a9e-d3d74ac4a59d",
+            "identifier": "BUS-102",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:18.248Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "f473a171-aafc-48d9-8181-48b883ce5bd3",
+            "identifier": "BUS-101",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T12:10:24.193Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "c863c3af-752c-45e2-9296-71851ce8c142",
+            "identifier": "BUS-100",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T01:07:16.792Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "5ab222d1-0628-4014-affb-14bfcb1f43f3",
+            "identifier": "BUS-99",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T23:07:47.962Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "cc6c2fea-eab4-4256-b450-3a448105b090",
+            "identifier": "BUS-98",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T05:06:40.595Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "6f732e9c-f55a-46ee-9cfe-ba410f5c852e",
+            "identifier": "BUS-97",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T19:07:13.942Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "8d253212-ae56-4054-867e-67c6adf064ce",
+            "identifier": "BUS-96",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T11:07:57.070Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "04793d82-3216-49f8-99c1-5ceac37387db",
+            "identifier": "BUS-95",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T23:40:53.782Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "66353908-53ca-4069-be59-a3df475261a6",
+            "identifier": "BUS-94",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:14.071Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "39a62e8e-e95b-4fe1-8d91-70cbbfca02be",
+            "identifier": "BUS-93",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:13.646Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "29b91674-64cd-4cf0-9327-28d9b9b6befc",
+            "identifier": "BUS-92",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:12.990Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "9216ace8-25e6-470d-8e1c-1bf5e225ed0d",
+            "identifier": "BUS-91",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:12.357Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "19f6a370-7671-4a0a-9300-9523a5b7ecba",
+            "identifier": "BUS-90",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:11.957Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "7e7ee687-52e0-49cb-a7eb-534fc121e77d",
+            "identifier": "BUS-89",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:11.563Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "851f7735-45a8-4104-b126-7e91c5d68678",
+            "identifier": "BUS-88",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T18:01:11.154Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "4353de3e-0c04-4d56-9445-8ea481c13c0a",
+            "identifier": "BUS-87",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T16:31:54.688Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "a072b113-a0ec-437f-98c8-1a3f12243e3e",
+            "identifier": "BUS-86",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-23T16:31:54.137Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "79c427cf-4783-4619-aed5-baae286577d8",
+            "identifier": "BUS-85",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-24T16:13:51.640Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "6efe0a75-5386-4476-80a8-6610a587e5e4",
+            "identifier": "BUS-84",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T21:46:25.513Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "c277d3a1-8469-49fe-b7d0-4c1540415840",
+            "identifier": "BUS-83",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T21:46:24.845Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "86a84b9f-ba5f-467a-b2d2-394755b9ef27",
+            "identifier": "BUS-82",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T21:46:22.260Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "6533547d-c5fa-4c39-8ccd-aa96f601ad62",
+            "identifier": "BUS-81",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T14:48:05.977Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "9c980b72-6473-4051-9431-d386c85f847d",
+            "identifier": "BUS-80",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T14:48:05.206Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "d441aaf8-fbc1-45b1-bd8e-ced255c45220",
+            "identifier": "BUS-79",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T14:48:04.749Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "f2af1c10-7a0d-4d41-a95e-53f0adca303f",
+            "identifier": "BUS-78",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T13:39:24.355Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "d4539785-ec41-492b-9f89-d56e0b37b073",
+            "identifier": "BUS-77",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T12:42:14.045Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "43e22da7-ec85-4797-b350-d572145038fc",
+            "identifier": "BUS-76",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T12:38:51.389Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "493cdd8a-30f9-453f-9dd3-c520c1b01121",
+            "identifier": "BUS-75",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T20:07:23.764Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "091bf52f-42d5-4328-b5cf-82c08419cef4",
+            "identifier": "BUS-74",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T13:57:38.622Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "6810656f-775f-4f09-bcdf-a4c844f4f197",
+            "identifier": "BUS-73",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T16:36:10.675Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "932b13b1-6eb9-4ca9-9c34-efadd3ddc33c",
+            "identifier": "BUS-72",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T16:20:09.806Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "0ca910b6-311a-4b17-a600-15d77b8ac48b",
+            "identifier": "BUS-71",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T01:32:24.612Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "e0169900-be1f-4631-970e-07496b36423d",
+            "identifier": "BUS-70",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "blocked-on-ash"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T14:51:13.882Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "51a5a989-62a4-4b16-8a2c-c5ae9fc15cde",
+            "identifier": "BUS-69",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "blocked-on-ash"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T14:51:13.195Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "d31ee986-f23e-4089-8be9-a56fd439e71f",
+            "identifier": "BUS-68",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "blocked-on-ash"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T14:51:12.731Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "30271e91-9da6-47e5-af63-344d581c95f4",
+            "identifier": "BUS-67",
+            "labels": {
+              "nodes": []
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:24.761Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "fe3860c1-e19c-4eb4-9d7b-4c706a1cd8d7",
+            "identifier": "BUS-66",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-31T09:32:30.509Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "b6fb2e47-4572-4cb8-a329-5f42e999db00",
+            "identifier": "BUS-65",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:52.844Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "2770216d-d936-4b7b-8b9f-62941bdfef16",
+            "identifier": "BUS-64",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:task"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:41.913Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "0819aa47-bfe1-4ca6-8e70-65737f191738",
+            "identifier": "BUS-63",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:23.965Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "dca98dce-b22b-4280-94e1-af9e2f191732",
+            "identifier": "BUS-60",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "qa-answer"
+                },
+                {
+                  "name": "type:both"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T16:09:46.419Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "329d3efd-ac54-4fb8-867c-95347210177b",
+            "identifier": "BUS-59",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "qa-answer"
+                },
+                {
+                  "name": "type:factual"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T16:37:04.466Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "a6001867-319c-4a1a-b120-1216a29f9d1e",
+            "identifier": "BUS-58",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "qa-answer"
+                },
+                {
+                  "name": "type:factual"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-22T16:37:04.407Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "d27bc342-df95-41fe-9c9b-f4a4c01289c9",
+            "identifier": "BUS-57",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:codex-coder"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "In Progress",
+              "type": "started"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-27T16:32:20.214Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "4c9a337c-efdc-4c40-9908-46f05c389652",
+            "identifier": "BUS-56",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "lane:active"
+                },
+                {
+                  "name": "agent:codex-coder"
+                },
+                {
+                  "name": "kind:directive"
+                },
+                {
+                  "name": "origin:fleet"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-18T01:21:27.794Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "4e5a90ec-bf55-4025-9583-f812fb538952",
+            "identifier": "BUS-55",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "lane:active"
+                },
+                {
+                  "name": "agent:codex-coder"
+                },
+                {
+                  "name": "kind:directive"
+                },
+                {
+                  "name": "origin:ash"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-18T01:21:28.019Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": {
+              "displayName": "<redacted person>"
+            },
+            "id": "b2b44fb7-5e7a-40c2-aa07-b885b5498188",
+            "identifier": "BUS-54",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "lane:missed"
+                },
+                {
+                  "name": "kind:missed"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:45.798Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": {
+              "displayName": "<redacted person>"
+            },
+            "id": "e221f96b-3bb0-4058-93a2-cf75ccc72547",
+            "identifier": "BUS-53",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "lane:missed"
+                },
+                {
+                  "name": "kind:missed"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:26.615Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": {
+              "displayName": "<redacted person>"
+            },
+            "id": "43d6db8b-6369-4919-bc70-034daabd9ab6",
+            "identifier": "BUS-52",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "lane:missed"
+                },
+                {
+                  "name": "kind:missed"
+                }
+              ]
+            },
+            "state": {
+              "name": "Done",
+              "type": "completed"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-18T01:21:27.115Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "545d4da9-a707-4db5-94a9-605b7bb3bea0",
+            "identifier": "BUS-51",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:codex-prefs"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:44.118Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "be65664d-b789-4db4-9c91-e6b89f4225ec",
+            "identifier": "BUS-50",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:claude-code:Mac:fulcra-tools"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:26.300Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "2103855f-a1ad-48df-b8a2-4eea60b16b51",
+            "identifier": "BUS-49",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:workbook:prefs_maintainer"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:11.385Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "90a84084-3e68-491e-bb08-96a6ee9ab282",
+            "identifier": "BUS-48",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:workbook:prefs_maintainer"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:05.715Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "3ae25efa-ba0c-4f9e-887a-d28c4a9963be",
+            "identifier": "BUS-47",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:workbook:prefs_maintainer"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:10.736Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "e3ddc636-fcfe-4b19-83c6-2af646b49bb6",
+            "identifier": "BUS-46",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:workbook:prefs_maintainer"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:25.415Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "8acd5546-35bc-4fc8-b706-045f59e7eafc",
+            "identifier": "BUS-45",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:workbook:prefs_maintainer"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:25.980Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "2b0af9f0-eda2-47fe-8c9c-397e737a48af",
+            "identifier": "BUS-44",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:claude-code:Mac:Fulcra-Coord-Ideas"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:38.711Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "0f4ab7b0-5ae7-4da6-aa20-de09c243f91e",
+            "identifier": "BUS-43",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:claude-code:Mac:ideas-inbox"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:04.143Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "bb890363-aaa0-4503-aad7-4c1bc00e252c",
+            "identifier": "BUS-42",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:claude-code:Mac:ideas-inbox"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T16:20:08.990Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "c41dc82d-94f9-42d8-9a77-0a6efdf11652",
+            "identifier": "BUS-41",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:claude-code:Mac:ideas-inbox"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:02.916Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "9eaa2a49-23c3-46c7-a307-58fe1912811c",
+            "identifier": "BUS-40",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:workbook:prefs_maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:31.149Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "598fa35f-a5cf-473a-9dea-aa2b25a52c3c",
+            "identifier": "BUS-39",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-reconcile:Ashs-MBP-Work.localdomai"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:47.589Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "f7de8742-d18b-473d-8d50-1c1d0e8a3c86",
+            "identifier": "BUS-38",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:minilab-infrastructure"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:23.808Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "a355f4ab-44e6-43ea-bf26-28ff4cb23d40",
+            "identifier": "BUS-37",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:37.894Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "76c937f6-ef6e-40b8-bbb8-60521625be5a",
+            "identifier": "BUS-36",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:37.335Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "dd3a03b3-7d07-4ed5-b9ce-87baac1d9261",
+            "identifier": "BUS-35",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:25.120Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "17a6018a-875c-4c19-b8f0-14f17fa37473",
+            "identifier": "BUS-34",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:codex-coder"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:44.827Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "2b955017-f3ad-49f8-942c-8519fa283cd3",
+            "identifier": "BUS-33",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-boss"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:24.573Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "893d2e03-990e-4274-8906-1dd9dbb8bdcf",
+            "identifier": "BUS-32",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:58.471Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "8b92b77e-0b25-4711-bb45-107d5bf138c6",
+            "identifier": "BUS-31",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:39.287Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "19de0616-7dc8-4bf0-b70b-6a3f026bcefe",
+            "identifier": "BUS-30",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-28T00:31:55.378Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "c6f0470f-427f-4e0d-aab4-66723458f71c",
+            "identifier": "BUS-29",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-boss"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:49:09.088Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "2c1a1dc3-e35c-4771-a4cc-b5cc6650005f",
+            "identifier": "BUS-28",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-maintainer"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:42.568Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "ac107b39-5cb8-4edb-9c39-14a146e93612",
+            "identifier": "BUS-27",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:claude-code:ArcBot:Arc_Maintenance"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:30.634Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "27641963-5187-4728-83ae-c9d666e2f160",
+            "identifier": "BUS-26",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-boss"
+                },
+                {
+                  "name": "kind:idea"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:28.753Z",
+            "url": "<redacted url>"
+          },
+          {
+            "assignee": null,
+            "id": "6ddbe307-e8e0-42a7-848d-275236189e7b",
+            "identifier": "BUS-25",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "agent:coord-boss"
+                },
+                {
+                  "name": "kind:directive"
+                }
+              ]
+            },
+            "state": {
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "title": "<redacted title>",
+            "updatedAt": "2026-07-21T12:48:34.096Z",
+            "url": "<redacted url>"
+          }
+        ],
+        "pageInfo": {
+          "endCursor": "6ddbe307-e8e0-42a7-848d-275236189e7b",
+          "hasNextPage": true
+        }
+      }
+    }
+  }
+}

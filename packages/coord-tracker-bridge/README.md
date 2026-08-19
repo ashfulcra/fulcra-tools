@@ -124,13 +124,17 @@ from a partial enumeration.
 
 ## `linear-inbox` — read Ash's board, never touch it
 
-> **STATUS: REVIEWED, NOT VERIFIED.** Every fixture behind this verb is
-> synthetic, the field-name contract test is skipped, and no line of this code
-> has ever met the real Linear API. Eight review rounds found seven real defects
-> and the logic now survives adversarial reading — that is what "reviewed"
-> buys, and it is not the same as "works". The honest status is *ready to try*.
-> It becomes verified when someone runs `tools/capture_inbox.py` against a real
-> key, the stamped fixture lands, and the contract test un-skips.
+> **STATUS: VERIFIED against the live API, 2026-08-19.** First live read
+> rendered 124 issues from team BUS at rc 0. The fail-closed path proved itself
+> first and by accident: an expired token produced `UNKNOWN — this is not an
+> empty board`, rc 3, exactly as designed — the verb refused to report an empty
+> board for an authentication failure. `tests/fixtures/real_linear_issues.json`
+> is the stamped capture from that read (100 nodes, payload fields redacted),
+> and the field-name contract test runs against it rather than being skipped.
+>
+> Nine review rounds found seven real defects before it ever met the API. What
+> "reviewed" bought was that the first live read worked; what "verified" adds is
+> that the shapes it was reasoned about are the shapes Linear actually sends.
 
 
 `coord-tracker-bridge linear-inbox --linear-team-id <TEAM>` performs one
@@ -177,6 +181,14 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
   A caller scripting this verb must be able to tell "no work" from "could not
   read", and rc 0 during an outage would report the first while meaning the
   second.
+
+**WRITES NEED A BOT ACTOR, NOT JUST A KEY** (Ash, 2026-08-19, binding). The
+original setup used an OAuth *bot* token deliberately, so Linear actions are not
+attributed to Ash personally. A personal API key is fine for READS — nothing is
+attributed — and that is what this verb uses. Any future write plan requires the
+refreshed bot-actor OAuth setup first. This is a design constraint, not a
+preference: shipping writes on a personal key would silently rewrite the
+authorship of every action on the board.
 
 The standing rail on this lane: **zero Linear writes of any kind** — no issue
 creation, no state changes, no comments, no label/assignee mutations — until

@@ -209,21 +209,99 @@ def test_to_item_tolerates_missing_optional_fields():
 CAPTURE = os.path.join(os.path.dirname(__file__), "fixtures", "real_linear_issues.json")
 
 
-@pytest.mark.skipif(not os.path.exists(CAPTURE),
-                    reason="no live Linear capture yet — no API key on this host; "
-                           "run tools/capture_inbox.py after the first live read")
-def test_the_query_fields_exist_on_a_real_response():
-    """Pinned against a REAL capture once one exists, the same way coord-mesh
-    pins its argv against a captured --help. Skipped rather than faked: a
-    hand-written fixture labelled 'real' is the exact defect that cost
-    sealed-secrets a review round."""
+def real_capture():
     with open(CAPTURE, "r", encoding="utf-8") as fh:
-        captured = json.load(fh)
+        return json.load(fh)
+
+
+def test_the_query_fields_exist_on_a_real_response():
+    """UN-SKIPPED 2026-08-19. Pinned against a REAL capture, the same way
+    coord-mesh pins its argv against a captured --help.
+
+    This test was skipped for its whole life until now, deliberately: a
+    hand-written fixture labelled "real" is the exact defect that cost
+    sealed-secrets a review round, so it waited rather than faking one. The
+    capture arrived when coord-boss ran the first live read - 100 nodes from
+    team BUS, payload fields redacted, provenance stamped by
+    tools/capture_inbox.py."""
+    captured = real_capture()
     assert captured.get("captured_from") == "linear.app"
     nodes = captured["response"]["data"]["issues"]["nodes"]
     assert nodes, "a capture with no issues cannot pin field names"
     for node in nodes:
-        assert to_item(node) is not None
+        assert to_item(node) is not None, node.get("identifier")
+
+
+def test_the_capture_was_taken_with_THIS_query():
+    """A capture of a different selection pins nothing about ours. If someone
+    edits INBOX_QUERY without re-capturing, this fails instead of the contract
+    silently covering fields the query no longer asks for."""
+    assert real_capture().get("query") == INBOX_QUERY
+
+
+def test_the_capture_carries_its_own_measured_provenance():
+    captured = real_capture()
+    assert captured.get("captured_at")
+    assert captured.get("operation") == "CoordInbox"
+    assert captured.get("node_count") == len(
+        captured["response"]["data"]["issues"]["nodes"])
+
+
+def test_no_payload_content_leaked_into_the_repository():
+    """The capture tool redacts titles, descriptions, urls and assignee names.
+    Verified across EVERY node rather than a sample - this file is committed,
+    and a leak would be permanent."""
+    captured = real_capture()
+    assert set(captured.get("redacted_fields") or []) >= {
+        "title", "url", "assignee.displayName"}
+    for node in captured["response"]["data"]["issues"]["nodes"]:
+        assert node.get("title") == "<redacted title>", node.get("identifier")
+        assert node.get("url") == "<redacted url>", node.get("identifier")
+        assert "description" not in node
+        assignee = node.get("assignee")
+        if assignee is not None:
+            assert assignee.get("displayName") == "<redacted person>"
+
+
+def test_the_captured_page_is_page_one_of_more():
+    """Worth pinning because it shapes the test below: the real board is larger
+    than one page — coord-boss's live read rendered 124 issues from a 100-node
+    first page — so this capture ends with hasNextPage true."""
+    page_info = real_capture()["response"]["data"]["issues"]["pageInfo"]
+    assert page_info["hasNextPage"] is True
+    assert page_info["endCursor"]
+
+
+def test_the_real_board_renders_a_fold():
+    """End to end on real shapes. The capture is page one of more, so the walk
+    correctly asks for a second page; a terminal page completes it. Feeding the
+    captured page ALONE would exhaust the transport, which is the walk doing its
+    job rather than a test fixture problem."""
+    captured = real_capture()
+    page_one = {"data": captured["response"]["data"]}
+    page_two = {"data": {"issues": {"nodes": [],
+                                    "pageInfo": {"hasNextPage": False}}}}
+    result = fetch_inbox(LinearClient(FakeTransport([page_one, page_two])), TEAM)
+    assert result.state == OK, result.detail
+    assert len(result.items) == captured["node_count"]
+    text = render_fold(result, team_id=TEAM)
+    assert "UNKNOWN" not in text
+    assert f"{captured['node_count']} issue(s)" in text
+    # Real identifiers and states survive normalization into the fold.
+    assert "BUS-" in text
+    assert any(item.state in {"Backlog", "Done", "In Progress", "Todo"}
+               for item in result.items)
+
+
+def test_a_truncated_real_walk_is_UNKNOWN_not_a_short_board():
+    """The failure that matters on a multi-page board: if the second page never
+    arrives, the 100 rows we DID read must not render as the whole board."""
+    captured = real_capture()
+    page_one = {"data": captured["response"]["data"]}
+    broken = {"data": {"issues": {"nodes": [], "pageInfo": {"hasNextPage": "yes"}}}}
+    result = fetch_inbox(LinearClient(FakeTransport([page_one, broken])), TEAM)
+    assert result.unknown
+    assert result.items == ()
 
 
 # --- the verb must actually exist and run ---------------------------------
