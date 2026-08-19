@@ -3311,6 +3311,7 @@ def _fold_source(rows: list, type_name: str) -> str:
 # else is partial COVERAGE over a readable authority: rows are a floor.
 _CLASS_A_BASIS: dict[str, str] = {
     "read-degraded": "source-unreadable",
+    "inbox-degraded": "source-unreadable",
     "role-degraded": "role-resolution-partial",
     "review-role-degraded": "role-resolution-partial",
     "forge-degraded": "budget-cut",
@@ -5758,13 +5759,19 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     got, ok, reason, unresolved_roles = _inbox_rows_status(
         transport, args.team, agent, include_backlog=args.all,
         include_history=args.all)
+    # Contract 2 (OC2/OC3, ladder PR 2): the envelope seals first and rc is a
+    # pure function of its health in BOTH modes — an unreadable summaries index
+    # is UNKNOWN (rc 3), an unresolved role inbox is DEGRADED (rc 3); the old
+    # unconditional rc 0 could not tell a clean-empty inbox from either.
+    rows_out = got
+    if not ok:
+        rows_out = [_read_degraded_row(reason, marker="inbox-degraded")] + rows_out
+    if unresolved_roles:
+        rows_out = [_role_degraded_row(unresolved_roles)] + rows_out
+    envelope, rc = class_a_envelope(rows_out, source_type="inbox-source")
     if args.json:
-        rows_out = ([_read_degraded_row(reason, marker="inbox-degraded")] + got
-                    if not ok else got)
-        if unresolved_roles:
-            rows_out = [_role_degraded_row(unresolved_roles)] + rows_out
-        jsonutil.print_json(rows_out)
-        return 0
+        jsonutil.print_json(envelope)
+        return rc
     if not ok:
         _surface_read_degraded(reason, json_mode=False, marker="inbox-degraded")
     print(f"inbox — {agent}: {len(got)} item(s)")
@@ -5772,7 +5779,7 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
         print(_role_degraded_line(_role_degraded_row(unresolved_roles)))
     for r in got:
         print(_line(r))
-    return 0
+    return rc
 
 
 #: PROPOSED, NOT WIRED. Emitting this on an empty read would violate slice 4's
