@@ -341,17 +341,30 @@ def cmd_queue(args) -> int:
                   f"ptr={note.get('ptr') or '-'}")
 
         # Advance to the newest INSTANT seen, carrying every id at that instant.
-        # Union with the previous ledger when the watermark did not move, so a
-        # row seen in an earlier read is not re-shown just because this window
-        # happened to exclude it.
+        # A WATERMARK NEVER MOVES BACKWARDS (codex-coder on 6492d6c6). A window
+        # whose maximum falls below the stored watermark — retention trimming,
+        # a caller narrowing --window, a peer whose newest rows are no longer
+        # served — would otherwise rewrite the position to that older instant
+        # and replay everything between, and drop the ledger that made the
+        # boundary exact. "I saw less this time" is never evidence of having
+        # seen less overall.
         if keys and not args.no_advance and uid not in degraded:
             newest = keys[-1][0]
             at_newest = {k[1] for k in keys if k[0] == newest}
             prev_mark = wire.parse_time(watermark) if watermark else None
-            if prev_mark is not None and prev_mark == newest:
-                at_newest |= seen_ids
-            peers.set_cursor(reg, space, uid,
-                             newest.isoformat(), at_newest)
+            if prev_mark is not None and newest < prev_mark:
+                print(f"  peer {uid}: this window's newest row ({newest.isoformat()}) "
+                      f"predates the stored watermark ({watermark}) — keeping the "
+                      f"watermark; a cursor that moved back would replay "
+                      f"everything between", file=sys.stderr)
+            else:
+                if prev_mark is not None and prev_mark == newest:
+                    # Same instant: keep the ids already recorded there, so a
+                    # row seen in an earlier read is not re-shown just because
+                    # this window happened to exclude it.
+                    at_newest |= seen_ids
+                peers.set_cursor(reg, space, uid,
+                                 newest.isoformat(), at_newest)
     if not args.no_advance:
         peers.save(reg)
 

@@ -275,3 +275,30 @@ def test_equal_timestamps_do_not_degrade_a_healthy_read(capsys, monkeypatch, reg
 def test_a_single_row_window_is_trivially_ordered(monkeypatch, registry):
     assert _run(monkeypatch, [ROWS[0]]) == cli.RC_OK
     assert _anchored_at(registry, "r1")
+
+
+def test_a_stale_window_never_drags_the_watermark_backwards(capsys, monkeypatch, registry):
+    """THE r4 REGRESSION (codex-coder on 6492d6c6). A window whose maximum falls
+    below the stored watermark — retention trimming, a narrowed --window, a peer
+    whose newest rows stopped being served — used to rewrite the position to that
+    older instant, replaying everything between and discarding the ledger that
+    made the boundary exact. "I saw less this time" is not evidence of having
+    seen less overall."""
+    _run(monkeypatch, ROWS)                       # watermark at T3
+    before = _cursor(registry)
+    capsys.readouterr()
+    rc = _run(monkeypatch, [ROWS[0], ROWS[1]])    # a window that stops at T2
+    assert rc == cli.RC_OK
+    cap = capsys.readouterr()
+    assert _cursor(registry) == before, (before, _cursor(registry))
+    assert "predates the stored watermark" in cap.err
+    assert "0 event(s)" in cap.out, "nothing in that window is new"
+
+
+def test_a_stale_window_does_not_replay_what_the_watermark_already_covers(capsys, monkeypatch, registry):
+    """The consequence the guard buys: the older rows stay consumed."""
+    _run(monkeypatch, ROWS)
+    capsys.readouterr()
+    _run(monkeypatch, [ROWS[0], ROWS[1]])
+    out = capsys.readouterr().out
+    assert "oldest" not in out and "middle" not in out, out
