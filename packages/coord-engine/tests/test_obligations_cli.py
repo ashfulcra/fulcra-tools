@@ -152,22 +152,14 @@ def test_task_index_failure_degrades_every_row_derived_component():
 
 # --- queue integration (slice 3, item: "fold runs in queue/briefing paths") ---
 
-def test_empty_queue_notice_is_proposed_but_not_wired():
-    """The notice exists as a reviewed string, deliberately not emitted.
-
-    Wiring it would break slice 4's golden contract, which pins text-mode CLEAR
-    stderr byte-for-byte. That contract is another agent's, freshly merged and
-    deliberately pinned, so changing it is a decision to request rather than a
-    constant to bump. This test records the state so the proposal cannot rot into
-    a half-applied change nobody remembers.
-    """
-    assert "NOT proof that nothing is owed" in cli._QUEUE_EMPTY_IS_NOT_CLEAR
-    assert "coord-engine obligations" in cli._QUEUE_EMPTY_IS_NOT_CLEAR
-    source = __import__("inspect").getsource(cli.cmd_queue)
-    assert "_QUEUE_EMPTY_IS_NOT_CLEAR" not in source, (
-        "the notice is wired into cmd_queue; slice 4's golden CLEAR test must be "
-        "updated in the same change, with coord-boss/codex-coder agreement"
-    )
+def test_empty_queue_notice_is_emitted_when_obligations_are_not_checked(capsys):
+    """Zero event rows cannot silently masquerade as zero durable work."""
+    transport = _queue_transport()
+    rc = cli.cmd_queue(_queue_args(), transport)
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "NOT proof that nothing is owed" in err
+    assert "coord-engine obligations" in err
 
 
 # --- queue --obligations: the switchable half of the integration -------------
@@ -205,7 +197,9 @@ def test_opt_out_restores_the_pre_ruling_cost(capsys):
     transport = _queue_transport()
     rc = cli.cmd_queue(_queue_args(obligations=False), transport)
     assert rc == 0
-    assert "obligations" not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "queue: obligations " not in err
+    assert "NOT proof that nothing is owed" in err
 
 
 def test_empty_read_does_not_reconcile_unless_asked(capsys, monkeypatch):
@@ -226,7 +220,8 @@ def test_empty_read_does_not_reconcile_unless_asked(capsys, monkeypatch):
     rc = cli.main(["queue", TEAM, "--agent", AGENT], transport=transport)
     err = capsys.readouterr().err
     assert rc == 0
-    assert "obligations" not in err
+    assert "queue: obligations " not in err
+    assert "NOT proof that nothing is owed" in err
 
 
 def test_no_obligations_stays_an_accepted_no_op_alias(capsys, monkeypatch):
@@ -237,7 +232,9 @@ def test_no_obligations_stays_an_accepted_no_op_alias(capsys, monkeypatch):
         ["queue", TEAM, "--agent", AGENT, "--no-obligations"],
         transport=transport)
     assert rc == 0
-    assert "obligations" not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "queue: obligations " not in err
+    assert "NOT proof that nothing is owed" in err
 
 
 def test_obligations_flag_opts_the_empty_read_back_in(capsys, monkeypatch):

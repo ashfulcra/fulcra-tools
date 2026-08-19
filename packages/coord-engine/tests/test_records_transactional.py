@@ -162,6 +162,22 @@ def _v2_argv(*extra):
     return ["queue", "r", "--agent", "amy", "--json", *extra]
 
 
+@pytest.mark.parametrize("extra", [(), ("--peek",)])
+def test_v2_text_clear_discloses_that_obligations_were_not_checked(
+        monkeypatch, capsys, extra):
+    """Transactional text reads cannot turn zero events into a no-work claim."""
+    t = _setup(CasTransport([]))
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+
+    rc = cli.main(["queue", "r", "--agent", "amy", *extra], transport=t)
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert captured.out == ""
+    assert "NOT proof that nothing is owed" in captured.err
+    assert "coord-engine obligations" in captured.err
+
+
 def test_v2_stage_honors_an_explicit_obligations_flag(monkeypatch, capsys):
     """The staged-delivery envelope carries the real verdict, not the marker."""
     t = _setup(CasTransport([_event("r1")]))

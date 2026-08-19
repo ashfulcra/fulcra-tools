@@ -486,6 +486,12 @@ GOLDEN_DATA_STDOUT = ("2026-07-27T17:00:00 boss directive P2 hello -\n"
                       "2026-07-27T17:05:00 boss directive P2 world -\n")
 GOLDEN_WARNING = ("queue: VERSION WARNING — legacy bus-v3 authority has no "
                   "fleet version fence; cursor v2 activation is forbidden\n")
+GOLDEN_EMPTY_NOTICE = (
+    "queue: 0 events — this is NOT proof that nothing is owed. Events are "
+    "best-effort wake hints; a hint never written, or one older than this "
+    "window, leaves a durable obligation unmentioned. For the actual answer: "
+    "coord-engine obligations <team> --agent <you>  (rc 3 = UNKNOWN)\n"
+)
 GOLDEN_PEEK_NOTICE = ("queue: peek — 1 event(s) shown, cursor NOT advanced "
                       "(the owning agent still receives them)\n")
 
@@ -501,40 +507,26 @@ def test_plain_data_output_byte_identical_to_pre_slice(monkeypatch, capsys):
     assert err == GOLDEN_WARNING
 
 
-def test_plain_clear_output_byte_identical_to_pre_slice(monkeypatch, capsys):
-    """CLEAR stays byte-identical on BOTH streams again.
-
-    Flipped 2026-08-03 (promise plan T3(b)): fold-on-empty is opt-in, which
-    reverses the 2026-07-30 slice-3 default and restores the pre-ruling bytes
-    on the default read — stdout "" and stderr exactly the version warning.
-    The measured grounds are in the plan: at the default budget the fold could
-    only ever answer UNKNOWN in production, so every default wake paid for a
-    signal with no information. The verdict is still available on demand
-    (pinned below), and the machine-readable envelope always states that the
-    fold was not checked.
-    """
+def test_plain_clear_is_loud_that_durable_obligations_were_not_checked(
+        monkeypatch, capsys):
+    """An empty event delta must not look like a terminal no-work verdict."""
     t = _transport(window=[])
     rc, out, err = _run(monkeypatch, capsys, t, [])
     assert rc == 0
-    assert out == "", "the stdout half of the golden contract is unchanged"
-    assert err == GOLDEN_WARNING
-    assert "obligations" not in err
+    assert out == "", "the notice belongs on stderr, preserving stdout purity"
+    assert err == GOLDEN_WARNING + GOLDEN_EMPTY_NOTICE
+    assert "obligations: " not in err, "the default read still skips the fold"
 
 
-@pytest.mark.parametrize("argv", [[], ["--no-obligations"]])
-def test_plain_clear_with_no_obligations_is_byte_identical_to_pre_slice(
+@pytest.mark.parametrize("argv", [[], ["--no-obligations"], ["--peek"]])
+def test_plain_clear_with_no_obligations_is_explicitly_not_a_no_work_verdict(
         monkeypatch, capsys, argv):
-    """Opting out explicitly is now identical to the default — a no-op alias.
-
-    ``--no-obligations`` is retained for compatibility with every caller
-    already passing it (promise plan T3(b)); it must keep parsing and keep
-    producing the same bytes as the plain read.
-    """
+    """Default and explicit opt-out both disclose the retained-state gap."""
     t = _transport(window=[])
     rc, out, err = _run(monkeypatch, capsys, t, argv)
     assert rc == 0
     assert out == ""
-    assert err == GOLDEN_WARNING
+    assert err == GOLDEN_WARNING + GOLDEN_EMPTY_NOTICE
 
 
 def test_obligations_opt_in_still_reconciles_the_empty_read(

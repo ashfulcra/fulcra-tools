@@ -5789,18 +5789,24 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     return rc
 
 
-#: PROPOSED, NOT WIRED. Emitting this on an empty read would violate slice 4's
-#: golden contract, which pins text-mode CLEAR stderr byte-for-byte
-#: (test_plain_clear_output_byte_identical_to_pre_slice). That contract belongs to
-#: another agent's just-merged surface, so re-pinning it is their call and not a
-#: constant bump I get to make quietly. Kept here so the proposal has an exact
-#: string attached to it; escalated to coord-boss with the golden-test implication.
+#: Text-mode counterpart to the JSON envelope's ``obligations: not-checked``.
+#: A successfully served empty event window is real CLEAR for the event delta,
+#: but says nothing about retained directives, tasks, or review obligations.
 _QUEUE_EMPTY_IS_NOT_CLEAR = (
     "queue: 0 events — this is NOT proof that nothing is owed. Events are "
     "best-effort wake hints; a hint never written, or one older than this "
     "window, leaves a durable obligation unmentioned. For the actual answer: "
     "coord-engine obligations <team> --agent <you>  (rc 3 = UNKNOWN)"
 )
+
+
+def _warn_empty_queue_gap(
+        events: list[Any], *, json_mode: bool,
+        obligations: "Optional[dict[str, Any]]",
+) -> None:
+    """Disclose the retained-state gap on otherwise silent text CLEAR reads."""
+    if not json_mode and not events and obligations is None:
+        print(_QUEUE_EMPTY_IS_NOT_CLEAR, file=sys.stderr)
 
 
 def _obligations_not_checked() -> dict[str, Any]:
@@ -6196,6 +6202,8 @@ def _print_v2_delivery(
         replay: bool, obligations: Optional[dict[str, Any]] = None,
 ) -> None:
     events = pending["events"]
+    _warn_empty_queue_gap(
+        events, json_mode=json_mode, obligations=obligations)
     _print_queue_events(events, json_mode=json_mode)
     envelope = {
         "type": "queue-delivery",
@@ -6285,7 +6293,11 @@ def _cmd_queue_v2(
     if isinstance(pending, dict):
         if peek:
             fragment = _requested_obligations(args, transport, agent)
-            if bool(getattr(args, "json", False)):
+            json_mode = bool(getattr(args, "json", False))
+            _warn_empty_queue_gap(
+                pending["events"], json_mode=json_mode,
+                obligations=fragment)
+            if json_mode:
                 jsonutil.print_json(_queue_result_envelope(
                     pending["events"], cfg=cfg,
                     cursor_path=records.v2_cursor_path(
@@ -6390,7 +6402,10 @@ def _cmd_queue_v2(
         )
     if peek:
         fragment = _requested_obligations(args, transport, agent)
-        if bool(getattr(args, "json", False)):
+        json_mode = bool(getattr(args, "json", False))
+        _warn_empty_queue_gap(
+            fresh, json_mode=json_mode, obligations=fragment)
+        if json_mode:
             jsonutil.print_json(_queue_result_envelope(
                 fresh, cfg=cfg,
                 cursor_path=records.v2_cursor_path(
@@ -6929,6 +6944,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
                       "read re-covers this window", file=sys.stderr)
     if peek:
         obligations_fragment = _requested_obligations(args, transport, agent)
+        _warn_empty_queue_gap(
+            fresh, json_mode=json_mode, obligations=obligations_fragment)
         if json_mode:
             jsonutil.print_json(_queue_result_envelope(
                 renderable, cfg=cfg,
@@ -6949,6 +6966,8 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
               "POISON lines verbatim: they name a writer this build cannot "
               "format.", file=sys.stderr)
     obligations_fragment = _requested_obligations(args, transport, agent)
+    _warn_empty_queue_gap(
+        fresh, json_mode=json_mode, obligations=obligations_fragment)
     if json_mode:
         envelope = _queue_result_envelope(
             renderable, cfg=cfg,
