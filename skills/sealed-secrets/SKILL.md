@@ -1,6 +1,6 @@
 ---
 name: sealed-secrets
-description: "Carry a role's credentials across ephemeral machines by sealing them in an object store the whole team can read: envelope encryption with one message per data key, an operator passphrase as the only durable unlock, and a verify step that proves the secret AUTHENTICATES rather than merely decrypts."
+description: "Use when an agent or role needs credentials on a machine that does not have them — a fresh container, a rebuilt host, a successor session — or when sealing, rotating, or verifying secrets kept in a shared object store."
 homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
@@ -121,7 +121,9 @@ import base64, json, os, hashlib
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 b64  = lambda b: base64.b64encode(b).decode()
-ub64 = lambda s: base64.b64decode(s)
+# validate=True: silently discarding non-alphabet bytes turns a corrupted or
+# doctored field into a shorter valid-looking one instead of an error.
+ub64 = lambda s: base64.b64decode(s, validate=True)
 
 def seal(role, version, payload_obj, passphrase):
     bundle_id = b64(os.urandom(16))
@@ -142,33 +144,92 @@ def seal(role, version, payload_obj, passphrase):
                        "wrapped_dek": b64(wdek), "nonce": b64(wn)}],
             "payload": {"nonce": b64(pn), "ct": b64(ct)}}
 
-def unseal(bundle, passphrase):
+class WrongPassphrase(Exception):
+    """This wrap is not yours. The ONLY error that means "try the next wrap"."""
+
+class BundleRejected(Exception):
+    """The bundle is not the one the caller asked for, or is malformed."""
+
+# Bounds on KDF parameters read from an ATTACKER-INFLUENCED document. n=2**22
+# would demand 4 GiB and hang the host; n=2 would cost nothing to brute-force.
+KDF_MIN_N, KDF_MAX_N, KDF_MAX_R, KDF_MAX_P = 2**14, 2**20, 32, 4
+
+def _check_kdf(k):
+    if k.get("name") != "scrypt":
+        raise BundleRejected(f"unsupported kdf {k.get('name')!r}")
+    n, r, p = k.get("n"), k.get("r"), k.get("p")
+    if not all(isinstance(v, int) for v in (n, r, p)):
+        raise BundleRejected("kdf parameters must be integers")
+    if not (KDF_MIN_N <= n <= KDF_MAX_N) or n & (n - 1):
+        raise BundleRejected(f"kdf n={n} out of bounds or not a power of two")
+    if not (1 <= r <= KDF_MAX_R) or not (1 <= p <= KDF_MAX_P):
+        raise BundleRejected(f"kdf r={r}/p={p} out of bounds")
+    return n, r, p
+
+def unseal(bundle, passphrase, *, expected_role, expected_version=None,
+           expected_schema="sealed-bundle/v1"):
+    """Open a bundle the caller has NAMED. `expected_role` is not optional.
+
+    A bundle is a file someone else can point you at. AAD binding stops a role
+    field from being EDITED inside a bundle — every field in the AAD comes from
+    the same bundle, so a self-consistent one always authenticates itself. It
+    does NOT stop SUBSTITUTION: repoint role B's charter at role A's untouched
+    bundle and, with the right passphrase, it opens perfectly and hands A's
+    credentials to B's flow. The identity check has to come from the CALLER.
+    """
+    if bundle.get("schema") != expected_schema:
+        raise BundleRejected(f"schema {bundle.get('schema')!r} != {expected_schema!r}")
     if bundle.get("alg") != "ChaCha20-Poly1305":
-        raise ValueError(f"unsupported alg {bundle.get('alg')!r}")   # never fall back
+        raise BundleRejected(f"unsupported alg {bundle.get('alg')!r}")  # never fall back
+    # BEFORE any KDF work or decryption: is this even the bundle we asked for?
+    if bundle.get("role") != expected_role:
+        raise BundleRejected(
+            f"bundle is for role {bundle.get('role')!r}, caller expected "
+            f"{expected_role!r} — refusing to open somebody else's secrets")
+    if expected_version is not None and bundle.get("version") != expected_version:
+        raise BundleRejected(
+            f"bundle version {bundle.get('version')!r} != {expected_version!r}")
+
     A = aad(bundle["schema"], bundle["bundle_id"],
             bundle["role"], bundle["version"])
+    tried = 0
     for w in bundle["wraps"]:                  # try each unlock path
-        k = w["kdf"]
+        n, r, p = _check_kdf(w["kdf"])         # malformed => BundleRejected, not skipped
         try:
-            kek = hashlib.scrypt(passphrase, salt=ub64(k["salt"]), n=k["n"],
-                                 r=k["r"], p=k["p"], dklen=32,
-                                 maxmem=k.get("maxmem", MAXMEM))
+            kek = hashlib.scrypt(passphrase, salt=ub64(w["kdf"]["salt"]),
+                                 n=n, r=r, p=p, dklen=32,
+                                 maxmem=128 * n * r + (1 << 20))
+        except ValueError as e:
+            # "memory limit exceeded" is a HOST problem. Swallowing it as a bad
+            # passphrase is the failure this document warns about two sections
+            # down; do not let the code do what the prose forbids.
+            raise BundleRejected(f"cannot run this bundle's KDF here: {e}") from e
+        try:
             dek = ChaCha20Poly1305(kek).decrypt(
                       ub64(w["nonce"]), ub64(w["wrapped_dek"]), A)
         except Exception:
+            tried += 1
             continue                            # wrong passphrase for THIS wrap
         pt = ChaCha20Poly1305(dek).decrypt(
                  ub64(bundle["payload"]["nonce"]),
                  ub64(bundle["payload"]["ct"]), A)
         return json.loads(pt)
-    raise ValueError("no wrap opened — wrong passphrase, or none of these "
-                     "unlock paths are yours")
+    # AEAD cannot tell a wrong key from a tampered ciphertext — both are just
+    # "tag did not verify". Say all three possibilities rather than the one that
+    # sounds most likely, or a tampered bundle reads as a typo forever.
+    raise WrongPassphrase(
+        f"no wrap opened ({tried} tried) — wrong passphrase, none of these "
+        "unlock paths are yours, or the bundle has been altered since sealing")
 ```
 
-Two properties worth checking in your own tests, because both are silent when
-broken: a bundle whose `role` or `version` is edited must **fail to open** (the
-AAD binding), and re-sealing the same payload must produce a **different** DEK
-and nonce (the one-message rule).
+**Four properties worth testing, because every one of them is silent when
+broken.** A bundle whose `role` or `version` is *edited* must fail to open (AAD
+binding). Re-sealing the same payload must produce a *different* DEK and nonce
+(the one-message rule). A bundle for a *different* role, entirely untouched and
+sealed with the same passphrase, must be **rejected before any decryption** —
+that is pointer substitution, and it is the one the AAD cannot catch for you.
+And a host that cannot afford the KDF must raise something distinguishable from
+a wrong passphrase, or a caller retypes forever against a memory error.
 
 A random **data key (DEK)** encrypts the payload. Each entry in `wraps`
 encrypts that DEK to one **key-encrypting key (KEK)**. `wraps` is a list from
@@ -226,6 +287,29 @@ def derive_kek(passphrase: bytes, salt: bytes) -> bytes:
     """32-byte KEK. Raises ValueError if the host will not grant the memory."""
     return hashlib.scrypt(passphrase, salt=salt, n=N, r=R, p=P,
                           dklen=DKLEN, maxmem=MAXMEM)
+```
+
+**The passphrase is bytes, and which bytes must not depend on the host.** A
+passphrase typed on one machine and retyped on another can differ while looking
+identical: composed vs decomposed accents, a non-breaking space, a trailing
+newline from a here-doc. scrypt hashes bytes, so any of those is simply a
+different passphrase, and the failure it produces is indistinguishable from a
+typo. Pin it once, at the edge, and never re-normalize deeper in:
+
+```python
+import unicodedata
+
+def passphrase_bytes(text: str) -> bytes:
+    """NFKC, stripped of surrounding whitespace, encoded UTF-8. One definition,
+    applied at seal AND unseal, or the two derive different KEKs."""
+    pw = unicodedata.normalize("NFKC", text).strip()
+    if len(pw) < 20:
+        # This bundle is readable by everyone the store is readable by, so its
+        # only real defence is the cost of guessing this string. A memory-hard
+        # KDF buys orders of magnitude; it does not rescue a weak passphrase.
+        raise ValueError("passphrase too short for an offline-readable bundle "
+                         "— use a generated phrase of 20+ characters")
+    return pw.encode("utf-8")
 ```
 
 Two failure modes to handle rather than discover:
