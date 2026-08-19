@@ -577,7 +577,12 @@ it (not on PyPI).
     and emit a trailing `review-source`/`forge-source` row disclosing it (`source: projection` + `as_of`,
     or `source: raw-scan` + the `reason`: stale / incomplete / malformed — duplicate slug rows and
     impossible `settled` combinations are malformed — / unrecognized). A projection that cannot be
-    served falls back to the full raw scan LOUDLY; it is never silently served as current. **The
+    served falls back to the full raw scan LOUDLY; it is never silently served as current. Reconcile
+    publishes review + forge as one complete generation: a budget-cut or failed build refuses the
+    `summaries.json` write and leaves the last complete aggregate intact. A publication-generation
+    fence binds every projection section to its writer pass, so a preserving older writer that
+    carries the fence but rebuilds sections without matching bindings is rejected by newer readers.
+    **The
     caller's OWN head is feed-gated too:** with a clean `data-updates` window, only caller-owned slugs
     named changed since the projection anchor are raw-tallied; unchanged caller-owned slugs are served
     from the projection. Without positive feed proof, every caller-owned head slug is raw-tallied
@@ -924,9 +929,11 @@ it (not on PyPI).
     added in version N is wiped by any host older than N**, which rebuilds the document from the
     key set it knows and writes it over everyone else's (this is how `acks_folded_through` kept
     vanishing while any pre-passthrough host still reconciled). `build_aggregate` now carries
-    unknown top-level keys through. **A new top-level key is live only once the whole fleet is
-    upgraded** — check `health` before assuming a fold-state key is doing anything, and never
-    rebuild the aggregate from a fixed key set.
+    unknown top-level keys through. A preserving older host that carries the projection-publication
+    fence but cannot mint its section bindings is fail-closed by newer readers; a host older than the
+    passthrough can still remove any fence. **A general new top-level key is live only once the whole
+    fleet is upgraded** — check `health` before assuming a fold-state key is doing anything, and
+    never rebuild the aggregate from a fixed key set.
 
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and

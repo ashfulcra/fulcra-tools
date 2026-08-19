@@ -709,7 +709,7 @@ def cmd_reconcile(args: argparse.Namespace, transport: Any) -> int:
         retention_days=getattr(args, "retention_days", None),
     )
     if res.get("degraded"):
-        print(f"reconcile degraded (no writes): {res.get('reason')}", file=sys.stderr)
+        print(f"reconcile degraded: {res.get('reason')}", file=sys.stderr)
         return 1
     print(
         f"reconciled team/{args.team}: {res['tasks']} tasks "

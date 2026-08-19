@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import aggregate, config, health as health_mod, jsonutil, model, okf, review
+from . import __version__, aggregate, config, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .log import get_logger
@@ -83,6 +83,11 @@ def log_path(team: str) -> str:
 
 def summaries_path(team: str) -> str:
     return f"team/{team}/_coord/summaries.json"
+
+
+def projection_progress_path(team: str) -> str:
+    """Private convergence state; never a reader-serving aggregate."""
+    return f"team/{team}/_coord/projection-build-progress.json"
 
 
 def _acks_prefix(team: str) -> str:
@@ -894,6 +899,41 @@ def _load_prior_aggregate(transport: Any, team: str) -> Optional[dict[str, Any]]
         return None
 
 
+def _publication_generation(aggregate_doc: Any) -> Optional[str]:
+    """The exact public generation a private build may be based on."""
+    fence = ((aggregate_doc or {}).get(projection_mod.PUBLICATION_FENCE_KEY)
+             if isinstance(aggregate_doc, dict) else None)
+    if (isinstance(fence, dict)
+            and fence.get("schema") == projection_mod.PUBLICATION_FENCE_SCHEMA
+            and isinstance(fence.get("generation"), str)
+            and fence.get("generation")):
+        return fence["generation"]
+    return None
+
+
+def _load_projection_progress(
+        transport: Any, team: str, prior_agg: Any) -> dict[str, Any]:
+    """Load private partial-build state only for the current public base.
+
+    Binding the shard to the public generation prevents a completed publish
+    from being followed by an older partial cursor, including when both hosts
+    used the same wall-clock second.
+    """
+    raw = transport.read(projection_progress_path(team))
+    if not raw:
+        return {}
+    try:
+        progress = json.loads(raw)
+    except Exception:
+        return {}
+    if (not isinstance(progress, dict)
+            or progress.get("schema") != projection_mod.BUILD_PROGRESS_SCHEMA
+            or progress.get("base_generation")
+                != _publication_generation(prior_agg)):
+        return {}
+    return progress
+
+
 # --- E1: incremental reconcile (feed-cursor fold) ---------------------------
 #
 # Reconcile's default pass is a FEED DELTA, not a directory scan: consume the
@@ -1400,16 +1440,24 @@ def reconcile(
     # The read half of the annotation modernization: fold review verdict state
     # and forge responsibility/feedback into summaries.json so wake folds answer
     # from ONE read instead of a budget-bounded raw scan (projection.py has the
-    # schema + freshness contract). Best-effort: a build failure carries the
-    # prior sections unchanged (their old stamp ages them out honestly) and can
-    # never fail the pass.
+    # schema + freshness contract). A build failure carries the prior sections
+    # only as diagnostic state; the atomic publication gate below refuses the
+    # aggregate write, so carried bytes can never be re-stamped as current.
     # The task projection depends only on the ack fold + rows already completed
-    # above.  Build it independently so a review/forge transport failure cannot
-    # prevent a current needs-me section from being published.
+    # above. Build it independently so its state is still available to the
+    # refusal result and health shard when review/forge cannot publish.
     proj_state: dict[str, Any] = {
         projection_mod.NEEDS_ME_KEY:
             projection_mod.build_needs_me_projection(
                 rows, now=now, complete=fold.conclusive),
+    }
+    # The public aggregate is atomic, but an incomplete review section is also
+    # the builder's durable scan frontier. Resume that frontier from a private
+    # shard bound to the exact public generation it was derived from.
+    build_progress = _load_projection_progress(transport, team, prior_agg)
+    built_current = {
+        projection_mod.REVIEWS_KEY: False,
+        projection_mod.FORGE_KEY: False,
     }
     try:
         # SEPARATE DEADLINES, opened independently. These used to share ONE
@@ -1428,18 +1476,27 @@ def reconcile(
         # partial review set cannot yield a complete forge view. Only the budget
         # was ever wrong.
         proj_dl = Deadline.open(projection_mod.build_budget())
+        prior_reviews = (build_progress.get(projection_mod.REVIEWS_KEY)
+                         or (prior_agg or {}).get(projection_mod.REVIEWS_KEY))
         reviews_section = projection_mod.build_review_projection(
             transport, team, now=now,
-            prior=(prior_agg or {}).get(projection_mod.REVIEWS_KEY),
+            prior=prior_reviews,
             settled_index=_load_settled_index(transport, team),
             deadline=proj_dl, log=log, feed_changes=projection_changes)
+        # On an unreadable review root the builder returns the exact prior dict
+        # untouched. Identity is its explicit carry contract; wall-clock stamps
+        # are not provenance because two fleet hosts can share one second.
+        built_current[projection_mod.REVIEWS_KEY] = (
+            reviews_section is not prior_reviews)
         forge_dl = Deadline.open(projection_mod.forge_budget())
         forge_section = projection_mod.build_forge_projection(
             transport, team, now=now,
             review_rows=reviews_section.get("rows") or [],
             reviews_complete=bool(reviews_section.get("complete")),
-            prior=(prior_agg or {}).get(projection_mod.FORGE_KEY),
+            prior=(build_progress.get(projection_mod.FORGE_KEY)
+                   or (prior_agg or {}).get(projection_mod.FORGE_KEY)),
             deadline=forge_dl, log=log)
+        built_current[projection_mod.FORGE_KEY] = True
         proj_state[projection_mod.REVIEWS_KEY] = reviews_section
         proj_state[projection_mod.FORGE_KEY] = forge_section
         if not reviews_section.get("complete"):
@@ -1453,6 +1510,68 @@ def reconcile(
         for key in (projection_mod.REVIEWS_KEY, projection_mod.FORGE_KEY):
             if isinstance((prior_agg or {}).get(key), dict):
                 proj_state[key] = (prior_agg or {})[key]
+
+    # Persist convergence state BEFORE the public gate. Readers never consume
+    # this shard. Staging complete work too means a failed aggregate write does
+    # not discard it; after a successful publish the changed public generation
+    # automatically invalidates this shard on the next pass.
+    if all(built_current.values()):
+        progress = {
+            "schema": projection_mod.BUILD_PROGRESS_SCHEMA,
+            "base_generation": _publication_generation(prior_agg),
+            "generated_at": now,
+            projection_mod.REVIEWS_KEY:
+                proj_state[projection_mod.REVIEWS_KEY],
+            projection_mod.FORGE_KEY:
+                proj_state[projection_mod.FORGE_KEY],
+        }
+        if not transport.write(
+                projection_progress_path(team), jsonutil.dumps(progress)):
+            warnings.append("projection build progress write failed")
+
+    # Review + forge publication is all-or-nothing. A section that exhausted its
+    # deadline or a carried prior section means this pass did not produce one
+    # complete generation. Refuse the aggregate write loudly rather than replace
+    # the last complete generation with bytes we already know are partial (the
+    # live 187/290 regression). needs_me is rebuilt separately but shares this
+    # aggregate write. Refusal therefore retains the prior public needs_me
+    # section, a safe-redundant direction: newly acked work may stay visible,
+    # but owed work is not hidden. On the next publishable pass, an inconclusive
+    # ack fold carries its held retry anchor into the committed generation.
+    incomplete = [
+        key for key, schema in projection_mod.ATOMIC_PUBLICATION_SECTIONS
+        if (not built_current[key]
+            or not isinstance(proj_state.get(key), dict)
+            or proj_state[key].get("schema") != schema
+            or proj_state[key].get("complete") is not True
+            or proj_state[key].get("generated_at") != now)
+    ]
+    if incomplete:
+        reason = ("projection publication refused: incomplete required "
+                  f"section(s): {', '.join(incomplete)}")
+        warnings.append(reason)
+        result = {
+            "degraded": True,
+            "reason": reason,
+            "tasks": len(rows),
+            "warnings": warnings,
+            "rows": rows,
+        }
+        _write_health_shard(
+            transport, team, host=host, now=now, result=result, log=log)
+        log.error("reconcile pass aborted (prior artifacts intact)",
+                  team=team, reason=reason)
+        return result
+
+    publication_generation = f"{__version__}:{host}:{now}"
+    for key, _schema in projection_mod.REQUIRED_SECTIONS:
+        proj_state[key][
+            projection_mod.FENCE_GENERATION_KEY] = publication_generation
+    proj_state[projection_mod.PUBLICATION_FENCE_KEY] = {
+        "schema": projection_mod.PUBLICATION_FENCE_SCHEMA,
+        "generation": publication_generation,
+        "minimum_writer_version": __version__,
+    }
 
     # --- heal engine-owned derived artifacts ---
     if not transport.write(index_path(team), okf.render_index(rows)):
@@ -1524,7 +1643,8 @@ def reconcile(
                                   RECONCILE_CURSOR_KEY,
                                   projection_mod.REVIEWS_KEY,
                                   projection_mod.FORGE_KEY,
-                                  projection_mod.NEEDS_ME_KEY)}
+                                  projection_mod.NEEDS_ME_KEY,
+                                  projection_mod.PUBLICATION_FENCE_KEY)}
     agg = aggregate.build_aggregate(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
