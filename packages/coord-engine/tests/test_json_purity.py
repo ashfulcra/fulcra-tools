@@ -56,9 +56,10 @@ def test_needs_me_json_one_value_under_read_degraded(capsys):
 def test_inbox_json_one_value_under_read_degraded(capsys):
     t = FakeTransport(); _corrupt_index(t)
     capsys.readouterr()
-    assert cli.main(["inbox", "r", "--agent", "alice", "--json"], transport=t) == 0
+    assert cli.main(["inbox", "r", "--agent", "alice", "--json"], transport=t) == 3  # contract 2: rc follows health (OC3/E4)
     v = _one_json_value(capsys.readouterr().out)
-    assert any(r.get("type") == "inbox-degraded" for r in v)
+    assert v["health"] == "UNKNOWN"
+    assert any(r.get("type") == "inbox-degraded" for r in v["rows"])
 
 
 def test_briefing_json_one_value_under_read_degraded(capsys):

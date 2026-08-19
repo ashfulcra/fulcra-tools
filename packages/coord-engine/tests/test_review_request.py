@@ -1020,7 +1020,7 @@ def test_request_notifies_each_required_reviewer(capsys):
     for reviewer in ("alice", "bob"):
         capsys.readouterr()
         cli.main(["inbox", "r", "--agent", reviewer, "--json"], transport=t)
-        got = json.loads(capsys.readouterr().out)
+        got = needs_me_rows(json.loads(capsys.readouterr().out))
         assert any("REVIEW REQUEST: pr-note" in (r.get("title") or "")
                    for r in got), (reviewer, got)
 

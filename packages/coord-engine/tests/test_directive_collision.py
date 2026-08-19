@@ -18,7 +18,7 @@ directive path carry the payload hash — ``<title-slug>-<sha256(payload)[:8]>``
 import json
 
 from coord_engine import cli, tasks
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 
 def _dslug(title, *, summary=None, next=None, assignee):
@@ -179,7 +179,7 @@ def test_distinct_messages_land_at_distinct_hash_paths(capsys):
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     assert cli.main(["inbox", "r", "--agent", "amy", "--json"], transport=t) == 0
-    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    names = {r["name"] for r in needs_me_rows(json.loads(capsys.readouterr().out))}
     assert names == {d[len("team/r/task/"):-len(".md")] for d in docs}
 
 
@@ -220,9 +220,9 @@ def test_same_text_different_assignees_delivers_both(capsys):
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     assert cli.main(["inbox", "r", "--agent", "amy", "--json"], transport=t) == 0
-    amy = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    amy = {r["name"] for r in needs_me_rows(json.loads(capsys.readouterr().out))}
     assert cli.main(["inbox", "r", "--agent", "bob", "--json"], transport=t) == 0
-    bob = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    bob = {r["name"] for r in needs_me_rows(json.loads(capsys.readouterr().out))}
     assert amy == {amy_slug}
     assert bob == {bob_slug}
 

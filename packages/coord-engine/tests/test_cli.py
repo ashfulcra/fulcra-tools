@@ -567,17 +567,17 @@ def test_cli_tell_inbox_ack_flow(capsys):
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    got = {r["name"] for r in _j.loads(capsys.readouterr().out)}
+    got = {r["name"] for r in needs_me_rows(_j.loads(capsys.readouterr().out))}
     assert got == {do_slug, all_slug}
     # ack the direct one -> disappears for amy, broadcast still there
     cli.main(["inbox", "r", "-a", "amy", "--ack", do_slug], transport=t)
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    assert {r["name"] for r in _j.loads(capsys.readouterr().out)} == {all_slug}
+    assert {r["name"] for r in needs_me_rows(_j.loads(capsys.readouterr().out))} == {all_slug}
     # bob sees only the broadcast (do-the-thing is amy's)
     cli.main(["inbox", "r", "-a", "bob", "--json"], transport=t)
-    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == [all_slug]
+    assert [r["name"] for r in needs_me_rows(_j.loads(capsys.readouterr().out))] == [all_slug]
 
 
 def test_cli_inbox_ack_hides_before_reconcile(capsys):
@@ -591,7 +591,7 @@ def test_cli_inbox_ack_hides_before_reconcile(capsys):
               _dslug("Immediate hide", assignee="amy")], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    assert _j.loads(capsys.readouterr().out) == []
+    assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []
 
 
 def test_cli_remind_hidden_until_when(capsys):
@@ -601,7 +601,7 @@ def test_cli_remind_hidden_until_when(capsys):
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    assert _j.loads(capsys.readouterr().out) == []          # gated by not_before
+    assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []          # gated by not_before
     assert cli.main(["remind", "r", "amy", "bogus", "X"], transport=t) == 1
 
 
@@ -612,9 +612,9 @@ def test_cli_later_backlog_only_with_all(capsys):
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "@backlog", "--json"], transport=t)
-    assert _j.loads(capsys.readouterr().out) == []
+    assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []
     cli.main(["inbox", "r", "-a", "@backlog", "--all", "--json"], transport=t)
-    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == [
+    assert [r["name"] for r in needs_me_rows(_j.loads(capsys.readouterr().out))] == [
         _dslug("Someday idea", assignee="@backlog")]
 
 
@@ -777,7 +777,7 @@ def test_cli_inbox_ack_hides_immediately_pre_reconcile(capsys):
     capsys.readouterr()
     # NO reconcile between ack and read — live self-hide must apply
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    assert _j.loads(capsys.readouterr().out) == []
+    assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []
 
 
 # --- Task 2.5: live-freshness overlay (the PR348 between-reconciles false-clear) ---
@@ -794,7 +794,7 @@ def test_cli_inbox_overlay_surfaces_fresh_directive_before_reconcile(capsys):
     fresh = _dslug("Fresh work", assignee="amy")
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    names = {r["name"] for r in needs_me_rows(json.loads(capsys.readouterr().out))}
     assert fresh in names                                # overlay surfaced it, no reconcile
 
 
@@ -806,7 +806,7 @@ def test_cli_inbox_overlay_no_duplicate_for_indexed_doc(capsys):
     cli.main(["reconcile", "r"], transport=t)            # now in index AND task dir
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    names = [r["name"] for r in json.loads(capsys.readouterr().out)]
+    names = [r["name"] for r in needs_me_rows(json.loads(capsys.readouterr().out))]
     assert names.count(_dslug("Do it", assignee="amy")) == 1
 
 
@@ -821,7 +821,7 @@ def test_cli_inbox_overlay_skips_unparseable_doc(capsys):
     t.put("team/r/task/broken.md", "no frontmatter fence here — unparseable")
     capsys.readouterr()
     assert cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t) == 0  # no crash
-    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    names = {r["name"] for r in needs_me_rows(json.loads(capsys.readouterr().out))}
     assert good in names and "broken" not in names
 
 
@@ -1706,9 +1706,9 @@ def test_cli_inbox_all_includes_closed_directive_history(capsys):
     capsys.readouterr()
 
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    assert _j.loads(capsys.readouterr().out) == []
+    assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []
     cli.main(["inbox", "r", "-a", "amy", "--all", "--json"], transport=t)
-    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == [slug]
+    assert [r["name"] for r in needs_me_rows(_j.loads(capsys.readouterr().out))] == [slug]
 
 
 def test_park_respects_per_role_sla(capsys):
@@ -2841,8 +2841,8 @@ def test_inbox_degraded_transport_marker_not_clean_empty(capsys):
     _degrade_summaries(t)
     capsys.readouterr()
     rc = cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    out = json.loads(capsys.readouterr().out)
-    assert rc == 0
+    out = needs_me_rows(json.loads(capsys.readouterr().out))
+    assert rc == 3  # contract 2: unreadable index is UNKNOWN (OC3/E4)
     assert out != [], "degraded inbox must NOT be a clean empty list"
     assert any(r.get("type") == "inbox-degraded" for r in out), \
         f"degraded inbox must carry the inbox-degraded marker: {out}"
@@ -2865,7 +2865,7 @@ def test_inbox_absent_index_is_not_degraded(capsys):
     cli.main(["tell", "r", "amy", "hi", "--from", "boss"], transport=t)  # no reconcile
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    out = json.loads(capsys.readouterr().out)
+    out = needs_me_rows(json.loads(capsys.readouterr().out))
     assert not any(r.get("type") == "inbox-degraded" for r in out)
 
 
@@ -2929,7 +2929,7 @@ def test_public_reads_healthy_no_degraded_marker(capsys):
     assert "read-degraded" not in json.loads(capsys.readouterr().out)
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
     assert not any(r.get("type") == "inbox-degraded"
-                   for r in json.loads(capsys.readouterr().out))
+                   for r in needs_me_rows(json.loads(capsys.readouterr().out)))
     cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
     assert not any(r.get("type") == "read-degraded"
                    for r in needs_me_rows(json.loads(capsys.readouterr().out)))
