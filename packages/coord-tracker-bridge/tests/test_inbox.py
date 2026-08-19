@@ -455,3 +455,79 @@ def test_the_malformed_label_case_exits_3_through_the_CLI(monkeypatch, capsys):
     monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
     assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
     assert "UNKNOWN" in capsys.readouterr().out
+
+
+# --- present-but-hollow is malformed, not absent: codex-coder at dd82af14 ---
+# The fourth site of the same confusion, and the reason the rule is now a table
+# (_REQUIRED_SUBFIELDS) rather than a check written wherever it was last named.
+
+from coord_tracker_bridge.inbox import _REQUIRED_SUBFIELDS  # noqa: E402
+
+
+@pytest.mark.parametrize("state_obj", [
+    {},                              # present, entirely hollow
+    {"type": "started"},             # present, no name
+    {"name": "In Progress"},         # present, no type
+    {"name": "  ", "type": "x"},     # present, blank name
+    {"name": "x", "type": None},     # present, null type
+])
+def test_a_present_but_hollow_state_degrades_the_row(state_obj):
+    """It used to render as state='unknown' — a confident answer about a field
+    we could not read, on a row we were happy to show."""
+    node = _node("ASH-1", "one")
+    node["state"] = state_obj
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+@pytest.mark.parametrize("who", [{}, {"name": "Ash"}, {"displayName": "   "}])
+def test_a_present_but_hollow_assignee_degrades_the_row(who):
+    """It used to render as 'unassigned', which is a claim about who owns work."""
+    node = _node("ASH-1", "one")
+    node["assignee"] = who
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+def test_absent_state_and_absent_assignee_still_render():
+    """The other half of the rule, kept honest: absent is not malformed."""
+    node = _node("ASH-1", "one")
+    node.pop("state")
+    node["assignee"] = None
+    result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
+    assert result.state == OK
+    assert result.items[0].state == "unknown"
+    assert result.items[0].state_type == "unknown"
+    assert result.items[0].assignee is None
+
+
+def test_a_whole_state_and_assignee_render_their_values():
+    node = _node("ASH-1", "one", state="In Progress", stype="started", who="Ash")
+    item = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).items[0]
+    assert item.state == "In Progress" and item.state_type == "started"
+    assert item.assignee == "Ash"
+
+
+def test_the_hollow_state_case_exits_3_through_the_CLI(monkeypatch, capsys):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    node = _node("ASH-1", "one")
+    node["state"] = {"type": "started"}
+    transport = FakeTransport([_page([node])])
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    assert "UNKNOWN" in capsys.readouterr().out
+
+
+def test_the_required_subfield_spec_matches_what_the_query_asks_for():
+    """THE ANTI-DRIFT PIN, and the structural answer to four rounds of the same
+    finding. Every sub-object the query selects must appear in the spec, and
+    every field the spec requires must be one the query actually asks for —
+    otherwise the next field somebody adds gets validated by nobody."""
+    for parent, fields in _REQUIRED_SUBFIELDS.items():
+        assert parent + "{" in INBOX_QUERY, f"{parent} is specced but not queried"
+        selection = INBOX_QUERY.split(parent + "{", 1)[1].split("}", 1)[0]
+        for field in fields:
+            assert field in selection, f"{parent}.{field} is required but not selected"
+    # And the reverse: a selected sub-object with no spec is an unguarded field.
+    for parent in ("state", "assignee"):
+        assert parent in _REQUIRED_SUBFIELDS, f"{parent} is queried but unspecced"

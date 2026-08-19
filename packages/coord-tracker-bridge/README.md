@@ -138,7 +138,12 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
   harmless for a mirror that skips what it cannot project, fatal for a verb
   promising never to render a partial board as a whole one. A `null` in a page
   used to arrive as a clean empty board.
-- **Absent has a default; malformed never does.** A sub-object that is missing
+- **Absent has a default; malformed never does — including inside an object.**
+  A present-but-hollow `state` or `assignee` is malformed, not absent, so it
+  degrades the row rather than rendering as "unknown" or "unassigned". Which
+  inner fields are required lives in one table, `_REQUIRED_SUBFIELDS`, pinned by
+  a test against the query itself so a field added to the selection cannot end
+  up validated by nobody. A sub-object that is missing
   (no labels, no assignee, no state) reads as its natural default. A sub-object
   that is *present and the wrong shape* degrades the row, and one bad row
   degrades the read. Coercing malformed to empty renders a confident answer

@@ -124,6 +124,36 @@ def _optional_object(node: Mapping[str, Any], key: str) -> Mapping[str, Any] | N
     return value
 
 
+#: The fields this module ASKS FOR on each optional sub-object of an issue.
+#: If the parent is PRESENT, every one of these must be readable or the row
+#: degrades — "present but hollow" is malformed, not absent.
+#:
+#: This is a table rather than four hand-written checks on purpose. codex-coder
+#: found the same absent-vs-malformed confusion at four sites across four review
+#: rounds — nodes, labels, then state and assignee internals — because each fix
+#: was written at the site that was named. A spec forces the question for the
+#: next field somebody adds to INBOX_QUERY, and a test pins the two together so
+#: they cannot drift apart silently.
+_REQUIRED_SUBFIELDS: Mapping[str, tuple[str, ...]] = {
+    "state": ("name", "type"),
+    "assignee": ("displayName",),
+}
+
+
+def _required_object(node: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    """The sub-object, validated inside. None only when genuinely absent."""
+    obj = _optional_object(node, key)
+    if obj is None:
+        return None
+    for field in _REQUIRED_SUBFIELDS[key]:
+        value = obj.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise _Malformed(
+                f"{key} is present but {key}.{field} is missing or unusable — "
+                "a present-but-hollow object is malformed, not absent")
+    return obj
+
+
 def _labels(node: Mapping[str, Any]) -> tuple[str, ...]:
     """Label names, with CARDINALITY PRESERVED.
 
@@ -164,8 +194,8 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
     if not isinstance(title, str):
         return None
     try:
-        state = _optional_object(node, "state") or {}
-        assignee_obj = _optional_object(node, "assignee")
+        state = _required_object(node, "state")
+        assignee_obj = _required_object(node, "assignee")
         labels = _labels(node)
     except _Malformed:
         return None
@@ -175,14 +205,12 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
         return None
     if updated is not None and not isinstance(updated, str):
         return None
-    state_type = state.get("type")
-    if state_type is not None and not isinstance(state_type, str):
-        return None
     return InboxItem(
         identifier=identifier.strip(),
         title=title.strip(),
-        state=_name(state) or "unknown",
-        state_type=state_type or "unknown",
+        # `state` is either absent — a genuine unknown — or validated whole.
+        state=_name(state) if state else "unknown",
+        state_type=(str(state["type"]).strip() if state else "unknown"),
         assignee=_name(assignee_obj, "displayName") if assignee_obj else None,
         labels=labels,
         url=url,
