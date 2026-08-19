@@ -322,3 +322,58 @@ def test_the_null_node_case_exits_3_through_the_CLI(monkeypatch, capsys):
     assert rc == 3
     out = capsys.readouterr().out
     assert "UNKNOWN" in out and "not an empty board" in out
+
+
+# --- shape checks must be POSITIVE, never inferred from truthiness ---------
+# codex-coder on 34a7220f: `x.get(k) or {}` rescues only a FALSY value. A truthy
+# non-Mapping sails past it and AttributeErrors on the next .get — a crash, not
+# an UNKNOWN, which escapes the single contract this verb makes. The idiom was
+# inherited from LinearClient.paginate and is mine now that I rewrote the walk.
+
+def _page_with(page_info, nodes=()):
+    return {"data": {"issues": {"nodes": list(nodes), "pageInfo": page_info}}}
+
+
+@pytest.mark.parametrize("bad", [["malformed"], "next", 7, True])
+def test_a_truthy_non_mapping_pageInfo_is_UNKNOWN_not_a_crash(bad):
+    """codex's negative control was pageInfo=[malformed]; the whole class is
+    covered, because the next malformed shape will not be a list."""
+    result = fetch_inbox(LinearClient(FakeTransport([_page_with(bad)])), TEAM)
+    assert result.unknown, result
+    assert "pageInfo" in result.detail
+
+
+def test_a_missing_pageInfo_is_simply_the_last_page():
+    """Absent is not malformed: a response that omits pageInfo has no next page,
+    and treating that as an error would degrade a healthy read."""
+    result = fetch_inbox(LinearClient(FakeTransport([_page_with(None, [_node("ASH-1", "one")])])), TEAM)
+    assert result.state == OK
+    assert [i.identifier for i in result.items] == ["ASH-1"]
+
+
+def test_the_malformed_pageInfo_case_exits_3_through_the_CLI(monkeypatch, capsys):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    transport = FakeTransport([_page_with(["malformed"])])
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    assert "UNKNOWN" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", ["label-string", 3, {"nodes": 1}])
+def test_a_malformed_labels_collection_degrades_the_row(bad):
+    """The same family, found by auditing rather than by being told: a truthy
+    non-list under labels.nodes would iterate character by character and yield
+    no labels — wrong rather than loud. An issue whose labels cannot be read is
+    an issue that cannot be rendered faithfully."""
+    node = _node("ASH-1", "one")
+    node["labels"] = {"nodes": bad} if not isinstance(bad, dict) else bad
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+def test_absent_labels_are_simply_no_labels():
+    node = _node("ASH-1", "one")
+    node.pop("labels")
+    result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
+    assert result.state == OK and result.items[0].labels == ()

@@ -118,9 +118,17 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
         return None
     state = node.get("state") if isinstance(node.get("state"), Mapping) else {}
     labels_root = node.get("labels") if isinstance(node.get("labels"), Mapping) else {}
-    label_nodes = labels_root.get("nodes") if isinstance(labels_root, Mapping) else []
+    label_nodes = labels_root.get("nodes")
+    if not isinstance(label_nodes, list):
+        # A truthy non-list here (a string, say) would iterate character by
+        # character and quietly yield no labels — wrong rather than loud, the
+        # same family as the pageInfo crash. An issue we cannot read the labels
+        # of is an issue we cannot render faithfully.
+        label_nodes = [] if label_nodes in (None, {}) else None
+    if label_nodes is None:
+        return None
     labels = tuple(
-        name for name in (_name(entry) for entry in (label_nodes or []))
+        name for name in (_name(entry) for entry in label_nodes)
         if name is not None
     )
     return InboxItem(
@@ -163,7 +171,16 @@ def _paginate_preserving(client: LinearClient, team_id: str) -> list[Any]:
         if not isinstance(raw, list):
             raise LinearError("CoordInbox: issues.nodes is not a list")
         nodes.extend(raw)                      # every node, nulls included
-        page_info = page.get("pageInfo") or {}
+        # `x.get("pageInfo") or {}` only rescues a FALSY value. A truthy
+        # non-Mapping — a list, a string — sails past it and AttributeErrors on
+        # the next .get, which is a crash rather than an UNKNOWN and so escapes
+        # the one contract this verb makes (codex-coder on 34a7220f). Every
+        # shape is checked positively; nothing is assumed from truthiness.
+        page_info = page.get("pageInfo")
+        if page_info is None:
+            page_info = {}
+        if not isinstance(page_info, Mapping):
+            raise LinearError("CoordInbox: issues.pageInfo is not an object")
         if not page_info.get("hasNextPage"):
             return nodes
         next_cursor = page_info.get("endCursor")
