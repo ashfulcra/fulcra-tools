@@ -138,6 +138,12 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
   harmless for a mirror that skips what it cannot project, fatal for a verb
   promising never to render a partial board as a whole one. A `null` in a page
   used to arrive as a clean empty board.
+- **Absent has a default; malformed never does.** A sub-object that is missing
+  (no labels, no assignee, no state) reads as its natural default. A sub-object
+  that is *present and the wrong shape* degrades the row, and one bad row
+  degrades the read. Coercing malformed to empty renders a confident answer
+  about data we could not read — a row missing labels it never mentions is the
+  same lie as an empty board, one level down.
 - A failed or partial read is **UNKNOWN and exits 3**, never an empty board.
   A caller scripting this verb must be able to tell "no work" from "could not
   read", and rc 0 during an outage would report the first while meaning the

@@ -377,3 +377,81 @@ def test_absent_labels_are_simply_no_labels():
     node.pop("labels")
     result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
     assert result.state == OK and result.items[0].labels == ()
+
+
+# --- cardinality one level down: codex-coder at 98ac86e1 -------------------
+# The issue-level null-node defect, reproduced inside the label list — written
+# while fixing the issue-level one. Absent has a default; malformed never does.
+
+def _with_labels(labels_value):
+    node = _node("ASH-1", "one")
+    node["labels"] = labels_value
+    return node
+
+
+def test_a_null_label_node_degrades_the_row_not_the_label_list():
+    """codex's control: [valid, null, {no name}] used to return OK with one
+    label — a confident row rendered from data we could not read."""
+    node = _with_labels({"nodes": [{"name": "infra"}, None, {"id": "x"}]})
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+def test_a_label_node_with_no_usable_name_degrades_the_row():
+    node = _with_labels({"nodes": [{"name": "   "}]})
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+@pytest.mark.parametrize("root", [["not", "an", "object"], "labels", 5, True])
+def test_a_truthy_non_object_labels_root_is_UNKNOWN_not_absent(root):
+    """It used to be coerced to {} and read as 'no labels'."""
+    assert fetch_inbox(LinearClient(FakeTransport([_page([_with_labels(root)])])), TEAM).unknown
+
+
+def test_absent_labels_and_absent_nodes_are_both_simply_no_labels():
+    for value in (None, {}, {"nodes": None}):
+        node = _with_labels(value) if value is not None else _node("ASH-1", "one")
+        if value is None:
+            node.pop("labels", None)
+        result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
+        assert result.state == OK, value
+        assert result.items[0].labels == ()
+
+
+# --- the same rule applied to every other optional sub-object -------------
+# Audited rather than reported: state and assignee had the identical coercion,
+# and a malformed one rendered as "unknown"/"unassigned" — a confident answer
+# about a field we could not read.
+
+@pytest.mark.parametrize("field,value", [
+    ("state", ["nope"]), ("state", "Todo"), ("assignee", ["nope"]), ("assignee", "Ash"),
+])
+def test_a_truthy_non_object_subfield_degrades_the_row(field, value):
+    node = _node("ASH-1", "one")
+    node[field] = value
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+@pytest.mark.parametrize("field", ["url", "updatedAt"])
+def test_a_non_string_scalar_degrades_the_row(field):
+    node = _node("ASH-1", "one")
+    node[field] = {"not": "a string"}
+    assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
+
+
+def test_absent_state_and_assignee_still_render():
+    node = _node("ASH-1", "one")
+    node.pop("state"); node["assignee"] = None
+    result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
+    assert result.state == OK
+    assert result.items[0].state == "unknown" and result.items[0].assignee is None
+
+
+def test_the_malformed_label_case_exits_3_through_the_CLI(monkeypatch, capsys):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    node = _with_labels({"nodes": [{"name": "infra"}, None]})
+    transport = FakeTransport([_page([node])])
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    assert "UNKNOWN" in capsys.readouterr().out

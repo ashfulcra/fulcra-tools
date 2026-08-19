@@ -95,6 +95,10 @@ class Result:
         return self.state == UNKNOWN
 
 
+class _Malformed(Exception):
+    """A sub-object was present but the wrong shape. Never a default."""
+
+
 def _name(node: Any, key: str = "name") -> str | None:
     if isinstance(node, Mapping):
         value = node.get(key)
@@ -103,12 +107,55 @@ def _name(node: Any, key: str = "name") -> str | None:
     return None
 
 
-def to_item(node: Mapping[str, Any]) -> InboxItem | None:
-    """Normalize one issue node, or None when it cannot be identified.
+def _optional_object(node: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    """Absent is fine. Present-but-wrong-shape is NOT a default.
 
-    An unidentifiable row is not silently dropped by this function's caller —
-    it degrades the whole read, because a board missing rows it never mentions
-    is the same lie as an empty board.
+    THE RULE, arrived at the hard way over three review rounds. Every version of
+    this file so far coerced a malformed sub-object into an empty one — labels
+    became no labels, state became "unknown", assignee became unassigned — and
+    each coercion renders a confident row from data we could not read. Absent
+    and malformed are different facts and only one of them has a default.
+    """
+    value = node.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise _Malformed(f"{key} is present but is not an object")
+    return value
+
+
+def _labels(node: Mapping[str, Any]) -> tuple[str, ...]:
+    """Label names, with CARDINALITY PRESERVED.
+
+    codex-coder at 98ac86e: labels.nodes=[valid, null, {no name}] returned OK and
+    emitted one label. That is the issue-level null-node defect they found at
+    667befac, one level down, written by me WHILE fixing the issue-level one — I
+    preserved cardinality where I had just been shown it mattered and dropped it
+    two lines later where I had not.
+    """
+    root = _optional_object(node, "labels")
+    if root is None:
+        return ()
+    raw = root.get("nodes")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise _Malformed("labels.nodes is present but is not a list")
+    names: list[str] = []
+    for entry in raw:
+        name = _name(entry)
+        if name is None:
+            raise _Malformed("a label node could not be named")
+        names.append(name)
+    return tuple(names)
+
+
+def to_item(node: Mapping[str, Any]) -> InboxItem | None:
+    """Normalize one issue node, or None when it cannot be read faithfully.
+
+    None degrades the WHOLE read upstream — a board missing rows it never
+    mentions is the same lie as an empty board, and a row missing labels it
+    never mentions is the same lie one level down.
     """
     identifier = node.get("identifier") or node.get("id")
     title = node.get("title")
@@ -116,30 +163,30 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
         return None
     if not isinstance(title, str):
         return None
-    state = node.get("state") if isinstance(node.get("state"), Mapping) else {}
-    labels_root = node.get("labels") if isinstance(node.get("labels"), Mapping) else {}
-    label_nodes = labels_root.get("nodes")
-    if not isinstance(label_nodes, list):
-        # A truthy non-list here (a string, say) would iterate character by
-        # character and quietly yield no labels — wrong rather than loud, the
-        # same family as the pageInfo crash. An issue we cannot read the labels
-        # of is an issue we cannot render faithfully.
-        label_nodes = [] if label_nodes in (None, {}) else None
-    if label_nodes is None:
+    try:
+        state = _optional_object(node, "state") or {}
+        assignee_obj = _optional_object(node, "assignee")
+        labels = _labels(node)
+    except _Malformed:
         return None
-    labels = tuple(
-        name for name in (_name(entry) for entry in label_nodes)
-        if name is not None
-    )
+    url = node.get("url")
+    updated = node.get("updatedAt")
+    if url is not None and not isinstance(url, str):
+        return None
+    if updated is not None and not isinstance(updated, str):
+        return None
+    state_type = state.get("type")
+    if state_type is not None and not isinstance(state_type, str):
+        return None
     return InboxItem(
         identifier=identifier.strip(),
         title=title.strip(),
         state=_name(state) or "unknown",
-        state_type=str(state.get("type") or "unknown"),
-        assignee=_name(node.get("assignee"), "displayName"),
+        state_type=state_type or "unknown",
+        assignee=_name(assignee_obj, "displayName") if assignee_obj else None,
         labels=labels,
-        url=node.get("url") if isinstance(node.get("url"), str) else None,
-        updated_at=node.get("updatedAt") if isinstance(node.get("updatedAt"), str) else None,
+        url=url,
+        updated_at=updated,
     )
 
 
