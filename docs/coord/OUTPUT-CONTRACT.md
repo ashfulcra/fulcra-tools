@@ -12,13 +12,15 @@ shape detector — consumers never sniff.
 
 ## Verb classes
 
-**Class A — bare-array folds** (`needs-me`, `inbox`, `asks`,
-`obligations`, `search`): migrate to the envelope. (ERRATUM 2026-08-19,
-found during ladder PR 2's shape verification: `board` was misclassified —
-its `--json` is already ONE object keyed by section, not a bare array, so
-reshaping it into `rows` would repeat the r1 queue mistake. It moves to the
-Class B additive-stamp treatment — RATIFIED by coord-boss ae73ac49 and
-by codex review inside pr-647's scope.) **Class B —
+**Class A — bare-array folds** (`needs-me`, `inbox`, `asks`, `search`):
+migrate to the envelope. (ERRATA, each found by verifying the live shape
+before its migration PR: `board` [2026-08-19, ratified — coord-boss
+ae73ac49 + codex inside pr-647's scope] is ONE object keyed by section;
+`obligations` [2026-08-19, ladder PR 4's verification, pending
+ratification in this PR's review] already emits a single typed domain
+object with a RICHER rc contract than the health law — 0 CLEAR/DATA, 3
+UNKNOWN, 4 INVALID — so reshaping it would weaken both shape and rc.
+Both move to the Class B additive-stamp treatment.) **Class B —
 domain-envelope verbs** (`queue`, `review status`, `roles status`): already
 lead stdout with one decisive domain object and are EXEMPT from reshaping —
 a stronger existing envelope is never replaced by a weaker generic one;
@@ -102,15 +104,16 @@ A conforming consumer:
   parsing stdout alone must succeed with one parse. (Consumers in
   stream-merging harnesses must be handed stdout separately; the engine's
   side of the contract is purity per stream.)
-- **OC2 — envelope first (ENFORCED for `needs-me`, `inbox`, and `asks`;
+- **OC2 — envelope first (ENFORCED for `needs-me`, `inbox`, `asks`, and
+  `search`;
   TARGET for the remaining Class A verbs; C03, C05, C06).** The FIRST JSON
   value on stdout is the Class A envelope above — health, source, basis, and
   rows INSIDE one object; degradation markers may repeat as rows but the
   envelope is authoritative. Nothing decisive may live only in the tail.
   (`needs-me`'s stderr envelope line stays as a courtesy duplicate; the
   stdout envelope is the authority.)
-- **OC3 — rc early and meaningful (ENFORCED for `needs-me`, `inbox`, and
-  `asks`, each in the same PR as its OC2 flip; TARGET elsewhere; C04, C05).** The process rc is a pure function
+- **OC3 — rc early and meaningful (ENFORCED for `needs-me`, `inbox`,
+  `asks`, and `search`, each in the same PR as its OC2 flip; TARGET elsewhere; C04, C05).** The process rc is a pure function
   of envelope health, sealed before row serialization: DEGRADED/UNKNOWN
   required folds exit nonzero even when partial rows were served — in text
   mode too. (This deliberately widened `needs-me`'s old forge-only rc:
@@ -179,11 +182,13 @@ A conforming consumer:
    never a clean-[] exit 0; unresolved roles are DEGRADED rc 3).
 5. **Envelope PR 3 (landed)**: `asks` joins contract 2 — an unreadable
    index can no longer read as "nothing waiting on the human" at rc 0.
-6. **Next**: `obligations`/`search`, one PR each; then the Class B
-   additive stamps (now including `board`, per the ratified erratum)
-   LAST, after every Class A verb proves the pattern (`queue` reshaping:
-   never).
-7. **Then**: OC6 canonical-writer enforcement, OC7 capability stamps, OC8
+6. **Envelope PR 4 (landed)**: `search` joins contract 2 — an unreadable
+   index can no longer return a confident match set at rc 0; Class A is
+   COMPLETE (obligations reclassified by erratum).
+7. **Next**: the Class B additive stamps (`board`, `obligations`, `queue`,
+   `review status`, `roles status`) in one small PR (`queue` reshaping:
+   never; every existing field and rc byte-for-byte).
+8. **Then**: OC6 canonical-writer enforcement, OC7 capability stamps, OC8
    identity, OC9 cadence classes.
 
 A clause flip without its fixture flip — or the reverse — is a review
