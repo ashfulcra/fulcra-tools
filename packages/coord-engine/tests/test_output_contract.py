@@ -124,7 +124,7 @@ def test_blocked_ask_renders_unlock_independent_of_blocked_on(
         cli.query, "asks",
         lambda rows, *, now, human: [dict(r, age_hours=1.0) for r in rows])
     cli.cmd_asks(args, SimpleNamespace())
-    rows = strict_parse(capsys.readouterr().out)
+    rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     rendered = json.dumps(rows)
     assert "user:ash" in rendered
     assert "grant the permission" in rendered, (
@@ -238,6 +238,31 @@ def test_oc2_inbox_unreadable_index_is_unknown_rc3(capsys):
     assert (v["health"], rc) == ("UNKNOWN", 3)
     assert "source-unreadable" in v["basis"]
     assert any(r.get("type") == "inbox-degraded" for r in v["rows"])
+
+
+def test_oc2_asks_envelope_leads_stdout(capsys, monkeypatch):
+    # LADDER PR 3: asks joins contract 2 — same envelope, same health->rc law.
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    t = FakeTransport()
+    t.put("team/r/task/blocked-1.md",
+          "---\ntype: Task\ntitle: Decide\nstatus: blocked\nowner: boss\n"
+          "assignee: ash\nblocked_on: user:ash\n"
+          "timestamp: 2026-08-15T00:00:00Z\n---\n")
+    rc = cli.main(["asks", "r", "--json"], transport=t)
+    value = strict_parse(capsys.readouterr().out)
+    assert isinstance(value, dict) and value["contract"] == 2
+    assert isinstance(value["rows"], list)
+    assert rc == (3 if value["health"] in ("DEGRADED", "UNKNOWN") else 0)
+
+
+def test_oc2_asks_unreadable_index_is_unknown_rc3(capsys):
+    # An unreadable index must never read as "nothing waiting on the human".
+    t = FakeTransport()
+    t.put("team/r/_coord/summaries.json", "{not json")
+    rc = cli.main(["asks", "r", "--human", "ash", "--json"], transport=t)
+    v = strict_parse(capsys.readouterr().out)
+    assert (v["health"], rc) == ("UNKNOWN", 3)
+    assert "source-unreadable" in v["basis"]
 
 
 def test_oc2_invalid_source_token_is_not_promoted_to_provenance():
