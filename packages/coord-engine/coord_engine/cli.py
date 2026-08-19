@@ -748,6 +748,10 @@ def cmd_status(args: argparse.Namespace, transport: Any) -> int:
 def cmd_board(args: argparse.Namespace, transport: Any) -> int:
     rows, ok, reason = _load_rows_status(transport, args.team)
     groups = query.board(rows)
+    # Contract 2, Class B additive stamp (ratified errata): board already leads
+    # stdout with one object keyed by section — the stamp is the shape detector,
+    # every existing key and the rc untouched.
+    groups["contract"] = 2
     if args.json:
         if not ok:
             # Reserved section-shaped key: value is a list (like every other board
@@ -1167,6 +1171,7 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     fresh = roles.fresh_holders(leases, now=now, sla_hours=sla) if leases else []
     result = {
         "team": team, "role": role, "status": status, "policy": policy, "sla_hours": sla,
+        "contract": 2,
         "holders": [l.get("agent") for l in (leases or [])],
         "fresh_holders": [l.get("agent") for l in fresh],
         "escalation_due": esc,
@@ -4360,7 +4365,7 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             _marker_unknown = True
         # SETTLED_MERGED, or absent: nothing to do. Merge evidence is not a cache
         # and is never dropped by a tally recompute.
-    result.update({"team": team, "slug": slug})
+    result.update({"team": team, "slug": slug, "contract": 2})
     if args.json:
         jsonutil.print_json(result)
     else:
@@ -5721,6 +5726,7 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
     if getattr(args, "json", False):
         print(jsonutil.dumps({
             "type": "obligations",
+            "contract": 2,
             "state": state,
             "owed_count": len(result.owed),
             "consulted": result.consulted,
@@ -5941,6 +5947,7 @@ def _queue_result_envelope(
     poisoned = poisoned or []
     envelope = {
         "type": "queue-result",
+        "contract": 2,
         "state": "DATA" if (events or poisoned) else "CLEAR",
         "events": [{
             "id": event.get("record_id"),
@@ -6207,6 +6214,7 @@ def _print_v2_delivery(
     _print_queue_events(events, json_mode=json_mode)
     envelope = {
         "type": "queue-delivery",
+        "contract": 2,
         "token": pending["token"],
         "event_count": len(events),
         "event_ids": [event.get("record_id") for event in events],
@@ -6639,6 +6647,7 @@ def _queue_failure(
     if bool(getattr(args, "json", False)):
         envelope = {
             "type": "queue-error",
+            "contract": 2,
             "state": state,
             "error_code": error_code,
             "rc": rc,
