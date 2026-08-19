@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .lease import LeaseHeld
+from .inbox import ReadOnlyTransport, fetch_inbox, render_fold
 from .linear import HttpxGraphQLTransport, LinearClient, LinearError, LinearTrackerAdapter
 from .policy import load_policy
 from .service import BridgePlan, BridgeService
@@ -18,7 +19,10 @@ from .source import EngineSourceAdapter, TeamsSourceAdapter
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coord-tracker-bridge")
-    parser.add_argument("phase", choices=("plan", "adopt-markers", "apply-resources", "sync"))
+    parser.add_argument(
+        "phase",
+        choices=("plan", "adopt-markers", "apply-resources", "sync", "linear-inbox"),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -83,6 +87,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.dry_run and args.phase != "adopt-markers":
             raise ValueError("--dry-run is only valid with adopt-markers")
+        if args.phase == "linear-inbox":
+            # Deliberately does NOT build a BridgeService: no ledger, no lease,
+            # no tracker adapter, so no write path exists to reach. The client
+            # is wrapped in a transport that refuses any non-query document.
+            api_key = os.environ.get("LINEAR_API_KEY")
+            if not api_key or not args.linear_team_id:
+                raise LinearError(
+                    "LINEAR_API_KEY and --linear-team-id/LINEAR_TEAM_ID are required")
+            client = LinearClient(ReadOnlyTransport(HttpxGraphQLTransport(api_key)))
+            result = fetch_inbox(client, args.linear_team_id)
+            print(render_fold(result, team_id=args.linear_team_id))
+            # UNKNOWN must not exit 0: a caller scripting this verb has to be
+            # able to tell "Ash has no work" from "I could not read the board".
+            return 3 if result.unknown else 0
+
         service = _service(args)
         if args.phase == "plan":
             print(json.dumps(_plan_json(service.plan()), sort_keys=True, default=str))

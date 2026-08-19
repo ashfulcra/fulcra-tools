@@ -122,6 +122,73 @@ downloads run concurrently under one whole-snapshot deadline (30 seconds by
 default); an incomplete batch degrades tasks instead of authorizing mutations
 from a partial enumeration.
 
+## `linear-inbox` — read Ash's board, never touch it
+
+> **STATUS: REVIEWED, NOT VERIFIED.** Every fixture behind this verb is
+> synthetic, the field-name contract test is skipped, and no line of this code
+> has ever met the real Linear API. Eight review rounds found seven real defects
+> and the logic now survives adversarial reading — that is what "reviewed"
+> buys, and it is not the same as "works". The honest status is *ready to try*.
+> It becomes verified when someone runs `tools/capture_inbox.py` against a real
+> key, the stamped fixture lands, and the contract test un-skips.
+
+
+`coord-tracker-bridge linear-inbox --linear-team-id <TEAM>` performs one
+paginated GraphQL read of a Linear team's issues and prints them as a coord
+fold. It is the only verb that runs in the read direction, and it is fenced:
+
+- It builds **no** `BridgeService` — no ledger, no lease, no tracker adapter —
+  so there is no write path in scope to reach.
+- Its client is wrapped in `ReadOnlyTransport`, which inspects the GraphQL
+  document about to be posted and refuses anything that is not a pure query.
+  The rail runs on what will execute, not on what the caller intended.
+- Node **cardinality is preserved**: the verb walks pages itself rather than
+  through `LinearClient.paginate`, which silently filters non-Mapping nodes —
+  harmless for a mirror that skips what it cannot project, fatal for a verb
+  promising never to render a partial board as a whole one. A `null` in a page
+  used to arrive as a clean empty board.
+- **Absent may default only when the default ASSERTS NOTHING.** No labels
+  asserts nothing; no assignee asserts nothing. But absent pagination metadata
+  would be read as "this is the last page" — a claim of completeness, which is
+  the one claim this verb exists never to fake. A terminal page must be stated
+  (`hasNextPage: false`), never inferred from silence.
+- **The invariant: every value read is either ABSENT WITH A DEFAULT or
+  VALIDATED WHOLE.** There is no third state, and "present but unusable" is
+  never quietly promoted into one of the first two. It holds at four scopes —
+  the node list, top-level scalars, optional sub-objects and the fields inside
+  them, and the pagination metadata and the fields inside THAT — because it was
+  broken at each one in turn across six review rounds. Fixing a scope's shape is
+  not the same as fixing its contents: `pageInfo` was corrected once and the
+  round that corrected it is what made its internals invisible for four more.
+  Watch fallbacks especially: `identifier or id` used to mask a present-but-
+  malformed identifier, so a row we could not identify rendered as one we could.
+- **Absent has a default; malformed never does — including inside an object.**
+  A present-but-hollow `state` or `assignee` is malformed, not absent, so it
+  degrades the row rather than rendering as "unknown" or "unassigned". Which
+  inner fields are required lives in one table, `_REQUIRED_SUBFIELDS`, pinned by
+  a test against the query itself so a field added to the selection cannot end
+  up validated by nobody. A sub-object that is missing
+  (no labels, no assignee, no state) reads as its natural default. A sub-object
+  that is *present and the wrong shape* degrades the row, and one bad row
+  degrades the read. Coercing malformed to empty renders a confident answer
+  about data we could not read — a row missing labels it never mentions is the
+  same lie as an empty board, one level down.
+- A failed or partial read is **UNKNOWN and exits 3**, never an empty board.
+  A caller scripting this verb must be able to tell "no work" from "could not
+  read", and rc 0 during an outage would report the first while meaning the
+  second.
+
+The standing rail on this lane: **zero Linear writes of any kind** — no issue
+creation, no state changes, no comments, no label/assignee mutations — until
+Ash approves a write plan explicitly. The reason is a near-miss, not caution: an
+earlier cutover plan would have pushed ~503 creates into a 55-issue curated
+board.
+
+`tools/capture_inbox.py` stamps a real response with its own measured
+provenance for the field-name contract test, redacting titles, descriptions,
+URLs and assignee names. It has no offline mode: a hand-written fixture
+labelled "real" is the defect it exists to prevent.
+
 - `plan` is read-only and shows projection changes plus missing bounded
   taxonomy resources.
 - `adopt-markers --dry-run` previews the complete legacy identity mapping and
