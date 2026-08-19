@@ -96,5 +96,42 @@ Live legs are documented in [SMOKE.md](SMOKE.md); the role charter is
 stayed green, because the fake emitted what the code wanted. `tests/fixtures/`
 holds a real captured record; the contract tests assert against its shape.
 
+**A cursor is a MONOTONIC WATERMARK plus a LEDGER, never a single row id.**
+The position is the newest instant consumed, together with the ids seen at that
+instant; a row is new when it post-dates the watermark, or shares it and is not
+in the ledger. That test asks membership, never id order — because id order is
+not append-monotonic. A record arriving later with the same timestamp and a
+lexically smaller id sorts *before* any single-id cursor, lands in the
+already-seen slice, and disappears. Same shape coord-engine's E1 fold settled
+on, for the same reason. The watermark never moves backwards: a window whose
+maximum falls below it — retention trimming, a narrowed `--window`, a peer whose
+newest rows stopped being served — leaves the position alone and says so.
+"I saw less this time" is not evidence of having seen less overall.
+
+**Cursors anchor to the NEWEST row, and the order is PROVEN on every read.**
+`get-records` yields rows in ascending `recorded_at` order. A cursor is a
+position in that stream, so it advances to the LAST row of the read, not the
+first. Getting this backwards cost a real incident: the cursor sat on the oldest
+row, every subsequent read stopped at row 0 and printed "0 event(s)" while
+addressed events sat unshown below it, and when that row aged out of the window
+the entire window replayed. The replay is what got noticed; the silence is what
+it cost. Two consequences worth keeping in mind as a consumer:
+
+- **Expect occasional full-window re-delivery.** If a cursor ages out of the
+  read window — a peer goes unpolled longer than `--window` — the window is
+  replayed. This is legal under at-least-once and your handling should be
+  idempotent. `mesh queue` now says so on stderr when it happens, naming the
+  cursor and the window, so a replay never costs an investigation again.
+- **A read that cannot identify a row degrades the whole peer**, not just that
+  row. Position in an ordered stream is unknowable past an unidentifiable
+  record, so a partial slice would be a claim we cannot support.
+- **An order we cannot prove is UNKNOWN.** Every row must carry a parseable
+  `recorded_at` and the window must be monotonic, or the peer degrades and the
+  cursor does not move. The first fix for the anchoring bug took one measured
+  ascending response as a permanent transport contract — the same unverified
+  assumption with the sign flipped, and a descending response would have
+  restored the silent-loss half of the very bug it removed. One measurement is
+  an observation; a contract is something you re-check on every read.
+
 **UNKNOWN is never quiet.** A failed peer read is UNKNOWN, not empty — a mesh
 that reports "no messages" when it could not read is worse than one that fails.

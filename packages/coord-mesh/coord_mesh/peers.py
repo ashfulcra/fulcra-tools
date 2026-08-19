@@ -72,23 +72,63 @@ def upsert_space(reg: dict[str, Any], space_id: str, *, kind: str = KIND_PAIR,
     return sp
 
 
-def get_cursor(reg: dict[str, Any], space_id: str, peer_uid: str) -> Optional[str]:
-    """Last record id consumed from this peer in this space, or None."""
+def get_cursor(reg: dict[str, Any], space_id: str, peer_uid: str):
+    """This peer's position: ``{"t": <iso>, "ids": [...]}``, a legacy id string,
+    or None.
+
+    WHY A WATERMARK AND A LEDGER, not a single record id (codex-coder on
+    54458d81). A lone id only works if the sort key never admits a NEW row
+    *before* it. Sorting by ``(recorded_at, id)`` is deterministic but NOT
+    append-monotonic: a record that arrives later carrying the same timestamp
+    and a lexically smaller id sorts before the stored cursor, lands in the
+    already-seen slice, and is silently skipped. That is the original
+    silent-loss defect once more, narrowed from a whole window to a tied group.
+
+    So the position is a WATERMARK (the newest instant consumed) plus the LEDGER
+    of ids seen AT that instant. A row is new when it is later than the
+    watermark, or shares the watermark and is not in the ledger — a test that
+    cannot be fooled by id ordering, because it never relies on id ordering.
+    Same shape coord-engine's E1 fold settled on: watermark plus processed
+    ledger.
+    """
     return ((reg.get("spaces") or {}).get(space_id, {})
             .get("cursors", {}).get(peer_uid))
 
 
+def cursor_parts(cursor):
+    """Normalize a stored cursor into ``(watermark_or_None, ids_set)``.
+
+    A legacy string cursor carries no time, so it yields ``(None, {id})`` and
+    the caller falls back to locating it positionally — the pre-watermark
+    behaviour — rather than being silently reinterpreted as "seen nothing",
+    which would replay the peer's whole window.
+    """
+    if not cursor:
+        return None, set()
+    if isinstance(cursor, str):
+        return None, {cursor}
+    return cursor.get("t"), set(cursor.get("ids") or [])
+
+
 def set_cursor(reg: dict[str, Any], space_id: str, peer_uid: str,
-               record_id: Optional[str]) -> None:
-    """Advance a cursor. A None/empty id is REFUSED.
+               watermark, ids=None) -> None:
+    """Advance a cursor to a watermark + the ids seen at it. Empty is REFUSED.
 
     Writing an empty cursor would silently reset the peer to "never read" and
     replay their whole outbox on the next poll — the at-least-once discipline
     tolerates a repeat, not a full replay.
     """
-    if not record_id:
+    if ids is None:                    # legacy single-id form, still accepted
+        if not watermark:
+            raise ValueError(
+                "refusing to write an empty cursor: an unidentifiable record "
+                "leaves the queue position UNKNOWN, and resetting would replay "
+                "the outbox")
+        upsert_space(reg, space_id)["cursors"][peer_uid] = watermark
+        return
+    if not watermark or not ids:
         raise ValueError(
-            "refusing to write an empty cursor: an unidentifiable record leaves "
-            "the queue position UNKNOWN, and resetting would replay the outbox"
-        )
-    upsert_space(reg, space_id)["cursors"][peer_uid] = record_id
+            "refusing to write an empty cursor: a watermark with no ids leaves "
+            "the queue position UNKNOWN, and resetting would replay the outbox")
+    upsert_space(reg, space_id)["cursors"][peer_uid] = {
+        "t": watermark, "ids": sorted(ids)}

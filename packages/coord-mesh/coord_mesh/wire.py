@@ -79,3 +79,69 @@ def missing_fields(row: dict[str, Any]) -> list[str]:
     instead of folding a wall of silent Nones.
     """
     return [f for f in REQUIRED_FIELDS if f not in row]
+
+
+def parse_time(value: Optional[str]) -> Optional["datetime.datetime"]:
+    """Parse a row's ``recorded_at`` into an aware UTC datetime, or None.
+
+    None means UNPARSEABLE and callers must treat it as UNKNOWN — never as
+    "sorts first" or "sorts last", both of which are silent guesses about
+    position. Real values seen live carry either microseconds or not, and end
+    in ``+00:00``; a trailing ``Z`` is accepted too.
+    """
+    import datetime as _dt
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = _dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        # A naive timestamp does not identify an absolute instant, and assuming
+        # UTC is a silent guess that can reorder rows against a peer running in
+        # any other zone (codex-coder on bd747f37). UNKNOWN, not "probably UTC".
+        return None
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def sort_key(row) -> Optional[tuple]:
+    """The TOTAL order key for a row: ``(recorded_at, id)``.
+
+    None when the row cannot be placed — no id, or a timestamp that is absent,
+    unparseable, or timezone-naive.
+
+    WHY A SECONDARY KEY (codex-coder on bd747f37). An earlier version accepted
+    equal timestamps as "monotonic non-decreasing", reasoning that two records
+    can share a second and that rejecting ties would degrade a healthy read.
+    Both halves were true and the conclusion was still wrong: timestamps alone
+    are a PARTIAL order, so any permutation of a tied group passes the check,
+    and the last row of a tied group is an arbitrary choice of cursor anchor —
+    which is the loss-and-replay defect all over again, just narrowed to ties.
+
+    The record id breaks ties deterministically. It is ours to compute, so the
+    order does not depend on the platform sorting ties any particular way — an
+    assumption this package has now been burned by twice.
+    """
+    when = parse_time(recorded_at(row) if isinstance(row, dict) else None)
+    rid = record_id(row) if isinstance(row, dict) else None
+    if when is None or not rid:
+        return None
+    return (when, rid)
+
+
+def total_order(rows: list) -> Optional[list]:
+    """Rows in canonical ``(recorded_at, id)`` order, or None if any row cannot
+    be placed.
+
+    Returning a canonical order rather than merely checking the transport's is
+    the point: a cursor advanced to the last element of THIS list anchors to the
+    newest record by an order we computed, so a descending or disordered
+    response can no longer choose the anchor for us.
+    """
+    keys = [sort_key(r) for r in rows]
+    if any(k is None for k in keys):
+        return None
+    return [r for _, r in sorted(zip(keys, rows), key=lambda pair: pair[0])]

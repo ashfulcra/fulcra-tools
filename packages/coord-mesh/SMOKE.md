@@ -156,6 +156,13 @@ pass; it is a successful read that found nothing.**
 Then repeat **without** `--no-advance` and run it twice: the second run should
 show fewer (or zero) events, proving the cursor advanced.
 
+**Expect occasional full-window re-delivery.** Cursors are a position in an
+ascending stream. If a cursor ages out of `--window` (the peer went unpolled
+longer than the window), `mesh queue` replays the window and says so on stderr,
+naming the cursor and the window. Re-delivery is legal under at-least-once —
+handle events idempotently. A replay with no such line on stderr is a defect,
+not a retention artifact.
+
 ## Leg 4 — `mesh doctor`
 
 ```
