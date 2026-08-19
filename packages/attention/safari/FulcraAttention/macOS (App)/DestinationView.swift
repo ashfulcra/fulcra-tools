@@ -35,6 +35,33 @@ import os
 
 private let destLog = Logger(subsystem: "com.fulcra.attention", category: "DestinationView")
 
+
+/// The three operations the destination UI needs, as a seam.
+///
+/// This exists because the first version of these tests could not fail: they
+/// wrote the cache double directly and never called the view model, so they
+/// stayed green with the production wiring deleted — the precise defect this
+/// whole file was written to fix, reproduced inside its own tests. A protocol
+/// makes "did the view model actually call the service" an assertable fact
+/// rather than an assumption.
+public protocol DestinationService: Sendable {
+    func listDestinations() async throws -> [AttentionDestination]
+    func choose(definitionId: String) async throws -> ResolvedAttention
+    func create(name: String) async throws -> ResolvedAttention
+}
+
+extension EnsureAttention: DestinationService {
+    public func listDestinations() async throws -> [AttentionDestination] {
+        try await listAttentionDestinations()
+    }
+    public func choose(definitionId: String) async throws -> ResolvedAttention {
+        try await chooseAttentionDestination(definitionId: definitionId)
+    }
+    public func create(name: String) async throws -> ResolvedAttention {
+        try await createAttentionDestination(name: name)
+    }
+}
+
 @MainActor
 public final class DestinationViewModel: ObservableObject {
 
@@ -49,15 +76,15 @@ public final class DestinationViewModel: ObservableObject {
     @Published public private(set) var status: Status = .idle
     @Published public private(set) var busy = false
 
-    private let ensure: EnsureAttention
+    private let service: DestinationService
     private let cache: ResolvedAttentionCache
 
     public init(
-        ensure: EnsureAttention? = nil,
+        service: DestinationService? = nil,
         cache: ResolvedAttentionCache = UserDefaultsResolvedCache(defaults: Sharing.sharedDefaults())
     ) {
         self.cache = cache
-        self.ensure = ensure ?? EnsureAttention(
+        self.service = service ?? EnsureAttention(
             token: AuthManagerTokenProvider(AuthManager(keychain: KeychainStore(accessGroup: Sharing.keychainAccessGroup))),
             cache: cache
         )
@@ -71,7 +98,7 @@ public final class DestinationViewModel: ObservableObject {
     public func load() async {
         status = .loading
         do {
-            let list = try await ensure.listAttentionDestinations()
+            let list = try await service.listDestinations()
             status = .loaded(destinations: list, current: cachedDefinitionId)
         } catch {
             destLog.error("load failed: \(error.localizedDescription, privacy: .public)")
@@ -85,7 +112,7 @@ public final class DestinationViewModel: ObservableObject {
         busy = true
         defer { busy = false }
         do {
-            _ = try await ensure.chooseAttentionDestination(definitionId: id)
+            _ = try await service.choose(definitionId: id)
             destLog.info("destination set to \(id, privacy: .public)")
             await load()
         } catch {
@@ -100,7 +127,7 @@ public final class DestinationViewModel: ObservableObject {
         busy = true
         defer { busy = false }
         do {
-            _ = try await ensure.createAttentionDestination(name: name)
+            _ = try await service.create(name: name)
             await load()
         } catch {
             status = .error(error.localizedDescription)
