@@ -85,6 +85,11 @@ def summaries_path(team: str) -> str:
     return f"team/{team}/_coord/summaries.json"
 
 
+def projection_progress_path(team: str) -> str:
+    """Private convergence state; never a reader-serving aggregate."""
+    return f"team/{team}/_coord/projection-build-progress.json"
+
+
 def _acks_prefix(team: str) -> str:
     return f"team/{team}/_coord/acks/"
 
@@ -894,6 +899,41 @@ def _load_prior_aggregate(transport: Any, team: str) -> Optional[dict[str, Any]]
         return None
 
 
+def _publication_generation(aggregate_doc: Any) -> Optional[str]:
+    """The exact public generation a private build may be based on."""
+    fence = ((aggregate_doc or {}).get(projection_mod.PUBLICATION_FENCE_KEY)
+             if isinstance(aggregate_doc, dict) else None)
+    if (isinstance(fence, dict)
+            and fence.get("schema") == projection_mod.PUBLICATION_FENCE_SCHEMA
+            and isinstance(fence.get("generation"), str)
+            and fence.get("generation")):
+        return fence["generation"]
+    return None
+
+
+def _load_projection_progress(
+        transport: Any, team: str, prior_agg: Any) -> dict[str, Any]:
+    """Load private partial-build state only for the current public base.
+
+    Binding the shard to the public generation prevents a completed publish
+    from being followed by an older partial cursor, including when both hosts
+    used the same wall-clock second.
+    """
+    raw = transport.read(projection_progress_path(team))
+    if not raw:
+        return {}
+    try:
+        progress = json.loads(raw)
+    except Exception:
+        return {}
+    if (not isinstance(progress, dict)
+            or progress.get("schema") != projection_mod.BUILD_PROGRESS_SCHEMA
+            or progress.get("base_generation")
+                != _publication_generation(prior_agg)):
+        return {}
+    return progress
+
+
 # --- E1: incremental reconcile (feed-cursor fold) ---------------------------
 #
 # Reconcile's default pass is a FEED DELTA, not a directory scan: consume the
@@ -1411,6 +1451,10 @@ def reconcile(
             projection_mod.build_needs_me_projection(
                 rows, now=now, complete=fold.conclusive),
     }
+    # The public aggregate is atomic, but an incomplete review section is also
+    # the builder's durable scan frontier. Resume that frontier from a private
+    # shard bound to the exact public generation it was derived from.
+    build_progress = _load_projection_progress(transport, team, prior_agg)
     built_current = {
         projection_mod.REVIEWS_KEY: False,
         projection_mod.FORGE_KEY: False,
@@ -1432,7 +1476,8 @@ def reconcile(
         # partial review set cannot yield a complete forge view. Only the budget
         # was ever wrong.
         proj_dl = Deadline.open(projection_mod.build_budget())
-        prior_reviews = (prior_agg or {}).get(projection_mod.REVIEWS_KEY)
+        prior_reviews = (build_progress.get(projection_mod.REVIEWS_KEY)
+                         or (prior_agg or {}).get(projection_mod.REVIEWS_KEY))
         reviews_section = projection_mod.build_review_projection(
             transport, team, now=now,
             prior=prior_reviews,
@@ -1448,7 +1493,8 @@ def reconcile(
             transport, team, now=now,
             review_rows=reviews_section.get("rows") or [],
             reviews_complete=bool(reviews_section.get("complete")),
-            prior=(prior_agg or {}).get(projection_mod.FORGE_KEY),
+            prior=(build_progress.get(projection_mod.FORGE_KEY)
+                   or (prior_agg or {}).get(projection_mod.FORGE_KEY)),
             deadline=forge_dl, log=log)
         built_current[projection_mod.FORGE_KEY] = True
         proj_state[projection_mod.REVIEWS_KEY] = reviews_section
@@ -1464,6 +1510,24 @@ def reconcile(
         for key in (projection_mod.REVIEWS_KEY, projection_mod.FORGE_KEY):
             if isinstance((prior_agg or {}).get(key), dict):
                 proj_state[key] = (prior_agg or {})[key]
+
+    # Persist convergence state BEFORE the public gate. Readers never consume
+    # this shard. Staging complete work too means a failed aggregate write does
+    # not discard it; after a successful publish the changed public generation
+    # automatically invalidates this shard on the next pass.
+    if all(built_current.values()):
+        progress = {
+            "schema": projection_mod.BUILD_PROGRESS_SCHEMA,
+            "base_generation": _publication_generation(prior_agg),
+            "generated_at": now,
+            projection_mod.REVIEWS_KEY:
+                proj_state[projection_mod.REVIEWS_KEY],
+            projection_mod.FORGE_KEY:
+                proj_state[projection_mod.FORGE_KEY],
+        }
+        if not transport.write(
+                projection_progress_path(team), jsonutil.dumps(progress)):
+            warnings.append("projection build progress write failed")
 
     # Review + forge publication is all-or-nothing. A section that exhausted its
     # deadline or a carried prior section means this pass did not produce one

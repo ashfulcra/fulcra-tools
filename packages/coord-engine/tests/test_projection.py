@@ -141,6 +141,55 @@ def test_incomplete_projection_never_replaces_complete_generation(monkeypatch):
     assert t.store[path] == complete_generation
 
 
+def test_refused_projection_persists_private_progress_and_converges(monkeypatch):
+    """Refusing public partial state must not discard the review builder's
+    convergence cursor.  The next pass resumes from the private partial section
+    and may atomically publish once it completes."""
+    t = FakeTransport()
+    seen_priors = []
+
+    def two_pass_reviews(*args, **kwargs):
+        prior = kwargs.get("prior")
+        seen_priors.append(prior)
+        if len(seen_priors) == 1:
+            return {
+                "schema": projection.REVIEWS_SCHEMA,
+                "generated_at": kwargs["now"],
+                "complete": False,
+                "scanned": 187,
+                "total": 290,
+                "rows": [{"name": "scanned-prefix"}],
+                "orphans": [],
+                "orphans_unknown": [],
+                "tombstones": [],
+            }
+        assert prior["scanned"] == 187
+        assert prior["rows"] == [{"name": "scanned-prefix"}]
+        return {
+            "schema": projection.REVIEWS_SCHEMA,
+            "generated_at": kwargs["now"],
+            "complete": True,
+            "scanned": 290,
+            "total": 290,
+            "rows": [],
+            "orphans": [],
+            "orphans_unknown": [],
+            "tombstones": [],
+        }
+
+    monkeypatch.setattr(
+        projection, "build_review_projection", two_pass_reviews)
+
+    first = _reconcile(t, now="2026-08-18T21:05:53Z")
+    assert first["degraded"] is True
+    assert f"team/{TEAM}/_coord/summaries.json" not in t.store
+
+    second = _reconcile(t, now="2026-08-18T21:10:53Z")
+    assert second["degraded"] is False
+    assert _agg(t)[projection.REVIEWS_KEY]["complete"] is True
+    assert seen_priors[0] is None
+
+
 def test_same_second_root_failure_cannot_rebind_carried_projection():
     """Two fleet hosts can reconcile in the same second.  A root-listing failure
     returns the prior review dict untouched; timestamp equality must not let the

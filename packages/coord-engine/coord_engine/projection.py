@@ -91,6 +91,7 @@ FORGE_KEY = "forge"
 NEEDS_ME_KEY = "needs_me"
 PUBLICATION_FENCE_KEY = "projection_publication_fence"
 FENCE_GENERATION_KEY = "publication_generation"
+BUILD_PROGRESS_SCHEMA = "coord.projection-build-progress.v1"
 
 REVIEWS_SCHEMA = "coord.reviews.projection.v2"
 FORGE_SCHEMA = "coord.forge.projection.v1"
