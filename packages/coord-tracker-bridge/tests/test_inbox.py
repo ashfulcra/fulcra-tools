@@ -1,0 +1,268 @@
+"""`linear-inbox` reads Ash's board and can never write to it.
+
+The hard rail on this lane is coord-boss's, and it exists because of a
+near-miss: an earlier cutover plan would have pushed ~503 creates into a
+55-issue curated board. So "this verb does not call mutations" is not the
+property under test — "this verb CANNOT call one" is.
+
+The second property is the coord-mesh one: a read that fails is UNKNOWN, never
+an empty board. An empty board and an unreadable board look identical to a
+caller unless the code refuses to conflate them, and here the caller is a person
+deciding whether they have work.
+
+FIXTURES ARE SYNTHETIC AND SAY SO. There is no Linear API key on this host, so
+no response has ever been captured from the live API. Per the sealed-secrets and
+coord-mesh lesson — a fixture whose provenance is assumed reads exactly like one
+that was measured — nothing here is labelled captured. `tools/capture_inbox.py`
+exists to stamp a real one on the first live read; until then these shapes are
+hand-built from Linear's published schema and the package's own ISSUES_QUERY,
+and the contract test that pins them against a live capture is skipped rather
+than faked.
+"""
+
+import json
+import os
+
+import pytest
+
+from coord_tracker_bridge.inbox import (
+    INBOX_QUERY,
+    OK,
+    EMPTY,
+    UNKNOWN,
+    ReadOnlyTransport,
+    Result,
+    WriteRefused,
+    fetch_inbox,
+    render_fold,
+    to_item,
+)
+from coord_tracker_bridge.linear import GraphQLResponse, LinearClient, LinearError
+
+TEAM = "team-abc"
+
+
+def _node(ident, title, *, state="Todo", stype="unstarted", who=None, labels=()):
+    return {
+        "id": "issue-" + ident, "identifier": ident, "title": title,
+        "url": "https://linear.app/x/issue/" + ident,
+        "updatedAt": "2026-08-19T12:00:00.000Z",
+        "state": {"name": state, "type": stype},
+        "assignee": ({"displayName": who} if who else None),
+        "labels": {"nodes": [{"name": name} for name in labels]},
+    }
+
+
+class FakeTransport:
+    """Records what would have been posted; returns canned pages."""
+
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.posted = []
+
+    def post(self, payload):
+        self.posted.append(dict(payload))
+        body = self.pages.pop(0)
+        return GraphQLResponse(200, body, {})
+
+
+def _page(nodes, *, has_next=False, cursor=None):
+    return {"data": {"issues": {"nodes": nodes,
+                                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor}}}}
+
+
+# --- THE HARD RAIL --------------------------------------------------------
+
+def test_the_transport_refuses_a_mutation_document():
+    """THE RAIL. Not 'we do not send mutations' — 'a mutation cannot be sent'."""
+    inner = FakeTransport([_page([])])
+    ro = ReadOnlyTransport(inner)
+    with pytest.raises(WriteRefused):
+        ro.post({"operationName": "IssueCreate",
+                 "query": "mutation IssueCreate($i:IssueCreateInput!){issueCreate(input:$i){success}}"})
+    assert inner.posted == [], "nothing may reach the network"
+
+
+def test_the_rail_reads_the_document_not_the_operation_name():
+    """A mutation smuggled under a query-shaped operationName still refuses."""
+    inner = FakeTransport([_page([])])
+    with pytest.raises(WriteRefused):
+        ReadOnlyTransport(inner).post({"operationName": "CoordInbox",
+                                       "query": "mutation { issueUpdate(id:1){success} }"})
+    assert inner.posted == []
+
+
+def test_subscriptions_are_refused_too():
+    inner = FakeTransport([_page([])])
+    with pytest.raises(WriteRefused):
+        ReadOnlyTransport(inner).post({"query": "subscription { issues { id } }"})
+
+
+def test_a_field_merely_containing_the_word_mutation_is_not_refused():
+    """The rail must not be so blunt it blocks a legitimate read — a title or
+    label containing the word would otherwise take the board down."""
+    inner = FakeTransport([_page([])])
+    ReadOnlyTransport(inner).post({"query": "query Q { issues { title } }",
+                                   "variables": {"q": "mutation testing notes"}})
+    assert len(inner.posted) == 1
+
+
+def test_the_inbox_query_itself_passes_the_rail():
+    inner = FakeTransport([_page([])])
+    ReadOnlyTransport(inner).post({"operationName": "CoordInbox", "query": INBOX_QUERY})
+    assert len(inner.posted) == 1
+
+
+def test_the_shipped_query_is_a_pure_query():
+    assert INBOX_QUERY.lstrip().startswith("query ")
+    assert "mutation" not in INBOX_QUERY.lower()
+
+
+# --- UNKNOWN is never an empty board --------------------------------------
+
+def test_a_transport_failure_is_unknown_not_empty():
+    class Boom:
+        def post(self, payload):
+            raise LinearError("boom")
+
+    result = fetch_inbox(LinearClient(Boom()), TEAM)
+    assert result.state == UNKNOWN and result.unknown
+    assert result.items == ()
+
+
+def test_a_stalled_cursor_is_unknown():
+    """paginate() raises on a cursor that does not advance; that must surface as
+    UNKNOWN rather than as the rows read so far."""
+    pages = [_page([_node("ASH-1", "one")], has_next=True, cursor="c1"),
+             _page([_node("ASH-2", "two")], has_next=True, cursor="c1")]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.unknown, result
+
+
+def test_an_unidentifiable_row_degrades_the_whole_read():
+    """A board missing rows it never mentions is the same lie as an empty one."""
+    pages = [_page([_node("ASH-1", "one"), {"title": "no identifier"}])]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.unknown
+    assert "partial" in result.detail
+
+
+def test_an_empty_board_is_empty_not_unknown():
+    result = fetch_inbox(LinearClient(FakeTransport([_page([])])), TEAM)
+    assert result.state == EMPTY and not result.unknown
+
+
+def test_pagination_collects_every_page():
+    pages = [_page([_node("ASH-2", "two")], has_next=True, cursor="c1"),
+             _page([_node("ASH-1", "one")])]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.state == OK
+    assert [i.identifier for i in result.items] == ["ASH-1", "ASH-2"], "sorted, deterministic"
+
+
+# --- rendering ------------------------------------------------------------
+
+def test_the_fold_says_unknown_loudly():
+    text = render_fold(Result(UNKNOWN, detail="429 rate limited"), team_id=TEAM)
+    assert "UNKNOWN" in text
+    assert "not an empty board" in text
+    assert "0 issue" not in text
+
+
+def test_the_fold_distinguishes_a_real_empty_board():
+    text = render_fold(Result(EMPTY), team_id=TEAM)
+    assert "0 issue(s)" in text and "read succeeded" in text
+    assert "UNKNOWN" not in text
+
+
+def test_the_fold_renders_identifier_state_assignee_and_labels():
+    result = fetch_inbox(LinearClient(FakeTransport([
+        _page([_node("ASH-7", "Wire the thing", state="In Progress",
+                     who="Ash", labels=("infra", "p1"))])])), TEAM)
+    text = render_fold(result, team_id=TEAM)
+    assert "ASH-7" in text and "In Progress" in text and "Ash" in text
+    assert "[infra, p1]" in text and "Wire the thing" in text
+
+
+def test_an_unassigned_issue_renders_as_unassigned():
+    result = fetch_inbox(LinearClient(FakeTransport([_page([_node("ASH-9", "orphan")])])), TEAM)
+    assert "unassigned" in render_fold(result, team_id=TEAM)
+
+
+# --- normalization --------------------------------------------------------
+
+def test_to_item_rejects_a_row_with_no_identifier():
+    assert to_item({"title": "x"}) is None
+
+
+def test_to_item_rejects_a_row_with_no_title():
+    assert to_item({"identifier": "ASH-1"}) is None
+
+
+def test_to_item_tolerates_missing_optional_fields():
+    item = to_item({"identifier": "ASH-1", "title": "t"})
+    assert item.state == "unknown" and item.assignee is None and item.labels == ()
+
+
+# --- the fixture that does not exist yet ----------------------------------
+
+CAPTURE = os.path.join(os.path.dirname(__file__), "fixtures", "real_linear_issues.json")
+
+
+@pytest.mark.skipif(not os.path.exists(CAPTURE),
+                    reason="no live Linear capture yet — no API key on this host; "
+                           "run tools/capture_inbox.py after the first live read")
+def test_the_query_fields_exist_on_a_real_response():
+    """Pinned against a REAL capture once one exists, the same way coord-mesh
+    pins its argv against a captured --help. Skipped rather than faked: a
+    hand-written fixture labelled 'real' is the exact defect that cost
+    sealed-secrets a review round."""
+    with open(CAPTURE, "r", encoding="utf-8") as fh:
+        captured = json.load(fh)
+    assert captured.get("captured_from") == "linear.app"
+    nodes = captured["response"]["data"]["issues"]["nodes"]
+    assert nodes, "a capture with no issues cannot pin field names"
+    for node in nodes:
+        assert to_item(node) is not None
+
+
+# --- the verb must actually exist and run ---------------------------------
+
+def test_the_console_entry_point_exposes_linear_inbox():
+    """codex-coder's coord-mesh finding, applied here before it can bite: a verb
+    declared in argparse but unreachable passes every unit test that imports the
+    module and none that runs the command."""
+    import subprocess
+    import sys as _sys
+    cp = subprocess.run([_sys.executable, "-m", "coord_tracker_bridge.cli", "--help"],
+                        capture_output=True, text=True, timeout=60)
+    assert cp.returncode == 0, cp.stderr
+    assert "linear-inbox" in cp.stdout
+
+
+def test_the_verb_refuses_without_credentials_rather_than_pretending(monkeypatch):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    rc = _cli.main(["linear-inbox", "--linear-team-id", "TEAM-X"])
+    assert rc == 2
+
+
+def test_unknown_exits_3_so_a_caller_can_tell_it_from_an_empty_board(monkeypatch, capsys):
+    """rc 0 for a board we could not read would make every script that wraps
+    this verb report 'no work' during an outage."""
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(_cli, "fetch_inbox",
+                        lambda *a, **k: Result(UNKNOWN, detail="429"))
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: object())
+    rc = _cli.main(["linear-inbox", "--linear-team-id", "TEAM-X"])
+    assert rc == 3
+    assert "UNKNOWN" in capsys.readouterr().out
+
+
+def test_an_empty_board_exits_0(monkeypatch, capsys):
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(_cli, "fetch_inbox", lambda *a, **k: Result(EMPTY))
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: object())
+    assert _cli.main(["linear-inbox", "--linear-team-id", "TEAM-X"]) == 0

@@ -122,6 +122,33 @@ downloads run concurrently under one whole-snapshot deadline (30 seconds by
 default); an incomplete batch degrades tasks instead of authorizing mutations
 from a partial enumeration.
 
+## `linear-inbox` — read Ash's board, never touch it
+
+`coord-tracker-bridge linear-inbox --linear-team-id <TEAM>` performs one
+paginated GraphQL read of a Linear team's issues and prints them as a coord
+fold. It is the only verb that runs in the read direction, and it is fenced:
+
+- It builds **no** `BridgeService` — no ledger, no lease, no tracker adapter —
+  so there is no write path in scope to reach.
+- Its client is wrapped in `ReadOnlyTransport`, which inspects the GraphQL
+  document about to be posted and refuses anything that is not a pure query.
+  The rail runs on what will execute, not on what the caller intended.
+- A failed or partial read is **UNKNOWN and exits 3**, never an empty board.
+  A caller scripting this verb must be able to tell "no work" from "could not
+  read", and rc 0 during an outage would report the first while meaning the
+  second.
+
+The standing rail on this lane: **zero Linear writes of any kind** — no issue
+creation, no state changes, no comments, no label/assignee mutations — until
+Ash approves a write plan explicitly. The reason is a near-miss, not caution: an
+earlier cutover plan would have pushed ~503 creates into a 55-issue curated
+board.
+
+`tools/capture_inbox.py` stamps a real response with its own measured
+provenance for the field-name contract test, redacting titles, descriptions,
+URLs and assignee names. It has no offline mode: a hand-written fixture
+labelled "real" is the defect it exists to prevent.
+
 - `plan` is read-only and shows projection changes plus missing bounded
   taxonomy resources.
 - `adopt-markers --dry-run` previews the complete legacy identity mapping and
