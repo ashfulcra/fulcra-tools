@@ -43,11 +43,14 @@ def test_board_json_one_value_under_read_degraded(capsys):
 
 
 def test_needs_me_json_one_value_under_read_degraded(capsys):
+    # Contract 2: an unreadable task authority is UNKNOWN health -> rc 3
+    # (OC3/E4; rc was previously forge-only). Still exactly ONE JSON value.
     t = FakeTransport(); _corrupt_index(t)
     capsys.readouterr()
-    assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
+    assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 3
     v = _one_json_value(capsys.readouterr().out)
-    assert any(r.get("type") == "read-degraded" for r in v)
+    assert v["health"] == "UNKNOWN"
+    assert any(r.get("type") == "read-degraded" for r in v["rows"])
 
 
 def test_inbox_json_one_value_under_read_degraded(capsys):
@@ -80,9 +83,12 @@ def test_needs_me_json_pure_under_review_budget_pressure(capsys, monkeypatch):
               "---\ntype: Verdict\nverdict: approve\n---\nv")
     reconcile.reconcile(t, "r", now="2026-07-20T00:00:00Z", today="2026-07-20", host="h")
     capsys.readouterr()
-    assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
+    assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 3
     v = _one_json_value(capsys.readouterr().out)
-    assert isinstance(v, list)
+    # Contract 2: still ONE value — now the envelope object; budget pressure is
+    # DEGRADED health and rc follows it (OC3/E4).
+    assert isinstance(v, dict) and v["health"] == "DEGRADED"
+    assert isinstance(v["rows"], list)
 
 
 def test_threads_json_is_one_value(capsys):

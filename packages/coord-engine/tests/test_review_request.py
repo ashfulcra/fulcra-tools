@@ -11,7 +11,7 @@ import time
 
 from coord_engine import budget, cli, okf, reconcile
 from coord_engine.transport import TransportError
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 
 # --- bounded-review-fold fixtures (Task 2) -----------------------------------
@@ -190,7 +190,7 @@ def test_fold_budget_emits_degraded_marker(capsys):
     assert 1 <= deg[0]["scanned"] < 4, deg[0]
 
 
-def test_briefing_and_needs_me_degraded_exit_zero_with_text(capsys, monkeypatch):
+def test_briefing_and_needs_me_degraded_rcs_with_text(capsys, monkeypatch):
     monkeypatch.setenv("COORD_REVIEW_FOLD_BUDGET", "0.01")
     t = SlowTransport(delay=0.03)
     for i in range(4):
@@ -198,14 +198,18 @@ def test_briefing_and_needs_me_degraded_exit_zero_with_text(capsys, monkeypatch)
                   "--reviewer", "alice"], transport=t)
     capsys.readouterr()
 
-    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 0
+    # Contract 2 (OC3/E4): needs-me's rc follows envelope health in BOTH
+    # output modes — a degraded review fold is DEGRADED -> rc 3 (previously
+    # only a forge cut moved the rc). briefing keeps its own rc contract
+    # until its ladder PR.
+    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 3
     assert "review fold degraded" in capsys.readouterr().out
 
     assert cli.main(["briefing", "r", "--agent", "alice"], transport=t) == 0
     assert "review fold degraded" in capsys.readouterr().out
 
     cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert any(r.get("type") == "review-fold-degraded" for r in got), \
         "json path must surface the marker as-is"
 
@@ -549,20 +553,20 @@ def test_needs_me_lists_named_role_until_verdict(capsys):
 
     assert cli.main(["needs-me", "r", "--agent", "reviewer", "--json"],
                     transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     pend = [r for r in got if r.get("type") == "review-pending"]
     assert len(pend) == 1 and pend[0]["name"] == "pr-9"
 
     # obligation persists across repeated polls (structural, not one-shot)
     cli.main(["needs-me", "r", "--agent", "reviewer", "--json"], transport=t)
-    assert [r for r in json.loads(capsys.readouterr().out)
+    assert [r for r in needs_me_rows(json.loads(capsys.readouterr().out))
             if r.get("type") == "review-pending"], "must stay until verdict exists"
 
     # verdict file appears -> obligation drops
     t.put("team/r/review/pr-9/verdicts/reviewer.md",
           "---\ntype: Verdict\nreviewer: reviewer\nverdict: approve\n---\n")
     cli.main(["needs-me", "r", "--agent", "reviewer", "--json"], transport=t)
-    assert not [r for r in json.loads(capsys.readouterr().out)
+    assert not [r for r in needs_me_rows(json.loads(capsys.readouterr().out))
                 if r.get("type") == "review-pending"], "must drop once verdict filed"
 
 
@@ -578,7 +582,7 @@ def test_needs_me_routes_role_to_fresh_holder(capsys):
               "--reviewer", "reviewer"], transport=t)
     capsys.readouterr()
     cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t)
-    got = json.loads(capsys.readouterr().out)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert [r for r in got if r.get("type") == "review-pending"], \
         "fresh holder of the required role owes the verdict"
 
@@ -1100,7 +1104,7 @@ def test_fold_emits_review_orphan_row_each_pass(capsys):
     capsys.readouterr()
     for _ in range(2):  # emitted EACH pass, not cached in the fold
         assert cli.main(["needs-me", "r", "--agent", "me", "--json"], transport=t) == 0
-        got = json.loads(capsys.readouterr().out)
+        got = needs_me_rows(json.loads(capsys.readouterr().out))
         orphans = [g for g in got if g.get("type") == "review-orphan"]
         assert [o["name"] for o in orphans] == ["pr-orphan"]
         # doc-ful review still tallies normally
@@ -1124,8 +1128,8 @@ def test_fold_role_lease_listing_degraded_is_visible_not_vacant(capsys):
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
     t.put("team/r/roles/reviewer/leases/amy.md",
           "---\ntype: Lease\nagent: amy\ntimestamp: 2026-07-01T00:00:00Z\n---\n")
-    assert cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    assert cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t) == 3  # contract 2: rc follows health (OC3/E4)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert [g for g in got if g.get("type") == "review-role-degraded"], \
         "a degraded role lease read must be VISIBLE, not a silent vacancy"
 
@@ -1145,8 +1149,8 @@ def test_fold_role_doc_none_but_listed_degrades_visibly(capsys):
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
     t.put("team/r/roles/reviewer/leases/amy.md",
           "---\ntype: Lease\nagent: amy\ntimestamp: 2026-07-01T00:00:00Z\n---\n")
-    assert cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t) == 0
-    got = json.loads(capsys.readouterr().out)
+    assert cli.main(["needs-me", "r", "--agent", "amy", "--json"], transport=t) == 3  # contract 2: rc follows health (OC3/E4)
+    got = needs_me_rows(json.loads(capsys.readouterr().out))
     assert [g for g in got if g.get("type") == "review-role-degraded"], \
         "doc-None on a LISTED role doc must degrade visibly, not silently non-role"
 
@@ -1226,7 +1230,7 @@ def test_needs_me_tombstone_absent_orphan_degraded_present(capsys):
     t.put("team/r/review/pr-tomb/", "")   # tombstone -> invisible
     t.put("team/r/review/pr-unk/", "")    # degraded  -> visible
     capsys.readouterr()
-    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 0
+    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 3  # contract 2: rc follows health (OC3/E4)
     out = capsys.readouterr().out
     assert "pr-tomb" not in out, "tombstone must never print"
     assert "pr-unk" in out, "a degraded orphan classification must print"

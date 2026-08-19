@@ -22,7 +22,7 @@ import json
 import pytest
 
 from coord_engine import cli
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 STRICT_READ_CAP = 8 * 1024
 
@@ -90,7 +90,7 @@ def test_degraded_rows_carry_type_and_coverage(capsys):
     _seed_rows(t)
     t.fail_list = True
     cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
-    rows = strict_parse(capsys.readouterr().out)
+    rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     assert isinstance(rows, list)
     markers = [r for r in rows if isinstance(r, dict)
                and str(r.get("type", "")).endswith(("-degraded", "-source"))
@@ -143,18 +143,101 @@ def test_blocked_ask_renders_unlock_independent_of_blocked_on(
 # in the registry below, which is explicitly documentation-only.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="OC2 TARGET (C03/C05/C06): stdout must lead with an envelope "
-           "object carrying state/source/contract; today it is a bare array. "
-           "When this XPASSes, flip OC2 to ENFORCED in the same PR.")
-def test_oc2_target_envelope_leads_stdout(capsys):
+# --- OC2: envelope first, needs-me (ENFORCED — ladder PR 1; C03, C05, C06) --
+
+
+def test_oc2_needs_me_envelope_leads_stdout(capsys):
+    # LADDER PR 1 (was the strict-xfail probe): needs-me's stdout is ONE
+    # envelope object — contract stamp, transport health, source, rows inside.
+    # One parse decides everything; a truncated read becomes a loud parse
+    # failure instead of a silently complete-looking array.
     t = FakeTransport()
     _seed_rows(t)
-    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    rc = cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
     value = strict_parse(capsys.readouterr().out)
     assert isinstance(value, dict), "envelope object must be the first value"
-    assert "state" in value and "contract" in value
+    assert value["contract"] == 2
+    assert value["health"] in ("DATA", "CLEAR", "DEGRADED", "UNKNOWN")
+    assert value["source"] in ("projection", "raw-scan"), (
+        "the normative source enum, verbatim (pr-641 r1 finding 2)")
+    assert isinstance(value["rows"], list)
+    assert rc == (3 if value["health"] in ("DEGRADED", "UNKNOWN") else 0), (
+        "rc must be a pure function of envelope health (OC3/E4)")
+
+
+def test_oc2_health_rules_and_rc(capsys):
+    # The r2 design's ordered health rules, driven end-to-end:
+    # complete scan + rows -> DATA rc0; failing transport -> partial coverage
+    # -> DEGRADED rc3 with a named basis (rows stay served as a floor).
+    t = FakeTransport()
+    head = "b" * 40
+    cli.main(["review", "request", "r", "pr-hz", "--of", "https://x/pr/hz",
+              "--reviewer", "alice", "--from", "boss", "--head", head],
+             transport=t)
+    capsys.readouterr()
+    rc = cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    v = strict_parse(capsys.readouterr().out)
+    assert (v["health"], rc) == ("DATA", 0)
+    assert v["degraded"] == [] and v["basis"] == []
+
+    t2 = FakeTransport()
+    _seed_rows(t2)
+    t2.fail_list = True
+    rc2 = cli.main(["needs-me", "r", "--agent", "alice", "--json"],
+                   transport=t2)
+    v2 = strict_parse(capsys.readouterr().out)
+    assert v2["health"] in ("DEGRADED", "UNKNOWN") and rc2 == 3
+    assert v2["basis"], "a non-clean health must name its failure classes"
+
+
+def test_oc2_envelope_source_enum_and_coverage():
+    # pr-641 r1 findings 2+3: `source` is the NORMATIVE enum verbatim
+    # (projection | raw-scan — never `raw`/`absent`), and coverage aggregates
+    # marker scanned/total into the envelope where bounded work ran.
+    env, rc = cli.class_a_envelope(
+        [{"type": "review-fold-degraded", "scanned": 2, "total": 7},
+         {"type": "forge-degraded", "scanned": 0, "total": 3},
+         {"type": "needs-me-source", "source": "raw-scan", "reason": "stale"}],
+        source_type="needs-me-source")
+    assert env["source"] == "raw-scan"
+    assert (env["scanned"], env["total"]) == (2, 10)
+    assert (env["health"], rc) == ("DEGRADED", 3)
+
+    env2, _rc2 = cli.class_a_envelope(
+        [{"type": "needs-me-source", "source": "projection",
+          "as_of": "2026-08-18T00:00:00Z"}],
+        source_type="needs-me-source")
+    assert env2["source"] == "projection"
+    assert env2["as_of"] == "2026-08-18T00:00:00Z"
+    assert "scanned" not in env2 and "total" not in env2
+
+    env3, _rc3 = cli.class_a_envelope([], source_type="needs-me-source")
+    assert env3["source"] == "raw-scan", (
+        "no source row = the pre-projection raw path; the enum stays closed")
+
+
+def test_oc2_invalid_source_token_is_not_promoted_to_provenance():
+    # pr-641 r2, the remaining finding: a present source row with a token
+    # OUTSIDE the closed enum is corrupt provenance — it must contribute
+    # source-invalid (health UNKNOWN, rc 3) and emit an explicit null, never
+    # be silently promoted to a clean raw-scan.
+    env, rc = cli.class_a_envelope(
+        [{"type": "needs-me-source", "source": "corrupt"}],
+        source_type="needs-me-source")
+    assert (env["health"], rc) == ("UNKNOWN", 3)
+    assert "source-invalid" in env["basis"]
+    assert env["source"] is None
+
+
+def test_oc2_unclassified_degraded_marker_fails_closed():
+    # pr-641 r1 finding 1: a degraded type the basis map does not know may be
+    # an unreadable/invalid authority — it must become UNKNOWN (rows not
+    # actable), never default into a coverage class that licenses a floor.
+    env, rc = cli.class_a_envelope(
+        [{"type": "future-source-degraded", "reason": "authority unreadable"}],
+        source_type="needs-me-source")
+    assert env["health"] == "UNKNOWN" and rc == 3
+    assert "source-invalid" in env["basis"]
 
 
 # --- OC5: act-on-it fields, review rows (ENFORCED — ladder flip 1; C01) ----
@@ -171,7 +254,7 @@ def test_oc5_review_row_carries_of_and_head(capsys):
              transport=t)
     capsys.readouterr()
     cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
-    rows = strict_parse(capsys.readouterr().out)
+    rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     pending = [r for r in rows if isinstance(r, dict)
                and r.get("type") == "review-pending"]
     assert pending, "reviewer must see the pending review"
@@ -188,7 +271,7 @@ def test_oc5_review_row_keys_present_even_on_legacy_headless_register(capsys):
           "---\ntype: Review\nof: https://x/pr/old\nrequired: [alice]\n"
           "requested_by: boss\n---\nReview requested\n")
     cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
-    rows = strict_parse(capsys.readouterr().out)
+    rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     pending = [r for r in rows if isinstance(r, dict)
                and r.get("type") == "review-pending"]
     assert pending, "reviewer must see the pending review"

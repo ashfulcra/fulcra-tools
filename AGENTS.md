@@ -420,15 +420,28 @@ it (not on PyPI).
   Corollary for any bug whose subject is a wrong reading: assume your own
   verification of it carries the same defect, and check the instrument before you
   trust what it told you.
-- **If your harness truncates output, read the verdict off stderr.** `needs-me`
-  and `briefing` print an unbounded row list to stdout with their degraded and
-  source markers inside it, so a truncating reader can lose exactly the part
-  that says whether the read is trustworthy. Both now also emit one compact
-  envelope line to **stderr** — `needs-me: N item(s), forge=…, source=…,
-  degraded=N, rc=N` — which survives stdout truncation. `needs-me
-  --envelope-only` gives you that verdict with no records at all, same rc.
-  Trust the envelope's `degraded` and `rc` over a payload you cannot see the end
-  of; `degraded>0` or `rc=3` means UNKNOWN, never clear.
+- **`needs-me --json` is contract 2: one envelope object, health first.**
+  stdout is a SINGLE JSON value — `{"contract": 2, "health":
+  DATA|CLEAR|DEGRADED|UNKNOWN, "source", "degraded", "basis", "rows": […]}`.
+  Read `health` before anything else: UNKNOWN means the authority itself was
+  untrusted and the rows must not be acted on; DEGRADED means rows are a
+  FLOOR (partial coverage — never infer absence); CLEAR is the only health
+  that licenses "nothing for me". rc is a pure function of health
+  (UNKNOWN|DEGRADED → 3, in text mode too). An incomplete parse is UNKNOWN;
+  never truncate an authority read with `tail`/`head` and never regex fields
+  out of a cut buffer. Other verbs migrate one PR at a time — a bare array
+  is the contract-1 shape, scan its marker rows as before
+  (`docs/coord/OUTPUT-CONTRACT.md`).
+- **If your harness truncates output, read the verdict off stderr.**
+  `needs-me` and `briefing` print their row payload with degraded and source
+  markers inside it, so a truncating reader can lose exactly the part that
+  says whether the read is trustworthy. Both emit one compact envelope line
+  to **stderr** — `needs-me: N item(s), health=…, forge=…, source=…,
+  degraded=N, rc=N` — which survives stdout truncation (a courtesy duplicate;
+  the stdout envelope is the authority). `needs-me --envelope-only` gives you
+  that verdict with no records at all, same rc. Trust the envelope's `health`
+  and `rc` over a payload you cannot see the end of; `degraded>0` or `rc=3`
+  means UNKNOWN or a floor, never clear.
 - **Bus-v3 convergence is authority-gated, not a rollout convention.** The
   shared `_coord/bus-v3/records.json` atomically declares protocol and cursor
   schema versions, minimum safe reader/writer engine versions, cursor

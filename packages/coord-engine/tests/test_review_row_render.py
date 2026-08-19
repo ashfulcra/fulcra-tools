@@ -81,7 +81,7 @@ def test_needs_me_head_degraded_renders_loud_not_line(capsys, monkeypatch):
     t = FakeTransport()
     capsys.readouterr()
     rc = cli.main(["needs-me", "r", "--agent", "alice"], transport=t)
-    assert rc == 0
+    assert rc == 3  # contract 2: head-degraded is DEGRADED health (OC3/E4)
     out = capsys.readouterr().out
     assert "review HEAD degraded" in out, out
     assert "UNKNOWN" in out, out

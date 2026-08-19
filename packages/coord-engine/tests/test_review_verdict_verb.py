@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from coord_engine import cli, okf, review
 from coord_engine.transport import TransportError
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 TEAM = "r"
 SLUG = "pr-1-thing"
@@ -607,7 +607,7 @@ def test_the_fanout_scan_applies_THE_SAME_rule_as_the_projection(capsys):
 
     cli.main(["needs-me", TEAM, "--agent", "second-reviewer", "--json"],
              transport=t)
-    rows = _j.loads(capsys.readouterr().out)
+    rows = needs_me_rows(_j.loads(capsys.readouterr().out))
     assert any(r.get("name") == SLUG for r in rows
                if r.get("type") == "review-pending"), (
         f"the fan-out scan honoured an unvalidated cache and hid an owed "
