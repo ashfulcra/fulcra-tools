@@ -63,9 +63,10 @@ therefore move monotonically toward ``total`` instead of restarting at zero.
 Without feed evidence the conservative legacy rule carries only settled rows
 whose doc mtime+size still match (including the same-minute guard). The build
 also drops the ``.settled`` marker on any tally it proves settleable. Until the
-build completes inside its budget the section says ``complete: false`` and
-readers keep raw-scanning (loud) — an incomplete projection is never served as
-coverage.
+build completes inside its budget, incomplete work stays in the private
+progress shard while readers keep serving the last complete public generation.
+Only a missing, stale, or legacy pre-fence generation falls back to a loud raw
+scan; an incomplete projection is never published as coverage.
 
 Stdlib-only; transport duck-typed (``list_dir``/``read``/``write``); build
 functions never raise (reconcile wraps them best-effort anyway).
@@ -106,8 +107,11 @@ REQUIRED_SECTIONS = (
 
 # Review is the expensive source fold and forge is derived from its rows, so
 # they form one atomic publication unit. needs_me has a separate retry-safety
-# contract: an inconclusive ack fold must publish its held anchor and
-# ``complete: false`` so the next quiet pass cannot fast-path past owed work.
+# contract, but shares the aggregate write: when review/forge refusal keeps the
+# prior public needs_me section, that staleness is safe-redundant (newly acked
+# work may remain visible; owed work is not hidden). On a publishable pass, an
+# inconclusive ack fold includes its held anchor and ``complete: false`` so the
+# next quiet pass cannot fast-path past owed work.
 ATOMIC_PUBLICATION_SECTIONS = (
     (REVIEWS_KEY, REVIEWS_SCHEMA),
     (FORGE_KEY, FORGE_SCHEMA),

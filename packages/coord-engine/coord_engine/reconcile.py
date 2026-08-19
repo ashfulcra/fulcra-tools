@@ -1533,8 +1533,11 @@ def reconcile(
     # deadline or a carried prior section means this pass did not produce one
     # complete generation. Refuse the aggregate write loudly rather than replace
     # the last complete generation with bytes we already know are partial (the
-    # live 187/290 regression). needs_me is deliberately separate: an
-    # inconclusive ack fold must publish its held retry anchor.
+    # live 187/290 regression). needs_me is rebuilt separately but shares this
+    # aggregate write. Refusal therefore retains the prior public needs_me
+    # section, a safe-redundant direction: newly acked work may stay visible,
+    # but owed work is not hidden. On the next publishable pass, an inconclusive
+    # ack fold carries its held retry anchor into the committed generation.
     incomplete = [
         key for key, schema in projection_mod.ATOMIC_PUBLICATION_SECTIONS
         if (not built_current[key]
