@@ -840,3 +840,73 @@ def test_the_missing_pageInfo_case_exits_3_through_the_CLI(monkeypatch, capsys):
     monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
     assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
     assert "UNKNOWN" in capsys.readouterr().out
+
+
+# --- what the capture tool redacts (coord-boss ruling a0af59b9) ------------
+# The fixture lands in a PUBLIC repo, so the tool's redaction is the thing the
+# committed file's safety rests on. Ruling: agent:* label values and
+# hostname-shaped fragments are fleet identifiers and go; kind:*/lane:* and
+# other generic vocabulary describe the work and stay.
+
+def _capture_tool():
+    import importlib.util
+    import os as _os
+    path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                         "tools", "capture_inbox.py")
+    spec = importlib.util.spec_from_file_location("capture_inbox", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("value", [
+    "agent:coord-boss",
+    "agent:claude-code:Mac:fulcra-tools",
+    "agent:coord-reconcile:Ashs-MBP-Work.localdomai",
+    "AGENT:Mixed-Case",
+])
+def test_agent_labels_are_redacted(value):
+    assert _capture_tool().redact_label(value) == "<redacted agent label>"
+
+
+@pytest.mark.parametrize("value", [
+    "coord-reconcile:some-host.local",
+    "box.localdomain",
+    "Ashs-MBP-Work.internal",
+])
+def test_hostname_shaped_labels_are_redacted(value):
+    assert _capture_tool().redact_label(value) == "<redacted host label>"
+
+
+@pytest.mark.parametrize("value", [
+    "kind:directive", "kind:task", "lane:active", "lane:backlog",
+    "origin:ash", "origin:fleet", "blocked-on-ash", "P1",
+])
+def test_generic_vocabulary_survives(value):
+    """The other half of the ruling. Over-redacting would strip the labels the
+    contract tests legitimately exercise, and origin:ash is already a committed
+    public value in this package's own default-v2.json policy."""
+    assert _capture_tool().redact_label(value) == value
+
+
+def test_redact_rewrites_labels_in_place_without_losing_the_list():
+    tool = _capture_tool()
+    node = {"identifier": "BUS-1", "title": "t", "url": "u",
+            "assignee": {"displayName": "A Person"},
+            "labels": {"nodes": [{"name": "agent:coord-boss"},
+                                 {"name": "kind:directive"}]}}
+    out = tool.redact(node)
+    names = [entry["name"] for entry in out["labels"]["nodes"]]
+    assert names == ["<redacted agent label>", "kind:directive"]
+    assert out["title"] == "<redacted title>"
+    assert out["assignee"]["displayName"] == "<redacted person>"
+    # The original node must not be mutated — a capture tool that edits its
+    # input in place would corrupt the response it is about to stamp.
+    assert node["labels"]["nodes"][0]["name"] == "agent:coord-boss"
+
+
+def test_redact_tolerates_a_malformed_labels_block():
+    tool = _capture_tool()
+    for labels in (None, {}, {"nodes": None}, {"nodes": ["not-a-dict"]}, "nope"):
+        node = {"identifier": "BUS-1", "labels": labels}
+        tool.redact(node)          # must not raise
