@@ -70,6 +70,17 @@ def registry(monkeypatch, tmp_path):
     return store
 
 
+def _cursor(registry):
+    """The stored position, as (watermark_iso, set_of_ids)."""
+    return cli.peers.cursor_parts(cli.peers.get_cursor(registry, "default", UID))
+
+
+def _anchored_at(registry, *ids):
+    """The cursor's ledger is exactly these ids (order-free by construction)."""
+    _, have = _cursor(registry)
+    return have == set(ids)
+
+
 def _run(monkeypatch, rows, extra=()):
     monkeypatch.setattr(cli.transport, "get_records",
                         lambda *a, **k: cli.transport.Result(
@@ -82,7 +93,7 @@ def test_cursor_anchors_to_the_newest_row_not_the_oldest(capsys, monkeypatch, re
     """THE REGRESSION. A first read shows everything and remembers the NEWEST id."""
     assert _run(monkeypatch, ROWS) == cli.RC_OK
     assert "3 event(s)" in capsys.readouterr().out
-    assert cli.peers.get_cursor(registry, "default", UID) == "r3", (
+    assert _anchored_at(registry, "r3"), (
         "cursor anchored to the wrong end of the window — this is the defect "
         "that produced the 8-event replay and the silent 0-event reads"
     )
@@ -148,7 +159,7 @@ def test_advance_lands_on_the_last_row_after_a_replay(monkeypatch, registry):
     next read is quiet for the right reason rather than by accident."""
     cli.peers.set_cursor(registry, "default", UID, "aged-out-id")
     _run(monkeypatch, ROWS)
-    assert cli.peers.get_cursor(registry, "default", UID) == "r3"
+    assert _anchored_at(registry, "r3")
 
 
 # --- the order is PROVEN per read, never assumed (codex-coder on 051109f) ----
@@ -165,7 +176,7 @@ def test_a_descending_response_is_sorted_not_silently_anchored(capsys, monkeypat
     cli.peers.set_cursor(registry, "default", UID, "r1")
     assert _run(monkeypatch, list(reversed(ROWS))) == cli.RC_OK
     out, err = capsys.readouterr().out, capsys.readouterr().err
-    assert cli.peers.get_cursor(registry, "default", UID) == "r3", \
+    assert _anchored_at(registry, "r3"), \
         "cursor must anchor to the true newest row regardless of transport order"
 
 
@@ -180,23 +191,56 @@ def test_a_descending_response_is_reported_even_though_it_is_handled(capsys, mon
 def test_an_internally_disordered_response_is_sorted(capsys, monkeypatch, registry):
     """One row out of place — the case a spot check misses."""
     assert _run(monkeypatch, [ROWS[0], ROWS[2], ROWS[1]]) == cli.RC_OK
-    assert cli.peers.get_cursor(registry, "default", UID) == "r3"
+    assert _anchored_at(registry, "r3")
 
 
-def test_tied_timestamps_get_a_deterministic_anchor(capsys, monkeypatch, registry):
-    """THE r2 FINDING. Equal timestamps are a PARTIAL order: every permutation
-    of a tied group passed the old monotonic check, so the last row of that
-    group — and therefore the cursor — was whatever the transport happened to
-    emit last. The id breaks the tie deterministically, so both orderings of the
-    same tied pair must anchor to the same record."""
-    a = _row("id-aaa", "first", T2)
-    b = _row("id-bbb", "second", T2)      # same instant, different id
+def test_tied_timestamps_anchor_the_same_way_whatever_the_transport_emits(capsys, monkeypatch, registry):
+    """Equal timestamps are a PARTIAL order: every permutation of a tied group
+    passed the old monotonic check, so the anchor was whatever the transport
+    happened to emit last. The ledger records ALL ids at the watermark instant,
+    so both orderings of the same tied pair reach the same position."""
+    a, b = _row("id-aaa", "first", T2), _row("id-bbb", "second", T2)
     _run(monkeypatch, [a, b])
-    one = cli.peers.get_cursor(registry, "default", UID)
+    one = _cursor(registry)
     registry["spaces"] = {}
-    _run(monkeypatch, [b, a])             # transport emits the tie the other way
-    two = cli.peers.get_cursor(registry, "default", UID)
-    assert one == two == "id-bbb", (one, two)
+    _run(monkeypatch, [b, a])
+    assert _cursor(registry) == one, (one, _cursor(registry))
+    assert one[1] == {"id-aaa", "id-bbb"}
+
+
+def test_a_later_row_at_the_SAME_instant_with_a_lower_id_is_not_skipped(capsys, monkeypatch, registry):
+    """THE r3 REGRESSION (codex-coder on 54458d81). A deterministic tie-break is
+    not an APPEND-MONOTONIC one: sorting by (recorded_at, id) puts a
+    later-arriving row with the same timestamp and a lexically smaller id
+    BEFORE the stored cursor, where a positional slice drops it silently. The
+    watermark+ledger test asks membership, never id order, so it survives."""
+    late = _row("id-aaa", "arrived-late", T3)     # same instant as r3, lower id
+    _run(monkeypatch, ROWS)                        # cursor: T3, {"r3"}
+    capsys.readouterr()
+    rc = _run(monkeypatch, sorted([*ROWS, late], key=lambda r: r["id"]))
+    assert rc == cli.RC_OK
+    out = capsys.readouterr().out
+    assert "arrived-late" in out, "a row that arrived after the cursor vanished"
+    assert "1 event(s)" in out, out
+    assert _anchored_at(registry, "r3", "id-aaa")
+
+
+def test_the_ledger_does_not_re_show_a_row_already_seen_at_the_watermark(capsys, monkeypatch, registry):
+    """The other half: membership must also stop a repeat."""
+    _run(monkeypatch, ROWS)
+    capsys.readouterr()
+    assert _run(monkeypatch, ROWS) == cli.RC_OK
+    assert "0 event(s)" in capsys.readouterr().out
+
+
+def test_a_legacy_string_cursor_still_works_and_is_migrated(capsys, monkeypatch, registry):
+    """Registries written before the watermark existed must not replay a whole
+    window, and must not be reinterpreted as 'never read'."""
+    cli.peers.set_cursor(registry, "default", UID, "r1")
+    assert _run(monkeypatch, ROWS) == cli.RC_OK
+    out = capsys.readouterr().out
+    assert "2 event(s)" in out, out
+    assert _anchored_at(registry, "r3"), "legacy cursor must migrate forward"
 
 
 def test_a_row_with_no_timestamp_is_UNKNOWN(capsys, monkeypatch, registry):
@@ -225,9 +269,9 @@ def test_equal_timestamps_do_not_degrade_a_healthy_read(capsys, monkeypatch, reg
     refusing them would degrade a healthy read."""
     rows = [_row("r1", "a", T1), _row("r2", "b", T1), _row("r3", "c", T2)]
     assert _run(monkeypatch, rows) == cli.RC_OK
-    assert cli.peers.get_cursor(registry, "default", UID) == "r3"
+    assert _anchored_at(registry, "r3")
 
 
 def test_a_single_row_window_is_trivially_ordered(monkeypatch, registry):
     assert _run(monkeypatch, [ROWS[0]]) == cli.RC_OK
-    assert cli.peers.get_cursor(registry, "default", UID) == "r1"
+    assert _anchored_at(registry, "r1")

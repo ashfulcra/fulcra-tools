@@ -228,8 +228,15 @@ def unseal(bundle, passphrase, *, expected_role, expected_version=None,
     tried = 0
     for w in bundle["wraps"]:                  # try each unlock path
         n, r, p = _check_kdf(w["kdf"])         # malformed => BundleRejected, not skipped
+        # The salt is structure too. It was the one field still decoded inline,
+        # so a malformed or wrong-length salt fell through to the wrap loop and
+        # reported as a wrong passphrase — the same conflation, surviving in the
+        # single line that had not been routed through _field (codex-coder on
+        # 54458d81). A short salt is also a real weakening, not just a shape
+        # error: it is what makes each wrap's KDF output unique.
+        salt = _field(w["kdf"], "salt", size=32)
         try:
-            kek = hashlib.scrypt(passphrase, salt=ub64(w["kdf"]["salt"]),
+            kek = hashlib.scrypt(passphrase, salt=salt,
                                  n=n, r=r, p=p, dklen=32,
                                  maxmem=128 * n * r + (1 << 20))
         except ValueError as e:

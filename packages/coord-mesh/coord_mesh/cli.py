@@ -288,21 +288,50 @@ def cmd_queue(args) -> int:
                   f"(recorded_at, id) order — sorted locally; cursor is "
                   f"unaffected", file=sys.stderr)
         ids = [wire.record_id(row) for row in ordered]
+        keys = [wire.sort_key(row) for row in ordered]
 
-        start = 0
-        if cursor:
-            if cursor in ids:
-                start = ids.index(cursor) + 1
+        # A row is NEW when it is later than the watermark, or shares the
+        # watermark instant and is not in the ledger of ids seen at it. This
+        # never compares ids for ORDER — only for membership — because id order
+        # is not append-monotonic: a record arriving later with the same
+        # timestamp and a smaller id would sort before a positional cursor and
+        # vanish (codex-coder on 54458d81).
+        watermark, seen_ids = peers.cursor_parts(cursor)
+        fresh = []
+        if watermark is None and seen_ids:
+            # Legacy single-id cursor: no time to compare against, so fall back
+            # to its POSITION in this window, exactly as before. Migrated to the
+            # watermark form on the advance below.
+            legacy = next(iter(seen_ids))
+            if legacy in ids:
+                fresh = ordered[ids.index(legacy) + 1:]
             else:
-                # At-least-once re-delivery is LEGAL, and this is it. Saying so
-                # is not optional: a replay nobody can explain costs an
-                # investigation every time it happens.
-                print(f"  peer {uid}: cursor {cursor} is not in the {args.window} "
-                      f"window (aged out) — replaying the window; re-delivery is "
-                      f"expected under at-least-once, handle events idempotently",
+                print(f"  peer {uid}: cursor {legacy} is not in the "
+                      f"{args.window} window (aged out) — replaying the window; "
+                      f"re-delivery is expected under at-least-once, handle "
+                      f"events idempotently", file=sys.stderr)
+                fresh = list(ordered)
+        elif watermark is None:
+            fresh = list(ordered)                      # never read this peer
+        else:
+            mark = wire.parse_time(watermark)
+            if mark is None:
+                print(f"  peer {uid}: stored watermark {watermark!r} is "
+                      f"unreadable — position UNKNOWN, not advancing cursor",
                       file=sys.stderr)
+                degraded.append(uid)
+                continue
+            if all(k[0] > mark for k in keys):
+                # Every row in the window post-dates the watermark: we cannot
+                # see the boundary, so we cannot tell a gap from a quiet peer.
+                print(f"  peer {uid}: watermark {watermark} predates this "
+                      f"{args.window} window — replaying what the window holds; "
+                      f"events older than it may have been missed entirely",
+                      file=sys.stderr)
+            fresh = [row for row, k in zip(ordered, keys)
+                     if k[0] > mark or (k[0] == mark and k[1] not in seen_ids)]
 
-        for row in ordered[start:]:
+        for row in fresh:
             note = envelope.parse(wire.note_text(row))
             if not note or not envelope.addressed_to(note, args.me):
                 continue
@@ -311,9 +340,18 @@ def cmd_queue(args) -> int:
                   f"from {wire.sender(row) or 'UNKNOWN-author'} "
                   f"ptr={note.get('ptr') or '-'}")
 
-        # The LAST row is the newest one; that is the position we have reached.
-        if ids and not args.no_advance and uid not in degraded:
-            peers.set_cursor(reg, space, uid, ids[-1])
+        # Advance to the newest INSTANT seen, carrying every id at that instant.
+        # Union with the previous ledger when the watermark did not move, so a
+        # row seen in an earlier read is not re-shown just because this window
+        # happened to exclude it.
+        if keys and not args.no_advance and uid not in degraded:
+            newest = keys[-1][0]
+            at_newest = {k[1] for k in keys if k[0] == newest}
+            prev_mark = wire.parse_time(watermark) if watermark else None
+            if prev_mark is not None and prev_mark == newest:
+                at_newest |= seen_ids
+            peers.set_cursor(reg, space, uid,
+                             newest.isoformat(), at_newest)
     if not args.no_advance:
         peers.save(reg)
 

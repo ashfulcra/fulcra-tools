@@ -96,6 +96,15 @@ Live legs are documented in [SMOKE.md](SMOKE.md); the role charter is
 stayed green, because the fake emitted what the code wanted. `tests/fixtures/`
 holds a real captured record; the contract tests assert against its shape.
 
+**A cursor is a WATERMARK plus a LEDGER, never a single row id.**
+The position is the newest instant consumed, together with the ids seen at that
+instant; a row is new when it post-dates the watermark, or shares it and is not
+in the ledger. That test asks membership, never id order — because id order is
+not append-monotonic. A record arriving later with the same timestamp and a
+lexically smaller id sorts *before* any single-id cursor, lands in the
+already-seen slice, and disappears. Same shape coord-engine's E1 fold settled
+on, for the same reason.
+
 **Cursors anchor to the NEWEST row, and the order is PROVEN on every read.**
 `get-records` yields rows in ascending `recorded_at` order. A cursor is a
 position in that stream, so it advances to the LAST row of the read, not the
