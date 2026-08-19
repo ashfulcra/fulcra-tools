@@ -185,9 +185,15 @@ A conforming consumer:
 6. **Envelope PR 4 (landed)**: `search` joins contract 2 — an unreadable
    index can no longer return a confident match set at rc 0; Class A is
    COMPLETE (obligations reclassified by erratum).
-7. **Next**: the Class B additive stamps (`board`, `obligations`, `queue`,
-   `review status`, `roles status`) in one small PR (`queue` reshaping:
-   never; every existing field and rc byte-for-byte).
+7. **Class B stamps (landed — the program closer)**: `board`,
+   `obligations`, `queue` (all three envelopes), `review status`, and
+   `roles status` carry `"contract": 2` additively; every existing field,
+   domain state, and rc byte-for-byte (`queue` reshaping: never). No
+   `source` stamp anywhere in Class B — none of these verbs has a
+   projection/raw distinction to disclose; their reads are their own
+   canonical paths. The OC2/OC3 ladder is COMPLETE: every machine surface
+   either serves the Class A envelope or carries the stamp on its own
+   stronger shape.
 8. **Then**: OC6 canonical-writer enforcement, OC7 capability stamps, OC8
    identity, OC9 cadence classes.
 

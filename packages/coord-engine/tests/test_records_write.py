@@ -570,7 +570,7 @@ def test_queue_json_distinguishes_invalid_config_from_unknown_transport(
     invalid_io = capsys.readouterr()
     invalid_row = json.loads(invalid_io.out)
     assert invalid_row == {
-        "type": "queue-error",
+        "type": "queue-error", "contract": 2,
         "state": "INVALID",
         "error_code": "config-invalid",
         "rc": 3,
@@ -582,7 +582,7 @@ def test_queue_json_distinguishes_invalid_config_from_unknown_transport(
     unknown_io = capsys.readouterr()
     unknown_row = json.loads(unknown_io.out)
     assert unknown_row == {
-        "type": "queue-error",
+        "type": "queue-error", "contract": 2,
         "state": "UNKNOWN",
         "error_code": "config-read-failed",
         "rc": 3,

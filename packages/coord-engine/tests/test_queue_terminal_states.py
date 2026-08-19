@@ -106,7 +106,7 @@ def test_corrupt_cursor_is_invalid_and_never_auto_recreated(monkeypatch, capsys)
     rc, out, err = _run(monkeypatch, capsys, t, ["--json"])
     assert rc == 3
     row = json.loads(out)
-    assert row == {"type": "queue-error", "state": "INVALID",
+    assert row == {"type": "queue-error", "contract": 2, "state": "INVALID",
                    "error_code": "cursor-invalid", "rc": 3}
     assert t.record_queries == []                    # refused before the read
     assert t.store[CURSOR] == "not json at all"      # evidence untouched
@@ -137,7 +137,7 @@ def test_transport_failure_is_still_error_distinguishable_from_invalid(
     rc, out, _err = _run(monkeypatch, capsys, t, ["--json"])
     assert rc == 3
     row = json.loads(out)
-    assert row == {"type": "queue-error", "state": "UNKNOWN",
+    assert row == {"type": "queue-error", "contract": 2, "state": "UNKNOWN",
                    "error_code": "cursor-read-failed", "rc": 3}
     assert t.record_queries == []
 
@@ -259,7 +259,7 @@ def test_consume_refused_when_audit_write_fails(monkeypatch, capsys):
     assert _takeover(monkeypatch, t, "--consume", "--json") == 3
     out = capsys.readouterr()
     row = json.loads(out.out)
-    assert row == {"type": "queue-error", "state": "UNKNOWN",
+    assert row == {"type": "queue-error", "contract": 2, "state": "UNKNOWN",
                    "error_code": "consume-audit-failed", "rc": 3}
     assert "REFUSED" in out.err
     assert CURSOR not in t.store                     # cursor never mutated
@@ -319,7 +319,7 @@ def test_json_data_envelope_is_one_object_with_full_event_shape(
     assert rc == 0
     row = _single_json_object(out)
     assert row == {
-        "type": "queue-result",
+        "type": "queue-result", "contract": 2,
         "state": "DATA",
         "events": [
             {"id": "r1", "ts": "2026-07-27T17:00:00+00:00", "sender": "boss",
@@ -456,7 +456,7 @@ def test_json_error_envelope_is_unchanged_by_the_success_envelope(
     rc, out, _err = _run(monkeypatch, capsys, t, ["--json"])
     assert rc == 3
     assert _single_json_object(out) == {
-        "type": "queue-error", "state": "INVALID",
+        "type": "queue-error", "contract": 2, "state": "INVALID",
         "error_code": "config-invalid", "rc": 3,
     }
 
@@ -470,7 +470,7 @@ def test_json_unknown_window_now_carries_the_error_envelope(
     rc, out, err = _run(monkeypatch, capsys, t, ["--json"])
     assert rc == 3
     assert _single_json_object(out) == {
-        "type": "queue-error", "state": "UNKNOWN",
+        "type": "queue-error", "contract": 2, "state": "UNKNOWN",
         "error_code": "window-unknown", "rc": 3,
     }
     assert "DEGRADED" in err
@@ -789,7 +789,7 @@ def test_every_nonzero_json_exit_emits_one_error_envelope(
     out = capsys.readouterr()
     assert got_rc == rc, f"{branch}: rc {got_rc} != {rc}"
     assert _single_json_object(out.out) == {
-        "type": "queue-error", "state": state,
+        "type": "queue-error", "contract": 2, "state": state,
         "error_code": error_code, "rc": rc,
     }, f"{branch}: envelope mismatch"
     assert out.err.strip(), f"{branch}: stderr diagnostic missing"

@@ -286,6 +286,53 @@ def test_oc2_search_unreadable_index_is_unknown_rc3(capsys):
     assert "source-unreadable" in v["basis"]
 
 
+def test_class_b_stamps_are_additive_and_domain_shapes_survive(capsys):
+    # PROGRAM CLOSER: every Class B surface carries the contract stamp while
+    # its domain shape, states, and rc contract stay byte-for-byte. board and
+    # obligations are the ratified errata; queue/review-status/roles-status
+    # were Class B from the design.
+    t = FakeTransport()
+    _seed_rows(t)
+
+    cli.main(["board", "r", "--json"], transport=t)
+    board = strict_parse(capsys.readouterr().out)
+    assert board["contract"] == 2
+    assert "active" in board and isinstance(board["active"], list), (
+        "board keeps its sections-object shape — never reshaped into rows")
+
+    rc = cli.main(["obligations", "r", "--agent", "alice", "--json"],
+                  transport=t)
+    obl = strict_parse(capsys.readouterr().out)
+    assert obl["contract"] == 2 and obl["type"] == "obligations"
+    assert obl["state"] in ("CLEAR", "DATA", "UNKNOWN", "INVALID"), (
+        "obligations keeps its richer domain states")
+    assert rc in (0, 3, 4), "obligations keeps its richer rc contract (0/3/4)"
+
+    cli.main(["review", "request", "r", "pr-st", "--of", "u",
+              "--reviewer", "alice", "--from", "boss"], transport=t)
+    capsys.readouterr()
+    cli.main(["review", "status", "r", "pr-st", "--json"], transport=t)
+    rs = strict_parse(capsys.readouterr().out)
+    assert rs["contract"] == 2 and rs["state"] == "PENDING"
+
+    t.put("team/r/roles/rev.md", "---\ntype: Role\npolicy: shared\n---\n")
+    cli.main(["roles", "status", "r", "rev", "--json"], transport=t)
+    ros = strict_parse(capsys.readouterr().out)
+    assert ros["contract"] == 2 and ros["status"] in (
+        "HELD", "VACANT", "CONTESTED", "DORMANT")
+
+
+def test_class_b_queue_envelopes_carry_stamp_fields_preserved():
+    # Constructor-level probe (FakeTransport has no records API): the
+    # queue-result envelope gains ONLY the stamp; state/events/obligations
+    # keys all survive.
+    env = cli._queue_result_envelope(
+        [], cfg={}, cursor_path="c", advanced=False)
+    assert env["contract"] == 2
+    assert env["type"] == "queue-result" and env["state"] == "CLEAR"
+    assert "obligations" in env, "the universal obligations key survives"
+
+
 def test_oc2_invalid_source_token_is_not_promoted_to_provenance():
     # pr-641 r2, the remaining finding: a present source row with a token
     # OUTSIDE the closed enum is corrupt provenance — it must contribute
