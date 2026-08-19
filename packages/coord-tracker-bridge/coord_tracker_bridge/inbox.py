@@ -135,10 +135,47 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
     )
 
 
+def _paginate_preserving(client: LinearClient, team_id: str) -> list[Any]:
+    """Walk the pages WITHOUT dropping a single node.
+
+    We cannot reuse `LinearClient.paginate` here. It does
+    ``nodes.extend(n for n in page["nodes"] if isinstance(n, Mapping))`` — a
+    silent filter, which is harmless for a mirror that skips what it cannot
+    project and fatal for a verb whose whole promise is that it never renders a
+    partial board as a whole one. codex-coder reproduced it at 667befac: a page
+    containing a null node came back state=empty, unknown=false, items=0. A
+    clean empty board for a response we could not read, which is the exact
+    failure this module was written to prevent — inherited from a library
+    function I reused without auditing, having verified only the guard I wrote
+    myself.
+
+    So cardinality is preserved end to end and the identity check downstream is
+    the only thing allowed to reject a row.
+    """
+    nodes: list[Any] = []
+    cursor: str | None = None
+    while True:
+        data = client.execute("CoordInbox", INBOX_QUERY, {"team": team_id, "after": cursor})
+        page = data.get("issues")
+        if not isinstance(page, Mapping):
+            raise LinearError("CoordInbox: missing page issues")
+        raw = page.get("nodes")
+        if not isinstance(raw, list):
+            raise LinearError("CoordInbox: issues.nodes is not a list")
+        nodes.extend(raw)                      # every node, nulls included
+        page_info = page.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            return nodes
+        next_cursor = page_info.get("endCursor")
+        if not next_cursor or next_cursor == cursor:
+            raise LinearError("CoordInbox: invalid pagination cursor")
+        cursor = str(next_cursor)
+
+
 def fetch_inbox(client: LinearClient, team_id: str) -> Result:
     """One paginated read. Any failure is UNKNOWN, never an empty board."""
     try:
-        nodes = client.paginate("CoordInbox", INBOX_QUERY, "issues", {"team": team_id})
+        nodes = _paginate_preserving(client, team_id)
     except LinearError as exc:
         return Result(UNKNOWN, detail=str(exc))
     items: list[InboxItem] = []
@@ -147,7 +184,8 @@ def fetch_inbox(client: LinearClient, team_id: str) -> Result:
         if item is None:
             return Result(
                 UNKNOWN,
-                detail=(f"{len(nodes)} node(s) read but one could not be identified — "
+                detail=(f"{len(nodes)} node(s) read but one could not be identified "
+                        f"(null or unidentifiable row) — "
                         "the board is partial, and a partial board rendered as a "
                         "whole one is the failure this verb exists to avoid"),
             )

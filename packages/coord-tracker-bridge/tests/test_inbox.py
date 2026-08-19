@@ -266,3 +266,59 @@ def test_an_empty_board_exits_0(monkeypatch, capsys):
     monkeypatch.setattr(_cli, "fetch_inbox", lambda *a, **k: Result(EMPTY))
     monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: object())
     assert _cli.main(["linear-inbox", "--linear-team-id", "TEAM-X"]) == 0
+
+
+# --- node cardinality: codex-coder's finding at 667befac -------------------
+
+def test_a_null_node_is_UNKNOWN_not_a_clean_empty_board():
+    """THE REGRESSION. `LinearClient.paginate` filters non-Mapping nodes before
+    any validation of ours can see them, so a page containing a null came back
+    state=empty, unknown=false, items=0 — a clean empty board for a response we
+    could not read, which is the precise failure this module exists to prevent.
+
+    The defect was inherited from a library function reused without auditing:
+    the guard downstream was verified, the filter upstream was not."""
+    result = fetch_inbox(LinearClient(FakeTransport([_page([None])])), TEAM)
+    assert result.unknown, result
+    assert result.state == UNKNOWN
+    assert result.items == ()
+
+
+def test_a_null_among_good_rows_still_degrades_the_whole_read():
+    """Partial is the dangerous shape: the good rows make the answer look real."""
+    pages = [_page([_node("ASH-1", "one"), None, _node("ASH-2", "two")])]
+    result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
+    assert result.unknown
+    assert "3 node(s) read" in result.detail, result.detail
+
+
+def test_a_null_on_a_LATER_page_is_not_lost():
+    """Cardinality must be preserved across the page boundary too."""
+    pages = [_page([_node("ASH-1", "one")], has_next=True, cursor="c1"),
+             _page([None])]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
+
+
+def test_a_non_list_nodes_field_is_UNKNOWN():
+    pages = [{"data": {"issues": {"nodes": {"not": "a list"},
+                                  "pageInfo": {"hasNextPage": False}}}}]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
+
+
+def test_a_missing_issues_root_is_UNKNOWN():
+    pages = [{"data": {}}]
+    assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
+
+
+def test_the_null_node_case_exits_3_through_the_CLI(monkeypatch, capsys):
+    """codex asked for the rc as well as the state: a script wrapping this verb
+    must see 3, because rc 0 here is the outage-reported-as-no-work case."""
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
+    transport = FakeTransport([_page([None])])
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    rc = _cli.main(["linear-inbox", "--linear-team-id", TEAM])
+    assert rc == 3
+    out = capsys.readouterr().out
+    assert "UNKNOWN" in out and "not an empty board" in out

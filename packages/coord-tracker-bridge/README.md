@@ -133,6 +133,11 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
 - Its client is wrapped in `ReadOnlyTransport`, which inspects the GraphQL
   document about to be posted and refuses anything that is not a pure query.
   The rail runs on what will execute, not on what the caller intended.
+- Node **cardinality is preserved**: the verb walks pages itself rather than
+  through `LinearClient.paginate`, which silently filters non-Mapping nodes —
+  harmless for a mirror that skips what it cannot project, fatal for a verb
+  promising never to render a partial board as a whole one. A `null` in a page
+  used to arrive as a clean empty board.
 - A failed or partial read is **UNKNOWN and exits 3**, never an empty board.
   A caller scripting this verb must be able to tell "no work" from "could not
   read", and rc 0 during an outage would report the first while meaning the
