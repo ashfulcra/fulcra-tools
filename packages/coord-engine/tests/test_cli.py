@@ -1843,7 +1843,7 @@ def test_operator_ask_answer_round_trip(capsys):
         capsys.readouterr()
         # orchestrator pulls asks
         assert cli.main(["asks", "r", "--human", "ash", "--json"], transport=t) == 0
-        got = _j.loads(capsys.readouterr().out)
+        got = needs_me_rows(_j.loads(capsys.readouterr().out))
         assert len(got) == 1 and got[0]["name"] == "deploy-thing"
         assert "vault A or B" in got[0]["blocked_on"]
         assert got[0]["age_hours"] is not None
@@ -1856,7 +1856,7 @@ def test_operator_ask_answer_round_trip(capsys):
         assert fm["assignee"] == fm["owner"]          # back in the owner's inbox
         cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
         cli.main(["asks", "r", "--human", "ash", "--json"], transport=t)
-        assert _j.loads(capsys.readouterr().out) == []  # ask cleared
+        assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []  # ask cleared
     finally:
         os.environ.pop("FULCRA_COORD_HUMAN", None)
 
@@ -1935,7 +1935,7 @@ def test_asks_oldest_first_ordering(capsys):
           "blocked_on: choose\ntimestamp: 2026-07-04T00:00:00Z\n---\n")
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     cli.main(["asks", "r", "--json"], transport=t)
-    got = _j.loads(capsys.readouterr().out)
+    got = needs_me_rows(_j.loads(capsys.readouterr().out))
     assert [g["name"] for g in got] == ["old-ask", "new-ask"]   # oldest first
 
 
@@ -1947,7 +1947,7 @@ def test_asks_word_human_in_nonblocked_text_not_matched(capsys):
           "blocked_on: waiting on human review board\ntimestamp: 2026-07-01T00:00:00Z\n---\n")
     cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
     cli.main(["asks", "r", "--human", "human", "--json"], transport=t)
-    assert _j.loads(capsys.readouterr().out) == []   # word 'human' in free text != an ask
+    assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []   # word 'human' in free text != an ask
 
 
 def _claim(t, agent="coord-maintainer"):
@@ -2213,7 +2213,7 @@ def test_answer_human_flag_matches_asks(capsys):
     capsys.readouterr()
     import json as _j
     cli.main(["asks", "r", "--human", "ash", "--json"], transport=t)   # asks lists it...
-    assert any(g["name"] == "pick-window" for g in _j.loads(capsys.readouterr().out))
+    assert any(g["name"] == "pick-window" for g in needs_me_rows(_j.loads(capsys.readouterr().out)))
     assert cli.main(["answer", "r", "pick-window", "--with", "window B",
                      "--human", "ash"], transport=t) == 0              # ...and answer accepts it
 

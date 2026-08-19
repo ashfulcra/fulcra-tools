@@ -11010,10 +11010,14 @@ def cmd_asks(args: argparse.Namespace, transport: Any) -> int:
     # not read as "nothing waiting on the human".
     rows, ok, reason = _load_rows_status(transport, args.team)
     got = query.asks(rows, now=_iso(_now()), human=args.human or _human())
+    # Contract 2 (OC2/OC3, ladder PR 3): envelope seals first, rc follows its
+    # health in BOTH modes — an unreadable index is UNKNOWN rc 3, never a
+    # clean-empty "nothing waiting on the human" at rc 0.
+    out = [_read_degraded_row(reason)] + got if not ok else got
+    envelope, rc = class_a_envelope(out, source_type="asks-source")
     if args.json:
-        out = [_read_degraded_row(reason)] + got if not ok else got
-        jsonutil.print_json(out)
-        return 0
+        jsonutil.print_json(envelope)
+        return rc
     if not ok:
         _surface_read_degraded(reason, json_mode=False)
     print(f"asks — {len(got)} waiting on {args.human or _human()} (oldest first)")
@@ -11032,7 +11036,7 @@ def cmd_asks(args: argparse.Namespace, transport: Any) -> int:
         if unlock and not _derived_unlock(r):
             print(f"           unlock: {_clip(unlock)}")
         print(f"           slug: {r.get('name')}  owner: {r.get('owner')}")
-    return 0
+    return rc
 
 
 def cmd_answer(args: argparse.Namespace, transport: Any) -> int:
