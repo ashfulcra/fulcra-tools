@@ -18,9 +18,42 @@ stdlib-only; these functions never raise.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
+from pathlib import Path
 from typing import Optional, Sequence
+
+
+def state_dir() -> Path:
+    """Local coord state root, shared by nonce and per-cwd identity state."""
+    return Path(os.environ.get("COORD_ENGINE_STATE_DIR") or
+                Path.home() / ".local" / "state" / "coord-engine")
+
+
+def identity_path(cwd: Optional[Path] = None) -> Path:
+    """The per-working-directory persisted identity path.
+
+    The real path, not the spelling used to enter the directory, is hashed so
+    aliases cannot mint competing local identities and separate repositories
+    cannot clobber one another.
+    """
+    root = (cwd or Path.cwd()).resolve()
+    digest = hashlib.sha256(str(root).encode("utf-8", "surrogatepass")).hexdigest()
+    return state_dir() / "identities" / f"{digest}.json"
+
+
+def persisted_identity(cwd: Optional[Path] = None) -> Optional[str]:
+    """Read a supported per-cwd identity, treating absent/corrupt state as unset."""
+    try:
+        value = json.loads(identity_path(cwd).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    identity = value.get("identity")
+    return identity if isinstance(identity, str) and identity else None
 
 
 def _resolve_raw(

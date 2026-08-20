@@ -75,6 +75,16 @@ def test_an_explicit_identity_is_never_rewritten(monkeypatch):
     assert cli._host() == "coord-maintainer"
 
 
+def test_identity_resolver_catches_two_sessions_on_one_host_becoming_one_host_identity(
+        monkeypatch):
+    """The resolver must retain each exported session id, never replace it with host."""
+    monkeypatch.setattr(cli.socket, "gethostname", lambda: "shared-host")
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "session-one")
+    assert cli._host() == "session-one"
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "session-two")
+    assert cli._host() == "session-two"
+
+
 def test_the_warning_fires_once_per_process_not_per_call(monkeypatch, capsys):
     """_host() is called on many paths; a warning per call would be noise, and
     noise is how a real signal gets tuned out."""

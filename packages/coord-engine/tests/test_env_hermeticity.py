@@ -29,6 +29,7 @@ import subprocess
 import sys
 
 from coord_engine.cli import INHERITED_ENV
+from coord_engine import classifier
 
 #: Files that actually broke under an inherited environment, so the wall
 #: exercises the real regressions rather than a sample chosen for convenience.
@@ -109,3 +110,12 @@ def test_the_walled_variables_are_the_ones_the_fixture_clears():
     assert set(INHERITED_ENV).isdisjoint(NOT_YET_WALLED), (
         "a variable cannot be both walled and listed as an unwalled gap"
     )
+
+
+def test_identity_resolver_catches_environment_identity_losing_to_persisted_identity():
+    """The env-over-persisted mutation would reintroduce host self-contests."""
+    assert classifier.resolve_identity(
+        environ={"FULCRA_COORD_AGENT": "exported-session"},
+        persisted="old-persisted-session",
+        hostname=lambda: "host",
+    ) == "exported-session"

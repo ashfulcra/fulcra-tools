@@ -24,7 +24,7 @@ import urllib.request
 from typing import Any, Optional
 
 from . import budget as budget_mod
-from . import config
+from . import classifier, config
 
 DEFAULT_COMMAND = ("fulcra-api",)
 
@@ -646,6 +646,10 @@ class FulcraFileTransport:
                 return None, "absent"
             return None, "error"
         return cp.stdout, "ok"
+
+    def canonical_read(self, prefix: str) -> "classifier.CanonicalRead":
+        """Classify one canonical directory through the shared conservative seam."""
+        return classifier.canonical_read(self, prefix)
 
     def write(self, path: str, content: str) -> bool:
         # contract: True on success, False on any REMOTE failure (incl. timeout/exec
