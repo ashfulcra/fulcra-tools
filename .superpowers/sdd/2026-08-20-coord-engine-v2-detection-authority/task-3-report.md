@@ -218,3 +218,105 @@ Implementation: `9f8700a7` (`coord-engine: sort normalized changes temporally`).
 ### Concerns
 
 - None known.
+
+## External Fix Round 3
+
+### Status
+
+Resolved the live `data-updates` record-count surface and explicit coverage for
+the observed engine-owned file families.
+
+### Captured fixture
+
+`packages/coord-engine/tests/fixtures/live_data_updates_2026-08-20T2013Z.min.json`
+is a sanitized/minimized derivative of
+`live-data-updates-envelope-2026-08-20T2013Z.json`. It retains the real
+top-level `data_types`/`file_changes` shape, the captured non-coordination
+count (`AppleLocationUpdate: 50`), both captured MomentAnnotation counts
+(`a093…: 4`, `d04…: 13`), and raw-schema examples for every observed in-team
+path family: task shard/index, presence, roles, review, member continuity,
+summaries, router, agents, annotate, and health. It deliberately omits the
+remaining 1,109 raw file rows and unrelated data-type counts: the regressions
+exercise classification and count semantics, not high-volume live task names
+or the full set of non-coordination count data.
+
+The existing queue authority identifies `MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041`
+as the control-plane channel; `a09350b2-e245-4348-ae63-bfb35c712c49` is the
+separate checkpoint stream and is not materialized by ordinary coordination
+detection.
+
+### Covering tests
+
+- `test_captured_data_types_materializes_the_configured_coordination_channel_once`
+- `test_missing_configured_channel_count_is_unknown_not_clear`
+- `test_captured_engine_owned_file_shapes_are_explicit_and_trusted`
+- `test_expired_budget_and_unknown_path_make_coverage_unknown`
+
+### Red evidence
+
+Before production edits:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_captured_data_types_materializes_the_configured_coordination_channel_once packages/coord-engine/tests/test_v2_change_detection.py::test_missing_configured_channel_count_is_unknown_not_clear packages/coord-engine/tests/test_v2_change_detection.py::test_captured_engine_owned_file_shapes_are_explicit_and_trusted -q
+```
+
+Output:
+
+```text
+FAILED test_captured_data_types_materializes_the_configured_coordination_channel_once
+assert 0 == 1
+FAILED test_missing_configured_channel_count_is_unknown_not_clear
+assert True is False
+FAILED test_captured_engine_owned_file_shapes_are_explicit_and_trusted
+assert False is True
+3 failed in 0.04s
+```
+
+### Implementation
+
+- Resolve the sole coordination channel through the existing classified
+  queue-authority contract, then require its integer non-negative count under
+  `data_types`. Missing/malformed authority, shape, or count is `UNKNOWN`.
+- Materialize exactly one bounded `records_cursor(channel, prior_watermark)`
+  call only when that count is nonzero; existing attested-boundary, exact-count,
+  immutable-ID, deduplication, and deadline checks remain in force.
+- Classify `_coord/router`, `_coord/agents`, `_coord/annotate`, `_coord/health`,
+  and `member/` as explicit router, agent, annotation, health, and member
+  state namespaces. A genuinely unknown in-team path remains fail-closed.
+- Update injected reconcile envelopes to carry the same queue authority and
+  zero-count `data_types` shape, preserving incremental and drift coverage.
+
+### Green evidence
+
+- Focused Unit 3/reconcile command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_reconcile.py -q`
+  → `100 passed in 0.16s`.
+- Full command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests -q`
+  → `2474 passed, 8 skipped in 82.42s`.
+- `git diff --check` exited 0.
+
+### Commit SHA
+
+Implementation: `2dc02705` (`coord-engine: honor live data type counts`).
+
+### Self-review
+
+- The new count resolution uses the pre-existing Unit 2-classified queue
+  authority; it adds no canonical `None` interpretation. Authority or count
+  doubt returns `UNKNOWN`, so reconcile retains its no-watermark-advance-on-
+  doubt behavior.
+- The data-types path selects one concrete coordination stream and can make
+  exactly one cursor materialization call before deduplication. Checkpoint and
+  unrelated data types are deliberately not treated as coordination records.
+- File immutable IDs, lifecycle parsing/UTC temporal ordering, per-row deadline
+  checks, and the no-legacy-feed reconcile path are unchanged. The live-shape
+  regression proves explicit supported families can be trusted; the existing
+  unknown-path regression proves unsupported in-team paths cannot.
+
+### Concerns
+
+- The current JSONL `get-records` implementation still lacks a server-attested
+  cursor envelope. A nonzero live coordination count therefore correctly falls
+  back to `UNKNOWN` after its one materialization attempt until the transport
+  can prove `{after, through, records}`.
