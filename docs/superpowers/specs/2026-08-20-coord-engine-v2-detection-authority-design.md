@@ -236,7 +236,8 @@ Each unit gets a separate exact-head review request naming the invariant it
 enforces. Through 2026-08-23, coord-boss is the required reviewer and
 codex-reviewer is optional.
 
-1. **Outcome spine:** typed states, coverage, rc-matches-body, and renderer parity.
+1. **Outcome spine:** typed states, coverage, rc-matches-body, renderer parity,
+   and continuity save-path truthfulness when role metadata is missing.
 2. **Identity and classifier:** env-over-host precedence; empty, tombstone, and
    unreadable are distinct.
 3. **Change detector:** one normalized feed batch with explicit namespace
@@ -270,6 +271,9 @@ The suite MUST pin every previously observed failure flavor:
 | Two builders consume identical batch | identical generation id and bytes |
 | Projection row contradicts canonical changed doc | overlay applies delta or returns `UNKNOWN` |
 | Renderer truncates rows | coverage and exit status remain truthful |
+| `continuity park` sees a held role lease with no role document | nonzero; report could-not-write distinctly from nothing-to-write; never success-shaped |
+| Role status derives a holder from lease fallback but `continuity park` would refuse that same role | status and park use one holder fact or return `UNKNOWN`; readers and writers cannot disagree |
+| Any continuity save-path failure at session exit | `UNKNOWN`, nonzero, and no quiet no-op or saved-state implication |
 
 Focused tests cover each row. The full coord-engine suite must remain green.
 
