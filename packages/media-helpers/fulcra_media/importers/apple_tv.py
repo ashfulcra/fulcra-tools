@@ -65,6 +65,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import zlib
 from collections.abc import Iterator
@@ -111,6 +112,17 @@ HISTORY_URL_MARKERS = ("RecentlyWatched", "PlayHistory")
 SNAPSHOT_TIMEOUT_SECONDS = 20
 
 
+
+def _cp_args() -> list[str]:
+    """`cp -c` requests an APFS clonefile(2) on macOS — instant, copy-on-write,
+    exactly right for snapshotting a live SQLite family. GNU coreutils has no
+    `-c`, so on any other platform (the Linux fleet runners included) a plain
+    `cp` does the same job without the clone optimization. Kept as a subprocess
+    either way: the killable timeout around it is load-bearing (an I/O-stalled
+    source must not pin the worker), which an in-process shutil copy cannot do.
+    """
+    return ["cp", "-c"] if sys.platform == "darwin" else ["cp"]
+
 class SnapshotError(RuntimeError):
     """Raised when the cache DB cannot be snapshotted (stalled/inaccessible)."""
 
@@ -144,7 +156,7 @@ def _snapshot_db(cache_dir: Path) -> Path:
             dest = snap_dir / candidate.name
             try:
                 subprocess.run(
-                    ["cp", "-c", str(candidate), str(dest)],
+                    [*_cp_args(), str(candidate), str(dest)],
                     check=True,
                     capture_output=True,
                     timeout=SNAPSHOT_TIMEOUT_SECONDS,
