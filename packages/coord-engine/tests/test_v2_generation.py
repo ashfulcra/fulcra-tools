@@ -56,42 +56,88 @@ def test_identical_inputs_have_identical_generation_id_and_bytes():
     assert json.loads(one.bytes)["id"] == one.id
 
 
-def test_each_required_section_has_its_own_deadline_and_unknown_never_seals(monkeypatch):
+def test_each_required_section_has_its_own_deadline_and_exhaustion_never_seals(monkeypatch):
     from coord_engine import reconcile
     from coord_engine.change_detection import Coverage
 
     opened = []
 
     class OpenDeadline:
-        def expired(self):
-            return False
+        def __init__(self, name):
+            self.name = name
+            self.reads = 0
 
-    monkeypatch.setattr(reconcile.Deadline, "open", lambda _budget: opened.append(OpenDeadline()) or opened[-1])
+        def expired(self):
+            # The roles read is a real production `_tree_section` read.  It
+            # exhausts only that section; every later section still opens and
+            # receives an independent deadline.
+            return self.name == "roles" and self.reads > 0
+
+    def deadline_for(name):
+        opened.append(OpenDeadline(name))
+        return opened[-1]
+
+    monkeypatch.setattr(reconcile, "_section_deadline", deadline_for)
     batch = ChangeBatch(
         (), {"tasks": Coverage.CLEAR, "reviews": Coverage.CLEAR,
              "forge": Coverage.CLEAR, "presence_roles": Coverage.CLEAR,
              "acknowledgments_responses": Coverage.CLEAR}, True,
         watermark="w-1")
     transport = MemoryTransport()
-    transport.list_dir = lambda _prefix: []
-    reconcile._generation_sections(
+    def list_dir(prefix):
+        return [{"name": "one.md", "is_dir": False}] if prefix.endswith("roles/") else []
+
+    def read_classified(_path, *, deadline):
+        deadline.reads += 1
+        return "---\ntype: Role\n---\n", "ok"
+
+    transport.list_dir = list_dir
+    transport.read_classified = read_classified
+    sections = reconcile._generation_sections(
         transport, TEAM, batch=batch, rows=[],
-        proj_state={"reviews": {"complete": True}, "forge": {"complete": True}})
-    assert len(opened) == 4
-    assert len({id(deadline) for deadline in opened}) == 4
+        proj_state={
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True, "rows": []},
+            "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
+                      "responsible": {}, "feedback": {}},
+        })
+    assert [deadline.name for deadline in opened] == list(generation.REQUIRED_SECTIONS)
+    assert len({id(deadline) for deadline in opened}) == len(generation.REQUIRED_SECTIONS)
+    assert sections["roles"].state == "UNKNOWN"
+    assert all(sections[name].state == "CLEAR"
+               for name in generation.REQUIRED_SECTIONS if name != "roles")
 
     result = generation.build_generation(
         prior_generation=None, source_watermark="w-1", batch=_batch(),
-        sections=_sections())
-    assert result.complete is True
-
-    incomplete = _sections()
-    incomplete["roles"] = generation.SectionResult("roles", "UNKNOWN", {"rows": []})
-    result = generation.build_generation(
-        prior_generation=None, source_watermark="w-1", batch=_batch(),
-        sections=incomplete)
+        sections=sections)
     assert result.complete is False
     assert result.incomplete == ("roles",)
+
+
+def test_generation_sections_reject_unparseable_canonical_bytes():
+    from coord_engine import reconcile
+    from coord_engine.change_detection import Coverage
+
+    class Transport(MemoryTransport):
+        def list_dir(self, prefix):
+            return [{"name": "broken.md", "is_dir": False}] if prefix.endswith("roles/") else []
+
+        def read_classified(self, _path, *, deadline):
+            return "not an OKF document", "ok"
+
+    batch = ChangeBatch(
+        (), {"tasks": Coverage.CLEAR, "reviews": Coverage.CLEAR,
+             "forge": Coverage.CLEAR, "presence_roles": Coverage.CLEAR,
+             "acknowledgments_responses": Coverage.CLEAR}, True,
+        watermark="w-1")
+    sections = reconcile._generation_sections(
+        Transport(), TEAM, batch=batch, rows=[],
+        proj_state={
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True, "rows": []},
+            "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
+                      "responsible": {}, "feedback": {}},
+        })
+
+    assert sections["roles"].state == "UNKNOWN"
 
 
 def test_write_read_verified_generation_publishes_digest_bound_manifest():

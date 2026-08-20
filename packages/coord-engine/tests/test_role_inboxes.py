@@ -64,6 +64,10 @@ def _team_with_role_directive(transport_cls=FakeTransport, *, holder="bob",
     _put_lease(t, "reviewer", holder, ts=lease_ts)
     _put_directive(t, "role-do-1", "Review the PR", owner="alice", assignee="reviewer")
     _reconcile(t)
+    # Establish a sealed generation first; failure tests below exercise the
+    # reader's role lookup, not publication of an incomplete source corpus.
+    if isinstance(t, LeaseListFails):
+        t.fail_leases = True
     return t
 
 
@@ -133,8 +137,10 @@ def test_ack_hides_a_role_routed_directive(capsys):
 class LeaseListFails(FakeTransport):
     """The role's lease listing raises — holder membership is UNKNOWN."""
 
+    fail_leases = False
+
     def list_dir(self, prefix):
-        if prefix.endswith("/leases/"):
+        if self.fail_leases and prefix.endswith("/leases/"):
             raise TransportError("boom")
         return super().list_dir(prefix)
 
@@ -181,8 +187,10 @@ def test_roles_listing_failure_degrades_every_candidate(capsys):
     # ones that look like literal agent ids. Loud and fail-closed: noisy is the
     # correct answer here, because we genuinely cannot tell whether a name routes.
     class RolesListFails(FakeTransport):
+        fail_roles = False
+
         def list_dir(self, prefix):
-            if prefix == f"team/{TEAM}/roles/":
+            if self.fail_roles and prefix == f"team/{TEAM}/roles/":
                 raise TransportError("boom")
             return super().list_dir(prefix)
 
@@ -192,6 +200,7 @@ def test_roles_listing_failure_degrades_every_candidate(capsys):
     _put_directive(t, "role-do-1", "Review", owner="alice", assignee="reviewer")
     _put_directive(t, "for-carol", "Theirs", owner="alice", assignee="carol")
     _reconcile(t)
+    t.fail_roles = True
     b = _briefing(t, "bob", capsys)
     # reviewer's doc still reads, so it resolves and its directive DOES surface —
     # a broken listing must not cost us work we can in fact route.
@@ -204,12 +213,15 @@ def test_role_doc_unreadable_while_listed_is_degraded_not_a_non_role(capsys):
     # The disambiguation `_role_fresh_holders` owns: listed-but-unreadable is a
     # transport failure, not "that assignee isn't a role".
     class RoleDocFails(FakeTransport):
+        fail_role_doc = False
+
         def read(self, path):
-            if path == cli._role_doc_path(TEAM, "reviewer"):
+            if self.fail_role_doc and path == cli._role_doc_path(TEAM, "reviewer"):
                 return None
             return super().read(path)
 
     t = _team_with_role_directive(RoleDocFails)
+    t.fail_role_doc = True
     b = _briefing(t, "bob", capsys)
     assert b["role_degraded"]["roles"] == ["reviewer"]
 
@@ -217,8 +229,10 @@ def test_role_doc_unreadable_while_listed_is_degraded_not_a_non_role(capsys):
 class RoleDocMalformed(FakeTransport):
     """The role doc READS, but its body is not frontmatter — corrupt or truncated."""
 
+    fail_role_doc = False
+
     def read(self, path):
-        if path == cli._role_doc_path(TEAM, "reviewer"):
+        if self.fail_role_doc and path == cli._role_doc_path(TEAM, "reviewer"):
             return "not frontmatter\n"
         return super().read(path)
 
@@ -231,6 +245,7 @@ def test_role_doc_malformed_while_listed_is_degraded_not_a_non_role(capsys):
     # failed parse as affirmative "not a role" served the holder a clean, empty
     # queue with no marker at all — a failure that type-checks as success.
     t = _team_with_role_directive(RoleDocMalformed)
+    t.fail_role_doc = True
     b = _briefing(t, "bob", capsys)
     assert b["role_degraded"] == {"type": "role-degraded", "roles": ["reviewer"]}
     # and the queue must NOT read as a clean "nothing for you"
@@ -240,6 +255,7 @@ def test_role_doc_malformed_while_listed_is_degraded_not_a_non_role(capsys):
 
 def test_role_doc_malformed_while_listed_is_loud_in_text(capsys):
     t = _team_with_role_directive(RoleDocMalformed)
+    t.fail_role_doc = True
     assert cli.main(["briefing", TEAM, "-a", "bob"], transport=t) == 0
     out = capsys.readouterr().out
     assert "role resolution degraded: reviewer" in out

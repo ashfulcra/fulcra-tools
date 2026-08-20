@@ -141,3 +141,43 @@ available to existing readers, but it is not a newer authoritative generation.
 
 - Full command: `uv run --project packages/coord-engine pytest packages/coord-engine/tests -q` — exit 0.
 - `git diff --check` — exit 0.
+
+## Fix Round 2
+
+### Critical 1 — compatibility cannot bypass untrusted detection
+
+- Covering tests: `packages/coord-engine/tests/test_reconcile.py::test_reconcile_untrusted_batch_is_degraded_even_with_legacy_compatibility`; `packages/coord-engine/tests/test_reconcile_incremental.py::test_feed_unavailable_fails_closed_without_advancing_current`; `packages/coord-engine/tests/test_reconcile_incremental.py::test_reconcile_never_bypasses_the_detector_with_a_legacy_raw_feed`.
+- Change: `reconcile()` now returns a degraded result before any task or
+  aggregate work whenever `ChangeBatch.trusted` is false, irrespective of a
+  transport compatibility attribute. A missing attested feed frontier is also
+  degraded. Incremental fixtures now use an attested `through` and proven CAS
+  seam for successful paths; unavailable feeds preserve the prior sealed view.
+- Red command/output: `PYTHONPATH=packages/coord-engine pytest -q packages/coord-engine/tests/test_reconcile.py::test_reconcile_untrusted_batch_is_degraded_even_with_legacy_compatibility packages/coord-engine/tests/test_v2_generation.py::test_each_required_section_has_its_own_deadline_and_exhaustion_never_seals packages/coord-engine/tests/test_v2_generation.py::test_generation_sections_reject_unparseable_canonical_bytes` — `3 failed` before implementation.
+
+### Important 3 — canonical bytes are parsed and typed states remain distinct
+
+- Covering tests: `packages/coord-engine/tests/test_v2_generation.py::test_generation_sections_reject_unparseable_canonical_bytes`; `packages/coord-engine/tests/test_v2_generation.py::test_each_required_section_has_its_own_deadline_and_exhaustion_never_seals`.
+- Change: every recursive canonical inventory read parses OKF frontmatter before
+  adding its original bytes and parsed document to the sealed value. Invalid or
+  expired reads produce `UNKNOWN`. Detector coverage now returns `CLEAR` when
+  appropriate rather than coercing it to `DATA`; fixed task/review/forge
+  sections validate their canonical folded shape and derive `CLEAR` or `DATA`
+  from content while preserving `NOT_RUN` and `UNKNOWN` fail-closed states.
+
+### Important 6 — all seven independent section deadlines are exercised
+
+- Covering test: `packages/coord-engine/tests/test_v2_generation.py::test_each_required_section_has_its_own_deadline_and_exhaustion_never_seals`.
+- Change: `_generation_sections()` opens a named deadline for every required
+  section: tasks, reviews, forge, roles, presence, acknowledgments, and
+  responses. The regression drives the production inventory reader until the
+  roles deadline expires, proves the remaining six deadlines opened distinctly,
+  and proves the resulting generation cannot seal.
+
+### Verification
+
+- Focused command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py packages/coord-engine/tests/test_reconcile.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_projection.py packages/coord-engine/tests/test_role_inboxes.py packages/coord-engine/tests/test_threads.py packages/coord-engine/tests/test_json_purity.py packages/coord-engine/tests/test_annotate_project.py packages/coord-engine/tests/test_authority_currency.py packages/coord-engine/tests/test_bus_tags.py`.
+- Focused output: `387 passed in 2.57s`.
+- Full command: `uv run --package coord-engine pytest -q packages/coord-engine/tests`.
+- Full output: `2494 passed, 8 skipped in 83.43s`.
+- Whitespace command: `git diff --check`.
+- Whitespace output: exit 0.

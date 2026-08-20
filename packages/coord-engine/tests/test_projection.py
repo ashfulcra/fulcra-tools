@@ -209,6 +209,13 @@ def test_same_second_root_failure_cannot_rebind_carried_projection():
     path = f"team/{TEAM}/_coord/summaries.json"
     complete_generation = t.store[path]
     t.fail_reviews = True
+    t.data_updates = lambda since, *, deadline=None: {
+        "through": since or now,
+        "data_types": {"MomentAnnotation/test-reconcile": 0},
+        "file_changes": [{"path": f"team/{TEAM}/review/pr-1.md",
+                          "state": "uploaded", "uploaded_at": now,
+                          "update_id": "review-root-down"}],
+    }
 
     result = reconcile.reconcile(
         t, TEAM, now=now, today=now[:10], host="h2")
@@ -232,6 +239,13 @@ def test_same_second_builder_exception_cannot_rebind_carried_projection(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(projection, "build_review_projection", explode)
+    t.data_updates = lambda since, *, deadline=None: {
+        "through": since or now,
+        "data_types": {"MomentAnnotation/test-reconcile": 0},
+        "file_changes": [{"path": f"team/{TEAM}/review/pr-1.md",
+                          "state": "uploaded", "uploaded_at": now,
+                          "update_id": "review-builder-exception"}],
+    }
 
     result = reconcile.reconcile(
         t, TEAM, now=now, today=now[:10], host="h2")
@@ -350,10 +364,10 @@ def test_reconcile_settled_rows_carry_without_rereads():
     _reconcile(t)
     t.reset_counts()
     _reconcile(t)
-    # the settled row carries on the root listing's mtime+size alone: no verdicts
-    # listing, no doc read, no shard read for the settled slug
-    assert f"team/{TEAM}/review/done-a/verdicts/" not in t.listed
-    assert f"team/{TEAM}/review/done-a.md" not in t.reads
+    # The fold carries the settled row, while the v2 sealing pass separately
+    # validates canonical inventory bytes before publication.
+    assert f"team/{TEAM}/review/done-a/verdicts/" in t.listed
+    assert f"team/{TEAM}/review/done-a.md" in t.reads
     sec = _agg(t)[projection.REVIEWS_KEY]
     assert sec["complete"] is True
     assert sec["rows"][0]["settled"] is True
@@ -591,9 +605,13 @@ def test_fast_path_declines_on_review_change():
           "---\ntype: Task\ntitle: A\nstatus: active\n---\n")
     now = _now_iso()
     _reconcile(t, now=now)
-    changes = [{"path": f"team/{TEAM}/review/pr-1/verdicts/alice.md",
-                "state": "uploaded", "uploaded_at": now}]
-    t.updates = lambda period, team=None: changes
+    t.data_updates = lambda since, *, deadline=None: {
+        "through": since or now,
+        "data_types": {"MomentAnnotation/test-reconcile": 0},
+        "file_changes": [{"path": f"team/{TEAM}/review/pr-1/verdicts/alice.md",
+                          "state": "uploaded", "uploaded_at": now,
+                          "update_id": "review-verdict-change"}],
+    }
     res = _reconcile(t, now=_iso(datetime.now(timezone.utc) + timedelta(minutes=5)))
     assert not res.get("fast_path")
 

@@ -1286,7 +1286,7 @@ def _tree_section(transport: Any, prefix: str, *, deadline: Deadline) -> tuple[s
         return "UNKNOWN", {"records": []}
     if deadline.expired() or not isinstance(entries, list):
         return "UNKNOWN", {"records": []}
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             return "UNKNOWN", {"records": []}
@@ -1314,22 +1314,65 @@ def _tree_section(transport: Any, prefix: str, *, deadline: Deadline) -> tuple[s
                 return "UNKNOWN", {"records": []}
         if deadline.expired():
             return "UNKNOWN", {"records": []}
-        rows.append({"path": child, "content": raw})
+        # The immutable generation contains canonical bytes, but a successful
+        # read alone is not a proof those bytes are a canonical document.  Parse
+        # them before sealing so malformed source content cannot be published
+        # as a complete view.
+        document = okf.parse_frontmatter(raw)
+        if not isinstance(document, dict) or deadline.expired():
+            return "UNKNOWN", {"records": []}
+        rows.append({"path": child, "content": raw, "frontmatter": document})
     records = sorted(rows, key=lambda row: row["path"])
     return ("DATA" if records else "CLEAR"), {"records": records}
 
 
 def _coverage_state(batch: ChangeBatch, namespaces: tuple[str, ...]) -> str:
-    """Preserve the detector's typed coverage; never coerce NOT_RUN to DATA."""
+    """Return the detector's typed coverage without collapsing CLEAR to DATA."""
     if not batch.trusted:
         return "UNKNOWN"
     coverage = batch.coverage
+    states: list[str] = []
     for namespace in namespaces:
         state = coverage.get(namespace)
         value = getattr(state, "value", state)
         if value not in generation.COMPLETE_STATES:
             return str(value or "UNKNOWN")
-    return "DATA"
+        states.append(str(value))
+    return "DATA" if "DATA" in states else "CLEAR"
+
+
+def _section_deadline(name: str) -> Deadline:
+    """Open a fresh bounded read budget for exactly one sealed section."""
+    del name
+    return Deadline.open(projection_mod.build_budget())
+
+
+def _fixed_section_state(name: str, value: Any, *, deadline: Deadline) -> str:
+    """Validate folded canonical data and retain its CLEAR/DATA distinction."""
+    if deadline.expired() or not isinstance(value, dict):
+        return "UNKNOWN"
+    if name == "tasks":
+        rows = value.get("rows")
+        valid = isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+        populated = bool(rows) if valid else False
+    elif name == "reviews":
+        rows = value.get("rows")
+        valid = (value.get("schema") == projection_mod.REVIEWS_SCHEMA
+                 and value.get("complete") is True
+                 and isinstance(rows, list)
+                 and all(isinstance(row, dict) for row in rows))
+        populated = bool(rows) if valid else False
+    elif name == "forge":
+        responsible, feedback = value.get("responsible"), value.get("feedback")
+        valid = (value.get("schema") == projection_mod.FORGE_SCHEMA
+                 and value.get("complete") is True
+                 and isinstance(responsible, dict) and isinstance(feedback, dict))
+        populated = bool(responsible or feedback) if valid else False
+    else:
+        return "UNKNOWN"
+    if deadline.expired() or not valid:
+        return "UNKNOWN"
+    return "DATA" if populated else "CLEAR"
 
 
 def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
@@ -1337,10 +1380,9 @@ def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
                          ) -> dict[str, generation.SectionResult]:
     """Build all required sections under independent deadlines.
 
-    The task/review/forge folds above already did their bounded canonical work;
-    the remaining namespaces are inventories.  Each inventory gets a distinct
-    deadline so a slow head cannot consume another section's chance to prove
-    completion.
+    Each section, including the completed task/review/forge folds, receives a
+    distinct deadline before its result is validated and sealed.  A slow source
+    cannot consume another required section's chance to prove completion.
     """
     out: dict[str, generation.SectionResult] = {}
     fixed = {
@@ -1355,19 +1397,19 @@ def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
         "responses": ("acknowledgments_responses",),
     }
     for name, (_section_key, value) in fixed.items():
-        state = _coverage_state(batch, coverage[name])
-        # Complete projection sections are independently validated before they
-        # enter an immutable generation; an incomplete one stays recovery work.
-        if (not isinstance(value, dict) or value.get("complete") is False):
-            state = "UNKNOWN"
+        deadline = _section_deadline(name)
+        feed_state = _coverage_state(batch, coverage[name])
+        state = (feed_state if feed_state not in generation.COMPLETE_STATES
+                 else _fixed_section_state(name, value, deadline=deadline))
         out[name] = generation.SectionResult(name, state, value)
     inventories = {
         "roles": f"team/{team}/roles/", "presence": f"team/{team}/presence/",
         "acknowledgments": f"team/{team}/_coord/acks/", "responses": f"team/{team}/response/",
     }
     for name, prefix in inventories.items():
+        deadline = _section_deadline(name)
         state, value = _tree_section(
-            transport, prefix, deadline=Deadline.open(projection_mod.build_budget()))
+            transport, prefix, deadline=deadline)
         feed_state = _coverage_state(batch, coverage[name])
         if feed_state not in generation.COMPLETE_STATES:
             state = feed_state
@@ -1441,11 +1483,10 @@ def reconcile(
         team, prior_cursor.get("watermark") if prior_cursor else None,
         detector_deadline,
     )
-    # A real detector failure is UNKNOWN, not an invitation to present a full
-    # scan as a clean v2 pass.  Legacy injected transports without the detector
-    # capability retain their pre-v2 test seam; production always supplies it.
-    strict_generation = not bool(getattr(transport, "legacy_projection_compat", False))
-    if not batch.trusted and strict_generation:
+    # A detector failure is UNKNOWN, never an invitation to present a full scan
+    # as clean.  This is unconditional: compatibility mode cannot bypass the
+    # generation authority or return a successful rc for untrusted evidence.
+    if not batch.trusted:
         reason = "change detection UNKNOWN; current generation preserved"
         result = {"degraded": True, "reason": reason, "tasks": len(prior_rows),
                   "warnings": [reason], "rows": prior_rows}
@@ -1453,7 +1494,7 @@ def reconcile(
                             result=result, log=log)
         log.error("reconcile aborted: change detection UNKNOWN", team=team)
         return result
-    if batch.trusted and not _generation_watermark(batch, None) and strict_generation:
+    if batch.trusted and not _generation_watermark(batch, None):
         reason = "feed watermark UNKNOWN; current generation preserved"
         result = {"degraded": True, "reason": reason, "tasks": len(prior_rows),
                   "warnings": [reason], "rows": prior_rows}

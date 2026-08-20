@@ -11,7 +11,7 @@ section cannot regress them.
 
 import json
 
-from coord_engine import cli, reconcile
+from coord_engine import cli, reconcile, records
 from coord_engine_test_helpers import FakeTransport
 
 
@@ -250,6 +250,8 @@ def _seeded_store():
     """Enough reviews/roles/intents that a squeezed budget actually truncates a
     fold — an empty store cannot produce the markers under test."""
     t = FakeTransport()
+    t.put(records.config_path("r"),
+          '{"data_type":"MomentAnnotation/test-reconcile","api_version":"v1alpha1"}')
     t.put("team/r/task/a.md",
           "---\ntype: Task\ntitle: A\nstatus: active\nassignee: alice\n"
           "timestamp: 2026-07-20T00:00:00Z\ntags: [\"intent:alice\"]\n---\nb")
