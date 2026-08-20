@@ -474,6 +474,33 @@ it (not on PyPI).
   that verdict with no records at all, same rc. Trust the envelope's `health`
   and `rc` over a payload you cannot see the end of; `degraded>0` or `rc=3`
   means UNKNOWN or a floor, never clear.
+- **A STATUS YOU PRINT IS NOT A STATUS YOU READ.** The same defect the clause
+  above describes shows up in our shell habits, where it is cheaper to commit and
+  harder to see: a script emits a success line without reading the status it
+  claims to report. Three instances in one week, all caught only by looking at
+  the NEXT command's output rather than at the success message itself — `rc=$?`
+  after a command substitution containing a pipe, the same after a pipeline, and
+  a `git branch -d` that REFUSED while the surrounding script echoed
+  `cleanup done` (the branch was still there on the next line).
+
+  **Mechanical form: a script that prints an outcome must read the rc it is
+  describing, and where it cannot, it says so rather than asserting.** The tell
+  is a success message whose text was decided before the command ran.
+
+  The mechanics, verified on this fleet's shell rather than recalled:
+
+  - `rc=$?` after a pipeline captures the **last stage only** — `false | true`
+    and `false | cat` both yield `0`, so the failure is invisible. Same for
+    `out=$(cmd | filter)`.
+  - Capture immediately (`cmd; rc=$?`) before any pipe or substitution, or set
+    `pipefail` for that stretch.
+  - **Our login shell is zsh**, where the per-stage array is lowercase
+    `pipestatus` — bash's `PIPESTATUS` expands to the empty string here and
+    silently tells you nothing, which is this very rule wearing its own costume.
+  - Prefer `if cmd; then …; else …; fi` over `cmd; echo done`.
+  - When reporting a BATCH, count the artifacts on the store rather than
+    tallying exit codes you did not check.
+
 - **Bus-v3 convergence is authority-gated, not a rollout convention.** The
   shared `_coord/bus-v3/records.json` atomically declares protocol and cursor
   schema versions, minimum safe reader/writer engine versions, cursor
