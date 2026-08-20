@@ -251,6 +251,13 @@ rather than by intent.
   a silent duplicate is indistinguishable from a second real assignment. On a
   dispatch failure the mark stops at the failing row, so everything that did not
   go out is still owed on the next pass.
+- **A dispatch has three outcomes, not two.** `coord-engine tell` can commit the
+  directive and then fail to report it, so a raise is not evidence that nothing
+  was written — this package's own invariant with the labels swapped, and the
+  defect codex-coder found in the first cut. The attempt is written to disk
+  *before* the transport runs, and a retry whose fingerprint is still marked
+  says **POSSIBLE RE-DELIVERY**: not "new", which under-claims, and not
+  "repeat", which over-claims. A confirmed success is what clears the marker.
 - Exit codes extend the `linear-inbox` contract by one: **0** succeeded, **3**
   UNKNOWN (proves nothing — never "no assignments changed"), **2** a deliberate
   refusal.

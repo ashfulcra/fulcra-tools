@@ -22,6 +22,7 @@ than faked.
 
 import json
 import os
+import re
 
 import pytest
 
@@ -261,6 +262,42 @@ def test_no_payload_content_leaked_into_the_repository():
         assignee = node.get("assignee")
         if assignee is not None:
             assert assignee.get("displayName") == "<redacted person>"
+
+
+#: A label value shaped like a host: `something.something`.
+_HOSTNAME_ISH = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z][A-Za-z0-9-]{1,}")
+
+
+def test_no_fleet_identifier_leaked_through_a_label():
+    """coord-boss's ruling, asserted on the ARTIFACT and not only on the tool.
+
+    `tools/capture_inbox.py` has its own tests for `redact_label`, but the file
+    that actually ships to a public repo is this one, and a tool whose guard is
+    tested while its output is not is the shape of every defect this package has
+    found. Agent labels carry a machine name; the hostname fragment is over the
+    line. Checked across every node, because a leak here is permanent."""
+    captured = real_capture()
+    assert set(captured.get("redacted_fields") or []) >= {
+        "labels.nodes.name(agent:*)", "labels.nodes.name(hostname-shaped)"
+    }, "the capture must DECLARE that it hid label values, not just hide them"
+    for node in captured["response"]["data"]["issues"]["nodes"]:
+        for label in ((node.get("labels") or {}).get("nodes") or []):
+            name = label.get("name")
+            assert not re.match(r"^agent:", name, re.IGNORECASE), name
+            assert not _HOSTNAME_ISH.search(name), name
+
+
+def test_the_generic_label_vocabulary_survived_redaction():
+    """The over-redaction half. A guard that strips what the contract test
+    depends on is the empty-board defect wearing a privacy costume: a fixture
+    with every label blanked would pass the leak test and prove nothing about
+    how a real board renders."""
+    names = {
+        label.get("name")
+        for node in real_capture()["response"]["data"]["issues"]["nodes"]
+        for label in ((node.get("labels") or {}).get("nodes") or [])
+    }
+    assert {"kind:directive", "lane:active", "origin:ash"} <= names, sorted(names)
 
 
 def test_the_captured_page_is_page_one_of_more():

@@ -29,7 +29,10 @@ import pytest
 
 from coord_tracker_bridge.assignments import (
     AMBIGUOUS,
+    NEW,
     NOT_ADDRESSABLE,
+    POSSIBLE_REPEAT,
+    REPEAT,
     RESOLVED,
     UNASSIGNED,
     UNRESOLVED,
@@ -391,7 +394,28 @@ def test_a_repeat_of_an_already_delivered_fingerprint_is_flagged():
         seeded=True, delivered={fingerprint("A-1", "Opie", "Todo")})
     plan = plan_assignments([_item("A-1", who="Opie", state="Todo")],
                             state, _roster(), coordinator="coord-boss")
-    assert plan.routes[0].redelivery is True
+    assert plan.routes[0].repeat == REPEAT
+
+
+def test_an_attempt_with_an_unknown_outcome_is_a_POSSIBLE_repeat():
+    """Neither of its neighbours. Called new it under-claims, called a repeat
+    it over-claims; the fingerprint sat in `attempted` because a dispatch
+    raised, and a raise is not evidence the write did not land."""
+    state = AssignmentState(
+        seeded=True, attempted={fingerprint("A-1", "Opie", "Todo")})
+    plan = plan_assignments([_item("A-1", who="Opie", state="Todo")],
+                            state, _roster(), coordinator="coord-boss")
+    assert plan.routes[0].repeat == POSSIBLE_REPEAT
+
+
+def test_a_confirmed_delivery_outranks_a_stale_attempt_marker():
+    state = AssignmentState(
+        seeded=True,
+        delivered={fingerprint("A-1", "Opie", "Todo")},
+        attempted={fingerprint("A-1", "Opie", "Todo")})
+    plan = plan_assignments([_item("A-1", who="Opie", state="Todo")],
+                            state, _roster(), coordinator="coord-boss")
+    assert plan.routes[0].repeat == REPEAT
 
 
 def test_candidates_are_in_total_order():
@@ -438,12 +462,23 @@ def test_only_dispatched_routes_are_fingerprinted_as_delivered():
     route = Route(identifier="A-1", title="t", url=None, assignee="Opie", state="Todo",
                   updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
                   disposition=RESOLVED, target="coord-opus-worker",
-                  redelivery=False, previous=None)
+                  repeat=NEW, previous=None)
     state = advance(AssignmentState(seeded=True),
                     [_cand("A-1", "2026-08-19T12:00:00Z"),
                      _cand("A-2", "2026-08-19T12:00:00Z")],
                     dispatched=[route])
     assert state.delivered == {fingerprint("A-1", "Opie", "Todo")}
+
+
+def test_a_confirmed_success_clears_the_ambiguity_marker():
+    fp = fingerprint("A-1", "Opie", "Todo")
+    route = Route(identifier="A-1", title="t", url=None, assignee="Opie", state="Todo",
+                  updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
+                  disposition=RESOLVED, target="coord-opus-worker",
+                  repeat=POSSIBLE_REPEAT, previous=None)
+    state = advance(AssignmentState(seeded=True, attempted={fp}),
+                    [_cand("A-1", "2026-08-19T12:00:00Z")], dispatched=[route])
+    assert state.delivered == {fp} and state.attempted == set()
 
 
 def test_seed_adopts_the_whole_board_and_delivers_nothing():
@@ -464,7 +499,7 @@ def test_the_directive_carries_the_card_identifier_and_url():
                   url="https://linear.app/x/issue/ENG-42", assignee="Opie",
                   state="Todo", updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
                   disposition=RESOLVED, target="coord-opus-worker",
-                  redelivery=False, previous=("Fabio", "Todo"))
+                  repeat=NEW, previous=("Fabio", "Todo"))
     summary, next_action = directive_body(route)
     assert "ENG-42" in summary
     assert "https://linear.app/x/issue/ENG-42" in summary
@@ -473,13 +508,23 @@ def test_the_directive_carries_the_card_identifier_and_url():
     assert next_action
 
 
+def test_a_possible_redelivery_says_POSSIBLE_in_the_directive():
+    route = Route(identifier="ENG-42", title="t", url=None, assignee="Opie",
+                  state="Todo", updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
+                  disposition=RESOLVED, target="coord-opus-worker",
+                  repeat=POSSIBLE_REPEAT, previous=None)
+    summary, _ = directive_body(route)
+    assert "POSSIBLE RE-DELIVERY" in summary
+    assert "may already exist" in summary
+
+
 def test_a_redelivery_says_so_in_the_directive_itself():
     """At-least-once with a silent duplicate is indistinguishable from a second
     real assignment, so the reader is told which it is."""
     route = Route(identifier="ENG-42", title="t", url=None, assignee="Opie",
                   state="Todo", updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
                   disposition=RESOLVED, target="coord-opus-worker",
-                  redelivery=True, previous=None)
+                  repeat=REPEAT, previous=None)
     summary, _ = directive_body(route)
     assert "RE-DELIVERY" in summary
 
@@ -493,7 +538,7 @@ def test_the_dispatcher_uses_tell_not_a_bare_send():
     route = Route(identifier="ENG-42", title="t", url=None, assignee="Opie",
                   state="Todo", updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
                   disposition=RESOLVED, target="coord-opus-worker",
-                  redelivery=False, previous=None)
+                  repeat=NEW, previous=None)
     EngineTellDispatcher(team="fulcra", sender="coord-opus-worker", runner=runner).deliver(route)
     argv = seen["argv"]
     assert argv[:5] == ("coord-engine", "tell", "fulcra", "coord-opus-worker",
@@ -507,7 +552,7 @@ def test_a_nonzero_tell_is_a_dispatch_failure_not_a_delivery():
     route = Route(identifier="ENG-42", title="t", url=None, assignee="Opie",
                   state="Todo", updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
                   disposition=RESOLVED, target="coord-opus-worker",
-                  redelivery=False, previous=None)
+                  repeat=NEW, previous=None)
     with pytest.raises(DispatchFailed):
         EngineTellDispatcher(team="fulcra", sender="x", runner=runner).deliver(route)
 
@@ -664,3 +709,100 @@ def test_the_fold_names_the_triage_reason():
                             _roster(), coordinator="coord-boss")
     text = render_plan(plan)
     assert "coord-boss" in text and NOT_ADDRESSABLE in text
+
+
+# --- 11. THE AMBIGUOUS DISPATCH ------------------------------------------
+#
+# codex-coder's finding at 722fcc2. `coord-engine tell` can commit the directive
+# and THEN fail to report it, so a raise is not evidence that nothing was
+# written. The first version of this module had two outcomes where reality has
+# three, and the retry announced a possible duplicate as a first delivery.
+
+class CommitThenErrorDispatcher:
+    """Writes, then reports failure — the outcome we cannot observe."""
+
+    def __init__(self, commit_then_fail=(), state_path=None):
+        self.sent = []
+        self.committed = []
+        self.commit_then_fail = set(commit_then_fail)
+        self.state_path = state_path
+        self.state_at_dispatch = []
+
+    def deliver(self, route):
+        if self.state_path is not None:
+            self.state_at_dispatch.append(
+                json.loads(self.state_path.read_text(encoding="utf-8")))
+        if route.identifier in self.commit_then_fail:
+            self.committed.append(route)          # the directive DID land
+            raise DispatchFailed(f"transport lost the reply for {route.identifier}")
+        self.sent.append(route)
+        self.committed.append(route)
+
+
+def test_the_attempt_is_on_disk_before_the_transport_runs(tmp_path):
+    """Write-ahead, and asserted from inside the dispatcher: if the marker were
+    written after the call, a process killed mid-tell would leave no trace of a
+    directive that may already exist."""
+    path = tmp_path / "s.json"
+    AssignmentState(seeded=True).save(path)
+    dispatcher = CommitThenErrorDispatcher(state_path=path)
+    _run(tmp_path, [_node("A-1", who="Opie")], dispatcher=dispatcher, deliver=True)
+    assert dispatcher.state_at_dispatch, "the dispatcher never ran"
+    assert fingerprint("A-1", "Opie", "Todo") in dispatcher.state_at_dispatch[0]["attempted"]
+
+
+def test_a_commit_then_error_retries_as_a_POSSIBLE_redelivery(tmp_path):
+    """codex-coder's repro, end to end: first pass commits A-1 and A-2 and then
+    reports failure on A-2; the retry must not tell the agent A-2 is new."""
+    path = tmp_path / "s.json"
+    AssignmentState(seeded=True).save(path)
+    first = CommitThenErrorDispatcher(commit_then_fail={"A-2"})
+    board = [_node("A-1", who="Opie", when="2026-08-19T11:00:00Z"),
+             _node("A-2", who="Opie", when="2026-08-19T12:00:00Z")]
+    outcome = _run(tmp_path, board, dispatcher=first, deliver=True)
+    assert outcome.code == 3
+    assert [r.identifier for r in first.committed] == ["A-1", "A-2"]
+    assert "UNKNOWN" in outcome.text
+
+    retry = CommitThenErrorDispatcher()
+    _run(tmp_path, board, dispatcher=retry, deliver=True)
+    assert [r.identifier for r in retry.sent] == ["A-2"]
+    assert retry.sent[0].repeat == POSSIBLE_REPEAT
+    summary, _ = directive_body(retry.sent[0])
+    assert "POSSIBLE RE-DELIVERY" in summary
+
+
+def test_the_ambiguous_row_is_the_only_one_left_ambiguous(tmp_path):
+    """A-1 succeeded, so it is CONFIRMED, not possible. Collapsing the two would
+    make every retry after any failure claim uncertainty it does not have."""
+    path = tmp_path / "s.json"
+    AssignmentState(seeded=True).save(path)
+    board = [_node("A-1", who="Opie", when="2026-08-19T11:00:00Z"),
+             _node("A-2", who="Opie", when="2026-08-19T12:00:00Z")]
+    _run(tmp_path, board, dispatcher=CommitThenErrorDispatcher(commit_then_fail={"A-2"}),
+         deliver=True)
+    state = AssignmentState.load(path)
+    assert state.delivered == {fingerprint("A-1", "Opie", "Todo")}
+    assert state.attempted == {fingerprint("A-2", "Opie", "Todo")}
+
+
+def test_a_later_confirmed_send_clears_the_marker_it_set(tmp_path):
+    """The marker is written for every attempt, so a clean run must not leave
+    the whole board looking permanently ambiguous."""
+    path = tmp_path / "s.json"
+    AssignmentState(seeded=True).save(path)
+    _run(tmp_path, [_node("A-1", who="Opie")], dispatcher=FakeDispatcher(), deliver=True)
+    state = AssignmentState.load(path)
+    assert state.attempted == set()
+    assert state.delivered == {fingerprint("A-1", "Opie", "Todo")}
+
+
+def test_a_v1_state_file_is_unreadable_rather_than_assumed_unambiguous(tmp_path):
+    """An absent `attempted` would default to "no dispatch ever ended
+    ambiguously" — a claim a file written before the concept cannot support."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "seeded": True, "cursor": {"t": None, "ids": []},
+        "observed": {}, "delivered": []}), encoding="utf-8")
+    with pytest.raises(StateUnreadable):
+        AssignmentState.load(path)

@@ -35,6 +35,17 @@ cursor doctrine — a cursor may repeat, it may never skip — and a repeat is
 announced in the directive itself rather than hidden, because a silent
 duplicate is indistinguishable from a real second assignment.
 
+A DISPATCH HAS THREE OUTCOMES, NOT TWO (codex-coder at 722fcc2). `coord-engine
+tell` can commit the directive and then fail to report it — a non-zero rc or a
+timeout AFTER the write. The first version of this file had `delivered` and
+nothing else, so an ambiguous attempt was recorded as "not delivered" and the
+retry announced itself as a first delivery of something that may already exist.
+That is this package's own invariant with the labels swapped: CONFIRMED,
+REFUSED and UNKNOWN are three facts, and only two of them have a default. So
+the attempt is written to `attempted` and persisted BEFORE the dispatch runs,
+and a retry whose fingerprint sits in `attempted` says POSSIBLE RE-DELIVERY —
+not "new", which under-claims, and not "repeat", which over-claims.
+
 PREVIEW IS THE DEFAULT. `--deliver` is what dispatches and what advances the
 watermark; without it the verb prints the plan and consumes nothing. The
 reason is on the record: the near-miss that shaped this whole lane was a plan
@@ -58,12 +69,19 @@ from .inbox import InboxItem, ReadOnlyTransport, fetch_inbox
 from .linear import LinearClient
 from .source import CommandRunner, subprocess_runner
 
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 #: Circuit breaker, mirroring the design's card cap. A single run that wants to
 #: dispatch more than this refuses whole rather than flooding the bus; the
 #: operator raises it deliberately or seeds past the backlog.
 DEFAULT_DELIVERY_CAP = 25
+
+#: How sure we are that this exact (card, assignee, state) has gone out before.
+#: Three values because a dispatch has three outcomes; collapsing the middle one
+#: into either neighbour is what codex-coder found at 722fcc2.
+NEW = "new"
+POSSIBLE_REPEAT = "possible-repeat"
+REPEAT = "repeat"
 
 #: Dispositions. Exactly one is a delivery to a fleet agent.
 RESOLVED = "resolved"
@@ -171,8 +189,29 @@ class AssignmentState:
     cursor: Cursor = Cursor()
     #: identifier -> (assignee, state) as last OBSERVED (not necessarily delivered)
     observed: dict[str, tuple[str | None, str]] = field(default_factory=dict)
-    #: fingerprints that have already been dispatched at least once
+    #: fingerprints CONFIRMED dispatched (the transport reported success)
     delivered: set[str] = field(default_factory=set)
+    #: fingerprints whose dispatch outcome is UNKNOWN — written before the
+    #: attempt, cleared only by a success. A fingerprint in here may or may not
+    #: already exist as a directive, and the retry has to say exactly that.
+    attempted: set[str] = field(default_factory=set)
+
+    def with_attempt(self, fp: str) -> AssignmentState:
+        """A copy that remembers we are ABOUT to try this fingerprint."""
+        return AssignmentState(
+            seeded=self.seeded,
+            cursor=self.cursor,
+            observed=dict(self.observed),
+            delivered=set(self.delivered),
+            attempted=self.attempted | {fp},
+        )
+
+    def repeat_state(self, fp: str) -> str:
+        if fp in self.delivered:
+            return REPEAT
+        if fp in self.attempted:
+            return POSSIBLE_REPEAT
+        return NEW
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -187,6 +226,7 @@ class AssignmentState:
                 for key, value in sorted(self.observed.items())
             },
             "delivered": sorted(self.delivered),
+            "attempted": sorted(self.attempted),
         }
 
     @classmethod
@@ -233,11 +273,21 @@ class AssignmentState:
             isinstance(i, str) for i in delivered_raw
         ):
             raise StateUnreadable("assignment state `delivered` is missing or not strings")
+        # NOT defaulted to empty when absent. An empty `attempted` asserts "no
+        # dispatch has ever ended ambiguously", which is the claim a v1 file
+        # cannot support — it predates the concept. That is why the schema
+        # version moved rather than the field being made optional.
+        attempted_raw = raw.get("attempted")
+        if not isinstance(attempted_raw, list) or not all(
+            isinstance(i, str) for i in attempted_raw
+        ):
+            raise StateUnreadable("assignment state `attempted` is missing or not strings")
         return cls(
             seeded=seeded,
             cursor=Cursor(t=when, ids=frozenset(raw_ids)),
             observed=observed,
             delivered=set(delivered_raw),
+            attempted=set(attempted_raw),
         )
 
     @classmethod
@@ -436,12 +486,16 @@ class Route:
     updated_at: datetime
     disposition: str
     target: str
-    redelivery: bool
+    repeat: str
     previous: tuple[str | None, str] | None
 
     @property
     def to_agent(self) -> bool:
         return self.disposition == RESOLVED
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(self.identifier, self.assignee, self.state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,7 +587,7 @@ def plan_assignments(
                 updated_at=when,
                 disposition=disposition,
                 target=target if disposition == RESOLVED else coordinator,
-                redelivery=fingerprint(item.identifier, *current) in state.delivered,
+                repeat=state.repeat_state(fingerprint(item.identifier, *current)),
                 previous=previous,
             ),
         ))
@@ -561,13 +615,18 @@ def advance(
     """
     observed = dict(state.observed)
     delivered = set(state.delivered)
+    attempted = set(state.attempted)
     for candidate in handled:
         observed[candidate.item.identifier] = (
             candidate.item.assignee,
             candidate.item.state,
         )
     for route in dispatched:
-        delivered.add(fingerprint(route.identifier, route.assignee, route.state))
+        # A confirmed success RESOLVES the ambiguity: the fingerprint graduates
+        # from "we do not know" to "we know", and only then does the directive
+        # a retry sends get to call itself a definite repeat.
+        delivered.add(route.fingerprint)
+        attempted.discard(route.fingerprint)
 
     cursor = state.cursor
     if handled:
@@ -586,6 +645,7 @@ def advance(
         cursor=cursor,
         observed=observed,
         delivered=delivered,
+        attempted=attempted,
     )
 
 
@@ -610,6 +670,7 @@ def seed(state: AssignmentState, items: Sequence[InboxItem]) -> AssignmentState:
         cursor=cursor,
         observed=observed,
         delivered=set(state.delivered),
+        attempted=set(state.attempted),
     )
 
 
@@ -654,14 +715,22 @@ def directive_body(route: Route) -> tuple[str, str]:
             f"state={prior_state}.")
     if not route.to_agent:
         parts.append(f"Routed here for triage because {_DISPOSITION_DETAIL[route.disposition]}.")
-    if route.redelivery:
-        # Announced, never suppressed. Suppressing it would turn at-least-once
-        # into "at most once, silently" — the reader could no longer tell a
-        # duplicate from a second real assignment, so they are told which it is.
+    # Announced, never suppressed, and at the confidence we actually have.
+    # Suppressing a repeat turns at-least-once into "at most once, silently";
+    # calling an ambiguous attempt a repeat over-claims just as badly, and
+    # calling it new under-claims — which is the defect codex-coder found.
+    if route.repeat == REPEAT:
         parts.append(
             "RE-DELIVERY: this exact (card, assignee, state) has already been "
             "dispatched at least once. Linear assignment delivery is "
             "at-least-once by design; treat this as a repeat, not a new change.")
+    elif route.repeat == POSSIBLE_REPEAT:
+        parts.append(
+            "POSSIBLE RE-DELIVERY: an earlier attempt to send this exact (card, "
+            "assignee, state) ended with an UNKNOWN outcome — the transport "
+            "failed in a way that may have committed the directive first. A "
+            "duplicate of this message may already exist; we cannot tell, and "
+            "would rather say so than guess either way.")
     parts.append("Sent by coord-tracker-bridge linear-assignments (read-only; zero Linear writes).")
     next_action = (
         "Pick up the card, or reply on the bus if it is not yours."
@@ -721,7 +790,8 @@ def render_plan(plan: Plan, *, delivered: int | None = None, note: str = "") -> 
             "below reads as a change. Nothing is delivered from a cold start — "
             "run with --seed to adopt the board as the baseline.")
     for route in plan.routes:
-        flag = " [RE-DELIVERY]" if route.redelivery else ""
+        flag = {REPEAT: " [RE-DELIVERY]",
+                POSSIBLE_REPEAT: " [POSSIBLE RE-DELIVERY]"}.get(route.repeat, "")
         where = route.target if route.to_agent else f"{route.target} (triage: {route.disposition})"
         lines.append(
             f"  {route.identifier}  {route.state:<12} -> {where}{flag}  {route.title}")
@@ -809,27 +879,43 @@ def run_assignments(
             f"the cap is {cap}. Nothing was delivered and the watermark did not move. "
             "Raise --delivery-cap deliberately, or --seed past a backlog."))
 
-    handled: list[Candidate] = []
-    dispatched: list[Route] = []
+    # Folded one candidate at a time rather than in a batch at the end, because
+    # the durable record has to be correct at every instant a process can die,
+    # not only at the ones where it returns.
+    current = state
+    sent = 0
     for candidate in plan.candidates:
-        if candidate.route is not None:
+        route = candidate.route
+        if route is not None:
+            # WRITE-AHEAD. The marker reaches disk BEFORE the transport runs.
+            # `coord-engine tell` can commit the directive and then fail to
+            # report it, and the process can die between the two, so "the call
+            # raised" is not evidence that nothing was written. A marker for a
+            # dispatch that never happened costs the retry a POSSIBLE-repeat
+            # label, which is true. NO marker for a dispatch that did happen
+            # costs a directive announcing itself as a first delivery of
+            # something that already exists — the defect codex-coder found.
+            current = current.with_attempt(route.fingerprint)
+            current.save(state_path)
             try:
-                dispatcher.deliver(candidate.route)      # type: ignore[union-attr]
+                dispatcher.deliver(route)                 # type: ignore[union-attr]
             except DispatchFailed as exc:
-                # The prefix before this row IS done, so it is folded and saved;
-                # this row and everything after it stays owed. Recording a
-                # delivery that did not happen is the transport split this fleet
-                # has already been bitten by twice, in the other direction.
-                advance(state, handled, dispatched=dispatched).save(state_path)
+                # Everything before this row is folded and on disk; this row and
+                # everything after it stays owed, and this row's fingerprint
+                # stays in `attempted` so the retry tells the truth about it.
                 return Outcome(3, render_unknown(
-                    f"{len(dispatched)} directive(s) went out, then delivery failed "
-                    f"at {candidate.route.identifier} ({exc}); the watermark stopped "
-                    "there and the rest are still owed"))
-            dispatched.append(candidate.route)
-        handled.append(candidate)
+                    f"{sent} directive(s) confirmed sent, then delivery failed at "
+                    f"{route.identifier} ({exc}) — that one's outcome is UNKNOWN, "
+                    "not refused: it may have committed before the transport "
+                    "reported. The watermark stopped there, the rest are still "
+                    "owed, and a retry will label it a possible re-delivery"))
+            current = advance(current, [candidate], dispatched=[route])
+            sent += 1
+        else:
+            current = advance(current, [candidate])
+        current.save(state_path)
 
-    advance(state, handled, dispatched=dispatched).save(state_path)
-    return Outcome(0, render_plan(plan, delivered=len(dispatched)))
+    return Outcome(0, render_plan(plan, delivered=sent))
 
 
 def build_client(api_key: str, transport_factory) -> LinearClient:

@@ -1,5 +1,5 @@
 {
-  "captured_at": "2026-08-19T22:41:22.451612+00:00",
+  "captured_at": "2026-08-20T00:14:33.420035+00:00",
   "captured_from": "linear.app",
   "node_count": 100,
   "operation": "CoordInbox",
@@ -8,7 +8,9 @@
     "title",
     "description",
     "url",
-    "assignee.displayName"
+    "assignee.displayName",
+    "labels.nodes.name(agent:*)",
+    "labels.nodes.name(hostname-shaped)"
   ],
   "response": {
     "data": {
@@ -1171,7 +1173,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:codex-coder"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1196,7 +1198,7 @@
                   "name": "lane:active"
                 },
                 {
-                  "name": "agent:codex-coder"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1224,7 +1226,7 @@
                   "name": "lane:active"
                 },
                 {
-                  "name": "agent:codex-coder"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1321,7 +1323,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:codex-prefs"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1343,7 +1345,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:claude-code:Mac:fulcra-tools"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1365,7 +1367,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:workbook:prefs_maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1387,7 +1389,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:workbook:prefs_maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1409,7 +1411,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:workbook:prefs_maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1431,7 +1433,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:workbook:prefs_maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1453,7 +1455,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:workbook:prefs_maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1475,7 +1477,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:claude-code:Mac:Fulcra-Coord-Ideas"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1497,7 +1499,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:claude-code:Mac:ideas-inbox"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1519,7 +1521,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:claude-code:Mac:ideas-inbox"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1541,7 +1543,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:claude-code:Mac:ideas-inbox"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1563,7 +1565,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:workbook:prefs_maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1585,7 +1587,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-reconcile:Ashs-MBP-Work.localdomai"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1607,7 +1609,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:minilab-infrastructure"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1629,7 +1631,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1651,7 +1653,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1673,7 +1675,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1695,7 +1697,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:codex-coder"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1717,7 +1719,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-boss"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1739,7 +1741,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1761,7 +1763,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1783,7 +1785,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1805,7 +1807,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-boss"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1827,7 +1829,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-maintainer"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1849,7 +1851,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:claude-code:ArcBot:Arc_Maintenance"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
@@ -1871,7 +1873,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-boss"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:idea"
@@ -1893,7 +1895,7 @@
             "labels": {
               "nodes": [
                 {
-                  "name": "agent:coord-boss"
+                  "name": "<redacted agent label>"
                 },
                 {
                   "name": "kind:directive"
