@@ -27,6 +27,10 @@ COORDINATION_TYPE = "MomentAnnotation/test-reconcile"
 class FakeTransport:
     """In-memory Fulcra File Store: {path: content} + per-path mtime."""
 
+    # Existing aggregate-only fixtures model the pre-generation transport
+    # contract. Dedicated v2 tests opt into the strict publication path.
+    legacy_projection_compat = True
+
     def __init__(self):
         self.store: dict[str, str] = {}
         self.mtimes: dict[str, str] = {}
@@ -77,6 +81,12 @@ class FakeTransport:
         self.store[path] = content
         return True
 
+    def write_if_unchanged(self, path, content, expected):
+        if self.store.get(path) != expected:
+            return False
+        self.store[path] = content
+        return True
+
     def delete(self, path):
         return self.store.pop(path, None) is not None
 
@@ -116,7 +126,8 @@ def test_reconcile_seals_a_verified_generation_before_advancing_current(monkeypa
 
     t = FakeTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))
-    batch = ChangeBatch((), {name: Coverage.CLEAR for name in NAMESPACES}, True)
+    batch = ChangeBatch((), {name: Coverage.CLEAR for name in NAMESPACES}, True,
+                        watermark="2026-07-01T00:00:00Z")
     monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: batch)
 
     result = _run(t)
@@ -126,6 +137,27 @@ def test_reconcile_seals_a_verified_generation_before_advancing_current(monkeypa
     assert current is not None
     assert current.id in t.store[
         "team/r/_coord/projections/current.json"]
+
+
+def test_reconcile_unknown_detector_returns_degraded_without_advancing_current(monkeypatch):
+    """A broken actual feed is UNKNOWN, not a successful legacy full scan."""
+    from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
+
+    class DetectorTransport(FakeTransport):
+        def data_updates(self, _since, *, deadline=None):
+            return None
+
+    t = DetectorTransport()
+    t.legacy_projection_compat = False
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    unknown = ChangeBatch((), {name: Coverage.UNKNOWN for name in NAMESPACES}, False)
+    monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: unknown)
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "change detection UNKNOWN" in result["reason"]
+    assert generation.current_path("r") not in t.store
 
 
 def test_reconcile_skips_index_and_non_task_docs():

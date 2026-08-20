@@ -150,6 +150,17 @@ def test_lifecycle_timestamps_are_validated_normalized_and_sorted_temporally():
     assert malformed.coverage["tasks"].value == "UNKNOWN"
 
 
+def test_attested_feed_frontier_is_sealed_separately_from_event_timestamps():
+    """A generation watermark is the feed's covered frontier, never max event time."""
+    batch = _poll(FeedTransport({
+        "through": "2026-08-20T12:10:00+00:00",
+        "file_changes": [_row("team/r/task/a.md", at="2026-08-20T12:00:00Z")],
+    }))
+
+    assert batch.trusted is True
+    assert batch.watermark == "2026-08-20T12:10:00Z"
+
+
 def test_mixed_precision_lifecycle_instants_sort_temporally():
     """A whole-second instant precedes a later fractional-second instant."""
     batch = _poll(FeedTransport({"file_changes": [

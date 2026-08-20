@@ -614,7 +614,8 @@ it (not on PyPI).
     compatibility-cache write and leaves the last complete generation current. The publication authority
     is `_coord/projections/current.json`: a builder write/read-verifies immutable
     `generations/<digest>.json` first, then writes and read-verifies the digest-bound manifest. Required
-    `UNKNOWN`/incomplete sections stay recovery progress and never advance current. `summaries.json`
+    `UNKNOWN`/incomplete sections, an unattested feed frontier, or missing atomic conditional-write
+    support stay recovery progress and never advance current; reconcile exits nonzero. `summaries.json`
     remains reader compatibility during migration; new readers validate the current generation before use.
     **The
     caller's OWN head is feed-gated too:** with a clean `data-updates` window, only caller-owned slugs

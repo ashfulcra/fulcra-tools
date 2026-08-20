@@ -97,9 +97,18 @@ def _batch_digest(batch: Any) -> str:
         })
     coverage = dict(getattr(batch, "coverage", {}))
     return _digest({"trusted": bool(getattr(batch, "trusted", False)),
+                    "watermark": getattr(batch, "watermark", None),
                     "changes": sorted(changes, key=lambda row: (
                         row["update_id"], row["path"], row["state"], row["at"])),
                     "coverage": coverage})
+
+
+def build_id(prior_generation: Optional[str], source_watermark: str, batch: Any) -> str:
+    """Immutable recovery identity for one exact base/feed/build attempt."""
+    return _digest({"prior_generation_id": prior_generation,
+                    "source_watermark": source_watermark,
+                    "normalized_update_digest": _batch_digest(batch),
+                    "schema_version": GENERATION_SCHEMA})
 
 
 def build_generation(
@@ -217,14 +226,10 @@ def publish(transport: Any, team: str, generation: Generation, *,
         "content_digest": generation.content_digest,
     })
     conditional = getattr(transport, "write_if_unchanged", None)
-    if callable(conditional):
-        if not conditional(current_path(team), manifest, prior_raw):
-            return PublishOutcome(False, "current manifest changed")
-    else:
-        if transport.read(current_path(team)) != prior_raw:
-            return PublishOutcome(False, "current manifest changed")
-        if not transport.write(current_path(team), manifest):
-            return PublishOutcome(False, "current manifest write failed")
+    if not callable(conditional):
+        return PublishOutcome(False, "conditional manifest write unsupported")
+    if not conditional(current_path(team), manifest, prior_raw):
+        return PublishOutcome(False, "current manifest changed")
     if transport.read(current_path(team)) != manifest:
         return PublishOutcome(False, "current manifest read verification failed")
     return PublishOutcome(True)

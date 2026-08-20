@@ -72,8 +72,72 @@ Implemented Unit 4 on `codex/engine-v2-spec`, based on
 
 ## Concern
 
-The existing transport interface has no universal compare-and-swap write.
-`generation.publish` uses `write_if_unchanged` when supplied and otherwise a
-double-read fence; a fully atomic stale-writer exclusion on legacy transports
-requires the transport-level conditional write planned for the next authority
-unit. No partial or unverified generation is published in either mode.
+The deployed Fulcra File API still lacks server-side conditional upload, so
+strict production reconciliation safely refuses generation publication until
+that platform capability is delivered. The compatibility aggregate remains
+available to existing readers, but it is not a newer authoritative generation.
+
+## Fix Round 1
+
+### Critical 1 — untrusted detection no longer reports success
+
+- Covering tests: `tests/test_reconcile.py::test_reconcile_unknown_detector_returns_degraded_without_advancing_current`.
+- Change: strict/production transports now stop immediately with a degraded,
+  nonzero reconcile result on an untrusted `ChangeBatch`; no aggregate or
+  current generation advances. The legacy aggregate fixture seam is explicitly
+  retained only for unmigrated reader-contract tests.
+- Command: `uv run --project packages/coord-engine pytest packages/coord-engine/tests/test_v2_generation.py packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_projection.py packages/coord-engine/tests/test_reconcile.py packages/coord-engine/tests/test_transport.py -q`
+- Output: `193 passed in 5.23s`.
+
+### Critical 2 — production transport cannot impersonate CAS
+
+- Covering tests: `tests/test_v2_generation.py::test_manifest_publish_fails_closed_without_a_proven_conditional_write`, `tests/test_transport.py::test_conditional_write_fails_closed_when_file_api_has_no_atomic_cas`.
+- Change: `generation.publish` requires `write_if_unchanged`; no double-read
+  fallback remains. `FulcraFileTransport.write_if_unchanged` explicitly returns
+  false because the deployed File API is last-writer-wins and exposes no atomic
+  conditional upload. This leaves the old manifest current rather than claiming
+  a publication the server cannot prove.
+- Command/output: same focused command; `193 passed in 5.23s`.
+
+### Important 3 — complete sections recursively read canonical bytes
+
+- Covering tests: `tests/test_v2_generation.py::test_each_required_section_has_its_own_deadline_and_unknown_never_seals`, `tests/test_projection.py::test_generation_reader_rejects_a_not_run_required_section`.
+- Change: namespace builders recurse through every directory, read every file
+  under their own `Deadline`, retain `CLEAR`/`DATA`/`NOT_RUN`/`UNKNOWN` as
+  distinct states, and never seal `NOT_RUN` or unreadable content.
+- Command/output: same focused command; `193 passed in 5.23s`.
+
+### Important 4 — recovery state is exact-build scoped
+
+- Covering tests: `tests/test_v2_generation.py::test_progress_build_id_binds_base_watermark_and_normalized_updates`, `tests/test_v2_generation.py::test_recovery_progress_resumes_only_the_exact_immutable_build_id`.
+- Change: progress paths now use a digest over prior generation, feed watermark,
+  normalized batch, and schema; a different watermark cannot load or overwrite
+  the previous build's recovery frontier.
+- Command/output: same focused command; `193 passed in 5.23s`.
+
+### Important 5 — manifest watermark is feed evidence
+
+- Covering test: `tests/test_v2_change_detection.py::test_attested_feed_frontier_is_sealed_separately_from_event_timestamps`.
+- Change: `ChangeBatch` carries an optional normalized, monotonic server-attested
+  `through` frontier. Strict publication rejects batches without it and never
+  substitutes the latest event timestamp or host clock.
+- Command: `uv run --project packages/coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_attested_feed_frontier_is_sealed_separately_from_event_timestamps -q`.
+- Output: `1 passed in 0.01s`.
+
+### Important 6 — missing regression coverage
+
+- Covering tests added in `tests/test_v2_generation.py`, `tests/test_projection.py`,
+  `tests/test_reconcile.py`, and `tests/test_transport.py` as listed above.
+- Command/output: focused command; `193 passed in 5.23s`.
+
+### Important 7 — documentation contract kept in sync
+
+- Updated `AGENTS.md`, `packages/coord-engine/README.md`, and
+  `docs/coord/OUTPUT-CONTRACT.md` to state immutable-manifest ordering,
+  attested-frontier/conditional-write requirements, nonzero failure behavior,
+  and the temporary `summaries.json` compatibility status.
+
+### Round verification
+
+- Full command: `uv run --project packages/coord-engine pytest packages/coord-engine/tests -q` — exit 0.
+- `git diff --check` — exit 0.

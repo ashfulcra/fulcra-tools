@@ -1277,33 +1277,58 @@ def _generation_value(value: Any) -> Any:
 
 
 def _tree_section(transport: Any, prefix: str, *, deadline: Deadline) -> tuple[str, dict[str, Any]]:
-    """A bounded, deterministic namespace inventory for generation evidence."""
+    """Read every canonical shard recursively under one section deadline."""
     if deadline.expired():
-        return "UNKNOWN", {"entries": []}
+        return "UNKNOWN", {"records": []}
     try:
         entries = transport.list_dir(prefix)
     except Exception:
-        return "UNKNOWN", {"entries": []}
+        return "UNKNOWN", {"records": []}
     if deadline.expired() or not isinstance(entries, list):
-        return "UNKNOWN", {"entries": []}
-    rows = []
+        return "UNKNOWN", {"records": []}
+    rows: list[dict[str, str]] = []
     for entry in entries:
         if not isinstance(entry, dict):
-            return "UNKNOWN", {"entries": []}
-        rows.append({key: entry.get(key) for key in ("name", "mtime", "size", "is_dir")
-                     if key in entry})
-    return "DATA", {"entries": sorted(rows, key=lambda row: str(row.get("name", "")))}
+            return "UNKNOWN", {"records": []}
+        name = entry.get("name")
+        if not isinstance(name, str) or not name or name.startswith("/") or ".." in name.split("/"):
+            return "UNKNOWN", {"records": []}
+        is_dir = bool(entry.get("is_dir")) or name.endswith("/")
+        child = prefix + name
+        if is_dir:
+            state, value = _tree_section(transport, child, deadline=deadline)
+            if state == "UNKNOWN":
+                return state, value
+            rows.extend(value["records"])
+            continue
+        if deadline.expired():
+            return "UNKNOWN", {"records": []}
+        classified = getattr(transport, "read_classified", None)
+        if callable(classified):
+            raw, read_state = classified(child, deadline=deadline)
+            if read_state != "ok" or not isinstance(raw, str):
+                return "UNKNOWN", {"records": []}
+        else:
+            raw = transport.read(child)
+            if not isinstance(raw, str):
+                return "UNKNOWN", {"records": []}
+        if deadline.expired():
+            return "UNKNOWN", {"records": []}
+        rows.append({"path": child, "content": raw})
+    records = sorted(rows, key=lambda row: row["path"])
+    return ("DATA" if records else "CLEAR"), {"records": records}
 
 
 def _coverage_state(batch: ChangeBatch, namespaces: tuple[str, ...]) -> str:
-    """UNKNOWN detector coverage is never a licence to seal a section."""
+    """Preserve the detector's typed coverage; never coerce NOT_RUN to DATA."""
     if not batch.trusted:
         return "UNKNOWN"
     coverage = batch.coverage
     for namespace in namespaces:
         state = coverage.get(namespace)
-        if getattr(state, "value", state) == "UNKNOWN" or state is None:
-            return "UNKNOWN"
+        value = getattr(state, "value", state)
+        if value not in generation.COMPLETE_STATES:
+            return str(value or "UNKNOWN")
     return "DATA"
 
 
@@ -1329,7 +1354,7 @@ def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
         "acknowledgments": ("acknowledgments_responses",),
         "responses": ("acknowledgments_responses",),
     }
-    for name, (section_key, value) in fixed.items():
+    for name, (_section_key, value) in fixed.items():
         state = _coverage_state(batch, coverage[name])
         # Complete projection sections are independently validated before they
         # enter an immutable generation; an incomplete one stays recovery work.
@@ -1343,20 +1368,18 @@ def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
     for name, prefix in inventories.items():
         state, value = _tree_section(
             transport, prefix, deadline=Deadline.open(projection_mod.build_budget()))
-        if _coverage_state(batch, coverage[name]) == "UNKNOWN":
-            state = "UNKNOWN"
+        feed_state = _coverage_state(batch, coverage[name])
+        if feed_state not in generation.COMPLETE_STATES:
+            state = feed_state
         out[name] = generation.SectionResult(name, state, value)
     return out
 
 
 def _generation_watermark(batch: ChangeBatch, prior: Optional[generation.Generation]) -> str:
-    """Use detector evidence, never a host clock, as the generation watermark."""
-    changes = tuple(getattr(batch, "changes", ()))
-    if changes:
-        return max(change.at for change in changes)
-    if prior is not None:
-        return prior.source_watermark
-    return "initial"
+    """The manifest carries only a feed-attested frontier, never event time."""
+    del prior
+    watermark = getattr(batch, "watermark", None)
+    return watermark if isinstance(watermark, str) and watermark else ""
 
 
 def reconcile(
@@ -1418,6 +1441,26 @@ def reconcile(
         team, prior_cursor.get("watermark") if prior_cursor else None,
         detector_deadline,
     )
+    # A real detector failure is UNKNOWN, not an invitation to present a full
+    # scan as a clean v2 pass.  Legacy injected transports without the detector
+    # capability retain their pre-v2 test seam; production always supplies it.
+    strict_generation = not bool(getattr(transport, "legacy_projection_compat", False))
+    if not batch.trusted and strict_generation:
+        reason = "change detection UNKNOWN; current generation preserved"
+        result = {"degraded": True, "reason": reason, "tasks": len(prior_rows),
+                  "warnings": [reason], "rows": prior_rows}
+        _write_health_shard(transport, team, host=host, now=now,
+                            result=result, log=log)
+        log.error("reconcile aborted: change detection UNKNOWN", team=team)
+        return result
+    if batch.trusted and not _generation_watermark(batch, None) and strict_generation:
+        reason = "feed watermark UNKNOWN; current generation preserved"
+        result = {"degraded": True, "reason": reason, "tasks": len(prior_rows),
+                  "warnings": [reason], "rows": prior_rows}
+        _write_health_shard(transport, team, host=host, now=now,
+                            result=result, log=log)
+        log.error("reconcile aborted: feed watermark absent", team=team)
+        return result
     # Fast path — the one normalized batch positively proves NOTHING changed —
     # only when NOT owed a full/drift pass.
     # It still advances the E1 cursor after independently confirming the feed
@@ -1598,7 +1641,9 @@ def reconcile(
     # the builder's durable scan frontier. Resume that frontier from a private
     # shard bound to the exact public generation it was derived from.
     current_generation = generation.load_current(transport, team)
-    progress_build_id = current_generation.id if current_generation else "root"
+    progress_build_id = generation.build_id(
+        current_generation.id if current_generation else None,
+        _generation_watermark(batch, current_generation), batch)
     build_progress = _load_projection_progress(transport, team, progress_build_id)
     built_current = {
         projection_mod.REVIEWS_KEY: False,
@@ -1800,7 +1845,7 @@ def reconcile(
     # remains a compatibility cache for existing readers, and is written only
     # after the immutable generation and digest-bound current manifest verify.
     publication = None
-    if batch.trusted:
+    if batch.trusted and _generation_watermark(batch, None):
         prior_generation = current_generation
         sealed = generation.build_generation(
             prior_generation=prior_generation.id if prior_generation else None,

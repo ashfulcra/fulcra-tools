@@ -56,7 +56,30 @@ def test_identical_inputs_have_identical_generation_id_and_bytes():
     assert json.loads(one.bytes)["id"] == one.id
 
 
-def test_each_required_section_has_its_own_deadline_and_unknown_never_seals():
+def test_each_required_section_has_its_own_deadline_and_unknown_never_seals(monkeypatch):
+    from coord_engine import reconcile
+    from coord_engine.change_detection import Coverage
+
+    opened = []
+
+    class OpenDeadline:
+        def expired(self):
+            return False
+
+    monkeypatch.setattr(reconcile.Deadline, "open", lambda _budget: opened.append(OpenDeadline()) or opened[-1])
+    batch = ChangeBatch(
+        (), {"tasks": Coverage.CLEAR, "reviews": Coverage.CLEAR,
+             "forge": Coverage.CLEAR, "presence_roles": Coverage.CLEAR,
+             "acknowledgments_responses": Coverage.CLEAR}, True,
+        watermark="w-1")
+    transport = MemoryTransport()
+    transport.list_dir = lambda _prefix: []
+    reconcile._generation_sections(
+        transport, TEAM, batch=batch, rows=[],
+        proj_state={"reviews": {"complete": True}, "forge": {"complete": True}})
+    assert len(opened) == 4
+    assert len({id(deadline) for deadline in opened}) == 4
+
     result = generation.build_generation(
         prior_generation=None, source_watermark="w-1", batch=_batch(),
         sections=_sections())
@@ -130,6 +153,44 @@ def test_stale_writer_manifest_race_refuses_to_replace_newer_current():
     assert outcome.published is False
     assert outcome.reason == "current manifest changed"
     assert generation.load_current(transport, TEAM).id == winner.id
+
+
+def test_manifest_publish_fails_closed_without_a_proven_conditional_write():
+    class LastWriterWins(MemoryTransport):
+        write_if_unchanged = None
+
+    transport = LastWriterWins()
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(), sections=_sections())
+
+    outcome = generation.publish(transport, TEAM, built)
+
+    assert outcome.published is False
+    assert outcome.reason == "conditional manifest write unsupported"
+    assert transport.read(generation.current_path(TEAM)) is None
+
+
+def test_progress_build_id_binds_base_watermark_and_normalized_updates():
+    first = generation.build_id("prior", "feed-1", _batch())
+    same = generation.build_id("prior", "feed-1", _batch())
+    later = generation.build_id("prior", "feed-2", _batch())
+
+    assert first == same
+    assert first != later
+
+
+def test_recovery_progress_resumes_only_the_exact_immutable_build_id():
+    from coord_engine import reconcile
+
+    transport = MemoryTransport()
+    build = generation.build_id("prior", "feed-1", _batch())
+    progress = {"schema": "coord.projection-build-progress.v1",
+                "base_generation": build, "reviews": {"scanned": 3}}
+    transport.write(reconcile.projection_progress_path(TEAM, build), json.dumps(progress))
+
+    assert reconcile._load_projection_progress(transport, TEAM, build) == progress
+    assert reconcile._load_projection_progress(
+        transport, TEAM, generation.build_id("prior", "feed-2", _batch())) == {}
 
 
 def test_projection_validation_reads_only_a_digest_verified_generation():

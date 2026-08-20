@@ -1376,3 +1376,27 @@ def test_review_root_listing_failure_carries_prior_projection():
     # re-stamping unknown state as current
     assert sec == prior
     assert sec["generated_at"] == old
+
+
+def test_generation_reader_rejects_a_not_run_required_section():
+    """Generation validation must preserve NOT_RUN rather than treating it clear."""
+    from coord_engine import generation
+    from coord_engine.change_detection import ChangeBatch, Coverage
+
+    t = FakeTransport()
+    t.write_if_unchanged = lambda path, content, expected: (
+        t.store.get(path) == expected and not t.store.__setitem__(path, content))
+    sections = {
+        name: generation.SectionResult(name, "DATA", {"rows": []})
+        for name in generation.REQUIRED_SECTIONS
+    }
+    sections["reviews"] = generation.SectionResult("reviews", "NOT_RUN", {"rows": []})
+    batch = ChangeBatch((), {"reviews": Coverage.NOT_RUN}, True,
+                        watermark="2026-08-20T12:00:00Z")
+    sealed = generation.build_generation(
+        prior_generation=None, source_watermark=batch.watermark, batch=batch,
+        sections=sections)
+
+    assert generation.publish(t, TEAM, sealed).published is False
+    section, reason = projection.generation_section(t, TEAM, "reviews")
+    assert section is None and "current generation" in reason

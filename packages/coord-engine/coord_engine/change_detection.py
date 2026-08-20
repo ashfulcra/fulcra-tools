@@ -63,6 +63,10 @@ class ChangeBatch:
     coverage: Mapping[str, Coverage]
     trusted: bool
     envelope: Optional[Mapping[str, Any]] = None
+    # The only cursor frontier a generation may publish.  The current
+    # data-updates response does not attest one, so this is usually None and
+    # generation publication fails closed until the feed supplies it.
+    watermark: Optional[str] = None
 
     def for_namespace(self, namespace: str) -> tuple[Change, ...]:
         return tuple(change for change in self.changes if change.namespace == namespace)
@@ -208,6 +212,18 @@ def _coordination_count(
     return channel, count
 
 
+def _feed_watermark(envelope: Mapping[str, Any], prior_watermark: Optional[str]) -> Optional[str]:
+    """Accept only a server-attested feed frontier that cannot move backward."""
+    frontier = _instant({"uploaded_at": envelope.get("through")}, "uploaded")
+    if frontier is None:
+        return None
+    if prior_watermark is not None:
+        prior = _instant({"uploaded_at": prior_watermark}, "uploaded")
+        if prior is None or frontier[0] < prior[0]:
+            return None
+    return frontier[1]
+
+
 class ChangeDetector:
     """The sole ordinary detector: exactly one bounded ``data-updates`` read."""
 
@@ -301,4 +317,5 @@ class ChangeDetector:
         changes.sort(key=lambda change: (instants[change.update_id], change.path, change.update_id))
         return ChangeBatch(
             tuple(changes), MappingProxyType(dict(coverage)), trusted, _freeze(envelope),
+            _feed_watermark(envelope, prior_watermark),
         )

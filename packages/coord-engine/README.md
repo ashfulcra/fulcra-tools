@@ -59,8 +59,13 @@ per-verb command references live in each skill's `references/` directory.
 Machine JSON is emitted compactly: `threads` emits one JSON array. `needs-me`
 preserves partial rows but returns rc 3 when its bounded forge fallback emits
 `forge-degraded`; a complete projection or raw scan returns rc 0. The hot
-`_coord/summaries.json` aggregate uses the same
-zero-whitespace serializer; parsed values and degradation markers are unchanged.
+`_coord/summaries.json` aggregate is a compatibility cache with the same
+zero-whitespace serializer; its parsed values and degradation markers are
+unchanged. The authoritative projection pointer is
+`_coord/projections/current.json`: it names a digest-verified immutable
+generation. Reconcile advances it only after every required section is complete
+and the transport proves an atomic conditional write; missing feed-frontier or
+conditional-write evidence is a nonzero, fail-closed reconcile result.
 
 Class A folds now enter the output boundary through
 `coord_engine.outcome.CommandOutcome`, the shared v2 state/coverage/rows/source

@@ -759,6 +759,18 @@ class FulcraFileTransport:
             except OSError:
                 pass
 
+    def write_if_unchanged(self, path: str, content: str,
+                           expected: Optional[str]) -> bool:
+        """Conditional-write capability required by generation publication.
+
+        The deployed ``fulcra-api file upload`` surface is last-writer-wins and
+        does not expose an If-Match/version precondition.  Returning ``False``
+        is deliberate: a client-side read/compare/write sequence is not CAS and
+        must never advance a correctness-critical manifest.
+        """
+        del path, content, expected
+        return False
+
     def stat(self, path: str) -> Optional[dict[str, Any]]:
         # contract: None on any failure (incl. timeout/exec error).
         try:

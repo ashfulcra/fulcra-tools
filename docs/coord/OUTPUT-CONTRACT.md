@@ -75,6 +75,19 @@ row serialization, and applies in text mode too.
 - rc 3 with rows present means a floor — act on what is present only if
   your task tolerates "at least this much exists", and say so.
 
+## Projection publication boundary
+
+`reconcile` publishes a projection view only through the digest-bound
+`_coord/projections/current.json` manifest. The manifest is written after its
+immutable generation has been written and read-verified, every required section
+is `CLEAR` or `DATA`, the detector supplies an attested feed frontier, and the
+transport proves a conditional write. `UNKNOWN`, `NOT_RUN`, an absent frontier,
+or unavailable conditional-write capability leaves the former manifest current
+and makes reconcile nonzero. `_coord/summaries.json` remains a compatibility
+cache for unmigrated readers; it is not evidence that a newer generation became
+current. Consumers must not infer success from a cache write or an event's
+timestamp.
+
 **Status:** clauses marked **ENFORCED** are pinned by
 `packages/coord-engine/tests/test_output_contract.py` and CI-failing;
 clauses marked **TARGET** are the ratified direction: probeable targets are
