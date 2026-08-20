@@ -185,6 +185,7 @@ class ChangeDetector:
 
         coverage = {name: Coverage.CLEAR for name in NAMESPACES}
         changes: list[Change] = []
+        instants: dict[str, datetime] = {}
         identities: set[str] = set()
         for row in rows:
             if deadline.expired() or not isinstance(row, Mapping):
@@ -210,6 +211,7 @@ class ChangeDetector:
             coverage[namespace] = Coverage.DATA
             if update_id not in identities:
                 identities.add(update_id)
+                instants[update_id] = instant
                 changes.append(Change(update_id, path, state, at, namespace))
 
         record_counts = envelope.get("record_counts", {})
@@ -247,13 +249,14 @@ class ChangeDetector:
                         normalized = _instant({"uploaded_at": row["recorded_at"]}, "uploaded")
                         if normalized is None:
                             return _unknown()
-                        _instant_value, at = normalized
+                        instant, at = normalized
+                        instants[update_id] = instant
                         changes.append(Change(update_id, "record:" + identity, "recorded", at,
                                               "acknowledgments_responses", _freeze(dict(row))))
                 coverage["acknowledgments_responses"] = Coverage.DATA
 
         trusted = not any(value is Coverage.UNKNOWN for value in coverage.values())
-        changes.sort(key=lambda change: (change.at, change.path, change.update_id))
+        changes.sort(key=lambda change: (instants[change.update_id], change.path, change.update_id))
         return ChangeBatch(
             tuple(changes), MappingProxyType(dict(coverage)), trusted, _freeze(envelope),
         )

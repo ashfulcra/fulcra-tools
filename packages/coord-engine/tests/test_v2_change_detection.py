@@ -106,6 +106,24 @@ def test_lifecycle_timestamps_are_validated_normalized_and_sorted_temporally():
     assert malformed.coverage["tasks"].value == "UNKNOWN"
 
 
+def test_mixed_precision_lifecycle_instants_sort_temporally():
+    """A whole-second instant precedes a later fractional-second instant."""
+    batch = _poll(FeedTransport({"file_changes": [
+        _row(
+            "team/r/task/later.md",
+            at="2026-08-20T12:00:00.1Z",
+            update_id="later",
+        ),
+        _row(
+            "team/r/task/earlier.md",
+            at="2026-08-20T12:00:00Z",
+            update_id="earlier",
+        ),
+    ]}))
+
+    assert [change.update_id for change in batch.changes] == ["earlier", "later"]
+
+
 def test_expired_budget_and_unknown_path_make_coverage_unknown():
     """Treating either doubt as clear could publish a watermark past unseen work."""
     from coord_engine.change_detection import ChangeDetector
