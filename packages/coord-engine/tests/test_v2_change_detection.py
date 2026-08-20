@@ -2,15 +2,31 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from coord_engine.budget import Deadline
+
+
+COORDINATION_TYPE = "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
+CHECKPOINT_TYPE = "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49"
+LIVE_ENVELOPE_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "live_data_updates_2026-08-20T2013Z.min.json"
+)
 
 
 class FeedTransport:
     """Small real-boundary double: one envelope call and optional record cursor."""
 
-    def __init__(self, envelope, records=None):
+    def __init__(
+        self, envelope, records=None, *, data_type=COORDINATION_TYPE,
+        supply_default_count=True,
+    ):
+        if isinstance(envelope, dict) and supply_default_count and "data_types" not in envelope:
+            envelope = {"data_types": {data_type: 0}, **envelope}
         self.envelope = envelope
         self.record_rows = records
+        self.data_type = data_type
         self.feed_calls = 0
         self.record_calls = 0
 
@@ -22,17 +38,45 @@ class FeedTransport:
         self.record_calls += 1
         return self.record_rows
 
+    def read_classified(self, _path):
+        return json.dumps({"data_type": self.data_type}), "ok"
+
+
+class ConfiguredFeedTransport(FeedTransport):
+    """Feed double with the queue authority used to select its record stream."""
+
+    def __init__(self, envelope, records=None, data_type=COORDINATION_TYPE):
+        super().__init__(
+            envelope, records, data_type=data_type, supply_default_count=False,
+        )
+        self.record_channels = []
+
+    def records_cursor(self, channel, since, *, deadline=None):
+        self.record_channels.append((channel, since))
+        return super().records_cursor(channel, since, deadline=deadline)
+
 
 def _row(path, state="uploaded", at="2026-08-20T12:00:00Z", update_id="u-1"):
     return {"path": path, "state": state, "uploaded_at": at, "update_id": update_id}
 
 
-def _poll(transport):
+def _poll(transport, team="r"):
     from coord_engine.change_detection import ChangeDetector
 
     return ChangeDetector(transport).poll(
-        "r", "2026-08-20T11:00:00Z", Deadline.open(5.0)
+        team, "2026-08-20T11:00:00Z", Deadline.open(5.0)
     )
+
+
+def _attested_records(count):
+    return {
+        "after": "2026-08-20T11:00:00Z",
+        "through": f"2026-08-20T12:00:{count:02d}Z",
+        "records": [
+            {"id": f"live-record-{index}", "recorded_at": f"2026-08-20T12:00:{index:02d}Z"}
+            for index in range(1, count + 1)
+        ],
+    }
 
 
 def test_invalid_envelope_is_unknown_before_any_rows_are_consumed():
@@ -124,6 +168,45 @@ def test_mixed_precision_lifecycle_instants_sort_temporally():
     assert [change.update_id for change in batch.changes] == ["earlier", "later"]
 
 
+def test_captured_data_types_materializes_the_configured_coordination_channel_once():
+    """Ignoring live ``data_types`` loses real coordination record triggers."""
+    envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
+    transport = ConfiguredFeedTransport(envelope, records=_attested_records(13))
+
+    batch = _poll(transport, team="fulcra")
+
+    assert transport.record_calls == 1
+    assert transport.record_channels == [(COORDINATION_TYPE, "2026-08-20T11:00:00Z")]
+    assert batch.coverage["acknowledgments_responses"].value == "DATA"
+
+
+def test_missing_configured_channel_count_is_unknown_not_clear():
+    """A missing live count cannot silently become a zero-count record window."""
+    batch = _poll(ConfiguredFeedTransport({
+        "data_types": {"AppleLocationUpdate": 50, CHECKPOINT_TYPE: 4},
+        "file_changes": [],
+    }))
+
+    assert batch.trusted is False
+    assert batch.coverage["acknowledgments_responses"].value == "UNKNOWN"
+
+
+def test_captured_engine_owned_file_shapes_are_explicit_and_trusted():
+    """Supported live engine state must not poison feed coverage as unknown."""
+    envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
+    batch = _poll(
+        ConfiguredFeedTransport(envelope, records=_attested_records(13)),
+        team="fulcra",
+    )
+
+    assert batch.trusted is True
+    assert batch.coverage["unknown_unsupported"].value == "CLEAR"
+    assert {change.namespace for change in batch.changes} >= {
+        "tasks", "reviews", "presence_roles", "projection_metadata",
+        "router_state", "agent_state", "annotation_state", "health", "member_state",
+    }
+
+
 def test_expired_budget_and_unknown_path_make_coverage_unknown():
     """Treating either doubt as clear could publish a watermark past unseen work."""
     from coord_engine.change_detection import ChangeDetector
@@ -142,7 +225,7 @@ def test_expired_budget_and_unknown_path_make_coverage_unknown():
 def test_nonzero_record_count_materializes_real_identities_once_before_dedupe():
     """A count is a trigger, never an identity; a short cursor response is UNKNOWN."""
     transport = FeedTransport(
-        {"file_changes": [], "record_counts": {"coordination": 2}},
+        {"file_changes": [], "data_types": {COORDINATION_TYPE: 2}},
         records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
                  "records": [
                      {"id": "r-2", "recorded_at": "2026-08-20T12:00:02Z"},
@@ -155,7 +238,7 @@ def test_nonzero_record_count_materializes_real_identities_once_before_dedupe():
     assert batch.coverage["acknowledgments_responses"].value == "DATA"
 
     short = _poll(FeedTransport(
-        {"file_changes": [], "record_counts": {"coordination": 2}},
+        {"file_changes": [], "data_types": {COORDINATION_TYPE: 2}},
         records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
                  "records": [{"id": "r-1", "recorded_at": "2026-08-20T12:00:01Z"}]},
     ))
@@ -165,7 +248,7 @@ def test_nonzero_record_count_materializes_real_identities_once_before_dedupe():
 
 def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel():
     """A count cannot prove either the cursor window or a future channel's meaning."""
-    envelope = {"file_changes": [], "record_counts": {"coordination": 1}}
+    envelope = {"file_changes": [], "data_types": {COORDINATION_TYPE: 1}}
     no_boundary = _poll(FeedTransport(envelope, records=[
         {"id": "r-1", "recorded_at": "2026-08-20T12:00:01Z"},
     ]))
@@ -178,7 +261,7 @@ def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel
     assert outside.trusted is False
 
     excessive = _poll(FeedTransport(
-        {"file_changes": [], "record_counts": {"coordination": 1}},
+        {"file_changes": [], "data_types": {COORDINATION_TYPE: 1}},
         records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
                  "records": [
                      {"id": "r-1", "recorded_at": "2026-08-20T12:00:01Z"},
@@ -187,7 +270,9 @@ def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel
     ))
     assert excessive.trusted is False
 
-    unsupported = _poll(FeedTransport({"file_changes": [], "record_counts": {"future": 0}}))
+    unsupported = _poll(ConfiguredFeedTransport({
+        "file_changes": [], "data_types": {CHECKPOINT_TYPE: 0},
+    }))
     assert unsupported.trusted is False
     assert unsupported.coverage["acknowledgments_responses"].value == "UNKNOWN"
 

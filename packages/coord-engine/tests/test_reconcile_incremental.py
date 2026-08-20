@@ -24,6 +24,9 @@ from coord_engine.transport import TransportError
 from test_reconcile import RECENT_MTIME
 
 
+COORDINATION_TYPE = "MomentAnnotation/test-reconcile"
+
+
 class CountingTransport:
     """In-memory store that counts reads/lists and serves a normalized feed.
 
@@ -81,7 +84,15 @@ class CountingTransport:
         self.feed_envelope_calls += 1
         if self._feed is None:
             return None
-        return {"file_changes": list(self._feed)}
+        return {
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": list(self._feed),
+        }
+
+    def read_classified(self, path):
+        if path == "team/r/_coord/bus-v3/records.json":
+            return json.dumps({"data_type": COORDINATION_TYPE}), "ok"
+        return None, "absent"
 
     def list_dir(self, prefix):
         self.lists.append(prefix)

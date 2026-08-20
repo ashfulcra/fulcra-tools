@@ -21,6 +21,8 @@ RECENT_MTIME = (
     datetime.now(timezone.utc) - timedelta(days=1)
 ).strftime("%Y-%m-%d %I:%M%p UTC")
 
+COORDINATION_TYPE = "MomentAnnotation/test-reconcile"
+
 
 class FakeTransport:
     """In-memory Fulcra File Store: {path: content} + per-path mtime."""
@@ -343,6 +345,11 @@ def _reconciled(t, now="2026-07-01T12:00:00Z"):
 
 def _with_updates(t, changes):
     """Attach an explicitly normalized Unit-3 detector envelope to the fake."""
+    t.store.setdefault(
+        "team/r/_coord/bus-v3/records.json",
+        json.dumps({"data_type": COORDINATION_TYPE}),
+    )
+
     def data_updates(_since, *, deadline=None):
         normalized = []
         for index, change in enumerate(changes):
@@ -359,7 +366,10 @@ def _with_updates(t, changes):
             row.setdefault("uploaded_at", "2026-07-01T12:00:00Z")
             row.setdefault("update_id", row.get("id", f"fixture-{index}"))
             normalized.append(row)
-        return {"file_changes": normalized}
+        return {
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": normalized,
+        }
     t.data_updates = data_updates
     # This helper attaches the detector after the fixture's seed pass. Model the
     # previously trusted empty envelope so the next pass has a legitimate

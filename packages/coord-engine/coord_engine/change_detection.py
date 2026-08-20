@@ -34,6 +34,11 @@ NAMESPACES = (
     "presence_roles",
     "acknowledgments_responses",
     "projection_metadata",
+    "router_state",
+    "agent_state",
+    "annotation_state",
+    "health",
+    "member_state",
     "unknown_unsupported",
 )
 
@@ -99,6 +104,16 @@ def _namespace(team: str, path: str) -> Optional[str]:
         return "presence_roles"
     if rest.startswith("_coord/acks/") or rest.startswith("response/"):
         return "acknowledgments_responses"
+    if rest.startswith("_coord/router/"):
+        return "router_state"
+    if rest.startswith("_coord/agents/"):
+        return "agent_state"
+    if rest.startswith("_coord/annotate/"):
+        return "annotation_state"
+    if rest.startswith("_coord/health/"):
+        return "health"
+    if rest.startswith("member/"):
+        return "member_state"
     if rest in ("_coord/summaries.json", "_coord/projection-build-progress.json") or rest.startswith("_coord/projection/"):
         return "projection_metadata"
     return None
@@ -161,6 +176,34 @@ def _record_window(
     return end[1], rows
 
 
+def _coordination_count(
+    transport: Any, team: str, envelope: Mapping[str, Any], deadline: Deadline,
+) -> Optional[tuple[str, int]]:
+    """Return the queue authority's count from a live ``data_types`` envelope.
+
+    ``data-updates`` reports counts by concrete data type, not an invented
+    ``record_counts.coordination`` alias.  The queue's classified records
+    authority is the only proof of which stream belongs to this team.  Missing
+    or malformed evidence is UNKNOWN rather than a zero-count observation.
+    """
+    data_types = envelope.get("data_types")
+    if not isinstance(data_types, Mapping) or deadline.expired():
+        return None
+    try:
+        config, status = records.load_config_classified(transport, team)
+    except Exception:
+        return None
+    if deadline.expired() or status != "ok" or not isinstance(config, Mapping):
+        return None
+    channel = config.get("data_type")
+    if not isinstance(channel, str) or not channel.strip() or channel not in data_types:
+        return None
+    count = data_types[channel]
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return None
+    return channel, count
+
+
 class ChangeDetector:
     """The sole ordinary detector: exactly one bounded ``data-updates`` read."""
 
@@ -214,46 +257,41 @@ class ChangeDetector:
                 instants[update_id] = instant
                 changes.append(Change(update_id, path, state, at, namespace))
 
-        record_counts = envelope.get("record_counts", {})
-        if record_counts is not None:
-            if not isinstance(record_counts, Mapping):
+        record_count = _coordination_count(self.transport, team, envelope, deadline)
+        if record_count is None:
+            return _unknown()
+        channel, count = record_count
+        if count:
+            if deadline.expired():
                 return _unknown()
-            if any(channel != "coordination" for channel in record_counts):
+            materialize = getattr(self.transport, "records_cursor", None)
+            if materialize is None:
                 return _unknown()
-            count = record_counts.get("coordination", 0)
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            try:
+                cursor = materialize(channel, prior_watermark, deadline=deadline)
+            except Exception:
                 return _unknown()
-            if count:
-                if deadline.expired():
+            if deadline.expired():
+                return _unknown()
+            window = _record_window(cursor, prior_watermark=prior_watermark, count=count)
+            if window is None:
+                return _unknown()
+            _through, rows = window
+            for row in rows:
+                identity = records.immutable_record_identity(row)
+                if identity is None:
                     return _unknown()
-                materialize = getattr(self.transport, "records_cursor", None)
-                if materialize is None:
-                    return _unknown()
-                try:
-                    cursor = materialize("coordination", prior_watermark, deadline=deadline)
-                except Exception:
-                    return _unknown()
-                if deadline.expired():
-                    return _unknown()
-                window = _record_window(cursor, prior_watermark=prior_watermark, count=count)
-                if window is None:
-                    return _unknown()
-                _through, rows = window
-                for row in rows:
-                    identity = records.immutable_record_identity(row)
-                    if identity is None:
+                update_id = f"record:{identity}"
+                if update_id not in identities:
+                    identities.add(update_id)
+                    normalized = _instant({"uploaded_at": row["recorded_at"]}, "uploaded")
+                    if normalized is None:
                         return _unknown()
-                    update_id = f"record:{identity}"
-                    if update_id not in identities:
-                        identities.add(update_id)
-                        normalized = _instant({"uploaded_at": row["recorded_at"]}, "uploaded")
-                        if normalized is None:
-                            return _unknown()
-                        instant, at = normalized
-                        instants[update_id] = instant
-                        changes.append(Change(update_id, "record:" + identity, "recorded", at,
-                                              "acknowledgments_responses", _freeze(dict(row))))
-                coverage["acknowledgments_responses"] = Coverage.DATA
+                    instant, at = normalized
+                    instants[update_id] = instant
+                    changes.append(Change(update_id, "record:" + identity, "recorded", at,
+                                          "acknowledgments_responses", _freeze(dict(row))))
+            coverage["acknowledgments_responses"] = Coverage.DATA
 
         trusted = not any(value is Coverage.UNKNOWN for value in coverage.values())
         changes.sort(key=lambda change: (instants[change.update_id], change.path, change.update_id))
