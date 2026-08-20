@@ -1771,6 +1771,31 @@ def test_park_unreadable_role_doc_is_unknown_not_no_roles(capsys):
     assert "nothing to park" not in cap.out
 
 
+def test_park_lease_directory_without_role_doc_is_unknown_not_no_roles(capsys):
+    """A lease directory is holder evidence even when role metadata is missing.
+
+    Mutation caught: enumerating only ``*.md`` role documents makes this role
+    disappear and renders a failed save as "nothing to park".
+    """
+    import hashlib
+
+    t = FakeTransport()
+    lease_name = "amy-" + hashlib.sha1(b"amy").hexdigest()[:6] + ".md"
+    t.put(
+        f"team/r/roles/reviewer/leases/{lease_name}",
+        "---\ntype: Lease\nagent: amy\ntimestamp: 2099-01-01T00:00:00Z\n---\n",
+    )
+
+    rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
+    cap = capsys.readouterr()
+
+    assert rc != 0
+    assert "CHECKPOINT NOT WRITTEN" in cap.err
+    assert "could not" in cap.err.lower()
+    assert "nothing to park" not in cap.err.lower()
+    assert not [path for path in t.store if "/continuity/" in path]
+
+
 def test_park_genuinely_no_roles_fails_loud(capsys):
     """A clean rc must certify that park wrote at least one checkpoint."""
     t = FakeTransport()
@@ -1807,10 +1832,25 @@ def test_park_failed_snapshot_write_leaves_ref_unchanged(capsys):
     orig_write = t.write
     t.write = lambda p, c: False if "/continuity/" in p else orig_write(p, c)
     capsys.readouterr()
-    cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
+    rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
+    assert rc != 0, "rc 0 must certify that every selected checkpoint was written"
     assert "FAILED" in capsys.readouterr().err
     fm = okf.parse_frontmatter(t.store["team/r/roles/reviewer.md"])
     assert "checkpoint_ref" not in fm                      # never points at a ghost snapshot
+
+
+def test_park_role_doc_and_lease_directory_are_one_candidate(capsys):
+    """Mutation caught: enumerating both evidence names without dedup saves twice."""
+    t = FakeTransport()
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
+    cli.main(["roles", "claim", "r", "reviewer", "-a", "amy"], transport=t)
+    capsys.readouterr()
+
+    rc = cli.main(["continuity", "park", "r", "-a", "amy"], transport=t)
+    cap = capsys.readouterr()
+
+    assert rc == 0
+    assert cap.out.count("parked reviewer ->") == 1
 
 def test_health_json_uses_monitor_exit_code(capsys):
     import json as _j

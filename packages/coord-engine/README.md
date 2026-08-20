@@ -62,6 +62,14 @@ preserves partial rows but returns rc 3 when its bounded forge fallback emits
 `_coord/summaries.json` aggregate uses the same
 zero-whitespace serializer; parsed values and degradation markers are unchanged.
 
+Class A folds now enter the output boundary through
+`coord_engine.outcome.CommandOutcome`, the shared v2 state/coverage/rows/source
+spine. Required incomplete coverage is typed `UNKNOWN` (rc 3); the existing
+contract-2 `DEGRADED` envelope remains a compatibility rendering for usable
+partial rows. Text and JSON adapters consume the same outcome, so serializers
+do not independently decide truth or exit status. Optional text coverage is
+explicitly marked `non-gating`, matching JSON's `required:false` field.
+
 ### Pairwise acceptance
 
 After two identities are installed and authenticated, one operator can prove the
@@ -95,6 +103,12 @@ transport bounds.
   announced; a degraded read fold says so (`review-fold-degraded`, `review-head-degraded`,
   a `queue-error` envelope, or a `raw scan — <reason>` source row)
   instead of returning a clean-looking partial answer.
+- **Park certifies every selected save.** Role documents and role-lease
+  directories form one deduplicated candidate set. A lease directory without a
+  readable role document is UNKNOWN and prints `CHECKPOINT NOT WRITTEN`; any
+  snapshot or checkpoint-ref failure makes the command nonzero. rc 0 means all
+  selected role saves completed, while rc 2 means a complete fold found no
+  fresh held role.
 - **Structured logs** to stderr (`$COORD_LOG_LEVEL`).
 
 ## Environment / tuning

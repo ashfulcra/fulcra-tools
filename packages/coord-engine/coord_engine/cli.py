@@ -33,7 +33,8 @@ from . import (
     aggregate, atc, atc_dash, budget as budget_mod, bus_tags,
     checkpoint_channel, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
-    health as health_mod, jsonutil, okf, presence, projection as projection_mod,
+    health as health_mod, jsonutil, okf, outcome as outcome_mod, presence,
+    projection as projection_mod,
     handoff, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
@@ -2340,9 +2341,12 @@ def _role_fresh_holders(
         if "names" not in cache:
             cache["names"] = _roles_listing_names(transport, team)
         names = cache["names"]
-        if names is None or f"{name}.md" in names:
+        if (names is None or f"{name}.md" in names or name in names
+                or f"{name}/" in names):
             # roles/ listing unreadable (membership unknown) OR the doc is listed
-            # yet unusable (transport failure / corrupt doc): UNKNOWN, fail closed.
+            # yet unusable, OR a lease directory exists without its role doc:
+            # UNKNOWN, fail closed.  A lease namespace is positive role evidence;
+            # it must not disappear merely because its metadata writer failed.
             return [], False
         return [], True  # genuinely absent -> not a role (literal agent id case)
     sla = roles.parse_sla_hours(reg.get("sla_hours"))
@@ -2402,7 +2406,8 @@ def _role_membership_for_agent(
         if "names" not in cache:
             cache["names"] = _roles_listing_names(transport, team)
         names = cache["names"]
-        if names is None or f"{name}.md" in names:
+        if (names is None or f"{name}.md" in names or name in names
+                or f"{name}/" in names):
             return [], False
         return [], True
     sla = roles.parse_sla_hours(reg.get("sla_hours"))
@@ -3334,6 +3339,86 @@ _CLASS_A_BASIS: dict[str, str] = {
 _UNKNOWN_BASIS = {"source-unreadable", "source-invalid", "fallback-failed"}
 
 
+def class_a_outcome(
+    rows: list, *, source_type: str,
+) -> tuple[outcome_mod.CommandOutcome, dict[str, Any]]:
+    """Adapt legacy Class A rows into the v2 typed outcome spine.
+
+    The second return is compatibility metadata for the contract-2 envelope.
+    Partial legacy health remains ``DEGRADED`` at that boundary, while the v2
+    outcome truthfully records the incomplete required surface as ``UNKNOWN``.
+    """
+    degraded_types: list[str] = []
+    for row in rows:
+        if _is_degraded_row(row):
+            marker = str(row.get("type") or "")
+            if marker not in degraded_types:
+                degraded_types.append(marker)
+    basis: list[str] = []
+    for marker in degraded_types:
+        reason = _CLASS_A_BASIS.get(marker, "source-invalid")
+        if reason not in basis:
+            basis.append(reason)
+
+    src_row = next((row for row in rows if isinstance(row, dict)
+                    and str(row.get("type") or "") == source_type), None)
+    src_token = src_row.get("source") if src_row is not None else None
+    if src_row is not None and src_token not in ("projection", "raw-scan"):
+        if "source-invalid" not in basis:
+            basis.append("source-invalid")
+
+    actionable = any(
+        isinstance(row, dict)
+        and not str(row.get("type") or "").endswith(("degraded", "-source"))
+        for row in rows)
+    coverage = tuple(
+        outcome_mod.SurfaceCoverage(
+            marker, outcome_mod.CoverageState.UNKNOWN,
+            required=True, reason=_CLASS_A_BASIS.get(marker, "source-invalid"))
+        for marker in degraded_types
+    )
+    if not coverage:
+        coverage = (outcome_mod.SurfaceCoverage(
+            source_type.removesuffix("-source"),
+            outcome_mod.CoverageState.DATA if actionable
+            else outcome_mod.CoverageState.CLEAR,
+        ),)
+    if any(reason in _UNKNOWN_BASIS for reason in basis):
+        state = outcome_mod.OutcomeState.UNKNOWN
+        health = "UNKNOWN"
+    elif degraded_types:
+        state = outcome_mod.OutcomeState.UNKNOWN
+        health = "DEGRADED"
+    else:
+        state = (outcome_mod.OutcomeState.DATA if actionable
+                 else outcome_mod.OutcomeState.CLEAR)
+        health = state.value
+    source = ("projection" if src_token == "projection" else
+              "raw-scan" if src_token == "raw-scan" or src_row is None else None)
+    typed = outcome_mod.CommandOutcome(
+        state=state, rows=tuple(rows), coverage=coverage, source=source)
+
+    scanned = total = 0
+    bounded = False
+    for row in rows:
+        if (_is_degraded_row(row) and isinstance(row.get("scanned"), int)
+                and isinstance(row.get("total"), int)):
+            scanned += row["scanned"]
+            total += row["total"]
+            bounded = True
+    legacy: dict[str, Any] = {
+        "health": health,
+        "source": source,
+        "as_of": src_row.get("as_of") if src_token == "projection" else None,
+        "degraded": degraded_types,
+        "basis": basis,
+    }
+    if bounded:
+        legacy["scanned"] = scanned
+        legacy["total"] = total
+    return typed, legacy
+
+
 def class_a_envelope(
     rows: list, *, source_type: str,
 ) -> tuple[dict[str, Any], int]:
@@ -3353,51 +3438,12 @@ def class_a_envelope(
 
     Marker and source rows stay inside ``rows`` exactly as before — derived
     duplicates for greppability, never the only carrier (OC10 unchanged)."""
-    degraded_types: list[str] = []
-    for r in rows:
-        if _is_degraded_row(r):
-            t = str(r.get("type") or "")
-            if t not in degraded_types:
-                degraded_types.append(t)
-    basis: list[str] = []
-    for t in degraded_types:
-        # FAIL CLOSED on an unclassified marker (pr-641 r1, finding 1): a
-        # degraded type this map does not know may be an unreadable or invalid
-        # authority, so defaulting it to a coverage class would license
-        # consumers to act on rows as a trustworthy floor. Until a human
-        # classifies the new marker here, it is `source-invalid` -> UNKNOWN.
-        b = _CLASS_A_BASIS.get(t, "source-invalid")
-        if b not in basis:
-            basis.append(b)
-    # `source` implements the normative enum, VALIDATED, never trusted verbatim
-    # (pr-641 r2, the remaining finding): a present source row whose token is
-    # outside the closed enum is corrupt PROVENANCE — promoting it to a clean
-    # `raw-scan` would manufacture trust exactly where it is least earned. An
-    # invalid token contributes `source-invalid` (forcing UNKNOWN below) and
-    # the field goes out as an explicit null. The documented raw-scan fallback
-    # applies ONLY when no source row exists at all (the pre-projection raw
-    # path, which genuinely is a raw scan).
-    src_row = next((r for r in rows if isinstance(r, dict)
-                    and str(r.get("type") or "") == source_type), None)
-    src_token = src_row.get("source") if src_row is not None else None
-    if src_row is not None and src_token not in ("projection", "raw-scan"):
-        if "source-invalid" not in basis:
-            basis.append("source-invalid")
-    if any(b in _UNKNOWN_BASIS for b in basis):
-        health = "UNKNOWN"
-    elif degraded_types:
-        health = "DEGRADED"
-    else:
-        actionable = any(
-            isinstance(r, dict)
-            and not str(r.get("type") or "").endswith(("degraded", "-source"))
-            for r in rows)
-        health = "DATA" if actionable else "CLEAR"
-    envelope: dict[str, Any] = {"contract": 2, "health": health}
-    if src_token == "projection":
+    typed, legacy = class_a_outcome(rows, source_type=source_type)
+    envelope: dict[str, Any] = {"contract": 2, "health": legacy["health"]}
+    if legacy["source"] == "projection":
         envelope["source"] = "projection"
-        envelope["as_of"] = src_row.get("as_of")
-    elif src_token == "raw-scan" or src_row is None:
+        envelope["as_of"] = legacy["as_of"]
+    elif legacy["source"] == "raw-scan":
         envelope["source"] = "raw-scan"
     else:
         envelope["source"] = None  # corrupt provenance: null under UNKNOWN
@@ -3405,22 +3451,13 @@ def class_a_envelope(
     # carry per-fold scanned/total — the envelope aggregates them (sums across
     # every marker carrying BOTH numbers) so a strict consumer reads coverage
     # without scanning rows. Omitted entirely when no bounded fold reported.
-    scanned = total = 0
-    bounded = False
-    for r in rows:
-        if (_is_degraded_row(r) and isinstance(r.get("scanned"), int)
-                and isinstance(r.get("total"), int)):
-            scanned += r["scanned"]
-            total += r["total"]
-            bounded = True
-    if bounded:
-        envelope["scanned"] = scanned
-        envelope["total"] = total
-    envelope["degraded"] = degraded_types
-    envelope["basis"] = basis
+    if "scanned" in legacy:
+        envelope["scanned"] = legacy["scanned"]
+        envelope["total"] = legacy["total"]
+    envelope["degraded"] = legacy["degraded"]
+    envelope["basis"] = legacy["basis"]
     envelope["rows"] = rows
-    rc = 3 if health in ("UNKNOWN", "DEGRADED") else 0
-    return envelope, rc
+    return envelope, typed.rc
 
 
 def emit_envelope(verb: str, *, count: int, rc: int, **fields: Any) -> None:
@@ -7172,10 +7209,18 @@ def _held_roles(transport: Any, team: str, agent: str) -> tuple[list[str], bool]
     held: list[str] = []
     ok_all = True
     cache: dict[str, Any] = {}
+    candidates: set[str] = set()
     for n in sorted(names):
-        if not n.endswith(".md") or n == "index.md":
+        if n == "index.md":
             continue
-        role = n[:-3]
+        if n.endswith(".md"):
+            candidates.add(n[:-3])
+        elif "." not in n.rstrip("/"):
+            # A role lease directory can outlive or precede its role document.
+            # It is still a candidate whose state must be classified, not an
+            # absence that licenses "nothing to park".
+            candidates.add(n.rstrip("/"))
+    for role in sorted(candidates):
         holders, ok = _role_fresh_holders(
             transport, team, role, now=now, listing_cache=cache)
         if not ok:
@@ -7238,12 +7283,14 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
             print(handoff.format_findings(findings), file=sys.stderr)
             return 3
 
+    failed = False
     for role in held:
         task_slug, snap = _build(role)
         path = _continuity_path(args.team, agent, task_slug)
         if not transport.write(path, json.dumps(snap, indent=2)):
             print(f"park: snapshot write FAILED for {role}; checkpoint_ref left unchanged",
                   file=sys.stderr)
+            failed = True
             continue
         # The save landed, so the moment is owed — emitted BEFORE the
         # checkpoint_ref update because the two answer different questions. The
@@ -7253,9 +7300,10 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
         _checkpoint_moment(transport, args.team, snap, path)
         if not _set_role_field(transport, args.team, role, "checkpoint_ref", path):
             print(f"park: checkpoint_ref update FAILED for {role}", file=sys.stderr)
+            failed = True
             continue
         print(f"parked {role} -> {path}")
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
