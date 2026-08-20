@@ -124,13 +124,17 @@ from a partial enumeration.
 
 ## `linear-inbox` — read Ash's board, never touch it
 
-> **STATUS: REVIEWED, NOT VERIFIED.** Every fixture behind this verb is
-> synthetic, the field-name contract test is skipped, and no line of this code
-> has ever met the real Linear API. Eight review rounds found seven real defects
-> and the logic now survives adversarial reading — that is what "reviewed"
-> buys, and it is not the same as "works". The honest status is *ready to try*.
-> It becomes verified when someone runs `tools/capture_inbox.py` against a real
-> key, the stamped fixture lands, and the contract test un-skips.
+> **STATUS: VERIFIED against the live API, 2026-08-19.** First live read
+> rendered 124 issues from team BUS at rc 0. The fail-closed path proved itself
+> first and by accident: an expired token produced `UNKNOWN — this is not an
+> empty board`, rc 3, exactly as designed — the verb refused to report an empty
+> board for an authentication failure. `tests/fixtures/real_linear_issues.json`
+> is the stamped capture from that read (100 nodes, payload fields redacted),
+> and the field-name contract test runs against it rather than being skipped.
+>
+> Nine review rounds found seven real defects before it ever met the API. What
+> "reviewed" bought was that the first live read worked; what "verified" adds is
+> that the shapes it was reasoned about are the shapes Linear actually sends.
 
 
 `coord-tracker-bridge linear-inbox --linear-team-id <TEAM>` performs one
@@ -178,6 +182,14 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
   read", and rc 0 during an outage would report the first while meaning the
   second.
 
+**WRITES NEED A BOT ACTOR, NOT JUST A KEY** (Ash, 2026-08-19, binding). The
+original setup used an OAuth *bot* token deliberately, so Linear actions are not
+attributed to Ash personally. A personal API key is fine for READS — nothing is
+attributed — and that is what this verb uses. Any future write plan requires the
+refreshed bot-actor OAuth setup first. This is a design constraint, not a
+preference: shipping writes on a personal key would silently rewrite the
+authorship of every action on the board.
+
 The standing rail on this lane: **zero Linear writes of any kind** — no issue
 creation, no state changes, no comments, no label/assignee mutations — until
 Ash approves a write plan explicitly. The reason is a near-miss, not caution: an
@@ -188,6 +200,70 @@ board.
 provenance for the field-name contract test, redacting titles, descriptions,
 URLs and assignee names. It has no offline mode: a hand-written fixture
 labelled "real" is the defect it exists to prevent.
+
+## `linear-assignments` — route board changes to the fleet, still never write
+
+Phase 1 of the Linear integration design (`_coord/agents/coord-boss/reports/
+2026-08-19-linear-integration-design.md`, approved by Ash 2026-08-19).
+`coord-tracker-bridge linear-assignments --linear-team-id <TEAM>` reads the
+board, works out which cards had their **assignee or state** change since a
+durable watermark, and turns each real change into a durable coord directive.
+Phases 2 and 3 — the one-time board reconcile and the two-tier projection — are
+separately gated on Ash GO'ing a printed plan plus a bot-actor token, and
+nothing in this verb anticipates them.
+
+It reaches Linear only through `linear-inbox`'s read path, `ReadOnlyTransport`
+and all, and builds no `BridgeService`: **zero Linear writes**, by construction
+rather than by intent.
+
+- **It re-reads the whole board rather than filtering server-side.** A second
+  query shape would be a second place for a partial board to be reported as a
+  whole one, and `fetch_inbox` is the read path that carries the completeness
+  contract. The watermark is applied after the rows have been read faithfully.
+- **A watermark selects candidates, not changes.** Linear bumps `updatedAt` for
+  any edit, so routing on the watermark alone would dispatch a directive every
+  time Ash fixes a typo — and the design names noise as a defect in its own
+  right. Durable state remembers the `(assignee, state)` pair last observed per
+  card; only a pair that actually differs is routed.
+- **`updatedAt` is optional in `linear-inbox` and required here**, which is what
+  load-bearing means. Neither default asserts nothing: called old, the row is
+  silently never delivered; called new, it is delivered on every run forever. So
+  a row that cannot be placed in time is UNKNOWN for the whole pass. Same for a
+  card whose workflow state was never read — a Linear state may legitimately be
+  *named* "Unknown", so `InboxItem.state_present` now carries whether the value
+  is a reading or the placeholder.
+- **No delivery is ever guessed.** Assignee display names resolve through the
+  nickname roster in the coord store. A name that is absent from it, resolves to
+  more than one identity, or names an external mesh peer — which the roster
+  states is not reachable via `coord-engine tell` — goes to the coordinator for
+  triage. A roster that fails to load is **UNKNOWN, not "nobody resolves"**: the
+  second files a confident triage verdict on every card in Ash's board on the
+  strength of a failed read.
+- **Preview is the default.** `--deliver` is both the flag that dispatches and
+  the flag that advances the watermark, so a run that shows you the plan can
+  never consume it. A **cold start refuses to deliver at all** — with no
+  baseline every card reads as a change, which is the ~503-creates shape again
+  with the fleet bus as the target — and `--seed` adopts the board as the
+  baseline without sending anything. A run that would exceed `--delivery-cap`
+  (default 25) refuses whole rather than flooding partway.
+- **The watermark may repeat; it may never skip.** Delivery is at-least-once,
+  and a repeat is announced *inside the directive* rather than suppressed —
+  a silent duplicate is indistinguishable from a second real assignment. On a
+  dispatch failure the mark stops at the failing row, so everything that did not
+  go out is still owed on the next pass.
+- **A dispatch has three outcomes, not two.** `coord-engine tell` can commit the
+  directive and then fail to report it, so a raise is not evidence that nothing
+  was written — this package's own invariant with the labels swapped, and the
+  defect codex-coder found in the first cut. The attempt is written to disk
+  *before* the transport runs, and a retry whose fingerprint is still marked
+  says **POSSIBLE RE-DELIVERY**: not "new", which under-claims, and not
+  "repeat", which over-claims. A confirmed success is what clears the marker.
+- Exit codes extend the `linear-inbox` contract by one: **0** succeeded, **3**
+  UNKNOWN (proves nothing — never "no assignments changed"), **2** a deliberate
+  refusal.
+
+Directives go out via `coord-engine tell`, never a bare bus send: an assignment
+that evaporates when a session ends is not an assignment.
 
 - `plan` is read-only and shows projection changes plus missing bounded
   taxonomy resources.

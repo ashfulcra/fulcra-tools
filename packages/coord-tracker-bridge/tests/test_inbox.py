@@ -22,6 +22,7 @@ than faked.
 
 import json
 import os
+import re
 
 import pytest
 
@@ -209,21 +210,135 @@ def test_to_item_tolerates_missing_optional_fields():
 CAPTURE = os.path.join(os.path.dirname(__file__), "fixtures", "real_linear_issues.json")
 
 
-@pytest.mark.skipif(not os.path.exists(CAPTURE),
-                    reason="no live Linear capture yet — no API key on this host; "
-                           "run tools/capture_inbox.py after the first live read")
-def test_the_query_fields_exist_on_a_real_response():
-    """Pinned against a REAL capture once one exists, the same way coord-mesh
-    pins its argv against a captured --help. Skipped rather than faked: a
-    hand-written fixture labelled 'real' is the exact defect that cost
-    sealed-secrets a review round."""
+def real_capture():
     with open(CAPTURE, "r", encoding="utf-8") as fh:
-        captured = json.load(fh)
+        return json.load(fh)
+
+
+def test_the_query_fields_exist_on_a_real_response():
+    """UN-SKIPPED 2026-08-19. Pinned against a REAL capture, the same way
+    coord-mesh pins its argv against a captured --help.
+
+    This test was skipped for its whole life until now, deliberately: a
+    hand-written fixture labelled "real" is the exact defect that cost
+    sealed-secrets a review round, so it waited rather than faking one. The
+    capture arrived when coord-boss ran the first live read - 100 nodes from
+    team BUS, payload fields redacted, provenance stamped by
+    tools/capture_inbox.py."""
+    captured = real_capture()
     assert captured.get("captured_from") == "linear.app"
     nodes = captured["response"]["data"]["issues"]["nodes"]
     assert nodes, "a capture with no issues cannot pin field names"
     for node in nodes:
-        assert to_item(node) is not None
+        assert to_item(node) is not None, node.get("identifier")
+
+
+def test_the_capture_was_taken_with_THIS_query():
+    """A capture of a different selection pins nothing about ours. If someone
+    edits INBOX_QUERY without re-capturing, this fails instead of the contract
+    silently covering fields the query no longer asks for."""
+    assert real_capture().get("query") == INBOX_QUERY
+
+
+def test_the_capture_carries_its_own_measured_provenance():
+    captured = real_capture()
+    assert captured.get("captured_at")
+    assert captured.get("operation") == "CoordInbox"
+    assert captured.get("node_count") == len(
+        captured["response"]["data"]["issues"]["nodes"])
+
+
+def test_no_payload_content_leaked_into_the_repository():
+    """The capture tool redacts titles, descriptions, urls and assignee names.
+    Verified across EVERY node rather than a sample - this file is committed,
+    and a leak would be permanent."""
+    captured = real_capture()
+    assert set(captured.get("redacted_fields") or []) >= {
+        "title", "url", "assignee.displayName"}
+    for node in captured["response"]["data"]["issues"]["nodes"]:
+        assert node.get("title") == "<redacted title>", node.get("identifier")
+        assert node.get("url") == "<redacted url>", node.get("identifier")
+        assert "description" not in node
+        assignee = node.get("assignee")
+        if assignee is not None:
+            assert assignee.get("displayName") == "<redacted person>"
+
+
+#: A label value shaped like a host: `something.something`.
+_HOSTNAME_ISH = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z][A-Za-z0-9-]{1,}")
+
+
+def test_no_fleet_identifier_leaked_through_a_label():
+    """coord-boss's ruling, asserted on the ARTIFACT and not only on the tool.
+
+    `tools/capture_inbox.py` has its own tests for `redact_label`, but the file
+    that actually ships to a public repo is this one, and a tool whose guard is
+    tested while its output is not is the shape of every defect this package has
+    found. Agent labels carry a machine name; the hostname fragment is over the
+    line. Checked across every node, because a leak here is permanent."""
+    captured = real_capture()
+    assert set(captured.get("redacted_fields") or []) >= {
+        "labels.nodes.name(agent:*)", "labels.nodes.name(hostname-shaped)"
+    }, "the capture must DECLARE that it hid label values, not just hide them"
+    for node in captured["response"]["data"]["issues"]["nodes"]:
+        for label in ((node.get("labels") or {}).get("nodes") or []):
+            name = label.get("name")
+            assert not re.match(r"^agent:", name, re.IGNORECASE), name
+            assert not _HOSTNAME_ISH.search(name), name
+
+
+def test_the_generic_label_vocabulary_survived_redaction():
+    """The over-redaction half. A guard that strips what the contract test
+    depends on is the empty-board defect wearing a privacy costume: a fixture
+    with every label blanked would pass the leak test and prove nothing about
+    how a real board renders."""
+    names = {
+        label.get("name")
+        for node in real_capture()["response"]["data"]["issues"]["nodes"]
+        for label in ((node.get("labels") or {}).get("nodes") or [])
+    }
+    assert {"kind:directive", "lane:active", "origin:ash"} <= names, sorted(names)
+
+
+def test_the_captured_page_is_page_one_of_more():
+    """Worth pinning because it shapes the test below: the real board is larger
+    than one page — coord-boss's live read rendered 124 issues from a 100-node
+    first page — so this capture ends with hasNextPage true."""
+    page_info = real_capture()["response"]["data"]["issues"]["pageInfo"]
+    assert page_info["hasNextPage"] is True
+    assert page_info["endCursor"]
+
+
+def test_the_real_board_renders_a_fold():
+    """End to end on real shapes. The capture is page one of more, so the walk
+    correctly asks for a second page; a terminal page completes it. Feeding the
+    captured page ALONE would exhaust the transport, which is the walk doing its
+    job rather than a test fixture problem."""
+    captured = real_capture()
+    page_one = {"data": captured["response"]["data"]}
+    page_two = {"data": {"issues": {"nodes": [],
+                                    "pageInfo": {"hasNextPage": False}}}}
+    result = fetch_inbox(LinearClient(FakeTransport([page_one, page_two])), TEAM)
+    assert result.state == OK, result.detail
+    assert len(result.items) == captured["node_count"]
+    text = render_fold(result, team_id=TEAM)
+    assert "UNKNOWN" not in text
+    assert f"{captured['node_count']} issue(s)" in text
+    # Real identifiers and states survive normalization into the fold.
+    assert "BUS-" in text
+    assert any(item.state in {"Backlog", "Done", "In Progress", "Todo"}
+               for item in result.items)
+
+
+def test_a_truncated_real_walk_is_UNKNOWN_not_a_short_board():
+    """The failure that matters on a multi-page board: if the second page never
+    arrives, the 100 rows we DID read must not render as the whole board."""
+    captured = real_capture()
+    page_one = {"data": captured["response"]["data"]}
+    broken = {"data": {"issues": {"nodes": [], "pageInfo": {"hasNextPage": "yes"}}}}
+    result = fetch_inbox(LinearClient(FakeTransport([page_one, broken])), TEAM)
+    assert result.unknown
+    assert result.items == ()
 
 
 # --- the verb must actually exist and run ---------------------------------
@@ -762,3 +877,73 @@ def test_the_missing_pageInfo_case_exits_3_through_the_CLI(monkeypatch, capsys):
     monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
     assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
     assert "UNKNOWN" in capsys.readouterr().out
+
+
+# --- what the capture tool redacts (coord-boss ruling a0af59b9) ------------
+# The fixture lands in a PUBLIC repo, so the tool's redaction is the thing the
+# committed file's safety rests on. Ruling: agent:* label values and
+# hostname-shaped fragments are fleet identifiers and go; kind:*/lane:* and
+# other generic vocabulary describe the work and stay.
+
+def _capture_tool():
+    import importlib.util
+    import os as _os
+    path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                         "tools", "capture_inbox.py")
+    spec = importlib.util.spec_from_file_location("capture_inbox", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("value", [
+    "agent:coord-boss",
+    "agent:claude-code:Mac:fulcra-tools",
+    "agent:coord-reconcile:Ashs-MBP-Work.localdomai",
+    "AGENT:Mixed-Case",
+])
+def test_agent_labels_are_redacted(value):
+    assert _capture_tool().redact_label(value) == "<redacted agent label>"
+
+
+@pytest.mark.parametrize("value", [
+    "coord-reconcile:some-host.local",
+    "box.localdomain",
+    "Ashs-MBP-Work.internal",
+])
+def test_hostname_shaped_labels_are_redacted(value):
+    assert _capture_tool().redact_label(value) == "<redacted host label>"
+
+
+@pytest.mark.parametrize("value", [
+    "kind:directive", "kind:task", "lane:active", "lane:backlog",
+    "origin:ash", "origin:fleet", "blocked-on-ash", "P1",
+])
+def test_generic_vocabulary_survives(value):
+    """The other half of the ruling. Over-redacting would strip the labels the
+    contract tests legitimately exercise, and origin:ash is already a committed
+    public value in this package's own default-v2.json policy."""
+    assert _capture_tool().redact_label(value) == value
+
+
+def test_redact_rewrites_labels_in_place_without_losing_the_list():
+    tool = _capture_tool()
+    node = {"identifier": "BUS-1", "title": "t", "url": "u",
+            "assignee": {"displayName": "A Person"},
+            "labels": {"nodes": [{"name": "agent:coord-boss"},
+                                 {"name": "kind:directive"}]}}
+    out = tool.redact(node)
+    names = [entry["name"] for entry in out["labels"]["nodes"]]
+    assert names == ["<redacted agent label>", "kind:directive"]
+    assert out["title"] == "<redacted title>"
+    assert out["assignee"]["displayName"] == "<redacted person>"
+    # The original node must not be mutated — a capture tool that edits its
+    # input in place would corrupt the response it is about to stamp.
+    assert node["labels"]["nodes"][0]["name"] == "agent:coord-boss"
+
+
+def test_redact_tolerates_a_malformed_labels_block():
+    tool = _capture_tool()
+    for labels in (None, {}, {"nodes": None}, {"nodes": ["not-a-dict"]}, "nope"):
+        node = {"identifier": "BUS-1", "labels": labels}
+        tool.redact(node)          # must not raise

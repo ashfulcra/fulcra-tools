@@ -18,6 +18,7 @@ fixture):
 """
 import argparse
 import json
+import re
 import os
 import sys
 from datetime import datetime, timezone
@@ -35,6 +36,33 @@ FIXTURE = os.path.join(os.path.dirname(HERE), "tests", "fixtures", "real_linear_
 #: state names are what the tests actually pin.
 _REDACT = ("title", "description", "url")
 
+#: Label values that identify the fleet rather than describe the work.
+#: coord-boss's ruling on the first capture: this fixture lands in a PUBLIC
+#: repo, and the fleet has a standing task for exactly this class
+#: (separation-sweep-2, public docs carrying fleet identifiers). Agent names are
+#: borderline — they appear throughout this repo already — but a hostname
+#: fragment is over the line, and one rule covers both.
+#:
+#: `kind:*`, `lane:*` and other generic vocabulary stay intact: they describe
+#: the work, they leak nothing, and the tests legitimately exercise them.
+_AGENT_LABEL = re.compile(r"^agent:", re.IGNORECASE)
+#: A dotted token with a TLD-ish tail, e.g. "Ashs-MBP-Work.localdomain".
+#: Matched anywhere in the value, because the identifier that prompted this rule
+#: was a suffix on an agent label rather than a bare hostname.
+_HOSTNAME_ISH = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z][A-Za-z0-9-]{1,}")
+
+
+def redact_label(name):
+    """One label name, redacted if it identifies the fleet. Returns the name
+    unchanged when it is generic vocabulary."""
+    if not isinstance(name, str):
+        return name
+    if _AGENT_LABEL.search(name):
+        return "<redacted agent label>"
+    if _HOSTNAME_ISH.search(name):
+        return "<redacted host label>"
+    return name
+
 
 def redact(node):
     out = dict(node)
@@ -43,6 +71,14 @@ def redact(node):
             out[key] = f"<redacted {key}>"
     if isinstance(out.get("assignee"), dict):
         out["assignee"] = {"displayName": "<redacted person>"}
+    labels = out.get("labels")
+    if isinstance(labels, dict) and isinstance(labels.get("nodes"), list):
+        out["labels"] = dict(labels)
+        out["labels"]["nodes"] = [
+            ({**entry, "name": redact_label(entry.get("name"))}
+             if isinstance(entry, dict) else entry)
+            for entry in labels["nodes"]
+        ]
     return out
 
 
@@ -79,7 +115,9 @@ def main() -> int:
         "operation": "CoordInbox",
         "query": INBOX_QUERY,
         "node_count": len(nodes),
-        "redacted_fields": list(_REDACT) + ["assignee.displayName"],
+        "redacted_fields": list(_REDACT) + [
+            "assignee.displayName", "labels.nodes.name(agent:*)",
+            "labels.nodes.name(hostname-shaped)"],
         "response": body,
     }
     os.makedirs(os.path.dirname(FIXTURE), exist_ok=True)

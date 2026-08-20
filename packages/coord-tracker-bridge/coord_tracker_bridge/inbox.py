@@ -1,11 +1,13 @@
 """`linear-inbox` — read Ash's Linear board into a coord fold. Never writes.
 
-STATUS: REVIEWED, NOT VERIFIED. Every fixture behind this module is synthetic,
-its field-name contract test is skipped, and no line of it has ever met the real
-Linear API. Eight review rounds found seven real defects, so the logic survives
-adversarial reading — which is what "reviewed" buys and is not the same as
-"works". It becomes verified when `tools/capture_inbox.py` runs against a real
-key, the stamped fixture lands, and the contract test un-skips.
+STATUS: VERIFIED against the live API on 2026-08-19 — first live read rendered
+124 issues at rc 0, and the fail-closed path proved itself first when an expired
+token produced UNKNOWN rather than an empty board. The field-name contract test
+now runs against a stamped capture instead of being skipped.
+
+WRITES NEED A BOT ACTOR (Ash, binding): a personal key is fine for reads because
+nothing is attributed, but any write plan requires the refreshed bot-actor OAuth
+setup — otherwise every action on the board is authored as Ash personally.
 
 THE RAIL IS IN THE CODE, NOT IN THE INTENT. coord-boss's order is that this
 lane performs zero Linear writes of any kind until Ash approves a write plan in
@@ -88,6 +90,15 @@ class InboxItem:
     labels: tuple[str, ...]
     url: str | None
     updated_at: str | None
+    #: Was `state` READ, or is it the "unknown" placeholder this module renders
+    #: when the sub-object was absent? For a verb that only prints a board the
+    #: two are interchangeable. For one that ROUTES on a state change they are
+    #: not: a Linear workflow state may legitimately be named "Unknown", so a
+    #: consumer comparing state strings cannot tell "moved to Unknown" from
+    #: "we could not read the state" — and would dispatch a directive on the
+    #: strength of the second. The placeholder stays (it is what a reader
+    #: should see); the fact that it IS a placeholder is now carried beside it.
+    state_present: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +267,7 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
         # `state` is either absent — a genuine unknown — or validated whole.
         state=_name(state) if state else "unknown",
         state_type=(str(state["type"]).strip() if state else "unknown"),
+        state_present=state is not None,
         assignee=_name(assignee_obj, "displayName") if assignee_obj else None,
         labels=labels,
         url=url,
