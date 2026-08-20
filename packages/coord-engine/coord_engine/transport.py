@@ -18,6 +18,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -231,12 +232,9 @@ class FulcraFileTransport:
         Never raises.  The subprocess is hard-bounded by ``run_bounded`` so a
         hung child tree cannot stall a listener/reconcile pass."""
         try:
-            rc, out, _err = run_bounded(
-                [*self.command, "data-updates", since], self.timeout
-            )
-            if rc != 0:
+            data = self.data_updates(since)
+            if not isinstance(data, dict):
                 return None
-            data = json.loads(out)
             changes = data.get("file_changes")
             if not isinstance(changes, list):
                 return None
@@ -262,6 +260,30 @@ class FulcraFileTransport:
                     "deleted_at": change.get("deleted_at"),
                 })
             return parsed
+        except Exception:
+            return None
+
+    def data_updates(
+        self, since: Optional[str], *, deadline: Optional[budget_mod.Deadline] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return the raw ``data-updates`` envelope for one bounded detector poll.
+
+        Envelope validation belongs to ``ChangeDetector`` so it can reject a
+        partial shape before consuming any rows.  This transport seam performs
+        exactly one command and returns ``None`` for every transport failure.
+        """
+        if deadline is not None and deadline.expired():
+            return None
+        period = since or "0 seconds"
+        bound = self.timeout if deadline is None else deadline.remaining()
+        if bound is not None and bound <= 0.0:
+            return None
+        try:
+            rc, out, _err = run_bounded([*self.command, "data-updates", period], bound)
+            if rc != 0 or (deadline is not None and deadline.expired()):
+                return None
+            data = json.loads(out)
+            return data if isinstance(data, dict) else None
         except Exception:
             return None
 
@@ -311,6 +333,53 @@ class FulcraFileTransport:
                     "recorded_at": recorded_at.strip(),
                     "sources": list(sources or []),
                     "note": rec.get("note"),
+                })
+            return parsed
+        except Exception:
+            return None
+
+    def records_cursor(
+        self, data_type: str, since: Optional[str], *,
+        deadline: Optional[budget_mod.Deadline] = None,
+    ) -> Optional[list]:
+        """Materialize one counted record channel inside the detector deadline.
+
+        This is intentionally one cursor/window read, not a count-to-identity
+        conversion.  A missing prior boundary is unprovable and therefore
+        UNKNOWN (``None``); the detector's full recovery owns that outcome.
+        """
+        if not isinstance(data_type, str) or not data_type.strip() or not since:
+            return None
+        if deadline is not None and deadline.expired():
+            return None
+        bound = self.timeout if deadline is None else deadline.remaining()
+        if bound is not None and bound <= 0.0:
+            return None
+        until = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            rc, out, _err = run_bounded(
+                [*self.command, "get-records", data_type, since, until], bound,
+            )
+            if rc != 0 or (deadline is not None and deadline.expired()):
+                return None
+            parsed: list[dict[str, Any]] = []
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if not isinstance(rec, dict):
+                    return None
+                record_id, recorded_at = rec.get("id"), rec.get("recorded_at")
+                if (not isinstance(record_id, str) or not record_id.strip()
+                        or not isinstance(recorded_at, str) or not recorded_at.strip()):
+                    return None
+                sources = rec.get("sources")
+                if sources is not None and not isinstance(sources, list):
+                    return None
+                parsed.append({
+                    "id": record_id, "recorded_at": recorded_at.strip(),
+                    "sources": list(sources or []), "note": rec.get("note"),
                 })
             return parsed
         except Exception:

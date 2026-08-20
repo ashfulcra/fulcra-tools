@@ -116,3 +116,19 @@ def test_updates_fails_closed_on_malformed_change(monkeypatch):
         _fake_run(0, '{"file_changes": [{"state": "uploaded"}]}', []),
     )
     assert t.updates("60 seconds", team="r") is None
+
+
+def test_records_cursor_uses_one_bounded_record_window(monkeypatch):
+    """A count-triggered materialization must not synthesize records or fan out."""
+    from coord_engine import transport as tr
+    t = tr.FulcraFileTransport(command=["fulcra-api"], timeout=7)
+    calls = []
+    monkeypatch.setattr(
+        tr, "run_bounded",
+        _fake_run(0, '{"id":"r-1","recorded_at":"2026-08-20T12:00:01Z"}\n', calls),
+    )
+    got = t.records_cursor("coordination", "2026-08-20T12:00:00Z")
+    assert got == [{"id": "r-1", "recorded_at": "2026-08-20T12:00:01Z",
+                    "sources": [], "note": None}]
+    assert len(calls) == 1
+    assert calls[0][:3] == ["fulcra-api", "get-records", "coordination"]

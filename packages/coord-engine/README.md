@@ -155,13 +155,19 @@ disable a bound or make an op hang.
 | `COORD_ENGINE_STATE_DIR` | `~/.local/state/coord-engine` | Local state root (write-verify nonce cache, etc.). |
 | `COORD_LOG_LEVEL` | `info` | Structured-log level to stderr (`debug`/`info`/`warn`/`error`). |
 
-The aggregate-backed task surfaces are feed-first: one
-team-filtered `data-updates` call identifies changed task, response, and verdict
-shards, which are read directly. A missing/corrupt/old cursor, unavailable or
-malformed feed, or doubtful shard read falls back to the existing bounded
-listing path without consuming the cursor. Presence remains a bounded
-current-time evaluation on every briefing, so session dormancy can become
-`LAPSED` even when no shard bytes changed.
+The aggregate-backed task surfaces are feed-first: ordinary detection consumes
+one normalized, bounded `data-updates` envelope, then reads only the canonical
+documents named by that batch. Coverage is explicit for tasks/directives,
+review registers/verdicts/settled markers, forge feedback, presence/roles,
+acknowledgments/responses, and projection metadata. `CLEAR`, `DATA`,
+`UNKNOWN`, and `NOT_RUN` are distinct facts: any malformed envelope, timeout,
+permission/read doubt, incomplete namespace, or unsupported team path is
+`UNKNOWN`, triggers the named full-scan recovery, and never advances the
+watermark. A record count only triggers one bounded cursor read to materialize
+immutable record identities; no identity is inferred from a count. Canonical
+documents remain authority and projections remain replaceable views. Presence
+is still a bounded current-time evaluation on every briefing, so session
+dormancy can become `LAPSED` even when no shard bytes changed.
 
 ## Dev
 

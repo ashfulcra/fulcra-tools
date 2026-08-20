@@ -20,6 +20,7 @@ from typing import Any, NamedTuple, Optional
 from . import __version__, aggregate, config, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
+from .change_detection import ChangeBatch, ChangeDetector
 from .log import get_logger
 from .roles import age_hours
 from .tasks import agent_key
@@ -1031,7 +1032,8 @@ def _collapse_feed_changes(
 
 
 def _feed_task_delta(
-    transport: Any, team: str, *, cursor: dict[str, Any], now: str, log: Any
+    transport: Any, team: str, *, cursor: dict[str, Any], now: str, log: Any,
+    changes: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[tuple[dict[str, str], set, dict[str, str], list[dict[str, Any]]]]:
     """What changed under ``task/`` since the cursor, via the data-updates feed.
 
@@ -1047,9 +1049,6 @@ def _feed_task_delta(
     an entry already folded in a prior overlapping window. Every doubt (no feed
     support, feed error, an entry we cannot positively parse, an unparseable
     upload time) returns None — never a false "nothing changed"."""
-    updates_fn = getattr(transport, "updates", None)
-    if updates_fn is None:
-        return None
     start = _parse_iso_utc(cursor.get("watermark"))
     end = _parse_iso_utc(now)
     if start is None or end is None:
@@ -1059,16 +1058,23 @@ def _feed_task_delta(
     # the same ceiling the ack change-query respects. Skip to the full scan.
     if span <= 0 or span > ACKS_ANCHOR_MAX_HOURS * 3600 + FAST_PATH_SKEW_MARGIN_SECONDS:
         return None
-    period = f"{int(span)} seconds"
-    try:
+    if changes is None:
+        # Compatibility only for callers outside the ordinary reconcile path.
+        # Reconcile itself supplies the sealed ChangeBatch and never performs a
+        # second raw feed query.
+        updates_fn = getattr(transport, "updates", None)
+        if updates_fn is None:
+            return None
+        period = f"{int(span)} seconds"
         try:
-            changes = updates_fn(period, team=team)
-        except TypeError:
-            changes = updates_fn(period)   # pre-team-kwarg duck-typed transports
-    except Exception as e:
-        log.warn("reconcile: data-updates delta raised; full scan",
-                 team=team, error=str(e))
-        return None
+            try:
+                changes = updates_fn(period, team=team)
+            except TypeError:
+                changes = updates_fn(period)
+        except Exception as e:
+            log.warn("reconcile: data-updates delta raised; full scan",
+                     team=team, error=str(e))
+            return None
     if not isinstance(changes, list):
         return None
     task_pfx = task_prefix(team)
@@ -1129,6 +1135,27 @@ def _feed_task_delta(
         else:  # archived | deleted -> the row goes away
             deleted.add(slug)
     return changed, deleted, new_processed, changes
+
+
+def _batch_feed_rows(batch: ChangeBatch) -> list[dict[str, Any]]:
+    """Adapt one sealed batch to E1's lifecycle collapse shape without I/O."""
+    rows: list[dict[str, Any]] = []
+    for change in batch.changes:
+        if change.record is not None:
+            continue
+        row: dict[str, Any] = {
+            "path": change.path, "state": change.state,
+            "update_id": change.update_id,
+            "uploaded_at": None, "archived_at": None, "deleted_at": None,
+        }
+        if change.state == "uploaded":
+            row["uploaded_at"] = change.at
+        elif change.state == "archived":
+            row["archived_at"] = change.at
+        elif change.state == "deleted":
+            row["deleted_at"] = change.at
+        rows.append(row)
+    return rows
 
 
 def _project_task_row(
@@ -1306,59 +1333,92 @@ def reconcile(
     stale = agg_age is None or agg_age < 0 or agg_age > MAX_FAST_PATH_HOURS
     due_for_full = prior_cursor is None or rec_streak + 1 >= full_every or stale
 
-    # Fast path — nothing relevant changed — only when NOT owed a full/drift pass.
+    # Unit 3's detection authority: ordinary reconciliation consumes ONE
+    # normalized envelope before deciding whether the task fold may be
+    # incremental.  Any doubt stays in the batch and forces the named full scan;
+    # no later branch is permitted to re-query the raw feed.
+    detector_deadline = Deadline.open(getattr(transport, "timeout", 30.0))
+    batch = ChangeDetector(transport).poll(
+        team, prior_cursor.get("watermark") if prior_cursor else None,
+        detector_deadline,
+    )
+    # Old duck-typed test/adapter transports may expose only the pre-Unit-3
+    # ``updates`` seam.  The concrete transport always exposes ``data_updates``;
+    # this compatibility branch preserves their established contract without
+    # weakening ordinary detection on a current engine.
+    legacy_feed = not callable(getattr(transport, "data_updates", None))
+
+    # Fast path — the one normalized batch positively proves NOTHING changed —
+    # only when NOT owed a full/drift pass.
     # It still advances the E1 cursor after independently confirming the feed
     # delta: unrelated events must not leave an old watermark to grow forever.
-    if not due_for_full and _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
+    if (not due_for_full and batch.trusted
+            and not batch.for_namespace("tasks")):
         fast_delta = _feed_task_delta(
-            transport, team, cursor=prior_cursor, now=now, log=log)
-        if fast_delta is not None:
-            fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
-            if not fast_changed and not fast_deleted:
-                fast_agg = dict(prior_agg or {})
-                fast_agg[RECONCILE_CURSOR_KEY] = {
-                    "watermark": now,
-                    "processed": fast_processed,
-                    "streak": rec_streak + 1,
-                }
-                if not transport.write(
-                        summaries_path(team), jsonutil.dumps(fast_agg)):
-                    result = {
-                        "degraded": True,
-                        "reason": "reconcile cursor write failed",
-                        "tasks": len(prior_rows),
-                    }
-                    _write_health_shard(
-                        transport, team, host=host, now=now, result=result, log=log)
-                    return result
-                # NOTE: warnings from the prior aggregate are not resurfaced here;
-                # they reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
+            transport, team, cursor=prior_cursor, now=now, log=log,
+            changes=[],
+        )
+    elif not due_for_full and legacy_feed and _fast_path_no_changes(
+            transport, team, prior_agg, now=now, log=log):
+        fast_delta = _feed_task_delta(
+            transport, team, cursor=prior_cursor, now=now, log=log,
+        )
+    else:
+        fast_delta = None
+    if fast_delta is not None:
+        fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
+        if not fast_changed and not fast_deleted:
+            fast_agg = dict(prior_agg or {})
+            fast_agg[RECONCILE_CURSOR_KEY] = {
+                "watermark": now,
+                "processed": fast_processed,
+                "streak": rec_streak + 1,
+            }
+            if not transport.write(
+                    summaries_path(team), jsonutil.dumps(fast_agg)):
                 result = {
+                    "degraded": True,
+                    "reason": "reconcile cursor write failed",
                     "tasks": len(prior_rows),
-                    "parsed": 0,
-                    "reused": len(prior_rows),
-                    "transitions": 0,
-                    "warnings": [],
-                    "fast_path": True,
                 }
                 _write_health_shard(
                     transport, team, host=host, now=now, result=result, log=log)
-                log.info(
-                    "reconciled (fast path)", team=team, tasks=len(prior_rows))
                 return result
+            # NOTE: warnings from the prior aggregate are not resurfaced here;
+            # they reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
+            result = {
+                "tasks": len(prior_rows),
+                "parsed": 0,
+                "reused": len(prior_rows),
+                "transitions": 0,
+                "warnings": [],
+                "fast_path": True,
+            }
+            _write_health_shard(
+                transport, team, host=host, now=now, result=result, log=log)
+            log.info(
+                "reconciled (fast path)", team=team, tasks=len(prior_rows))
+            return result
 
     # Try the feed-delta fold when a cursor is usable; None at any step is doubt.
     inc: Optional[tuple] = None
     projection_changes: Optional[list[dict[str, Any]]] = None
-    if prior_cursor is not None:
+    if prior_cursor is not None and batch.trusted:
+        delta = _feed_task_delta(
+            transport, team, cursor=prior_cursor, now=now, log=log,
+            changes=_batch_feed_rows(batch),
+        )
+    elif prior_cursor is not None and legacy_feed:
         delta = _feed_task_delta(transport, team, cursor=prior_cursor, now=now, log=log)
-        if delta is not None:
-            changed, deleted, new_processed, projection_changes = delta
-            folded = _incremental_reconcile_rows(
-                transport, team, prior_by_name,
-                changed=changed, deleted=deleted, log=log)
-            if folded is not None:
-                inc = (*folded, new_processed)  # (rows, parsed, reused, warnings, processed)
+    else:
+        delta = None
+    if delta is not None:
+        changed, deleted, new_processed, projection_changes = delta
+        folded = _incremental_reconcile_rows(
+            transport, team, prior_by_name,
+            changed=changed, deleted=deleted, log=log)
+        if folded is not None:
+            inc = (*folded, new_processed)  # (rows, parsed, reused, warnings, processed)
 
     incremental = False
     drift_detected = False

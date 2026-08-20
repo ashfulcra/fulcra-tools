@@ -40,6 +40,7 @@ class CountingTransport:
         self.lists: list[str] = []
         self.fail_list = False
         self._feed = None  # None => no updates() support at all
+        self.feed_envelope_calls = 0
 
     # --- seeding -----------------------------------------------------------
     def put(self, path, content, mtime=None, size=None):
@@ -74,6 +75,13 @@ class CountingTransport:
                 continue
             out.append(e)
         return out
+
+    def data_updates(self, since, *, deadline=None):
+        """The Unit-3 normalized detector seam; one call returns one envelope."""
+        self.feed_envelope_calls += 1
+        if self._feed is None:
+            return None
+        return {"file_changes": list(self._feed)}
 
     def list_dir(self, prefix):
         self.lists.append(prefix)
@@ -231,6 +239,20 @@ def test_incremental_reads_only_changed_shards():
     assert "team/r/task/" not in t.lists
     assert _rows_by_name(_agg(t))["b"]["status"] == "done"
     assert res["parsed"] == 1 and res["reused"] == 2
+
+
+def test_incremental_discovery_consumes_one_normalized_batch():
+    """A second raw feed query could observe a different world and lose work."""
+    t = CountingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+    t.put("team/r/task/a.md", _task("Alpha", "done"),
+          mtime="2026-07-01 12:15PM UTC")
+    t.set_feed([_up("team/r/task/a.md")])
+    t.feed_envelope_calls = 0
+    result = _run(t, "2026-07-01T12:30:00Z")
+    assert result["incremental"] is True
+    assert t.feed_envelope_calls == 1
 
 
 # --- a deleted shard drops its row without a full listing ------------------

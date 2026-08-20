@@ -146,6 +146,23 @@ def sender_of(record: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def immutable_record_identity(record: Any) -> Optional[str]:
+    """Return a record's immutable identity only when its cursor shape proves it.
+
+    Counts are deliberately not identities.  A detector may use a non-zero count
+    solely to decide whether to perform one bounded record cursor read; only a
+    concrete record id plus its orderable timestamp can enter the normalized
+    change batch.
+    """
+    if not isinstance(record, dict):
+        return None
+    record_id, recorded_at = record.get("id"), record.get("recorded_at")
+    if (not isinstance(record_id, str) or not record_id.strip()
+            or not isinstance(recorded_at, str) or not recorded_at.strip()):
+        return None
+    return record_id.strip()
+
+
 def observed_version_warnings(rows: Optional[list[Any]]) -> list[str]:
     """Describe mixed/unstamped engine traffic in an already-read window."""
     if rows is None:
