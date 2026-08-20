@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from coord_engine.change_detection import Change, ChangeBatch, Coverage
 from coord_engine import generation, projection
 
@@ -179,6 +181,86 @@ def test_generation_sections_reject_parseable_wrong_section_documents():
     built = generation.build_generation(
         prior_generation=None, source_watermark="w-1", batch=_batch(), sections=sections)
     assert built.incomplete == ("roles", "presence", "acknowledgments", "responses")
+
+
+def _generation_sections_for_role_documents(documents):
+    from coord_engine import reconcile
+
+    class Transport(MemoryTransport):
+        def list_dir(self, prefix):
+            children = {}
+            for path in documents:
+                if not path.startswith(prefix):
+                    continue
+                relative = path[len(prefix):]
+                if not relative:
+                    continue
+                name, separator, _descendant = relative.partition("/")
+                entry_name = name + "/" if separator else name
+                children[entry_name] = {
+                    "name": entry_name,
+                    "is_dir": bool(separator),
+                }
+            return [children[name] for name in sorted(children)]
+
+        def read_classified(self, path, *, deadline):
+            return documents[path], "ok"
+
+    batch = ChangeBatch(
+        (), {"tasks": Coverage.CLEAR, "reviews": Coverage.CLEAR,
+             "forge": Coverage.CLEAR, "presence_roles": Coverage.CLEAR,
+             "acknowledgments_responses": Coverage.CLEAR}, True,
+        watermark="w-1")
+    return reconcile._generation_sections(
+        Transport(), TEAM, batch=batch, rows=[],
+        proj_state={
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True,
+                        "rows": []},
+            "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
+                      "responsible": {}, "feedback": {}},
+        })
+
+
+@pytest.mark.parametrize(("relative_path", "document"), [
+    ("reviewer", "---\ntype: Role\n---\n"),
+    ("reviewer/leases", "---\ntype: Lease\nagent: amy\n---\n"),
+    ("reviewer/escalations", "---\ntype: Escalation\n---\n"),
+    ("reviewer/lease/amy.md", "---\ntype: Lease\nagent: amy\n---\n"),
+    ("reviewer/escalation/2026-08-20.md", "---\ntype: Escalation\n---\n"),
+    ("reviewer/leases/archive/amy.md", "---\ntype: Lease\nagent: amy\n---\n"),
+    ("reviewer/escalations/archive/2026-08-20.md", "---\ntype: Escalation\n---\n"),
+])
+def test_role_inventory_rejects_malformed_path_hierarchy(relative_path, document):
+    sections = _generation_sections_for_role_documents({
+        f"team/{TEAM}/roles/{relative_path}": document,
+    })
+
+    assert sections["roles"].state == "UNKNOWN"
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(),
+        sections=sections)
+    assert built.complete is False
+    assert built.incomplete == ("roles",)
+
+
+def test_role_inventory_accepts_only_canonical_role_lease_and_escalation_paths():
+    documents = {
+        f"team/{TEAM}/roles/reviewer.md": "---\ntype: Role\n---\n",
+        f"team/{TEAM}/roles/reviewer/leases/amy.md": (
+            "---\ntype: Lease\nagent: amy\n---\n"),
+        f"team/{TEAM}/roles/reviewer/escalations/2026-08-20.md": (
+            "---\ntype: Escalation\n---\n"),
+    }
+
+    sections = _generation_sections_for_role_documents(documents)
+
+    assert sections["roles"].state == "DATA"
+    assert [record["path"] for record in sections["roles"].value["records"]] == sorted(documents)
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(),
+        sections=sections)
+    assert built.complete is True
+    assert built.incomplete == ()
 
 
 def test_generation_sections_reject_wrong_fixed_section_shapes():

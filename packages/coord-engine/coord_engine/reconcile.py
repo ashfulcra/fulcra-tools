@@ -1288,10 +1288,17 @@ def _canonical_section_document(section: str, path: str,
         relative = path.split("/roles/", 1)[-1]
         parts = relative.split("/")
         if len(parts) == 1:
-            return doc_type == "Role"
-        if len(parts) >= 2 and parts[1] == "leases":
+            role_file = parts[0]
+            return (role_file.endswith(".md") and len(role_file) > len(".md")
+                    and doc_type == "Role")
+        if (len(parts) != 3 or not parts[0]
+                or parts[0].endswith(".md")
+                or not parts[2].endswith(".md")
+                or len(parts[2]) <= len(".md")):
+            return False
+        if parts[1] == "leases":
             return doc_type == "Lease" and _nonempty_text(document.get("agent"))
-        if len(parts) >= 2 and parts[1] == "escalations":
+        if parts[1] == "escalations":
             return doc_type == "Escalation"
         return False
     if section == "presence":

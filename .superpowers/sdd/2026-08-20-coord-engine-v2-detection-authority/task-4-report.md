@@ -181,3 +181,45 @@ available to existing readers, but it is not a newer authoritative generation.
 - Full output: `2494 passed, 8 skipped in 83.43s`.
 - Whitespace command: `git diff --check`.
 - Whitespace output: exit 0.
+
+## Fix Round 3
+
+### Important 3 — parseable but noncanonical section content is rejected
+
+- Covering tests: `packages/coord-engine/tests/test_v2_generation.py::test_generation_sections_reject_parseable_wrong_section_documents` and `packages/coord-engine/tests/test_v2_generation.py::test_generation_sections_reject_wrong_fixed_section_shapes`.
+- Change: recursive inventory sealing now validates section-specific canonical
+  types and required shape: Role/Lease/Escalation hierarchy, Presence agent,
+  Ack agent, and Response agent/outcome. Fixed task, review, and forge results
+  validate their required row/map shapes in addition to their projection
+  schemas. Any wrong type or shape yields `UNKNOWN`, so the generation remains
+  incomplete and cannot seal.
+- Red command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py::test_generation_sections_reject_parseable_wrong_section_documents packages/coord-engine/tests/test_v2_generation.py::test_generation_sections_reject_wrong_fixed_section_shapes`.
+- Red output: `2 failed` before implementation.
+- Focused command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py packages/coord-engine/tests/test_reconcile.py packages/coord-engine/tests/test_projection.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_role_inboxes.py packages/coord-engine/tests/test_threads.py`.
+- Focused output: `229 passed in 1.22s`.
+- Full command: `uv run --package coord-engine pytest -q packages/coord-engine/tests`.
+- Full output: `2496 passed, 8 skipped in 80.29s`.
+- Whitespace command: `git diff --check`.
+- Whitespace output: exit 0.
+
+## Fix Round 4
+
+### Important 3 — role documents require their exact canonical path hierarchy
+
+- Covering tests: `packages/coord-engine/tests/test_v2_generation.py::test_role_inventory_rejects_malformed_path_hierarchy` and `packages/coord-engine/tests/test_v2_generation.py::test_role_inventory_accepts_only_canonical_role_lease_and_escalation_paths`.
+- Change: Role documents seal only at `roles/<role>.md`; Lease and Escalation
+  documents seal only at `roles/<role>/leases/<id>.md` and
+  `roles/<role>/escalations/<id>.md`. Missing filename/id segments, wrong
+  folder names, non-markdown leaves, and extra nesting yield `UNKNOWN`, which
+  keeps the generation incomplete and prevents publication. Canonical role,
+  lease, and escalation paths remain `DATA` and seal normally.
+- Red command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py::test_role_inventory_rejects_malformed_path_hierarchy packages/coord-engine/tests/test_v2_generation.py::test_role_inventory_accepts_only_canonical_role_lease_and_escalation_paths`.
+- Red output: `5 failed, 3 passed in 0.05s` before implementation.
+- Green command: same targeted command.
+- Green output: `8 passed in 0.01s`.
+- Focused command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py packages/coord-engine/tests/test_reconcile.py packages/coord-engine/tests/test_projection.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_role_inboxes.py packages/coord-engine/tests/test_threads.py`.
+- Focused output: `237 passed in 1.22s`.
+- Full command: `uv run --package coord-engine pytest -q packages/coord-engine/tests`.
+- Full output: `2504 passed, 8 skipped in 80.40s`.
+- Whitespace command: `git diff --check`.
+- Whitespace output: exit 0.
