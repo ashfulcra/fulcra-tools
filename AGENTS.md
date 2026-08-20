@@ -438,6 +438,13 @@ it (not on PyPI).
   out of a cut buffer. Other verbs migrate one PR at a time — a bare array
   is the contract-1 shape, scan its marker rows as before
   (`docs/coord/OUTPUT-CONTRACT.md`).
+- **Class A results flow through the shared v2 outcome spine.**
+  `coord_engine.outcome.CommandOutcome` is the internal authority for state,
+  coverage, rows, provenance, and rc; legacy contract-2 envelopes are adapters
+  over that value. A required surface that is not verified is `UNKNOWN` and
+  therefore rc 3 even when some rows are usable. New Class A folds must build
+  the typed outcome first, then render text or JSON from it; do not recompute
+  health or rc in a serializer.
 - **If your harness truncates output, read the verdict off stderr.**
   `needs-me` and `briefing` print their row payload with degraded and source
   markers inside it, so a truncating reader can lose exactly the part that
@@ -743,6 +750,11 @@ it (not on PyPI).
   on `ok is False` park fails non-zero saying the checkpoint was NOT written, and a complete fold
   proving zero fresh roles exits **rc 2** `CHECKPOINT NOT WRITTEN` — a command that ACTS on the
   roles you hold refuses to act on UNKNOWN rather than treating it as "nothing to do". The fold's
+  candidate set is the union of role documents and role-lease directories, deduplicated by role;
+  a lease directory whose role document is absent/unreadable is UNKNOWN, not evidence that no
+  role exists. If any selected role snapshot or checkpoint-ref write fails, park exits non-zero
+  after attempting the remaining roles; rc 0 certifies that every selected save completed.
+  The fold's
   cost is one `roles/` listing + a few ops per role the open work references, and it runs under one
   cumulative `COORD_ROLE_FOLD_BUDGET` (default 20s) — a cut marks every unfinished candidate
   `unresolved`, never "not held".
