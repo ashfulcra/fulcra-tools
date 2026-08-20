@@ -118,6 +118,16 @@ ordinary change detector. It performs one bounded `data-updates` query, validate
 the response envelope before consuming rows, normalizes paths and lifecycle
 timestamps, deduplicates by immutable update identity, and sorts deterministically.
 
+Record namespaces are different from file changes: `data-updates` file-change
+rows carry identities, but record changes are reported only as
+`{data_type: count}`. A nonzero count for a coordination channel is therefore a
+detection signal only. The detector MUST
+materialize identities with one bounded channel read using the queue's existing
+cursor contract before it deduplicates those records. If that read cannot prove
+its boundary or fit the remaining budget, coverage for the record namespace is
+`UNKNOWN`; the count alone is never promoted into an identity or a complete
+change batch.
+
 The detector assigns every recognized update to a namespace:
 
 - tasks and directives;
@@ -186,13 +196,23 @@ Every public fold follows one path:
 
 1. read and validate the current manifest;
 2. read and digest-verify its immutable generation;
-3. obtain one bounded `data-updates` overlay after the generation watermark;
+3. obtain one bounded `data-updates` overlay beginning at the generation
+   watermark minus epsilon and ending at the bounded-staleness horizon;
 4. either apply the supported delta or return `UNKNOWN` with a recovery action;
 5. render `CommandOutcome` and derive the exit status from its typed coverage.
 
 Commands MUST NOT return a clean projection when the overlay was not run. JSON
-includes `state`, `coverage`, `generation`, and `watermark`. Text output names the
-same unknown surfaces without turning diagnostics into work rows.
+includes `state`, `coverage`, `coverage_horizon`, `generation`, and `watermark`.
+Text output names the same unknown surfaces without turning diagnostics into
+work rows.
+
+Feed indexing can lag canonical writes. Overlay reads therefore use the overlap
+window `[watermark - epsilon, now - epsilon]`; re-delivery is legal under
+at-least-once processing and identities are deduplicated. Epsilon is a configured,
+fleet-verified upper bound on feed visibility lag. Public folds make a
+bounded-staleness claim through the reported coverage horizon, never an absolute
+claim through wall-clock now. If the lag bound or overlap coverage cannot be
+proven, the affected surface is `UNKNOWN` and the command exits nonzero.
 
 The invariant is mechanical: if JSON or text says any required surface is
 `UNKNOWN`, the exit code is nonzero. Tests assert the structured outcome and the
@@ -271,6 +291,8 @@ The suite MUST pin every previously observed failure flavor:
 | Two builders consume identical batch | identical generation id and bytes |
 | Projection row contradicts canonical changed doc | overlay applies delta or returns `UNKNOWN` |
 | Renderer truncates rows | coverage and exit status remain truthful |
+| Record namespace reports only a count | identities materialized by one bounded channel read, or record coverage `UNKNOWN` |
+| Canonical document is written but not yet visible in the feed | exclude wall-clock now from the bounded-staleness claim; report the coverage horizon, or return `UNKNOWN` if the lag bound is unproven |
 | `continuity park` sees a held role lease with no role document | nonzero; report could-not-write distinctly from nothing-to-write; never success-shaped |
 | Role status derives a holder from lease fallback but `continuity park` would refuse that same role | status and park use one holder fact or return `UNKNOWN`; readers and writers cannot disagree |
 | Any continuity save-path failure at session exit | `UNKNOWN`, nonzero, and no quiet no-op or saved-state implication |
