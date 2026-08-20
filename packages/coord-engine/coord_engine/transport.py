@@ -341,7 +341,7 @@ class FulcraFileTransport:
     def records_cursor(
         self, data_type: str, since: Optional[str], *,
         deadline: Optional[budget_mod.Deadline] = None,
-    ) -> Optional[list]:
+    ) -> Optional[dict[str, Any]]:
         """Materialize one counted record channel inside the detector deadline.
 
         This is intentionally one cursor/window read, not a count-to-identity
@@ -362,25 +362,14 @@ class FulcraFileTransport:
             )
             if rc != 0 or (deadline is not None and deadline.expired()):
                 return None
-            parsed: list[dict[str, Any]] = []
-            for line in out.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                if not isinstance(rec, dict):
-                    return None
-                record_id, recorded_at = rec.get("id"), rec.get("recorded_at")
-                if (not isinstance(record_id, str) or not record_id.strip()
-                        or not isinstance(recorded_at, str) or not recorded_at.strip()):
-                    return None
-                sources = rec.get("sources")
-                if sources is not None and not isinstance(sources, list):
-                    return None
-                parsed.append({
-                    "id": record_id, "recorded_at": recorded_at.strip(),
-                    "sources": list(sources or []), "note": rec.get("note"),
-                })
+            # The current CLI's JSONL response has no server-attested cursor
+            # boundary. It is therefore not evidence the detector may trust.
+            # Future endpoint envelopes must carry all three fields below.
+            parsed = json.loads(out)
+            if not isinstance(parsed, dict):
+                return None
+            if not {"after", "through", "records"}.issubset(parsed):
+                return None
             return parsed
         except Exception:
             return None
