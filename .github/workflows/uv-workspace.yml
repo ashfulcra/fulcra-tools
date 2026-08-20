@@ -46,14 +46,23 @@ jobs:
 
       - name: Skill contract + installer tests (cheap, OS-agnostic)
         # Fast ubuntu gate for skill trees the expensive macOS job path-filters
-        # away: netflix + csv-importer + media-helpers contract tests, plus the
-        # coord-engine suite (incl. the bash installer tests, which shim
-        # uname/launchctl/crontab so both platform branches run anywhere). Keeps
-        # "drift is caught at commit time" true for skill-only PRs. ~30s.
-        # The csv/media selections are node-id filtered to the SKILL-contract
-        # files so this stays cheap — their full suites run in the macOS job.
+        # away: netflix + csv-importer contract tests, the coord-engine suite
+        # (incl. the bash installer tests, which shim uname/launchctl/crontab
+        # so both platform branches run anywhere), and the FULL media-helpers
+        # suite. Keeps "drift is caught at commit time" true for skill-only PRs.
+        # media-helpers runs in full here since PR 656: its 16 red-on-main
+        # failures were a macOS-only-ism (`cp -c`) that this gate never saw
+        # because it ran only the skill-contract file while macOS CI stayed
+        # green — a required Linux gate that skips the suite ships that class.
+        # One deselect: the SIGINT webhook shutdown test is a known macOS-CI
+        # flake (10s subprocess timeout, tracked as BUS-126) and stays out of
+        # this REQUIRED gate until hardened — deselected loudly, not silently.
+        # The csv selection stays node-id filtered to the SKILL-contract file
+        # so this stays cheap — its full suite runs in the macOS job.
         run: |
           uv run --all-packages --extra dev python -m pytest \
             packages/netflix-skill/tests packages/coord-engine/tests \
             packages/csv-importer/tests/test_skill_contract.py \
-            packages/media-helpers/tests/test_skill_contract.py -q
+            packages/media-helpers/tests \
+            --deselect "packages/media-helpers/tests/test_webhook_cli.py::test_webhook_starts_and_shuts_down_on_sigint" \
+            -q
