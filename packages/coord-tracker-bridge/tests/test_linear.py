@@ -669,3 +669,71 @@ def test_schema_query_uses_string_variable_type():
     from coord_tracker_bridge.linear import SCHEMA_QUERY
     assert "$team:String!" in SCHEMA_QUERY
     assert ":ID!" not in SCHEMA_QUERY
+
+
+# --- paginate must not lose data quietly (coord-boss audit ask c9b26266) -----
+
+def _paginate_page(nodes, page_info):
+    return response({"issues": {"nodes": nodes, "pageInfo": page_info}})
+
+
+def test_a_non_object_node_is_an_ERROR_not_a_silent_drop():
+    """paginate used to filter non-Mapping nodes out of the page. That is not
+    harmless for the callers that exist today:
+
+    `resource_plan` computes `wanted - existing`, so a dropped label lands in
+    the CREATE list and the bridge tries to create a label that already exists;
+    `_build_fields` raises ResourceMissing("run apply-resources before sync")
+    for a label that IS there. A silent drop is not a skipped render — it is a
+    false instruction to the operator.
+    """
+    client = LinearClient(FakeTransport([
+        _paginate_page([{"id": "real"}, None], {"hasNextPage": False}),
+    ]))
+
+    with pytest.raises(LinearError) as excinfo:
+        client.paginate("Issues", "query", "issues")
+
+    assert "non-object node" in str(excinfo.value)
+
+
+def test_a_dropped_node_would_have_made_an_EXISTING_label_look_missing():
+    """The consequence, at the caller that actually suffers it — stated as a
+    test so the reason for the strictness cannot be refactored away."""
+    client = LinearClient(FakeTransport([
+        _paginate_page([{"id": "l1", "name": "bug"}, None], {"hasNextPage": False}),
+    ]))
+    adapter = LinearTrackerAdapter(client, "team")
+
+    with pytest.raises(LinearError):
+        adapter.resource_plan(labels=["bug"], projects=[])
+
+
+@pytest.mark.parametrize("bad", ["next", 7, ["malformed"], True])
+def test_a_TRUTHY_malformed_pageInfo_is_a_LinearError_not_an_AttributeError(bad):
+    """`or {}` rescues only FALSY values, so a truthy-malformed pageInfo reached
+    `.get` and raised AttributeError — escaping this module's LinearError
+    contract, so callers catching LinearError never caught it."""
+    client = LinearClient(FakeTransport([_paginate_page([{"id": "a"}], bad)]))
+
+    with pytest.raises(LinearError) as excinfo:
+        client.paginate("Issues", "query", "issues")
+
+    assert "malformed pageInfo" in str(excinfo.value)
+
+
+def test_an_ABSENT_pageInfo_still_terminates_cleanly():
+    """The falsy cases `or {}` did handle must keep working: no pageInfo means
+    no next page, not an error."""
+    client = LinearClient(FakeTransport([_paginate_page([{"id": "a"}], None)]))
+
+    assert client.paginate("Issues", "query", "issues") == [{"id": "a"}]
+
+
+def test_malformed_nodes_container_is_an_error():
+    client = LinearClient(FakeTransport([_paginate_page("not-a-list", {"hasNextPage": False})]))
+
+    with pytest.raises(LinearError) as excinfo:
+        client.paginate("Issues", "query", "issues")
+
+    assert "malformed nodes" in str(excinfo.value)

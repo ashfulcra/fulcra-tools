@@ -193,8 +193,37 @@ class LinearClient:
             page = data.get(root)
             if not isinstance(page, Mapping):
                 raise LinearError(f"{operation}: missing page {root}")
-            nodes.extend(node for node in page.get("nodes", []) if isinstance(node, Mapping))
-            page_info = page.get("pageInfo") or {}
+            # A TRANSPORT DOES NOT GET TO DECIDE THAT DATA LOSS IS ACCEPTABLE.
+            #
+            # This used to silently drop non-Mapping nodes. That is not harmless
+            # for the callers that exist today: `resource_plan` computes
+            # `wanted - existing`, so a dropped label lands in the CREATE list
+            # and the bridge tries to create a label that is already there; and
+            # `_build_fields` raises ResourceMissing("run apply-resources before
+            # sync") for a label that does exist. A silent drop there is not a
+            # skipped render — it is a false instruction to the operator.
+            #
+            # A caller that genuinely wants best-effort must filter at ITS level,
+            # where the promise it is making is visible. Down here, absence and
+            # unrepresentable are indistinguishable to everyone above.
+            raw_nodes = page.get("nodes", [])
+            if not isinstance(raw_nodes, list):
+                raise LinearError(f"{operation}: page {root} has malformed nodes")
+            for node in raw_nodes:
+                if not isinstance(node, Mapping):
+                    raise LinearError(
+                        f"{operation}: page {root} contains a non-object node")
+                nodes.append(node)
+
+            # `or {}` rescues only FALSY values, so a truthy-malformed pageInfo
+            # (a string, a list) reached `.get` and raised AttributeError —
+            # escaping this module's LinearError contract, so callers catching
+            # LinearError did not catch it.
+            page_info = page.get("pageInfo")
+            if page_info is None:
+                page_info = {}
+            if not isinstance(page_info, Mapping):
+                raise LinearError(f"{operation}: page {root} has malformed pageInfo")
             if not page_info.get("hasNextPage"):
                 return nodes
             next_cursor = page_info.get("endCursor")
