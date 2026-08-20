@@ -7,6 +7,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,17 @@ MAC_EPOCH_OFFSET = 978307200  # seconds between Unix epoch and Core Data epoch (
 # with this timeout makes a stalled DB fail fast with a clear error.
 SNAPSHOT_TIMEOUT_SECONDS = 120
 
+
+
+def _cp_args() -> list[str]:
+    """`cp -c` requests an APFS clonefile(2) on macOS — instant, copy-on-write,
+    exactly right for snapshotting a live SQLite family. GNU coreutils has no
+    `-c`, so on any other platform (the Linux fleet runners included) a plain
+    `cp` does the same job without the clone optimization. Kept as a subprocess
+    either way: the killable timeout around it is load-bearing (an I/O-stalled
+    source must not pin the worker), which an in-process shutil copy cannot do.
+    """
+    return ["cp", "-c"] if sys.platform == "darwin" else ["cp"]
 
 class SnapshotError(RuntimeError):
     """Raised when the on-device DB cannot be snapshotted (stalled/inaccessible)."""
@@ -69,7 +81,7 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
             # does stall fails fast with a clear error instead of hanging.
             try:
                 subprocess.run(
-                    ["cp", "-c", str(candidate), str(dest)],
+                    [*_cp_args(), str(candidate), str(dest)],
                     check=True,
                     capture_output=True,
                     timeout=SNAPSHOT_TIMEOUT_SECONDS,
