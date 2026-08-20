@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 from . import (
     aggregate, atc, atc_dash, budget as budget_mod, bus_tags,
-    checkpoint_channel, config, continuity,
+    checkpoint_channel, classifier, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     health as health_mod, jsonutil, okf, outcome as outcome_mod, presence,
     projection as projection_mod,
@@ -66,8 +66,6 @@ def _iso(dt: datetime) -> str:
 #: Characters an identity may contain. Matches the charset the installer already
 #: validates agent ids against — applied here at ID CONSTRUCTION, which is where
 #: the unvalidated value actually enters the keyspace.
-_IDENTITY_SAFE = re.compile(r"[^A-Za-z0-9:_.-]+")
-
 _hostname_rewrite_warned = False
 
 
@@ -97,13 +95,7 @@ def _sanitize_hostname(raw: str) -> tuple[str, bool]:
     version-skew audit, and permanently unaddressable — a hole in a shared
     keyspace that nothing can now reference.
     """
-    collapsed = _IDENTITY_SAFE.sub("-", raw).strip("-.:_")
-    if collapsed == raw:
-        return raw, False
-    if not collapsed:
-        return "", True  # nothing usable — the caller refuses rather than invents
-    digest = hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:6]
-    return f"{collapsed}-{digest}", True
+    return classifier.sanitize_hostname(raw)
 
 
 #: Ambient environment a real caller exports that the TEST SUITE must neutralise,
@@ -138,28 +130,39 @@ INHERITED_ENV: dict[str, str] = {
 }
 
 
-def _host() -> str:
-    explicit = os.environ.get("FULCRA_COORD_AGENT")
-    if explicit:
-        return explicit
+def _identity(explicit: Optional[str] = None) -> str:
+    """The one CLI identity resolver: argument, environment, state, then host."""
     global _hostname_rewrite_warned
-    raw = socket.gethostname()
-    safe, rewritten = _sanitize_hostname(raw)
-    if not safe:
-        # Refuse rather than invent. A process that cannot establish WHO IT IS
-        # must not write to a shared keyspace — minting a placeholder is how the
-        # phantom-identity traps got there in the first place.
-        raise RuntimeError(
-            "cannot derive a fleet identity: this host's name contains no "
-            "usable characters (" + repr(raw) + "). Set FULCRA_COORD_AGENT to "
-            "an explicit identity before writing to the coordination store.")
-    if rewritten and not _hostname_rewrite_warned:
-        _hostname_rewrite_warned = True
-        print(f"coord-engine: hostname {raw!r} is not a usable fleet id; using "
-              f"{safe!r}. This host's presence/lease/health keys depend on it — "
-              f"set FULCRA_COORD_AGENT explicitly to pin your identity.",
-              file=sys.stderr)
-    return f"coord-reconcile:{safe}"
+    def warn(raw: str, safe: str) -> None:
+        global _hostname_rewrite_warned
+        if not _hostname_rewrite_warned:
+            _hostname_rewrite_warned = True
+            print(f"coord-engine: hostname {raw!r} is not a usable fleet id; using "
+                  f"{safe!r}. This host's presence/lease/health keys depend on it — "
+                  f"set FULCRA_COORD_AGENT explicitly to pin your identity.",
+                  file=sys.stderr)
+
+    resolved = classifier.resolve_identity(
+        explicit,
+        environ=os.environ,
+        persisted=config.persisted_identity,
+        hostname=socket.gethostname,
+        on_hostname_rewritten=warn,
+    )
+    assert resolved is not None
+    return resolved
+
+
+def _host() -> str:
+    """Backward-compatible anonymous-host entry point for existing call sites."""
+    return _identity()
+
+
+def _declared_identity(explicit: Optional[str] = None) -> Optional[str]:
+    """Resolve a usable identity without manufacturing a host identity."""
+    return classifier.resolve_identity(
+        explicit, environ=os.environ, persisted=config.persisted_identity
+    )
 
 
 def cmd_wake_queue_file(args: argparse.Namespace, transport: Any) -> int:
@@ -192,7 +195,10 @@ def _known_sender(args: argparse.Namespace) -> Optional[str]:
     breadcrumb points others at ``queue --agent <sender>``, so we print it only
     when the sender is a real identity someone actually reads a queue as — never
     the bare host tag."""
-    return getattr(args, "sender", None) or os.environ.get("FULCRA_COORD_AGENT")
+    return classifier.resolve_identity(
+        getattr(args, "sender", None), environ=os.environ,
+        persisted=config.persisted_identity,
+    )
 
 
 def _replies_breadcrumb(team: str, sender: str) -> str:
@@ -1926,7 +1932,7 @@ def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
         "state": "MERGED",
         "merge_sha": sha,
         "merged_at": args.merged_at or now,
-        "closed_by": args.sender or _host(),
+        "closed_by": _identity(args.sender),
         "reason": args.reason or "PR merged; the head will not be reviewed again",
         "ts": now,
     }
@@ -3983,7 +3989,7 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
                   file=sys.stderr)
             return 2
     path = _review_doc_path(team, slug)
-    owner = getattr(args, "sender", None) or _host()
+    owner = _identity(getattr(args, "sender", None))
     existing = transport.read(path)
     if existing is not None:
         # A doc already occupies the slot. This is NOT automatically a conflict:
@@ -4876,7 +4882,7 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
         _, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
             status=("done" if fyi else "proposed"), priority=args.priority,
-            owner=getattr(args, "sender", None) or _host(), assignee=assignee,
+            owner=_identity(getattr(args, "sender", None)), assignee=assignee,
             summary=args.summary or "", next_action=args.next, kind="directive",
             not_before=not_before, slug=slug, fyi=fyi,
             evidence=("notification delivered; no action was requested of the "
@@ -5352,7 +5358,7 @@ def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
         _, base = tasks.new_task_doc(
             text, now=now_iso, status="proposed",
             priority=getattr(args, "priority", None) or "P2",
-            owner=getattr(args, "sender", None) or _host(), assignee=principal,
+            owner=_identity(getattr(args, "sender", None)), assignee=principal,
             summary="", next_action=None, kind="directive", slug=slug,
         )
     except tasks.TaskError as e:
@@ -5794,7 +5800,7 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     if args.ack:
         fm = {"type": "Ack", "agent": agent, "timestamp": _iso(_now())}
         transport.write(_ack_path(args.team, args.ack, agent),
@@ -6511,7 +6517,7 @@ def _cmd_queue_v2(
 
 def cmd_queue_commit(args: argparse.Namespace, transport: Any) -> int:
     team = getattr(args, "commit_team", None)
-    agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
+    agent = _declared_identity(getattr(args, "agent", None))
     token = getattr(args, "token", None)
     if not team or not agent or not token:
         return _queue_failure(
@@ -6732,7 +6738,7 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             message="queue: unexpected second team argument",
             rc=2,
         )
-    agent = getattr(args, "agent", None) or os.environ.get("FULCRA_COORD_AGENT")
+    agent = _declared_identity(getattr(args, "agent", None))
     if not agent:
         return _queue_failure(
             args,
@@ -6741,7 +6747,7 @@ def cmd_queue(args: argparse.Namespace, transport: Any) -> int:
             message="queue: --agent or FULCRA_COORD_AGENT required",
             rc=2,
         )
-    own_identity = os.environ.get("FULCRA_COORD_AGENT")
+    own_identity = classifier.resolve_identity(environ=os.environ)
     peek = bool(getattr(args, "peek", False))
     # Guard fires ONLY when the caller HAS a declared identity that differs:
     # `--agent X` with no FULCRA_COORD_AGENT set is the normal automation
@@ -7075,7 +7081,7 @@ def _requested_obligations(
 
 
 def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     now = _iso(_now())
     path = _task_path(args.team, args.name)
     doc = transport.read(path)
@@ -7233,7 +7239,7 @@ def _held_roles(transport: Any, team: str, agent: str) -> tuple[list[str], bool]
 
 def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
     """Session-exit checkpoint for every held role, or one selected role."""
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     now = _iso(_now())
     if args.role:
         holders, ok = _role_fresh_holders(
@@ -7308,7 +7314,7 @@ def cmd_continuity_park(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     """One-call session-start bundle. Every section tolerates absent add-ons."""
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     now = _iso(_now())
     out: dict[str, Any] = {"schema": "coord.teams.briefing.v1", "team": args.team,
                            "agent": agent, "at": now}
@@ -7676,7 +7682,7 @@ def cmd_dash(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     now = _now()
     engagement = getattr(args, "engagement", None)
     until = getattr(args, "until", None)
@@ -8208,7 +8214,7 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     slug = tasks.agent_key(agent)
     if okf.parse_frontmatter(transport.read(_role_doc_path(args.team, args.role))) is None:
         print(f"note: role {args.role!r} has no registered role doc — status folds fall back "
@@ -8255,7 +8261,7 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_roles_release(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     slug = tasks.agent_key(agent)
     path = f"{_leases_prefix(args.team, args.role)}{slug}.md"
     state = _nonce_state_path(args.team, args.role, slug)
@@ -9604,7 +9610,7 @@ def _stash_prefix(team: str, agent: str) -> str:
 
 
 def cmd_stash_push(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     prefix = _stash_prefix(args.team, agent)
     now = _iso(_now())
     # Stage + guard EVERYTHING before the first upload: a batch with one
@@ -9661,7 +9667,7 @@ def cmd_stash_push(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_stash_pull(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     prefix = _stash_prefix(args.team, agent)
     manifest = stash.parse_manifest(transport.read(prefix + stash.MANIFEST_NAME))
     files = manifest.get("files", {})
@@ -9716,7 +9722,7 @@ def cmd_stash_pull(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_stash_list(args: argparse.Namespace, transport: Any) -> int:
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     prefix = _stash_prefix(args.team, agent)
     try:
         entries = transport.list_dir(prefix)
@@ -10279,7 +10285,7 @@ def cmd_review_gc(args: argparse.Namespace, transport: Any) -> int:
     if not args.apply:
         return 0
     now = _iso(_now())
-    by = getattr(args, "sender", None) or _host()
+    by = _identity(getattr(args, "sender", None))
     failed = 0
     for v in verdicts:
         if not v.retirable:
@@ -10495,7 +10501,7 @@ def _doctor_self(args: argparse.Namespace, transport: Any) -> int:
 
 def _doctor_delivery(args: argparse.Namespace, transport: Any) -> int:
     """Write and read one probe through the production typed-record seams."""
-    agent = args.agent or os.environ.get("FULCRA_COORD_AGENT")
+    agent = _declared_identity(args.agent)
     if not args.team:
         print("doctor --delivery: team is required", file=sys.stderr)
         return 2
@@ -11042,7 +11048,7 @@ def cmd_forge_watch(args: argparse.Namespace, transport: Any) -> int:
         print(f"forge watch: not a GitHub PR url: {args.pr_url}", file=sys.stderr)
         return 1
     url = forge_mod.parse_pr_url(args.pr_url)
-    agent = args.agent or _host()
+    agent = _identity(args.agent)
     fm = {"type": "Watch", "schema": "forge-watch/v1", "url": url,
           "agent": agent, "ts": _iso(_now())}
     transport.write(_watch_path(args.team, slug),
@@ -11206,7 +11212,7 @@ def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
     the fix is to re-provision, which is cheap and rewrites only that
     dimension.
     """
-    agent = args.agent or os.environ.get("FULCRA_COORD_AGENT")
+    agent = _declared_identity(args.agent)
     if not agent:
         print("tag-provision: no agent identity (--agent or "
               "FULCRA_COORD_AGENT)", file=sys.stderr)
@@ -11309,7 +11315,7 @@ def cmd_bus_v3_send(args: argparse.Namespace, transport: Any) -> int:
     to go that is certainly right, and guessing a stream is worse than not
     writing. rc 0 written, 2 otherwise.
     """
-    sender = args.sender or os.environ.get("FULCRA_COORD_AGENT")
+    sender = _declared_identity(args.sender)
     if not sender:
         print("send: no agent identity (--from or FULCRA_COORD_AGENT)",
               file=sys.stderr)

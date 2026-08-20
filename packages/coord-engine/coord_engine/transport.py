@@ -24,7 +24,7 @@ import urllib.request
 from typing import Any, Optional
 
 from . import budget as budget_mod
-from . import config
+from . import classifier, config
 
 DEFAULT_COMMAND = ("fulcra-api",)
 
@@ -646,6 +646,23 @@ class FulcraFileTransport:
                 return None, "absent"
             return None, "error"
         return cp.stdout, "ok"
+
+    def canonical_read(
+        self, prefix: str, *, lifecycle_since: Optional[str] = None,
+    ) -> "classifier.CanonicalRead":
+        """Classify one directory, optionally proving tombstones from change events."""
+        team = None
+        parts = prefix.strip("/").split("/")
+        if len(parts) >= 2 and parts[0] == "team":
+            team = parts[1]
+        lifecycle = (
+            self.updates(lifecycle_since, team=team)
+            if lifecycle_since is not None else None
+        )
+        return classifier.canonical_read(
+            self, prefix, lifecycle_events=lifecycle,
+            lifecycle_requested=lifecycle_since is not None,
+        )
 
     def write(self, path: str, content: str) -> bool:
         # contract: True on success, False on any REMOTE failure (incl. timeout/exec

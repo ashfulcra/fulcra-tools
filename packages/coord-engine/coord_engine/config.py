@@ -18,9 +18,50 @@ stdlib-only; these functions never raise.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
+from pathlib import Path
 from typing import Optional, Sequence
+
+from . import classifier
+
+
+def state_dir() -> Path:
+    """Local coord state root, shared by nonce and per-cwd identity state."""
+    return Path(os.environ.get("COORD_ENGINE_STATE_DIR") or
+                Path.home() / ".local" / "state" / "coord-engine")
+
+
+def identity_path(cwd: Optional[Path] = None) -> Path:
+    """The per-working-directory persisted identity path.
+
+    The real path, not the spelling used to enter the directory, is hashed so
+    aliases cannot mint competing local identities and separate repositories
+    cannot clobber one another.
+    """
+    root = (cwd or Path.cwd()).resolve()
+    digest = hashlib.sha256(str(root).encode("utf-8", "surrogatepass")).hexdigest()
+    return state_dir() / "identities" / f"{digest}.json"
+
+
+def persisted_identity(cwd: Optional[Path] = None) -> classifier.PersistedIdentity:
+    """Classify per-cwd identity state without treating unreadable as absent."""
+    try:
+        value = json.loads(identity_path(cwd).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.ABSENT)
+    except OSError:
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNKNOWN)
+    except (ValueError, TypeError):
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNSUPPORTED)
+    if not isinstance(value, dict):
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNSUPPORTED)
+    identity = value.get("identity")
+    if not isinstance(identity, str) or not identity:
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNSUPPORTED)
+    return classifier.PersistedIdentity(classifier.PersistedIdentityState.PRESENT, identity)
 
 
 def _resolve_raw(
