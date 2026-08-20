@@ -155,3 +155,66 @@ Implementation: `ea6b25a9` (`coord-engine: fail closed change detector`).
   the JSONL `get-records` CLI alone because it has no server-attested cursor
   boundary. This is intentional fail-closed behavior until the transport can
   return the documented cursor envelope.
+
+## Fix Round 2
+
+### Status
+
+Resolved mixed-precision lifecycle ordering: the detector now orders by parsed
+UTC instants rather than their rendered timestamp strings.
+
+### Covering test
+
+- `test_mixed_precision_lifecycle_instants_sort_temporally`
+
+### Red evidence
+
+Command before the production edit:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_mixed_precision_lifecycle_instants_sort_temporally -q
+```
+
+Output:
+
+```text
+FAILED ...::test_mixed_precision_lifecycle_instants_sort_temporally
+AssertionError: assert ['later', 'earlier'] == ['earlier', 'later']
+1 failed in 0.03s
+```
+
+### Implementation
+
+- Retain the parsed UTC `datetime` for each accepted change through the poll.
+- Sort by `(parsed_utc_instant, path, update_id)`, preserving the existing
+  deterministic path and immutable-identity tie-breakers.
+
+### Green evidence
+
+- Regression:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_mixed_precision_lifecycle_instants_sort_temporally -q`
+  → `1 passed in 0.01s`.
+- Covering Unit 3 command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py -q`
+  → `36 passed in 0.05s`.
+- Full command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests -q`
+  → `2471 passed, 8 skipped in 83.31s`.
+- `git diff --check` exited 0.
+
+### Commit SHA
+
+Implementation: `9f8700a7` (`coord-engine: sort normalized changes temporally`).
+
+### Self-review
+
+- Mixed whole-second and fractional-second spellings are ordered by their
+  timezone-aware UTC instants, so punctuation in ISO rendering cannot affect
+  ordering.
+- Equal instants retain the prior `(path, update_id)` deterministic ordering;
+  immutable identity handling and Unit 2 canonical-read authority are
+  unchanged.
+
+### Concerns
+
+- None known.
