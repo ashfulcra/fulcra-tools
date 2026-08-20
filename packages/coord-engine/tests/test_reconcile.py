@@ -21,6 +21,8 @@ RECENT_MTIME = (
     datetime.now(timezone.utc) - timedelta(days=1)
 ).strftime("%Y-%m-%d %I:%M%p UTC")
 
+COORDINATION_TYPE = "MomentAnnotation/test-reconcile"
+
 
 class FakeTransport:
     """In-memory Fulcra File Store: {path: content} + per-path mtime."""
@@ -66,6 +68,10 @@ class FakeTransport:
 
     def read(self, path):
         return self.store.get(path)
+
+    def read_classified(self, path, *, deadline=None):
+        content = self.read(path)
+        return (content, "ok") if content is not None else (None, "absent")
 
     def write(self, path, content):
         self.store[path] = content
@@ -342,11 +348,43 @@ def _reconciled(t, now="2026-07-01T12:00:00Z"):
 
 
 def _with_updates(t, changes):
-    t.updates_calls = []
-    def updates(period):
-        t.updates_calls.append(period)
-        return changes
-    t.updates = updates
+    """Attach an explicitly normalized Unit-3 detector envelope to the fake."""
+    t.store.setdefault(
+        "team/r/_coord/bus-v3/records.json",
+        json.dumps({"data_type": COORDINATION_TYPE}),
+    )
+
+    def data_updates(_since, *, deadline=None):
+        normalized = []
+        for index, change in enumerate(changes):
+            if not isinstance(change, dict):
+                normalized.append(change)
+                continue
+            path = change.get("path", change.get("full_name"))
+            if not isinstance(path, str):
+                normalized.append(change)
+                continue
+            row = dict(change)
+            row["path"] = path
+            row["state"] = row.get("state", "uploaded")
+            row.setdefault("uploaded_at", "2026-07-01T12:00:00Z")
+            row.setdefault("update_id", row.get("id", f"fixture-{index}"))
+            normalized.append(row)
+        return {
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": normalized,
+        }
+    t.data_updates = data_updates
+    # This helper attaches the detector after the fixture's seed pass. Model the
+    # previously trusted empty envelope so the next pass has a legitimate
+    # watermark; production obtains this state from the prior detector pass.
+    raw = t.store.get("team/r/_coord/summaries.json")
+    if raw:
+        aggregate = json.loads(raw)
+        cursor = aggregate.get(reconcile.RECONCILE_CURSOR_KEY)
+        if isinstance(cursor, dict) and cursor.get("watermark") is None:
+            cursor["watermark"] = aggregate.get("generated_at")
+            t.store["team/r/_coord/summaries.json"] = json.dumps(aggregate)
     return t
 
 
@@ -559,6 +597,10 @@ def test_fast_path_fires_on_a_quiet_beat():
 
 def _seed_acks(t):
     """Three live tasks, each with one ack shard."""
+    t.data_updates = lambda _since, *, deadline=None: {"file_changes": [{
+        "path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
+        "uploaded_at": "2026-07-01T16:00:00Z", "update_id": "ack-fixture",
+    }]}
     for slug, agent in (("a", "amy"), ("b", "bob"), ("c", "cat")):
         t.put(f"team/r/task/{slug}.md", _task(slug.upper(), "active"))
         t.put(f"team/r/_coord/acks/{slug}/{agent}.md",
@@ -576,6 +618,19 @@ def _with_recent_changes(t, files):
         return files(start_iso, end_iso) if callable(files) else files
 
     t.recent_changes = recent_changes
+    # The normalized detector is now the ordinary authority.  This fixture
+    # models the ack namespace as changed so reconcile reaches the existing
+    # ack-fold assertions; an unavailable recent-change response also makes the
+    # detector batch unavailable and forces recovery.
+    if files is None:
+        t.data_updates = lambda _since, *, deadline=None: None
+    else:
+        t.data_updates = lambda _since, *, deadline=None: {
+            "file_changes": [{
+                "path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
+                "uploaded_at": "2026-07-01T16:10:00Z", "update_id": "ack-fixture",
+            }],
+        }
     return t
 
 
@@ -698,6 +753,12 @@ def test_acks_new_slug_absent_from_prior_is_folded_not_assumed_empty():
     t.put("team/r/_coord/acks/d/eve.md",
           "---\ntype: Ack\nagent: eve\ntimestamp: 2026-06-30T09:00:00Z\n---\n")
     _with_recent_changes(t, [])
+    t.data_updates = lambda _since, *, deadline=None: {"file_changes": [
+        {"path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
+         "uploaded_at": "2026-07-01T16:10:00Z", "update_id": "ack-fixture"},
+        {"path": "team/r/task/d.md", "state": "uploaded",
+         "uploaded_at": "2026-07-01T16:10:00Z", "update_id": "task-d"},
+    ]}
     calls = _spy_lists(t)
     _reconciled(t, now="2026-07-01T16:15:00Z")
     assert _ack_lists(calls) == ["team/r/_coord/acks/d/"]

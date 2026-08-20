@@ -34,6 +34,7 @@ import re
 from typing import Any, Optional
 
 from . import read_retry
+from .budget import Deadline
 
 #: Payload schema version. Bump only for incompatible shape changes; readers
 #: must ignore payloads whose version they do not know rather than guess.
@@ -144,6 +145,23 @@ def sender_of(record: dict[str, Any]) -> Optional[str]:
         if isinstance(src, str) and src and not src.startswith("com.fulcradynamics."):
             return src
     return None
+
+
+def immutable_record_identity(record: Any) -> Optional[str]:
+    """Return a record's immutable identity only when its cursor shape proves it.
+
+    Counts are deliberately not identities.  A detector may use a non-zero count
+    solely to decide whether to perform one bounded record cursor read; only a
+    concrete record id plus its orderable timestamp can enter the normalized
+    change batch.
+    """
+    if not isinstance(record, dict):
+        return None
+    record_id, recorded_at = record.get("id"), record.get("recorded_at")
+    if (not isinstance(record_id, str) or not record_id.strip()
+            or not isinstance(recorded_at, str) or not recorded_at.strip()):
+        return None
+    return record_id.strip()
 
 
 def observed_version_warnings(rows: Optional[list[Any]]) -> list[str]:
@@ -588,6 +606,46 @@ def load_config_classified(
         cfg["api_version"] = (
             (os.environ.get(ENV_API_VERSION) or "").strip()
             or cfg["api_version"])
+    return cfg, "ok"
+
+
+def load_canonical_config_classified(
+        transport: Any, team: str, *, deadline: Deadline,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Read the stored queue authority within ``deadline``, without env overlays.
+
+    Detection consumes fleet authority, whereas :func:`load_config_classified`
+    intentionally supports host-local writer/test overrides.  Keeping this
+    seam separate prevents a local ``COORD_RECORDS_TYPE`` from changing which
+    live count the detector treats as the coordination queue.
+    """
+    if deadline.expired():
+        return None, "error"
+    reader = getattr(transport, "read_classified", None)
+    if reader is None:
+        return None, "error"
+
+    def bounded_reader(path: str) -> tuple[Optional[str], str]:
+        if deadline.expired():
+            return None, "error"
+        raw, status = reader(path, deadline=deadline)
+        if deadline.expired():
+            return None, "error"
+        return raw, status
+
+    try:
+        raw, status = read_retry.read_classified_retrying(
+            bounded_reader, config_path(team), deadline=deadline,
+        )
+    except Exception:
+        return None, "error"
+    if deadline.expired() or status == "error":
+        return None, "error"
+    if raw is None:
+        return None, "absent"
+    cfg = _parse_config(raw)
+    if cfg is None:
+        return None, "invalid"
     return cfg, "ok"
 
 

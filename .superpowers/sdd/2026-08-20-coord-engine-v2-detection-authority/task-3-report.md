@@ -1,0 +1,436 @@
+# Task 3 report — Normalized Change Detector
+
+## Status
+
+Implemented and verified.
+
+## Files changed
+
+- `packages/coord-engine/coord_engine/change_detection.py`
+- `packages/coord-engine/coord_engine/transport.py`
+- `packages/coord-engine/coord_engine/records.py`
+- `packages/coord-engine/coord_engine/reconcile.py`
+- `packages/coord-engine/tests/test_v2_change_detection.py`
+- `packages/coord-engine/tests/test_transport_parse.py`
+- `packages/coord-engine/tests/test_reconcile_incremental.py`
+- `packages/coord-engine/README.md`
+
+## Red evidence
+
+1. `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py -q`
+   failed 6/6 with `ModuleNotFoundError: No module named
+   'coord_engine.change_detection'` before production implementation.
+2. `test_incremental_discovery_consumes_one_normalized_batch` failed with
+   `feed_envelope_calls == 0`, proving reconcile still used its old raw-feed
+   path before integration.
+3. `test_records_cursor_uses_one_bounded_record_window` failed with
+   `AttributeError: ... has no attribute 'records_cursor'` before its transport
+   implementation.
+
+## Implementation decisions
+
+- `ChangeDetector.poll(team, prior_watermark, deadline)` consumes one bounded
+  raw envelope, validates it before rows are consumed, normalizes lifecycle
+  rows, deduplicates immutable update identities, and sorts deterministically.
+- Namespace coverage is explicit and fail-closed. Timeout, malformed envelope,
+  unrecognized in-team path, record materialization doubt, or short record
+  cursor response yields `UNKNOWN` and blocks trusted watermark advancement.
+- Record counts only trigger one bounded cursor read; only concrete `id` plus
+  `recorded_at` identities enter the batch.
+- Current reconcile transports consume the sealed batch once. Pre-Unit-3
+  duck-typed transports retain their established `updates` compatibility branch;
+  the real `FulcraFileTransport` uses `data_updates`.
+
+## Verification
+
+- Focused: `20 passed in 0.04s` for detector, transport cursor, and affected
+  incremental/fast-path tests.
+- Full: `2463 passed, 8 skipped in 95.79s (0:01:35)` for
+  `packages/coord-engine/tests`.
+- `git diff --check`: exit 0.
+
+## Commit SHA
+
+Implementation: `36cbe576` (`coord-engine: add normalized change detector`).
+
+## Self-review findings
+
+- Verified the detector never manufactures record identities from a count and
+  retains the distinct `NOT_RUN`/`CLEAR`/`DATA`/`UNKNOWN` enum facts.
+- Verified normal reconcile discovery takes one envelope call; recovery remains
+  a named full scan when the batch cannot be trusted.
+
+## Concerns
+
+- The platform envelope's record-count key is currently normalized as
+  `record_counts.coordination`; other future channel names intentionally degrade
+  to `UNKNOWN` until their immutable cursor semantics are specified.
+
+## Fix Round 1
+
+### Status
+
+Resolved the five critical/important findings and the adjacent sealed-batch
+mutability issue.
+
+### Covering tests
+
+- `test_file_without_a_proven_immutable_identity_makes_the_batch_unknown`
+- `test_lifecycle_timestamps_are_validated_normalized_and_sorted_temporally`
+- `test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel`
+- `test_sealed_batch_does_not_expose_mutable_coverage_or_envelope`
+- `test_records_cursor_without_a_server_attested_boundary_is_unknown`
+- `test_reconcile_never_bypasses_the_detector_with_a_legacy_raw_feed`
+- `test_untrusted_batch_full_recovery_does_not_advance_the_watermark`
+- `test_stale_cursor_drift_recovery_keeps_the_existing_feed_frontier`
+
+### Red evidence
+
+Commands run before the corresponding production edits:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_reconcile_incremental.py::test_reconcile_never_bypasses_the_detector_with_a_legacy_raw_feed -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_transport_parse.py::test_records_cursor_without_a_server_attested_boundary_is_unknown -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_reconcile_incremental.py::test_untrusted_batch_full_recovery_does_not_advance_the_watermark -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_reconcile_incremental.py::test_stale_cursor_drift_recovery_keeps_the_existing_feed_frontier -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_lifecycle_timestamps_are_validated_normalized_and_sorted_temporally -q
+```
+
+1. The new detector regression run failed 6 tests before implementation:
+   fallback `file:<path>:<state>:<at>` identities were trusted, offset
+   timestamps were not canonicalized, list-shaped record cursors were accepted,
+   unsupported record-count channels were clear, mutable batch mappings could
+   be rewritten, and reconcile called the legacy raw `updates` seam.
+2. `test_records_cursor_without_a_server_attested_boundary_is_unknown` failed
+   because JSONL rows were returned with a locally derived endpoint rather than
+   a server-attested `after`/`through` boundary.
+3. `test_untrusted_batch_full_recovery_does_not_advance_the_watermark` failed
+   with watermark `2026-07-01T12:30:00Z` instead of the trusted prior frontier.
+4. `test_stale_cursor_drift_recovery_keeps_the_existing_feed_frontier` failed
+   with watermark `2026-07-01T19:00:00Z` instead of `2026-07-01T12:00:00Z`.
+5. Fractional-timestamp normalization initially failed by truncating
+   `.123456` from the canonical UTC instant.
+
+### Implementation
+
+- File rows now require a concrete immutable `update_id`, `id`, or
+  `version_id`; absence is `UNKNOWN`.
+- Lifecycle instants are parsed as timezone-aware ISO-8601 values, normalized
+  to UTC without losing fractional precision, and sorted on canonical time.
+- Record cursor materialization accepts only an exact-count, server-attested
+  `{after, through, records}` window matching the requested watermark; any
+  missing, excess, or out-of-window row is `UNKNOWN`. The current JSONL CLI
+  response lacks that attestation and therefore fails closed.
+- Unsupported record-count channel keys are `UNKNOWN`; `ChangeBatch` output
+  mappings are recursively frozen.
+- Reconcile has no legacy `updates` fallback: absent `data_updates` performs
+  named full recovery. Untrusted and stale-cursor recovery preserves the prior
+  watermark while repairing canonical rows.
+
+### Verification
+
+- Focused command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_reconcile.py -q`
+  → `96 passed in 0.16s`.
+- Full: `uv run --package coord-engine pytest packages/coord-engine/tests -q`
+  exited 0.
+- `git diff --check` exited 0.
+
+### Commit SHA
+
+Implementation: `ea6b25a9` (`coord-engine: fail closed change detector`).
+
+### Self-review
+
+- The Unit 2 classified canonical-read seam is unchanged; no new canonical
+  `None` interpretation was added. Detector `None` handling applies only to
+  its own explicit feed/cursor transport contract and always yields UNKNOWN.
+- The named full-scan and drift branches remain. Their cursor publication now
+  preserves the old frontier on detector doubt and on stale drift recovery, so
+  recovery cannot claim ordinary feed completeness.
+
+### Concerns
+
+- A coordination record-count signal cannot currently become `DATA` against
+  the JSONL `get-records` CLI alone because it has no server-attested cursor
+  boundary. This is intentional fail-closed behavior until the transport can
+  return the documented cursor envelope.
+
+## Fix Round 2
+
+### Status
+
+Resolved mixed-precision lifecycle ordering: the detector now orders by parsed
+UTC instants rather than their rendered timestamp strings.
+
+### Covering test
+
+- `test_mixed_precision_lifecycle_instants_sort_temporally`
+
+### Red evidence
+
+Command before the production edit:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_mixed_precision_lifecycle_instants_sort_temporally -q
+```
+
+Output:
+
+```text
+FAILED ...::test_mixed_precision_lifecycle_instants_sort_temporally
+AssertionError: assert ['later', 'earlier'] == ['earlier', 'later']
+1 failed in 0.03s
+```
+
+### Implementation
+
+- Retain the parsed UTC `datetime` for each accepted change through the poll.
+- Sort by `(parsed_utc_instant, path, update_id)`, preserving the existing
+  deterministic path and immutable-identity tie-breakers.
+
+### Green evidence
+
+- Regression:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_mixed_precision_lifecycle_instants_sort_temporally -q`
+  → `1 passed in 0.01s`.
+- Covering Unit 3 command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py -q`
+  → `36 passed in 0.05s`.
+- Full command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests -q`
+  → `2471 passed, 8 skipped in 83.31s`.
+- `git diff --check` exited 0.
+
+### Commit SHA
+
+Implementation: `9f8700a7` (`coord-engine: sort normalized changes temporally`).
+
+### Self-review
+
+- Mixed whole-second and fractional-second spellings are ordered by their
+  timezone-aware UTC instants, so punctuation in ISO rendering cannot affect
+  ordering.
+- Equal instants retain the prior `(path, update_id)` deterministic ordering;
+  immutable identity handling and Unit 2 canonical-read authority are
+  unchanged.
+
+### Concerns
+
+- None known.
+
+## External Fix Round 3
+
+### Status
+
+Resolved the live `data-updates` record-count surface and explicit coverage for
+the observed engine-owned file families.
+
+### Captured fixture
+
+`packages/coord-engine/tests/fixtures/live_data_updates_2026-08-20T2013Z.min.json`
+is a sanitized/minimized derivative of
+`live-data-updates-envelope-2026-08-20T2013Z.json`. It retains the real
+top-level `data_types`/`file_changes` shape, the captured non-coordination
+count (`AppleLocationUpdate: 50`), both captured MomentAnnotation counts
+(`a093…: 4`, `d04…: 13`), and raw-schema examples for every observed in-team
+path family: task shard/index, presence, roles, review, member continuity,
+summaries, router, agents, annotate, and health. It deliberately omits the
+remaining 1,109 raw file rows and unrelated data-type counts: the regressions
+exercise classification and count semantics, not high-volume live task names
+or the full set of non-coordination count data.
+
+The existing queue authority identifies `MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041`
+as the control-plane channel; `a09350b2-e245-4348-ae63-bfb35c712c49` is the
+separate checkpoint stream and is not materialized by ordinary coordination
+detection.
+
+### Covering tests
+
+- `test_captured_data_types_materializes_the_configured_coordination_channel_once`
+- `test_missing_configured_channel_count_is_unknown_not_clear`
+- `test_captured_engine_owned_file_shapes_are_explicit_and_trusted`
+- `test_expired_budget_and_unknown_path_make_coverage_unknown`
+
+### Red evidence
+
+Before production edits:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_captured_data_types_materializes_the_configured_coordination_channel_once packages/coord-engine/tests/test_v2_change_detection.py::test_missing_configured_channel_count_is_unknown_not_clear packages/coord-engine/tests/test_v2_change_detection.py::test_captured_engine_owned_file_shapes_are_explicit_and_trusted -q
+```
+
+Output:
+
+```text
+FAILED test_captured_data_types_materializes_the_configured_coordination_channel_once
+assert 0 == 1
+FAILED test_missing_configured_channel_count_is_unknown_not_clear
+assert True is False
+FAILED test_captured_engine_owned_file_shapes_are_explicit_and_trusted
+assert False is True
+3 failed in 0.04s
+```
+
+### Implementation
+
+- Resolve the sole coordination channel through the existing classified
+  queue-authority contract, then require its integer non-negative count under
+  `data_types`. Missing/malformed authority, shape, or count is `UNKNOWN`.
+- Materialize exactly one bounded `records_cursor(channel, prior_watermark)`
+  call only when that count is nonzero; existing attested-boundary, exact-count,
+  immutable-ID, deduplication, and deadline checks remain in force.
+- Classify `_coord/router`, `_coord/agents`, `_coord/annotate`, `_coord/health`,
+  and `member/` as explicit router, agent, annotation, health, and member
+  state namespaces. A genuinely unknown in-team path remains fail-closed.
+- Update injected reconcile envelopes to carry the same queue authority and
+  zero-count `data_types` shape, preserving incremental and drift coverage.
+
+### Green evidence
+
+- Focused Unit 3/reconcile command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_reconcile.py -q`
+  → `100 passed in 0.16s`.
+- Full command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests -q`
+  → `2474 passed, 8 skipped in 82.42s`.
+- `git diff --check` exited 0.
+
+### Commit SHA
+
+Implementation: `2dc02705` (`coord-engine: honor live data type counts`).
+
+### Self-review
+
+- The new count resolution uses the pre-existing Unit 2-classified queue
+  authority; it adds no canonical `None` interpretation. Authority or count
+  doubt returns `UNKNOWN`, so reconcile retains its no-watermark-advance-on-
+  doubt behavior.
+- The data-types path selects one concrete coordination stream and can make
+  exactly one cursor materialization call before deduplication. Checkpoint and
+  unrelated data types are deliberately not treated as coordination records.
+- File immutable IDs, lifecycle parsing/UTC temporal ordering, per-row deadline
+  checks, and the no-legacy-feed reconcile path are unchanged. The live-shape
+  regression proves explicit supported families can be trusted; the existing
+  unknown-path regression proves unsupported in-team paths cannot.
+
+### Concerns
+
+- The current JSONL `get-records` implementation still lacks a server-attested
+  cursor envelope. A nonzero live coordination count therefore correctly falls
+  back to `UNKNOWN` after its one materialization attempt until the transport
+  can prove `{after, through, records}`.
+
+## External Fix Round 4
+
+### Status
+
+Resolved canonical coordination-channel authority and detector-deadline
+enforcement. Detection can no longer be redirected by a host-local
+`COORD_RECORDS_TYPE`, and the stored-authority read plus retry cannot escape the
+`ChangeDetector.poll` deadline.
+
+### Covering tests
+
+- `test_host_override_cannot_redirect_detection_from_canonical_bus_authority`
+- `test_authority_lookup_stops_at_detector_deadline_without_retry`
+- `test_deadline_shorter_than_backoff_does_not_sleep_or_retry`
+- `test_read_classified_does_not_start_past_supplied_deadline`
+
+### Red evidence
+
+Before the production edits:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_host_override_cannot_redirect_detection_from_canonical_bus_authority packages/coord-engine/tests/test_v2_change_detection.py::test_authority_lookup_stops_at_detector_deadline_without_retry -q
+```
+
+Output:
+
+```text
+FAILED ...::test_host_override_cannot_redirect_detection_from_canonical_bus_authority
+assert 0 == 1
+FAILED ...::test_authority_lookup_stops_at_detector_deadline_without_retry
+assert 2 == 1
+2 failed in 0.04s
+```
+
+The retry backoff regression was also observed red against the unbounded retry
+branch (the test was subsequently renamed for precision):
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_read_retry.py::test_expired_deadline_does_not_pay_backoff_or_retry -q
+```
+
+Output:
+
+```text
+FAILED ...::test_expired_deadline_does_not_pay_backoff_or_retry
+assert [0.05] == []
+1 failed in 0.03s
+```
+
+The real transport bound was mutation-checked by temporarily restoring its
+independent timeout:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_transport_parse.py::test_read_classified_does_not_start_past_supplied_deadline -q
+```
+
+Output:
+
+```text
+FAILED ...::test_read_classified_does_not_start_past_supplied_deadline
+assert ('{"data_type":"coordination"}', 'ok') == (None, 'error')
+1 failed in 0.02s
+```
+
+### Implementation
+
+- Added `records.load_canonical_config_classified`, a narrow read-only seam
+  that parses the stored `_coord/bus-v3/records.json` authority without applying
+  writer/test environment overrides.
+- `ChangeDetector` resolves the `data_types` coordination count only through
+  that stored authority. The existing exact-count, one-cursor-call, attested
+  boundary, immutable identity, deduplication, and fail-closed behavior remain
+  unchanged.
+- Threaded the detector's `Deadline` into classified authority reads. The real
+  transport uses the earlier of its local timeout and the supplied deadline,
+  and the retry helper checks the same deadline before/after reads and before/
+  after backoff. Expiry returns classified `error`, which detection seals as
+  `UNKNOWN`.
+- Updated the coord-engine README to distinguish stored detection authority
+  from the host-local record writer/test override. `AGENTS.md` needed no change:
+  its existing canonical-authority doctrine already states the invariant.
+
+### Green evidence
+
+- New regressions:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_host_override_cannot_redirect_detection_from_canonical_bus_authority packages/coord-engine/tests/test_v2_change_detection.py::test_authority_lookup_stops_at_detector_deadline_without_retry packages/coord-engine/tests/test_read_retry.py::test_deadline_shorter_than_backoff_does_not_sleep_or_retry packages/coord-engine/tests/test_transport_parse.py::test_read_classified_does_not_start_past_supplied_deadline -q`
+  → `4 passed in 0.01s`.
+- Focused Unit 3/retry/transport/reconcile command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_read_retry.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_reconcile.py -q`
+  → `123 passed in 0.23s`.
+- Full command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests -q`
+  → `2478 passed, 8 skipped in 84.99s (0:01:24)`.
+- `git diff --check` exited 0.
+
+### Commit SHA
+
+Implementation: `2218bac6` (`coord-engine: bind detection to canonical authority`).
+
+### Self-review
+
+- Verified a stored nonzero canonical count plus a present zero-count override
+  still makes exactly one cursor call on the canonical channel; the override is
+  neither selected nor materialized.
+- Verified absent, malformed, unreadable, or over-deadline stored authority is
+  `UNKNOWN`; no environment fallback is available on the detector seam and no
+  watermark can advance on that doubt.
+- Verified the ordinary writer-facing `load_config_classified` override behavior
+  is untouched, and no Bus state, review state, push, or merge was performed.
+
+### Concerns
+
+- None known.

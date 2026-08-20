@@ -18,6 +18,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -231,12 +232,9 @@ class FulcraFileTransport:
         Never raises.  The subprocess is hard-bounded by ``run_bounded`` so a
         hung child tree cannot stall a listener/reconcile pass."""
         try:
-            rc, out, _err = run_bounded(
-                [*self.command, "data-updates", since], self.timeout
-            )
-            if rc != 0:
+            data = self.data_updates(since)
+            if not isinstance(data, dict):
                 return None
-            data = json.loads(out)
             changes = data.get("file_changes")
             if not isinstance(changes, list):
                 return None
@@ -262,6 +260,30 @@ class FulcraFileTransport:
                     "deleted_at": change.get("deleted_at"),
                 })
             return parsed
+        except Exception:
+            return None
+
+    def data_updates(
+        self, since: Optional[str], *, deadline: Optional[budget_mod.Deadline] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return the raw ``data-updates`` envelope for one bounded detector poll.
+
+        Envelope validation belongs to ``ChangeDetector`` so it can reject a
+        partial shape before consuming any rows.  This transport seam performs
+        exactly one command and returns ``None`` for every transport failure.
+        """
+        if deadline is not None and deadline.expired():
+            return None
+        period = since or "0 seconds"
+        bound = self.timeout if deadline is None else deadline.remaining()
+        if bound is not None and bound <= 0.0:
+            return None
+        try:
+            rc, out, _err = run_bounded([*self.command, "data-updates", period], bound)
+            if rc != 0 or (deadline is not None and deadline.expired()):
+                return None
+            data = json.loads(out)
+            return data if isinstance(data, dict) else None
         except Exception:
             return None
 
@@ -312,6 +334,42 @@ class FulcraFileTransport:
                     "sources": list(sources or []),
                     "note": rec.get("note"),
                 })
+            return parsed
+        except Exception:
+            return None
+
+    def records_cursor(
+        self, data_type: str, since: Optional[str], *,
+        deadline: Optional[budget_mod.Deadline] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Materialize one counted record channel inside the detector deadline.
+
+        This is intentionally one cursor/window read, not a count-to-identity
+        conversion.  A missing prior boundary is unprovable and therefore
+        UNKNOWN (``None``); the detector's full recovery owns that outcome.
+        """
+        if not isinstance(data_type, str) or not data_type.strip() or not since:
+            return None
+        if deadline is not None and deadline.expired():
+            return None
+        bound = self.timeout if deadline is None else deadline.remaining()
+        if bound is not None and bound <= 0.0:
+            return None
+        until = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            rc, out, _err = run_bounded(
+                [*self.command, "get-records", data_type, since, until], bound,
+            )
+            if rc != 0 or (deadline is not None and deadline.expired()):
+                return None
+            # The current CLI's JSONL response has no server-attested cursor
+            # boundary. It is therefore not evidence the detector may trust.
+            # Future endpoint envelopes must carry all three fields below.
+            parsed = json.loads(out)
+            if not isinstance(parsed, dict):
+                return None
+            if not {"after", "through", "records"}.issubset(parsed):
+                return None
             return parsed
         except Exception:
             return None
@@ -604,7 +662,9 @@ class FulcraFileTransport:
         content, _ = self.read_classified(path)
         return content
 
-    def read_classified(self, path: str) -> tuple[Optional[str], str]:
+    def read_classified(
+        self, path: str, *, deadline: Optional[budget_mod.Deadline] = None,
+    ) -> tuple[Optional[str], str]:
         # contract: (content, "ok") | (None, "absent") | (None, "error").
         # "absent" is claimed ONLY on the CLI's affirmative not-found message;
         # every other failure (timeout, exec, network, auth) is "error" so a
@@ -619,9 +679,21 @@ class FulcraFileTransport:
         # HTTP token + resolve + download, then the CLI fallback. Each phase
         # receives only what is LEFT, so ``timeout`` bounds the OPERATION rather
         # than bounding each leg separately and multiplying.
-        op = budget_mod.Deadline.open(self.timeout)
+        local = budget_mod.Deadline.open(self.timeout)
+        if deadline is None:
+            op = local
+        else:
+            instants = [
+                instant for instant in (local.instant, deadline.instant)
+                if instant is not None
+            ]
+            op = budget_mod.Deadline(min(instants) if instants else None)
+        if op.expired():
+            return None, "error"
         if self._http_enabled():
             content, state = self._http_read(path, deadline=op)
+            if op.expired():
+                return None, "error"
             if state in ("ok", "absent"):
                 return content, state
         left = op.remaining()
@@ -635,6 +707,8 @@ class FulcraFileTransport:
         try:
             cp = self._run(["download", path, "-"], timeout=left)
         except TransportError:
+            return None, "error"
+        if op.expired():
             return None, "error"
         if cp.returncode != 0:
             # Claim "absent" ONLY on the CLI's exact not-found signature —

@@ -20,6 +20,7 @@ from typing import Any, NamedTuple, Optional
 from . import __version__, aggregate, config, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
+from .change_detection import ChangeBatch, ChangeDetector
 from .log import get_logger
 from .roles import age_hours
 from .tasks import agent_key
@@ -1031,7 +1032,8 @@ def _collapse_feed_changes(
 
 
 def _feed_task_delta(
-    transport: Any, team: str, *, cursor: dict[str, Any], now: str, log: Any
+    transport: Any, team: str, *, cursor: dict[str, Any], now: str, log: Any,
+    changes: list[dict[str, Any]],
 ) -> Optional[tuple[dict[str, str], set, dict[str, str], list[dict[str, Any]]]]:
     """What changed under ``task/`` since the cursor, via the data-updates feed.
 
@@ -1047,9 +1049,6 @@ def _feed_task_delta(
     an entry already folded in a prior overlapping window. Every doubt (no feed
     support, feed error, an entry we cannot positively parse, an unparseable
     upload time) returns None — never a false "nothing changed"."""
-    updates_fn = getattr(transport, "updates", None)
-    if updates_fn is None:
-        return None
     start = _parse_iso_utc(cursor.get("watermark"))
     end = _parse_iso_utc(now)
     if start is None or end is None:
@@ -1058,16 +1057,6 @@ def _feed_task_delta(
     # An anchor so old the query would 500 on an over-wide window is unusable —
     # the same ceiling the ack change-query respects. Skip to the full scan.
     if span <= 0 or span > ACKS_ANCHOR_MAX_HOURS * 3600 + FAST_PATH_SKEW_MARGIN_SECONDS:
-        return None
-    period = f"{int(span)} seconds"
-    try:
-        try:
-            changes = updates_fn(period, team=team)
-        except TypeError:
-            changes = updates_fn(period)   # pre-team-kwarg duck-typed transports
-    except Exception as e:
-        log.warn("reconcile: data-updates delta raised; full scan",
-                 team=team, error=str(e))
         return None
     if not isinstance(changes, list):
         return None
@@ -1129,6 +1118,27 @@ def _feed_task_delta(
         else:  # archived | deleted -> the row goes away
             deleted.add(slug)
     return changed, deleted, new_processed, changes
+
+
+def _batch_feed_rows(batch: ChangeBatch) -> list[dict[str, Any]]:
+    """Adapt one sealed batch to E1's lifecycle collapse shape without I/O."""
+    rows: list[dict[str, Any]] = []
+    for change in batch.changes:
+        if change.record is not None:
+            continue
+        row: dict[str, Any] = {
+            "path": change.path, "state": change.state,
+            "update_id": change.update_id,
+            "uploaded_at": None, "archived_at": None, "deleted_at": None,
+        }
+        if change.state == "uploaded":
+            row["uploaded_at"] = change.at
+        elif change.state == "archived":
+            row["archived_at"] = change.at
+        elif change.state == "deleted":
+            row["deleted_at"] = change.at
+        rows.append(row)
+    return rows
 
 
 def _project_task_row(
@@ -1306,59 +1316,91 @@ def reconcile(
     stale = agg_age is None or agg_age < 0 or agg_age > MAX_FAST_PATH_HOURS
     due_for_full = prior_cursor is None or rec_streak + 1 >= full_every or stale
 
-    # Fast path — nothing relevant changed — only when NOT owed a full/drift pass.
+    # Unit 3's detection authority: ordinary reconciliation consumes ONE
+    # normalized envelope before deciding whether the task fold may be
+    # incremental.  Any doubt stays in the batch and forces the named full scan;
+    # no later branch is permitted to re-query the raw feed.
+    detector_deadline = Deadline.open(getattr(transport, "timeout", 30.0))
+    batch = ChangeDetector(transport).poll(
+        team, prior_cursor.get("watermark") if prior_cursor else None,
+        detector_deadline,
+    )
+    # Fast path — the one normalized batch positively proves NOTHING changed —
+    # only when NOT owed a full/drift pass.
     # It still advances the E1 cursor after independently confirming the feed
     # delta: unrelated events must not leave an old watermark to grow forever.
-    if not due_for_full and _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
+    fast_namespaces = {
+        "tasks", "directives", "reviews", "forge", "acknowledgments_responses",
+    }
+    ack_settled = (prior_agg or {}).get(ACKS_ANCHOR_KEY) == (prior_agg or {}).get("generated_at")
+    projections_owed = projection_mod.sections_owing_pass(prior_agg)
+    if not ack_settled:
+        log.info("fast path declined: ack fold owes a pass (anchor behind generated_at)",
+                 team=team, ack_anchor=(prior_agg or {}).get(ACKS_ANCHOR_KEY),
+                 generated_at=(prior_agg or {}).get("generated_at"))
+    if projections_owed:
+        log.info("fast path declined: projection owes a pass",
+                 team=team, sections=projections_owed)
+    if (not due_for_full and batch.trusted and ack_settled and not projections_owed and not any(
+            change.namespace in fast_namespaces for change in batch.changes)):
         fast_delta = _feed_task_delta(
-            transport, team, cursor=prior_cursor, now=now, log=log)
-        if fast_delta is not None:
-            fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
-            if not fast_changed and not fast_deleted:
-                fast_agg = dict(prior_agg or {})
-                fast_agg[RECONCILE_CURSOR_KEY] = {
-                    "watermark": now,
-                    "processed": fast_processed,
-                    "streak": rec_streak + 1,
-                }
-                if not transport.write(
-                        summaries_path(team), jsonutil.dumps(fast_agg)):
-                    result = {
-                        "degraded": True,
-                        "reason": "reconcile cursor write failed",
-                        "tasks": len(prior_rows),
-                    }
-                    _write_health_shard(
-                        transport, team, host=host, now=now, result=result, log=log)
-                    return result
-                # NOTE: warnings from the prior aggregate are not resurfaced here;
-                # they reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
+            transport, team, cursor=prior_cursor, now=now, log=log,
+            changes=[],
+        )
+    else:
+        fast_delta = None
+    if fast_delta is not None:
+        fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
+        if not fast_changed and not fast_deleted:
+            fast_agg = dict(prior_agg or {})
+            fast_agg[RECONCILE_CURSOR_KEY] = {
+                "watermark": now,
+                "processed": fast_processed,
+                "streak": rec_streak + 1,
+            }
+            if not transport.write(
+                    summaries_path(team), jsonutil.dumps(fast_agg)):
                 result = {
+                    "degraded": True,
+                    "reason": "reconcile cursor write failed",
                     "tasks": len(prior_rows),
-                    "parsed": 0,
-                    "reused": len(prior_rows),
-                    "transitions": 0,
-                    "warnings": [],
-                    "fast_path": True,
                 }
                 _write_health_shard(
                     transport, team, host=host, now=now, result=result, log=log)
-                log.info(
-                    "reconciled (fast path)", team=team, tasks=len(prior_rows))
                 return result
+            # NOTE: warnings from the prior aggregate are not resurfaced here;
+            # they reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
+            result = {
+                "tasks": len(prior_rows),
+                "parsed": 0,
+                "reused": len(prior_rows),
+                "transitions": 0,
+                "warnings": [],
+                "fast_path": True,
+            }
+            _write_health_shard(
+                transport, team, host=host, now=now, result=result, log=log)
+            log.info(
+                "reconciled (fast path)", team=team, tasks=len(prior_rows))
+            return result
 
     # Try the feed-delta fold when a cursor is usable; None at any step is doubt.
     inc: Optional[tuple] = None
     projection_changes: Optional[list[dict[str, Any]]] = None
-    if prior_cursor is not None:
-        delta = _feed_task_delta(transport, team, cursor=prior_cursor, now=now, log=log)
-        if delta is not None:
-            changed, deleted, new_processed, projection_changes = delta
-            folded = _incremental_reconcile_rows(
-                transport, team, prior_by_name,
-                changed=changed, deleted=deleted, log=log)
-            if folded is not None:
-                inc = (*folded, new_processed)  # (rows, parsed, reused, warnings, processed)
+    if prior_cursor is not None and batch.trusted:
+        delta = _feed_task_delta(
+            transport, team, cursor=prior_cursor, now=now, log=log,
+            changes=_batch_feed_rows(batch),
+        )
+    else:
+        delta = None
+    if delta is not None:
+        changed, deleted, new_processed, projection_changes = delta
+        folded = _incremental_reconcile_rows(
+            transport, team, prior_by_name,
+            changed=changed, deleted=deleted, log=log)
+        if folded is not None:
+            inc = (*folded, new_processed)  # (rows, parsed, reused, warnings, processed)
 
     incremental = False
     drift_detected = False
@@ -1382,7 +1424,15 @@ def reconcile(
             return {"degraded": True, "reason": str(e), "tasks": 0}
         rows, warnings, reused, parsed = _full_scan_task_rows(
             transport, team, listing, prior_by_name, last_reconcile_iso, log)
-        new_cursor = {"watermark": now, "processed": {}, "streak": 0}
+        if batch.trusted and (prior_cursor is None or not stale):
+            new_cursor = {"watermark": now, "processed": {}, "streak": 0}
+        elif prior_cursor is not None:
+            # The listing repairs canonical rows but says nothing about whether
+            # this feed window was complete. Keep the old frontier so the next
+            # trusted detector pass re-covers the doubtful interval.
+            new_cursor = dict(prior_cursor)
+        else:
+            new_cursor = {"watermark": None, "processed": {}, "streak": 0}
         if inc is not None:
             diverged = _rows_diverged(inc[0], rows)
             if diverged:

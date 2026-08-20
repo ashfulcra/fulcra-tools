@@ -24,6 +24,9 @@ from coord_engine.transport import TransportError
 from test_reconcile import RECENT_MTIME
 
 
+COORDINATION_TYPE = "MomentAnnotation/test-reconcile"
+
+
 class CountingTransport:
     """In-memory store that counts reads/lists and serves a normalized feed.
 
@@ -39,7 +42,8 @@ class CountingTransport:
         self.reads: list[str] = []
         self.lists: list[str] = []
         self.fail_list = False
-        self._feed = None  # None => no updates() support at all
+        self._feed = []  # None => an unavailable detector envelope
+        self.feed_envelope_calls = 0
 
     # --- seeding -----------------------------------------------------------
     def put(self, path, content, mtime=None, size=None):
@@ -74,6 +78,21 @@ class CountingTransport:
                 continue
             out.append(e)
         return out
+
+    def data_updates(self, since, *, deadline=None):
+        """The Unit-3 normalized detector seam; one call returns one envelope."""
+        self.feed_envelope_calls += 1
+        if self._feed is None:
+            return None
+        return {
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": list(self._feed),
+        }
+
+    def read_classified(self, path, *, deadline=None):
+        if path == "team/r/_coord/bus-v3/records.json":
+            return json.dumps({"data_type": COORDINATION_TYPE}), "ok"
+        return None, "absent"
 
     def list_dir(self, prefix):
         self.lists.append(prefix)
@@ -113,7 +132,8 @@ def _task(title, status, priority="P2"):
 
 
 def _up(path, state="uploaded", at="2026-07-01T12:15:30Z"):
-    return {"path": path, "state": state, "uploaded_at": at}
+    return {"path": path, "state": state, "uploaded_at": at,
+            "update_id": f"fixture:{path}:{state}:{at}"}
 
 
 def _run(t, now):
@@ -142,6 +162,40 @@ def test_feed_unavailable_falls_back_to_full_pass():
     assert not res.get("incremental")           # fell back to full scan
     assert t.lists                               # a full listing was taken
     assert {r["name"] for r in _agg(t)["rows"]} == {"a", "b"}
+
+
+def test_untrusted_batch_full_recovery_does_not_advance_the_watermark():
+    """A recovery listing repairs rows but cannot claim feed completeness."""
+    t = CountingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+    before, reason = reconcile._parse_reconcile_cursor(
+        _agg(t)[reconcile.RECONCILE_CURSOR_KEY])
+    assert reason is None and before is not None
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    t.set_feed(None)
+    _run(t, "2026-07-01T12:30:00Z")
+    after, reason = reconcile._parse_reconcile_cursor(
+        _agg(t)[reconcile.RECONCILE_CURSOR_KEY])
+    assert reason is None and after is not None
+    assert after["watermark"] == before["watermark"]
+    assert {row["name"] for row in _agg(t)["rows"]} == {"a", "b"}
+
+
+def test_stale_cursor_drift_recovery_keeps_the_existing_feed_frontier():
+    """A periodic listing detects drift but cannot prove retained feed history."""
+    t = CountingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+    before, _ = reconcile._parse_reconcile_cursor(_agg(t)[reconcile.RECONCILE_CURSOR_KEY])
+    t.put("team/r/task/a.md", _task("Alpha", "done"),
+          mtime="2026-07-01 06:30PM UTC")
+    t.set_feed([])
+    result = _run(t, "2026-07-01T19:00:00Z")
+    after, _ = reconcile._parse_reconcile_cursor(_agg(t)[reconcile.RECONCILE_CURSOR_KEY])
+    assert result["incremental"] is not True
+    assert after["watermark"] == before["watermark"]
+    assert _rows_by_name(_agg(t))["a"]["status"] == "done"
 
 
 # --- corrupt cursor ⇒ full pass --------------------------------------------
@@ -231,6 +285,35 @@ def test_incremental_reads_only_changed_shards():
     assert "team/r/task/" not in t.lists
     assert _rows_by_name(_agg(t))["b"]["status"] == "done"
     assert res["parsed"] == 1 and res["reused"] == 2
+
+
+def test_incremental_discovery_consumes_one_normalized_batch():
+    """A second raw feed query could observe a different world and lose work."""
+    t = CountingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+    t.put("team/r/task/a.md", _task("Alpha", "done"),
+          mtime="2026-07-01 12:15PM UTC")
+    t.set_feed([_up("team/r/task/a.md")])
+    t.feed_envelope_calls = 0
+    result = _run(t, "2026-07-01T12:30:00Z")
+    assert result["incremental"] is True
+    assert t.feed_envelope_calls == 1
+
+
+def test_reconcile_never_bypasses_the_detector_with_a_legacy_raw_feed():
+    """A transport without data_updates must recover by listing, not call updates."""
+    t = CountingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _run(t, "2026-07-01T12:00:00Z")
+    t.data_updates = None
+    calls = []
+    t.updates = lambda *_args, **_kwargs: calls.append("updates") or []
+    t.lists.clear()
+    result = _run(t, "2026-07-01T12:30:00Z")
+    assert result["incremental"] is not True
+    assert calls == []
+    assert "team/r/task/" in t.lists
 
 
 # --- a deleted shard drops its row without a full listing ------------------
