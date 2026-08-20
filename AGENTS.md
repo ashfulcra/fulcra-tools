@@ -611,9 +611,11 @@ it (not on PyPI).
     impossible `settled` combinations are malformed — / unrecognized). A projection that cannot be
     served falls back to the full raw scan LOUDLY; it is never silently served as current. Reconcile
     publishes review + forge as one complete generation: a budget-cut or failed build refuses the
-    `summaries.json` write and leaves the last complete aggregate intact. A publication-generation
-    fence binds every projection section to its writer pass, so a preserving older writer that
-    carries the fence but rebuilds sections without matching bindings is rejected by newer readers.
+    compatibility-cache write and leaves the last complete generation current. The publication authority
+    is `_coord/projections/current.json`: a builder write/read-verifies immutable
+    `generations/<digest>.json` first, then writes and read-verifies the digest-bound manifest. Required
+    `UNKNOWN`/incomplete sections stay recovery progress and never advance current. `summaries.json`
+    remains reader compatibility during migration; new readers validate the current generation before use.
     **The
     caller's OWN head is feed-gated too:** with a clean `data-updates` window, only caller-owned slugs
     named changed since the projection anchor are raw-tallied; unchanged caller-owned slugs are served

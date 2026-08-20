@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from coord_engine import aggregate as aggregate_mod
+from coord_engine import aggregate as aggregate_mod, generation
 from coord_engine import annotate, reconcile
 from coord_engine.transport import TransportError
 
@@ -107,6 +107,25 @@ def test_reconcile_builds_index_and_aggregate():
     assert agg["team"] == "r"
     assert {r["name"] for r in agg["rows"]} == {"a", "b"}
     assert raw == json.dumps(agg, separators=(",", ":"))
+
+
+def test_reconcile_seals_a_verified_generation_before_advancing_current(monkeypatch):
+    """The compatibility aggregate may be written only after the sealed,
+    digest-addressed generation is readable through its manifest."""
+    from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    batch = ChangeBatch((), {name: Coverage.CLEAR for name in NAMESPACES}, True)
+    monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: batch)
+
+    result = _run(t)
+
+    assert result["degraded"] is False
+    current = generation.load_current(t, "r")
+    assert current is not None
+    assert current.id in t.store[
+        "team/r/_coord/projections/current.json"]
 
 
 def test_reconcile_skips_index_and_non_task_docs():

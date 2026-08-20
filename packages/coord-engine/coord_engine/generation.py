@@ -1,0 +1,230 @@
+"""Immutable, digest-addressed projection generations.
+
+The current pointer is deliberately tiny.  A builder first seals every
+required section into one deterministic JSON document, writes and reads that
+document back, and only then advances ``current.json``.  Progress that cannot
+make that proof remains outside this module's public paths.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from hashlib import sha256
+import json
+from typing import Any, Mapping, Optional
+
+
+GENERATION_SCHEMA = "coord.projections.generation.v1"
+REQUIRED_SECTIONS = (
+    "tasks", "reviews", "forge", "roles", "presence", "acknowledgments",
+    "responses",
+)
+COMPLETE_STATES = frozenset(("CLEAR", "DATA"))
+
+
+def _json(value: Any) -> str:
+    """The one compact, key-sorted encoding used for all generation bytes."""
+    return json.dumps(value, separators=(",", ":"), sort_keys=True,
+                      ensure_ascii=False, default=_json_default)
+
+
+def _json_default(value: Any) -> Any:
+    # ChangeBatch deliberately freezes mappings with MappingProxyType and uses
+    # Enums for coverage.  Both are semantic values, not builder identity.
+    if isinstance(value, Mapping):
+        return dict(value)
+    raw = getattr(value, "value", None)
+    if isinstance(raw, str):
+        return raw
+    raise TypeError(f"not generation-json: {type(value).__name__}")
+
+
+def _digest(value: Any) -> str:
+    return sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def generation_path(team: str, generation_id: str) -> str:
+    return f"team/{team}/_coord/projections/generations/{generation_id}.json"
+
+
+def current_path(team: str) -> str:
+    return f"team/{team}/_coord/projections/current.json"
+
+
+@dataclass(frozen=True)
+class SectionResult:
+    """Pure output of one independently budgeted projection section."""
+
+    name: str
+    state: str
+    value: Mapping[str, Any]
+    schema: str = "coord.projection-section.v1"
+
+    @property
+    def complete(self) -> bool:
+        return self.state in COMPLETE_STATES
+
+    def document(self) -> dict[str, Any]:
+        return {"schema": self.schema, "state": self.state, "value": dict(self.value)}
+
+
+@dataclass(frozen=True)
+class Generation:
+    id: str
+    bytes: str
+    content_digest: str
+    source_watermark: str
+    schemas: dict[str, str]
+    engine_version: str
+    complete: bool
+    incomplete: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PublishOutcome:
+    published: bool
+    reason: str = ""
+
+
+def _batch_digest(batch: Any) -> str:
+    """Digest the sealed detector output without host/session observations."""
+    changes = []
+    for change in getattr(batch, "changes", ()):
+        changes.append({
+            "update_id": change.update_id, "path": change.path,
+            "state": change.state, "at": change.at,
+            "namespace": change.namespace, "record": change.record,
+        })
+    coverage = dict(getattr(batch, "coverage", {}))
+    return _digest({"trusted": bool(getattr(batch, "trusted", False)),
+                    "changes": sorted(changes, key=lambda row: (
+                        row["update_id"], row["path"], row["state"], row["at"])),
+                    "coverage": coverage})
+
+
+def build_generation(
+    *, prior_generation: Optional[str], source_watermark: str, batch: Any,
+    sections: Mapping[str, SectionResult], engine_version: str = "unknown",
+    schema_version: str = GENERATION_SCHEMA,
+) -> Generation:
+    """Seal a generation.  This is pure: identical inputs mean identical bytes."""
+    incomplete = tuple(name for name in REQUIRED_SECTIONS
+                       if name not in sections or not sections[name].complete)
+    schemas = {name: sections[name].schema for name in REQUIRED_SECTIONS
+               if name in sections}
+    normalized_updates = _batch_digest(batch)
+    identity = {
+        "prior_generation_id": prior_generation,
+        "source_watermark": source_watermark,
+        "normalized_update_digest": normalized_updates,
+        "schema_version": schema_version,
+        "engine_version": engine_version,
+    }
+    generation_id = _digest(identity)
+    doc = {
+        "schema": schema_version,
+        "id": generation_id,
+        "prior_generation_id": prior_generation,
+        "source_watermark": source_watermark,
+        "normalized_update_digest": normalized_updates,
+        "engine_version": engine_version,
+        "sections": {name: sections[name].document() for name in REQUIRED_SECTIONS
+                     if name in sections},
+    }
+    # The ID above names the identity inputs.  content_digest names the exact
+    # immutable bytes readers will verify through current.json.
+    raw = _json(doc)
+    return Generation(generation_id, raw, sha256(raw.encode("utf-8")).hexdigest(),
+                      source_watermark, schemas, engine_version, not incomplete,
+                      incomplete)
+
+
+def _valid_generation(raw: Any, expected: Generation) -> bool:
+    if not isinstance(raw, str) or raw != expected.bytes:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return (parsed.get("id") == expected.id
+            and sha256(raw.encode("utf-8")).hexdigest() == expected.content_digest)
+
+
+def _read_manifest(transport: Any, team: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    raw = transport.read(current_path(team))
+    if raw is None:
+        return None, None
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, raw
+    if not isinstance(doc, dict):
+        return None, raw
+    required = {"generation_id", "source_watermark", "schemas", "engine_version", "content_digest"}
+    if set(doc) != required or not isinstance(doc["generation_id"], str):
+        return None, raw
+    return doc, raw
+
+
+def load_current(transport: Any, team: str) -> Optional[Generation]:
+    """Read and validate the current pointer plus its immutable target."""
+    manifest, _raw = _read_manifest(transport, team)
+    if manifest is None:
+        return None
+    raw = transport.read(generation_path(team, manifest["generation_id"]))
+    if not isinstance(raw, str) or sha256(raw.encode("utf-8")).hexdigest() != manifest["content_digest"]:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if (not isinstance(doc, dict) or doc.get("id") != manifest["generation_id"]
+            or doc.get("source_watermark") != manifest["source_watermark"]):
+        return None
+    return Generation(doc["id"], raw, manifest["content_digest"],
+                      manifest["source_watermark"], dict(manifest["schemas"]),
+                      manifest["engine_version"], True, ())
+
+
+def publish(transport: Any, team: str, generation: Generation, *,
+            fail_before_manifest: bool = False) -> PublishOutcome:
+    """Write/read-verify generation first, then atomically fence current.json.
+
+    A transport exposing ``write_if_unchanged`` gets a compare-and-swap fence.
+    Older transports retain a double-read fence: this cannot claim freshness,
+    but it still refuses a current pointer that changed before publication.
+    """
+    if not generation.complete:
+        return PublishOutcome(False, "incomplete required section(s): " + ", ".join(generation.incomplete))
+    path = generation_path(team, generation.id)
+    existing = transport.read(path)
+    if existing is None:
+        if not transport.write(path, generation.bytes):
+            return PublishOutcome(False, "generation write failed")
+    elif existing != generation.bytes:
+        return PublishOutcome(False, "generation id collision")
+    if not _valid_generation(transport.read(path), generation):
+        return PublishOutcome(False, "generation read verification failed")
+    if fail_before_manifest:
+        return PublishOutcome(False, "interrupted after generation write")
+
+    _prior, prior_raw = _read_manifest(transport, team)
+    manifest = _json({
+        "generation_id": generation.id,
+        "source_watermark": generation.source_watermark,
+        "schemas": generation.schemas,
+        "engine_version": generation.engine_version,
+        "content_digest": generation.content_digest,
+    })
+    conditional = getattr(transport, "write_if_unchanged", None)
+    if callable(conditional):
+        if not conditional(current_path(team), manifest, prior_raw):
+            return PublishOutcome(False, "current manifest changed")
+    else:
+        if transport.read(current_path(team)) != prior_raw:
+            return PublishOutcome(False, "current manifest changed")
+        if not transport.write(current_path(team), manifest):
+            return PublishOutcome(False, "current manifest write failed")
+    if transport.read(current_path(team)) != manifest:
+        return PublishOutcome(False, "current manifest read verification failed")
+    return PublishOutcome(True)

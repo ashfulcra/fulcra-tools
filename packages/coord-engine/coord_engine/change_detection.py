@@ -114,7 +114,9 @@ def _namespace(team: str, path: str) -> Optional[str]:
         return "health"
     if rest.startswith("member/"):
         return "member_state"
-    if rest in ("_coord/summaries.json", "_coord/projection-build-progress.json") or rest.startswith("_coord/projection/"):
+    if (rest in ("_coord/summaries.json", "_coord/projection-build-progress.json")
+            or rest.startswith("_coord/projection/")
+            or rest.startswith("_coord/projections/")):
         return "projection_metadata"
     return None
 
