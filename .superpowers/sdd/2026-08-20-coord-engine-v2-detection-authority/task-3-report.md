@@ -320,3 +320,117 @@ Implementation: `2dc02705` (`coord-engine: honor live data type counts`).
   cursor envelope. A nonzero live coordination count therefore correctly falls
   back to `UNKNOWN` after its one materialization attempt until the transport
   can prove `{after, through, records}`.
+
+## External Fix Round 4
+
+### Status
+
+Resolved canonical coordination-channel authority and detector-deadline
+enforcement. Detection can no longer be redirected by a host-local
+`COORD_RECORDS_TYPE`, and the stored-authority read plus retry cannot escape the
+`ChangeDetector.poll` deadline.
+
+### Covering tests
+
+- `test_host_override_cannot_redirect_detection_from_canonical_bus_authority`
+- `test_authority_lookup_stops_at_detector_deadline_without_retry`
+- `test_deadline_shorter_than_backoff_does_not_sleep_or_retry`
+- `test_read_classified_does_not_start_past_supplied_deadline`
+
+### Red evidence
+
+Before the production edits:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_host_override_cannot_redirect_detection_from_canonical_bus_authority packages/coord-engine/tests/test_v2_change_detection.py::test_authority_lookup_stops_at_detector_deadline_without_retry -q
+```
+
+Output:
+
+```text
+FAILED ...::test_host_override_cannot_redirect_detection_from_canonical_bus_authority
+assert 0 == 1
+FAILED ...::test_authority_lookup_stops_at_detector_deadline_without_retry
+assert 2 == 1
+2 failed in 0.04s
+```
+
+The retry backoff regression was also observed red against the unbounded retry
+branch (the test was subsequently renamed for precision):
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_read_retry.py::test_expired_deadline_does_not_pay_backoff_or_retry -q
+```
+
+Output:
+
+```text
+FAILED ...::test_expired_deadline_does_not_pay_backoff_or_retry
+assert [0.05] == []
+1 failed in 0.03s
+```
+
+The real transport bound was mutation-checked by temporarily restoring its
+independent timeout:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_transport_parse.py::test_read_classified_does_not_start_past_supplied_deadline -q
+```
+
+Output:
+
+```text
+FAILED ...::test_read_classified_does_not_start_past_supplied_deadline
+assert ('{"data_type":"coordination"}', 'ok') == (None, 'error')
+1 failed in 0.02s
+```
+
+### Implementation
+
+- Added `records.load_canonical_config_classified`, a narrow read-only seam
+  that parses the stored `_coord/bus-v3/records.json` authority without applying
+  writer/test environment overrides.
+- `ChangeDetector` resolves the `data_types` coordination count only through
+  that stored authority. The existing exact-count, one-cursor-call, attested
+  boundary, immutable identity, deduplication, and fail-closed behavior remain
+  unchanged.
+- Threaded the detector's `Deadline` into classified authority reads. The real
+  transport uses the earlier of its local timeout and the supplied deadline,
+  and the retry helper checks the same deadline before/after reads and before/
+  after backoff. Expiry returns classified `error`, which detection seals as
+  `UNKNOWN`.
+- Updated the coord-engine README to distinguish stored detection authority
+  from the host-local record writer/test override. `AGENTS.md` needed no change:
+  its existing canonical-authority doctrine already states the invariant.
+
+### Green evidence
+
+- New regressions:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_host_override_cannot_redirect_detection_from_canonical_bus_authority packages/coord-engine/tests/test_v2_change_detection.py::test_authority_lookup_stops_at_detector_deadline_without_retry packages/coord-engine/tests/test_read_retry.py::test_deadline_shorter_than_backoff_does_not_sleep_or_retry packages/coord-engine/tests/test_transport_parse.py::test_read_classified_does_not_start_past_supplied_deadline -q`
+  → `4 passed in 0.01s`.
+- Focused Unit 3/retry/transport/reconcile command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_read_retry.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_reconcile.py -q`
+  → `123 passed in 0.23s`.
+- Full command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests -q`
+  → `2478 passed, 8 skipped in 84.99s (0:01:24)`.
+- `git diff --check` exited 0.
+
+### Commit SHA
+
+Implementation: `2218bac6` (`coord-engine: bind detection to canonical authority`).
+
+### Self-review
+
+- Verified a stored nonzero canonical count plus a present zero-count override
+  still makes exactly one cursor call on the canonical channel; the override is
+  neither selected nor materialized.
+- Verified absent, malformed, unreadable, or over-deadline stored authority is
+  `UNKNOWN`; no environment fallback is available on the detector seam and no
+  watermark can advance on that doubt.
+- Verified the ordinary writer-facing `load_config_classified` override behavior
+  is untouched, and no Bus state, review state, push, or merge was performed.
+
+### Concerns
+
+- None known.
