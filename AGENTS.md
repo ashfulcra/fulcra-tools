@@ -269,11 +269,13 @@ under `skills/`, each package with its own README, build, and tests.
   argument → `FULCRA_COORD_AGENT` → the per-cwd persisted
   `identities/<realpath-hash>.json` state entry → sanitized host. In
   particular, never let a host-derived id replace an exported session id: two
-  sessions on one host must remain separate actors. Canonical directory reads
-  go through `canonical_read`; a successful empty listing is `EMPTY`, an
-  explicit lifecycle deletion is `TOMBSTONED`, and unreadable or ambiguous
-  evidence is `UNKNOWN` rather than absence. An unrecognised input shape is
-  `UNSUPPORTED`, not a clean result.
+  sessions on one host must remain separate actors. An unreadable persisted
+  identity fails closed rather than falling through to host; an absent file is
+  the only state that permits that fallback. Canonical directory reads go
+  through `canonical_read`; a successful empty listing is `EMPTY`, a
+  `data-updates` lifecycle deletion is `TOMBSTONED`, and unreadable or
+  ambiguous evidence is `UNKNOWN` rather than absence. An unrecognised input
+  shape (including a listed directory) is `UNSUPPORTED`, not a clean result.
 
 ## Coordinate on the bus
 

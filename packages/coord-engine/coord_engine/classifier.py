@@ -25,10 +25,23 @@ class CanonicalState(str, Enum):
     UNSUPPORTED = "UNSUPPORTED"
 
 
+class PersistedIdentityState(str, Enum):
+    PRESENT = "PRESENT"
+    ABSENT = "ABSENT"
+    UNKNOWN = "UNKNOWN"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
 @dataclass(frozen=True)
 class CanonicalRead:
     state: CanonicalState
     documents: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PersistedIdentity:
+    state: PersistedIdentityState
+    identity: Optional[str] = None
 
 
 def sanitize_hostname(raw: str) -> tuple[str, bool]:
@@ -46,7 +59,10 @@ def resolve_identity(
     explicit: Optional[str] = None,
     *,
     environ: Optional[Mapping[str, str]] = None,
-    persisted: Union[Optional[str], Callable[[], Optional[str]]] = None,
+    persisted: Union[
+        Optional[str], PersistedIdentity,
+        Callable[[], Union[Optional[str], PersistedIdentity]],
+    ] = None,
     hostname: Optional[Callable[[], str]] = None,
     on_hostname_rewritten: Optional[Callable[[str, str], None]] = None,
 ) -> Optional[str]:
@@ -62,6 +78,18 @@ def resolve_identity(
     if declared:
         return declared
     saved = persisted() if callable(persisted) else persisted
+    if isinstance(saved, PersistedIdentity):
+        if saved.state is PersistedIdentityState.UNKNOWN:
+            raise RuntimeError(
+                "cannot resolve identity: persisted identity is unreadable; "
+                "set FULCRA_COORD_AGENT explicitly before writing to the coordination store"
+            )
+        if saved.state is PersistedIdentityState.UNSUPPORTED:
+            raise RuntimeError(
+                "cannot resolve identity: persisted identity has an unsupported shape; "
+                "set FULCRA_COORD_AGENT explicitly before writing to the coordination store"
+            )
+        saved = saved.identity
     if saved:
         return saved
     if hostname is None:
@@ -79,7 +107,13 @@ def resolve_identity(
     return f"coord-reconcile:{safe}"
 
 
-def canonical_read(transport: Any, prefix: str) -> CanonicalRead:
+def canonical_read(
+    transport: Any,
+    prefix: str,
+    *,
+    lifecycle_events: Optional[list[Any]] = None,
+    lifecycle_requested: bool = False,
+) -> CanonicalRead:
     """Read a canonical directory without collapsing distinct negative facts.
 
     A listing is positive evidence of empty only when it completed.  A listed
@@ -88,6 +122,19 @@ def canonical_read(transport: Any, prefix: str) -> CanonicalRead:
     only when their explicit state proves deletion/archive, and malformed entry
     shapes remain unsupported rather than becoming an empty listing.
     """
+    tombstones = 0
+    if lifecycle_requested:
+        if not isinstance(lifecycle_events, list):
+            return CanonicalRead(CanonicalState.UNKNOWN)
+        for event in lifecycle_events:
+            if not isinstance(event, dict):
+                return CanonicalRead(CanonicalState.UNKNOWN)
+            path, state = event.get("path"), event.get("state")
+            if not isinstance(path, str) or not isinstance(state, str):
+                return CanonicalRead(CanonicalState.UNKNOWN)
+            if path.startswith(prefix) and state in ("archived", "deleted"):
+                tombstones += 1
+
     try:
         listing = transport.list_dir(prefix)
     except Exception:
@@ -95,21 +142,18 @@ def canonical_read(transport: Any, prefix: str) -> CanonicalRead:
     if not isinstance(listing, list):
         return CanonicalRead(CanonicalState.UNSUPPORTED)
     if not listing:
-        return CanonicalRead(CanonicalState.EMPTY)
+        return CanonicalRead(
+            CanonicalState.TOMBSTONED if tombstones else CanonicalState.EMPTY
+        )
 
     documents: list[str] = []
-    tombstones = 0
     for entry in listing:
         if not isinstance(entry, dict):
             return CanonicalRead(CanonicalState.UNSUPPORTED)
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
             return CanonicalRead(CanonicalState.UNSUPPORTED)
-        lifecycle = entry.get("state")
-        if lifecycle in ("archived", "deleted", "tombstoned"):
-            tombstones += 1
-            continue
-        if lifecycle is not None and lifecycle not in ("uploaded", "present"):
+        if entry.get("is_dir") is True:
             return CanonicalRead(CanonicalState.UNSUPPORTED)
         path = name if name.startswith(prefix) else prefix + name
         reader = getattr(transport, "read_classified", None)

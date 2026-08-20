@@ -25,6 +25,8 @@ import os
 from pathlib import Path
 from typing import Optional, Sequence
 
+from . import classifier
+
 
 def state_dir() -> Path:
     """Local coord state root, shared by nonce and per-cwd identity state."""
@@ -44,16 +46,22 @@ def identity_path(cwd: Optional[Path] = None) -> Path:
     return state_dir() / "identities" / f"{digest}.json"
 
 
-def persisted_identity(cwd: Optional[Path] = None) -> Optional[str]:
-    """Read a supported per-cwd identity, treating absent/corrupt state as unset."""
+def persisted_identity(cwd: Optional[Path] = None) -> classifier.PersistedIdentity:
+    """Classify per-cwd identity state without treating unreadable as absent."""
     try:
         value = json.loads(identity_path(cwd).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
+    except FileNotFoundError:
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.ABSENT)
+    except OSError:
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNKNOWN)
+    except (ValueError, TypeError):
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNSUPPORTED)
     if not isinstance(value, dict):
-        return None
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNSUPPORTED)
     identity = value.get("identity")
-    return identity if isinstance(identity, str) and identity else None
+    if not isinstance(identity, str) or not identity:
+        return classifier.PersistedIdentity(classifier.PersistedIdentityState.UNSUPPORTED)
+    return classifier.PersistedIdentity(classifier.PersistedIdentityState.PRESENT, identity)
 
 
 def _resolve_raw(
