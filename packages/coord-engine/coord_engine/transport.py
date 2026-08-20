@@ -662,7 +662,9 @@ class FulcraFileTransport:
         content, _ = self.read_classified(path)
         return content
 
-    def read_classified(self, path: str) -> tuple[Optional[str], str]:
+    def read_classified(
+        self, path: str, *, deadline: Optional[budget_mod.Deadline] = None,
+    ) -> tuple[Optional[str], str]:
         # contract: (content, "ok") | (None, "absent") | (None, "error").
         # "absent" is claimed ONLY on the CLI's affirmative not-found message;
         # every other failure (timeout, exec, network, auth) is "error" so a
@@ -677,9 +679,21 @@ class FulcraFileTransport:
         # HTTP token + resolve + download, then the CLI fallback. Each phase
         # receives only what is LEFT, so ``timeout`` bounds the OPERATION rather
         # than bounding each leg separately and multiplying.
-        op = budget_mod.Deadline.open(self.timeout)
+        local = budget_mod.Deadline.open(self.timeout)
+        if deadline is None:
+            op = local
+        else:
+            instants = [
+                instant for instant in (local.instant, deadline.instant)
+                if instant is not None
+            ]
+            op = budget_mod.Deadline(min(instants) if instants else None)
+        if op.expired():
+            return None, "error"
         if self._http_enabled():
             content, state = self._http_read(path, deadline=op)
+            if op.expired():
+                return None, "error"
             if state in ("ok", "absent"):
                 return content, state
         left = op.remaining()
@@ -693,6 +707,8 @@ class FulcraFileTransport:
         try:
             cp = self._run(["download", path, "-"], timeout=left)
         except TransportError:
+            return None, "error"
+        if op.expired():
             return None, "error"
         if cp.returncode != 0:
             # Claim "absent" ONLY on the CLI's exact not-found signature —

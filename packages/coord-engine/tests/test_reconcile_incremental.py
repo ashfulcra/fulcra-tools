@@ -89,7 +89,7 @@ class CountingTransport:
             "file_changes": list(self._feed),
         }
 
-    def read_classified(self, path):
+    def read_classified(self, path, *, deadline=None):
         if path == "team/r/_coord/bus-v3/records.json":
             return json.dumps({"data_type": COORDINATION_TYPE}), "ok"
         return None, "absent"

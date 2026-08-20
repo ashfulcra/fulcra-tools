@@ -28,6 +28,7 @@ import os
 import time
 from typing import Any, Callable, Optional
 
+from .budget import Deadline
 from .log import get_logger
 
 #: Backoff before the single retry, in milliseconds. Long enough to clear a
@@ -63,6 +64,7 @@ def read_classified_retrying(
         *,
         sleep: Callable[[float], None] = time.sleep,
         log: Any = None,
+        deadline: Optional[Deadline] = None,
 ) -> tuple[Optional[str], str]:
     """``reader(path)``, retried ONCE if and only if it returns ``error``.
 
@@ -78,15 +80,31 @@ def read_classified_retrying(
     Exceptions propagate untouched: today's callers wrap this call in their own
     ``except Exception: return None, "error"``, and swallowing a raise here
     would move that decision away from the caller that owns it.
+
+    When supplied, ``deadline`` owns the initial read, backoff, and retry as one
+    operation.  An answer that arrives after expiry is still ``error``.
     """
+    if deadline is not None and deadline.expired():
+        return None, "error"
     raw, status = reader(path)
+    if deadline is not None and deadline.expired():
+        return None, "error"
     if status != "error":
         return raw, status
     delay_ms = retry_delay_ms()
     if delay_ms <= 0:
         return raw, status
-    sleep(delay_ms / 1000.0)
+    delay = delay_ms / 1000.0
+    if deadline is not None:
+        remaining = deadline.remaining()
+        if remaining is not None and delay >= remaining:
+            return None, "error"
+    sleep(delay)
+    if deadline is not None and deadline.expired():
+        return None, "error"
     raw, status = reader(path)
+    if deadline is not None and deadline.expired():
+        return None, "error"
     if status != "error":
         # A breadcrumb, not an alarm: silence would hide a live race (the whole
         # point of item 4 of the directive is that we do not yet know whether

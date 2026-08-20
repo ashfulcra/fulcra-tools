@@ -38,7 +38,7 @@ class FeedTransport:
         self.record_calls += 1
         return self.record_rows
 
-    def read_classified(self, _path):
+    def read_classified(self, _path, *, deadline=None):
         return json.dumps({"data_type": self.data_type}), "ok"
 
 
@@ -178,6 +178,71 @@ def test_captured_data_types_materializes_the_configured_coordination_channel_on
     assert transport.record_calls == 1
     assert transport.record_channels == [(COORDINATION_TYPE, "2026-08-20T11:00:00Z")]
     assert batch.coverage["acknowledgments_responses"].value == "DATA"
+
+
+def test_host_override_cannot_redirect_detection_from_canonical_bus_authority(
+    monkeypatch,
+):
+    """A writer/test override must not hide work on the stored canonical queue."""
+    override_type = "MomentAnnotation/host-local-override"
+    monkeypatch.setenv("COORD_RECORDS_TYPE", override_type)
+    transport = ConfiguredFeedTransport(
+        {
+            "data_types": {COORDINATION_TYPE: 1, override_type: 0},
+            "file_changes": [],
+        },
+        records=_attested_records(1),
+    )
+
+    batch = _poll(transport)
+
+    assert transport.record_calls == 1
+    assert transport.record_channels == [
+        (COORDINATION_TYPE, "2026-08-20T11:00:00Z")
+    ]
+    assert batch.trusted is True
+    assert batch.coverage["acknowledgments_responses"].value == "DATA"
+
+
+def test_authority_lookup_stops_at_detector_deadline_without_retry(monkeypatch):
+    """An authority retry after expiry could advance from an over-budget answer."""
+    from coord_engine.change_detection import ChangeDetector
+
+    class ManualDeadline:
+        def __init__(self):
+            self.spent = False
+
+        def expired(self):
+            return self.spent
+
+        def remaining(self):
+            return 0.0 if self.spent else 5.0
+
+    class ExpiringAuthorityTransport(FeedTransport):
+        def __init__(self, deadline):
+            super().__init__({"file_changes": []})
+            self.deadline = deadline
+            self.authority_calls = 0
+            self.authority_deadlines = []
+
+        def read_classified(self, _path, *, deadline=None):
+            self.authority_calls += 1
+            self.authority_deadlines.append(deadline)
+            self.deadline.spent = True
+            return None, "error"
+
+    monkeypatch.setenv("COORD_READ_RETRY_MS", "1")
+    deadline = ManualDeadline()
+    transport = ExpiringAuthorityTransport(deadline)
+
+    batch = ChangeDetector(transport).poll(
+        "r", "2026-08-20T11:00:00Z", deadline
+    )
+
+    assert transport.authority_calls == 1
+    assert transport.authority_deadlines == [deadline]
+    assert batch.trusted is False
+    assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
 
 
 def test_missing_configured_channel_count_is_unknown_not_clear():

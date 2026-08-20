@@ -1,4 +1,5 @@
 from coord_engine import transport
+from coord_engine.budget import Deadline
 
 
 def test_parse_list_output_basic():
@@ -116,6 +117,23 @@ def test_updates_fails_closed_on_malformed_change(monkeypatch):
         _fake_run(0, '{"file_changes": [{"state": "uploaded"}]}', []),
     )
     assert t.updates("60 seconds", team="r") is None
+
+
+def test_read_classified_does_not_start_past_supplied_deadline(monkeypatch):
+    """The detector's authority read must not open a fresh transport timeout."""
+    from coord_engine import transport as tr
+
+    t = tr.FulcraFileTransport(command=["fulcra-api"], timeout=30)
+    calls = []
+    monkeypatch.setattr(t, "_http_enabled", lambda: False)
+    monkeypatch.setattr(
+        tr, "run_bounded", _fake_run(0, '{"data_type":"coordination"}', calls),
+    )
+
+    assert t.read_classified(
+        "team/r/_coord/bus-v3/records.json", deadline=Deadline.open(0.0),
+    ) == (None, "error")
+    assert calls == []
 
 
 def test_records_cursor_without_a_server_attested_boundary_is_unknown(monkeypatch):

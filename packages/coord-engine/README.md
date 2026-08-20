@@ -164,10 +164,14 @@ acknowledgments/responses, and projection metadata. `CLEAR`, `DATA`,
 permission/read doubt, incomplete namespace, or unsupported team path is
 `UNKNOWN`, triggers the named full-scan recovery, and never advances the
 watermark. A record count only triggers one bounded cursor read to materialize
-immutable record identities; no identity is inferred from a count. Canonical
-documents remain authority and projections remain replaceable views. Presence
-is still a bounded current-time evaluation on every briefing, so session
-dormancy can become `LAPSED` even when no shard bytes changed.
+immutable record identities; no identity is inferred from a count. The concrete
+count key always comes from the stored `_coord/bus-v3/records.json` authority:
+the host-local `COORD_RECORDS_TYPE` writer/test override cannot redirect
+detection. That authority read and its optional one retry spend the detector's
+existing deadline; expiry is `UNKNOWN`. Canonical documents remain authority
+and projections remain replaceable views. Presence is still a bounded
+current-time evaluation on every briefing, so session dormancy can become
+`LAPSED` even when no shard bytes changed.
 
 ## Dev
 

@@ -69,6 +69,10 @@ class FakeTransport:
     def read(self, path):
         return self.store.get(path)
 
+    def read_classified(self, path, *, deadline=None):
+        content = self.read(path)
+        return (content, "ok") if content is not None else (None, "absent")
+
     def write(self, path, content):
         self.store[path] = content
         return True

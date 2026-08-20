@@ -190,7 +190,9 @@ def _coordination_count(
     if not isinstance(data_types, Mapping) or deadline.expired():
         return None
     try:
-        config, status = records.load_config_classified(transport, team)
+        config, status = records.load_canonical_config_classified(
+            transport, team, deadline=deadline,
+        )
     except Exception:
         return None
     if deadline.expired() or status != "ok" or not isinstance(config, Mapping):

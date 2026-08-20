@@ -122,6 +122,32 @@ def test_retry_disabled_behaves_exactly_as_today(no_sleep, monkeypatch):
     assert slept == []
 
 
+def test_deadline_shorter_than_backoff_does_not_sleep_or_retry(no_sleep, monkeypatch):
+    """A retry delay cannot outlive the bounded authority lookup that owns it."""
+    monkeypatch.setenv(read_retry.ENV_RETRY_MS, "50")
+    sleep, slept = no_sleep
+
+    class Deadline:
+        def expired(self):
+            return False
+
+        def remaining(self):
+            return 0.01
+
+    deadline = Deadline()
+    calls = []
+
+    def reader(path):
+        calls.append(path)
+        return None, "error"
+
+    assert read_retry.read_classified_retrying(
+        reader, "p", sleep=sleep, deadline=deadline,
+    ) == (None, "error")
+    assert slept == []
+    assert calls == ["p"]
+
+
 def test_a_successful_read_is_not_retried(no_sleep):
     sleep, slept = no_sleep
     reader = Reader(("{}", "ok"))
