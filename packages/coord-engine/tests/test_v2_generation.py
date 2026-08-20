@@ -140,6 +140,70 @@ def test_generation_sections_reject_unparseable_canonical_bytes():
     assert sections["roles"].state == "UNKNOWN"
 
 
+def test_generation_sections_reject_parseable_wrong_section_documents():
+    """Type-correct frontmatter is insufficient when it belongs elsewhere."""
+    from coord_engine import reconcile
+    from coord_engine.change_detection import Coverage
+
+    class Transport(MemoryTransport):
+        def list_dir(self, prefix):
+            return [{"name": "bad.md", "is_dir": False}] if prefix in {
+                "team/r/roles/", "team/r/presence/", "team/r/_coord/acks/",
+                "team/r/response/",
+            } else []
+
+        def read_classified(self, path, *, deadline):
+            documents = {
+                "team/r/roles/bad.md": "---\ntype: Ack\nagent: amy\n---\n",
+                "team/r/presence/bad.md": "---\ntype: Presence\n---\n",
+                "team/r/_coord/acks/bad.md": "---\ntype: Response\nagent: amy\noutcome: done\n---\n",
+                "team/r/response/bad.md": "---\ntype: Response\nagent: amy\n---\n",
+            }
+            return documents[path], "ok"
+
+    batch = ChangeBatch(
+        (), {"tasks": Coverage.CLEAR, "reviews": Coverage.CLEAR,
+             "forge": Coverage.CLEAR, "presence_roles": Coverage.CLEAR,
+             "acknowledgments_responses": Coverage.CLEAR}, True,
+        watermark="w-1")
+    sections = reconcile._generation_sections(
+        Transport(), TEAM, batch=batch, rows=[],
+        proj_state={
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True, "rows": []},
+            "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
+                      "responsible": {}, "feedback": {}},
+        })
+
+    assert all(sections[name].state == "UNKNOWN"
+               for name in ("roles", "presence", "acknowledgments", "responses"))
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(), sections=sections)
+    assert built.incomplete == ("roles", "presence", "acknowledgments", "responses")
+
+
+def test_generation_sections_reject_wrong_fixed_section_shapes():
+    from coord_engine import reconcile
+    from coord_engine.change_detection import Coverage
+
+    batch = ChangeBatch(
+        (), {"tasks": Coverage.CLEAR, "reviews": Coverage.CLEAR,
+             "forge": Coverage.CLEAR, "presence_roles": Coverage.CLEAR,
+             "acknowledgments_responses": Coverage.CLEAR}, True,
+        watermark="w-1")
+    transport = MemoryTransport()
+    transport.list_dir = lambda _prefix: []
+    sections = reconcile._generation_sections(
+        transport, TEAM, batch=batch, rows=[{"name": "task-without-status"}],
+        proj_state={
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True,
+                        "rows": [{"name": "review-without-state"}]},
+            "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
+                      "responsible": {"pr-1": "amy"}, "feedback": {}},
+        })
+
+    assert all(sections[name].state == "UNKNOWN" for name in ("tasks", "reviews", "forge"))
+
+
 def test_write_read_verified_generation_publishes_digest_bound_manifest():
     transport = MemoryTransport()
     built = generation.build_generation(

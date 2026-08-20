@@ -1276,7 +1276,36 @@ def _generation_value(value: Any) -> Any:
     return value
 
 
-def _tree_section(transport: Any, prefix: str, *, deadline: Deadline) -> tuple[str, dict[str, Any]]:
+def _nonempty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _canonical_section_document(section: str, path: str,
+                                document: dict[str, Any]) -> bool:
+    """Validate that parsed canonical frontmatter belongs to its sealed section."""
+    doc_type = document.get("type")
+    if section == "roles":
+        relative = path.split("/roles/", 1)[-1]
+        parts = relative.split("/")
+        if len(parts) == 1:
+            return doc_type == "Role"
+        if len(parts) >= 2 and parts[1] == "leases":
+            return doc_type == "Lease" and _nonempty_text(document.get("agent"))
+        if len(parts) >= 2 and parts[1] == "escalations":
+            return doc_type == "Escalation"
+        return False
+    if section == "presence":
+        return doc_type == "Presence" and _nonempty_text(document.get("agent"))
+    if section == "acknowledgments":
+        return doc_type == "Ack" and _nonempty_text(document.get("agent"))
+    if section == "responses":
+        return (doc_type == "Response" and _nonempty_text(document.get("agent"))
+                and _nonempty_text(document.get("outcome")))
+    return False
+
+
+def _tree_section(transport: Any, prefix: str, *, section: str,
+                  deadline: Deadline) -> tuple[str, dict[str, Any]]:
     """Read every canonical shard recursively under one section deadline."""
     if deadline.expired():
         return "UNKNOWN", {"records": []}
@@ -1296,7 +1325,7 @@ def _tree_section(transport: Any, prefix: str, *, deadline: Deadline) -> tuple[s
         is_dir = bool(entry.get("is_dir")) or name.endswith("/")
         child = prefix + name
         if is_dir:
-            state, value = _tree_section(transport, child, deadline=deadline)
+            state, value = _tree_section(transport, child, section=section, deadline=deadline)
             if state == "UNKNOWN":
                 return state, value
             rows.extend(value["records"])
@@ -1319,7 +1348,9 @@ def _tree_section(transport: Any, prefix: str, *, deadline: Deadline) -> tuple[s
         # them before sealing so malformed source content cannot be published
         # as a complete view.
         document = okf.parse_frontmatter(raw)
-        if not isinstance(document, dict) or deadline.expired():
+        if (not isinstance(document, dict)
+                or not _canonical_section_document(section, child, document)
+                or deadline.expired()):
             return "UNKNOWN", {"records": []}
         rows.append({"path": child, "content": raw, "frontmatter": document})
     records = sorted(rows, key=lambda row: row["path"])
@@ -1353,20 +1384,32 @@ def _fixed_section_state(name: str, value: Any, *, deadline: Deadline) -> str:
         return "UNKNOWN"
     if name == "tasks":
         rows = value.get("rows")
-        valid = isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+        valid = (isinstance(rows, list)
+                 and all(isinstance(row, dict) and _nonempty_text(row.get("name"))
+                         and _nonempty_text(row.get("status")) for row in rows))
         populated = bool(rows) if valid else False
     elif name == "reviews":
         rows = value.get("rows")
         valid = (value.get("schema") == projection_mod.REVIEWS_SCHEMA
                  and value.get("complete") is True
                  and isinstance(rows, list)
-                 and all(isinstance(row, dict) for row in rows))
+                 and all(isinstance(row, dict) and _nonempty_text(row.get("name"))
+                         and _nonempty_text(row.get("state")) for row in rows))
         populated = bool(rows) if valid else False
     elif name == "forge":
         responsible, feedback = value.get("responsible"), value.get("feedback")
         valid = (value.get("schema") == projection_mod.FORGE_SCHEMA
                  and value.get("complete") is True
-                 and isinstance(responsible, dict) and isinstance(feedback, dict))
+                 and isinstance(responsible, dict) and isinstance(feedback, dict)
+                 and all(_nonempty_text(pr) and isinstance(agents, list)
+                         and all(_nonempty_text(agent) for agent in agents)
+                         for pr, agents in responsible.items())
+                 and all(_nonempty_text(pr) and isinstance(items, list)
+                         and all(isinstance(item, dict) and _nonempty_text(item.get("id"))
+                                 and (item.get("author") is None
+                                      or _nonempty_text(item.get("author")))
+                                 for item in items)
+                         for pr, items in feedback.items()))
         populated = bool(responsible or feedback) if valid else False
     else:
         return "UNKNOWN"
@@ -1409,7 +1452,7 @@ def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
     for name, prefix in inventories.items():
         deadline = _section_deadline(name)
         state, value = _tree_section(
-            transport, prefix, deadline=deadline)
+            transport, prefix, section=name, deadline=deadline)
         feed_state = _coverage_state(batch, coverage[name])
         if feed_state not in generation.COMPLETE_STATES:
             state = feed_state
