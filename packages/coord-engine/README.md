@@ -67,7 +67,8 @@ Class A folds now enter the output boundary through
 spine. Required incomplete coverage is typed `UNKNOWN` (rc 3); the existing
 contract-2 `DEGRADED` envelope remains a compatibility rendering for usable
 partial rows. Text and JSON adapters consume the same outcome, so serializers
-do not independently decide truth or exit status.
+do not independently decide truth or exit status. Optional text coverage is
+explicitly marked `non-gating`, matching JSON's `required:false` field.
 
 ### Pairwise acceptance
 

@@ -103,7 +103,10 @@ class CommandOutcome:
         lines = [self.state.value]
         for item in self.coverage:
             line = f"{item.surface}: {item.state.value}"
-            if item.reason:
-                line += f" ({item.reason})"
+            detail = ([item.reason] if item.reason else [])
+            if not item.required:
+                detail.append("non-gating")
+            if detail:
+                line += f" ({'; '.join(detail)})"
             lines.append(line)
         return "\n".join(lines)

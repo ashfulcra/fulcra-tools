@@ -444,7 +444,8 @@ it (not on PyPI).
   over that value. A required surface that is not verified is `UNKNOWN` and
   therefore rc 3 even when some rows are usable. New Class A folds must build
   the typed outcome first, then render text or JSON from it; do not recompute
-  health or rc in a serializer.
+  health or rc in a serializer. Text coverage lines mark optional surfaces as
+  `non-gating`, preserving the `required:false` distinction carried by JSON.
 - **If your harness truncates output, read the verdict off stderr.**
   `needs-me` and `briefing` print their row payload with degraded and source
   markers inside it, so a truncating reader can lose exactly the part that

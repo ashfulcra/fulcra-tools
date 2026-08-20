@@ -136,7 +136,7 @@ git diff --check
 
 Expected: all tests PASS; no diff errors.
 
-- [ ] **Step 7: Commit, push, verify, and request exact-head review**
+- [x] **Step 7: Commit, push, verify, and request exact-head review**
 
 Commit with the repository-required co-author trailer. Verify the pushed hash
 with `git ls-remote`, then open review slug

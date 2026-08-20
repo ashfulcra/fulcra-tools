@@ -36,7 +36,8 @@ rows, provenance, and the derived rc. Required UNKNOWN coverage dominates the
 result. The contract-2 envelope below is a compatibility adapter over that
 spine: partial readable coverage is still rendered as legacy `DEGRADED`, but
 its typed state is `UNKNOWN` and both representations return rc 3. Text and JSON
-renderers consume the same value and must not independently infer health or rc.
+renderers consume the same value and must not independently infer health or rc;
+text marks optional coverage `non-gating`, preserving JSON's `required:false`.
 
 The FIRST and ONLY JSON value on stdout: `{"contract": 2, "health":
 DATA|CLEAR|DEGRADED|UNKNOWN, "source": "projection"|"raw-scan", "as_of"?,

@@ -56,6 +56,22 @@ def test_optional_not_run_does_not_poison_required_clear_surface():
         "NOT_RUN", "CLEAR"]
 
 
+def test_optional_unknown_text_marks_surface_non_gating_while_rc_stays_zero():
+    """Mutation caught: text dropping the required flag retained by JSON."""
+    result = CommandOutcome.from_surfaces(
+        rows=[],
+        coverage=[
+            SurfaceCoverage("tasks", CoverageState.CLEAR, required=True),
+            SurfaceCoverage(
+                "forge", CoverageState.UNKNOWN, required=False,
+                reason="budget-cut"),
+        ],
+    )
+
+    assert result.rc == 0
+    assert "forge: UNKNOWN (budget-cut; non-gating)" in result.render_text()
+
+
 def test_complete_rows_make_data_and_text_json_share_the_sealed_state():
     """Mutation caught: a renderer deriving a different state from the outcome."""
     result = CommandOutcome.from_surfaces(
