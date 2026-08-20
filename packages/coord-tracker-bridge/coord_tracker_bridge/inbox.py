@@ -90,6 +90,15 @@ class InboxItem:
     labels: tuple[str, ...]
     url: str | None
     updated_at: str | None
+    #: Was `state` READ, or is it the "unknown" placeholder this module renders
+    #: when the sub-object was absent? For a verb that only prints a board the
+    #: two are interchangeable. For one that ROUTES on a state change they are
+    #: not: a Linear workflow state may legitimately be named "Unknown", so a
+    #: consumer comparing state strings cannot tell "moved to Unknown" from
+    #: "we could not read the state" — and would dispatch a directive on the
+    #: strength of the second. The placeholder stays (it is what a reader
+    #: should see); the fact that it IS a placeholder is now carried beside it.
+    state_present: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +267,7 @@ def to_item(node: Mapping[str, Any]) -> InboxItem | None:
         # `state` is either absent — a genuine unknown — or validated whole.
         state=_name(state) if state else "unknown",
         state_type=(str(state["type"]).strip() if state else "unknown"),
+        state_present=state is not None,
         assignee=_name(assignee_obj, "displayName") if assignee_obj else None,
         labels=labels,
         url=url,

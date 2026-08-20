@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .assignments import (
+    DEFAULT_DELIVERY_CAP,
+    EngineTellDispatcher,
+    FulcraRosterReader,
+    run_assignments,
+)
 from .lease import LeaseHeld
 from .inbox import ReadOnlyTransport, fetch_inbox, render_fold
 from .linear import HttpxGraphQLTransport, LinearClient, LinearError, LinearTrackerAdapter
@@ -21,7 +27,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coord-tracker-bridge")
     parser.add_argument(
         "phase",
-        choices=("plan", "adopt-markers", "apply-resources", "sync", "linear-inbox"),
+        choices=(
+            "plan", "adopt-markers", "apply-resources", "sync",
+            "linear-inbox", "linear-assignments",
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -37,6 +46,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--state-dir",
         type=Path,
         default=Path.home() / ".local/state/coord-tracker-bridge",
+    )
+    # linear-assignments only. Preview is the default on purpose: --deliver is
+    # the flag that dispatches directives AND the flag that advances the
+    # watermark, so a run that shows you the plan can never consume it.
+    parser.add_argument(
+        "--deliver",
+        action="store_true",
+        help="linear-assignments: actually dispatch the planned directives",
+    )
+    parser.add_argument(
+        "--seed",
+        action="store_true",
+        help="linear-assignments: adopt the current board as the baseline, delivering nothing",
+    )
+    parser.add_argument(
+        "--delivery-cap",
+        type=int,
+        default=DEFAULT_DELIVERY_CAP,
+        help="linear-assignments: refuse a run that would dispatch more than this",
+    )
+    parser.add_argument(
+        "--coordinator",
+        default=os.environ.get("COORD_COORDINATOR", "coord-boss"),
+        help="linear-assignments: who receives unresolved/unassigned cards for triage",
+    )
+    parser.add_argument(
+        "--sender",
+        default=os.environ.get("FULCRA_COORD_AGENT", "coord-opus-worker"),
+        help="linear-assignments: the --from identity on dispatched directives",
+    )
+    parser.add_argument(
+        "--roster-path",
+        default="team/fulcra/_coord/roster-nicknames.md",
+        help="linear-assignments: the nickname roster document in the coord store",
     )
     return parser
 
@@ -87,6 +130,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.dry_run and args.phase != "adopt-markers":
             raise ValueError("--dry-run is only valid with adopt-markers")
+        if (args.deliver or args.seed) and args.phase != "linear-assignments":
+            raise ValueError("--deliver/--seed are only valid with linear-assignments")
         if args.phase == "linear-inbox":
             # Deliberately does NOT build a BridgeService: no ledger, no lease,
             # no tracker adapter, so no write path exists to reach. The client
@@ -101,6 +146,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             # UNKNOWN must not exit 0: a caller scripting this verb has to be
             # able to tell "Ash has no work" from "I could not read the board".
             return 3 if result.unknown else 0
+
+        if args.phase == "linear-assignments":
+            # Same shape as linear-inbox: no BridgeService, so no ledger, no
+            # lease and no tracker adapter exist to reach a Linear write with.
+            api_key = os.environ.get("LINEAR_API_KEY")
+            if not api_key or not args.linear_team_id:
+                raise LinearError(
+                    "LINEAR_API_KEY and --linear-team-id/LINEAR_TEAM_ID are required")
+            client = LinearClient(ReadOnlyTransport(HttpxGraphQLTransport(api_key)))
+            state_path = (
+                args.state_dir
+                / f"assignments-{args.coord_team}-{args.linear_team_id}.json"
+            )
+            outcome = run_assignments(
+                client,
+                team_id=args.linear_team_id,
+                state_path=state_path,
+                roster_reader=FulcraRosterReader(path=args.roster_path),
+                coordinator=args.coordinator,
+                dispatcher=EngineTellDispatcher(team=args.coord_team, sender=args.sender),
+                deliver=args.deliver,
+                do_seed=args.seed,
+                cap=args.delivery_cap,
+            )
+            print(outcome.text)
+            return outcome.code
 
         service = _service(args)
         if args.phase == "plan":

@@ -64,3 +64,27 @@ def test_source_modes_use_distinct_ledger_paths(monkeypatch, tmp_path):
     teams = _service(parser.parse_args([*common, "--source", "teams"]))
 
     assert engine.ledger_path != teams.ledger_path
+
+
+def test_cli_exposes_linear_assignments_and_defaults_to_preview():
+    """`--deliver` is both the dispatch flag and the consume flag, so the
+    default has to be the one that does neither."""
+    parser = build_parser()
+    args = parser.parse_args(["linear-assignments", "--linear-team-id", "team"])
+    assert args.phase == "linear-assignments"
+    assert args.deliver is False and args.seed is False
+    assert args.coordinator == "coord-boss"
+
+
+def test_cli_rejects_deliver_outside_the_assignments_phase(monkeypatch, capsys):
+    monkeypatch.setenv("LINEAR_API_KEY", "test-key")
+
+    assert main(["sync", "--deliver", "--linear-team-id", "team"]) == 2
+    assert "only valid with linear-assignments" in capsys.readouterr().err
+
+
+def test_cli_assignments_fails_loud_without_linear_credentials(monkeypatch, capsys):
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+
+    assert main(["linear-assignments", "--linear-team-id", "team"]) == 2
+    assert "LINEAR_API_KEY" in capsys.readouterr().err
