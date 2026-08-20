@@ -20,6 +20,7 @@
 		FCA000000000000000000004 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000001 /* AuthManager.swift */; };
 		FCA000000000000000000005 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000002 /* KeychainStore.swift */; };
 		FCA000000000000000000006 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000003 /* SignInView.swift */; };
+		FCA000000000000000000061 /* DestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000060 /* DestinationView.swift */; };
 		FCA000000000000000000021 /* Sharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000020 /* Sharing.swift */; };
 		FCA000000000000000000031 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000030 /* DeviceIdentity.swift */; };
 		FCA000000000000000000032 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000030 /* DeviceIdentity.swift */; };
@@ -78,6 +79,8 @@
 		FCA000000000000000000051 /* IngestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000004D /* IngestTests.swift */; };
 		FCA000000000000000000052 /* NativeBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000004E /* NativeBridgeTests.swift */; };
 		FCA000000000000000000053 /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000100 /* NativeBridge.swift */; };
+		FCA000000000000000000062 /* DestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000060 /* DestinationView.swift */; };
+		FCA000000000000000000065 /* DestinationViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000064 /* DestinationViewModelTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -149,6 +152,7 @@
 		FCA000000000000000000001 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		FCA000000000000000000002 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		FCA000000000000000000003 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
+		FCA000000000000000000060 /* DestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationView.swift; sourceTree = "<group>"; };
 		FCA000000000000000000020 /* Sharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sharing.swift; sourceTree = "<group>"; };
 		FCA000000000000000000030 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
 		FCA000000000000000000009 /* EnsureDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnsureDefinition.swift; sourceTree = "<group>"; };
@@ -172,6 +176,7 @@
 		FCA00000000000000000004D /* IngestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IngestTests.swift; sourceTree = "<group>"; };
 		FCA00000000000000000004E /* NativeBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeTests.swift; sourceTree = "<group>"; };
 		FCA000000000000000000040 /* FulcraAttentionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FulcraAttentionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		FCA000000000000000000064 /* DestinationViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationViewModelTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -282,6 +287,7 @@
 				FCA000000000000000000001 /* AuthManager.swift */,
 				FCA000000000000000000002 /* KeychainStore.swift */,
 				FCA000000000000000000003 /* SignInView.swift */,
+				FCA000000000000000000060 /* DestinationView.swift */,
 				FCA000000000000000000020 /* Sharing.swift */,
 				FCA000000000000000000030 /* DeviceIdentity.swift */,
 				FCA000000000000000000009 /* EnsureDefinition.swift */,
@@ -328,6 +334,7 @@
 			isa = PBXGroup;
 			children = (
 				FCA00000000000000000004B /* DeviceIdentityTests.swift */,
+				FCA000000000000000000064 /* DestinationViewModelTests.swift */,
 				FCA00000000000000000004C /* EnsureDefinitionTests.swift */,
 				FCA00000000000000000004D /* IngestTests.swift */,
 				FCA00000000000000000004E /* NativeBridgeTests.swift */,
@@ -542,6 +549,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000062 /* DestinationView.swift in Sources */,
 				0DAEBD7B2FD5D984008ADF6D /* ViewController.swift in Sources */,
 				0DAEBD492FD5D984008ADF6D /* AppDelegate.swift in Sources */,
 				0DAEBD4B2FD5D984008ADF6D /* SceneDelegate.swift in Sources */,
@@ -557,6 +565,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000061 /* DestinationView.swift in Sources */,
 				FCA000000000000000000053 /* NativeBridge.swift in Sources */,
 				FCA000000000000000000031 /* DeviceIdentity.swift in Sources */,
 				0DAEBD7C2FD5D984008ADF6D /* ViewController.swift in Sources */,
@@ -610,6 +619,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000065 /* DestinationViewModelTests.swift in Sources */,
 				FCA00000000000000000004F /* DeviceIdentityTests.swift in Sources */,
 				FCA000000000000000000050 /* EnsureDefinitionTests.swift in Sources */,
 				FCA000000000000000000051 /* IngestTests.swift in Sources */,

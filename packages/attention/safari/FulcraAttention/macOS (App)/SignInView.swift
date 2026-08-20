@@ -143,6 +143,14 @@ public struct SignInView: View {
                     .foregroundStyle(.green)
                 Button("Sign out") { model.signOut() }
 
+                // The destination is shown ONLY once signed in: listing
+                // definitions needs a token, and an empty/erroring picker on the
+                // signed-out screen would read as "something is broken" rather
+                // than "sign in first".
+                Divider().padding(.vertical, 4)
+                DestinationView()
+                    .padding(.horizontal, -16)
+
             case let .error(message):
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)

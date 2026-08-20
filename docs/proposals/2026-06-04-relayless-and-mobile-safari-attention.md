@@ -270,14 +270,38 @@ This supersedes "Auth on iOS" and the `browser.storage.local` token note above.
    wire transform and the def/tag resolver:
    - wire byte-parity transform → `Wire.swift` *(PR #93, merged; 30/30 golden vectors after review)*;
    - def/tag resolver → `EnsureDefinition.swift` *(PR #94, merged; 72/72 parity after review)*.
-4. **Capture stays in JS** (visibility-based content script, `visibility.ts`,
+4. **The user picks the destination — this is a REQUIREMENT, not an
+   implementation detail.** The containing app MUST show which "Attention"
+   annotation definition this device writes into, and MUST let the user change
+   it or create a new one. Chrome has had this as a wizard step since the
+   beginning; Safari shipped without it and that was a defect, not a
+   simplification.
+
+   `EnsureAttention` resolves a destination automatically (list definitions
+   named "Attention", oldest `created_at` first, adopt index 0). That is a
+   sensible **default** and it is not a substitute for the step. Oldest-first is
+   an arbitrary tiebreak: with one definition it is always right, with two it
+   silently adopts the older one — possibly an empty one created by accident —
+   and the data still lands, still validates, and is merely in the wrong place,
+   discoverable only by noticing an absence. Duplicate definitions occur in real
+   accounts (this repo's own author has three "Watched" definitions, two empty).
+
+   The list/choose/create API in `EnsureDefinition.swift` was implemented and
+   unit-tested well before any UI called it. Green tests made the capability
+   look finished while nothing on screen could reach it — so the requirement is
+   stated in terms of what the USER can see and do, not in terms of the API
+   existing. Surfaced by `DestinationView.swift`; the chosen id is written to
+   the shared App Group cache, which is what the extension resolves from, so a
+   change takes effect without an app restart.
+
+5. **Capture stays in JS** (visibility-based content script, `visibility.ts`,
    PR #87) and hands `AttentionEvent` batches to native via
    `sendNativeMessage` → `SafariWebExtensionHandler.swift`, which builds the
    wire record (Wire.swift), resolves the destination (EnsureDefinition.swift),
    and POSTs `ingest/v1/record/batch` with the Keychain token. The handler
    returns auth state (signed-in? which account?) so the popup can prompt
    sign-in without ever holding a token.
-5. Safari uses **event pages**, not service workers; no `chrome.idle` /
+6. Safari uses **event pages**, not service workers; no `chrome.idle` /
    `chrome.windows` focus / `chrome.history` → **no backfill**, visibility +
    opportunistic `pagehide` flush only.
 
