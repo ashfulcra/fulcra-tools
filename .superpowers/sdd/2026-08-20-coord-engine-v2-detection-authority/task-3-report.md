@@ -86,6 +86,16 @@ mutability issue.
 
 ### Red evidence
 
+Commands run before the corresponding production edits:
+
+```text
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_reconcile_incremental.py::test_reconcile_never_bypasses_the_detector_with_a_legacy_raw_feed -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_transport_parse.py::test_records_cursor_without_a_server_attested_boundary_is_unknown -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_reconcile_incremental.py::test_untrusted_batch_full_recovery_does_not_advance_the_watermark -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_reconcile_incremental.py::test_stale_cursor_drift_recovery_keeps_the_existing_feed_frontier -q
+uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py::test_lifecycle_timestamps_are_validated_normalized_and_sorted_temporally -q
+```
+
 1. The new detector regression run failed 6 tests before implementation:
    fallback `file:<path>:<state>:<at>` identities were trusted, offset
    timestamps were not canonicalized, list-shaped record cursors were accepted,
@@ -119,8 +129,9 @@ mutability issue.
 
 ### Verification
 
-- Focused: `96 passed in 0.16s` — detector, cursor transport, incremental
-  reconcile, and reconcile contracts.
+- Focused command:
+  `uv run --package coord-engine pytest packages/coord-engine/tests/test_v2_change_detection.py packages/coord-engine/tests/test_transport_parse.py packages/coord-engine/tests/test_reconcile_incremental.py packages/coord-engine/tests/test_reconcile.py -q`
+  → `96 passed in 0.16s`.
 - Full: `uv run --package coord-engine pytest packages/coord-engine/tests -q`
   exited 0.
 - `git diff --check` exited 0.
