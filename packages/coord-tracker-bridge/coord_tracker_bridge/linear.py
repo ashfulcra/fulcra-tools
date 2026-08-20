@@ -206,7 +206,16 @@ class LinearClient:
             # A caller that genuinely wants best-effort must filter at ITS level,
             # where the promise it is making is visible. Down here, absence and
             # unrepresentable are indistinguishable to everyone above.
-            raw_nodes = page.get("nodes", [])
+            # NO DEFAULT. `page.get("nodes", [])` turned an ABSENT field into an
+            # empty list, so the validation below never ran and a page with no
+            # `nodes` at all returned a clean empty collection — the same false
+            # CREATE instruction this change exists to remove (codex-reviewer,
+            # 660 r1). Writing "absent and unrepresentable are indistinguishable
+            # to callers above" in the same commit that left this default in
+            # place is the finding worth remembering.
+            if "nodes" not in page:
+                raise LinearError(f"{operation}: page {root} is missing nodes")
+            raw_nodes = page["nodes"]
             if not isinstance(raw_nodes, list):
                 raise LinearError(f"{operation}: page {root} has malformed nodes")
             for node in raw_nodes:

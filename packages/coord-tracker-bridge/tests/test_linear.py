@@ -737,3 +737,29 @@ def test_malformed_nodes_container_is_an_error():
         client.paginate("Issues", "query", "issues")
 
     assert "malformed nodes" in str(excinfo.value)
+
+
+def test_an_ABSENT_nodes_field_is_an_error_not_a_clean_empty_page():
+    """codex-reviewer, 660 r1 P1. `page.get("nodes", [])` converted an absent
+    field to `[]`, so the validation never ran and a page carrying no `nodes` at
+    all came back as a successful empty collection — reaching `resource_plan`
+    as the same false CREATE instruction this change exists to remove.
+
+    The default was left in the very commit whose message argued that absent and
+    unrepresentable must not be indistinguishable to callers above."""
+    client = LinearClient(FakeTransport([
+        response({"issues": {"pageInfo": {"hasNextPage": False}}}),
+    ]))
+
+    with pytest.raises(LinearError) as excinfo:
+        client.paginate("Issues", "query", "issues")
+
+    assert "missing nodes" in str(excinfo.value)
+
+
+def test_an_EMPTY_nodes_list_is_still_a_legitimate_empty_page():
+    """The guard must distinguish absent from empty, not collapse them the other
+    way: a page that genuinely carries zero nodes is not an error."""
+    client = LinearClient(FakeTransport([_paginate_page([], {"hasNextPage": False})]))
+
+    assert client.paginate("Issues", "query", "issues") == []
