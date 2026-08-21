@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from datetime import datetime, timezone
 from hashlib import sha256
 
@@ -1129,13 +1130,14 @@ def test_every_migrated_public_fold_has_one_value_json_and_text_metadata_parity(
         assert text_transport.feed_starts == [OVERLAP_START], argv
 
 
-def test_deployed_transport_keeps_public_reads_gated_until_unit6_measurement():
+def test_deployed_transport_keeps_generation_serving_dormant():
+    from coord_engine import cli
     from coord_engine.transport import FulcraFileTransport
 
     transport = FulcraFileTransport(command=["fulcra-api"])
-    assert transport.public_read_v2_enabled is True
-    assert transport.public_read_epsilon_seconds > 0
-    assert transport.public_read_epsilon_verified is False
+    args = Namespace(func=cli.cmd_status, team=TEAM)
+
+    assert cli._begin_v2_public_read(args, transport) is None
 
 
 def test_projection_generation_section_cannot_bypass_an_unrun_overlay():
