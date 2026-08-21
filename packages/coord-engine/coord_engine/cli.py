@@ -9856,12 +9856,28 @@ def cmd_stash_list(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_measure_feed_lag(args: argparse.Namespace, transport: Any) -> int:
     """Emit one host-neutral, secret-free feed visibility measurement."""
+    deadline = budget_mod.Deadline.open(args.timeout)
     result = migration.measure_feed_visibility_lag(
         transport, args.team, args.host_id,
         persisted=config.persisted_identity, hostname=socket.gethostname,
-        timeout_seconds=args.timeout, poll_seconds=args.poll,
+        timeout_seconds=args.timeout, poll_seconds=args.poll, deadline=deadline,
     )
-    jsonutil.print_json(result.as_dict())
+    payload = jsonutil.dumps(result.as_dict())
+    if result.state == "DATA" and deadline.expired():
+        result = migration.LagMeasurement.unknown(
+            team=result.team, host_identity=result.host_identity,
+            principal_identity=result.principal_identity,
+            transport_authority=result.transport_authority,
+            producer_build=result.producer_build,
+            display_label=result.display_label,
+            reason="command rendering exceeded harness deadline",
+            measured_at=result.measured_at, probe_id=result.probe_id,
+            probe_path=result.probe_path,
+        )
+        payload = jsonutil.dumps(result.as_dict())
+    print(payload)
+    if deadline.expired():
+        return 3
     return result.rc
 
 

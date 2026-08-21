@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from coord_engine import classifier, migration
+from coord_engine import classifier, migration, pin_currency
 from coord_engine import cli
 
 
@@ -62,6 +62,12 @@ AUTHORITY = {
     "data_type": "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041",
     "api_version": "v1alpha1",
 }
+BUILD_SHA = "c3f4680a93a135520b6ffaf767ef46e1fe97a798"
+
+
+@pytest.fixture(autouse=True)
+def _stable_measurement_build(monkeypatch):
+    monkeypatch.setattr(pin_currency, "build_sha", lambda: BUILD_SHA)
 
 
 def _binding(row):
@@ -81,6 +87,8 @@ def _host(name: str, *, credentialed: bool = True, label: str | None = None):
         "display_label": label or name,
         "principal_identity": f"agent-{name}",
         "transport_authority": dict(AUTHORITY),
+        "probe_schema": "coord.feed-visibility-lag-probe.v1",
+        "producer_build": BUILD_SHA,
         "credential_provenance": None,
         "credentialed": credentialed,
         "observed_seconds": 2.5,
@@ -92,6 +100,17 @@ def _host(name: str, *, credentialed: bool = True, label: str | None = None):
         "update_id": "3185bd09-9500-4407-bd87-013832fe55f3",
         "reason": None,
     }
+    row["credential_provenance"] = _binding(row)
+    return row
+
+
+def _cohort_row(name, *, team="fulcra", authority=None):
+    row = _host(name)
+    row["team"] = team
+    row["transport_authority"] = dict(authority or AUTHORITY)
+    row["probe_path"] = (
+        f"team/{team}/_coord/projections/lag-probes/{row['probe_id']}.json"
+    )
     row["credential_provenance"] = _binding(row)
     return row
 
@@ -198,6 +217,99 @@ def test_display_labels_cannot_turn_one_attested_machine_into_two_hosts():
     assert decision.state == "UNKNOWN"
     assert decision.ready is False
     assert "two distinct credentialed host measurements required" in decision.reasons
+
+
+def test_activation_rejects_mixed_team_and_transport_authority_cohort():
+    other_authority = {
+        "data_type": "MomentAnnotation/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "api_version": "v1alpha1",
+    }
+    decision = migration.evaluate_activation(
+        hosts=[_cohort_row("host-a"), _cohort_row(
+            "host-b", team="other-team", authority=other_authority,
+        )],
+        configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert "measurement cohort mismatch: canonical team" in decision.reasons
+    assert "measurement cohort mismatch: transport authority" in decision.reasons
+
+
+@pytest.mark.parametrize("authority", [
+    {"data_type": "MomentAnnotation/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+     "api_version": "v1alpha1"},
+    {"data_type": AUTHORITY["data_type"], "api_version": "V1ALPHA1"},
+    {"data_type": AUTHORITY["data_type"] + " ", "api_version": "v1alpha1"},
+])
+def test_activation_rejects_different_or_caller_normalized_authority(authority):
+    decision = migration.evaluate_activation(
+        hosts=[_cohort_row("host-a"), _cohort_row("host-b", authority=authority)],
+        configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert any("transport authority" in reason for reason in decision.reasons)
+
+
+def test_activation_rejects_noncanonical_team_case_without_aliasing():
+    decision = migration.evaluate_activation(
+        hosts=[_cohort_row("host-a"), _cohort_row("host-b", team="Fulcra")],
+        configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert any("canonical team" in reason for reason in decision.reasons)
+
+
+def test_activation_rejects_different_producer_builds_in_one_cohort():
+    second = _cohort_row("host-b")
+    second["producer_build"] = "d" * 40
+    second["credential_provenance"] = _binding(second)
+    decision = migration.evaluate_activation(
+        hosts=[_cohort_row("host-a"), second], configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert "measurement cohort mismatch: producer build" in decision.reasons
+
+
+def test_activation_compares_every_versioned_authority_field():
+    first_authority = {
+        **AUTHORITY,
+        "protocol_version": 1,
+        "cursor_schema_version": 1,
+        "minimum_reader_version": "1.8.0",
+        "minimum_writer_version": "1.8.0",
+        "cursor_generation": 0,
+        "cursor_activated_at": None,
+    }
+    second_authority = {**first_authority, "minimum_writer_version": "1.9.0"}
+    decision = migration.evaluate_activation(
+        hosts=[
+            _cohort_row("host-a", authority=first_authority),
+            _cohort_row("host-b", authority=second_authority),
+        ],
+        configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert "measurement cohort mismatch: transport authority" in decision.reasons
 
 
 def test_measurement_host_identity_must_have_canonical_machine_shape():
@@ -410,6 +522,8 @@ def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
     assert result.credentialed is True
     assert result.host_identity == "coord-reconcile:same-machine"
     assert result.event_at == "2026-08-21T00:00:01Z"
+    assert result.as_dict().get("probe_schema") == "coord.feed-visibility-lag-probe.v1"
+    assert result.as_dict().get("producer_build") == BUILD_SHA
     assert "observed_max_seconds" not in result.as_dict()
     assert result.as_dict()["credential_provenance"] == _binding(result.as_dict())
 
@@ -532,6 +646,23 @@ def test_token_refresh_or_auth_mode_is_not_credential_provenance(auth_mode):
     assert result.rc == 0
 
 
+def test_missing_exact_producer_build_is_unknown_before_write(monkeypatch):
+    transport = _LagTransport(0, _Clock())
+    monkeypatch.setattr(pin_currency, "build_sha", lambda: None)
+
+    result = migration.measure_feed_visibility_lag(
+        transport, "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.001,
+        now=_Now(),
+    )
+
+    assert result.state == "UNKNOWN"
+    assert result.rc == 3
+    assert transport.writes == []
+
+
 @pytest.mark.parametrize("slow_phase", ["auth", "write"])
 def test_entire_harness_timeout_covers_slow_preflight_and_upload(slow_phase):
     class Slow(_LagTransport):
@@ -560,3 +691,102 @@ def test_entire_harness_timeout_covers_slow_preflight_and_upload(slow_phase):
     assert elapsed < 0.20
     if slow_phase == "auth":
         assert transport.writes == []
+
+
+def test_final_observation_overrun_is_unknown_not_data():
+    class SlowFinalNow:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            if self.calls == 2:
+                time.sleep(0.08)
+            second = 0 if self.calls == 1 else 2
+            return datetime(2026, 8, 21, 0, 0, second, tzinfo=timezone.utc)
+
+    result = migration.measure_feed_visibility_lag(
+        _LagTransport(0, _Clock()), "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=0.02, poll_seconds=0.001,
+        now=SlowFinalNow(),
+    )
+
+    assert result.state == "UNKNOWN"
+    assert result.rc == 3
+
+
+def test_final_measurement_serialization_overrun_is_unknown(monkeypatch):
+    real_dumps = migration.json.dumps
+
+    def slow_measurement_dumps(value, *args, **kwargs):
+        if isinstance(value, dict) and value.get("schema") == "coord.feed-visibility-lag.v1":
+            time.sleep(0.08)
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(migration.json, "dumps", slow_measurement_dumps)
+    result = migration.measure_feed_visibility_lag(
+        _LagTransport(0, _Clock()), "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=0.02, poll_seconds=0.001,
+        now=_Now(),
+    )
+
+    assert result.state == "UNKNOWN"
+    assert result.rc == 3
+
+
+def test_exact_final_deadline_boundary_is_expired():
+    clock = _Clock()
+
+    class BoundaryNow(_Now):
+        def __call__(self):
+            value = super().__call__()
+            if self.calls == 2:
+                clock.value = 0.02
+            return value
+
+    result = migration.measure_feed_visibility_lag(
+        _LagTransport(0, clock), "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=0.02, poll_seconds=0.001,
+        monotonic=clock.monotonic, sleep=clock.sleep, now=BoundaryNow(),
+    )
+
+    assert result.state == "UNKNOWN"
+    assert result.rc == 3
+
+
+def test_cli_renderer_overrun_replaces_data_with_unknown(monkeypatch, capsys):
+    measurement = migration.measure_feed_visibility_lag(
+        _LagTransport(0, _Clock()), "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.001,
+        now=_Now(),
+    )
+    assert measurement.state == "DATA"
+    real_dumps = cli.jsonutil.dumps
+
+    def slow_dumps(value):
+        if isinstance(value, dict) and value.get("state") == "DATA":
+            time.sleep(0.08)
+        return real_dumps(value)
+
+    monkeypatch.setattr(
+        migration, "measure_feed_visibility_lag",
+        lambda *_args, **_kwargs: measurement,
+    )
+    monkeypatch.setattr(cli.jsonutil, "dumps", slow_dumps)
+    rc = cli.cmd_measure_feed_lag(
+        Namespace(team="fulcra", host_id="display", timeout=0.02, poll=0.001),
+        _LagTransport(0, _Clock()),
+    )
+    body = json.loads(capsys.readouterr().out)
+
+    assert rc == 3
+    assert body["state"] == "UNKNOWN"
+    assert body["reason"]

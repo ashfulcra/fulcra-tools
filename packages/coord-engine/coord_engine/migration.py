@@ -19,14 +19,24 @@ import time
 import uuid
 from typing import Any, Callable, Mapping, Optional
 
-from . import change_detection, classifier, generation, jsonutil, records
+from . import change_detection, classifier, generation, jsonutil, pin_currency, records
 
 
 TARGET_VERSION = "2.0.0"
+MEASUREMENT_SCHEMA = "coord.feed-visibility-lag.v1"
+PROBE_SCHEMA = "coord.feed-visibility-lag-probe.v1"
 AGE_TOLERANCE_SECONDS = 5.0
+_CANONICAL_TEAM = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _ATTESTED_HOST_IDENTITY = re.compile(r"^coord-reconcile:[A-Za-z0-9:_.-]+$")
 _PROBE_ID = re.compile(r"^[0-9a-f]{32}$")
 _PROVENANCE = re.compile(r"^evidence-sha256:[0-9a-f]{64}$")
+_BUILD_IDENTITY = re.compile(r"^[0-9a-f]{40}$")
+_AUTHORITY_BASE_FIELDS = ("data_type", "api_version")
+_AUTHORITY_VERSIONED_FIELDS = (
+    "protocol_version", "cursor_schema_version",
+    "minimum_reader_version", "minimum_writer_version",
+    "cursor_generation", "cursor_activated_at",
+)
 LAG_TOLERANCE_SECONDS = 0.001
 
 # Exclusion is evidence, not omission. Values are the operator-approved reason
@@ -72,7 +82,9 @@ class LagMeasurement:
     host_identity: Optional[str]
     display_label: Optional[str]
     principal_identity: Optional[str]
-    transport_authority: Optional[Mapping[str, str]]
+    transport_authority: Optional[Mapping[str, Any]]
+    probe_schema: str
+    producer_build: Optional[str]
     credential_provenance: Optional[str]
     credentialed: bool
     observed_seconds: Optional[float]
@@ -90,7 +102,7 @@ class LagMeasurement:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "schema": "coord.feed-visibility-lag.v1",
+            "schema": MEASUREMENT_SCHEMA,
             "state": self.state,
             "team": self.team,
             "host_identity": self.host_identity,
@@ -100,6 +112,8 @@ class LagMeasurement:
                 dict(self.transport_authority)
                 if isinstance(self.transport_authority, Mapping) else None
             ),
+            "probe_schema": self.probe_schema,
+            "producer_build": self.producer_build,
             "credential_provenance": self.credential_provenance,
             "credentialed": self.credentialed,
             "observed_seconds": self.observed_seconds,
@@ -118,12 +132,16 @@ class LagMeasurement:
         probe_id: str, team: Optional[str] = None, probe_path: str = "",
         host_identity: Optional[str] = None,
         principal_identity: Optional[str] = None,
-        transport_authority: Optional[Mapping[str, str]] = None,
+        transport_authority: Optional[Mapping[str, Any]] = None,
+        producer_build: Optional[str] = None,
     ) -> "LagMeasurement":
         return cls(
-            "UNKNOWN", team, host_identity, display_label, principal_identity,
-            transport_authority, None, False, None, measured_at, probe_id,
-            probe_path, reason=reason,
+            state="UNKNOWN", team=team, host_identity=host_identity,
+            display_label=display_label, principal_identity=principal_identity,
+            transport_authority=transport_authority, probe_schema=PROBE_SCHEMA,
+            producer_build=producer_build, credential_provenance=None,
+            credentialed=False, observed_seconds=None, measured_at=measured_at,
+            probe_id=probe_id, probe_path=probe_path, reason=reason,
         )
 
 
@@ -163,13 +181,16 @@ def read_v1_bootstrap(raw: Any) -> BootstrapResult:
 
 _MEASUREMENT_KEYS = frozenset({
     "schema", "state", "team", "host_identity", "display_label",
-    "principal_identity", "transport_authority", "credential_provenance",
+    "principal_identity", "transport_authority", "probe_schema",
+    "producer_build", "credential_provenance",
     "credentialed", "observed_seconds", "measured_at", "probe_id",
     "probe_path", "event_at", "observed_at", "update_id", "reason",
 })
 
 
-def _measurement_provenance(row: Mapping[str, Any]) -> Optional[str]:
+def _measurement_provenance(
+    row: Mapping[str, Any], *, expired: Optional[Callable[[], bool]] = None,
+) -> Optional[str]:
     payload = {key: value for key, value in row.items()
                if key != "credential_provenance"}
     try:
@@ -178,7 +199,12 @@ def _measurement_provenance(row: Mapping[str, Any]) -> Optional[str]:
         )
     except (TypeError, ValueError):
         return None
-    return "evidence-sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if expired is not None and expired():
+        return None
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if expired is not None and expired():
+        return None
+    return "evidence-sha256:" + digest
 
 
 def _valid_update_id(value: Any) -> bool:
@@ -191,19 +217,44 @@ def _valid_update_id(value: Any) -> bool:
 
 
 def _valid_transport_authority(value: Any) -> bool:
-    return (
-        isinstance(value, Mapping)
-        and set(value) == {"data_type", "api_version"}
-        and isinstance(value.get("data_type"), str)
-        and bool(value["data_type"].strip())
-        and isinstance(value.get("api_version"), str)
-        and bool(value["api_version"].strip())
+    if not isinstance(value, Mapping):
+        return False
+    keys = set(value)
+    base = set(_AUTHORITY_BASE_FIELDS)
+    versioned = base | set(_AUTHORITY_VERSIONED_FIELDS)
+    if keys not in (base, versioned):
+        return False
+    for name in _AUTHORITY_BASE_FIELDS:
+        item = value.get(name)
+        if (not isinstance(item, str) or not item
+                or item != item.strip()):
+            return False
+    try:
+        parsed = records._parse_config(json.dumps(
+            dict(value), sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ))
+    except (TypeError, ValueError):
+        return False
+    if parsed is None:
+        return False
+    expected_mode = "legacy" if keys == base else "versioned"
+    actual_mode = parsed.get("authority_mode", "legacy")
+    return actual_mode == expected_mode and all(
+        parsed.get(name) == value.get(name) for name in keys
     )
+
+
+def _authority_from_config(config: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    names = list(_AUTHORITY_BASE_FIELDS)
+    if config.get("authority_mode") == "versioned":
+        names.extend(_AUTHORITY_VERSIONED_FIELDS)
+    authority = {name: config.get(name) for name in names}
+    return authority if _valid_transport_authority(authority) else None
 
 
 def _valid_measurement_row(row: Mapping[str, Any]) -> bool:
     if (set(row) != _MEASUREMENT_KEYS
-            or row.get("schema") != "coord.feed-visibility-lag.v1"
+            or row.get("schema") != MEASUREMENT_SCHEMA
             or row.get("state") != "DATA" or row.get("reason") is not None
             or row.get("credentialed") is not True):
         return False
@@ -214,11 +265,14 @@ def _valid_measurement_row(row: Mapping[str, Any]) -> bool:
     probe_path = row.get("probe_path")
     observed = row.get("observed_seconds")
     provenance = row.get("credential_provenance")
-    if (not isinstance(team, str) or not team.strip()
+    if (not isinstance(team, str) or _CANONICAL_TEAM.fullmatch(team) is None
             or not isinstance(host_identity, str)
             or _ATTESTED_HOST_IDENTITY.fullmatch(host_identity) is None
             or not isinstance(principal, str) or not principal.strip()
             or not _valid_transport_authority(row.get("transport_authority"))
+            or row.get("probe_schema") != PROBE_SCHEMA
+            or not isinstance(row.get("producer_build"), str)
+            or _BUILD_IDENTITY.fullmatch(row["producer_build"]) is None
             or not isinstance(probe_id, str) or _PROBE_ID.fullmatch(probe_id) is None
             or probe_path != (
                 f"team/{team}/_coord/projections/lag-probes/{probe_id}.json"
@@ -253,6 +307,7 @@ def evaluate_activation(
     if evidence_instant is None:
         reasons.append("fleet evidence measured_at unavailable or malformed")
     measured: dict[str, Mapping[str, Any]] = {}
+    cohort: Optional[dict[str, Any]] = None
     if not isinstance(hosts, list):
         reasons.append("host measurement evidence unavailable")
         hosts = []
@@ -262,8 +317,46 @@ def evaluate_activation(
             continue
         host_identity = row.get("host_identity")
         if not _valid_measurement_row(row):
-            reasons.append("credentialed host measurement evidence malformed")
+            row_reasons: list[str] = []
+            team = row.get("team")
+            authority = row.get("transport_authority")
+            if (not isinstance(team, str)
+                    or _CANONICAL_TEAM.fullmatch(team) is None):
+                row_reasons.append("measurement canonical team malformed")
+            if not _valid_transport_authority(authority):
+                row_reasons.append("measurement transport authority malformed")
+            if row.get("schema") != MEASUREMENT_SCHEMA:
+                row_reasons.append("measurement schema/protocol malformed")
+            if row.get("probe_schema") != PROBE_SCHEMA:
+                row_reasons.append("measurement probe protocol malformed")
+            build = row.get("producer_build")
+            if (not isinstance(build, str)
+                    or _BUILD_IDENTITY.fullmatch(build) is None):
+                row_reasons.append("measurement producer build malformed")
+            reasons.extend(row_reasons or (
+                "credentialed host measurement evidence malformed",
+            ))
             continue
+        current_cohort = {
+            "team": row["team"],
+            "authority": dict(row["transport_authority"]),
+            "schema": row["schema"],
+            "probe_schema": row["probe_schema"],
+            "producer_build": row["producer_build"],
+        }
+        if cohort is None:
+            cohort = current_cohort
+        else:
+            if current_cohort["team"] != cohort["team"]:
+                reasons.append("measurement cohort mismatch: canonical team")
+            if current_cohort["authority"] != cohort["authority"]:
+                reasons.append("measurement cohort mismatch: transport authority")
+            if current_cohort["schema"] != cohort["schema"]:
+                reasons.append("measurement cohort mismatch: measurement schema")
+            if current_cohort["probe_schema"] != cohort["probe_schema"]:
+                reasons.append("measurement cohort mismatch: probe protocol")
+            if current_cohort["producer_build"] != cohort["producer_build"]:
+                reasons.append("measurement cohort mismatch: producer build")
         host_identity = host_identity.strip()
         if host_identity in measured:
             reasons.append(f"duplicate host measurement identity: {host_identity}")
@@ -395,19 +488,21 @@ def measure_feed_visibility_lag(
     hostname: Callable[[], str],
     timeout_seconds: float = 30.0,
     poll_seconds: float = 0.25,
+    deadline: Optional[Any] = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> LagMeasurement:
     """Measure one probe under a single preflight-to-verification deadline."""
     start = monotonic()
-    measured_at = _iso(now())
-    probe_id = uuid.uuid4().hex
-    path = f"team/{team}/_coord/projections/lag-probes/{probe_id}.json"
+    measured_at = ""
+    probe_id = ""
+    path = ""
 
     host_identity: Optional[str] = None
     principal_identity: Optional[str] = None
-    authority: Optional[dict[str, str]] = None
+    authority: Optional[dict[str, Any]] = None
+    producer_build: Optional[str] = None
 
     def unknown(reason: str) -> LagMeasurement:
         return LagMeasurement.unknown(
@@ -415,7 +510,7 @@ def measure_feed_visibility_lag(
             principal_identity=principal_identity,
             transport_authority=authority, display_label=display_label,
             reason=reason, measured_at=measured_at, probe_id=probe_id,
-            probe_path=path,
+            probe_path=path, producer_build=producer_build,
         )
 
     if (not isinstance(timeout_seconds, (int, float))
@@ -435,7 +530,27 @@ def measure_feed_visibility_lag(
         def expired(self) -> bool:
             return self.remaining() <= 0.0
 
-    bound = _Bound()
+    bound = deadline if deadline is not None else _Bound()
+
+    if bound.expired():
+        return unknown("harness deadline expired before initial observation")
+    if not isinstance(team, str) or _CANONICAL_TEAM.fullmatch(team) is None:
+        return unknown("canonical measurement team unavailable")
+
+    try:
+        measured_instant = now()
+    except Exception:
+        return unknown("initial observation clock unavailable")
+    if bound.expired():
+        return unknown("initial observation exceeded harness deadline")
+    try:
+        measured_at = _iso(measured_instant)
+        probe_id = uuid.uuid4().hex
+        path = f"team/{team}/_coord/projections/lag-probes/{probe_id}.json"
+    except Exception:
+        return unknown("measurement probe construction failed")
+    if bound.expired():
+        return unknown("measurement probe construction exceeded harness deadline")
 
     # A method that cannot receive the shared remaining budget is not licensed
     # to start: falling back to its COORD_TRANSPORT_TIMEOUT would expand this
@@ -448,11 +563,16 @@ def measure_feed_visibility_lag(
 
     try:
         saved = persisted()
+    except Exception:
+        return unknown("persisted principal identity unavailable")
+    if bound.expired():
+        return unknown("principal identity preflight exceeded harness deadline")
+    try:
         raw_host = hostname()
     except Exception:
-        return unknown("persisted principal or machine identity unavailable")
+        return unknown("machine identity unavailable")
     if bound.expired():
-        return unknown("identity preflight exceeded harness deadline")
+        return unknown("machine identity preflight exceeded harness deadline")
     if (not isinstance(saved, classifier.PersistedIdentity)
             or saved.state is not classifier.PersistedIdentityState.PRESENT
             or not isinstance(saved.identity, str) or not saved.identity.strip()):
@@ -465,6 +585,16 @@ def measure_feed_visibility_lag(
     host_identity = f"coord-reconcile:{safe_host}"
     principal_identity = saved.identity.strip()
 
+    try:
+        producer_build = pin_currency.build_sha()
+    except Exception:
+        producer_build = None
+    if bound.expired():
+        return unknown("producer build preflight exceeded harness deadline")
+    if (not isinstance(producer_build, str)
+            or _BUILD_IDENTITY.fullmatch(producer_build) is None):
+        return unknown("stable producer build identity unavailable")
+
     config, status = records.load_canonical_config_classified(
         transport, team, deadline=bound,
     )
@@ -472,24 +602,19 @@ def measure_feed_visibility_lag(
         return unknown("transport authority preflight exceeded harness deadline")
     if status != "ok" or not isinstance(config, Mapping):
         return unknown("stable canonical transport authority unavailable")
-    candidate_authority = {
-        "data_type": config.get("data_type"),
-        "api_version": config.get("api_version"),
-    }
-    if not _valid_transport_authority(candidate_authority):
+    candidate_authority = _authority_from_config(config)
+    if candidate_authority is None:
         return unknown("stable canonical transport authority malformed")
-    authority = {
-        "data_type": str(candidate_authority["data_type"]),
-        "api_version": str(candidate_authority["api_version"]),
-    }
+    authority = candidate_authority
 
     content = jsonutil.dumps({
-        "schema": "coord.feed-visibility-lag-probe.v1",
+        "schema": PROBE_SCHEMA,
         "id": probe_id,
         "team": team,
         "host_identity": host_identity,
         "principal_identity": principal_identity,
         "transport_authority": authority,
+        "producer_build": producer_build,
         "display_label": display_label,
         "written_at": measured_at,
     })
@@ -516,12 +641,16 @@ def measure_feed_visibility_lag(
             return unknown("data-updates envelope unavailable")
         window, reason = change_detection._feed_window(result, measured_at)
         rows = result.get("file_changes")
+        if bound.expired():
+            return unknown("feed envelope validation exceeded harness deadline")
         if window is None or not isinstance(rows, list):
             return unknown(reason or "data-updates file_changes unavailable")
         start_at = _parse_aware_utc(window[0])
         through_at = _parse_aware_utc(window[1])
         matched: list[tuple[str, datetime, str]] = []
         for row in rows:
+            if bound.expired():
+                return unknown("feed lifecycle validation exceeded harness deadline")
             if not isinstance(row, Mapping):
                 reason = "data-updates contains malformed lifecycle row"
                 break
@@ -544,25 +673,61 @@ def measure_feed_visibility_lag(
                 matched.append((update_id, instant[0], instant[1]))
         else:
             reason = ""
+        if bound.expired():
+            return unknown("feed lifecycle validation exceeded harness deadline")
         if reason:
             return unknown(reason)
         if matched:
             if len(matched) != 1:
                 return unknown("probe update identity is not unique")
             update_id, event_instant, event_at = matched[0]
-            observed_instant = now().astimezone(timezone.utc)
-            lag = (observed_instant - event_instant).total_seconds()
+            try:
+                observed_value = now()
+            except Exception:
+                return unknown("final observation clock unavailable")
+            if bound.expired():
+                return unknown("final observation exceeded harness deadline")
+            try:
+                observed_instant = observed_value.astimezone(timezone.utc)
+                lag = (observed_instant - event_instant).total_seconds()
+                observed_at = _iso(observed_instant)
+            except Exception:
+                return unknown("final observation is malformed")
+            if bound.expired():
+                return unknown("lag computation exceeded harness deadline")
             if not math.isfinite(lag) or lag < 0:
                 return unknown("authoritative event timestamp is after observation")
             measurement = LagMeasurement(
-                "DATA", team, host_identity, display_label, principal_identity,
-                authority, None, True, lag, measured_at, probe_id, path,
-                event_at, _iso(observed_instant), update_id,
+                state="DATA", team=team, host_identity=host_identity,
+                display_label=display_label, principal_identity=principal_identity,
+                transport_authority=authority, probe_schema=PROBE_SCHEMA,
+                producer_build=producer_build, credential_provenance=None,
+                credentialed=True, observed_seconds=lag, measured_at=measured_at,
+                probe_id=probe_id, probe_path=path, event_at=event_at,
+                observed_at=observed_at, update_id=update_id,
             )
-            return replace(
-                measurement,
-                credential_provenance=_measurement_provenance(measurement.as_dict()),
+            if bound.expired():
+                return unknown("measurement construction exceeded harness deadline")
+            provenance = _measurement_provenance(
+                measurement.as_dict(), expired=bound.expired,
             )
+            if bound.expired():
+                return unknown("measurement serialization exceeded harness deadline")
+            if provenance is None:
+                return unknown("measurement serialization failed")
+            final = replace(measurement, credential_provenance=provenance)
+            if bound.expired():
+                return unknown("measurement finalization exceeded harness deadline")
+            final_row = final.as_dict()
+            if bound.expired():
+                return unknown("measurement result serialization exceeded harness deadline")
+            if not _valid_measurement_row(final_row):
+                return unknown("measurement result failed activation validation")
+            # Definitive final gate: DATA is licensed only while the original
+            # preflight-to-result deadline still has positive budget.
+            if bound.expired():
+                return unknown("measurement deadline expired before DATA return")
+            return final
         remaining = bound.remaining()
         if remaining <= 0:
             return unknown("feed visibility bound expired")

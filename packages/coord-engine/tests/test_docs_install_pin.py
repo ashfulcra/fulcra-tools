@@ -125,7 +125,8 @@ def test_v2_evidence_templates_pin_attested_identity_and_age_consistency():
     for token in (
         "display-only", "host_identity", "principal_identity",
         "credential_provenance", "transport_authority", "probe_path",
-        "observed_seconds", "event_at", "observed_at", "update_id",
+        "probe_schema", "producer_build", "single canonical cohort",
+        "observed_seconds", "event_at", "observed_at", "update_id", "renderer",
         "evidence-sha256", "entire harness deadline",
     ):
         assert token in epsilon

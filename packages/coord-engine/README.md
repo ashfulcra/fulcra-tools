@@ -251,8 +251,11 @@ DISPLAY-ONLY-LABEL` on at least two credentialed hosts. The label does not
 attest identity: the harness binds sanitized machine identity, persisted
 principal, and stable non-secret canonical transport authority into the exact
 probe evidence; transient access credentials are neither recorded nor hashed.
-Its single deadline covers authority preflight, upload, feed polling, and
-verification, and it accepts only fully attested feed lifecycle envelopes. Then complete the
+Both hosts must report one exact team/authority/probe-schema/build cohort; case
+or caller-normalized aliases are not equivalent. Its single deadline covers
+authority preflight, upload, feed polling, final observation, hashing,
+serialization, and rendering, and it accepts only fully attested feed lifecycle
+envelopes. Then complete the
 [epsilon evidence](../../docs/coord/evidence/coord-engine-v2-epsilon-measurement.md)
 and [fleet verification](../../docs/coord/evidence/coord-engine-v2-fleet-verification.md).
 The current templates are explicitly BLOCKED; therefore the package version,

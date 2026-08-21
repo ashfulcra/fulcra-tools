@@ -14,7 +14,9 @@ attest a host or make two runs on one machine count twice. The harness derives
 canonical team configuration, and binds the complete probe evidence to an
 `evidence-sha256` `credential_provenance`. The binding does not read or hash a
 transient access credential, so token refresh and authentication mode changes
-cannot manufacture a second host identity:
+cannot manufacture a second host identity. `producer_build` is the running
+installation's exact PEP 610 VCS commit; an editable/wheel build without that
+identity is `UNKNOWN`:
 
 ```bash
 coord-engine measure-feed-lag fulcra --host-id host-a --timeout 30 --poll 0.25
@@ -40,6 +42,8 @@ a path-only `files` response is not evidence.
     "data_type": "<canonical-data-type>",
     "api_version": "<canonical-api-version>"
   },
+  "probe_schema": "coord.feed-visibility-lag-probe.v1",
+  "producer_build": "<exact lowercase VCS commit>",
   "credential_provenance": "evidence-sha256:<64 lowercase hex characters>",
   "credentialed": true,
   "observed_seconds": "<finite nonnegative seconds>",
@@ -58,16 +62,20 @@ Only a comparable `after`/`through` window with a supported lifecycle state,
 stable update identity, and aware authoritative event timestamp is accepted.
 The entire harness deadline starts before identity/authentication preflight and
 covers canonical-authority acquisition, probe upload, feed polling, and final
-verification. Every transport operation receives only its remaining budget; an
-operation without deadline support is refused before it starts. Timeout,
+observation, serialization, hashing, result construction, and renderer return.
+Every transport operation receives only its remaining budget; an operation
+without deadline support is refused before it starts. Timeout,
 malformed feed output, missing stable authority, or an unproven write is
 `UNKNOWN` with rc 3.
 
 Activation revalidates every row exactly: field set, canonical host and update
 identities, stable authority, probe/path correlation, evidence binding, aware
 timestamps, and the finite nonnegative lag derived from
-`observed_at - event_at`. The configured epsilon lives in release configuration,
-not in these measurement rows, and must cover the maximum of two distinct valid
-rows.
+`observed_at - event_at`. Both rows must form a single canonical cohort: exact
+case-sensitive team, the complete canonical transport authority/account/store
+identity (including every versioned authority field when present), measurement
+schema, `probe_schema`, and `producer_build`. Caller-normalized aliases do not
+declare equivalence. The configured epsilon lives in release configuration, not
+in these measurement rows, and must cover the maximum of two distinct valid rows.
 An unmeasured or one-host epsilon is not a conservative estimate; it is no
 bound at all and blocks activation.
