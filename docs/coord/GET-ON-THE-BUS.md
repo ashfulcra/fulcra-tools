@@ -426,6 +426,12 @@ evidenced as an exclusion), and two credentialed hosts must run `queue`,
 `UNKNOWN`, degraded fallback, or nonzero result. The cancelled epsilon
 measurement is not part of this gate.
 
+The tagged release currently enables the dormant generation wrapper in its
+deployed transport, causing migrated folds to return `UNKNOWN` before their
+canonical handlers. Do not claim fleet adoption from this build until a
+reviewed exact-head follow-up disables generation-backed serving and the
+functional matrix passes. Epsilon remains cancelled; it is not the repair.
+
 Do not turn fleet adoption into generation or cursor activation.
 `public_read_epsilon_verified` stays false, no current generation is treated as
 public authority, and cursor schema 2 stays refused until its separate

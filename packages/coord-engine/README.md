@@ -61,15 +61,16 @@ preserves partial rows but returns rc 3 when its bounded forge fallback emits
 `forge-degraded`; a complete projection or raw scan returns rc 0. The hot
 `_coord/summaries.json` aggregate is a compatibility cache with the same
 zero-whitespace serializer; its parsed values and degradation markers are
-unchanged. The authoritative projection pointer is
-`_coord/projections/current.json`: it names a digest-verified immutable
-generation. Reconcile advances it only after every required section is complete
+unchanged. The dormant generation-serving candidate uses
+`_coord/projections/current.json` as its projection pointer; it names a
+digest-verified immutable generation. Reconcile advances it only after every required section is complete
 and the feed frontier is attested. A transport that proves conditional-write
 support uses CAS; one that explicitly declares CAS unsupported uses a
 last-writer-wins manifest write followed by exact read verification. Missing or
 invalid capability and manifest write/read failure are nonzero. The mandatory
-public-read freshness overlay rejects a stale raced manifest before v2 authority
-activates. The shared public-read path validates the exact manifest and immutable
+candidate public-read freshness overlay rejects a stale raced manifest before v2
+authority activates. When separately activated, the shared public-read path
+validates the exact manifest and immutable
 generation bytes, queries one at-least-once `data-updates` window from
 `watermark - epsilon` through `now - epsilon`, deduplicates update identities,
 validates every sealed section before a domain handler sees it (including exact
@@ -89,10 +90,12 @@ Unsupported deltas, incomplete
 feed coverage, a changed pointer, or an unverified epsilon return typed
 `UNKNOWN` and nonzero; an overlay that was not invoked is `NOT_RUN`, never
 clean. JSON and text both expose the generation, source watermark, attested
-coverage horizon, and per-surface coverage. During the Unit 5-to-6 activation
-gate the deployed transport enters this authority with epsilon deliberately
-unverified, so migrated public reads fail closed until Unit 6 records fleet lag
-evidence.
+coverage horizon, and per-surface coverage. The tagged `2.0.0` transport still
+sets `public_read_v2_enabled=true`, so migrated public folds enter the dormant
+candidate and return `UNKNOWN` before reaching canonical handlers. That is an
+adoption blocker until a reviewed exact head disables generation serving while
+preserving generation construction. Epsilon is cancelled and inapplicable; it is
+not a repair for this mismatch.
 
 `roles status` now returns one `liveness_fact` that carries lease and presence
 observations plus both store-prefix provenance fields. Fresh holder presence and
@@ -100,8 +103,9 @@ a lapsed lease can therefore never be rendered as confidently `VACANT`.
 Attendance is separately typed: omitting `--check-attendance` reports
 `NOT_RUN`; a requested scan that hits its cap reports `UNKNOWN` with
 `scanned`/`total` and exits nonzero; a completed check reports its boolean
-result. Generation-backed public folds reconstruct role/presence inventories
-from the validated immutable bytes rather than reopening the mutable store.
+result. When separately activated, generation-backed public folds reconstruct
+role/presence inventories from the validated immutable bytes rather than reopening
+the mutable store.
 
 Class A folds now enter the output boundary through
 `coord_engine.outcome.CommandOutcome`, the shared v2 state/coverage/rows/source
@@ -243,11 +247,15 @@ version (v1.4.0/v1.5.0/v1.5.1 all shipped stale off a frozen `1.3.0`, caught by 
 
 `2.0.0` ships the truthfulness spine: typed outcomes, exit codes that agree
 with their bodies, deterministic identity precedence, and distinct empty,
-tombstoned, unreadable, and unknown states. Public action surfaces continue to
-read canonical authorities directly while the fleet adopts the release.
+tombstoned, unreadable, and unknown states. Before the fleet may adopt the
+release, public action surfaces must read canonical authorities directly.
 
-Generation-backed serving is dormant in this release. Epsilon is inapplicable
-to the `2.0.0` release and adoption gate: do not run the cancelled host-one
+Generation-backed serving is the required dormant state for this release. The
+tagged implementation does not yet satisfy it: `public_read_v2_enabled=true`
+routes migrated folds into generation authority and returns `UNKNOWN` before
+canonical handlers. Adoption therefore remains blocked pending a reviewed
+serving-disable exact head. Epsilon is inapplicable to the `2.0.0` release and
+adoption gate: do not run the cancelled host-one
 measurement, set `public_read_epsilon_verified`, or treat a current generation
 as public authority. Cursor schema 2 is a separate activation and remains
 refused until the fleet version fence and CAS transport are proven.

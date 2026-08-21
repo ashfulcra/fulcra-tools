@@ -800,8 +800,8 @@ a measured wake-the-dead need and the isolation the spec requires.
 
 `2.0.0` activates the truthfulness spine: typed outcomes, body/exit-status
 agreement, deterministic identity precedence, and distinct empty, tombstoned,
-unreadable, and unknown states. Public action surfaces continue reading their
-canonical authorities directly.
+unreadable, and unknown states. Fleet adoption requires public action surfaces
+to keep reading their canonical authorities directly.
 
 Generation-backed public serving stays dormant. Epsilon is therefore
 inapplicable to the `2.0.0` release and fleet-adoption decision: no host-one lag
@@ -810,6 +810,12 @@ measurement is required or licensed, and the release does not set
 authority. Cursor schema 2
 is also separate and remains refused without its own version fence and proven
 CAS transport.
+
+The tagged release does not yet satisfy that runtime boundary: its deployed
+transport still enables the generation wrapper, so migrated folds return
+`UNKNOWN` before their canonical handlers run. Fleet adoption remains blocked
+until a reviewed exact-head follow-up disables serving while preserving
+generation artifact construction. This defect does not make epsilon applicable.
 
 Fleet adoption requires exact released-build identity on every live host
 within the recorded SLA, named exclusions with evidence, and functional
