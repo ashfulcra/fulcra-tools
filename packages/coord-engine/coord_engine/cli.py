@@ -9863,7 +9863,8 @@ def cmd_measure_feed_lag(args: argparse.Namespace, transport: Any) -> int:
         timeout_seconds=args.timeout, poll_seconds=args.poll, deadline=deadline,
     )
     payload = jsonutil.dumps(result.as_dict())
-    if result.state == "DATA" and deadline.expired():
+    expired_at_commit = deadline.expired()
+    if result.state == "DATA" and expired_at_commit:
         result = migration.LagMeasurement.unknown(
             team=result.team, host_identity=result.host_identity,
             principal_identity=result.principal_identity,
@@ -9875,10 +9876,9 @@ def cmd_measure_feed_lag(args: argparse.Namespace, transport: Any) -> int:
             probe_path=result.probe_path,
         )
         payload = jsonutil.dumps(result.as_dict())
+    decided_rc = result.rc
     print(payload)
-    if deadline.expired():
-        return 3
-    return result.rc
+    return decided_rc
 
 
 # --- health / doctor (fulcra-agent-health) ---

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 from argparse import Namespace
 from datetime import datetime, timezone
@@ -505,6 +506,18 @@ class _Now:
         return datetime(2026, 8, 21, 0, 0, second, tzinfo=timezone.utc)
 
 
+def _data_measurement():
+    result = migration.measure_feed_visibility_lag(
+        _LagTransport(0, _Clock()), "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.001,
+        now=_Now(),
+    )
+    assert result.state == "DATA"
+    return result
+
+
 def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
     clock = _Clock()
     transport = _LagTransport(0.3, clock)
@@ -761,14 +774,7 @@ def test_exact_final_deadline_boundary_is_expired():
 
 
 def test_cli_renderer_overrun_replaces_data_with_unknown(monkeypatch, capsys):
-    measurement = migration.measure_feed_visibility_lag(
-        _LagTransport(0, _Clock()), "fulcra", "display",
-        persisted=lambda: classifier.PersistedIdentity(
-            classifier.PersistedIdentityState.PRESENT, "agent-a"),
-        hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.001,
-        now=_Now(),
-    )
-    assert measurement.state == "DATA"
+    measurement = _data_measurement()
     real_dumps = cli.jsonutil.dumps
 
     def slow_dumps(value):
@@ -790,3 +796,111 @@ def test_cli_renderer_overrun_replaces_data_with_unknown(monkeypatch, capsys):
     assert rc == 3
     assert body["state"] == "UNKNOWN"
     assert body["reason"]
+
+
+def test_cli_commits_body_and_rc_before_stdout_without_post_print_downgrade(
+        monkeypatch, capsys):
+    measurement = _data_measurement()
+
+    class FalseThenTrue:
+        def __init__(self):
+            self.calls = 0
+
+        def expired(self):
+            self.calls += 1
+            return self.calls > 1
+
+    deadline = FalseThenTrue()
+    monkeypatch.setattr(
+        cli.budget_mod.Deadline, "open", classmethod(lambda _cls, _seconds: deadline),
+    )
+    monkeypatch.setattr(
+        migration, "measure_feed_visibility_lag",
+        lambda *_args, **_kwargs: measurement,
+    )
+
+    rc = cli.cmd_measure_feed_lag(
+        Namespace(team="fulcra", host_id="display", timeout=0.02, poll=0.001),
+        _LagTransport(0, _Clock()),
+    )
+    output = capsys.readouterr().out
+    body = json.loads(output)
+
+    assert body["state"] == "DATA"
+    assert rc == 0
+    assert deadline.calls == 1
+    assert output.count("\n") == 1
+
+
+def test_cli_serialization_boundary_expiry_commits_unknown_once(monkeypatch, capsys):
+    measurement = _data_measurement()
+
+    class ExpiredAtDecision:
+        def __init__(self):
+            self.calls = 0
+
+        def expired(self):
+            self.calls += 1
+            return True
+
+    deadline = ExpiredAtDecision()
+    monkeypatch.setattr(
+        cli.budget_mod.Deadline, "open", classmethod(lambda _cls, _seconds: deadline),
+    )
+    monkeypatch.setattr(
+        migration, "measure_feed_visibility_lag",
+        lambda *_args, **_kwargs: measurement,
+    )
+
+    rc = cli.cmd_measure_feed_lag(
+        Namespace(team="fulcra", host_id="display", timeout=0.02, poll=0.001),
+        _LagTransport(0, _Clock()),
+    )
+    output = capsys.readouterr().out
+    body = json.loads(output)
+
+    assert body["state"] == "UNKNOWN"
+    assert rc == 3
+    assert deadline.calls == 1
+    assert output.count("\n") == 1
+
+
+def test_cli_slow_stdout_does_not_retroactively_change_committed_data(
+        monkeypatch, capsys):
+    measurement = _data_measurement()
+
+    class FalseThenTrue:
+        def __init__(self):
+            self.calls = 0
+
+        def expired(self):
+            self.calls += 1
+            return self.calls > 1
+
+    deadline = FalseThenTrue()
+    real_print = builtins.print
+
+    def slow_print(*args, **kwargs):
+        time.sleep(0.03)
+        return real_print(*args, **kwargs)
+
+    monkeypatch.setattr(
+        cli.budget_mod.Deadline, "open", classmethod(lambda _cls, _seconds: deadline),
+    )
+    monkeypatch.setattr(
+        migration, "measure_feed_visibility_lag",
+        lambda *_args, **_kwargs: measurement,
+    )
+    monkeypatch.setattr(builtins, "print", slow_print)
+
+    rc = cli.cmd_measure_feed_lag(
+        Namespace(team="fulcra", host_id="display", timeout=0.02, poll=0.001),
+        _LagTransport(0, _Clock()),
+    )
+    output = capsys.readouterr().out
+    body = json.loads(output)
+
+    assert body["state"] == "DATA"
+    assert rc == 0
+    assert deadline.calls == 1
+    assert output.count("\n") == 1

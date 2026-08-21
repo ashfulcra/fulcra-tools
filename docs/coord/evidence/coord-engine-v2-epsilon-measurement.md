@@ -7,6 +7,14 @@ happened. Do not set `public_read_epsilon_verified`, bump/release `2.0.0`, or
 move the fleet pin until two distinct credentialed hosts have produced complete
 rows and the configured epsilon is at least the largest observed value.
 
+**Candidate host note — not measurement evidence:** coord-boss provisionally
+offers the distinct credentialed host `vm` as host 2 only after this harness is
+approved and pushed. That pairing is sampling-biased: the two hosts are the
+implementer/reviewer hosts, both are heavy store users, and `vm` is stale as a
+reconcile participant. If used, disclose the pair as floor evidence rather than
+a representative fleet estimate; an independent credentialed host is preferred.
+Do not run either measurement from this blocked template.
+
 Run once per credentialed host. `--host-id` is a display-only label; it cannot
 attest a host or make two runs on one machine count twice. The harness derives
 `host_identity` from the sanitized machine identity, requires a persisted
