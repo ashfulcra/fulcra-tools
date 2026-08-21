@@ -70,7 +70,7 @@ def engine_stamp() -> dict[str, Any]:
 
 
 def build_payload(*, to: str, kind: str, priority: str, slug: str,
-                  ptr: Optional[str] = None,
+                  ptr: Optional[str] = None, fyi: bool = False,
                   stamp: Optional[dict[str, Any]] = None) -> str:
     """Serialize a control-plane payload for the ``note`` field.
 
@@ -85,6 +85,12 @@ def build_payload(*, to: str, kind: str, priority: str, slug: str,
     }
     if ptr:
         payload["ptr"] = ptr
+    if fyi:
+        # A notification opens nothing (2026-08-11 ruling): the doc is born
+        # closed, so the EVENT must say so too — a stream fold that cannot see
+        # this flag replays every FYI as a permanent open obligation (measured
+        # 2026-08-21: most of 92 stream-only "opens" were exactly this).
+        payload["fyi"] = True
     payload["writer"] = dict(stamp or engine_stamp())
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -113,6 +119,7 @@ def parse_payload(note: Any) -> Optional[dict[str, Any]]:
     return {
         "to": to, "kind": kind, "slug": slug,
         "pri": obj.get("pri"), "ptr": obj.get("ptr"),
+        "fyi": obj.get("fyi") is True,
         "writer": obj.get("writer") if isinstance(obj.get("writer"), dict)
         else None,
     }
@@ -780,7 +787,7 @@ def authority_currency_state(config: Optional[dict], *,
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
                kind: str, priority: str, slug: str, ptr: Optional[str] = None,
-               recorded_at: Optional[str] = None,
+               fyi: bool = False, recorded_at: Optional[str] = None,
                team: Optional[str] = None) -> bool:
     """Emit one control-plane event; ``recorded_at`` in the future is a timer.
 
@@ -797,7 +804,8 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     the write: see the module docstring there for the absent/missing/invalid
     contract.
     """
-    note = build_payload(to=to, kind=kind, priority=priority, slug=slug, ptr=ptr)
+    note = build_payload(to=to, kind=kind, priority=priority, slug=slug,
+                         ptr=ptr, fyi=fyi)
     from . import bus_tags
     tags = bus_tags.tags_for_write(transport, team, sender)
     kwargs: dict[str, Any] = {"recorded_at": recorded_at}

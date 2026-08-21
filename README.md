@@ -220,7 +220,7 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 `uv run fulcra-collect doctor`. The coord engine installs on its own:
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0.0#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0.1#subdirectory=packages/coord-engine"
 ```
 
 (The release tag is the **cold-install** path — correct for a first install from

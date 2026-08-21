@@ -1611,9 +1611,50 @@ def cmd_task_done(args: argparse.Namespace, transport: Any) -> int:
     except tasks.TaskError as e:
         print(f"task done failed: {e}", file=sys.stderr)
         return 1
-    transport.write(path, out)
+    if not transport.write(path, out):
+        # No ghost closes (round-2 finding 3): a failed durable write with an
+        # emitted close event would tell the stream "closed" while the file
+        # authority stays open. Emit nothing, say so, exit nonzero.
+        print(f"task done failed: the durable close for {args.name} did not "
+              f"land — no close event emitted, the task is still open",
+              file=sys.stderr)
+        return 3
     print(f"done {args.name}")
+    # THE CLOSE MUST REACH THE STREAM (2026-08-21). A done task closed the DOC
+    # but emitted nothing, so stream readers replayed it as open forever — 92 of
+    # 121 stream-fold opens were closes that never became events. In the stream
+    # architecture an unemitted event is a lie of omission: everything that
+    # closes an obligation emits its close. Best-effort like every companion —
+    # the doc is truth, the event is delivery.
+    fm = okf.parse_frontmatter(out) or {}
+    _emit_response_companion(
+        transport, args.team, slug=args.name,
+        owner=str(fm.get("owner") or ""),
+        responder=_identity(getattr(args, "agent", None)),
+        shard_ptr=f"task/{args.name}.md")
     return 0
+
+
+def cmd_owed(args: argparse.Namespace, transport: Any) -> int:
+    """Open obligations folded from the annotation stream. Zero enumeration.
+
+    The stream-architecture sibling of `needs-me`: one bounded stream read
+    forward from a durable cursor, cost proportional to new events. `needs-me`
+    remains the file-plane authority until the cutover seed; both truthfully
+    label their coverage so a reader can tell which world answered.
+    """
+    from . import stream_fold
+    agent = _identity(getattr(args, "agent", None))
+    out = stream_fold.fold(transport, args.team, agent)
+    if getattr(args, "json", False):
+        print(out.render_json())
+    else:
+        print(f"owed [{agent}] — {out.state.value}")
+        for cov in out.coverage:
+            print(f"  {cov.surface}: {cov.reason or cov.state.value}")
+        for row in out.rows:
+            print(f"  [{row.get('pri')}] {row.get('at','')}  {row.get('slug','')[:88]}")
+    return out.rc
 
 
 # --- review (fulcra-agent-review verdict tally) ---
@@ -5039,6 +5080,7 @@ def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
             transport, cfg, sender=sender, to=to, kind="directive",
             priority=getattr(args, "priority", None) or "P2", slug=slug,
             ptr=_task_path(args.team, slug).split("/", 2)[-1],
+            fyi=bool(getattr(args, "fyi", False)),
             team=args.team)
     except Exception as e:
         print(f"record: dispatch companion not emitted ({e}) — dispatch rides "
@@ -11468,6 +11510,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_json(nm)
     nm.set_defaults(func=cmd_needs_me)
 
+    ow = sub.add_parser(
+        "owed", help="open obligations folded from the annotation stream "
+                     "(forward from a durable cursor; zero enumeration)")
+    ow.add_argument("team")
+    ow.add_argument("--agent", "-a")
+    ow.add_argument("--json", action="store_true")
+    ow.set_defaults(func=cmd_owed)
+
     ob = sub.add_parser("obligations",
                         help="terminal answer: does this agent owe work?")
     ob.add_argument("team"); ob.add_argument("--agent", required=True)
@@ -11803,6 +11853,7 @@ def build_parser() -> argparse.ArgumentParser:
     tup.set_defaults(func=cmd_task_update)
     tdn = tksub.add_parser("done", help="mark done (requires evidence)")
     tdn.add_argument("team"); tdn.add_argument("name"); tdn.add_argument("--evidence", "-e", required=True)
+    tdn.add_argument("--agent", "-a", help="closing identity for the close event")
     tdn.set_defaults(func=cmd_task_done)
     tbl = tksub.add_parser("block", help="mark blocked (requires --unlock; sets blocked_on; --on-user routes to a human)")
     tbl.add_argument("team"); tbl.add_argument("name")
@@ -12087,7 +12138,7 @@ def build_parser() -> argparse.ArgumentParser:
 #: the extracted command modules are imported — see the note down there; that
 #: ordering is load-bearing, not cosmetic.
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
-    cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_briefing,
+    cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_owed, cmd_briefing,
     cmd_presence_show, cmd_review_status, cmd_health, cmd_doctor,
     cmd_obligations, cmd_roles_status, cmd_continuity_resume,
     cmd_agents, cmd_asks, cmd_engagement_gate, cmd_stash_list,

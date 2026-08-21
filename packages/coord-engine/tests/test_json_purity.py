@@ -166,6 +166,7 @@ _JSON_PINNED = {
     "headroom": ["headroom", "r"],
     "health": ["health", "r"],
     "inbox": ["inbox", "r", "--agent", "alice"],
+    "owed": ["owed", "r", "--agent", "alice"],
     "needs-me": ["needs-me", "r", "--agent", "alice"],
     "obligations": ["obligations", "r", "--agent", "alice"],
     "presence show": ["presence", "show", "r"],

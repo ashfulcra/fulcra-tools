@@ -37,7 +37,8 @@ from coord_engine import cli
 #: Pure views. Running one is NOT evidence anyone did work, so it must never
 #: refresh presence.
 EXPECTED_READS = {
-    "cmd_status", "cmd_board", "cmd_search", "cmd_needs_me", "cmd_briefing",
+    "cmd_status", "cmd_board", "cmd_search", "cmd_needs_me", "cmd_owed",
+    "cmd_briefing",
     "cmd_presence_show", "cmd_health", "cmd_doctor",
     "cmd_obligations", "cmd_roles_status", "cmd_continuity_resume",
     "cmd_agents", "cmd_asks", "cmd_engagement_gate", "cmd_stash_list",
