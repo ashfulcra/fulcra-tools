@@ -13,13 +13,23 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping, Optional
 
+from . import __version__
+
 
 GENERATION_SCHEMA = "coord.projections.generation.v1"
+SECTION_SCHEMA = "coord.projection-section.v1"
 REQUIRED_SECTIONS = (
     "tasks", "reviews", "forge", "roles", "presence", "acknowledgments",
     "responses",
 )
 COMPLETE_STATES = frozenset(("CLEAR", "DATA"))
+# A public reader accepts identifiers we ship, not arbitrary strings whose only
+# credential is that the mutable manifest and immutable document repeat them.
+# Keep the registry here beside the builder so writers and readers cannot drift.
+SUPPORTED_ENGINE_VERSIONS = frozenset((__version__,))
+SUPPORTED_SECTION_SCHEMAS = {
+    name: frozenset((SECTION_SCHEMA,)) for name in REQUIRED_SECTIONS
+}
 
 
 def _json(value: Any) -> str:
@@ -58,7 +68,7 @@ class SectionResult:
     name: str
     state: str
     value: Mapping[str, Any]
-    schema: str = "coord.projection-section.v1"
+    schema: str = SECTION_SCHEMA
 
     @property
     def complete(self) -> bool:

@@ -89,6 +89,88 @@ class PublicReadResult:
         )
 
 
+class SealedGenerationTransport:
+    """Read inventory-backed public namespaces from one validated generation.
+
+    Public folds predate generations and take a transport, so changing every
+    helper into a second projection reader would create many subtly different
+    authority paths.  This adapter preserves those domain folds while replacing
+    their canonical inventory reads with the exact bytes already sealed in the
+    shared public-read result.  Everything outside the four inventory-backed
+    generation sections delegates to the wrapped transport.
+    """
+
+    def __init__(self, transport: Any, team: str, authority: PublicReadResult):
+        self._transport = transport
+        self._team = team
+        self._prefix_sections = {
+            f"team/{team}/roles/": "roles",
+            f"team/{team}/presence/": "presence",
+            f"team/{team}/_coord/acks/": "acknowledgments",
+            f"team/{team}/response/": "responses",
+        }
+        self._records: dict[str, str] = {}
+        for prefix, section_name in self._prefix_sections.items():
+            section = authority.section(section_name)
+            records = section.get("records") if isinstance(section, Mapping) else None
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, Mapping):
+                    continue
+                path, content = record.get("path"), record.get("content")
+                if (isinstance(path, str) and path.startswith(prefix)
+                        and isinstance(content, str)):
+                    self._records[path] = content
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._transport, name)
+
+    def _sealed_prefix(self, path: str) -> Optional[str]:
+        return next((prefix for prefix in self._prefix_sections
+                     if path.startswith(prefix)), None)
+
+    def read(self, path: str) -> Optional[str]:
+        if self._sealed_prefix(path) is not None:
+            return self._records.get(path)
+        return self._transport.read(path)
+
+    def read_classified(
+        self, path: str, *, deadline: Optional[Deadline] = None,
+    ) -> tuple[Optional[str], str]:
+        if self._sealed_prefix(path) is not None:
+            value = self._records.get(path)
+            return (value, "ok") if value is not None else (None, "absent")
+        classified = getattr(self._transport, "read_classified", None)
+        if callable(classified):
+            return classified(path, deadline=deadline)
+        value = self._transport.read(path)
+        return (value, "ok") if value is not None else (None, "absent")
+
+    def list_dir(self, path: str) -> list[dict[str, Any]]:
+        if self._sealed_prefix(path) is None:
+            return self._transport.list_dir(path)
+        children: dict[str, dict[str, Any]] = {}
+        for record_path, content in self._records.items():
+            if not record_path.startswith(path):
+                continue
+            remainder = record_path[len(path):]
+            if not remainder:
+                continue
+            head, separator, _tail = remainder.partition("/")
+            if separator:
+                name = head + "/"
+                children[name] = {
+                    "name": name, "mtime": None, "size": None, "is_dir": True,
+                }
+            else:
+                children[head] = {
+                    "name": head, "mtime": None,
+                    "size": f"{len(content)}B", "is_dir": False,
+                }
+        return [children[name] for name in sorted(children)]
+
+
 def _coverage(
     manifest: CoverageState,
     immutable: CoverageState,
@@ -147,6 +229,16 @@ def _read_generation(
                for value in manifest["schemas"].values())
     ):
         return manifest_raw, None, None, "current manifest schema invalid"
+    if manifest["engine_version"] not in generation.SUPPORTED_ENGINE_VERSIONS:
+        return manifest_raw, manifest, None, (
+            f"unsupported engine version {manifest['engine_version']}"
+        )
+    for name in generation.REQUIRED_SECTIONS:
+        schema = manifest["schemas"][name]
+        if schema not in generation.SUPPORTED_SECTION_SCHEMAS[name]:
+            return manifest_raw, manifest, None, (
+                f"unsupported {name} section schema {schema}"
+            )
     try:
         raw = transport.read(generation.generation_path(team, manifest["generation_id"]))
     except Exception:

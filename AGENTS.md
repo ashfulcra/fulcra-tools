@@ -621,7 +621,9 @@ it (not on PyPI).
   `roles status --check-attendance` (opt-in: one listing per review, budgeted and
   reported as `scanned N/M`) before calling any role unattended. The JSON
   `attendance` fact distinguishes the unrequested `NOT_RUN` state from a
-  requested, budget-truncated `UNKNOWN` scan. `roles status` also seals lease
+  requested, budget-truncated `UNKNOWN` scan; that requested incomplete check
+  exits 3 and makes the public-read envelope `UNKNOWN`, so automation cannot
+  mistake a nested unknown for a clean role decision. `roles status` also seals lease
   assignment and holder presence into one `liveness_fact`, including both
   observations and both store-prefix provenance fields. Fresh presence plus a
   stale lease is `LAPSED` (or `UNKNOWN` if the observations cannot be sealed),

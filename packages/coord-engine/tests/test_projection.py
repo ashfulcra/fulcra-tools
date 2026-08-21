@@ -316,7 +316,11 @@ def test_reconcile_writes_review_projection():
     assert by_name["open-one"]["pending_required"] == ["alice"]
     assert by_name["open-one"]["requested_by"] == "bob"
     assert by_name["open-one"]["artifact"] == "o-r-7"
+    assert by_name["open-one"]["tally"]["of"] == "https://github.com/o/r/pull/7"
+    assert by_name["open-one"]["tally"]["head"] == _HEAD
+    assert isinstance(by_name["open-one"]["tally"]["evidence"], str)
     assert by_name["settled-one"]["state"] == "APPROVED"
+    assert by_name["settled-one"]["tally"]["approvals"] == ["alice"]
     assert by_name["settled-one"]["settled"] is True
     assert by_name["changed-one"]["state"] == "CHANGES"
     # a proven settle also drops the read fold's settled-cache marker

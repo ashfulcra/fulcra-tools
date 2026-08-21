@@ -86,7 +86,9 @@ observations plus both store-prefix provenance fields. Fresh holder presence and
 a lapsed lease can therefore never be rendered as confidently `VACANT`.
 Attendance is separately typed: omitting `--check-attendance` reports
 `NOT_RUN`; a requested scan that hits its cap reports `UNKNOWN` with
-`scanned`/`total`; a completed check reports its boolean result.
+`scanned`/`total` and exits nonzero; a completed check reports its boolean
+result. Generation-backed public folds reconstruct role/presence inventories
+from the validated immutable bytes rather than reopening the mutable store.
 
 Class A folds now enter the output boundary through
 `coord_engine.outcome.CommandOutcome`, the shared v2 state/coverage/rows/source

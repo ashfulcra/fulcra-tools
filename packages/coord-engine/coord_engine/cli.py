@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import contextvars
+from copy import deepcopy
 import hashlib
 import concurrent.futures
 import io
@@ -1086,6 +1087,15 @@ def _role_attended(transport: Any, team: str, holders: list[str], *,
     """
     if not holders:
         return None, 0, 0
+    authority = _PUBLIC_READ_CONTEXT.get()
+    if authority is not None:
+        # The review projection proves current tally state, but it does not
+        # carry per-reviewer verdict timestamps.  Reopening the live review tree
+        # would mix a later observation into the sealed decision.  Distinguish
+        # this checked-but-unprovable result from the NOT_RUN default.
+        rows = authority.section("reviews").get("rows")
+        total = len(rows) if isinstance(rows, list) else 0
+        return None, min(total, budget), total
     # ``index`` lets a caller with MANY roles pay the scan ONCE (see
     # `_verdict_activity_index`). Without it, behaviour is exactly as before.
     if index is None:
@@ -1320,11 +1330,16 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
                       "today. ATTENDANCE NOT CHECKED: this says the LEASE lapsed, "
                       "not that nobody is working. Re-run with --check-attendance "
                       "before calling a role unattended.")
-    if status == roles.UNKNOWN or liveness_fact["state"] == roles.UNKNOWN:
+    if (status == roles.UNKNOWN or liveness_fact["state"] == roles.UNKNOWN
+            or attendance["state"] == "UNKNOWN"):
         # FAIL CLOSED (2026-07-11): the lease listing was unreadable, so the role's
         # state is UNKNOWN — NOT vacant. A degraded transport must not let a caller
         # read this as VACANT and fire a false SLA escalation. rc 1, same register
         # as `review status`'s "tally unknown" (leases dropped/None never asserts).
+        if attendance["state"] == "UNKNOWN":
+            print(f"attendance state unknown for role {role} in team/{team} — "
+                  f"checked but incomplete, retry after reconcile", file=sys.stderr)
+            return 3
         print(f"lease state unknown for role {role} in team/{team} — "
               f"degraded transport, retry", file=sys.stderr)
         return 1
@@ -4425,6 +4440,46 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
+    authority = _PUBLIC_READ_CONTEXT.get()
+    if authority is not None:
+        section = authority.section("reviews")
+        rows = section.get("rows") if isinstance(section, Mapping) else None
+        row = next((item for item in (rows or [])
+                    if isinstance(item, dict) and item.get("name") == slug), None)
+        if row is None:
+            print(f"review status failed: {slug} is absent from the validated "
+                  "generation — tally unknown", file=sys.stderr)
+            return 1
+        tally = row.get("tally")
+        required_fields = {
+            "state", "approvals", "changes", "required", "pending_required",
+            "evidence", "of",
+        }
+        if (not isinstance(tally, dict)
+                or not required_fields.issubset(tally)
+                or not all(isinstance(tally.get(key), list)
+                           for key in ("approvals", "changes", "required",
+                                       "pending_required"))):
+            print(f"review status failed: validated generation row for {slug} "
+                  "does not prove the full direct tally — reconcile with a "
+                  "compatible writer", file=sys.stderr)
+            return 3
+        result = deepcopy(tally)
+        result.update({"team": team, "slug": slug, "contract": 2})
+        if args.json:
+            jsonutil.print_json(result)
+        else:
+            print(f"review {slug} in team/{team}: {result['state']}")
+            if result["approvals"]:
+                print("  approvals: " + ", ".join(result["approvals"]))
+            if result["changes"]:
+                print("  changes requested: " + ", ".join(result["changes"]))
+            if result["pending_required"]:
+                print("  awaiting required: " + ", ".join(result["pending_required"]))
+        unproven = bool(result.get("unattributable")
+                        or result.get("unrecognised_verdicts")
+                        or result.get("head_mismatched_verdicts"))
+        return 3 if unproven else 0
     result, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
     if not doc_ok:
         # The doc read returned None: no doc. If the verdicts dir is also empty
@@ -7927,6 +7982,12 @@ def _work_evidence_index(
     """
     newest: dict[str, str] = {}
     ok = True
+    if _PUBLIC_READ_CONTEXT.get() is not None:
+        # Work-artifact mtimes are not part of the Unit-4 generation.  Mixing a
+        # later raw review/report listing into a generation-backed roster would
+        # create a second freshness authority.  PARTIAL preserves the existing
+        # annotation field while withholding any negative/nudge inference.
+        return {}, False
 
     def _note(agent: str, mtime: Any) -> None:
         # Store mtimes render on a TWELVE-HOUR clock ("2026-08-09 01:14AM UTC"),
@@ -12531,11 +12592,14 @@ def _run_v2_public_handler(
         )
 
     token = _PUBLIC_READ_CONTEXT.set(authority)
+    sealed_transport = public_read.SealedGenerationTransport(
+        transport, args.team, authority,
+    )
     try:
         if getattr(args, "json", False):
             captured = io.StringIO()
             with contextlib.redirect_stdout(captured):
-                rc = args.func(args, transport)
+                rc = args.func(args, sealed_transport)
             raw = captured.getvalue()
             try:
                 domain = json.loads(raw) if raw.strip() else None
@@ -12546,7 +12610,7 @@ def _run_v2_public_handler(
             rendered = with_domain_result(rc)
             print(rendered.render_json(result=domain))
             return rc
-        rc = args.func(args, transport)
+        rc = args.func(args, sealed_transport)
         rendered = with_domain_result(rc)
         print(rendered.render_text_metadata())
         if rc != 0:

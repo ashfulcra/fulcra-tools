@@ -116,7 +116,10 @@ Role status seals role assignment and holder presence into `liveness_fact`,
 naming both observations and the lease/presence prefixes that produced them. A
 fresh presence observation plus a stale lease is never confidently `VACANT`.
 Attendance has its own state: no flag is `NOT_RUN`; a requested but truncated
-scan is `UNKNOWN` with `scanned`/`total`; a completed scan carries `attended`.
+scan is `UNKNOWN` with `scanned`/`total` and makes the command/public envelope
+nonzero; a completed scan carries `attended`. Inventory-backed public folds
+consume the validated generation bytes, never a later live listing of those
+same namespaces.
 
 **Status:** clauses marked **ENFORCED** are pinned by
 `packages/coord-engine/tests/test_output_contract.py` and CI-failing;

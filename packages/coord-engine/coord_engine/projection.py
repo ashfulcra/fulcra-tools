@@ -29,7 +29,7 @@ doc genuinely lacks them — a legacy headless review has no head to serve)::
     {"schema", "generated_at", "complete", "scanned", "total",
      "rows": [{"name", "state", "pending_required", "required",
                "requested_by", "artifact", "of", "head", "settled",
-               "mtime", "size"}],
+               "mtime", "size", "tally"}],
      "orphans": [slug], "orphans_unknown": [slug], "tombstones": [slug]}
 
 ``forge`` — ``coord.forge.projection.v1``::
@@ -686,6 +686,9 @@ def _scan_review_slug(
             return row, True
         # Otherwise fall through and fold the shards for real.
     verdicts: list[dict[str, Any]] = []
+    unattributable: list[str] = []
+    unrecognised: list[tuple[str, str]] = []
+    mismatched: list[tuple[str, str]] = []
     for v in ventries:
         n = v.get("name") or ""
         if v.get("is_dir") or not n.endswith(".md"):
@@ -694,6 +697,11 @@ def _scan_review_slug(
         reviewer = parsed_name[0] if parsed_name else None
         parsed_ts = parsed_name[1] if parsed_name else None
         if reviewer is None:
+            stem = n[:-3] if n.endswith(".md") else n
+            if "--" in stem and (
+                    not head
+                    or review.normalize_head(stem.split("--", 1)[0]) is None):
+                unattributable.append(n)
             continue  # superseded head / foreign filename: zero reads
         if deadline.expired():
             return None, False
@@ -704,10 +712,14 @@ def _scan_review_slug(
             return None, False  # listed shard unreadable -> the tally is a floor
         vfm = okf.parse_frontmatter(raw_v) or {}
         if head and review.normalize_head(vfm.get("head")) != head:
+            mismatched.append((n, str(vfm.get("head") or "")))
             continue  # the verdict must independently attest the exact head
+        token = vfm.get("verdict")
+        if token is not None and review.normalize_verdict(token) is None:
+            unrecognised.append((n, str(token)))
         verdicts.append({
             "reviewer": reviewer,
-            "verdict": vfm.get("verdict"),
+            "verdict": token,
             "name": n,
             # SAME fallback chain as `_tally_from_verdict_entries` — filename
             # ts, then frontmatter ts, then the LISTING MTIME. Projection used
@@ -749,6 +761,26 @@ def _scan_review_slug(
     # merge evidence a `review close` wrote, and that is never ours to clobber.
     evidence = (review.evidence_digest(vnames)
                 if review.evidence_is_immutable(vnames) else "")
+    tally["evidence"] = evidence
+    tally["of"] = base["of"]
+    if head:
+        tally["head"] = head
+        try:
+            tally["round"] = max(1, int(fm.get("round") or 1))
+        except (TypeError, ValueError):
+            tally["round"] = 1
+    if unattributable:
+        tally["unattributable"] = sorted(unattributable)
+    if unrecognised:
+        tally["unrecognised_verdicts"] = [
+            {"file": filename, "verdict": verdict}
+            for filename, verdict in sorted(unrecognised)
+        ]
+    if mismatched:
+        tally["head_mismatched_verdicts"] = [
+            {"file": filename, "claimed_head": claimed_head}
+            for filename, claimed_head in sorted(mismatched)
+        ]
     prior_state = str(marker_fm.get("state") or "")
     may_write = (SETTLED_MARKER not in vnames) or prior_state == review.APPROVED
     if settled and evidence and may_write:
@@ -761,6 +793,11 @@ def _scan_review_slug(
             pass
     return {**base, "state": tally["state"],
             "pending_required": tally["pending_required"],
+            # Direct public `review status` must not reopen canonical shards
+            # after the generation has been validated. Preserve the complete
+            # domain tally alongside the fan-out fields; old/carried rows that
+            # lack it fail UNKNOWN rather than fabricating omitted evidence.
+            "tally": tally,
             "settled": settled}, True
 
 

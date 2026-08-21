@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from hashlib import sha256
 
-from coord_engine import generation, public_read
+from coord_engine import __version__, generation, okf, public_read, tasks
 from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
 from coord_engine.generation import SectionResult
 from coord_engine_test_helpers import FakeTransport
@@ -26,7 +26,7 @@ def _batch(watermark=WATERMARK):
     )
 
 
-def _sections(rows=()):
+def _sections(rows=(), *, values_override=None):
     values = {
         "tasks": {"rows": list(rows)},
         "reviews": {
@@ -43,6 +43,7 @@ def _sections(rows=()):
         "acknowledgments": {"records": []},
         "responses": {"records": []},
     }
+    values.update(values_override or {})
     return {
         name: SectionResult(name, "DATA" if value[next(iter(value))] else "CLEAR", value)
         for name, value in values.items()
@@ -72,13 +73,13 @@ class OverlayTransport(FakeTransport):
         return self.envelope
 
 
-def _publish(t, *, rows=(), watermark=WATERMARK):
+def _publish(t, *, rows=(), watermark=WATERMARK, values_override=None):
     sealed = generation.build_generation(
         prior_generation=None,
         source_watermark=watermark,
         batch=_batch(watermark),
-        sections=_sections(rows),
-        engine_version="2.0.0-test",
+        sections=_sections(rows, values_override=values_override),
+        engine_version=__version__,
     )
     assert generation.publish(t, TEAM, sealed).published
     return sealed
@@ -148,6 +149,76 @@ def test_generation_id_must_bind_the_validated_immutable_identity():
     assert result.rc == 3
     assert t.feed_starts == []
     assert "identity" in (
+        result.coverage_by_surface("immutable-generation").reason or ""
+    )
+
+
+def test_unsupported_engine_and_section_schemas_fail_closed_before_overlay():
+    t = OverlayTransport()
+    sealed = _publish(t)
+    generation_path = generation.generation_path(TEAM, sealed.id)
+    doc = json.loads(t.store[generation_path])
+    doc["engine_version"] = "0.0.0"
+    for section in doc["sections"].values():
+        section["schema"] = "attacker.schema.v9"
+    identity = {
+        "prior_generation_id": doc["prior_generation_id"],
+        "source_watermark": doc["source_watermark"],
+        "normalized_update_digest": doc["normalized_update_digest"],
+        "schema_version": doc["schema"],
+        "engine_version": doc["engine_version"],
+    }
+    forged_id = sha256(json.dumps(
+        identity, separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+    doc["id"] = forged_id
+    forged_bytes = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+    del t.store[generation_path]
+    t.store[generation.generation_path(TEAM, forged_id)] = forged_bytes
+    manifest = {
+        "generation_id": forged_id,
+        "source_watermark": WATERMARK,
+        "schemas": {
+            name: "attacker.schema.v9" for name in generation.REQUIRED_SECTIONS
+        },
+        "engine_version": "0.0.0",
+        "content_digest": sha256(forged_bytes.encode()).hexdigest(),
+    }
+    t.store[generation.current_path(TEAM)] = json.dumps(
+        manifest, separators=(",", ":"), sort_keys=True,
+    )
+
+    result = _read(t)
+
+    assert result.rc == 3
+    assert result.state.value == "UNKNOWN"
+    assert t.feed_starts == []
+    immutable = result.coverage_by_surface("immutable-generation")
+    assert immutable.state.value == "UNKNOWN"
+    assert "unsupported engine version 0.0.0" in (immutable.reason or "")
+    assert result.coverage_by_surface("freshness-overlay").state.value == "NOT_RUN"
+
+
+def test_unsupported_section_schema_is_rejected_even_with_supported_engine():
+    t = OverlayTransport()
+    sealed = _publish(t)
+    path = generation.generation_path(TEAM, sealed.id)
+    doc = json.loads(t.store[path])
+    doc["sections"]["presence"]["schema"] = "attacker.schema.v9"
+    forged_bytes = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+    t.store[path] = forged_bytes
+    manifest = json.loads(t.store[generation.current_path(TEAM)])
+    manifest["schemas"]["presence"] = "attacker.schema.v9"
+    manifest["content_digest"] = sha256(forged_bytes.encode()).hexdigest()
+    t.store[generation.current_path(TEAM)] = json.dumps(
+        manifest, separators=(",", ":"), sort_keys=True,
+    )
+
+    result = _read(t)
+
+    assert result.rc == 3
+    assert t.feed_starts == []
+    assert "unsupported presence section schema attacker.schema.v9" in (
         result.coverage_by_surface("immutable-generation").reason or ""
     )
 
@@ -388,12 +459,156 @@ def test_role_attendance_not_run_is_distinct_from_checked_truncation(
         )
     assert cli.main([
         "roles", "status", TEAM, "reviewer", "--check-attendance", "--json",
-    ], transport=t) == 0
+    ], transport=t) != 0
     checked = json.loads(capsys.readouterr().out)
     assert checked["attendance"] == {
         "state": "UNKNOWN", "scanned": 40, "total": 45,
         "reason": "attendance check budget-truncated",
     }
+
+
+class CanonicalPoisonTransport(OverlayTransport):
+    """Generation reads work; any reopened canonical public section explodes."""
+
+    poisoned_prefixes = (
+        f"team/{TEAM}/roles/",
+        f"team/{TEAM}/presence/",
+        f"team/{TEAM}/review/",
+        f"team/{TEAM}/_coord/acks/",
+        f"team/{TEAM}/response/",
+    )
+
+    def list_dir(self, path):
+        if self.poisoned and any(path.startswith(prefix)
+                                 for prefix in self.poisoned_prefixes):
+            raise RuntimeError(f"live canonical listing reopened: {path}")
+        return super().list_dir(path)
+
+    def read(self, path):
+        if self.poisoned and any(path.startswith(prefix)
+                                 for prefix in self.poisoned_prefixes):
+            raise RuntimeError(f"live canonical read reopened: {path}")
+        return super().read(path)
+
+
+def _record(path, fields, body):
+    content = okf.render_frontmatter(fields) + f"\n{body}\n"
+    return {"path": path, "content": content, "frontmatter": fields}
+
+
+def test_non_task_public_folds_read_the_sealed_generation_not_live_canonical(
+    capsys, monkeypatch,
+):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    presence_path = f"team/{TEAM}/presence/{tasks.agent_key('alice')}.md"
+    review_tally = {
+        "state": "APPROVED", "approvals": ["alice"], "changes": [],
+        "required": ["alice"], "pending_required": [], "evidence": "proof",
+        "of": "task/a", "head": "a" * 40, "round": 1,
+    }
+    values = {
+        "presence": {"records": [_record(presence_path, {
+            "type": "Presence", "agent": "alice", "timestamp": WATERMARK,
+            "workstreams": ["activation"], "summary": "sealed",
+        }, "presence")]},
+        "roles": {"records": [
+            _record(f"team/{TEAM}/roles/reviewer.md", {
+                "type": "Role", "sla_hours": 24,
+            }, "role"),
+            _record(f"team/{TEAM}/roles/reviewer/leases/alice.md", {
+                "type": "Lease", "agent": "alice", "timestamp": WATERMARK,
+            }, "lease"),
+        ]},
+        "reviews": {
+            "schema": "coord.reviews.projection.v2", "generated_at": WATERMARK,
+            "complete": True, "scanned": 1, "total": 1,
+            "rows": [{
+                "name": "pr1", "state": "APPROVED", "settled": True,
+                "pending_required": [], "required": ["alice"],
+                "requested_by": "alice", "artifact": None,
+                "of": "task/a", "head": "a" * 40,
+                "mtime": None, "size": None, "tally": review_tally,
+            }],
+            "orphans": [], "orphans_unknown": [], "tombstones": [],
+        },
+    }
+    t = CanonicalPoisonTransport()
+    t.poisoned = False
+    _publish(t, values_override=values)
+    t.poisoned = True
+
+    assert cli.main(["presence", "show", TEAM, "--json"], transport=t) == 0
+    presence_payload = json.loads(capsys.readouterr().out)
+    assert presence_payload["result"][0]["agent"] == "alice"
+    assert presence_payload["result"][0]["summary"] == "sealed"
+
+    assert cli.main([
+        "roles", "status", TEAM, "reviewer", "--json",
+    ], transport=t) == 0
+    role_payload = json.loads(capsys.readouterr().out)
+    assert role_payload["result"]["fresh_holders"] == ["alice"]
+
+    assert cli.main([
+        "review", "status", TEAM, "pr1", "--json",
+    ], transport=t) == 0
+    review_payload = json.loads(capsys.readouterr().out)
+    assert review_payload["result"] == {
+        **review_tally, "team": TEAM, "slug": "pr1", "contract": 2,
+    }
+
+
+def test_generation_backed_checked_truncation_is_top_level_unknown(
+    capsys, monkeypatch,
+):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    values = {
+        "presence": {"records": [_record(
+            f"team/{TEAM}/presence/{tasks.agent_key('alice')}.md",
+            {"type": "Presence", "agent": "alice", "timestamp": WATERMARK},
+            "presence",
+        )]},
+        "roles": {"records": [
+            _record(f"team/{TEAM}/roles/reviewer.md", {
+                "type": "Role", "sla_hours": 24,
+            }, "role"),
+            _record(f"team/{TEAM}/roles/reviewer/leases/alice.md", {
+                "type": "Lease", "agent": "alice", "timestamp": WATERMARK,
+            }, "lease"),
+        ]},
+        "reviews": {
+            "schema": "coord.reviews.projection.v2", "generated_at": WATERMARK,
+            "complete": True, "scanned": 45, "total": 45,
+            "rows": [{
+                "name": f"pr{index}", "state": "PENDING", "settled": False,
+                "pending_required": ["bob"], "required": ["bob"],
+                "requested_by": "bob", "artifact": None,
+                "of": None, "head": None, "mtime": None, "size": None,
+            } for index in range(45)],
+            "orphans": [], "orphans_unknown": [], "tombstones": [],
+        },
+    }
+    t = CanonicalPoisonTransport()
+    t.poisoned = False
+    _publish(t, values_override=values)
+    t.poisoned = True
+
+    rc = cli.main([
+        "roles", "status", TEAM, "reviewer", "--check-attendance", "--json",
+    ], transport=t)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 3
+    assert payload["state"] == "UNKNOWN"
+    assert payload["result"]["attendance"] == {
+        "state": "UNKNOWN", "scanned": 40, "total": 45,
+        "reason": "attendance check budget-truncated",
+    }
+    assert any(item["surface"] == "domain-result"
+               and item["state"] == "UNKNOWN" for item in payload["coverage"])
 
 
 MIGRATED_PUBLIC_FOLDS = [
@@ -412,14 +627,34 @@ MIGRATED_PUBLIC_FOLDS = [
 
 
 def _public_fold_transport():
-    from coord_engine import okf, tasks
-
     t = OverlayTransport()
-    _publish(t, rows=[
-        {"name": "a", "id": "a", "title": "A", "description": "",
-         "status": "active", "priority": "P2", "assignee": "alice",
-         "tags": [], "acked_by": []},
-    ])
+    _publish(
+        t,
+        rows=[
+            {"name": "a", "id": "a", "title": "A", "description": "",
+             "status": "active", "priority": "P2", "assignee": "alice",
+             "tags": [], "acked_by": []},
+        ],
+        values_override={
+            "reviews": {
+                "schema": "coord.reviews.projection.v2",
+                "generated_at": WATERMARK, "complete": True,
+                "scanned": 1, "total": 1,
+                "rows": [{
+                    "name": "pr1", "state": "PENDING", "settled": False,
+                    "pending_required": [], "required": [],
+                    "requested_by": "alice", "artifact": None,
+                    "of": None, "head": None, "mtime": None, "size": None,
+                    "tally": {
+                        "state": "PENDING", "approvals": [], "changes": [],
+                        "required": [], "pending_required": [], "evidence": "",
+                        "of": None,
+                    },
+                }],
+                "orphans": [], "orphans_unknown": [], "tombstones": [],
+            },
+        },
+    )
     t.put(
         "team/r/review/pr1.md",
         okf.render_frontmatter({
