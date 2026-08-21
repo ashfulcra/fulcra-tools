@@ -489,7 +489,7 @@ def test_overlay_not_run_for_unverified_epsilon_is_unknown_not_clean():
 def test_feed_that_does_not_attest_the_overlap_or_horizon_is_unknown():
     for envelope, expected in [
         ({"through": HORIZON, "data_types": {"MomentAnnotation/test-reconcile": 0},
-          "file_changes": []}, "overlap"),
+          "file_changes": []}, "boundary"),
         ({"after": OVERLAP_START, "through": "2026-08-21T00:59:29Z",
           "data_types": {"MomentAnnotation/test-reconcile": 0},
           "file_changes": []}, "horizon"),
@@ -527,8 +527,66 @@ def test_nonzero_coordination_signal_without_enumerated_records_is_unknown(
     assert result.state.value == "UNKNOWN"
     assert result.coverage_horizon is None
     overlay = result.coverage_by_surface("freshness-overlay")
-    assert overlay.state.value == "UNKNOWN"
+    assert overlay.state.value == "NOT_RUN"
     assert "feed coverage UNKNOWN" in (overlay.reason or "")
+
+
+@pytest.mark.parametrize(("count", "record_window"), [
+    (0, {
+        "after": OVERLAP_START,
+        "through": OVERLAP_START,
+        "records": [],
+    }),
+    (2737, {
+        "after": OVERLAP_START,
+        "through": "2026-08-21T00:45:00Z",
+        "records": [{"id": "r-1", "recorded_at": "2026-08-21T00:40:00Z"}],
+    }),
+])
+def test_public_overlay_rejects_empty_and_nonempty_lagging_record_cursors(
+    count, record_window,
+):
+    """The feed horizon cannot outrun the record channel it claims to cover."""
+    t = OverlayTransport({
+        "after": OVERLAP_START,
+        "through": HORIZON,
+        "data_types": {"MomentAnnotation/test-reconcile": count},
+        "file_changes": [],
+    }, record_window=record_window)
+    _publish(t)
+
+    result = _read(t)
+
+    assert t.record_calls == 1
+    assert result.rc == 3
+    assert result.state.value == "UNKNOWN"
+    assert result.coverage_horizon is None
+    overlay = result.coverage_by_surface("freshness-overlay")
+    assert overlay.state.value == "NOT_RUN"
+    assert "record cursor coverage horizon precedes data-updates frontier" in (
+        overlay.reason or ""
+    )
+
+
+@pytest.mark.parametrize("cursor_through", [
+    HORIZON,
+    "2026-08-20T20:59:30.000001-04:00",
+])
+def test_public_overlay_accepts_equal_or_later_record_cursor_horizon(
+    cursor_through,
+):
+    t = OverlayTransport(record_window={
+        "after": OVERLAP_START,
+        "through": cursor_through,
+        "records": [],
+    })
+    _publish(t)
+
+    result = _read(t)
+
+    assert result.rc == 0
+    assert result.state.value == "CLEAR"
+    assert result.coverage_horizon == HORIZON
 
 
 def test_supported_task_delta_is_applied_and_overlap_redelivery_is_idempotent():

@@ -682,9 +682,12 @@ it (not on PyPI).
     positive signal therefore requires a bounded attested enumeration with at
     least one immutable identity; positive-with-none is `UNKNOWN`/nonzero. A
     zero signal is not proof of CLEAR: a bounded enumeration must prove the
-    window, or bootstrap reports record coverage `NOT_RUN` and uses the named
-    canonical recovery pass. The public-read overlay has no recovery licence,
-    so NOT_RUN/UNKNOWN coverage stays nonzero.
+    whole outer feed window. The outer feed must attest the exact requested
+    `after`; the record cursor must repeat that boundary and reach or pass the
+    outer `through`. A missing, lagging, mismatched, or incomparable horizon is
+    UNKNOWN, advances no watermark, and leaves freshness overlay NOT_RUN/nonzero.
+    Bootstrap is complete only when an outer `after` supplies its boundary and
+    the record cursor covers the same full frontier.
     Review projection v3 rows carry the full direct-query tally; one shared
     validator requires `of`/`head`, unique row slugs, settled invariants, and
     all three orphan/tombstone slug lists before producer carry, publication,

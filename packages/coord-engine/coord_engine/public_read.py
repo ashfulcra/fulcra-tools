@@ -522,10 +522,14 @@ def read_current(
     poll_deadline = deadline or Deadline.open(DEFAULT_READ_BUDGET_SECONDS)
     batch = ChangeDetector(transport).poll(team, _iso(start), poll_deadline)
     if not batch.trusted:
+        detail = getattr(batch, "reason", None)
+        overlay_reason = "freshness overlay feed coverage UNKNOWN"
+        if isinstance(detail, str) and detail:
+            overlay_reason += ": " + detail
         return _unknown(
             coverage=_coverage(
-                CoverageState.CLEAR, CoverageState.CLEAR, CoverageState.UNKNOWN,
-                overlay_reason="freshness overlay feed coverage UNKNOWN",
+                CoverageState.CLEAR, CoverageState.CLEAR, CoverageState.NOT_RUN,
+                overlay_reason=overlay_reason,
             ), sections=section_values,
             generation_id=generation_id, watermark=watermark_text,
         )

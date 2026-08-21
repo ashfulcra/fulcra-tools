@@ -1431,14 +1431,7 @@ def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
         state, value = _tree_section(
             transport, prefix, section=name, deadline=deadline)
         feed_state = _coverage_state(batch, coverage[name])
-        # A bootstrap zero-count cannot prove the record side of the combined
-        # ack/response namespace, so the detector reports NOT_RUN.  This is the
-        # named recovery pass: its canonical inventory enumeration may establish
-        # complete section coverage without laundering the count into CLEAR.
-        if (feed_state == "NOT_RUN"
-                and name in ("acknowledgments", "responses")):
-            pass
-        elif feed_state not in generation.COMPLETE_STATES:
+        if feed_state not in generation.COMPLETE_STATES:
             state = "UNKNOWN"
         out[name] = generation.SectionResult(name, state, value)
     return out

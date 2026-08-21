@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from coord_engine.budget import Deadline
 
 
@@ -23,6 +25,10 @@ class FeedTransport:
         self, envelope, records=_DEFAULT_RECORD_WINDOW, *, data_type=COORDINATION_TYPE,
         supply_default_count=True,
     ):
+        if isinstance(envelope, dict) and "after" not in envelope:
+            envelope = {"after": "2026-08-20T11:00:00Z", **envelope}
+        if isinstance(envelope, dict) and "through" not in envelope:
+            envelope = {"through": "2026-08-20T12:00:00Z", **envelope}
         if isinstance(envelope, dict) and supply_default_count and "data_types" not in envelope:
             envelope = {"data_types": {data_type: 0}, **envelope}
         self.envelope = envelope
@@ -182,6 +188,10 @@ def test_attested_feed_frontier_is_sealed_separately_from_event_timestamps():
     batch = _poll(FeedTransport({
         "through": "2026-08-20T12:10:00+00:00",
         "file_changes": [_row("team/r/task/a.md", at="2026-08-20T12:00:00Z")],
+    }, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:10:00Z",
+        "records": [],
     }))
 
     assert batch.trusted is True
@@ -367,11 +377,12 @@ def test_zero_record_count_does_not_suppress_attested_enumerated_records():
     assert batch.coverage["acknowledgments_responses"].value == "DATA"
 
 
-def test_zero_record_signal_without_a_prior_boundary_is_not_proof_of_clear():
-    """Bootstrap may recover canonically, but the zero count did not check records."""
+def test_zero_record_signal_without_any_attested_start_boundary_is_unknown():
+    """Neither a zero count nor an outer frontier can invent a cursor start."""
     from coord_engine.change_detection import ChangeDetector
 
     transport = FeedTransport({
+        "after": None,
         "through": "2026-08-20T12:00:00Z",
         "file_changes": [],
         "data_types": {COORDINATION_TYPE: 0},
@@ -379,9 +390,35 @@ def test_zero_record_signal_without_a_prior_boundary_is_not_proof_of_clear():
 
     batch = ChangeDetector(transport).poll("r", None, Deadline.open(5.0))
 
-    assert batch.trusted is True
+    assert batch.trusted is False
+    assert batch.watermark is None
     assert transport.record_calls == 0
-    assert batch.coverage["acknowledgments_responses"].value == "NOT_RUN"
+    assert getattr(batch, "reason", None) == (
+        "data-updates coverage boundary unavailable or unparseable"
+    )
+
+
+def test_bootstrap_uses_an_attested_outer_start_and_covers_its_frontier():
+    """A first pass is complete only when one cursor covers the whole feed window."""
+    from coord_engine.change_detection import ChangeDetector
+
+    transport = FeedTransport({
+        "after": "2026-08-20T10:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records={
+        "after": "2026-08-20T10:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    })
+
+    batch = ChangeDetector(transport).poll("r", None, Deadline.open(5.0))
+
+    assert transport.record_calls == 1
+    assert batch.trusted is True
+    assert batch.watermark == "2026-08-20T12:00:00Z"
+    assert batch.coverage["acknowledgments_responses"].value == "CLEAR"
 
 
 def test_nonzero_record_signal_without_materialized_identities_is_unknown():
@@ -397,6 +434,116 @@ def test_nonzero_record_signal_without_materialized_identities_is_unknown():
         ))
         assert batch.trusted is False
         assert batch.coverage["acknowledgments_responses"].value == "UNKNOWN"
+
+
+@pytest.mark.parametrize(("count", "cursor"), [
+    (0, {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T11:00:00Z",
+        "records": [],
+    }),
+    (2737, {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T11:59:59.999999Z",
+        "records": [{"id": "r-1", "recorded_at": "2026-08-20T11:30:00Z"}],
+    }),
+])
+def test_record_cursor_must_cover_the_outer_feed_frontier(count, cursor):
+    """A short cursor must not license CLEAR/DATA or advance the feed watermark."""
+    batch = _poll(FeedTransport({
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: count},
+    }, records=cursor))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert getattr(batch, "reason", None) == (
+        "record cursor coverage horizon precedes data-updates frontier"
+    )
+    assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
+
+
+@pytest.mark.parametrize("cursor_through", [
+    "2026-08-20T08:00:00.000000-04:00",
+    "2026-08-20T12:00:00.000001Z",
+])
+def test_equal_or_later_record_cursor_horizon_covers_feed_across_precision_and_zone(
+    cursor_through,
+):
+    """Instant comparison, not lexical spelling, decides cursor coverage."""
+    batch = _poll(FeedTransport({
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": cursor_through,
+        "records": [],
+    }))
+
+    assert batch.trusted is True
+    assert batch.watermark == "2026-08-20T12:00:00Z"
+
+
+@pytest.mark.parametrize(("envelope_through", "cursor", "expected"), [
+    (None, {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    }, "data-updates coverage frontier unavailable or unparseable"),
+    ("2026-08-20T12:00:00Z", None,
+     "record cursor window unavailable or malformed"),
+    ("2026-08-20T12:00:00Z", {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "not-a-time",
+        "records": [],
+    }, "record cursor boundary or horizon is unparseable"),
+])
+def test_missing_or_incomparable_horizons_are_precise_unknowns(
+    envelope_through, cursor, expected,
+):
+    batch = _poll(FeedTransport({
+        "through": envelope_through,
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records=cursor))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert getattr(batch, "reason", None) == expected
+
+
+@pytest.mark.parametrize(("after", "through", "expected"), [
+    (
+        "2026-08-20T11:00:00.000001Z",
+        "2026-08-20T12:00:00Z",
+        "data-updates coverage boundary does not match requested watermark",
+    ),
+    (
+        "2026-08-20T11:00:00Z",
+        "2026-08-20T10:59:59.999999Z",
+        "data-updates coverage frontier precedes its boundary",
+    ),
+])
+def test_outer_feed_boundary_and_frontier_form_one_exact_window(
+    after, through, expected,
+):
+    """No consumer may trust a feed whose outer window leaves a gap."""
+    batch = _poll(FeedTransport({
+        "after": after,
+        "through": through,
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    }))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert getattr(batch, "reason", None) == expected
 
 
 def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel():

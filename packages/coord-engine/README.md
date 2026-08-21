@@ -210,9 +210,12 @@ count to enumerated identities (`2721 -> 9`, `1444 -> 0`, `2737 -> 25`) make
 numeric equality invalid. A positive signal must materialize at least one
 immutable identity in one bounded attested cursor read or coverage is
 `UNKNOWN`; a zero signal becomes CLEAR only when that cursor window proves it.
-Bootstrap without a prior record boundary reports record coverage `NOT_RUN`
-and lets the named canonical recovery pass establish the inventory; a public
-overlay has no such recovery licence and remains nonzero. The concrete
+The outer feed and record cursor must attest one contiguous window: exact
+requested `after`, and record `through` at or beyond feed `through`. A lagging,
+missing, mismatched, or incomparable boundary/frontier is `UNKNOWN`, advances
+no watermark, and leaves the public overlay `NOT_RUN`/nonzero. Bootstrap is
+licensed only by an outer `after` plus a cursor covering the same full
+frontier. The concrete
 count key always comes from the stored `_coord/bus-v3/records.json` authority:
 the host-local `COORD_RECORDS_TYPE` writer/test override cannot redirect
 detection. That authority read and its optional one retry spend the detector's
