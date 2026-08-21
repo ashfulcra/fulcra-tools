@@ -44,6 +44,15 @@ class PersistedIdentity:
     identity: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class IdentityResolution:
+    """A session identity fact that can remain explicitly unknown."""
+
+    state: str
+    identity: Optional[str] = None
+    reason: Optional[str] = None
+
+
 def sanitize_hostname(raw: str) -> tuple[str, bool]:
     """Return an injective safe hostname, or an empty string when none is usable."""
     collapsed = _IDENTITY_SAFE.sub("-", raw).strip("-.:_")
@@ -105,6 +114,30 @@ def resolve_identity(
     if rewritten and on_hostname_rewritten is not None:
         on_hostname_rewritten(raw, safe)
     return f"coord-reconcile:{safe}"
+
+
+def resolve_identity_outcome(
+    explicit: Optional[str] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+    persisted: Union[
+        Optional[str], PersistedIdentity,
+        Callable[[], Union[Optional[str], PersistedIdentity]],
+    ] = None,
+    hostname: Optional[Callable[[], str]] = None,
+    on_hostname_rewritten: Optional[Callable[[str, str], None]] = None,
+) -> IdentityResolution:
+    """Typed counterpart to :func:`resolve_identity`; never raises on doubt."""
+    try:
+        identity = resolve_identity(
+            explicit, environ=environ, persisted=persisted, hostname=hostname,
+            on_hostname_rewritten=on_hostname_rewritten,
+        )
+    except RuntimeError as exc:
+        return IdentityResolution("UNKNOWN", reason=str(exc))
+    if identity is None:
+        return IdentityResolution("NOT_RUN", reason="no identity source selected")
+    return IdentityResolution("DATA", identity=identity)
 
 
 def canonical_read(

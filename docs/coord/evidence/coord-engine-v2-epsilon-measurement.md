@@ -1,0 +1,33 @@
+# Coord Engine v2 Feed-Visibility Evidence
+
+**Status: BLOCKED — zero of two required credentialed-host measurements are recorded.**
+
+This file is the activation evidence schema, not evidence that measurement has
+happened. Do not set `public_read_epsilon_verified`, bump/release `2.0.0`, or
+move the fleet pin until two distinct credentialed hosts have produced complete
+rows and the configured epsilon is at least the largest observed value.
+
+Run once per credentialed host, using a host-neutral label:
+
+```bash
+coord-engine measure-feed-lag fulcra --host-id host-a --timeout 30 --poll 0.25
+```
+
+Record the complete one-value JSON output below. Never record tokens, account
+identifiers, machine paths, or other credentials.
+
+```json
+{
+  "schema": "coord.feed-visibility-lag-evidence.v1",
+  "status": "BLOCKED",
+  "measurements": [],
+  "observed_max_seconds": null,
+  "configured_epsilon_seconds": null,
+  "measured_at": null
+}
+```
+
+The harness writes one nonce document and polls for that exact immutable path.
+Timeout, malformed feed output, or an unproven write is `UNKNOWN` with rc 3.
+An unmeasured or one-host epsilon is not a conservative estimate; it is no
+bound at all and blocks activation.

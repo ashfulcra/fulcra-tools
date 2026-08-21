@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import __version__, aggregate, config, generation, health as health_mod, jsonutil, model, okf, review
+from . import __version__, aggregate, config, generation, health as health_mod, jsonutil, migration, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .change_detection import ChangeBatch, ChangeDetector
@@ -895,9 +895,14 @@ def _load_prior_aggregate(transport: Any, team: str) -> Optional[dict[str, Any]]
     if not raw:
         return None
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except Exception:
         return None
+    # Unit 6: legacy summaries are licensed only as bootstrap input. Parsing
+    # them here never promotes them to the current-generation authority; it
+    # merely lets the canonical rebuild reuse valid v1 task/projection bytes.
+    bootstrap = migration.read_v1_bootstrap(raw)
+    return parsed if bootstrap.state == "DATA" and isinstance(parsed, dict) else None
 
 
 def _publication_generation(aggregate_doc: Any) -> Optional[str]:

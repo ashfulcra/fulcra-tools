@@ -796,6 +796,20 @@ polling with extra steps. The bus works without it, and scheduled wakes +
 queue reads are the standing pattern; deploy a router only if your fleet has
 a measured wake-the-dead need and the isolation the spec requires.
 
+## Coord-engine v2 release boundary
+
+Legacy v1 aggregates are readable only as non-authoritative bootstrap input.
+Mixed-fleet writers may keep writing canonical documents, but v2 projection
+authority and cursor schema 2 stay refused until compatibility, CAS, two-host
+feed lag, and fleet adoption are proven. See the
+[epsilon](evidence/coord-engine-v2-epsilon-measurement.md) and
+[fleet](evidence/coord-engine-v2-fleet-verification.md) evidence templates.
+
+Release completion is not merge completion: it requires the `2.0.0` release,
+exact adoption on every live (within-SLA) host, named exclusions with evidence,
+and two credentialed hosts verifying all public folds. Older readers continue
+using canonical/v1-compatible surfaces and reject v2-only authority.
+
 ## Rules
 
 1. Never write secrets, tokens, or credentials into a note or document.

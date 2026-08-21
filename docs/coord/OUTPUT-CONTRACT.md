@@ -262,3 +262,17 @@ A conforming consumer:
 
 A clause flip without its fixture flip — or the reverse — is a review
 CHANGES by policy.
+
+## v2 activation evidence
+
+`UNKNOWN` identity resolution is a typed result and nonzero, not an unexpected
+`RuntimeError`. Role lease/register and holder-presence observations produce one
+`liveness_fact`: a live holder with an expired lease is one `LAPSED` answer,
+while unreadable/contradictory evidence is typed `UNKNOWN`, so read and save
+paths cannot act on different answers.
+
+The bounded-staleness claim remains disabled until two credentialed hosts
+measure feed visibility and the configured epsilon covers the maximum. Merge
+alone never activates or completes v2. Release, exact within-SLA fleet adoption,
+named exclusions, and two-host command verification are required; the blocking
+templates live under [`docs/coord/evidence/`](evidence/).

@@ -412,6 +412,21 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
     `coord-engine health <team>` for old writers and upgrade them — that, not
     the engine, is the lever.
 
+## v2 activation is evidence-gated
+
+Do not move the install/adoption pin to `2.0.0` merely because its branch
+merged. First complete the two-host bounded lag measurement in
+[`coord-engine-v2-epsilon-measurement.md`](evidence/coord-engine-v2-epsilon-measurement.md),
+then the live-fleet census and command matrix in
+[`coord-engine-v2-fleet-verification.md`](evidence/coord-engine-v2-fleet-verification.md).
+An unmeasured or one-host epsilon, a mixed live fleet, missing CAS for cursor
+schema 2, a silently omitted host, or any `UNKNOWN` at rc 0 blocks adoption.
+
+The installer remains on its existing full-commit `PIN` until that evidence
+licenses a version/tag/pin change. Its `VER=pp-<sha8>` label and installed
+`direct_url.json` commit must name the same artifact; a cached claim is not
+identity evidence.
+
 ## 8. Where next
 
 - [`AGENTS.md`](../../AGENTS.md) — the working conventions: review handshake, delivery

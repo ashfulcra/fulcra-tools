@@ -1189,6 +1189,21 @@ intents), split by kind:
   guessing. Deeper retrieval (search/MCP) is future work — storage now is what
   makes it possible later.
 
+## Coord-engine v2 migration gate
+
+v1 projection aggregates are bootstrap input only, never v2 authority. The
+bounded `measure-feed-lag` harness must succeed on two distinct credentialed
+hosts before epsilon can be marked verified. Until the
+[epsilon](docs/coord/evidence/coord-engine-v2-epsilon-measurement.md) and
+[fleet](docs/coord/evidence/coord-engine-v2-fleet-verification.md) evidence are
+complete, do not bump/release `2.0.0`, move `adopt-latest.sh`, enable v2 public
+reads, or activate cursor schema 2. Mixed fleets and missing CAS refuse.
+
+“Done” means release plus exact adoption by every host reconciled within the
+recorded fleet SLA, with every exclusion named and evidenced, then queue,
+needs-me, review, forge, roles, presence, and reconcile verified from at least
+two credentialed hosts. Merge is insufficient. `UNKNOWN` must remain nonzero.
+
 ## Working tree
 
 Prefer a **per-agent git worktree**, not a shared checkout — concurrent

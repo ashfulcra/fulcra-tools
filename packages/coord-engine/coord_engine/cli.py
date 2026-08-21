@@ -40,7 +40,7 @@ from . import (
     generation,
     health as health_mod, jsonutil, okf, outcome as outcome_mod, presence,
     projection as projection_mod, public_read,
-    handoff, pin_currency, query, read_retry, records, review, review_gc,
+    handoff, migration, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
 from .budget import Deadline
@@ -51,6 +51,14 @@ from .transport import FulcraFileTransport, TransportError
 __all__ = ["main"]
 
 _log = get_logger("cli")
+
+
+class IdentityUnavailable(Exception):
+    """Carries typed identity doubt to the one CLI outcome boundary."""
+
+    def __init__(self, outcome: classifier.IdentityResolution):
+        super().__init__(outcome.reason or "identity unavailable")
+        self.outcome = outcome
 
 # Set exactly once by ``main`` after Unit 5 proves a generation and overlay.
 # All task-backed folds then share those same sealed bytes rather than each
@@ -156,15 +164,16 @@ def _identity(explicit: Optional[str] = None) -> str:
                   f"set FULCRA_COORD_AGENT explicitly to pin your identity.",
                   file=sys.stderr)
 
-    resolved = classifier.resolve_identity(
+    outcome = classifier.resolve_identity_outcome(
         explicit,
         environ=os.environ,
         persisted=config.persisted_identity,
         hostname=socket.gethostname,
         on_hostname_rewritten=warn,
     )
-    assert resolved is not None
-    return resolved
+    if outcome.state != "DATA" or outcome.identity is None:
+        raise IdentityUnavailable(outcome)
+    return outcome.identity
 
 
 def _host() -> str:
@@ -174,9 +183,12 @@ def _host() -> str:
 
 def _declared_identity(explicit: Optional[str] = None) -> Optional[str]:
     """Resolve a usable identity without manufacturing a host identity."""
-    return classifier.resolve_identity(
+    outcome = classifier.resolve_identity_outcome(
         explicit, environ=os.environ, persisted=config.persisted_identity
     )
+    if outcome.state == "UNKNOWN":
+        raise IdentityUnavailable(outcome)
+    return outcome.identity
 
 
 def cmd_wake_queue_file(args: argparse.Namespace, transport: Any) -> int:
@@ -209,10 +221,13 @@ def _known_sender(args: argparse.Namespace) -> Optional[str]:
     breadcrumb points others at ``queue --agent <sender>``, so we print it only
     when the sender is a real identity someone actually reads a queue as — never
     the bare host tag."""
-    return classifier.resolve_identity(
+    outcome = classifier.resolve_identity_outcome(
         getattr(args, "sender", None), environ=os.environ,
         persisted=config.persisted_identity,
     )
+    if outcome.state == "UNKNOWN":
+        raise IdentityUnavailable(outcome)
+    return outcome.identity
 
 
 def _replies_breadcrumb(team: str, sender: str) -> str:
@@ -9839,6 +9854,16 @@ def cmd_stash_list(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def cmd_measure_feed_lag(args: argparse.Namespace, transport: Any) -> int:
+    """Emit one host-neutral, secret-free feed visibility measurement."""
+    result = migration.measure_feed_visibility_lag(
+        transport, args.team, args.host_id,
+        timeout_seconds=args.timeout, poll_seconds=args.poll,
+    )
+    jsonutil.print_json(result.as_dict())
+    return result.rc
+
+
 # --- health / doctor (fulcra-agent-health) ---
 
 def cmd_health(args: argparse.Namespace, transport: Any) -> int:
@@ -11441,6 +11466,17 @@ def build_parser() -> argparse.ArgumentParser:
     def add_json(sp):
         sp.add_argument("--json", action="store_true", help="emit JSON")
 
+    ms = sub.add_parser(
+        "measure-feed-lag",
+        help="bounded canonical-write to data-updates visibility measurement",
+    )
+    ms.add_argument("team")
+    ms.add_argument("--host-id", required=True,
+                    help="host-neutral label recorded in evidence (no secrets)")
+    ms.add_argument("--timeout", type=float, default=30.0)
+    ms.add_argument("--poll", type=float, default=0.25)
+    ms.set_defaults(func=cmd_measure_feed_lag)
+
     r = sub.add_parser(
         "reconcile",
         help="feed-fold + heal a team's task views (full-scan fallback)",
@@ -12540,6 +12576,18 @@ def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
         authority = _begin_v2_public_read(args, transport)
         rc = (_run_v2_public_handler(args, transport, authority)
               if authority is not None else args.func(args, transport))
+    except IdentityUnavailable as e:
+        reason = e.outcome.reason or "identity authority unavailable"
+        if getattr(args, "json", False):
+            jsonutil.print_json({
+                "state": "UNKNOWN",
+                "coverage": [{"surface": "identity", "state": "UNKNOWN",
+                              "reason": reason}],
+                "result": None,
+            })
+        else:
+            print(f"coord-engine: identity UNKNOWN: {reason}", file=sys.stderr)
+        return 3
     except Exception as e:  # never dump a traceback at the user
         # Registered error envelope. An UNEXPECTED exception is NOT a retryable
         # degrade: the `error:` register token (distinct from the "…, retry" /

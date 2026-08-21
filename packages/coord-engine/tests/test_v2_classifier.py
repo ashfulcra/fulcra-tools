@@ -70,7 +70,7 @@ def test_identity_resolver_catches_an_unreadable_persisted_file_minting_a_host(
     monkeypatch.setattr(cli.socket, "gethostname", lambda: "same-host")
     classified = config.persisted_identity()
     assert classified.state is classifier.PersistedIdentityState.UNKNOWN
-    with pytest.raises(RuntimeError, match="persisted identity.*unreadable"):
+    with pytest.raises(cli.IdentityUnavailable, match="persisted identity.*unreadable"):
         cli._host()
 
 

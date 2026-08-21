@@ -93,3 +93,25 @@ def test_expected_docs_carry_a_pin():
         "expected coord-engine install pin missing from: "
         + ", ".join(missing)
     )
+
+
+def test_fleet_installer_label_names_the_exact_full_commit_pin():
+    """A release label cannot certify a different artifact than PIN installs."""
+    script = (REPO / "adopt-latest.sh").read_text(encoding="utf-8")
+    pin = re.search(r'^PIN="([0-9a-f]+)"', script, re.MULTILINE).group(1)
+    label = re.search(r'^VER="pp-([0-9a-f]+)"', script, re.MULTILINE).group(1)
+    assert len(pin) == 40
+    assert label == pin[:8]
+
+
+def test_v2_release_docs_point_to_both_blocking_evidence_artifacts():
+    required = (
+        "coord-engine-v2-epsilon-measurement.md",
+        "coord-engine-v2-fleet-verification.md",
+    )
+    for rel in (
+        "AGENTS.md", "packages/coord-engine/README.md",
+        "docs/coord/GET-ON-THE-BUS.md", "docs/coord/BUS-V3.md",
+    ):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert all(name in text for name in required), rel

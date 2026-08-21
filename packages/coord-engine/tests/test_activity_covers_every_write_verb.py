@@ -82,6 +82,8 @@ EXPECTED_WRITES = {
     "cmd_atc_init", "cmd_atc_harvest",
     "cmd_annotate_project", "cmd_annotate_resolution",
     "cmd_wake_consume", "cmd_wake_queue_file",
+    # Writes one nonce probe before reading its feed visibility.
+    "cmd_measure_feed_lag",
 }
 
 

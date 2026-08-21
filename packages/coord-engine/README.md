@@ -238,3 +238,24 @@ The suite is CI-gated on Linux and macOS; run it locally before pushing (see
 [`coord_engine/__init__.py`](coord_engine/__init__.py) to the same `X.Y.Z` **in the same commit** —
 `doctor` self-reports `__version__`, so a tag without the bump makes upgraded installs report a stale
 version (v1.4.0/v1.5.0/v1.5.1 all shipped stale off a frozen `1.3.0`, caught by a remote field report).
+
+### v2 migration and release fence
+
+The v1 `summaries.json` aggregate is bootstrap input only; it is never
+advertised as a v2 current generation. A mixed fleet keeps canonical writes
+compatible but refuses v2 authority. Cursor schema 2 additionally requires
+proven CAS. Public v2 reads remain fail-closed while epsilon is unverified.
+
+Measure feed visibility with `coord-engine measure-feed-lag TEAM --host-id
+HOST-NEUTRAL-LABEL` on at least two credentialed hosts, then complete the
+[epsilon evidence](../../docs/coord/evidence/coord-engine-v2-epsilon-measurement.md)
+and [fleet verification](../../docs/coord/evidence/coord-engine-v2-fleet-verification.md).
+The current templates are explicitly BLOCKED; therefore the package version,
+release tag, installer pin, and activation flags remain unchanged.
+
+For v2, merge is insufficient. Completion requires the `2.0.0` release, exact
+fleet adoption by every host reconciled within the explicit fleet SLA, all
+named exclusions with reasons and stale timestamps/ages, and the two-host live
+command verification. Downgrade readers may use canonical documents and v1
+bootstrap input, but must reject v2-only projection authority they do not
+support.

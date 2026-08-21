@@ -60,7 +60,7 @@ def test_a_hostname_with_no_usable_characters_REFUSES_rather_than_inventing(
     write to a shared keyspace — minting a placeholder is exactly how the
     phantom-identity traps got there."""
     monkeypatch.setattr(cli.socket, "gethostname", lambda: "\x00\x01\x02")
-    with pytest.raises(RuntimeError) as e:
+    with pytest.raises(cli.IdentityUnavailable) as e:
         cli._host()
     assert "FULCRA_COORD_AGENT" in str(e.value)
 
