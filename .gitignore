@@ -28,3 +28,11 @@ packages/menubar/dist/
 packages/menubar/logs/
 .primitives-state/
 /.worktrees/
+
+# Third-party agent skills installed by `npx skills@latest add ...` (tool-managed,
+# like node_modules — the installer writes both paths and re-creates them on demand).
+# Deliberately NOT vendored: these run with full agent permissions, this repo is the
+# substrate every coordination agent clones, and `git add -A` in the docs-QA flow
+# would otherwise sweep them into an unrelated commit.
+/.agents/
+/skills-lock.json
