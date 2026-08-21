@@ -12,6 +12,8 @@ TEAM = "r"
 
 
 class MemoryTransport:
+    conditional_writes_supported = True
+
     def __init__(self):
         self.store = {}
         self.before_current_write = None
@@ -30,6 +32,20 @@ class MemoryTransport:
             return False
         self.store[path] = content
         return True
+
+
+class LastWriterWinsTransport(MemoryTransport):
+    """Deployed-like store with explicit non-CAS publication capability."""
+
+    conditional_writes_supported = False
+
+    def __init__(self):
+        super().__init__()
+        self.conditional_write_calls = 0
+
+    def write_if_unchanged(self, path, content, expected):
+        self.conditional_write_calls += 1
+        return False
 
 
 def _batch(*, at="2026-08-20T00:00:00Z"):
@@ -347,18 +363,127 @@ def test_stale_writer_manifest_race_refuses_to_replace_newer_current():
     assert generation.load_current(transport, TEAM).id == winner.id
 
 
-def test_manifest_publish_fails_closed_without_a_proven_conditional_write():
-    class LastWriterWins(MemoryTransport):
-        write_if_unchanged = None
+def test_explicit_non_cas_transport_publishes_a_verified_complete_generation():
+    transport = LastWriterWinsTransport()
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(),
+        sections=_sections())
 
-    transport = LastWriterWins()
+    outcome = generation.publish(transport, TEAM, built)
+
+    assert outcome.published is True
+    assert outcome.reason == ""
+    assert transport.conditional_write_calls == 0
+    assert generation.load_current(transport, TEAM).id == built.id
+
+
+def test_explicit_non_cas_transport_never_advances_an_incomplete_generation():
+    transport = LastWriterWinsTransport()
+    old_current = "old current remains"
+    transport.store[generation.current_path(TEAM)] = old_current
+    sections = _sections()
+    sections["roles"] = generation.SectionResult("roles", "UNKNOWN", {})
+    built = generation.build_generation(
+        prior_generation="old", source_watermark="w-1", batch=_batch(),
+        sections=sections)
+
+    outcome = generation.publish(transport, TEAM, built)
+
+    assert outcome.published is False
+    assert outcome.reason == "incomplete required section(s): roles"
+    assert transport.read(generation.current_path(TEAM)) == old_current
+    assert transport.conditional_write_calls == 0
+
+
+def test_explicit_non_cas_transport_never_advances_an_unverified_generation():
+    class UnverifiedGenerationTransport(LastWriterWinsTransport):
+        def read(self, path):
+            if "/generations/" in path and path in self.store:
+                return self.store[path] + "corrupt"
+            return super().read(path)
+
+    transport = UnverifiedGenerationTransport()
+    old_current = "old current remains"
+    transport.store[generation.current_path(TEAM)] = old_current
+    built = generation.build_generation(
+        prior_generation="old", source_watermark="w-1", batch=_batch(),
+        sections=_sections())
+
+    outcome = generation.publish(transport, TEAM, built)
+
+    assert outcome.published is False
+    assert outcome.reason == "generation read verification failed"
+    assert transport.read(generation.current_path(TEAM)) == old_current
+    assert transport.conditional_write_calls == 0
+
+
+def test_explicit_non_cas_manifest_write_failure_is_not_a_pointer_race():
+    class ManifestWriteFails(LastWriterWinsTransport):
+        def write(self, path, content):
+            if path == generation.current_path(TEAM):
+                return False
+            return super().write(path, content)
+
+    transport = ManifestWriteFails()
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(),
+        sections=_sections())
+
+    outcome = generation.publish(transport, TEAM, built)
+
+    assert outcome.published is False
+    assert outcome.reason == "current manifest write failed"
+    assert outcome.reason != "current manifest changed"
+    assert transport.conditional_write_calls == 0
+
+
+def test_explicit_non_cas_manifest_read_failure_is_not_a_pointer_race():
+    class ManifestReadVerificationFails(LastWriterWinsTransport):
+        def write(self, path, content):
+            if path == generation.current_path(TEAM):
+                self.store[path] = content + "corrupt"
+                return True
+            return super().write(path, content)
+
+    transport = ManifestReadVerificationFails()
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(),
+        sections=_sections())
+
+    outcome = generation.publish(transport, TEAM, built)
+
+    assert outcome.published is False
+    assert outcome.reason == "current manifest read verification failed"
+    assert outcome.reason != "current manifest changed"
+    assert transport.conditional_write_calls == 0
+
+
+def test_manifest_publish_fails_closed_when_conditional_write_capability_is_unknown():
+    class UnknownCapabilityTransport:
+        def __init__(self):
+            self.store = {}
+
+        def read(self, path):
+            return self.store.get(path)
+
+        def write(self, path, content):
+            self.store[path] = content
+            return True
+
+        def write_if_unchanged(self, path, content, expected):
+            if self.store.get(path) != expected:
+                return False
+            self.store[path] = content
+            return True
+
+    transport = UnknownCapabilityTransport()
     built = generation.build_generation(
         prior_generation=None, source_watermark="w-1", batch=_batch(), sections=_sections())
 
     outcome = generation.publish(transport, TEAM, built)
 
     assert outcome.published is False
-    assert outcome.reason == "conditional manifest write unsupported"
+    assert outcome.reason == "conditional manifest write capability unknown"
     assert transport.read(generation.current_path(TEAM)) is None
 
 

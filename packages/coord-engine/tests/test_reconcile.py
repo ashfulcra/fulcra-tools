@@ -27,6 +27,8 @@ COORDINATION_TYPE = "MomentAnnotation/test-reconcile"
 class FakeTransport:
     """In-memory Fulcra File Store: {path: content} + per-path mtime."""
 
+    conditional_writes_supported = True
+
     def __init__(self):
         self.store: dict[str, str] = {}
         self.mtimes: dict[str, str] = {}

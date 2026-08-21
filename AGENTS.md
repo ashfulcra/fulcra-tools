@@ -614,9 +614,14 @@ it (not on PyPI).
     compatibility-cache write and leaves the last complete generation current. The publication authority
     is `_coord/projections/current.json`: a builder write/read-verifies immutable
     `generations/<digest>.json` first, then writes and read-verifies the digest-bound manifest. Required
-    `UNKNOWN`/incomplete sections, an unattested feed frontier, or missing atomic conditional-write
-    support stay recovery progress and never advance current; reconcile exits nonzero. `summaries.json`
-    remains reader compatibility during migration; new readers validate the current generation before use.
+    `UNKNOWN`/incomplete sections or an unattested feed frontier stay recovery progress and never advance
+    current; reconcile exits nonzero. A transport that proves conditional-write support uses CAS to fence a
+    moved pointer. A transport that explicitly declares CAS unsupported may use one last-writer-wins
+    manifest write only after the complete deterministic immutable generation verifies, and must verify the
+    exact manifest read-back; missing/invalid capability and write/read failure remain nonzero. Because a
+    non-CAS writer can race, the mandatory public-read freshness overlay rejects stale manifests before v2
+    authority activates. `summaries.json` remains reader compatibility during migration; new readers
+    validate the current generation before use.
     **The
     caller's OWN head is feed-gated too:** with a clean `data-updates` window, only caller-owned slugs
     named changed since the projection anchor are raw-tallied; unchanged caller-owned slugs are served

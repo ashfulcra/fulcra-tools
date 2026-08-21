@@ -81,12 +81,15 @@ row serialization, and applies in text mode too.
 `_coord/projections/current.json` manifest. The manifest is written after its
 immutable generation has been written and read-verified, every required section
 is `CLEAR` or `DATA`, the detector supplies an attested feed frontier, and the
-transport proves a conditional write. `UNKNOWN`, `NOT_RUN`, an absent frontier,
-or unavailable conditional-write capability leaves the former manifest current
-and makes reconcile nonzero. `_coord/summaries.json` remains a compatibility
-cache for unmigrated readers; it is not evidence that a newer generation became
-current. Consumers must not infer success from a cache write or an event's
-timestamp.
+transport declares its conditional-write capability. Proven conditional writes
+use CAS and reject a moved pointer. Explicitly unsupported conditional writes
+use one last-writer-wins manifest write followed by an exact read verification;
+the mandatory public-read freshness overlay rejects a stale raced manifest.
+`UNKNOWN`, `NOT_RUN`, an absent frontier, missing/invalid capability, or a
+manifest write/read failure makes reconcile nonzero. `_coord/summaries.json`
+remains a compatibility cache for unmigrated readers; it is not evidence that a
+newer generation became current. Consumers must not infer success from a cache
+write or an event's timestamp.
 
 **Status:** clauses marked **ENFORCED** are pinned by
 `packages/coord-engine/tests/test_output_contract.py` and CI-failing;

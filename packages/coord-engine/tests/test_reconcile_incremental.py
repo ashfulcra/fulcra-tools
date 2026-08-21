@@ -35,6 +35,8 @@ class CountingTransport:
     normalized ``{path, state, uploaded_at}`` shape (never the raw ``full_name``
     feed — that normalization is the transport's job, see transport.updates)."""
 
+    conditional_writes_supported = True
+
     def __init__(self):
         self.store: dict[str, str] = {}
         self.mtimes: dict[str, str] = {}

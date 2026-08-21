@@ -197,11 +197,13 @@ def load_current(transport: Any, team: str) -> Optional[Generation]:
 
 def publish(transport: Any, team: str, generation: Generation, *,
             fail_before_manifest: bool = False) -> PublishOutcome:
-    """Write/read-verify generation first, then atomically fence current.json.
+    """Write/read-verify the generation, then publish and verify current.json.
 
-    A transport exposing ``write_if_unchanged`` gets a compare-and-swap fence.
-    Older transports retain a double-read fence: this cannot claim freshness,
-    but it still refuses a current pointer that changed before publication.
+    ``conditional_writes_supported is True`` uses ``write_if_unchanged`` with
+    the previously read manifest.  Explicit ``False`` uses one last-writer-wins
+    manifest write plus exact read-back verification; freshness remains the
+    reader overlay's responsibility.  A missing or invalid capability fails
+    closed.
     """
     if not generation.complete:
         return PublishOutcome(False, "incomplete required section(s): " + ", ".join(generation.incomplete))
@@ -217,7 +219,6 @@ def publish(transport: Any, team: str, generation: Generation, *,
     if fail_before_manifest:
         return PublishOutcome(False, "interrupted after generation write")
 
-    _prior, prior_raw = _read_manifest(transport, team)
     manifest = _json({
         "generation_id": generation.id,
         "source_watermark": generation.source_watermark,
@@ -225,11 +226,19 @@ def publish(transport: Any, team: str, generation: Generation, *,
         "engine_version": generation.engine_version,
         "content_digest": generation.content_digest,
     })
-    conditional = getattr(transport, "write_if_unchanged", None)
-    if not callable(conditional):
-        return PublishOutcome(False, "conditional manifest write unsupported")
-    if not conditional(current_path(team), manifest, prior_raw):
-        return PublishOutcome(False, "current manifest changed")
+    capability = getattr(transport, "conditional_writes_supported", None)
+    if capability is True:
+        conditional = getattr(transport, "write_if_unchanged", None)
+        if not callable(conditional):
+            return PublishOutcome(False, "conditional manifest write unavailable")
+        _prior, prior_raw = _read_manifest(transport, team)
+        if not conditional(current_path(team), manifest, prior_raw):
+            return PublishOutcome(False, "current manifest changed")
+    elif capability is False:
+        if not transport.write(current_path(team), manifest):
+            return PublishOutcome(False, "current manifest write failed")
+    else:
+        return PublishOutcome(False, "conditional manifest write capability unknown")
     if transport.read(current_path(team)) != manifest:
         return PublishOutcome(False, "current manifest read verification failed")
     return PublishOutcome(True)

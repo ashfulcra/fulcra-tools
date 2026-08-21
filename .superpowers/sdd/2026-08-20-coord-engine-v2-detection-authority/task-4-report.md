@@ -223,3 +223,76 @@ available to existing readers, but it is not a newer authoritative generation.
 - Full output: `2504 passed, 8 skipped in 80.40s`.
 - Whitespace command: `git diff --check`.
 - Whitespace output: exit 0.
+
+## External coord-boss fix r1
+
+### Covering tests
+
+- `packages/coord-engine/tests/test_v2_generation.py::test_explicit_non_cas_transport_publishes_a_verified_complete_generation`
+  proves a deployed-like transport that explicitly declares CAS unsupported
+  publishes a complete, immutable, write/read-verified generation and advances
+  `current.json` without calling the CAS seam.
+- `test_explicit_non_cas_transport_never_advances_an_incomplete_generation`
+  and `test_explicit_non_cas_transport_never_advances_an_unverified_generation`
+  preserve both gates ahead of every manifest path.
+- `test_stale_writer_manifest_race_refuses_to_replace_newer_current` keeps a
+  CAS-capable transport fenced when its expected pointer moves.
+- `test_explicit_non_cas_manifest_write_failure_is_not_a_pointer_race` and
+  `test_explicit_non_cas_manifest_read_failure_is_not_a_pointer_race` require
+  precise fallback failure reasons distinct from `current manifest changed`.
+- `test_manifest_publish_fails_closed_when_conditional_write_capability_is_unknown`
+  proves that a callable CAS-shaped method alone is not capability evidence.
+- `packages/coord-engine/tests/test_transport.py::test_conditional_write_fails_closed_when_file_api_has_no_atomic_cas`
+  binds deployed `FulcraFileTransport` to the explicit unsupported capability.
+
+### Red-first evidence
+
+- Command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py::test_explicit_non_cas_transport_publishes_a_verified_complete_generation packages/coord-engine/tests/test_v2_generation.py::test_explicit_non_cas_transport_never_advances_an_incomplete_generation packages/coord-engine/tests/test_v2_generation.py::test_explicit_non_cas_transport_never_advances_an_unverified_generation packages/coord-engine/tests/test_v2_generation.py::test_stale_writer_manifest_race_refuses_to_replace_newer_current packages/coord-engine/tests/test_v2_generation.py::test_explicit_non_cas_manifest_write_failure_is_not_a_pointer_race packages/coord-engine/tests/test_v2_generation.py::test_explicit_non_cas_manifest_read_failure_is_not_a_pointer_race packages/coord-engine/tests/test_v2_generation.py::test_manifest_publish_fails_closed_when_conditional_write_capability_is_unknown packages/coord-engine/tests/test_transport.py::test_conditional_write_fails_closed_when_file_api_has_no_atomic_cas`.
+- Output before production edits: `5 failed, 3 passed in 0.09s`. The explicit
+  non-CAS success and both fallback error tests all received `current manifest
+  changed`; the unknown-capability test published incorrectly; and the deployed
+  transport lacked the explicit capability attribute. The pre-existing
+  completeness, generation verification, and CAS-race gates remained green.
+- Green command: the same targeted command.
+- Green output: `8 passed in 0.02s`.
+
+### Implementation and architectural effect
+
+- Added the explicit tri-state `conditional_writes_supported` transport seam.
+  Only literal `True` enters `write_if_unchanged`; literal `False` selects the
+  non-CAS path; a missing or invalid declaration fails closed. A failed CAS
+  attempt is never interpreted as unsupported.
+- `generation.publish()` still rejects incomplete generations and verifies the
+  immutable bytes first. Proven CAS transports conditionally replace the prior
+  raw manifest and report `current manifest changed` only for that fenced
+  branch. Explicitly non-CAS transports perform one ordinary manifest write,
+  then require an exact read-back; write and read failures report `current
+  manifest write failed` and `current manifest read verification failed`.
+- Replaced the false double-read docstring promise with the exact implemented
+  fallback. Updated `AGENTS.md`, the package README, and the output contract to
+  state the read-side authority ruling and Unit 5 activation gate.
+- This restores publication on deployed `FulcraFileTransport` without claiming
+  that its mutable pointer is atomic. Immutable generation completeness and
+  digest verification remain Unit 4's authority; stale-manifest rejection
+  remains the mandatory Unit 5 reader overlay.
+
+### Verification
+
+- Generation/transport command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py packages/coord-engine/tests/test_transport.py`.
+- Generation/transport output: `65 passed in 4.90s`.
+- Focused command: `uv run --package coord-engine pytest -q packages/coord-engine/tests/test_v2_generation.py packages/coord-engine/tests/test_transport.py packages/coord-engine/tests/test_projection.py packages/coord-engine/tests/test_reconcile.py packages/coord-engine/tests/test_reconcile_incremental.py`.
+- Focused output: `208 passed in 5.30s`.
+- Full command: `uv run --package coord-engine pytest -q packages/coord-engine/tests`.
+- Full output: `2509 passed, 8 skipped in 80.87s (0:01:20)`.
+- Whitespace command: `git diff --check`.
+- Whitespace output: exit 0.
+
+### Remaining risk
+
+A non-CAS writer can be replaced by an older but still complete and
+digest-valid generation after its successful read verification. Unit 5's
+freshness overlay must land and remain a strict activation gate before any v2
+public reader treats the manifest as authoritative. A store with delayed
+read-after-write visibility can also make a successful manifest write report a
+verification failure; reconcile remains nonzero and retryable rather than
+claiming publication.
