@@ -262,3 +262,24 @@ A conforming consumer:
 
 A clause flip without its fixture flip — or the reverse — is a review
 CHANGES by policy.
+
+## Coord-engine 2.0 truthfulness release
+
+`2.0.0` makes the existing canonical-read surfaces truthful before changing
+where they read from. Typed outcomes, body/rc agreement, deterministic identity
+precedence, and the distinctions among empty, tombstoned, unreadable, and
+unknown are release behavior. Consumers must continue to treat required
+incomplete coverage and degraded fallbacks as nonzero.
+
+Generation-backed public serving is deliberately dormant, so epsilon is not a
+release or fleet-adoption prerequisite and must not be presented as a blocked
+`2.0.0` gate. The transport keeps `public_read_epsilon_verified` false; no
+current generation or generation-backed authority is implied by the version.
+Cursor schema 2 remains separately gated by fleet version fencing and proven
+CAS support.
+
+Fleet adoption is proven functionally: exact released-build identity for every
+live host within the stated SLA, evidenced exclusions, and two credentialed
+hosts running `queue`, `needs-me`, review, forge, roles, presence, and reconcile
+through canonical paths. Release, fleet adoption, generation serving, and
+cursor-v2 activation are separate claims and require separate evidence.

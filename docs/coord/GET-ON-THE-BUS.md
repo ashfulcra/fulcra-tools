@@ -412,6 +412,25 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
     `coord-engine health <team>` for old writers and upgrade them — that, not
     the engine, is the lever.
 
+## Adopt 2.0 without activating dormant authorities
+
+The `coord-engine-v2.0.0` tag is the cold-install release. The fleet runtime
+still follows the full commit in the team's `adopt-latest.sh` and
+`BOOTSTRAP.md`; a release-tag install is not an adoption claim when that commit
+differs from the fleet pin.
+
+For `2.0.0`, adoption verifies the truthfulness paths directly. Every live host
+within the declared SLA must prove the exact released build (or be named and
+evidenced as an exclusion), and two credentialed hosts must run `queue`,
+`needs-me`, review, forge, roles, presence, and reconcile without a required
+`UNKNOWN`, degraded fallback, or nonzero result. The cancelled epsilon
+measurement is not part of this gate.
+
+Do not turn fleet adoption into generation or cursor activation.
+`public_read_epsilon_verified` stays false, no current generation is treated as
+public authority, and cursor schema 2 stays refused until its separate
+version-fence and CAS requirements are proven.
+
 ## 8. Where next
 
 - [`AGENTS.md`](../../AGENTS.md) — the working conventions: review handshake, delivery

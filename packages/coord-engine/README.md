@@ -238,3 +238,23 @@ The suite is CI-gated on Linux and macOS; run it locally before pushing (see
 [`coord_engine/__init__.py`](coord_engine/__init__.py) to the same `X.Y.Z` **in the same commit** —
 `doctor` self-reports `__version__`, so a tag without the bump makes upgraded installs report a stale
 version (v1.4.0/v1.5.0/v1.5.1 all shipped stale off a frozen `1.3.0`, caught by a remote field report).
+
+### 2.0 truthfulness boundary
+
+`2.0.0` ships the truthfulness spine: typed outcomes, exit codes that agree
+with their bodies, deterministic identity precedence, and distinct empty,
+tombstoned, unreadable, and unknown states. Public action surfaces continue to
+read canonical authorities directly while the fleet adopts the release.
+
+Generation-backed serving is dormant in this release. Epsilon is inapplicable
+to the `2.0.0` release and adoption gate: do not run the cancelled host-one
+measurement, set `public_read_epsilon_verified`, or treat a current generation
+as public authority. Cursor schema 2 is a separate activation and remains
+refused until the fleet version fence and CAS transport are proven.
+
+Adoption requires exact released-build identity on every live host within the
+declared SLA, named exclusions with evidence, and functional verification from
+two credentialed hosts across `queue`, `needs-me`, review, forge, roles,
+presence, and reconcile. Required `UNKNOWN`, degraded fallback, or nonzero
+results block the adoption claim. Release, adoption, generation serving, and
+cursor-v2 activation are four independent facts.

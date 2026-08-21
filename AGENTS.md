@@ -1189,6 +1189,27 @@ intents), split by kind:
   guessing. Deeper retrieval (search/MCP) is future work — storage now is what
   makes it possible later.
 
+## Coord-engine 2.0 truthfulness boundary
+
+`2.0.0` ships the truthfulness spine only: typed command outcomes, exit status
+that agrees with the body, deterministic identity precedence, and distinct
+empty, tombstoned, unreadable, and unknown states. Those direct canonical-read
+paths are load-bearing during fleet adoption.
+
+Generation-backed public serving is dormant in `2.0.0`. Do not run or require
+the cancelled epsilon measurement, set `public_read_epsilon_verified`, treat a
+current generation as public authority, or infer that authority from the release version.
+Cursor schema 2 remains a separate activation that requires its own fleet
+version fence and proven CAS transport.
+
+Fleet adoption is functional, not epsilon-based. Every live host within the
+recorded SLA must run the exact released build (with named, evidenced
+exclusions), and at least two credentialed hosts must verify `queue`,
+`needs-me`, review, forge, roles, presence, and reconcile through the direct
+canonical paths. Any required `UNKNOWN`, degraded fallback, or nonzero result
+blocks the adoption claim. Release, adoption, generation serving, and cursor-v2
+activation are four separate facts; never use one as evidence for another.
+
 ## Working tree
 
 Prefer a **per-agent git worktree**, not a shared checkout — concurrent
