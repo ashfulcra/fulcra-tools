@@ -1208,6 +1208,15 @@ both runs. Install the reviewed, pushed full VCS commit before measuring so
 PEP 610 `direct_url.json` supplies the exact producer build; checkout, wheel,
 or otherwise unattested builds remain `UNKNOWN`.
 
+`measure-feed-lag` is a positive point-observation harness, not a complete-feed
+coverage proof. It polls one bounded relative period and returns `DATA` only
+after exactly one `uploaded` lifecycle row for its unique probe path appears
+with a unique stable update identity and aware server timestamp. The live
+`data-updates` envelope attests neither `after` nor `through`; the harness never
+synthesizes those boundaries, treats absence as evidence, or makes a negative
+coverage claim. Absence, duplicate identities, malformed lifecycle rows, and
+deadline expiry are `UNKNOWN`/nonzero.
+
 “Done” means release plus exact adoption by every host reconciled within the
 recorded fleet SLA, with every exclusion named and evidenced, then queue,
 needs-me, review, forge, roles, presence, and reconcile verified from at least

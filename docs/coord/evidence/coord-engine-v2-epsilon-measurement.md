@@ -81,7 +81,7 @@ for that exact immutable path. The live envelope does not attest `after` or
 `through`, so the measurement makes no complete-window or negative-coverage
 claim. It accepts `DATA` only after exactly one uploaded lifecycle row for the
 unique probe path appears with a stable update identity and aware authoritative
-event timestamp. Absence, duplicate matches, or any malformed lifecycle row is
+event timestamp. Absence, duplicate identities, or any malformed lifecycle row is
 `UNKNOWN`/nonzero.
 The entire harness deadline starts before identity/authentication preflight and
 covers canonical-authority acquisition, probe upload, feed polling, and final

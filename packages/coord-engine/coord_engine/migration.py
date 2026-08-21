@@ -674,6 +674,7 @@ def measure_feed_visibility_lag(
         if not isinstance(rows, list):
             return unknown("data-updates file_changes unavailable")
         matched: list[tuple[str, datetime, str]] = []
+        identities: set[str] = set()
         for row in rows:
             if bound.expired():
                 return unknown("feed lifecycle validation exceeded harness deadline")
@@ -689,6 +690,10 @@ def measure_feed_visibility_lag(
                     or not _valid_update_id(update_id) or instant is None):
                 reason = "data-updates lifecycle row is malformed"
                 break
+            if update_id in identities:
+                reason = "data-updates contains duplicate update identity"
+                break
+            identities.add(update_id)
             normalized_path = raw_path.strip().lstrip("/")
             if normalized_path == path:
                 if state != "uploaded":

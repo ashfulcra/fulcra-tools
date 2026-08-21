@@ -603,6 +603,39 @@ def test_lag_measurement_uses_positive_probe_row_from_exact_live_envelope():
     assert transport.feed_requests == ["6 seconds"]
 
 
+def test_lag_measurement_rejects_duplicate_identity_outside_probe_path():
+    """One repeated feed identity makes the entire point observation ambiguous."""
+    class DuplicateIdentityTransport(_LagTransport):
+        def data_updates(self, since, *, deadline=None):
+            update_id = "3185bd09-9500-4407-bd87-013832fe55f3"
+            return {"file_changes": [
+                {
+                    "id": update_id,
+                    "path": self.writes[-1][0],
+                    "state": "uploaded",
+                    "uploaded_at": "2026-08-21T00:00:01Z",
+                },
+                {
+                    "id": update_id,
+                    "path": "team/fulcra/task/unrelated.md",
+                    "state": "uploaded",
+                    "uploaded_at": "2026-08-21T00:00:01Z",
+                },
+            ]}
+
+    result = migration.measure_feed_visibility_lag(
+        DuplicateIdentityTransport(0, _Clock()), "fulcra", "host-a",
+        environ={"FULCRA_COORD_AGENT": "agent-a"},
+        persisted=lambda: pytest.fail("env identity must not consult persisted state"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.1,
+        now=_Now(),
+    )
+
+    assert result.state == "UNKNOWN"
+    assert result.rc == 3
+    assert result.reason == "data-updates contains duplicate update identity"
+
+
 @pytest.mark.parametrize("mutation", ["missing", "invalid", "unbound"])
 def test_activation_rejects_missing_invalid_or_unbound_principal_source(mutation):
     row = _host("host-a")
@@ -751,7 +784,7 @@ def test_feed_visibility_measurement_refuses_non_finite_bounds_before_write():
     {"after": "2026-08-21T00:00:00Z", "through": "2026-08-21T00:00:10Z",
      "file_changes": [{"id": "u", "path": "PROBE", "state": "uploaded"}]},
 ])
-def test_lag_harness_rejects_unattested_or_malformed_feed_body_and_rc(envelope):
+def test_lag_harness_rejects_malformed_feed_or_absent_positive_probe(envelope):
     clock = _Clock()
 
     class Malformed(_LagTransport):
