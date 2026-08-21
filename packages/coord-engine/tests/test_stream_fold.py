@@ -181,6 +181,154 @@ def test_task_done_write_failure_emits_no_close_and_returns_nonzero(monkeypatch,
     assert calls == [], "no stream close may be emitted for a failed doc write"
 
 
+def _task_doc(owner="owner", assignee="alice", status="active"):
+    return (f"---\ntype: Task\ntitle: x\nstatus: {status}\nowner: {owner}\n"
+            f"assignee: {assignee}\ntags:\n  - kind:directive\n"
+            f"timestamp: 2026-08-21T00:00:00Z\n---\n# x\n")
+
+
+class DocTransport:
+    """Read/write doc store with the bus config present — for CLI close paths."""
+
+    def __init__(self, docs):
+        self.store = dict(docs)
+        self.store[f"team/{TEAM}/_coord/bus-v3/records.json"] = json.dumps(
+            {"data_type": "MomentAnnotation/chan", "api_version": "v1alpha1"})
+
+    def read(self, path):
+        return self.store.get(path)
+
+    def write(self, path, content):
+        self.store[path] = content
+        return True
+
+
+@pytest.fixture()
+def emitted(monkeypatch):
+    calls = []
+    monkeypatch.setattr(records, "emit_event",
+                        lambda *a, **k: calls.append(k) or True)
+    return calls
+
+
+# --- round-3 findings (pilot round-trip probe, 2026-08-21): the close names
+# whom it discharges. Found live minutes after the coord-boss cutover seed: a
+# self-assigned probe closed in the doc and replayed open in the stream forever,
+# because the response companion existed only to NOTIFY an owner — and several
+# closers (self-answer, tell --closes, supersede, abandon, terminal update)
+# therefore emitted nothing at all.
+
+def test_close_for_field_discharges_the_named_agent_not_the_sender():
+    # A third-party close (owner superseding, dispatcher abandoning) is sent by
+    # someone who is not the assignee; the assignee's fold copy must still drop.
+    rows = [
+        _rec("a", "2026-08-21T20:00:00+00:00",
+             _payload(to="alice", kind="directive", slug="s-1")),
+        {"id": "b", "recorded_at": "2026-08-21T20:01:00+00:00",
+         "sources": ["coord-boss"],
+         "note": _payload(to="coord-boss", kind="response", slug="s-1",
+                          for_agent="alice")},
+    ]
+    t = StreamOnlyTransport(rows); _cfg_store(t)
+    out = stream_fold.fold(t, TEAM, "alice", now=NOW)
+    assert out.rows == (), (
+        "a close naming alice must discharge alice's copy whoever sent it")
+
+
+def test_close_for_field_never_discharges_anyone_else():
+    rows = [
+        _rec("a", "2026-08-21T20:00:00+00:00",
+             _payload(to=records.BROADCAST, kind="directive", slug="all-1")),
+        {"id": "b", "recorded_at": "2026-08-21T20:01:00+00:00",
+         "sources": ["alice"],
+         "note": _payload(to="owner", kind="response", slug="all-1",
+                          for_agent="bob")},
+    ]
+    t = StreamOnlyTransport(rows); _cfg_store(t)
+    out = stream_fold.fold(t, TEAM, "alice", now=NOW)
+    assert [r["slug"] for r in out.rows] == ["all-1"], (
+        "an explicit for=bob must not discharge alice's copy — even when "
+        "alice happens to be the sender")
+
+
+def test_for_round_trips_and_never_leaks_when_absent():
+    ev = records.parse_payload(records.build_payload(
+        to="o", kind="response", priority="P2", slug="s", for_agent="alice"))
+    assert ev is not None and ev["for"] == "alice"
+    bare = records.build_payload(to="o", kind="response", priority="P2", slug="s")
+    assert '"for"' not in bare
+    assert records.parse_payload(bare)["for"] is None
+
+
+def test_task_done_on_a_self_owned_task_still_emits_its_close(emitted, capsys):
+    # THE PILOT PROBE'S EXACT SHAPE: owner == responder suppressed the
+    # companion ("nobody to tell"), so the doc closed while the seeded stream
+    # fold replayed the obligation open forever.
+    from argparse import Namespace
+    t = DocTransport({f"team/{TEAM}/task/t-1.md":
+                      _task_doc(owner="alice", assignee="alice")})
+    rc = cli.cmd_task_done(
+        Namespace(team=TEAM, name="t-1", evidence="done", agent="alice"), t)
+    assert rc == 0
+    assert len(emitted) == 1
+    assert emitted[0]["kind"] == "response" and emitted[0]["slug"] == "t-1"
+    assert emitted[0]["for_agent"] == "alice"
+
+
+def test_tell_closes_emits_the_close_event_for_the_replier(emitted):
+    from argparse import Namespace
+    t = DocTransport({f"team/{TEAM}/task/ask-1.md":
+                      _task_doc(owner="owner", assignee="alice")})
+    args = Namespace(team=TEAM, closes="ask-1", assignee="owner",
+                     sender="alice", agent="alice")
+    rc = cli._close_answered_directive(t, args, reply_slug="reply-1")
+    assert rc == 0
+    closes = [k for k in emitted if k["kind"] == "response"]
+    assert len(closes) == 1 and closes[0]["slug"] == "ask-1"
+    assert closes[0]["for_agent"] == "alice", (
+        "the open lives in the REPLIER's fold; the close must name them")
+
+
+def test_supersede_and_abandon_emit_the_close_for_the_assignee(emitted):
+    from argparse import Namespace
+    t = DocTransport({f"team/{TEAM}/task/t-2.md": _task_doc(),
+                      f"team/{TEAM}/task/t-3.md": _task_doc()})
+    rc = cli.cmd_task_supersede(
+        Namespace(team=TEAM, name="t-2", by="t-9", reason=None, record=None,
+                  verb="supersede"), t)
+    assert rc == 0
+    rc = cli.cmd_task_abandon(
+        Namespace(team=TEAM, name="t-3", reason="stale", verb="abandon"), t)
+    assert rc == 0
+    closes = [k for k in emitted if k["kind"] == "response"]
+    assert [k["slug"] for k in closes] == ["t-2", "t-3"]
+    assert all(k["for_agent"] == "alice" for k in closes), (
+        "a dispatcher's close discharges the ASSIGNEE's fold copy")
+
+
+def test_update_to_a_terminal_status_emits_the_close(emitted):
+    from argparse import Namespace
+    t = DocTransport({f"team/{TEAM}/task/t-4.md": _task_doc()})
+    rc = cli.cmd_task_update(
+        Namespace(team=TEAM, name="t-4", status="done", summary=None,
+                  next=None, assignee=None, blocked_on=None, priority=None,
+                  evidence="finished"), t)
+    assert rc == 0
+    closes = [k for k in emitted if k["kind"] == "response"]
+    assert len(closes) == 1 and closes[0]["slug"] == "t-4"
+
+
+def test_update_to_a_live_status_emits_nothing(emitted):
+    from argparse import Namespace
+    t = DocTransport({f"team/{TEAM}/task/t-5.md": _task_doc()})
+    rc = cli.cmd_task_update(
+        Namespace(team=TEAM, name="t-5", status="active", summary=None,
+                  next=None, assignee=None, blocked_on=None, priority=None,
+                  evidence=None), t)
+    assert rc == 0
+    assert emitted == [], "a live transition closes nothing and must not emit"
+
+
 def test_state_write_failure_is_unknown_nonzero_not_a_checkpoint():
     class NoPersist(StreamOnlyTransport):
         def write(self, path, content):

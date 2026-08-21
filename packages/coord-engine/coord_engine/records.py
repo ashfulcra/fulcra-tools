@@ -71,6 +71,7 @@ def engine_stamp() -> dict[str, Any]:
 
 def build_payload(*, to: str, kind: str, priority: str, slug: str,
                   ptr: Optional[str] = None, fyi: bool = False,
+                  for_agent: Optional[str] = None,
                   stamp: Optional[dict[str, Any]] = None) -> str:
     """Serialize a control-plane payload for the ``note`` field.
 
@@ -91,6 +92,13 @@ def build_payload(*, to: str, kind: str, priority: str, slug: str,
         # this flag replays every FYI as a permanent open obligation (measured
         # 2026-08-21: most of 92 stream-only "opens" were exactly this).
         payload["fyi"] = True
+    if for_agent:
+        # A close names WHOM it discharges (2026-08-21 pilot round-trip): the
+        # per-responder rule reads the sender, so a third-party close — an
+        # owner superseding, a dispatcher abandoning — could never drop the
+        # assignee's fold copy. ``for`` makes the discharge explicit; events
+        # without it keep the sender fallback.
+        payload["for"] = for_agent
     payload["writer"] = dict(stamp or engine_stamp())
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -116,10 +124,12 @@ def parse_payload(note: Any) -> Optional[dict[str, Any]]:
         return None
     if not isinstance(to, str) or not isinstance(slug, str) or not slug:
         return None
+    fa = obj.get("for")
     return {
         "to": to, "kind": kind, "slug": slug,
         "pri": obj.get("pri"), "ptr": obj.get("ptr"),
         "fyi": obj.get("fyi") is True,
+        "for": fa if isinstance(fa, str) and fa else None,
         "writer": obj.get("writer") if isinstance(obj.get("writer"), dict)
         else None,
     }
@@ -787,7 +797,8 @@ def authority_currency_state(config: Optional[dict], *,
 
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
                kind: str, priority: str, slug: str, ptr: Optional[str] = None,
-               fyi: bool = False, recorded_at: Optional[str] = None,
+               fyi: bool = False, for_agent: Optional[str] = None,
+               recorded_at: Optional[str] = None,
                team: Optional[str] = None) -> bool:
     """Emit one control-plane event; ``recorded_at`` in the future is a timer.
 
@@ -805,7 +816,7 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     contract.
     """
     note = build_payload(to=to, kind=kind, priority=priority, slug=slug,
-                         ptr=ptr, fyi=fyi)
+                         ptr=ptr, fyi=fyi, for_agent=for_agent)
     from . import bus_tags
     tags = bus_tags.tags_for_write(transport, team, sender)
     kwargs: dict[str, Any] = {"recorded_at": recorded_at}

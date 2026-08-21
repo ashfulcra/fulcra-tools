@@ -20,7 +20,7 @@ and the agent conventions ([`AGENTS.md`](../../AGENTS.md)).
 ## Install
 
 ```bash
-uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0.1#subdirectory=packages/coord-engine"
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0.2#subdirectory=packages/coord-engine"
 coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 ```
 
