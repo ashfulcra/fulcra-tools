@@ -57,8 +57,21 @@ def _batch(*, at="2026-08-20T00:00:00Z"):
 
 
 def _sections(state="DATA"):
-    return {name: generation.SectionResult(name, state, {"rows": [name]})
-            for name in generation.REQUIRED_SECTIONS}
+    sections = {
+        name: generation.SectionResult(name, state, {"rows": [name]})
+        for name in generation.REQUIRED_SECTIONS
+    }
+    sections["forge"] = generation.SectionResult(
+        "forge",
+        state,
+        {
+            "schema": generation.FORGE_PROJECTION_SCHEMA,
+            "complete": state in generation.COMPLETE_STATES,
+            "responsible": {},
+            "feedback": {},
+        },
+    )
+    return sections
 
 
 def test_identical_inputs_have_identical_generation_id_and_bytes():
@@ -578,6 +591,31 @@ def test_progress_build_id_binds_base_watermark_and_normalized_updates():
 
     assert first == same
     assert first != later
+
+
+def test_malformed_nested_forge_projection_cannot_be_sealed():
+    sections = _sections()
+    sections["forge"] = generation.SectionResult(
+        "forge",
+        "DATA",
+        {
+            "schema": generation.FORGE_PROJECTION_SCHEMA,
+            "complete": True,
+            "responsible": {"pr1": "alice"},
+            "feedback": {},
+        },
+    )
+
+    built = generation.build_generation(
+        prior_generation=None,
+        source_watermark="w-1",
+        batch=_batch(),
+        sections=sections,
+    )
+
+    assert built.complete is False
+    assert built.incomplete == ("forge",)
+    assert generation.publish(MemoryTransport(), TEAM, built).published is False
 
 
 def test_recovery_progress_resumes_only_the_exact_immutable_build_id():

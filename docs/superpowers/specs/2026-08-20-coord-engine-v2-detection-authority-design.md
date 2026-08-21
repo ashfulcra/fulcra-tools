@@ -309,6 +309,7 @@ The suite MUST pin every previously observed failure flavor:
 | Record cursor frontier equals or exceeds the outer frontier (including equivalent timezone/precision spellings) | cursor evidence may establish CLEAR/DATA; published watermark remains the outer feed frontier |
 | Outer feed or record cursor boundary/frontier is missing, mismatched, or incomparable | precise `UNKNOWN`, no watermark advancement, public overlay `NOT_RUN`, nonzero |
 | Ack/response inventory contains dot/traversal, file-shaped slug, hidden leaf, wrong depth, or invalid extension | immutable-generation coverage `UNKNOWN`, freshness overlay `NOT_RUN`, nonzero |
+| Malformed sealed forge data reaches a canonical scan | `UNKNOWN`, nonzero, no domain row |
 | Canonical document is written but not yet visible in the feed | exclude wall-clock now from the bounded-staleness claim; report the coverage horizon, or return `UNKNOWN` if the lag bound is unproven |
 | `continuity park` sees a held role lease with no role document | nonzero; report could-not-write distinctly from nothing-to-write; never success-shaped |
 | Role status derives a holder from lease fallback but `continuity park` would refuse that same role | status and park use one holder fact or return `UNKNOWN`; readers and writers cannot disagree |

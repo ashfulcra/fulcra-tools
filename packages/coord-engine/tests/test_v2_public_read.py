@@ -808,19 +808,27 @@ class CanonicalPoisonTransport(OverlayTransport):
         f"team/{TEAM}/roles/",
         f"team/{TEAM}/presence/",
         f"team/{TEAM}/review/",
+        f"team/{TEAM}/_coord/forge/watch/",
+        f"team/{TEAM}/_coord/forge/feedback/",
         f"team/{TEAM}/_coord/acks/",
         f"team/{TEAM}/_coord/responses/",
     )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.canonical_attempts = []
+
     def list_dir(self, path):
         if self.poisoned and any(path.startswith(prefix)
                                  for prefix in self.poisoned_prefixes):
+            self.canonical_attempts.append(("list", path))
             raise RuntimeError(f"live canonical listing reopened: {path}")
         return super().list_dir(path)
 
     def read(self, path):
         if self.poisoned and any(path.startswith(prefix)
                                  for prefix in self.poisoned_prefixes):
+            self.canonical_attempts.append(("read", path))
             raise RuntimeError(f"live canonical read reopened: {path}")
         return super().read(path)
 
@@ -921,6 +929,49 @@ def test_needs_me_serves_validated_review_v3_without_reopening_live_review(
     rows = needs_me_rows(payload["result"])
     assert any(row.get("type") == "review-pending"
                and row.get("name") == "pr1" for row in rows)
+
+
+def test_needs_me_rejects_digest_valid_malformed_forge_before_domain_scan(
+    capsys, monkeypatch,
+):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    t = CanonicalPoisonTransport()
+    t.poisoned = False
+    sealed = _publish(t)
+    _replace_section_value(t, sealed, "forge", {
+        "schema": generation.FORGE_PROJECTION_SCHEMA,
+        "complete": True,
+        "responsible": {"pr1": "alice"},
+        "feedback": {},
+    })
+    t.poisoned = True
+
+    rc = cli.main([
+        "needs-me", TEAM, "--agent", "alice", "--json",
+    ], transport=t)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert rc == 3
+    assert payload["state"] == "UNKNOWN"
+    assert payload["result"] is None
+    assert payload["coverage"] == [
+        {"surface": "current-manifest", "state": "CLEAR", "required": True},
+        {
+            "surface": "freshness-overlay", "state": "NOT_RUN",
+            "required": True,
+            "reason": "immutable generation validation did not license overlay",
+        },
+        {
+            "surface": "immutable-generation", "state": "UNKNOWN",
+            "required": True,
+            "reason": "forge projection nested structure invalid",
+        },
+    ]
+    assert t.feed_starts == []
+    assert t.canonical_attempts == []
 
 
 def test_generation_backed_checked_truncation_is_top_level_unknown(

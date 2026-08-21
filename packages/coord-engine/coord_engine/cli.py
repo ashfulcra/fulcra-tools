@@ -3680,7 +3680,9 @@ def _forge_feedback_for(
     feedback item for THIS agent (ack state is per-agent and stays live) — and
     the fold appends ``{"type": "forge-source", "source": "projection",
     "as_of": T}``. A projection present but unservable falls back to the raw
-    scan loudly (``"source": "raw-scan"`` + reason); no projection / no
+    scan loudly (``"source": "raw-scan"`` + reason), except a projection
+    rejected by the shared deep validator: that is UNKNOWN and returns no
+    domain rows without reopening canonical state. No projection / no
     ``aggregate_doc`` is the pre-projection raw scan, byte-identical."""
     if aggregate_doc is not None:
         feed_supplied = feed_evidence is not None
@@ -3713,6 +3715,13 @@ def _forge_feedback_for(
                 if served is not None:
                     return served
                 reason = "forge projection malformed"
+                degraded = budget_mod.degraded_row("forge-degraded", 0, 0)
+                degraded["reason"] = reason
+                return [
+                    degraded,
+                    {"type": "forge-source", "source": "projection",
+                     "reason": reason},
+                ]
         if reason:
             out = _forge_feedback_raw(transport, team, agent, deadline=deadline)
             out.append({"type": "forge-source", "source": "raw-scan",
@@ -3741,41 +3750,6 @@ def _forge_feed_delta(team: str, changes: list[Any]) -> tuple[set[str], bool]:
     return changed, responsibility_changed
 
 
-def _validated_forge_projection(
-    section: dict[str, Any],
-) -> "Optional[tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]]":
-    """POSITIVELY validate a ``forge`` projection section's nested data.
-
-    Returns ``(responsible, feedback)`` only when EVERY nested collection
-    matches the schema exactly: every ``responsible`` value a list of non-empty
-    strs (a non-list entry must not be silently excluded — it could hide a real
-    responsibility), every ``feedback`` value a list of dicts each carrying a
-    non-empty str ``id`` (the ack key — an id-less item must not silently
-    vanish) and an ``author`` that is a str or None. ANY other nested type/value
-    returns None — the caller then emits "projection malformed" and raw-scans,
-    loudly (round-2 P1)."""
-    resp = section.get("responsible")
-    fb = section.get("feedback")
-    if not isinstance(resp, dict) or not isinstance(fb, dict):
-        return None
-    for agents in resp.values():
-        if not isinstance(agents, list) or not all(
-                isinstance(a, str) and a for a in agents):
-            return None
-    for items in fb.values():
-        if not isinstance(items, list):
-            return None
-        for it in items:
-            if not isinstance(it, dict):
-                return None
-            if not isinstance(it.get("id"), str) or not it["id"]:
-                return None
-            author = it.get("author")
-            if author is not None and not isinstance(author, str):
-                return None
-    return resp, fb
-
-
 def _forge_feedback_from_projection(
     transport: Any, team: str, agent: str, section: dict[str, Any], *,
     deadline: Optional[float] = None,
@@ -3788,9 +3762,9 @@ def _forge_feedback_from_projection(
     as the raw fold hides them). Bounded by the caller's shared ``deadline``; a
     breach truncates with the same ``forge-degraded`` marker discipline. Every
     nested collection is positively validated FIRST
-    (``_validated_forge_projection``); any shape doubt returns None (caller
-    raw-scans, loud)."""
-    validated = _validated_forge_projection(section)
+    (``generation.validated_forge_projection``); any shape doubt returns None
+    so the caller marks coverage UNKNOWN without reopening canonical state."""
+    validated = generation.validated_forge_projection(section)
     if validated is None:
         return None
     resp, fb = validated
@@ -3828,7 +3802,7 @@ def _forge_feedback_from_projection(
         unacked: list[str] = []
         authors: list[str] = []
         cut = False
-        for it in items:  # shapes proven by _validated_forge_projection
+        for it in items:  # shapes proven by generation.validated_forge_projection
             stem = it["id"]
             if dl.expired():
                 cut = True

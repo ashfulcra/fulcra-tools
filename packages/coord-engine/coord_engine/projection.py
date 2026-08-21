@@ -1121,6 +1121,10 @@ def build_forge_projection(
         "responsible": {k: sorted(v) for k, v in sorted(resp.items())},
         "feedback": feedback,
     }
+    if generation.validated_forge_projection(section) is None:
+        complete = False
+        section["complete"] = False
+        log.warn("forge projection validation failed", team=team)
     if not complete:
         log.warn("forge projection incomplete", team=team,
                  responsible=len(resp))

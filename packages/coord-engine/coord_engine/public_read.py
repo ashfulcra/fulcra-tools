@@ -229,6 +229,8 @@ def _section_value_reason(team: str, name: str, value: Any) -> str:
                 or not isinstance(value.get("responsible"), Mapping)
                 or not isinstance(value.get("feedback"), Mapping)):
             return "forge projection incomplete or invalid"
+        if generation.validated_forge_projection(value) is None:
+            return "forge projection nested structure invalid"
         return ""
     prefix = generation.inventory_prefix(team, name)
     if prefix is None:

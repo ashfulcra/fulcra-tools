@@ -1105,10 +1105,10 @@ def test_review_fold_malformed_slug_lists_fall_back_loud():
         assert src[0]["reason"] == "reviews projection malformed", key
 
 
-def test_forge_fold_malformed_nested_values_fall_back_loud():
+def test_forge_fold_malformed_nested_values_are_unknown_without_raw_fallback():
     # Round-2 P1, forge side: a non-list responsibility entry or an id-less
     # feedback item must not be silently skipped — any invalid nested value is
-    # a loud raw-scan fallback.
+    # UNKNOWN and may not reopen canonical forge/review state.
     t = FakeTransport()
     _seed_forge_team(t)
     fresh = {"schema": projection.FORGE_SCHEMA, "generated_at": _now_iso(),
@@ -1127,11 +1127,25 @@ def test_forge_fold_malformed_nested_values_fall_back_loud():
         agg = {projection.FORGE_KEY: dict(fresh, **over)}
         out = cli._forge_feedback_for(t, TEAM, "bob", aggregate_doc=agg)
         src = [r for r in out if r.get("type") == "forge-source"]
-        assert len(src) == 1 and src[0]["source"] == "raw-scan", over
+        assert len(src) == 1 and src[0]["source"] == "projection", over
         assert src[0]["reason"] == "forge projection malformed", over
-        # the loud raw scan still finds the real feedback
-        assert [r["pr_slug"] for r in out
-                if r.get("type") == "forge-feedback"] == ["o-r-9"], over
+        assert any(r.get("type") == "forge-degraded" for r in out), over
+        assert not [r for r in out if r.get("type") == "forge-feedback"], over
+
+
+def test_forge_builder_rejects_an_idless_feedback_item():
+    t = FakeTransport()
+    t.put(f"team/{TEAM}/_coord/forge/watch/o-r-9.md",
+          "---\ntype: Watch\nurl: https://github.com/o/r/pull/9\nagent: bob\n---\n")
+    t.put(f"team/{TEAM}/_coord/forge/feedback/o-r-9/.md",
+          "---\ntype: Feedback\nauthor: reviewer\n---\n")
+
+    section = projection.build_forge_projection(
+        t, TEAM, now=_now_iso(), review_rows=[], reviews_complete=True,
+        prior=None, deadline=budget.Deadline(None),
+    )
+
+    assert section["complete"] is False
 
 
 def test_review_fold_unresolvable_head_slug_is_unknown_loud():

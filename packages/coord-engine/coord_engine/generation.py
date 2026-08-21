@@ -197,6 +197,43 @@ def validated_review_projection(
     return by_name, slug_lists[0], slug_lists[1], slug_lists[2]
 
 
+def validated_forge_projection(
+    section: Any,
+) -> Optional[tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]]:
+    """Validate all reusable/servable forge-v1 nested structure once.
+
+    Outer schema and completeness are publication facts checked by callers.
+    This function owns the nested contract shared by the producer, generation
+    sealing, public-read authority, and the legacy domain consumer.
+    """
+    if not isinstance(section, Mapping):
+        return None
+    responsible = section.get("responsible")
+    feedback = section.get("feedback")
+    if not isinstance(responsible, Mapping) or not isinstance(feedback, Mapping):
+        return None
+    validated_responsible: dict[str, list[str]] = {}
+    for slug, agents in responsible.items():
+        if (not _nonempty_text(slug) or not isinstance(agents, list)
+                or not all(_nonempty_text(agent) for agent in agents)):
+            return None
+        validated_responsible[str(slug)] = list(agents)
+    validated_feedback: dict[str, list[dict[str, Any]]] = {}
+    for slug, items in feedback.items():
+        if not _nonempty_text(slug) or not isinstance(items, list):
+            return None
+        validated_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, Mapping) or not _nonempty_text(item.get("id")):
+                return None
+            author = item.get("author")
+            if author is not None and not isinstance(author, str):
+                return None
+            validated_items.append(dict(item))
+        validated_feedback[str(slug)] = validated_items
+    return validated_responsible, validated_feedback
+
+
 def _json(value: Any) -> str:
     """The one compact, key-sorted encoding used for all generation bytes."""
     return json.dumps(value, separators=(",", ":"), sort_keys=True,
@@ -292,8 +329,13 @@ def build_generation(
     schema_version: str = GENERATION_SCHEMA,
 ) -> Generation:
     """Seal a generation.  This is pure: identical inputs mean identical bytes."""
-    incomplete = tuple(name for name in REQUIRED_SECTIONS
-                       if name not in sections or not sections[name].complete)
+    incomplete = tuple(
+        name for name in REQUIRED_SECTIONS
+        if (name not in sections
+            or not sections[name].complete
+            or (name == "forge"
+                and validated_forge_projection(sections[name].value) is None))
+    )
     schemas = {name: sections[name].schema for name in REQUIRED_SECTIONS
                if name in sections}
     normalized_updates = _batch_digest(batch)
