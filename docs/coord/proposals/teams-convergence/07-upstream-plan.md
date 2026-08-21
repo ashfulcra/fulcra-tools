@@ -1,5 +1,11 @@
 # Upstream plan — contributing coord to Fulcra
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 **Goal:** get coord's skills + engine adopted upstream (`fulcradynamics/agent-skills` + the fulcra-api
 surface), so the "pro tier of the official skill" stops being a personal fork and becomes the official
 capability. Operator (Ash) is at Fulcra — this is an internal champion play, not a cold OSS PR: optimize

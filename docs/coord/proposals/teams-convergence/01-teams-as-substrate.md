@@ -1,5 +1,11 @@
 # Teams-as-substrate: coord + continuity as optional layers on top of `fulcra-agent-teams`
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 **Question:** Can we take the official `fulcra-agent-teams` skill as the foundation and rebuild
 coord's + continuity's additional functionality as one or more *optional packages* that run on top of it?
 

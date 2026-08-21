@@ -1,5 +1,11 @@
 # Upstream pitch plan — getting coord adopted by Fulcra
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 Execution plan for the internal-champion play defined in `07-upstream-plan.md` (adversarially
 reviewed, APPROVE, 2026-07-04). Ash pitches; coord-maintainer packages and executes. The three
 carry-forward risks from the review are baked in below.

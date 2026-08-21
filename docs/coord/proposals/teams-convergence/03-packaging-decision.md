@@ -1,5 +1,11 @@
 # Packaging decision — how coord's layers ship
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 **Question:** should coord's layers be Python **packages**, pure-prose **skills**, or a **hybrid**?
 
 ## Options
