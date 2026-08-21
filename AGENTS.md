@@ -666,6 +666,11 @@ it (not on PyPI).
     nonzero — never clean. JSON and text name the same generation, source
     watermark, attested coverage horizon, and sorted surface coverage; JSON is
     still exactly one value and preserves the domain result beneath `result`.
+    Immutable section values are structurally validated before dispatch:
+    inventory records cannot be missing, malformed, outside their canonical
+    namespace, or non-string, and content/frontmatter/type must agree. Review
+    projection v3 rows carry the full direct-query tally; v2 carry rows and v1
+    settled caches are rebuilt before publication.
     **The
     caller's OWN head is feed-gated too:** with a clean `data-updates` window, only caller-owned slugs
     named changed since the projection anchor are raw-tallied; unchanged caller-owned slugs are served

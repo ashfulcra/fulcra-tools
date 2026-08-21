@@ -188,8 +188,10 @@ A conforming consumer:
   path (projection schema v2 plus both raw folds), with an EXPLICIT null
   when the register doc genuinely lacks the field (a legacy headless
   review has no head to serve — the register is the honest source, never
-  a guess), and `review request` requires `--of` so new registers always
-  carry the pointer.
+  a guess). Projection schema v3 additionally carries the complete direct
+  review tally; a legacy carried row or settled cache is rebuilt before a v3
+  generation can seal it. `review request` requires `--of` so new registers
+  always carry the pointer.
 - **OC6 — one canonical write path (TARGET; C02, C11).** A verdict exists
   iff its register shard exists; bus signals are derived, never
   constitutive. The register declares its shard schema version; the verb is

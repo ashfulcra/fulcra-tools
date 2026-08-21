@@ -2890,6 +2890,8 @@ def _validated_review_projection(
     for r in proj_rows:
         if not isinstance(r, dict):
             return None
+        if generation.review_row_reason(r):
+            return None
         name = r.get("name")
         if not isinstance(name, str) or not name:
             return None

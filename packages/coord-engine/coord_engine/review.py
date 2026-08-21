@@ -8,6 +8,7 @@ here; the I/O wrapper + CLI live in ``cli.py``.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any, Optional
 
@@ -276,7 +277,8 @@ def settle_shortcircuit(marker_fm: Any, names: Any) -> str:
 
 def settled_marker_fields(*, state: str, ts: str,
                           evidence: Optional[str] = None,
-                          merge_sha: Optional[str] = None) -> dict:
+                          merge_sha: Optional[str] = None,
+                          tally: Optional[dict[str, Any]] = None) -> dict:
     """The ``.settled`` frontmatter, composed in ONE place.
 
     Both writers — the read fold's cache and the projection's — render through
@@ -294,5 +296,13 @@ def settled_marker_fields(*, state: str, ts: str,
         # CURRENT listing, so a cache written from a stale snapshot carries a
         # stale digest and is ignored by construction, whenever it was written.
         fields["evidence"] = evidence or ""
+    if tally is not None:
+        # The OKF renderer is intentionally shallow, so nested lists/maps must
+        # travel as deterministic JSON. This additive v1 field is ignored by
+        # older readers; v3 projections use it to recover a complete direct-
+        # query row without reopening every shard.
+        fields["tally_json"] = json.dumps(
+            tally, separators=(",", ":"), sort_keys=True,
+            ensure_ascii=False,
+        )
     return fields
-

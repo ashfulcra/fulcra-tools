@@ -72,7 +72,12 @@ public-read freshness overlay rejects a stale raced manifest before v2 authority
 activates. The shared public-read path validates the exact manifest and immutable
 generation bytes, queries one at-least-once `data-updates` window from
 `watermark - epsilon` through `now - epsilon`, deduplicates update identities,
-and applies only locally supported task deltas. Unsupported deltas, incomplete
+validates every sealed section before a domain handler sees it (including exact
+inventory record shape, namespace, string content, parsed frontmatter, and
+canonical document type), and applies only locally supported task deltas.
+Review projection v3 carries the complete direct-status tally; legacy v2 rows
+and v1 settled caches are rebuilt before they can be sealed as compatible.
+Unsupported deltas, incomplete
 feed coverage, a changed pointer, or an unverified epsilon return typed
 `UNKNOWN` and nonzero; an overlay that was not invoked is `NOT_RUN`, never
 clean. JSON and text both expose the generation, source watermark, attested

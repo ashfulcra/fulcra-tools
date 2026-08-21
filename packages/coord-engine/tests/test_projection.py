@@ -9,10 +9,11 @@ before. These tests pin all four legs plus the end-to-end state agreement
 between the projection and the raw per-slug tally.
 """
 
+from copy import deepcopy
 import json
 from datetime import datetime, timedelta, timezone
 
-from coord_engine import budget, cli, projection, reconcile
+from coord_engine import budget, cli, okf, projection, reconcile, review
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
@@ -325,6 +326,47 @@ def test_reconcile_writes_review_projection():
     assert by_name["changed-one"]["state"] == "CHANGES"
     # a proven settle also drops the read fold's settled-cache marker
     assert f"team/{TEAM}/review/settled-one/verdicts/.settled" in t.store
+
+
+def test_v2_prior_row_without_tally_is_rebuilt_under_v3_schema():
+    t = FakeTransport()
+    _put_review(t, "legacy-row", "alice", verdicts=[("alice", "approve")])
+    prior = _build_reviews(t)
+    prior = deepcopy(prior)
+    prior["schema"] = "coord.reviews.projection.v2"
+    prior["rows"][0].pop("tally")
+
+    rebuilt = projection.build_review_projection(
+        t, TEAM, now=_now_iso(), prior=prior, settled_index=set(),
+        deadline=budget.Deadline(None), feed_changes=[],
+    )
+
+    assert rebuilt["schema"] == "coord.reviews.projection.v3"
+    row = rebuilt["rows"][0]
+    assert row["tally"]["approvals"] == ["alice"]
+    assert row["tally"]["pending_required"] == []
+
+
+def test_settled_marker_shortcut_rebuilds_a_full_v3_tally():
+    t = FakeTransport()
+    _put_review(t, "marker-row", "alice", verdicts=[("alice", "approve")])
+    prefix = f"team/{TEAM}/review/marker-row/verdicts/"
+    names = [entry["name"] for entry in t.list_dir(prefix)]
+    t.put(
+        prefix + projection.SETTLED_MARKER,
+        okf.render_frontmatter(review.settled_marker_fields(
+            state=review.APPROVED, ts=_now_iso(),
+            evidence=review.evidence_digest(names),
+        )),
+    )
+
+    rebuilt = _build_reviews(t)
+
+    assert rebuilt["schema"] == "coord.reviews.projection.v3"
+    row = rebuilt["rows"][0]
+    assert row["state"] == "APPROVED"
+    assert row["tally"]["approvals"] == ["alice"]
+    assert row["tally"]["evidence"]
 
 
 def test_reconcile_writes_forge_projection():

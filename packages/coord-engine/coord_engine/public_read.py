@@ -198,6 +198,76 @@ def _unknown(
     )
 
 
+def _section_value_reason(team: str, name: str, value: Any) -> str:
+    """Positive schema validation before any domain fold receives bytes."""
+    if not isinstance(value, Mapping):
+        return f"{name} section value must be an object"
+    if name == "tasks":
+        if set(value) != {"rows"}:
+            return "tasks section must contain exactly rows"
+        rows = value.get("rows")
+        if not isinstance(rows, list):
+            return "tasks rows must be a list"
+        for index, row in enumerate(rows):
+            if (not isinstance(row, Mapping)
+                    or not isinstance(row.get("name"), str) or not row.get("name")
+                    or not isinstance(row.get("status"), str) or not row.get("status")):
+                return f"tasks row {index} invalid"
+        return ""
+    if name == "reviews":
+        if value.get("schema") != generation.REVIEW_PROJECTION_SCHEMA:
+            return f"reviews projection schema unsupported: {value.get('schema')}"
+        if value.get("complete") is not True or not isinstance(value.get("rows"), list):
+            return "reviews projection incomplete or rows invalid"
+        for index, row in enumerate(value["rows"]):
+            reason = generation.review_row_reason(row)
+            if reason:
+                return f"reviews projection row {index} {reason}"
+        return ""
+    if name == "forge":
+        if value.get("schema") != generation.FORGE_PROJECTION_SCHEMA:
+            return f"forge projection schema unsupported: {value.get('schema')}"
+        if (value.get("complete") is not True
+                or not isinstance(value.get("responsible"), Mapping)
+                or not isinstance(value.get("feedback"), Mapping)):
+            return "forge projection incomplete or invalid"
+        return ""
+    prefix = generation.inventory_prefix(team, name)
+    if prefix is None:
+        return f"{name} section unrecognized"
+    if set(value) != {"records"}:
+        return f"{name} inventory must contain exactly records"
+    records = value.get("records")
+    if not isinstance(records, list):
+        return f"{name} inventory records must be a list"
+    seen: set[str] = set()
+    prior_path: Optional[str] = None
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            return f"{name} inventory record {index} must be an object"
+        if set(record) != {"path", "content", "frontmatter"}:
+            return f"{name} inventory record {index} fields invalid"
+        path, content, frontmatter = (
+            record.get("path"), record.get("content"), record.get("frontmatter"),
+        )
+        if not isinstance(path, str) or not path.startswith(prefix):
+            return f"{name} inventory record {index} path outside namespace"
+        if path in seen or (prior_path is not None and path <= prior_path):
+            return f"{name} inventory record {index} path duplicate or unsorted"
+        if not isinstance(content, str):
+            return f"{name} inventory record {index} content must be a string"
+        if not isinstance(frontmatter, Mapping):
+            return f"{name} inventory record {index} frontmatter must be an object"
+        parsed = okf.parse_frontmatter(content)
+        if not isinstance(parsed, dict) or parsed != dict(frontmatter):
+            return f"{name} inventory record {index} content/frontmatter mismatch"
+        if not generation.canonical_inventory_document(name, path, frontmatter):
+            return f"{name} inventory record {index} canonical document invalid"
+        seen.add(path)
+        prior_path = path
+    return ""
+
+
 def _read_generation(
     transport: Any, team: str,
 ) -> tuple[Optional[str], Optional[dict[str, Any]], Optional[dict[str, Any]], str]:
@@ -297,6 +367,9 @@ def _read_generation(
             return manifest_raw, manifest, None, (
                 f"immutable generation section {name} invalid"
             )
+        value_reason = _section_value_reason(team, name, section["value"])
+        if value_reason:
+            return manifest_raw, manifest, None, value_reason
     return manifest_raw, manifest, doc, ""
 
 

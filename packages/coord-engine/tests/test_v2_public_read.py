@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from hashlib import sha256
 
+import pytest
+
 from coord_engine import __version__, generation, okf, public_read, tasks
 from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
 from coord_engine.generation import SectionResult
@@ -30,7 +32,8 @@ def _sections(rows=(), *, values_override=None):
     values = {
         "tasks": {"rows": list(rows)},
         "reviews": {
-            "schema": "coord.reviews.projection.v2", "generated_at": WATERMARK,
+            "schema": generation.REVIEW_PROJECTION_SCHEMA,
+            "generated_at": WATERMARK,
             "complete": True, "scanned": 0, "total": 0, "rows": [],
             "orphans": [], "orphans_unknown": [], "tombstones": [],
         },
@@ -93,6 +96,19 @@ def _read(t, **kwargs):
         epsilon_seconds=kwargs.pop("epsilon_seconds", 30.0),
         epsilon_verified=kwargs.pop("epsilon_verified", True),
         **kwargs,
+    )
+
+
+def _replace_section_value(t, sealed, section_name, value):
+    path = generation.generation_path(TEAM, sealed.id)
+    doc = json.loads(t.store[path])
+    doc["sections"][section_name]["value"] = value
+    forged_bytes = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+    t.store[path] = forged_bytes
+    manifest = json.loads(t.store[generation.current_path(TEAM)])
+    manifest["content_digest"] = sha256(forged_bytes.encode()).hexdigest()
+    t.store[generation.current_path(TEAM)] = json.dumps(
+        manifest, separators=(",", ":"), sort_keys=True,
     )
 
 
@@ -221,6 +237,97 @@ def test_unsupported_section_schema_is_rejected_even_with_supported_engine():
     assert "unsupported presence section schema attacker.schema.v9" in (
         result.coverage_by_surface("immutable-generation").reason or ""
     )
+
+
+@pytest.mark.parametrize(("value", "reason"), [
+    ({}, "presence inventory must contain exactly records"),
+    ({"records": {}}, "presence inventory records must be a list"),
+    ({"records": ["not-a-record"]}, "presence inventory record 0 must be an object"),
+    ({"records": [{
+        "path": f"team/{TEAM}/presence/alice.md",
+        "content": "---\ntype: Presence\nagent: alice\n---\n",
+    }]}, "presence inventory record 0 fields invalid"),
+    ({"records": [{
+        "path": f"team/{TEAM}/roles/reviewer.md", "content": "valid",
+        "frontmatter": {"type": "Role"},
+    }]}, "presence inventory record 0 path outside namespace"),
+    ({"records": [{
+        "path": f"team/{TEAM}/presence/alice.md", "content": None,
+        "frontmatter": {"type": "Presence", "agent": "alice"},
+    }]}, "presence inventory record 0 content must be a string"),
+])
+def test_malformed_sealed_inventory_is_unknown_and_never_runs_overlay(
+    value, reason,
+):
+    t = OverlayTransport()
+    sealed = _publish(t)
+    _replace_section_value(t, sealed, "presence", value)
+
+    result = _read(t)
+
+    assert result.rc == 3
+    assert result.state.value == "UNKNOWN"
+    assert t.feed_starts == []
+    assert reason in (
+        result.coverage_by_surface("immutable-generation").reason or ""
+    )
+    assert result.coverage_by_surface("freshness-overlay").state.value == "NOT_RUN"
+
+
+@pytest.mark.parametrize(("section_name", "path", "frontmatter"), [
+    ("roles", f"team/{TEAM}/roles/reviewer.md", {"type": "Role"}),
+    ("presence", f"team/{TEAM}/presence/alice.md",
+     {"type": "Presence", "agent": "alice"}),
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/a/alice.md",
+     {"type": "Ack", "agent": "alice"}),
+    ("responses", f"team/{TEAM}/response/a.md",
+     {"type": "Response", "agent": "alice", "outcome": "done"}),
+])
+def test_every_inventory_section_rejects_non_string_content(
+    section_name, path, frontmatter,
+):
+    t = OverlayTransport()
+    sealed = _publish(t)
+    _replace_section_value(t, sealed, section_name, {
+        "records": [{"path": path, "content": None, "frontmatter": frontmatter}],
+    })
+
+    result = _read(t)
+
+    assert result.rc == 3
+    assert t.feed_starts == []
+    assert f"{section_name} inventory record 0 content must be a string" in (
+        result.coverage_by_surface("immutable-generation").reason or ""
+    )
+
+
+@pytest.mark.parametrize(("section_name", "argv"), [
+    ("presence", ["presence", "show", TEAM]),
+    ("roles", ["roles", "status", TEAM, "reviewer"]),
+    ("acknowledgments", ["briefing", TEAM, "--agent", "alice"]),
+    ("responses", ["briefing", TEAM, "--agent", "alice"]),
+])
+def test_affected_public_folds_surface_malformed_inventory_at_top_level(
+    capsys, monkeypatch, section_name, argv,
+):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    t = OverlayTransport()
+    sealed = _publish(t)
+    _replace_section_value(t, sealed, section_name, {"records": [{
+        "path": f"team/{TEAM}/{section_name}/bad.md",
+        "content": None,
+        "frontmatter": {},
+    }]})
+
+    rc = cli.main([*argv, "--json"], transport=t)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 3
+    assert payload["state"] == "UNKNOWN"
+    assert payload["result"] is None
+    assert t.feed_starts == []
 
 
 def test_overlay_not_run_for_unverified_epsilon_is_unknown_not_clean():
@@ -493,7 +600,13 @@ class CanonicalPoisonTransport(OverlayTransport):
 
 def _record(path, fields, body):
     content = okf.render_frontmatter(fields) + f"\n{body}\n"
-    return {"path": path, "content": content, "frontmatter": fields}
+    # Mirror the generation builder: the sealed frontmatter is the parse of
+    # the exact sealed bytes, not the caller's pre-render Python values.
+    return {
+        "path": path,
+        "content": content,
+        "frontmatter": okf.parse_frontmatter(content),
+    }
 
 
 def test_non_task_public_folds_read_the_sealed_generation_not_live_canonical(
@@ -522,7 +635,8 @@ def test_non_task_public_folds_read_the_sealed_generation_not_live_canonical(
             }, "lease"),
         ]},
         "reviews": {
-            "schema": "coord.reviews.projection.v2", "generated_at": WATERMARK,
+            "schema": generation.REVIEW_PROJECTION_SCHEMA,
+            "generated_at": WATERMARK,
             "complete": True, "scanned": 1, "total": 1,
             "rows": [{
                 "name": "pr1", "state": "APPROVED", "settled": True,
@@ -580,13 +694,19 @@ def test_generation_backed_checked_truncation_is_top_level_unknown(
             }, "lease"),
         ]},
         "reviews": {
-            "schema": "coord.reviews.projection.v2", "generated_at": WATERMARK,
+            "schema": generation.REVIEW_PROJECTION_SCHEMA,
+            "generated_at": WATERMARK,
             "complete": True, "scanned": 45, "total": 45,
             "rows": [{
                 "name": f"pr{index}", "state": "PENDING", "settled": False,
                 "pending_required": ["bob"], "required": ["bob"],
                 "requested_by": "bob", "artifact": None,
                 "of": None, "head": None, "mtime": None, "size": None,
+                "tally": {
+                    "state": "PENDING", "approvals": [], "changes": [],
+                    "required": ["bob"], "pending_required": ["bob"],
+                    "evidence": "", "of": None,
+                },
             } for index in range(45)],
             "orphans": [], "orphans_unknown": [], "tombstones": [],
         },
@@ -637,7 +757,7 @@ def _public_fold_transport():
         ],
         values_override={
             "reviews": {
-                "schema": "coord.reviews.projection.v2",
+                "schema": generation.REVIEW_PROJECTION_SCHEMA,
                 "generated_at": WATERMARK, "complete": True,
                 "scanned": 1, "total": 1,
                 "rows": [{

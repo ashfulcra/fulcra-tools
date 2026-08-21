@@ -18,6 +18,8 @@ from . import __version__
 
 GENERATION_SCHEMA = "coord.projections.generation.v1"
 SECTION_SCHEMA = "coord.projection-section.v1"
+REVIEW_PROJECTION_SCHEMA = "coord.reviews.projection.v3"
+FORGE_PROJECTION_SCHEMA = "coord.forge.projection.v1"
 REQUIRED_SECTIONS = (
     "tasks", "reviews", "forge", "roles", "presence", "acknowledgments",
     "responses",
@@ -30,6 +32,100 @@ SUPPORTED_ENGINE_VERSIONS = frozenset((__version__,))
 SUPPORTED_SECTION_SCHEMAS = {
     name: frozenset((SECTION_SCHEMA,)) for name in REQUIRED_SECTIONS
 }
+INVENTORY_PREFIXES = {
+    "roles": "roles/",
+    "presence": "presence/",
+    "acknowledgments": "_coord/acks/",
+    "responses": "response/",
+}
+
+
+def inventory_prefix(team: str, section: str) -> Optional[str]:
+    relative = INVENTORY_PREFIXES.get(section)
+    return f"team/{team}/{relative}" if relative is not None else None
+
+
+def _nonempty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def canonical_inventory_document(
+    section: str, path: str, document: Mapping[str, Any],
+) -> bool:
+    """One semantic classifier shared by generation writers and readers."""
+    doc_type = document.get("type")
+    if section == "roles":
+        relative = path.split("/roles/", 1)[-1]
+        parts = relative.split("/")
+        if len(parts) == 1:
+            role_file = parts[0]
+            return (role_file.endswith(".md") and len(role_file) > len(".md")
+                    and doc_type == "Role")
+        if (len(parts) != 3 or not parts[0]
+                or parts[0].endswith(".md")
+                or not parts[2].endswith(".md")
+                or len(parts[2]) <= len(".md")):
+            return False
+        if parts[1] == "leases":
+            return doc_type == "Lease" and _nonempty_text(document.get("agent"))
+        if parts[1] == "escalations":
+            return doc_type == "Escalation"
+        return False
+    if section == "presence":
+        return doc_type == "Presence" and _nonempty_text(document.get("agent"))
+    if section == "acknowledgments":
+        return doc_type == "Ack" and _nonempty_text(document.get("agent"))
+    if section == "responses":
+        return (doc_type == "Response" and _nonempty_text(document.get("agent"))
+                and _nonempty_text(document.get("outcome")))
+    return False
+
+
+def review_tally_reason(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return "tally must be an object"
+    required = {
+        "state", "approvals", "changes", "required", "pending_required",
+        "evidence", "of",
+    }
+    if not required.issubset(value):
+        return "tally fields invalid"
+    if value.get("state") not in ("PENDING", "APPROVED", "CHANGES"):
+        return "tally state invalid"
+    for key in ("approvals", "changes", "required", "pending_required"):
+        items = value.get(key)
+        if (not isinstance(items, list)
+                or not all(_nonempty_text(item) for item in items)):
+            return f"tally {key} invalid"
+    if not isinstance(value.get("evidence"), str):
+        return "tally evidence invalid"
+    if value.get("of") is not None and not _nonempty_text(value.get("of")):
+        return "tally of invalid"
+    if "head" in value and value.get("head") is not None and not _nonempty_text(value.get("head")):
+        return "tally head invalid"
+    return ""
+
+
+def review_row_reason(row: Any) -> str:
+    if not isinstance(row, Mapping):
+        return "row must be an object"
+    if not _nonempty_text(row.get("name")):
+        return "row name invalid"
+    if row.get("state") not in ("PENDING", "APPROVED", "CHANGES"):
+        return "row state invalid"
+    if not isinstance(row.get("settled"), bool):
+        return "row settled invalid"
+    tally_reason = review_tally_reason(row.get("tally"))
+    if tally_reason:
+        return tally_reason
+    tally = row["tally"]
+    if tally.get("state") != row.get("state"):
+        return "row/tally state mismatch"
+    if tally.get("pending_required") != row.get("pending_required"):
+        return "row/tally pending_required mismatch"
+    if tally.get("required") != row.get("required"):
+        return "row/tally required mismatch"
+    return ""
 
 
 def _json(value: Any) -> str:
