@@ -63,18 +63,19 @@ class ChangeBatch:
     coverage: Mapping[str, Coverage]
     trusted: bool
     envelope: Optional[Mapping[str, Any]] = None
-    # The only cursor frontier a generation may publish.  The current
-    # data-updates response does not attest one, so this is usually None and
-    # generation publication fails closed until the feed supplies it.
+    # The only cursor frontier a generation may publish. It is present only
+    # after the outer feed and record cursor prove one contiguous window.
     watermark: Optional[str] = None
+    reason: Optional[str] = None
 
     def for_namespace(self, namespace: str) -> tuple[Change, ...]:
         return tuple(change for change in self.changes if change.namespace == namespace)
 
 
-def _unknown() -> ChangeBatch:
+def _unknown(reason: Optional[str] = None) -> ChangeBatch:
     return ChangeBatch(
         (), MappingProxyType({name: Coverage.UNKNOWN for name in NAMESPACES}), False,
+        reason=reason,
     )
 
 
@@ -106,7 +107,8 @@ def _namespace(team: str, path: str) -> Optional[str]:
         return "forge"
     if rest.startswith("presence/") or rest.startswith("roles/") or rest.startswith("role/"):
         return "presence_roles"
-    if rest.startswith("_coord/acks/") or rest.startswith("response/"):
+    if (rest.startswith("_coord/acks/")
+            or rest.startswith("_coord/responses/")):
         return "acknowledgments_responses"
     if rest.startswith("_coord/router/"):
         return "router_state"
@@ -154,32 +156,42 @@ def _file_identity(row: Mapping[str, Any]) -> Optional[str]:
 
 
 def _record_window(
-    value: Any, *, prior_watermark: Optional[str], count: int,
-) -> Optional[tuple[str, list[Mapping[str, Any]]]]:
+    value: Any, *, prior_watermark: Optional[str],
+) -> tuple[Optional[tuple[str, list[Mapping[str, Any]]]], str]:
     """Accept only a server-attested, exact record cursor window.
 
     The detector cannot turn a local observation time into a cursor boundary.
     ``after`` must prove the requested boundary, ``through`` must prove the
-    returned horizon, and the number of raw rows must exactly match the count
-    signal before any immutable-id deduplication occurs.
+    returned horizon, and raw rows must carry their own identities. The
+    ``data_types`` count is only a detector signal: production measurements show
+    it persistently disagrees with cursor enumeration, so it is never an exact
+    cardinality, threshold, diff, or substitute identity.
     """
-    if not isinstance(value, Mapping) or not isinstance(prior_watermark, str):
-        return None
+    if not isinstance(value, Mapping):
+        return None, "record cursor window unavailable or malformed"
+    if not isinstance(prior_watermark, str):
+        return None, "record cursor prior watermark unavailable"
     after, through, rows = value.get("after"), value.get("through"), value.get("records")
     if not isinstance(after, str) or not isinstance(through, str) or not isinstance(rows, list):
-        return None
+        return None, "record cursor window missing after, through, or records"
     requested = _instant({"uploaded_at": prior_watermark}, "uploaded")
     start = _instant({"uploaded_at": after}, "uploaded")
     end = _instant({"uploaded_at": through}, "uploaded")
-    if requested is None or start is None or end is None or start[0] != requested[0] or end[0] < start[0]:
-        return None
-    if len(rows) != count or any(not isinstance(row, Mapping) for row in rows):
-        return None
+    if requested is None:
+        return None, "record cursor prior watermark is unparseable"
+    if start is None or end is None:
+        return None, "record cursor boundary or horizon is unparseable"
+    if start[0] != requested[0]:
+        return None, "record cursor boundary does not match requested watermark"
+    if end[0] < start[0]:
+        return None, "record cursor horizon precedes its boundary"
+    if any(not isinstance(row, Mapping) for row in rows):
+        return None, "record cursor contains a malformed record"
     for row in rows:
         at = _instant({"uploaded_at": row.get("recorded_at")}, "uploaded")
         if at is None or not (start[0] < at[0] <= end[0]):
-            return None
-    return end[1], rows
+            return None, "record cursor contains a record outside its attested window"
+    return (end[1], rows), ""
 
 
 def _coordination_count(
@@ -212,16 +224,27 @@ def _coordination_count(
     return channel, count
 
 
-def _feed_watermark(envelope: Mapping[str, Any], prior_watermark: Optional[str]) -> Optional[str]:
-    """Accept only a server-attested feed frontier that cannot move backward."""
+def _feed_window(
+    envelope: Mapping[str, Any], prior_watermark: Optional[str],
+) -> tuple[Optional[tuple[str, str]], str]:
+    """Accept one exact outer feed window and normalize both boundaries."""
+    boundary = _instant({"uploaded_at": envelope.get("after")}, "uploaded")
     frontier = _instant({"uploaded_at": envelope.get("through")}, "uploaded")
+    if boundary is None:
+        return None, "data-updates coverage boundary unavailable or unparseable"
     if frontier is None:
-        return None
+        return None, "data-updates coverage frontier unavailable or unparseable"
     if prior_watermark is not None:
         prior = _instant({"uploaded_at": prior_watermark}, "uploaded")
-        if prior is None or frontier[0] < prior[0]:
-            return None
-    return frontier[1]
+        if prior is None:
+            return None, "requested data-updates watermark is unparseable"
+        if boundary[0] != prior[0]:
+            return None, (
+                "data-updates coverage boundary does not match requested watermark"
+            )
+    if frontier[0] < boundary[0]:
+        return None, "data-updates coverage frontier precedes its boundary"
+    return (boundary[1], frontier[1]), ""
 
 
 class ChangeDetector:
@@ -245,6 +268,10 @@ class ChangeDetector:
         rows = envelope.get("file_changes")
         if not isinstance(rows, list):
             return _unknown()
+        feed_window, feed_reason = _feed_window(envelope, prior_watermark)
+        if feed_window is None:
+            return _unknown(feed_reason)
+        feed_start, feed_watermark = feed_window
 
         coverage = {name: Coverage.CLEAR for name in NAMESPACES}
         changes: list[Change] = []
@@ -281,41 +308,56 @@ class ChangeDetector:
         if record_count is None:
             return _unknown()
         channel, count = record_count
-        if count:
-            if deadline.expired():
+        record_start = feed_start
+        if deadline.expired():
+            return _unknown()
+        materialize = getattr(self.transport, "records_cursor", None)
+        if materialize is None:
+            return _unknown()
+        try:
+            cursor = materialize(channel, record_start, deadline=deadline)
+        except Exception:
+            return _unknown()
+        if deadline.expired():
+            return _unknown()
+        window, window_reason = _record_window(
+            cursor, prior_watermark=record_start,
+        )
+        if window is None:
+            return _unknown(window_reason)
+        record_through, record_rows = window
+        feed_frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")
+        record_frontier = _instant({"uploaded_at": record_through}, "uploaded")
+        if (feed_frontier is None or record_frontier is None
+                or record_frontier[0] < feed_frontier[0]):
+            return _unknown(
+                "record cursor coverage horizon precedes data-updates frontier"
+            )
+        # A positive signal that materializes no identities is an observed
+        # disagreement, not a clean no-op. A zero signal is not proof either:
+        # only this enumerated window can establish CLEAR or DATA.
+        if count > 0 and not record_rows:
+            return _unknown()
+        for row in record_rows:
+            identity = records.immutable_record_identity(row)
+            if identity is None:
                 return _unknown()
-            materialize = getattr(self.transport, "records_cursor", None)
-            if materialize is None:
-                return _unknown()
-            try:
-                cursor = materialize(channel, prior_watermark, deadline=deadline)
-            except Exception:
-                return _unknown()
-            if deadline.expired():
-                return _unknown()
-            window = _record_window(cursor, prior_watermark=prior_watermark, count=count)
-            if window is None:
-                return _unknown()
-            _through, rows = window
-            for row in rows:
-                identity = records.immutable_record_identity(row)
-                if identity is None:
+            update_id = f"record:{identity}"
+            if update_id not in identities:
+                identities.add(update_id)
+                normalized = _instant({"uploaded_at": row["recorded_at"]}, "uploaded")
+                if normalized is None:
                     return _unknown()
-                update_id = f"record:{identity}"
-                if update_id not in identities:
-                    identities.add(update_id)
-                    normalized = _instant({"uploaded_at": row["recorded_at"]}, "uploaded")
-                    if normalized is None:
-                        return _unknown()
-                    instant, at = normalized
-                    instants[update_id] = instant
-                    changes.append(Change(update_id, "record:" + identity, "recorded", at,
-                                          "acknowledgments_responses", _freeze(dict(row))))
+                instant, at = normalized
+                instants[update_id] = instant
+                changes.append(Change(update_id, "record:" + identity, "recorded", at,
+                                      "acknowledgments_responses", _freeze(dict(row))))
+        if record_rows:
             coverage["acknowledgments_responses"] = Coverage.DATA
 
         trusted = not any(value is Coverage.UNKNOWN for value in coverage.values())
         changes.sort(key=lambda change: (instants[change.update_id], change.path, change.update_id))
         return ChangeBatch(
             tuple(changes), MappingProxyType(dict(coverage)), trusted, _freeze(envelope),
-            _feed_watermark(envelope, prior_watermark),
+            feed_watermark,
         )

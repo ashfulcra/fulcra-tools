@@ -171,7 +171,7 @@ unreadable, and unsupported inputs never collapse into one another.
 ## Unit 3: Normalized Change Detector
 
 **Invariant:** Ordinary detection consumes one normalized feed batch; record
-counts are only triggers for bounded identity materialization.
+counts are only zero/nonzero detector signals, never magnitude or identity.
 
 **Files:**
 
@@ -186,9 +186,15 @@ counts are only triggers for bounded identity materialization.
 - [ ] Write red tests for envelope validation, namespace coverage, immutable
   identity dedup, deterministic sorting, budget expiry, unknown namespaces, and
   no-envelope transport failures.
-- [ ] Write the record-count test: a coordination-channel count invokes exactly
-  one bounded cursor read; missing identities or an unproven boundary yields
-  record coverage `UNKNOWN`.
+- [ ] Write the record-count tests: measured nonzero/enumeration disagreements
+  (`2721 -> 9`, `2737 -> 25`) trust the attested immutable identities rather
+  than numeric equality; positive-with-none (`1444 -> 0`) and an unproven
+  boundary yield record coverage `UNKNOWN`. A zero count is not proof of CLEAR:
+  an attested empty cursor window covering the outer feed frontier is required.
+- [ ] Bind both ends of the record cursor to the outer feed: exact requested
+  `after`, cursor `through >= feed through`, and no watermark advancement for a
+  missing, lagging, mismatched, or incomparable horizon. Bootstrap requires an
+  outer `after` plus the same fully covering cursor.
 - [ ] Implement `ChangeDetector.poll(...) -> ChangeBatch` and transport seams.
 - [ ] Adapt reconcile incremental discovery to consume `ChangeBatch`; retain the
   named full-scan recovery and periodic drift check on any doubt.
@@ -243,6 +249,9 @@ changes through an explicit coverage horizon; blind currentness is impossible.
   re-delivery, and lag-bound failure.
 - [ ] Pin `[watermark - epsilon, now - epsilon]`, at-least-once dedup, reported
   `coverage_horizon`, and `UNKNOWN` when epsilon or feed coverage is unproven.
+- [ ] Reject an empty or nonempty record cursor whose attested horizon lags the
+  outer feed frontier; the overlay remains `NOT_RUN`, returns nonzero, and never
+  reports or persists the unproven frontier.
 - [ ] Route `status`, `board`, `needs-me`, `search`, `inbox`, `digest`, `asks`,
   reviews, forge, roles, presence, and briefing through the shared public-read
   entry point without weakening their existing domain fields.

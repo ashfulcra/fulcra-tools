@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from coord_engine.budget import Deadline
 
 
@@ -13,19 +15,28 @@ CHECKPOINT_TYPE = "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49"
 LIVE_ENVELOPE_FIXTURE = (
     Path(__file__).parent / "fixtures" / "live_data_updates_2026-08-20T2013Z.min.json"
 )
+_DEFAULT_RECORD_WINDOW = object()
 
 
 class FeedTransport:
     """Small real-boundary double: one envelope call and optional record cursor."""
 
     def __init__(
-        self, envelope, records=None, *, data_type=COORDINATION_TYPE,
+        self, envelope, records=_DEFAULT_RECORD_WINDOW, *, data_type=COORDINATION_TYPE,
         supply_default_count=True,
     ):
+        if isinstance(envelope, dict) and "after" not in envelope:
+            envelope = {"after": "2026-08-20T11:00:00Z", **envelope}
+        if isinstance(envelope, dict) and "through" not in envelope:
+            envelope = {"through": "2026-08-20T12:00:00Z", **envelope}
         if isinstance(envelope, dict) and supply_default_count and "data_types" not in envelope:
             envelope = {"data_types": {data_type: 0}, **envelope}
         self.envelope = envelope
-        self.record_rows = records
+        self.record_rows = (
+            {"after": "2026-08-20T11:00:00Z",
+             "through": "2026-08-20T12:00:00Z", "records": []}
+            if records is _DEFAULT_RECORD_WINDOW else records
+        )
         self.data_type = data_type
         self.feed_calls = 0
         self.record_calls = 0
@@ -107,6 +118,28 @@ def test_every_supported_namespace_is_explicitly_covered():
     }
 
 
+def test_canonical_response_updates_share_acknowledgment_response_coverage():
+    batch = _poll(FeedTransport({"file_changes": [
+        _row(
+            "team/r/_coord/responses/task-1/20260821T010000Z-amy.md",
+            update_id="response",
+        ),
+    ]}))
+
+    assert batch.trusted is True
+    assert batch.changes[0].namespace == "acknowledgments_responses"
+    assert batch.coverage["acknowledgments_responses"].value == "DATA"
+
+
+def test_legacy_singular_response_path_is_not_canonical_coverage():
+    batch = _poll(FeedTransport({"file_changes": [
+        _row("team/r/response/task-1/amy.md", update_id="legacy-response"),
+    ]}))
+
+    assert batch.trusted is False
+    assert batch.coverage["unknown_unsupported"].value == "UNKNOWN"
+
+
 def test_duplicate_immutable_update_identity_is_consumed_once_and_sorted():
     """Replacing immutable-id dedupe with path dedupe loses legitimate lifecycles."""
     transport = FeedTransport({"file_changes": [
@@ -155,6 +188,10 @@ def test_attested_feed_frontier_is_sealed_separately_from_event_timestamps():
     batch = _poll(FeedTransport({
         "through": "2026-08-20T12:10:00+00:00",
         "file_changes": [_row("team/r/task/a.md", at="2026-08-20T12:00:00Z")],
+    }, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:10:00Z",
+        "records": [],
     }))
 
     assert batch.trusted is True
@@ -298,8 +335,8 @@ def test_expired_budget_and_unknown_path_make_coverage_unknown():
     assert unknown.coverage["unknown_unsupported"].value == "UNKNOWN"
 
 
-def test_nonzero_record_count_materializes_real_identities_once_before_dedupe():
-    """A count is a trigger, never an identity; a short cursor response is UNKNOWN."""
+def test_record_count_is_only_a_signal_and_never_an_identity_or_magnitude():
+    """Measured counts disagree with enumeration; enumerated IDs are authority."""
     transport = FeedTransport(
         {"file_changes": [], "data_types": {COORDINATION_TYPE: 2}},
         records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
@@ -313,13 +350,200 @@ def test_nonzero_record_count_materializes_real_identities_once_before_dedupe():
     assert [change.update_id for change in batch.changes] == ["record:r-1", "record:r-2"]
     assert batch.coverage["acknowledgments_responses"].value == "DATA"
 
-    short = _poll(FeedTransport(
-        {"file_changes": [], "data_types": {COORDINATION_TYPE: 2}},
-        records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
-                 "records": [{"id": "r-1", "recorded_at": "2026-08-20T12:00:01Z"}]},
-    ))
-    assert short.trusted is False
-    assert short.coverage["acknowledgments_responses"].value == "UNKNOWN"
+    for reported_count, enumerated_count in ((2721, 9), (2737, 25)):
+        measured = _poll(FeedTransport(
+            {"file_changes": [],
+             "data_types": {COORDINATION_TYPE: reported_count}},
+            records=_attested_records(enumerated_count),
+        ))
+        assert measured.trusted is True
+        assert len(measured.changes) == enumerated_count
+        assert all(change.update_id.startswith("record:live-record-")
+                   for change in measured.changes)
+
+
+def test_zero_record_count_does_not_suppress_attested_enumerated_records():
+    """A reported zero is not proof that the enumerated cursor window is empty."""
+    transport = FeedTransport(
+        {"file_changes": [], "data_types": {COORDINATION_TYPE: 0}},
+        records=_attested_records(1),
+    )
+
+    batch = _poll(transport)
+
+    assert transport.record_calls == 1
+    assert batch.trusted is True
+    assert [change.update_id for change in batch.changes] == ["record:live-record-1"]
+    assert batch.coverage["acknowledgments_responses"].value == "DATA"
+
+
+def test_zero_record_signal_without_any_attested_start_boundary_is_unknown():
+    """Neither a zero count nor an outer frontier can invent a cursor start."""
+    from coord_engine.change_detection import ChangeDetector
+
+    transport = FeedTransport({
+        "after": None,
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    })
+
+    batch = ChangeDetector(transport).poll("r", None, Deadline.open(5.0))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert transport.record_calls == 0
+    assert getattr(batch, "reason", None) == (
+        "data-updates coverage boundary unavailable or unparseable"
+    )
+
+
+def test_bootstrap_uses_an_attested_outer_start_and_covers_its_frontier():
+    """A first pass is complete only when one cursor covers the whole feed window."""
+    from coord_engine.change_detection import ChangeDetector
+
+    transport = FeedTransport({
+        "after": "2026-08-20T10:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records={
+        "after": "2026-08-20T10:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    })
+
+    batch = ChangeDetector(transport).poll("r", None, Deadline.open(5.0))
+
+    assert transport.record_calls == 1
+    assert batch.trusted is True
+    assert batch.watermark == "2026-08-20T12:00:00Z"
+    assert batch.coverage["acknowledgments_responses"].value == "CLEAR"
+
+
+def test_nonzero_record_signal_without_materialized_identities_is_unknown():
+    """A nonzero detector signal may not degrade to a silent no-op."""
+    for records in (
+        None,
+        {"after": "2026-08-20T11:00:00Z",
+         "through": "2026-08-20T12:00:00Z", "records": []},
+    ):
+        batch = _poll(FeedTransport(
+            {"file_changes": [], "data_types": {COORDINATION_TYPE: 1444}},
+            records=records,
+        ))
+        assert batch.trusted is False
+        assert batch.coverage["acknowledgments_responses"].value == "UNKNOWN"
+
+
+@pytest.mark.parametrize(("count", "cursor"), [
+    (0, {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T11:00:00Z",
+        "records": [],
+    }),
+    (2737, {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T11:59:59.999999Z",
+        "records": [{"id": "r-1", "recorded_at": "2026-08-20T11:30:00Z"}],
+    }),
+])
+def test_record_cursor_must_cover_the_outer_feed_frontier(count, cursor):
+    """A short cursor must not license CLEAR/DATA or advance the feed watermark."""
+    batch = _poll(FeedTransport({
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: count},
+    }, records=cursor))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert getattr(batch, "reason", None) == (
+        "record cursor coverage horizon precedes data-updates frontier"
+    )
+    assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
+
+
+@pytest.mark.parametrize("cursor_through", [
+    "2026-08-20T08:00:00.000000-04:00",
+    "2026-08-20T12:00:00.000001Z",
+])
+def test_equal_or_later_record_cursor_horizon_covers_feed_across_precision_and_zone(
+    cursor_through,
+):
+    """Instant comparison, not lexical spelling, decides cursor coverage."""
+    batch = _poll(FeedTransport({
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": cursor_through,
+        "records": [],
+    }))
+
+    assert batch.trusted is True
+    assert batch.watermark == "2026-08-20T12:00:00Z"
+
+
+@pytest.mark.parametrize(("envelope_through", "cursor", "expected"), [
+    (None, {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    }, "data-updates coverage frontier unavailable or unparseable"),
+    ("2026-08-20T12:00:00Z", None,
+     "record cursor window unavailable or malformed"),
+    ("2026-08-20T12:00:00Z", {
+        "after": "2026-08-20T11:00:00Z",
+        "through": "not-a-time",
+        "records": [],
+    }, "record cursor boundary or horizon is unparseable"),
+])
+def test_missing_or_incomparable_horizons_are_precise_unknowns(
+    envelope_through, cursor, expected,
+):
+    batch = _poll(FeedTransport({
+        "through": envelope_through,
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records=cursor))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert getattr(batch, "reason", None) == expected
+
+
+@pytest.mark.parametrize(("after", "through", "expected"), [
+    (
+        "2026-08-20T11:00:00.000001Z",
+        "2026-08-20T12:00:00Z",
+        "data-updates coverage boundary does not match requested watermark",
+    ),
+    (
+        "2026-08-20T11:00:00Z",
+        "2026-08-20T10:59:59.999999Z",
+        "data-updates coverage frontier precedes its boundary",
+    ),
+])
+def test_outer_feed_boundary_and_frontier_form_one_exact_window(
+    after, through, expected,
+):
+    """No consumer may trust a feed whose outer window leaves a gap."""
+    batch = _poll(FeedTransport({
+        "after": after,
+        "through": through,
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    }, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    }))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert getattr(batch, "reason", None) == expected
 
 
 def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel():
@@ -336,7 +560,7 @@ def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel
     }))
     assert outside.trusted is False
 
-    excessive = _poll(FeedTransport(
+    count_mismatch = _poll(FeedTransport(
         {"file_changes": [], "data_types": {COORDINATION_TYPE: 1}},
         records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
                  "records": [
@@ -344,7 +568,10 @@ def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel
                      {"id": "r-2", "recorded_at": "2026-08-20T12:00:02Z"},
                  ]},
     ))
-    assert excessive.trusted is False
+    assert count_mismatch.trusted is True
+    assert [change.update_id for change in count_mismatch.changes] == [
+        "record:r-1", "record:r-2",
+    ]
 
     unsupported = _poll(ConfiguredFeedTransport({
         "file_changes": [], "data_types": {CHECKPOINT_TYPE: 0},

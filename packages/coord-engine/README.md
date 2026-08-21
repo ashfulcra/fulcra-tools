@@ -69,7 +69,39 @@ support uses CAS; one that explicitly declares CAS unsupported uses a
 last-writer-wins manifest write followed by exact read verification. Missing or
 invalid capability and manifest write/read failure are nonzero. The mandatory
 public-read freshness overlay rejects a stale raced manifest before v2 authority
-activates.
+activates. The shared public-read path validates the exact manifest and immutable
+generation bytes, queries one at-least-once `data-updates` window from
+`watermark - epsilon` through `now - epsilon`, deduplicates update identities,
+validates every sealed section before a domain handler sees it (including exact
+inventory record shape, namespace, string content, parsed frontmatter, and
+canonical document type), and applies only locally supported task deltas.
+Presence is flat under `presence/`; acknowledgments and responses are one
+slug directory deep under `_coord/acks/` and `_coord/responses/`. Slugs match
+`[a-z0-9]+(?:-[a-z0-9]+)*`; leaf names start alphanumeric, use only
+alphanumerics/`_`/`-`, and end in one final `.md`. Dot/traversal segments,
+file-shaped intermediate components, hidden leaves, and the legacy singular
+`response/` path are unsupported. Review projection v3 carries the
+complete direct-status tally; its producer, publication authority, and domain
+consumers share one nested validator for act-on fields, unique row slugs,
+settled invariants, and orphan/tombstone lists. Legacy v2 rows and v1 settled
+caches are rebuilt before they can be sealed as compatible.
+Unsupported deltas, incomplete
+feed coverage, a changed pointer, or an unverified epsilon return typed
+`UNKNOWN` and nonzero; an overlay that was not invoked is `NOT_RUN`, never
+clean. JSON and text both expose the generation, source watermark, attested
+coverage horizon, and per-surface coverage. During the Unit 5-to-6 activation
+gate the deployed transport enters this authority with epsilon deliberately
+unverified, so migrated public reads fail closed until Unit 6 records fleet lag
+evidence.
+
+`roles status` now returns one `liveness_fact` that carries lease and presence
+observations plus both store-prefix provenance fields. Fresh holder presence and
+a lapsed lease can therefore never be rendered as confidently `VACANT`.
+Attendance is separately typed: omitting `--check-attendance` reports
+`NOT_RUN`; a requested scan that hits its cap reports `UNKNOWN` with
+`scanned`/`total` and exits nonzero; a completed check reports its boolean
+result. Generation-backed public folds reconstruct role/presence inventories
+from the validated immutable bytes rather than reopening the mutable store.
 
 Class A folds now enter the output boundary through
 `coord_engine.outcome.CommandOutcome`, the shared v2 state/coverage/rows/source
@@ -172,8 +204,18 @@ acknowledgments/responses, and projection metadata. `CLEAR`, `DATA`,
 `UNKNOWN`, and `NOT_RUN` are distinct facts: any malformed envelope, timeout,
 permission/read doubt, incomplete namespace, or unsupported team path is
 `UNKNOWN`, triggers the named full-scan recovery, and never advances the
-watermark. A record count only triggers one bounded cursor read to materialize
-immutable record identities; no identity is inferred from a count. The concrete
+watermark. A record count is only a zero/nonzero detector signal, never a
+cardinality, threshold, diff, or identity. Persistent live pairs of reported
+count to enumerated identities (`2721 -> 9`, `1444 -> 0`, `2737 -> 25`) make
+numeric equality invalid. A positive signal must materialize at least one
+immutable identity in one bounded attested cursor read or coverage is
+`UNKNOWN`; a zero signal becomes CLEAR only when that cursor window proves it.
+The outer feed and record cursor must attest one contiguous window: exact
+requested `after`, and record `through` at or beyond feed `through`. A lagging,
+missing, mismatched, or incomparable boundary/frontier is `UNKNOWN`, advances
+no watermark, and leaves the public overlay `NOT_RUN`/nonzero. Bootstrap is
+licensed only by an outer `after` plus a cursor covering the same full
+frontier. The concrete
 count key always comes from the stored `_coord/bus-v3/records.json` authority:
 the host-local `COORD_RECORDS_TYPE` writer/test override cannot redirect
 detection. That authority read and its optional one retry spend the detector's

@@ -46,6 +46,7 @@ class CountingTransport:
         self.fail_list = False
         self._feed = []  # None => an unavailable detector envelope
         self.feed_envelope_calls = 0
+        self._record_through: str | None = None
 
     # --- seeding -----------------------------------------------------------
     def put(self, path, content, mtime=None, size=None):
@@ -86,8 +87,12 @@ class CountingTransport:
         self.feed_envelope_calls += 1
         if self._feed is None:
             return None
+        through = since or "2026-07-01T12:00:00Z"
+        after = since or "2026-07-01T11:59:59Z"
+        self._record_through = through
         return {
-            "through": since or "2026-07-01T12:00:00Z",
+            "after": after,
+            "through": through,
             "data_types": {COORDINATION_TYPE: 0},
             "file_changes": list(self._feed),
         }
@@ -96,6 +101,12 @@ class CountingTransport:
         if path == "team/r/_coord/bus-v3/records.json":
             return json.dumps({"data_type": COORDINATION_TYPE}), "ok"
         return None, "absent"
+
+    def records_cursor(self, _data_type, since, *, deadline=None):
+        """Attest the empty synthetic record window used by feed fixtures."""
+        if not isinstance(since, str) or not isinstance(self._record_through, str):
+            return None
+        return {"after": since, "through": self._record_through, "records": []}
 
     def list_dir(self, prefix):
         self.lists.append(prefix)

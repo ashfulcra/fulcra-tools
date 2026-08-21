@@ -14,8 +14,12 @@ network; ``main`` builds the real ``FulcraFileTransport``.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
+from copy import deepcopy
 import hashlib
 import concurrent.futures
+import io
 import json
 import math
 import os
@@ -27,14 +31,15 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from . import (
     aggregate, atc, atc_dash, budget as budget_mod, bus_tags,
     checkpoint_channel, classifier, config, continuity,
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
+    generation,
     health as health_mod, jsonutil, okf, outcome as outcome_mod, presence,
-    projection as projection_mod,
+    projection as projection_mod, public_read,
     handoff, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
@@ -46,6 +51,15 @@ from .transport import FulcraFileTransport, TransportError
 __all__ = ["main"]
 
 _log = get_logger("cli")
+
+# Set exactly once by ``main`` after Unit 5 proves a generation and overlay.
+# All task-backed folds then share those same sealed bytes rather than each
+# opening an independent discovery path. Context-local state prevents nested
+# test invocations (or future in-process callers) from leaking one team's view
+# into another.
+_PUBLIC_READ_CONTEXT: contextvars.ContextVar[
+    Optional[public_read.PublicReadResult]
+] = contextvars.ContextVar("coord-public-read", default=None)
 
 # Cohesive command groups extracted into focused modules (behavior-preserving
 # split). Each imports ``cli`` and reaches shared helpers through it, so there is
@@ -531,6 +545,31 @@ def _load_rows_status(
     not be read/parsed. Callers hand it to the review/forge folds so they can
     consume the projection sections (``projection.py``) from the summaries read
     this load already paid for, never a second ~MiB read."""
+    authority = _PUBLIC_READ_CONTEXT.get()
+    if authority is not None:
+        task_value = authority.section("tasks")
+        sealed_rows = task_value.get("rows") if isinstance(task_value, Mapping) else None
+        if isinstance(sealed_rows, list) and all(isinstance(row, dict)
+                                                 for row in sealed_rows):
+            if doc_sink is not None:
+                # Preserve the established add-on seam: reviews/forge consume
+                # their values from the SAME validated generation rather than
+                # paying a second summaries read.
+                doc_sink.append({
+                    "rows": sealed_rows,
+                    projection_mod.REVIEWS_KEY: dict(authority.section("reviews")),
+                    projection_mod.FORGE_KEY: dict(authority.section("forge")),
+                    projection_mod.NEEDS_ME_KEY: {"complete": True},
+                })
+            if feed_sink is not None:
+                feed_sink.append({
+                    "ok": True,
+                    "changes": [],
+                    "coverage_horizon": authority.coverage_horizon,
+                })
+            return [dict(row) for row in sealed_rows], True, ""
+        return [], False, "validated generation tasks section unrecognized"
+
     path = rec.summaries_path(team)
     if doc_sink is not None:
         doc_sink.append(None)
@@ -1048,6 +1087,15 @@ def _role_attended(transport: Any, team: str, holders: list[str], *,
     """
     if not holders:
         return None, 0, 0
+    authority = _PUBLIC_READ_CONTEXT.get()
+    if authority is not None:
+        # The review projection proves current tally state, but it does not
+        # carry per-reviewer verdict timestamps.  Reopening the live review tree
+        # would mix a later observation into the sealed decision.  Distinguish
+        # this checked-but-unprovable result from the NOT_RUN default.
+        rows = authority.section("reviews").get("rows")
+        total = len(rows) if isinstance(rows, list) else 0
+        return None, min(total, budget), total
     # ``index`` lets a caller with MANY roles pay the scan ONCE (see
     # `_verdict_activity_index`). Without it, behaviour is exactly as before.
     if index is None:
@@ -1089,6 +1137,58 @@ def _nonce_state_path(team: str, role: str, key: str) -> pathlib.Path:
 
 def _escalation_marker_path(team: str, role: str, date: str) -> str:
     return f"team/{team}/roles/{role}/escalations/{date}.md"
+
+
+def _role_liveness_fact(
+    transport: Any,
+    team: str,
+    role: str,
+    leases: Optional[list[dict[str, Any]]],
+    *,
+    status: str,
+    now: str,
+) -> dict[str, Any]:
+    """Seal lease assignment and holder presence as one auditable fact.
+
+    Presence never grants a role, so lease status remains the fact's state.
+    It does, however, independently show whether a stale holder is alive. Both
+    observations and their store prefixes travel together so a consumer cannot
+    turn a fresh holder plus stale lease into the stronger claim ``VACANT``.
+    """
+    holders = [str(lease.get("agent")) for lease in (leases or [])
+               if lease.get("agent")]
+    shards, roster_ok = _presence_shards_status(transport, team)
+    holder_shards = [shard for shard in shards
+                     if str(shard.get("agent") or "") in holders]
+    if not roster_ok:
+        presence_state = "UNKNOWN"
+        fact_state = roles.UNKNOWN
+    elif not holder_shards:
+        presence_state = "absent"
+        fact_state = status
+    else:
+        observations = [presence.liveness(shard, now=now) for shard in holder_shards]
+        freshness = [str(item.get("freshness") or "UNKNOWN") for item in observations]
+        presence_state = (
+            "live" if "live" in freshness
+            else "idle" if "idle" in freshness
+            else "stale" if "stale" in freshness
+            else "UNKNOWN"
+        )
+        fact_state = roles.UNKNOWN if presence_state == "UNKNOWN" else status
+    return {
+        "state": fact_state,
+        "observations": {
+            "lease": {"state": status, "holders": holders},
+            "presence": {"state": presence_state, "holders": [
+                str(shard.get("agent")) for shard in holder_shards
+            ]},
+        },
+        "provenance": [
+            _leases_prefix(team, role),
+            _presence_prefix(team),
+        ],
+    }
 
 
 def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
@@ -1172,10 +1272,30 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
             attended, att_scanned, att_total = _role_attended(
                 transport, team, [l.get("agent") for l in (leases or [])],
                 since=anchor - timedelta(hours=sla))
+    if not getattr(args, "check_attendance", False):
+        attendance = {
+            "state": "NOT_RUN", "scanned": 0, "total": 0,
+            "reason": "--check-attendance not requested",
+        }
+    elif attended is None:
+        attendance = {
+            "state": "UNKNOWN", "scanned": att_scanned, "total": att_total,
+            "reason": ("attendance check budget-truncated"
+                       if att_total and att_scanned < att_total
+                       else "attendance check inconclusive"),
+        }
+    else:
+        attendance = {
+            "state": "DATA", "scanned": att_scanned, "total": att_total,
+            "attended": attended,
+        }
     esc = roles.escalation_due(leases, now=now, sla_hours=sla,
                                marker_exists_today=marker_exists, dormant=dormant,
                                attended=attended)
     fresh = roles.fresh_holders(leases, now=now, sla_hours=sla) if leases else []
+    liveness_fact = _role_liveness_fact(
+        transport, team, role, leases, status=status, now=now,
+    )
     result = {
         "team": team, "role": role, "status": status, "policy": policy, "sla_hours": sla,
         "contract": 2,
@@ -1184,6 +1304,8 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
         "escalation_due": esc,
         "attended": attended,
         "attendance_scanned": f"{att_scanned}/{att_total}" if att_total else None,
+        "attendance": attendance,
+        "liveness_fact": liveness_fact,
     }
     if status == roles.DORMANT:
         result["dormant_until"] = reg.get("dormant_until")
@@ -1208,11 +1330,16 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
                       "today. ATTENDANCE NOT CHECKED: this says the LEASE lapsed, "
                       "not that nobody is working. Re-run with --check-attendance "
                       "before calling a role unattended.")
-    if status == roles.UNKNOWN:
+    if (status == roles.UNKNOWN or liveness_fact["state"] == roles.UNKNOWN
+            or attendance["state"] == "UNKNOWN"):
         # FAIL CLOSED (2026-07-11): the lease listing was unreadable, so the role's
         # state is UNKNOWN — NOT vacant. A degraded transport must not let a caller
         # read this as VACANT and fire a false SLA escalation. rc 1, same register
         # as `review status`'s "tally unknown" (leases dropped/None never asserts).
+        if attendance["state"] == "UNKNOWN":
+            print(f"attendance state unknown for role {role} in team/{team} — "
+                  f"checked but incomplete, retry after reconcile", file=sys.stderr)
+            return 3
         print(f"lease state unknown for role {role} in team/{team} — "
               f"degraded transport, retry", file=sys.stderr)
         return 1
@@ -2728,77 +2855,11 @@ def _pending_reviews_for(
         deadline=deadline, degraded_sink=degraded_sink)
 
 
-#: The only ``state`` values a review projection row may carry — exactly what
-#: ``review.tally`` emits. Anything else is not a recognizable tally and must
-#: fail validation (never be served, never derive coverage).
-_REVIEW_PROJECTION_STATES = (review.PENDING, review.APPROVED, review.CHANGES)
-
-
 def _validated_review_projection(
     section: dict[str, Any],
 ) -> "Optional[tuple[dict[str, dict[str, Any]], list[str], list[str], list[str]]]":
-    """POSITIVELY validate a ``reviews`` projection section's nested data.
-
-    Returns ``(rows_by_name, orphans, orphans_unknown, tombstones)`` only when
-    EVERY served row and slug list matches the schema exactly: ``name`` a
-    non-empty str, ``state`` one of ``review.tally``'s states, ``settled`` a real
-    bool (a truthy ``"false"`` string must never suppress a pending row),
-    ``pending_required`` a list of non-empty strs, and ``of``/``head`` PRESENT
-    keys whose value is a non-empty str or None (v2's act-on-it fields — an
-    absent key is a pre-v2 row and the section is malformed); the three slug
-    lists are lists of non-empty strs (absent -> empty). Producer INVARIANTS are enforced too
-    (round-3 P1b) — reconcile can produce neither a duplicate ``name`` (rows key
-    on the listing) nor ``settled: true`` outside a terminal
-    APPROVED-with-nothing-pending tally — so a duplicate row (last-write-wins
-    would let a later settled row silently replace a pending one) or an
-    impossible settled combination is malformed, never served. ANY violation
-    returns None — the caller then emits "projection malformed" and raw-scans,
-    loudly. Validation runs BEFORE any coverage or row is derived (round-2 P1: a
-    consumer that tolerates malformed nested values serves them silently, which
-    contradicts the loud-fallback contract)."""
-    proj_rows = section.get("rows")
-    if not isinstance(proj_rows, list):
-        return None
-    by_name: dict[str, dict[str, Any]] = {}
-    for r in proj_rows:
-        if not isinstance(r, dict):
-            return None
-        name = r.get("name")
-        if not isinstance(name, str) or not name:
-            return None
-        if r.get("state") not in _REVIEW_PROJECTION_STATES:
-            return None
-        if not isinstance(r.get("settled"), bool):
-            return None
-        pending = r.get("pending_required")
-        if not isinstance(pending, list) or not all(
-                isinstance(x, str) and x for x in pending):
-            return None
-        for key in ("of", "head"):
-            # v2 act-on-it fields (OC5/C01): the KEY must exist on every row —
-            # None is the honest "the register doc lacks it" value, but an
-            # ABSENT key means a pre-v2 row leaked into a v2 section, and
-            # serving it would re-open the second-lookup gap this schema closed.
-            if key not in r:
-                return None
-            val = r[key]
-            if val is not None and not (isinstance(val, str) and val):
-                return None
-        if r["settled"] and (r["state"] != review.APPROVED or pending):
-            return None  # settled is ONLY a terminal APPROVED-nothing-pending
-        if name in by_name:
-            return None  # duplicate name: last-write-wins could hide work
-        by_name[name] = r
-    slug_lists: list[list[str]] = []
-    for key in ("orphans", "orphans_unknown", "tombstones"):
-        val = section.get(key)
-        if val is None:
-            val = []
-        if not isinstance(val, list) or not all(
-                isinstance(s, str) and s for s in val):
-            return None
-        slug_lists.append(val)
-    return by_name, slug_lists[0], slug_lists[1], slug_lists[2]
+    """Use the shared review-v3 validator used by producer and authority."""
+    return generation.validated_review_projection(section)
 
 
 def _pending_reviews_from_projection(
@@ -3619,7 +3680,9 @@ def _forge_feedback_for(
     feedback item for THIS agent (ack state is per-agent and stays live) — and
     the fold appends ``{"type": "forge-source", "source": "projection",
     "as_of": T}``. A projection present but unservable falls back to the raw
-    scan loudly (``"source": "raw-scan"`` + reason); no projection / no
+    scan loudly (``"source": "raw-scan"`` + reason), except a projection
+    rejected by the shared deep validator: that is UNKNOWN and returns no
+    domain rows without reopening canonical state. No projection / no
     ``aggregate_doc`` is the pre-projection raw scan, byte-identical."""
     if aggregate_doc is not None:
         feed_supplied = feed_evidence is not None
@@ -3652,6 +3715,13 @@ def _forge_feedback_for(
                 if served is not None:
                     return served
                 reason = "forge projection malformed"
+                degraded = budget_mod.degraded_row("forge-degraded", 0, 0)
+                degraded["reason"] = reason
+                return [
+                    degraded,
+                    {"type": "forge-source", "source": "projection",
+                     "reason": reason},
+                ]
         if reason:
             out = _forge_feedback_raw(transport, team, agent, deadline=deadline)
             out.append({"type": "forge-source", "source": "raw-scan",
@@ -3680,41 +3750,6 @@ def _forge_feed_delta(team: str, changes: list[Any]) -> tuple[set[str], bool]:
     return changed, responsibility_changed
 
 
-def _validated_forge_projection(
-    section: dict[str, Any],
-) -> "Optional[tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]]":
-    """POSITIVELY validate a ``forge`` projection section's nested data.
-
-    Returns ``(responsible, feedback)`` only when EVERY nested collection
-    matches the schema exactly: every ``responsible`` value a list of non-empty
-    strs (a non-list entry must not be silently excluded — it could hide a real
-    responsibility), every ``feedback`` value a list of dicts each carrying a
-    non-empty str ``id`` (the ack key — an id-less item must not silently
-    vanish) and an ``author`` that is a str or None. ANY other nested type/value
-    returns None — the caller then emits "projection malformed" and raw-scans,
-    loudly (round-2 P1)."""
-    resp = section.get("responsible")
-    fb = section.get("feedback")
-    if not isinstance(resp, dict) or not isinstance(fb, dict):
-        return None
-    for agents in resp.values():
-        if not isinstance(agents, list) or not all(
-                isinstance(a, str) and a for a in agents):
-            return None
-    for items in fb.values():
-        if not isinstance(items, list):
-            return None
-        for it in items:
-            if not isinstance(it, dict):
-                return None
-            if not isinstance(it.get("id"), str) or not it["id"]:
-                return None
-            author = it.get("author")
-            if author is not None and not isinstance(author, str):
-                return None
-    return resp, fb
-
-
 def _forge_feedback_from_projection(
     transport: Any, team: str, agent: str, section: dict[str, Any], *,
     deadline: Optional[float] = None,
@@ -3727,9 +3762,9 @@ def _forge_feedback_from_projection(
     as the raw fold hides them). Bounded by the caller's shared ``deadline``; a
     breach truncates with the same ``forge-degraded`` marker discipline. Every
     nested collection is positively validated FIRST
-    (``_validated_forge_projection``); any shape doubt returns None (caller
-    raw-scans, loud)."""
-    validated = _validated_forge_projection(section)
+    (``generation.validated_forge_projection``); any shape doubt returns None
+    so the caller marks coverage UNKNOWN without reopening canonical state."""
+    validated = generation.validated_forge_projection(section)
     if validated is None:
         return None
     resp, fb = validated
@@ -3767,7 +3802,7 @@ def _forge_feedback_from_projection(
         unacked: list[str] = []
         authors: list[str] = []
         cut = False
-        for it in items:  # shapes proven by _validated_forge_projection
+        for it in items:  # shapes proven by generation.validated_forge_projection
             stem = it["id"]
             if dl.expired():
                 cut = True
@@ -4313,6 +4348,46 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
+    authority = _PUBLIC_READ_CONTEXT.get()
+    if authority is not None:
+        section = authority.section("reviews")
+        rows = section.get("rows") if isinstance(section, Mapping) else None
+        row = next((item for item in (rows or [])
+                    if isinstance(item, dict) and item.get("name") == slug), None)
+        if row is None:
+            print(f"review status failed: {slug} is absent from the validated "
+                  "generation — tally unknown", file=sys.stderr)
+            return 1
+        tally = row.get("tally")
+        required_fields = {
+            "state", "approvals", "changes", "required", "pending_required",
+            "evidence", "of",
+        }
+        if (not isinstance(tally, dict)
+                or not required_fields.issubset(tally)
+                or not all(isinstance(tally.get(key), list)
+                           for key in ("approvals", "changes", "required",
+                                       "pending_required"))):
+            print(f"review status failed: validated generation row for {slug} "
+                  "does not prove the full direct tally — reconcile with a "
+                  "compatible writer", file=sys.stderr)
+            return 3
+        result = deepcopy(tally)
+        result.update({"team": team, "slug": slug, "contract": 2})
+        if args.json:
+            jsonutil.print_json(result)
+        else:
+            print(f"review {slug} in team/{team}: {result['state']}")
+            if result["approvals"]:
+                print("  approvals: " + ", ".join(result["approvals"]))
+            if result["changes"]:
+                print("  changes requested: " + ", ".join(result["changes"]))
+            if result["pending_required"]:
+                print("  awaiting required: " + ", ".join(result["pending_required"]))
+        unproven = bool(result.get("unattributable")
+                        or result.get("unrecognised_verdicts")
+                        or result.get("head_mismatched_verdicts"))
+        return 3 if unproven else 0
     result, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
     if not doc_ok:
         # The doc read returned None: no doc. If the verdicts dir is also empty
@@ -7815,6 +7890,12 @@ def _work_evidence_index(
     """
     newest: dict[str, str] = {}
     ok = True
+    if _PUBLIC_READ_CONTEXT.get() is not None:
+        # Work-artifact mtimes are not part of the Unit-4 generation.  Mixing a
+        # later raw review/report listing into a generation-backed roster would
+        # create a second freshness authority.  PARTIAL preserves the existing
+        # annotation field while withholding any negative/nudge inference.
+        return {}, False
 
     def _note(agent: str, mtime: Any) -> None:
         # Store mtimes render on a TWELVE-HOUR clock ("2026-08-09 01:14AM UTC"),
@@ -12317,11 +12398,148 @@ def _refresh_activity_presence(
         print(f"presence activity-refresh failed: {e}", file=sys.stderr)
 
 
+def _v2_public_read_sections(func: Any) -> Optional[tuple[str, ...]]:
+    """Required generation sections for each migrated public fold.
+
+    The tuple is documentation as executable policy: every function in the
+    Unit 5 migration list enters one shared read before its domain renderer.
+    Empty/``None`` are distinct — ``None`` means this is not a public fold.
+    """
+    return {
+        cmd_status: ("tasks",),
+        cmd_board: ("tasks",),
+        cmd_needs_me: ("tasks", "reviews", "forge", "roles", "presence"),
+        cmd_search: ("tasks",),
+        cmd_inbox: ("tasks", "roles"),
+        cmd_digest: ("tasks", "presence"),
+        cmd_asks: ("tasks",),
+        cmd_review_status: ("reviews",),
+        cmd_roles_status: ("roles", "presence"),
+        cmd_presence_show: ("presence",),
+        cmd_briefing: generation.REQUIRED_SECTIONS,
+    }.get(func)
+
+
+def _begin_v2_public_read(
+    args: argparse.Namespace, transport: Any,
+) -> Optional[public_read.PublicReadResult]:
+    """Enter Unit 5 only when the transport explicitly activates v2 reads.
+
+    Mixed-fleet/test transports without the capability keep the established v1
+    compatibility path. The deployed transport declares this capability; Unit
+    6 owns flipping its fleet-verified epsilon to true during activation.
+    """
+    sections = _v2_public_read_sections(getattr(args, "func", None))
+    if sections is None or getattr(transport, "public_read_v2_enabled", None) is not True:
+        return None
+    result = public_read.read_current(
+        transport,
+        args.team,
+        now=_now(),
+        epsilon_seconds=getattr(transport, "public_read_epsilon_seconds", None),
+        epsilon_verified=getattr(transport, "public_read_epsilon_verified", False),
+        deadline=Deadline.open(getattr(transport, "timeout", 30.0)),
+    )
+    # Structural section validation happens centrally, but keep the command's
+    # declared dependency explicit so a future partial-generation schema cannot
+    # accidentally license a fold whose section is absent.
+    if result.rc == 0 and any(not isinstance(result.section(name), Mapping)
+                              for name in sections):
+        return public_read.PublicReadResult(
+            outcome_mod.OutcomeState.UNKNOWN,
+            result.coverage + (outcome_mod.SurfaceCoverage(
+                "required-sections", outcome_mod.CoverageState.UNKNOWN,
+                reason="required public-read section absent"),),
+            result.sections,
+            result.coverage_horizon,
+            result.generation,
+            result.watermark,
+            result.applied_update_ids,
+        )
+    return result
+
+
+def _run_v2_public_handler(
+    args: argparse.Namespace,
+    transport: Any,
+    authority: public_read.PublicReadResult,
+) -> int:
+    """Render domain output and authority metadata from one sealed decision."""
+    if authority.rc != 0:
+        if getattr(args, "json", False):
+            print(authority.render_json(result=None))
+        else:
+            print(authority.render_text_metadata())
+            for item in authority.coverage:
+                if item.state in (outcome_mod.CoverageState.UNKNOWN,
+                                  outcome_mod.CoverageState.NOT_RUN):
+                    print(f"  {item.surface}: {item.state.value}"
+                          + (f" — {item.reason}" if item.reason else ""),
+                          file=sys.stderr)
+        return authority.rc
+
+    def with_domain_result(rc: int) -> public_read.PublicReadResult:
+        if rc == 0:
+            return authority
+        coverage = tuple(sorted(
+            authority.coverage + (outcome_mod.SurfaceCoverage(
+                "domain-result",
+                outcome_mod.CoverageState.UNKNOWN,
+                reason=f"domain renderer exited {rc}",
+            ),),
+            key=lambda item: item.surface,
+        ))
+        return public_read.PublicReadResult(
+            outcome_mod.OutcomeState.UNKNOWN,
+            coverage,
+            authority.sections,
+            authority.coverage_horizon,
+            authority.generation,
+            authority.watermark,
+            authority.applied_update_ids,
+        )
+
+    token = _PUBLIC_READ_CONTEXT.set(authority)
+    sealed_transport = public_read.SealedGenerationTransport(
+        transport, args.team, authority,
+    )
+    try:
+        if getattr(args, "json", False):
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                rc = args.func(args, sealed_transport)
+            raw = captured.getvalue()
+            try:
+                domain = json.loads(raw) if raw.strip() else None
+            except ValueError as exc:
+                raise RuntimeError(
+                    "public JSON renderer emitted more than one value or prose"
+                ) from exc
+            rendered = with_domain_result(rc)
+            print(rendered.render_json(result=domain))
+            return rc
+        rc = args.func(args, sealed_transport)
+        rendered = with_domain_result(rc)
+        print(rendered.render_text_metadata())
+        if rc != 0:
+            domain_coverage = rendered.coverage_by_surface("domain-result")
+            print(
+                f"  domain-result: {domain_coverage.state.value}"
+                + (f" — {domain_coverage.reason}" if domain_coverage.reason else ""),
+                file=sys.stderr,
+            )
+        return rc
+    finally:
+        _PUBLIC_READ_CONTEXT.reset(token)
+
+
 def main(argv: Optional[list[str]] = None, transport: Any = None) -> int:
     args = build_parser().parse_args(argv)
     transport = transport if transport is not None else FulcraFileTransport()
     try:
-        rc = args.func(args, transport)
+        authority = _begin_v2_public_read(args, transport)
+        rc = (_run_v2_public_handler(args, transport, authority)
+              if authority is not None else args.func(args, transport))
     except Exception as e:  # never dump a traceback at the user
         # Registered error envelope. An UNEXPECTED exception is NOT a retryable
         # degrade: the `error:` register token (distinct from the "…, retry" /

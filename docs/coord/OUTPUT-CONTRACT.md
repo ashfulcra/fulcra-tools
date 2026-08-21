@@ -91,6 +91,42 @@ remains a compatibility cache for unmigrated readers; it is not evidence that a
 newer generation became current. Consumers must not infer success from a cache
 write or an event's timestamp.
 
+## v2 public-read authority
+
+The migrated public folds (`status`, `board`, `needs-me`, `search`, `inbox`,
+`digest`, `asks`, review status, roles status, presence show, and `briefing`)
+enter one shared authority before their existing domain renderer. It validates
+the exact five-field current manifest, digest-verifies the named immutable
+generation, then obtains one bounded `data-updates` window over
+`[watermark - epsilon, now - epsilon]`. At-least-once update identities are
+deduplicated. A named canonical task delta may be applied; any unsupported
+post-watermark namespace or unproven coverage returns `UNKNOWN` with a reconcile
+recovery action and a nonzero exit. The mutable pointer is read again after the
+overlay, and changed bytes reject the read.
+
+The public envelope adds `state`, sorted `coverage`, `coverage_horizon`,
+`generation`, `watermark`, and `result` without narrowing the result's existing
+domain fields. `coverage_horizon` is present only after the feed attests the
+requested horizon. If the manifest/digest is invalid or the overlay was not
+licensed, `result` is null, the uninvoked leg is `NOT_RUN`, and rc is 3. Text
+prints the same authority metadata and surface states. JSON stdout remains
+exactly one parseable value in both success and failure modes.
+
+Role status seals role assignment and holder presence into `liveness_fact`,
+naming both observations and the lease/presence prefixes that produced them. A
+fresh presence observation plus a stale lease is never confidently `VACANT`.
+Attendance has its own state: no flag is `NOT_RUN`; a requested but truncated
+scan is `UNKNOWN` with `scanned`/`total` and makes the command/public envelope
+nonzero; a completed scan carries `attended`. Inventory-backed public folds
+consume the validated generation bytes, never a later live listing of those
+same namespaces. Canonical inventory paths are exactly `presence/<file>.md`,
+`_coord/acks/<slug>/<file>.md`, and `_coord/responses/<slug>/<file>.md`; nested
+presence files, wrong extensions/depths, and the legacy singular `response/`
+namespace fail closed. Review projection v3 producer carry, generation
+validation, and domain consumers share the same nested validator for `of` and
+`head`, unique row slugs, settled invariants, and the three
+orphan/tombstone-list shapes.
+
 **Status:** clauses marked **ENFORCED** are pinned by
 `packages/coord-engine/tests/test_output_contract.py` and CI-failing;
 clauses marked **TARGET** are the ratified direction: probeable targets are
@@ -158,8 +194,10 @@ A conforming consumer:
   path (projection schema v2 plus both raw folds), with an EXPLICIT null
   when the register doc genuinely lacks the field (a legacy headless
   review has no head to serve — the register is the honest source, never
-  a guess), and `review request` requires `--of` so new registers always
-  carry the pointer.
+  a guess). Projection schema v3 additionally carries the complete direct
+  review tally; a legacy carried row or settled cache is rebuilt before a v3
+  generation can seal it. `review request` requires `--of` so new registers
+  always carry the pointer.
 - **OC6 — one canonical write path (TARGET; C02, C11).** A verdict exists
   iff its register shard exists; bus signals are derived, never
   constitutive. The register declares its shard schema version; the verb is

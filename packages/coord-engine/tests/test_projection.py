@@ -9,10 +9,11 @@ before. These tests pin all four legs plus the end-to-end state agreement
 between the projection and the raw per-slug tally.
 """
 
+from copy import deepcopy
 import json
 from datetime import datetime, timedelta, timezone
 
-from coord_engine import budget, cli, projection, reconcile
+from coord_engine import budget, cli, okf, projection, reconcile, review
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
@@ -316,11 +317,79 @@ def test_reconcile_writes_review_projection():
     assert by_name["open-one"]["pending_required"] == ["alice"]
     assert by_name["open-one"]["requested_by"] == "bob"
     assert by_name["open-one"]["artifact"] == "o-r-7"
+    assert by_name["open-one"]["tally"]["of"] == "https://github.com/o/r/pull/7"
+    assert by_name["open-one"]["tally"]["head"] == _HEAD
+    assert isinstance(by_name["open-one"]["tally"]["evidence"], str)
     assert by_name["settled-one"]["state"] == "APPROVED"
+    assert by_name["settled-one"]["tally"]["approvals"] == ["alice"]
     assert by_name["settled-one"]["settled"] is True
     assert by_name["changed-one"]["state"] == "CHANGES"
     # a proven settle also drops the read fold's settled-cache marker
     assert f"team/{TEAM}/review/settled-one/verdicts/.settled" in t.store
+
+
+def test_v2_prior_row_without_tally_is_rebuilt_under_v3_schema():
+    t = FakeTransport()
+    _put_review(t, "legacy-row", "alice", verdicts=[("alice", "approve")])
+    prior = _build_reviews(t)
+    prior = deepcopy(prior)
+    prior["schema"] = "coord.reviews.projection.v2"
+    prior["rows"][0].pop("tally")
+
+    rebuilt = projection.build_review_projection(
+        t, TEAM, now=_now_iso(), prior=prior, settled_index=set(),
+        deadline=budget.Deadline(None), feed_changes=[],
+    )
+
+    assert rebuilt["schema"] == "coord.reviews.projection.v3"
+    row = rebuilt["rows"][0]
+    assert row["tally"]["approvals"] == ["alice"]
+    assert row["tally"]["pending_required"] == []
+
+
+def test_malformed_v3_prior_missing_act_on_fields_is_rebuilt_not_carried():
+    t = CountingTransport()
+    _put_review(
+        t, "missing-fields", "alice", verdicts=[("alice", "approve")],
+        of="task/a",
+    )
+    prior = _build_reviews(t)
+    prior = deepcopy(prior)
+    prior["rows"][0].pop("of")
+    prior["rows"][0].pop("head")
+    t.reset_counts()
+
+    rebuilt = projection.build_review_projection(
+        t, TEAM, now=_now_iso(), prior=prior, settled_index=set(),
+        deadline=budget.Deadline(None), feed_changes=[],
+    )
+
+    row = rebuilt["rows"][0]
+    assert row["of"] == "task/a"
+    assert row["head"] == _HEAD
+    assert f"team/{TEAM}/review/missing-fields.md" in t.reads
+
+
+def test_settled_marker_shortcut_rebuilds_a_full_v3_tally():
+    t = FakeTransport()
+    _put_review(t, "marker-row", "alice", verdicts=[("alice", "approve")])
+    prefix = f"team/{TEAM}/review/marker-row/verdicts/"
+    names = [entry["name"] for entry in t.list_dir(prefix)]
+    t.put(
+        prefix + projection.SETTLED_MARKER,
+        okf.render_frontmatter(review.settled_marker_fields(
+            state=review.APPROVED, ts=_now_iso(),
+            evidence=review.evidence_digest(names),
+        )),
+    )
+
+    rebuilt = _build_reviews(t)
+
+    assert rebuilt["schema"] == "coord.reviews.projection.v3"
+    row = rebuilt["rows"][0]
+    assert row["state"] == "APPROVED"
+    assert row["tally"]["approvals"] == ["alice"]
+    assert row["tally"]["evidence"]
 
 
 def test_reconcile_writes_forge_projection():
@@ -1036,10 +1105,10 @@ def test_review_fold_malformed_slug_lists_fall_back_loud():
         assert src[0]["reason"] == "reviews projection malformed", key
 
 
-def test_forge_fold_malformed_nested_values_fall_back_loud():
+def test_forge_fold_malformed_nested_values_are_unknown_without_raw_fallback():
     # Round-2 P1, forge side: a non-list responsibility entry or an id-less
     # feedback item must not be silently skipped — any invalid nested value is
-    # a loud raw-scan fallback.
+    # UNKNOWN and may not reopen canonical forge/review state.
     t = FakeTransport()
     _seed_forge_team(t)
     fresh = {"schema": projection.FORGE_SCHEMA, "generated_at": _now_iso(),
@@ -1058,11 +1127,25 @@ def test_forge_fold_malformed_nested_values_fall_back_loud():
         agg = {projection.FORGE_KEY: dict(fresh, **over)}
         out = cli._forge_feedback_for(t, TEAM, "bob", aggregate_doc=agg)
         src = [r for r in out if r.get("type") == "forge-source"]
-        assert len(src) == 1 and src[0]["source"] == "raw-scan", over
+        assert len(src) == 1 and src[0]["source"] == "projection", over
         assert src[0]["reason"] == "forge projection malformed", over
-        # the loud raw scan still finds the real feedback
-        assert [r["pr_slug"] for r in out
-                if r.get("type") == "forge-feedback"] == ["o-r-9"], over
+        assert any(r.get("type") == "forge-degraded" for r in out), over
+        assert not [r for r in out if r.get("type") == "forge-feedback"], over
+
+
+def test_forge_builder_rejects_an_idless_feedback_item():
+    t = FakeTransport()
+    t.put(f"team/{TEAM}/_coord/forge/watch/o-r-9.md",
+          "---\ntype: Watch\nurl: https://github.com/o/r/pull/9\nagent: bob\n---\n")
+    t.put(f"team/{TEAM}/_coord/forge/feedback/o-r-9/.md",
+          "---\ntype: Feedback\nauthor: reviewer\n---\n")
+
+    section = projection.build_forge_projection(
+        t, TEAM, now=_now_iso(), review_rows=[], reviews_complete=True,
+        prior=None, deadline=budget.Deadline(None),
+    )
+
+    assert section["complete"] is False
 
 
 def test_review_fold_unresolvable_head_slug_is_unknown_loud():

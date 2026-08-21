@@ -629,6 +629,10 @@ def test_a_MERGED_marker_still_short_circuits_a_mutable_directory():
         now="2026-08-10T05:00:00Z", deadline=Deadline(None))
     assert ok and row and row["settled"] is True, (
         f"merge evidence was demoted to a cache and re-folded: {row}")
+    assert row["tally"]["closed_as"] == "MERGED"
+    assert row["tally"]["merge_sha"] == "b" * 40
+    assert row["tally"]["approvals"] == []
+    assert row["tally"]["changes"] == []
 
 
 def test_the_projection_writes_a_cache_ITS_OWN_reader_then_honours():
@@ -681,6 +685,7 @@ def test_the_projection_writes_a_cache_ITS_OWN_reader_then_honours():
     row2, ok2 = pj._scan_review_slug(t, *args, now="2026-08-10T06:00:00Z",
                                      deadline=Deadline(None))
     assert ok2 and row2 and row2["settled"] is True
+    assert row2["tally"] == row["tally"]
     assert f"{PREFIX}{approve}" not in t.reads, (
         "the projection's own cache did not hit its own fast path — the "
         f"verdict shard was re-read: {t.reads}")

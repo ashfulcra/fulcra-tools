@@ -619,7 +619,15 @@ it (not on PyPI).
   escalates as `UNATTENDED`, and the default None still escalates but must say
   **attendance not checked** rather than assert absence. Pass
   `roles status --check-attendance` (opt-in: one listing per review, budgeted and
-  reported as `scanned N/M`) before calling any role unattended.
+  reported as `scanned N/M`) before calling any role unattended. The JSON
+  `attendance` fact distinguishes the unrequested `NOT_RUN` state from a
+  requested, budget-truncated `UNKNOWN` scan; that requested incomplete check
+  exits 3 and makes the public-read envelope `UNKNOWN`, so automation cannot
+  mistake a nested unknown for a clean role decision. `roles status` also seals lease
+  assignment and holder presence into one `liveness_fact`, including both
+  observations and both store-prefix provenance fields. Fresh presence plus a
+  stale lease is `LAPSED` (or `UNKNOWN` if the observations cannot be sealed),
+  never confidently `VACANT`.
 - **Park a role, don't mute the sweep by hand.** Deliberately leaving a role unattended (a reviewer on leave, seasonal on-call) is an ENGINE fact, not an agent-side convention: set `dormant_until: <ISO>` in `team/<team>/roles/<role>.md`, and while that date is future the mechanical `escalate` sweep suppresses the role's vacancy escalation on every heartbeat host and `roles status` reports `DORMANT (until <ts>)`; escalation resumes automatically past the date, a live lease still shows HELD, and a garbage `dormant_until` fails OPEN (noted on stderr, escalation still fires) so a typo can't silently mute a role — see [`fulcra-agent-roles`](skills/fulcra-agent-roles/SKILL.md).
 - **Fold text is capped; the task doc is the payload's home.** Summaries rows bound
   `title`/`description` to `COORD_SUMMARY_TEXT_CAP` (default 280 chars, ellipsis-marked),
@@ -649,6 +657,42 @@ it (not on PyPI).
     non-CAS writer can race, the mandatory public-read freshness overlay rejects stale manifests before v2
     authority activates. `summaries.json` remains reader compatibility during migration; new readers
     validate the current generation before use.
+    The shared v2 public-read authority validates the exact current manifest and
+    immutable digest, then obtains one bounded at-least-once feed window over
+    `[watermark - epsilon, now - epsilon]`. It deduplicates update identities,
+    applies only supported task deltas, and re-reads the mutable pointer before
+    rendering. Unsupported canonical changes, unproven epsilon/feed coverage,
+    a raced pointer, or a skipped overlay are typed `UNKNOWN`/`NOT_RUN` and
+    nonzero — never clean. JSON and text name the same generation, source
+    watermark, attested coverage horizon, and sorted surface coverage; JSON is
+    still exactly one value and preserves the domain result beneath `result`.
+    Immutable section values are structurally validated before dispatch:
+    inventory records cannot be missing, malformed, outside their canonical
+    namespace, or non-string, and content/frontmatter/type must agree. Presence
+    is exactly `presence/<file>.md`; acknowledgments and responses are exactly
+    `_coord/acks/<slug>/<file>.md` and `_coord/responses/<slug>/<file>.md`.
+    Canonical slugs match `[a-z0-9]+(?:-[a-z0-9]+)*`; canonical leaf names
+    start with an alphanumeric, contain only alphanumerics/`_`/`-`, and end in
+    one final `.md`. Dot/traversal segments, file-shaped intermediate
+    components, hidden leaves, and the legacy singular `response/` namespace
+    are not authoritative coverage.
+    `data-updates` record counts are detector signals only, never cardinality,
+    a diff, a threshold, or an identity. Live measurements persistently showed
+    `2721 -> 9`, `1444 -> 0`, and `2737 -> 25` count/enumeration pairs. A
+    positive signal therefore requires a bounded attested enumeration with at
+    least one immutable identity; positive-with-none is `UNKNOWN`/nonzero. A
+    zero signal is not proof of CLEAR: a bounded enumeration must prove the
+    whole outer feed window. The outer feed must attest the exact requested
+    `after`; the record cursor must repeat that boundary and reach or pass the
+    outer `through`. A missing, lagging, mismatched, or incomparable horizon is
+    UNKNOWN, advances no watermark, and leaves freshness overlay NOT_RUN/nonzero.
+    Bootstrap is complete only when an outer `after` supplies its boundary and
+    the record cursor covers the same full frontier.
+    Review projection v3 rows carry the full direct-query tally; one shared
+    validator requires `of`/`head`, unique row slugs, settled invariants, and
+    all three orphan/tombstone slug lists before producer carry, publication,
+    or consumption. V2 carry rows and v1 settled caches are rebuilt before
+    publication.
     **The
     caller's OWN head is feed-gated too:** with a clean `data-updates` window, only caller-owned slugs
     named changed since the projection anchor are raw-tallied; unchanged caller-owned slugs are served

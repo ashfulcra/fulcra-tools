@@ -92,8 +92,9 @@ class FakeTransport:
         team = next((path.split("/", 2)[1] for path in self.store
                      if path.startswith("team/") and path.count("/") >= 2), "r")
         self._synthetic_detector_config = json.dumps({"data_type": COORDINATION_TYPE})
-        prefixes = ("task/", "review/", "roles/", "presence/", "response/",
-                    "_coord/acks/", "_coord/forge/", "directive/")
+        prefixes = ("task/", "review/", "roles/", "presence/",
+                    "_coord/responses/", "_coord/acks/", "_coord/forge/",
+                    "directive/")
         changes = []
         for path in sorted(self.store):
             relative = path.removeprefix(f"team/{team}/")
@@ -110,14 +111,27 @@ class FakeTransport:
             path: content for path, content in self.store.items()
             if path.removeprefix(f"team/{team}/").startswith(prefixes)
         }
+        through = since or "2026-07-01T00:00:00Z"
+        after = since or "2026-06-30T23:59:59Z"
         return {
-            "through": since or "2026-07-01T00:00:00Z",
+            "after": after,
+            "through": through,
             "data_types": {COORDINATION_TYPE: 0},
             "file_changes": changes,
         }
 
     def records(self, _data_type, _since, _until):
         return []
+
+    def records_cursor(self, _data_type, since, *, deadline=None):
+        """Attest the empty synthetic record window used by reconcile fixtures."""
+        if not isinstance(since, str):
+            return None
+        return {
+            "after": since,
+            "through": "9999-12-31T23:59:59Z",
+            "records": [],
+        }
 
     def write(self, path, content):
         self.store[path] = content
@@ -479,6 +493,7 @@ def _with_updates(t, changes):
             row.setdefault("update_id", row.get("id", f"fixture-{index}"))
             normalized.append(row)
         return {
+            "after": _since or "2026-07-01T11:59:59Z",
             "through": _since or "2026-07-01T12:00:00Z",
             "data_types": {COORDINATION_TYPE: 0},
             "file_changes": normalized,
@@ -711,6 +726,7 @@ def _seed_acks(t):
     t.put("team/r/_coord/bus-v3/records.json",
           json.dumps({"data_type": COORDINATION_TYPE}))
     t.data_updates = lambda _since, *, deadline=None: {
+        "after": _since or "2026-07-01T15:59:59Z",
         "through": _since or "2026-07-01T16:00:00Z",
         "data_types": {COORDINATION_TYPE: 0},
         "file_changes": [{
@@ -742,6 +758,7 @@ def _with_recent_changes(t, files):
     # requires a full ack fold, not an untrusted feed batch.
     if files is None:
         t.data_updates = lambda _since, *, deadline=None: {
+            "after": _since or "2026-07-01T16:09:59Z",
             "through": _since or "2026-07-01T16:10:00Z",
             "data_types": {COORDINATION_TYPE: 0},
             "file_changes": [{
@@ -751,6 +768,7 @@ def _with_recent_changes(t, files):
         }
     else:
         t.data_updates = lambda _since, *, deadline=None: {
+            "after": _since or "2026-07-01T16:09:59Z",
             "through": _since or "2026-07-01T16:10:00Z",
             "data_types": {COORDINATION_TYPE: 0},
             "file_changes": [{
@@ -885,7 +903,8 @@ def test_acks_new_slug_absent_from_prior_is_folded_not_assumed_empty():
           "---\ntype: Ack\nagent: eve\ntimestamp: 2026-06-30T09:00:00Z\n---\n")
     _with_recent_changes(t, [])
     t.data_updates = lambda _since, *, deadline=None: {
-        "through": _since or "2026-07-01T16:10:00Z",
+        "after": _since,
+        "through": "2026-07-01T16:10:00Z",
         "data_types": {COORDINATION_TYPE: 0},
         "file_changes": [
         {"path": "team/r/_coord/acks/fixture.md", "state": "uploaded",

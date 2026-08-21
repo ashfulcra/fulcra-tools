@@ -57,8 +57,21 @@ def _batch(*, at="2026-08-20T00:00:00Z"):
 
 
 def _sections(state="DATA"):
-    return {name: generation.SectionResult(name, state, {"rows": [name]})
-            for name in generation.REQUIRED_SECTIONS}
+    sections = {
+        name: generation.SectionResult(name, state, {"rows": [name]})
+        for name in generation.REQUIRED_SECTIONS
+    }
+    sections["forge"] = generation.SectionResult(
+        "forge",
+        state,
+        {
+            "schema": generation.FORGE_PROJECTION_SCHEMA,
+            "complete": state in generation.COMPLETE_STATES,
+            "responsible": {},
+            "feedback": {},
+        },
+    )
+    return sections
 
 
 def test_identical_inputs_have_identical_generation_id_and_bytes():
@@ -114,7 +127,9 @@ def test_each_required_section_has_its_own_deadline_and_exhaustion_never_seals(m
     sections = reconcile._generation_sections(
         transport, TEAM, batch=batch, rows=[],
         proj_state={
-            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True, "rows": []},
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True,
+                        "rows": [], "orphans": [], "orphans_unknown": [],
+                        "tombstones": []},
             "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
                       "responsible": {}, "feedback": {}},
         })
@@ -150,7 +165,9 @@ def test_generation_sections_reject_unparseable_canonical_bytes():
     sections = reconcile._generation_sections(
         Transport(), TEAM, batch=batch, rows=[],
         proj_state={
-            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True, "rows": []},
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True,
+                        "rows": [], "orphans": [], "orphans_unknown": [],
+                        "tombstones": []},
             "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
                       "responsible": {}, "feedback": {}},
         })
@@ -165,17 +182,27 @@ def test_generation_sections_reject_parseable_wrong_section_documents():
 
     class Transport(MemoryTransport):
         def list_dir(self, prefix):
-            return [{"name": "bad.md", "is_dir": False}] if prefix in {
-                "team/r/roles/", "team/r/presence/", "team/r/_coord/acks/",
-                "team/r/response/",
-            } else []
+            if prefix in {"team/r/roles/", "team/r/presence/"}:
+                return [{"name": "bad.md", "is_dir": False}]
+            if prefix in {
+                "team/r/_coord/acks/", "team/r/_coord/responses/",
+            }:
+                return [{"name": "task-1/", "is_dir": True}]
+            if prefix in {
+                "team/r/_coord/acks/task-1/",
+                "team/r/_coord/responses/task-1/",
+            }:
+                return [{"name": "bad.md", "is_dir": False}]
+            return []
 
         def read_classified(self, path, *, deadline):
             documents = {
                 "team/r/roles/bad.md": "---\ntype: Ack\nagent: amy\n---\n",
                 "team/r/presence/bad.md": "---\ntype: Presence\n---\n",
-                "team/r/_coord/acks/bad.md": "---\ntype: Response\nagent: amy\noutcome: done\n---\n",
-                "team/r/response/bad.md": "---\ntype: Response\nagent: amy\n---\n",
+                "team/r/_coord/acks/task-1/bad.md": (
+                    "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+                "team/r/_coord/responses/task-1/bad.md": (
+                    "---\ntype: Response\nagent: amy\n---\n"),
             }
             return documents[path], "ok"
 
@@ -187,7 +214,9 @@ def test_generation_sections_reject_parseable_wrong_section_documents():
     sections = reconcile._generation_sections(
         Transport(), TEAM, batch=batch, rows=[],
         proj_state={
-            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True, "rows": []},
+            "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True,
+                        "rows": [], "orphans": [], "orphans_unknown": [],
+                        "tombstones": []},
             "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
                       "responsible": {}, "feedback": {}},
         })
@@ -199,7 +228,7 @@ def test_generation_sections_reject_parseable_wrong_section_documents():
     assert built.incomplete == ("roles", "presence", "acknowledgments", "responses")
 
 
-def _generation_sections_for_role_documents(documents):
+def _generation_sections_for_inventory_documents(documents):
     from coord_engine import reconcile
 
     class Transport(MemoryTransport):
@@ -231,7 +260,8 @@ def _generation_sections_for_role_documents(documents):
         Transport(), TEAM, batch=batch, rows=[],
         proj_state={
             "reviews": {"schema": projection.REVIEWS_SCHEMA, "complete": True,
-                        "rows": []},
+                        "rows": [], "orphans": [], "orphans_unknown": [],
+                        "tombstones": []},
             "forge": {"schema": projection.FORGE_SCHEMA, "complete": True,
                       "responsible": {}, "feedback": {}},
         })
@@ -247,7 +277,7 @@ def _generation_sections_for_role_documents(documents):
     ("reviewer/escalations/archive/2026-08-20.md", "---\ntype: Escalation\n---\n"),
 ])
 def test_role_inventory_rejects_malformed_path_hierarchy(relative_path, document):
-    sections = _generation_sections_for_role_documents({
+    sections = _generation_sections_for_inventory_documents({
         f"team/{TEAM}/roles/{relative_path}": document,
     })
 
@@ -268,7 +298,7 @@ def test_role_inventory_accepts_only_canonical_role_lease_and_escalation_paths()
             "---\ntype: Escalation\n---\n"),
     }
 
-    sections = _generation_sections_for_role_documents(documents)
+    sections = _generation_sections_for_inventory_documents(documents)
 
     assert sections["roles"].state == "DATA"
     assert [record["path"] for record in sections["roles"].value["records"]] == sorted(documents)
@@ -277,6 +307,73 @@ def test_role_inventory_accepts_only_canonical_role_lease_and_escalation_paths()
         sections=sections)
     assert built.complete is True
     assert built.incomplete == ()
+
+
+def test_canonical_presence_ack_and_response_inventories_seal_as_data():
+    documents = {
+        f"team/{TEAM}/presence/amy.md": (
+            "---\ntype: Presence\nagent: amy\n---\n"),
+        f"team/{TEAM}/_coord/acks/task-1/amy.md": (
+            "---\ntype: Ack\nagent: amy\n---\n"),
+        f"team/{TEAM}/_coord/responses/task-1/20260821T010000Z-amy.md": (
+            "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    }
+
+    sections = _generation_sections_for_inventory_documents(documents)
+
+    for name in ("presence", "acknowledgments", "responses"):
+        assert sections[name].state == "DATA", name
+    assert sections["responses"].value["records"][0]["path"] == (
+        f"team/{TEAM}/_coord/responses/task-1/20260821T010000Z-amy.md"
+    )
+
+
+@pytest.mark.parametrize(("section", "relative_path", "document"), [
+    ("presence", "presence/subdir/amy.md",
+     "---\ntype: Presence\nagent: amy\n---\n"),
+    ("presence", "presence/amy.txt",
+     "---\ntype: Presence\nagent: amy\n---\n"),
+    ("presence", "presence/.hidden.md",
+     "---\ntype: Presence\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/amy.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/task-1/amy.txt",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("responses", "_coord/responses/amy.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("responses", "_coord/responses/task-1/amy.txt",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("acknowledgments", "_coord/acks/../amy.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/./amy.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/task.md/amy.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/task-1/.hidden.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("responses", "_coord/responses/../amy.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("responses", "_coord/responses/./amy.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("responses", "_coord/responses/task.md/amy.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("responses", "_coord/responses/task-1/.hidden.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+])
+def test_flat_inventory_namespaces_reject_noncanonical_components(
+    section, relative_path, document,
+):
+    sections = _generation_sections_for_inventory_documents({
+        f"team/{TEAM}/{relative_path}": document,
+    })
+
+    assert sections[section].state == "UNKNOWN"
+    built = generation.build_generation(
+        prior_generation=None, source_watermark="w-1", batch=_batch(),
+        sections=sections,
+    )
+    assert built.complete is False
+    assert section in built.incomplete
 
 
 def test_generation_sections_reject_wrong_fixed_section_shapes():
@@ -494,6 +591,31 @@ def test_progress_build_id_binds_base_watermark_and_normalized_updates():
 
     assert first == same
     assert first != later
+
+
+def test_malformed_nested_forge_projection_cannot_be_sealed():
+    sections = _sections()
+    sections["forge"] = generation.SectionResult(
+        "forge",
+        "DATA",
+        {
+            "schema": generation.FORGE_PROJECTION_SCHEMA,
+            "complete": True,
+            "responsible": {"pr1": "alice"},
+            "feedback": {},
+        },
+    )
+
+    built = generation.build_generation(
+        prior_generation=None,
+        source_watermark="w-1",
+        batch=_batch(),
+        sections=sections,
+    )
+
+    assert built.complete is False
+    assert built.incomplete == ("forge",)
+    assert generation.publish(MemoryTransport(), TEAM, built).published is False
 
 
 def test_recovery_progress_resumes_only_the_exact_immutable_build_id():

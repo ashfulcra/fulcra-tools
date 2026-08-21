@@ -302,3 +302,31 @@ def test_pinned_json_path_under_read_degraded(path, capsys):
     except SystemExit:
         pass
     _assert_one_json_value_and_non_empty(capsys.readouterr().out, path)
+
+
+_V2_PUBLIC_JSON_PATHS = {
+    path: _JSON_PINNED[path]
+    for path in (
+        "status", "board", "needs-me", "search", "inbox", "digest", "asks",
+        "review status", "roles status", "presence show", "briefing",
+    )
+}
+
+
+@pytest.mark.parametrize(
+    "path", sorted(_V2_PUBLIC_JSON_PATHS), ids=sorted(_V2_PUBLIC_JSON_PATHS),
+)
+def test_v2_public_gate_unknown_is_one_json_value(path, capsys):
+    """The authority envelope itself obeys parser-discovered JSON purity."""
+    class ActivatedTransport(FakeTransport):
+        public_read_v2_enabled = True
+        public_read_epsilon_seconds = 30.0
+        public_read_epsilon_verified = False
+
+    capsys.readouterr()
+    rc = cli.main(_V2_PUBLIC_JSON_PATHS[path] + ["--json"],
+                  transport=ActivatedTransport())
+    payload = _one_json_value(capsys.readouterr().out)
+    assert rc == 3
+    assert payload["state"] == "UNKNOWN"
+    assert payload["result"] is None

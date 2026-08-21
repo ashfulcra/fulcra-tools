@@ -22,14 +22,15 @@ passthrough carries them across mixed-fleet hosts; a host too old to preserve
 them merely wipes them, which readers treat as "projection absent" and fall back
 to the raw scan — fail-closed, never wrong):
 
-``reviews`` — ``coord.reviews.projection.v2`` (v2 adds ``of`` + ``head``,
+``reviews`` — ``coord.reviews.projection.v3`` (v2 added ``of`` + ``head``;
+v3 adds the full direct-query ``tally``,
 the OC5/C01 act-on-it fields; both are always present, None when the register
 doc genuinely lacks them — a legacy headless review has no head to serve)::
 
     {"schema", "generated_at", "complete", "scanned", "total",
      "rows": [{"name", "state", "pending_required", "required",
                "requested_by", "artifact", "of", "head", "settled",
-               "mtime", "size"}],
+               "mtime", "size", "tally"}],
      "orphans": [slug], "orphans_unknown": [slug], "tombstones": [slug]}
 
 ``forge`` — ``coord.forge.projection.v1``::
@@ -79,9 +80,9 @@ import json
 
 from typing import Any, Optional
 
-from datetime import timezone
+from datetime import datetime, timezone
 
-from . import aggregate, config, forge, generation, okf, review, review_gc
+from . import aggregate, config, forge, generation, okf, public_read, review, review_gc
 from .budget import Deadline
 from .log import get_logger
 from .roles import age_hours
@@ -95,8 +96,8 @@ PUBLICATION_FENCE_KEY = "projection_publication_fence"
 FENCE_GENERATION_KEY = "publication_generation"
 BUILD_PROGRESS_SCHEMA = "coord.projection-build-progress.v1"
 
-REVIEWS_SCHEMA = "coord.reviews.projection.v2"
-FORGE_SCHEMA = "coord.forge.projection.v1"
+REVIEWS_SCHEMA = generation.REVIEW_PROJECTION_SCHEMA
+FORGE_SCHEMA = generation.FORGE_PROJECTION_SCHEMA
 NEEDS_ME_SCHEMA = "coord.needs-me.projection.v1"
 PUBLICATION_FENCE_SCHEMA = "coord.projection-publication-fence.v1"
 
@@ -269,7 +270,7 @@ def fresh_section(
 
 
 def generation_section(
-    transport: Any, team: str, key: str,
+    transport: Any, team: str, key: str, *, now: Optional[datetime] = None,
 ) -> tuple[Optional[dict[str, Any]], str]:
     """Read one section from the digest-verified current generation.
 
@@ -277,6 +278,31 @@ def generation_section(
     remain on the compatibility fence until each is migrated, but no new reader
     should treat ``summaries.json`` as its publication authority.
     """
+    if getattr(transport, "public_read_v2_enabled", None) is True:
+        authority = public_read.read_current(
+            transport,
+            team,
+            now=now or datetime.now(timezone.utc),
+            epsilon_seconds=getattr(transport, "public_read_epsilon_seconds", None),
+            epsilon_verified=getattr(
+                transport, "public_read_epsilon_verified", False,
+            ),
+        )
+        if authority.rc != 0:
+            observations = [
+                f"{item.surface}={item.state.value}"
+                + (f" ({item.reason})" if item.reason else "")
+                for item in authority.coverage
+                if item.state.value in ("UNKNOWN", "NOT_RUN")
+            ]
+            return None, "; ".join(observations) or "public read unknown"
+        if key not in authority.sections:
+            return None, f"{key} public-read section unrecognized"
+        section = authority.section(key)
+        if not isinstance(section, dict):
+            return None, f"{key} public-read section unrecognized"
+        return dict(section), ""
+
     current = generation.load_current(transport, team)
     if current is None:
         return None, "current generation absent or unverifiable"
@@ -632,35 +658,74 @@ def _scan_review_slug(
         # information a consumer wants: it owes nobody a verdict.
         return None, True
     marker_fm: dict = {}
+    marker_short = review.SETTLE_NO
     if SETTLED_MARKER in vnames:
-        # A cache is only trustworthy if it still describes THIS directory.
-        #
-        # Deleting a stale cache cannot stop another writer recreating it: a
-        # `review status` that read the old tally, paused, and resumed AFTER a
-        # correction landed rewrote `.settled` from its stale snapshot, and this
-        # short-circuit then answered APPROVED while the newest verdict was
-        # CHANGES (codex-reviewer, 595 r4). No delete ordering fixes that.
-        #
-        # So VALIDATE rather than order — in the SHARED decision function, so
-        # the fan-out obligation scan applies the identical rule. That rule now
-        # also refuses any directory holding a mutable plain shard, whose
-        # in-place rewrite a name digest cannot see (595 r5).
+        # A v1 marker proves only a terminal cache/merge fact; it does not carry
+        # reviewer identities or the rest of v3's direct-query tally. It cannot
+        # short-circuit a v3 producer. Read it for the cache-preservation choice
+        # below, then fold the shards. Compatible unchanged v3 rows still use
+        # the zero-op carry tiers in build_review_projection.
         marker_raw = transport.read(_verdicts_prefix(team, slug) + SETTLED_MARKER)
         marker_fm = okf.parse_frontmatter(marker_raw) or {}
-        short = review.settle_shortcircuit(marker_fm, vnames)
-        if short != review.SETTLE_NO:
-            row = {**base, "state": review.APPROVED, "pending_required": [],
-                   "settled": True}
-            if short == review.SETTLE_MERGED:
-                # MERGE EVIDENCE is bindable whatever the shards look like: it
-                # records that a PR landed, and no later verdict can make that
-                # untrue, so no rewrite under this slug can move the row. That
-                # keeps terminal reviews — most of the register — at the zero-op
-                # tier even when their shards are hand-written.
-                row[BINDABLE_KEY] = True
-            return row, True
-        # Otherwise fall through and fold the shards for real.
+        marker_short = review.settle_shortcircuit(marker_fm, vnames)
+        if marker_short == review.SETTLE_MERGED:
+            # Merge evidence is a terminal fact, not a verdict-cache inference.
+            # A v1 marker does not know reviewer identities, so emit only what
+            # it proves: no approvals/changes assertion, no remaining
+            # obligation, and the exact merge evidence/provenance. This keeps
+            # the legacy terminal semantics while satisfying v3's full-tally
+            # contract without fabricating votes.
+            merge_sha = review.normalize_head(marker_fm.get("merge_sha"))
+            if merge_sha:
+                tally: dict[str, Any] = {
+                    "state": review.APPROVED,
+                    "approvals": [],
+                    "changes": [],
+                    "required": base["required"],
+                    "pending_required": [],
+                    "evidence": merge_sha,
+                    "of": base["of"],
+                    "closed_as": "MERGED",
+                    "merge_sha": merge_sha,
+                }
+                if head:
+                    tally["head"] = head
+                    try:
+                        tally["round"] = max(1, int(fm.get("round") or 1))
+                    except (TypeError, ValueError):
+                        tally["round"] = 1
+                return {
+                    **base,
+                    BINDABLE_KEY: True,
+                    "state": review.APPROVED,
+                    "pending_required": [],
+                    "tally": tally,
+                    "settled": True,
+                }, True
+        elif marker_short == review.SETTLE_CACHE:
+            try:
+                cached = json.loads(marker_fm.get("tally_json") or "")
+            except (TypeError, ValueError):
+                cached = None
+            if (not generation.review_tally_reason(cached)
+                    and cached.get("state") == review.APPROVED
+                    and cached.get("pending_required") == []
+                    and cached.get("required") == base["required"]
+                    and cached.get("of") == base["of"]
+                    and cached.get("head") == base["head"]
+                    and cached.get("evidence") == marker_fm.get("evidence")):
+                return {
+                    **base,
+                    "state": review.APPROVED,
+                    "pending_required": [],
+                    "tally": dict(cached),
+                    "settled": True,
+                }, True
+            base[BINDABLE_KEY] = True
     verdicts: list[dict[str, Any]] = []
+    unattributable: list[str] = []
+    unrecognised: list[tuple[str, str]] = []
+    mismatched: list[tuple[str, str]] = []
     for v in ventries:
         n = v.get("name") or ""
         if v.get("is_dir") or not n.endswith(".md"):
@@ -669,6 +734,11 @@ def _scan_review_slug(
         reviewer = parsed_name[0] if parsed_name else None
         parsed_ts = parsed_name[1] if parsed_name else None
         if reviewer is None:
+            stem = n[:-3] if n.endswith(".md") else n
+            if "--" in stem and (
+                    not head
+                    or review.normalize_head(stem.split("--", 1)[0]) is None):
+                unattributable.append(n)
             continue  # superseded head / foreign filename: zero reads
         if deadline.expired():
             return None, False
@@ -679,10 +749,14 @@ def _scan_review_slug(
             return None, False  # listed shard unreadable -> the tally is a floor
         vfm = okf.parse_frontmatter(raw_v) or {}
         if head and review.normalize_head(vfm.get("head")) != head:
+            mismatched.append((n, str(vfm.get("head") or "")))
             continue  # the verdict must independently attest the exact head
+        token = vfm.get("verdict")
+        if token is not None and review.normalize_verdict(token) is None:
+            unrecognised.append((n, str(token)))
         verdicts.append({
             "reviewer": reviewer,
-            "verdict": vfm.get("verdict"),
+            "verdict": token,
             "name": n,
             # SAME fallback chain as `_tally_from_verdict_entries` — filename
             # ts, then frontmatter ts, then the LISTING MTIME. Projection used
@@ -724,6 +798,26 @@ def _scan_review_slug(
     # merge evidence a `review close` wrote, and that is never ours to clobber.
     evidence = (review.evidence_digest(vnames)
                 if review.evidence_is_immutable(vnames) else "")
+    tally["evidence"] = evidence
+    tally["of"] = base["of"]
+    if head:
+        tally["head"] = head
+        try:
+            tally["round"] = max(1, int(fm.get("round") or 1))
+        except (TypeError, ValueError):
+            tally["round"] = 1
+    if unattributable:
+        tally["unattributable"] = sorted(unattributable)
+    if unrecognised:
+        tally["unrecognised_verdicts"] = [
+            {"file": filename, "verdict": verdict}
+            for filename, verdict in sorted(unrecognised)
+        ]
+    if mismatched:
+        tally["head_mismatched_verdicts"] = [
+            {"file": filename, "claimed_head": claimed_head}
+            for filename, claimed_head in sorted(mismatched)
+        ]
     prior_state = str(marker_fm.get("state") or "")
     may_write = (SETTLED_MARKER not in vnames) or prior_state == review.APPROVED
     if settled and evidence and may_write:
@@ -731,11 +825,17 @@ def _scan_review_slug(
             transport.write(
                 _verdicts_prefix(team, slug) + SETTLED_MARKER,
                 okf.render_frontmatter(review.settled_marker_fields(
-                    state=review.APPROVED, ts=now, evidence=evidence)))
+                    state=review.APPROVED, ts=now, evidence=evidence,
+                    tally=tally)))
         except Exception:
             pass
     return {**base, "state": tally["state"],
             "pending_required": tally["pending_required"],
+            # Direct public `review status` must not reopen canonical shards
+            # after the generation has been validated. Preserve the complete
+            # domain tally alongside the fan-out fields; old/carried rows that
+            # lack it fail UNKNOWN rather than fabricating omitted evidence.
+            "tally": tally,
             "settled": settled}, True
 
 
@@ -763,6 +863,9 @@ def build_review_projection(
         # One full fresh scan re-derives every row under the current schema.
         log.warn("review projection: prior schema superseded; full rescan",
                  team=team, prior_schema=str(prior.get("schema")))
+        prior = {}
+    elif prior and generation.validated_review_projection(prior) is None:
+        log.warn("review projection: prior malformed; full rescan", team=team)
         prior = {}
     prior_rows = {str(r.get("name")): r for r in (prior.get("rows") or [])
                   if isinstance(r, dict) and r.get("name")}
@@ -1018,6 +1121,10 @@ def build_forge_projection(
         "responsible": {k: sorted(v) for k, v in sorted(resp.items())},
         "feedback": feedback,
     }
+    if generation.validated_forge_projection(section) is None:
+        complete = False
+        section["complete"] = False
+        log.warn("forge projection validation failed", team=team)
     if not complete:
         log.warn("forge projection incomplete", team=team,
                  responsible=len(resp))
