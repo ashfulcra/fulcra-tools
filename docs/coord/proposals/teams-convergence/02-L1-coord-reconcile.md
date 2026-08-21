@@ -1,5 +1,11 @@
 # L1 `coord-reconcile` — implementable design
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 The linchpin package of the teams-as-substrate architecture: give a `fulcra-agent-teams` space
 **queryable, self-healing views** by scanning the OKF markdown and (re)generating its indexes + a
 fast-path aggregate — without a shadow store. Grounded in OKF v0.1 (`type` required; producers MAY add

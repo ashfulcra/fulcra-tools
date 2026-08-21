@@ -1,5 +1,11 @@
 # Full port — coord/continuity parity as optional add-ons
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 **Goal (operator directive):** before migrating off `fulcra-tools-coord` and testing, port ALL remaining
 coord + continuity functionality to coord, structured as **optional add-ons** wherever that doesn't make
 the functionality useless. Base tier stays `fulcra-agent-teams`; each add-on is a `fulcra-agent-*` skill

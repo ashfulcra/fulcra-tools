@@ -1,5 +1,11 @@
 # fulcra-coord + continuity (as-built) vs. official `fulcra-agent-teams` (alpha)
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 > Grounding: coord side reversed from `/Users/ashkalb/Developer/fulcra-tools-coord/packages/fulcra-coord`
 > (v0.15.16) as it runs today. Official side from a fresh clone of `fulcradynamics/agent-skills`
 > (`skills/fulcra-agent-teams/SKILL.md` + `references/fulcra-agent-teams-cli.md` + README).

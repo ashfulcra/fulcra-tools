@@ -1,5 +1,11 @@
 # Standalone packaging — how coord installs on its own (pre-upstream)
 
+> **📎 HISTORICAL — design provenance, not current instructions.** Part of the
+> [teams-convergence proposal set](README.md), superseded by what shipped
+> (`packages/coord-engine` + `skills/fulcra-agent-*`). Read it for the reasoning,
+> not for runnable commands; current setup is in
+> [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
+
 **Goal (this phase):** make coord usable **standalone** — an agent/user installs it and gets the
 `coord-engine` tool + the 6 `fulcra-agent-*` skills working over a `fulcra-agent-teams` space — **without
 publishing anything externally**. Sequence set by the operator: *standalone now → migrate off the
