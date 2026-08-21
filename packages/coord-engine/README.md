@@ -247,7 +247,10 @@ compatible but refuses v2 authority. Cursor schema 2 additionally requires
 proven CAS. Public v2 reads remain fail-closed while epsilon is unverified.
 
 Measure feed visibility with `coord-engine measure-feed-lag TEAM --host-id
-HOST-NEUTRAL-LABEL` on at least two credentialed hosts, then complete the
+DISPLAY-ONLY-LABEL` on at least two credentialed hosts. The label does not
+attest identity: the harness binds sanitized machine identity, persisted
+principal, and transport credential provenance, and accepts only fully attested
+feed lifecycle envelopes. Then complete the
 [epsilon evidence](../../docs/coord/evidence/coord-engine-v2-epsilon-measurement.md)
 and [fleet verification](../../docs/coord/evidence/coord-engine-v2-fleet-verification.md).
 The current templates are explicitly BLOCKED; therefore the package version,

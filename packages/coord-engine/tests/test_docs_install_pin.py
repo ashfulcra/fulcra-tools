@@ -115,3 +115,20 @@ def test_v2_release_docs_point_to_both_blocking_evidence_artifacts():
     ):
         text = (REPO / rel).read_text(encoding="utf-8")
         assert all(name in text for name in required), rel
+
+
+def test_v2_evidence_templates_pin_attested_identity_and_age_consistency():
+    epsilon = (REPO / "docs/coord/evidence/coord-engine-v2-epsilon-measurement.md").read_text(
+        encoding="utf-8")
+    fleet = (REPO / "docs/coord/evidence/coord-engine-v2-fleet-verification.md").read_text(
+        encoding="utf-8")
+    for token in (
+        "display-only", "host_identity", "principal_identity",
+        "credential_provenance", "event_at", "update_id",
+    ):
+        assert token in epsilon
+    for token in (
+        "measured_at", "five-second", "host_identity", "provenance",
+        "Ash operator ruling", "measured fleet census",
+    ):
+        assert token in fleet
