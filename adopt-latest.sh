@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="0a093dba4ba17fe344086c8c7c0d229ad5b153af"   # == main after PR 571. Carries eleven merges since pp-b2e649e6, several of which fix things agents hit this shift: 567 (the verdict must not live only at the tail of the payload - a needs-me read whose rc was truncated out of view could not be certified either way), 566 (a cap-starved review sweep must not be silent), 571 (ONE deadline for the whole HTTP read - it was FOUR stacked bounds, so a configured 30s per-op bound could take 120s and every fold budget assumes that bound holds), 569 (the codex watcher can no longer report WATCH_OK on a blind read), 568 (--json purity for every verb), 561 (a merged PR closes its review as an ARTIFACT of the merge), 558 (a hostname the OS hands back is not a fleet key until it is validated), 565, 563, 562, 557.
+PIN="59cb228b19144d3ddd56ca9fc20316c30158ae24"   # coord-engine 2.0.1: units 1-3 truthfulness spine live, generation serving dormant (public_read_v2_enabled=False, pinned), the stream fold (`owed`, per-responder closes, fyi events, no ghost closes). Stream-vs-file agreement is the port acceptance test.
 VER="pp-0a093dba"
 # TYPE mirrors the CURRENT channel in _coord/bus-v3/records.json — when the authority moves, update BOTH (2026-08-04 cutover lesson: this line silently pinned the OLD channel)
 TYPE="MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
