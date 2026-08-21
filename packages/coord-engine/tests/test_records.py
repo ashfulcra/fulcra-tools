@@ -30,7 +30,7 @@ def test_payload_round_trips():
     parsed = records.parse_payload(_payload(ptr="task/fix-the-thing.md"))
     assert parsed == {"to": "codex-coder", "kind": "directive",
                       "slug": "fix-the-thing", "pri": "P0",
-                      "ptr": "task/fix-the-thing.md",
+                      "ptr": "task/fix-the-thing.md", "fyi": False,
                       "writer": {
                           # the RELEASE, not a frozen literal: a version bump is
                           # release discipline, not a reason to edit this test
