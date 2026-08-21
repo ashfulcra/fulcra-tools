@@ -69,8 +69,9 @@ def test_directive_opens_and_response_closes_in_one_batch():
              _payload(to="alice", kind="directive", slug="s-1")),
         _rec("b", "2026-08-21T20:01:00+00:00",
              _payload(to="alice", kind="directive", slug="s-2")),
-        _rec("c", "2026-08-21T20:02:00+00:00",
-             _payload(to="coord-boss", kind="response", slug="s-1")),
+        {"id": "c", "recorded_at": "2026-08-21T20:02:00+00:00",
+         "sources": ["alice"],
+         "note": _payload(to="coord-boss", kind="response", slug="s-1")},
     ]
     t = StreamOnlyTransport(rows); _cfg_store(t)
     out = stream_fold.fold(t, TEAM, "alice", now=NOW)
@@ -120,17 +121,6 @@ def test_warm_rerun_cost_is_new_events_and_state_round_trips():
     assert [r["slug"] for r in out2.rows] == ["s-1"]
 
 
-def test_state_write_failure_is_declared_not_silent():
-    class NoPersist(StreamOnlyTransport):
-        def write(self, path, content):
-            return False
-    rows = [_rec("a", "2026-08-21T20:00:00+00:00",
-                 _payload(to="alice", kind="directive", slug="s-1"))]
-    t = NoPersist(rows); _cfg_store(t)
-    out = stream_fold.fold(t, TEAM, "alice", now=NOW)
-    assert "STATE WRITE FAILED" in (out.coverage[0].reason or "")
-
-
 def test_fyi_flag_round_trips_through_payload():
     note = records.build_payload(to="a", kind="directive", priority="P2",
                                  slug="s", fyi=True)
@@ -142,3 +132,63 @@ def test_fyi_flag_round_trips_through_payload():
     # and the flag never leaks into non-fyi payloads' JSON
     assert '"fyi"' not in records.build_payload(
         to="a", kind="directive", priority="P2", slug="s")
+
+
+# --- round-2 findings (codex-coder, 2026-08-21): four fail-open paths --------
+
+def test_corrupt_state_is_unknown_nonzero_and_left_untouched():
+    t = StreamOnlyTransport([]); _cfg_store(t)
+    bad = '{"v": 999, "cursor": "not-a-time"}'
+    t.store[stream_fold.state_path(TEAM, "alice")] = bad
+    out = stream_fold.fold(t, TEAM, "alice", now=NOW)
+    assert out.state is OutcomeState.UNKNOWN and out.rc != 0
+    # the corrupt document is preserved for forensics, never overwritten
+    assert t.store[stream_fold.state_path(TEAM, "alice")] == bad
+
+
+def test_broadcast_close_is_per_recipient_not_first_responder_wins():
+    open_all = _rec("a", "2026-08-21T20:00:00+00:00",
+                    _payload(to=records.BROADCAST, kind="directive", slug="all-1"))
+    bob_close = {"id": "b", "recorded_at": "2026-08-21T20:01:00+00:00",
+                 "sources": ["bob"],
+                 "note": _payload(to="owner", kind="response", slug="all-1")}
+    t = StreamOnlyTransport([open_all, bob_close]); _cfg_store(t)
+    out_bob = stream_fold.fold(t, TEAM, "bob", now=NOW)
+    assert out_bob.rows == (), "bob responded; bob's copy closes"
+    t2 = StreamOnlyTransport([open_all, bob_close]); _cfg_store(t2)
+    out_alice = stream_fold.fold(t2, TEAM, "alice", now=NOW)
+    assert [r["slug"] for r in out_alice.rows] == ["all-1"], (
+        "bob's response must not close alice's copy of a broadcast")
+
+
+def test_task_done_write_failure_emits_no_close_and_returns_nonzero(monkeypatch, capsys):
+    from argparse import Namespace
+    calls = []
+
+    class T:
+        def read(self, path):
+            return ("---\ntype: Task\ntitle: x\nstatus: active\nowner: owner\n"
+                    "assignee: alice\ntimestamp: 2026-08-21T00:00:00Z\n---\n# x\n")
+        def write(self, path, content):
+            return False  # the durable close never lands
+
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    monkeypatch.setattr(cli, "_emit_response_companion",
+                        lambda *a, **k: calls.append(a) or True)
+    rc = cli.cmd_task_done(
+        Namespace(team=TEAM, name="t-1", evidence="done", agent="alice"), T())
+    assert rc != 0, "a close that never landed durably is not rc 0"
+    assert calls == [], "no stream close may be emitted for a failed doc write"
+
+
+def test_state_write_failure_is_unknown_nonzero_not_a_checkpoint():
+    class NoPersist(StreamOnlyTransport):
+        def write(self, path, content):
+            return False
+    rows = [_rec("a", "2026-08-21T20:00:00+00:00",
+                 _payload(to="alice", kind="directive", slug="s-1"))]
+    t = NoPersist(rows); _cfg_store(t)
+    out = stream_fold.fold(t, TEAM, "alice", now=NOW)
+    assert out.state is OutcomeState.UNKNOWN and out.rc != 0, (
+        "the architecture claims a durable cursor; failing to persist it "
+        "cannot be a successful checkpoint")

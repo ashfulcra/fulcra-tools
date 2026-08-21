@@ -1611,7 +1611,14 @@ def cmd_task_done(args: argparse.Namespace, transport: Any) -> int:
     except tasks.TaskError as e:
         print(f"task done failed: {e}", file=sys.stderr)
         return 1
-    transport.write(path, out)
+    if not transport.write(path, out):
+        # No ghost closes (round-2 finding 3): a failed durable write with an
+        # emitted close event would tell the stream "closed" while the file
+        # authority stays open. Emit nothing, say so, exit nonzero.
+        print(f"task done failed: the durable close for {args.name} did not "
+              f"land — no close event emitted, the task is still open",
+              file=sys.stderr)
+        return 3
     print(f"done {args.name}")
     # THE CLOSE MUST REACH THE STREAM (2026-08-21). A done task closed the DOC
     # but emitted nothing, so stream readers replayed it as open forever — 92 of
