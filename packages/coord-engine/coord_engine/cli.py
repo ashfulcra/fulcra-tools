@@ -9859,7 +9859,8 @@ def cmd_measure_feed_lag(args: argparse.Namespace, transport: Any) -> int:
     deadline = budget_mod.Deadline.open(args.timeout)
     result = migration.measure_feed_visibility_lag(
         transport, args.team, args.host_id,
-        persisted=config.persisted_identity, hostname=socket.gethostname,
+        environ=os.environ, persisted=config.persisted_identity,
+        hostname=socket.gethostname,
         timeout_seconds=args.timeout, poll_seconds=args.poll, deadline=deadline,
     )
     payload = jsonutil.dumps(result.as_dict())
@@ -9868,6 +9869,7 @@ def cmd_measure_feed_lag(args: argparse.Namespace, transport: Any) -> int:
         result = migration.LagMeasurement.unknown(
             team=result.team, host_identity=result.host_identity,
             principal_identity=result.principal_identity,
+            principal_source=result.principal_source,
             transport_authority=result.transport_authority,
             producer_build=result.producer_build,
             display_label=result.display_label,

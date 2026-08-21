@@ -1199,6 +1199,15 @@ hosts before epsilon can be marked verified. Until the
 complete, do not bump/release `2.0.0`, move `adopt-latest.sh`, enable v2 public
 reads, or activate cursor schema 2. Mixed fleets and missing CAS refuse.
 
+The lag harness resolves its write principal through the shared identity
+authority (explicit API input → `FULCRA_COORD_AGENT` → persisted identity),
+with hostname fallback disabled; hostname is separate host attribution only.
+Every probe and measurement records the auditable source
+`explicit|env|persisted`, and the two-host evidence protocol requires `env` on
+both runs. Install the reviewed, pushed full VCS commit before measuring so
+PEP 610 `direct_url.json` supplies the exact producer build; checkout, wheel,
+or otherwise unattested builds remain `UNKNOWN`.
+
 “Done” means release plus exact adoption by every host reconciled within the
 recorded fleet SLA, with every exclusion named and evidenced, then queue,
 needs-me, review, forge, roles, presence, and reconcile verified from at least

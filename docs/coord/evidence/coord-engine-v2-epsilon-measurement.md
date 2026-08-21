@@ -17,9 +17,15 @@ Do not run either measurement from this blocked template.
 
 Run once per credentialed host. `--host-id` is a display-only label; it cannot
 attest a host or make two runs on one machine count twice. The harness derives
-`host_identity` from the sanitized machine identity, requires a persisted
-`principal_identity`, reads stable non-secret `transport_authority` from the
-canonical team configuration, and binds the complete probe evidence to an
+`host_identity` from the sanitized machine identity and resolves the write
+principal through the shared authority: explicit API input, then
+`FULCRA_COORD_AGENT`, then persisted per-cwd identity. Hostname fallback is
+disabled for the write principal. The two evidence runs require
+`principal_source: env`, so export `FULCRA_COORD_AGENT` on both hosts; a
+hostname can only attest `host_identity`, never mint `principal_identity`.
+The harness reads stable non-secret `transport_authority` from the canonical
+team configuration and binds the complete probe evidence, including
+`principal_identity` and `principal_source`, to an
 `evidence-sha256` `credential_provenance`. The binding does not read or hash a
 transient access credential, so token refresh and authentication mode changes
 cannot manufacture a second host identity. `producer_build` is the running
@@ -27,6 +33,10 @@ installation's exact PEP 610 VCS commit; an editable/wheel build without that
 identity is `UNKNOWN`:
 
 ```bash
+export FULCRA_COORD_AGENT=<approved-agent-identity>
+# After the reviewed harness commit is pushed, install that exact VCS build;
+# do not substitute a checkout/path/wheel install, which lacks the PEP 610 SHA.
+uv tool install --force "git+https://github.com/ashfulcra/fulcra-tools@<approved-full-commit>#subdirectory=packages/coord-engine"
 coord-engine measure-feed-lag fulcra --host-id host-a --timeout 30 --poll 0.25
 ```
 
@@ -45,7 +55,8 @@ a path-only `files` response is not evidence.
   "team": "fulcra",
   "host_identity": "coord-reconcile:<canonical-host>",
   "display_label": "host-a",
-  "principal_identity": "<persisted-principal>",
+  "principal_identity": "<FULCRA_COORD_AGENT value>",
+  "principal_source": "env",
   "transport_authority": {
     "data_type": "<canonical-data-type>",
     "api_version": "<canonical-api-version>"
@@ -82,8 +93,9 @@ timestamps, and the finite nonnegative lag derived from
 `observed_at - event_at`. Both rows must form a single canonical cohort: exact
 case-sensitive team, the complete canonical transport authority/account/store
 identity (including every versioned authority field when present), measurement
-schema, `probe_schema`, and `producer_build`. Caller-normalized aliases do not
-declare equivalence. The configured epsilon lives in release configuration, not
-in these measurement rows, and must cover the maximum of two distinct valid rows.
+schema, `probe_schema`, `producer_build`, and `principal_source` (`env` for this
+two-host protocol). Caller-normalized aliases do not declare equivalence. The
+configured epsilon lives in release configuration, not in these measurement
+rows, and must cover the maximum of two distinct valid rows.
 An unmeasured or one-host epsilon is not a conservative estimate; it is no
 bound at all and blocks activation.

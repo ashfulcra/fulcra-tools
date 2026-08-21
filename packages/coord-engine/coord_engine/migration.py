@@ -31,6 +31,7 @@ _ATTESTED_HOST_IDENTITY = re.compile(r"^coord-reconcile:[A-Za-z0-9:_.-]+$")
 _PROBE_ID = re.compile(r"^[0-9a-f]{32}$")
 _PROVENANCE = re.compile(r"^evidence-sha256:[0-9a-f]{64}$")
 _BUILD_IDENTITY = re.compile(r"^[0-9a-f]{40}$")
+_PRINCIPAL_SOURCES = frozenset({"explicit", "env", "persisted"})
 _AUTHORITY_BASE_FIELDS = ("data_type", "api_version")
 _AUTHORITY_VERSIONED_FIELDS = (
     "protocol_version", "cursor_schema_version",
@@ -82,6 +83,7 @@ class LagMeasurement:
     host_identity: Optional[str]
     display_label: Optional[str]
     principal_identity: Optional[str]
+    principal_source: Optional[str]
     transport_authority: Optional[Mapping[str, Any]]
     probe_schema: str
     producer_build: Optional[str]
@@ -108,6 +110,7 @@ class LagMeasurement:
             "host_identity": self.host_identity,
             "display_label": self.display_label,
             "principal_identity": self.principal_identity,
+            "principal_source": self.principal_source,
             "transport_authority": (
                 dict(self.transport_authority)
                 if isinstance(self.transport_authority, Mapping) else None
@@ -132,12 +135,14 @@ class LagMeasurement:
         probe_id: str, team: Optional[str] = None, probe_path: str = "",
         host_identity: Optional[str] = None,
         principal_identity: Optional[str] = None,
+        principal_source: Optional[str] = None,
         transport_authority: Optional[Mapping[str, Any]] = None,
         producer_build: Optional[str] = None,
     ) -> "LagMeasurement":
         return cls(
             state="UNKNOWN", team=team, host_identity=host_identity,
             display_label=display_label, principal_identity=principal_identity,
+            principal_source=principal_source,
             transport_authority=transport_authority, probe_schema=PROBE_SCHEMA,
             producer_build=producer_build, credential_provenance=None,
             credentialed=False, observed_seconds=None, measured_at=measured_at,
@@ -181,7 +186,8 @@ def read_v1_bootstrap(raw: Any) -> BootstrapResult:
 
 _MEASUREMENT_KEYS = frozenset({
     "schema", "state", "team", "host_identity", "display_label",
-    "principal_identity", "transport_authority", "probe_schema",
+    "principal_identity", "principal_source", "transport_authority",
+    "probe_schema",
     "producer_build", "credential_provenance",
     "credentialed", "observed_seconds", "measured_at", "probe_id",
     "probe_path", "event_at", "observed_at", "update_id", "reason",
@@ -261,6 +267,7 @@ def _valid_measurement_row(row: Mapping[str, Any]) -> bool:
     team = row.get("team")
     host_identity = row.get("host_identity")
     principal = row.get("principal_identity")
+    principal_source = row.get("principal_source")
     probe_id = row.get("probe_id")
     probe_path = row.get("probe_path")
     observed = row.get("observed_seconds")
@@ -269,6 +276,7 @@ def _valid_measurement_row(row: Mapping[str, Any]) -> bool:
             or not isinstance(host_identity, str)
             or _ATTESTED_HOST_IDENTITY.fullmatch(host_identity) is None
             or not isinstance(principal, str) or not principal.strip()
+            or principal_source not in _PRINCIPAL_SOURCES
             or not _valid_transport_authority(row.get("transport_authority"))
             or row.get("probe_schema") != PROBE_SCHEMA
             or not isinstance(row.get("producer_build"), str)
@@ -329,6 +337,8 @@ def evaluate_activation(
                 row_reasons.append("measurement schema/protocol malformed")
             if row.get("probe_schema") != PROBE_SCHEMA:
                 row_reasons.append("measurement probe protocol malformed")
+            if row.get("principal_source") not in _PRINCIPAL_SOURCES:
+                row_reasons.append("measurement principal source malformed")
             build = row.get("producer_build")
             if (not isinstance(build, str)
                     or _BUILD_IDENTITY.fullmatch(build) is None):
@@ -343,6 +353,7 @@ def evaluate_activation(
             "schema": row["schema"],
             "probe_schema": row["probe_schema"],
             "producer_build": row["producer_build"],
+            "principal_source": row["principal_source"],
         }
         if cohort is None:
             cohort = current_cohort
@@ -357,6 +368,8 @@ def evaluate_activation(
                 reasons.append("measurement cohort mismatch: probe protocol")
             if current_cohort["producer_build"] != cohort["producer_build"]:
                 reasons.append("measurement cohort mismatch: producer build")
+            if current_cohort["principal_source"] != cohort["principal_source"]:
+                reasons.append("measurement cohort mismatch: principal source")
         host_identity = host_identity.strip()
         if host_identity in measured:
             reasons.append(f"duplicate host measurement identity: {host_identity}")
@@ -486,6 +499,8 @@ def measure_feed_visibility_lag(
     transport: Any, team: str, display_label: str, *,
     persisted: Callable[[], classifier.PersistedIdentity],
     hostname: Callable[[], str],
+    explicit_identity: Optional[str] = None,
+    environ: Optional[Mapping[str, str]] = None,
     timeout_seconds: float = 30.0,
     poll_seconds: float = 0.25,
     deadline: Optional[Any] = None,
@@ -501,6 +516,7 @@ def measure_feed_visibility_lag(
 
     host_identity: Optional[str] = None
     principal_identity: Optional[str] = None
+    principal_source: Optional[str] = None
     authority: Optional[dict[str, Any]] = None
     producer_build: Optional[str] = None
 
@@ -508,6 +524,7 @@ def measure_feed_visibility_lag(
         return LagMeasurement.unknown(
             team=team, host_identity=host_identity,
             principal_identity=principal_identity,
+            principal_source=principal_source,
             transport_authority=authority, display_label=display_label,
             reason=reason, measured_at=measured_at, probe_id=probe_id,
             probe_path=path, producer_build=producer_build,
@@ -561,29 +578,38 @@ def measure_feed_visibility_lag(
     if not all(_accepts_deadline(op) for op in (reader, writer, feed)):
         return unknown("transport operation lacks shared deadline support")
 
+    identity_env = environ or {}
     try:
-        saved = persisted()
+        principal_identity = classifier.resolve_identity(
+            explicit_identity, environ=identity_env, persisted=persisted,
+            hostname=None,
+        )
     except Exception:
-        return unknown("persisted principal identity unavailable")
+        return unknown("principal identity unavailable")
     if bound.expired():
         return unknown("principal identity preflight exceeded harness deadline")
+    if not isinstance(principal_identity, str) or not principal_identity.strip():
+        principal_identity = None
+        return unknown("principal identity unavailable")
+    principal_identity = principal_identity.strip()
+    if explicit_identity:
+        principal_source = "explicit"
+    elif identity_env.get("FULCRA_COORD_AGENT"):
+        principal_source = "env"
+    else:
+        principal_source = "persisted"
     try:
         raw_host = hostname()
     except Exception:
         return unknown("machine identity unavailable")
     if bound.expired():
         return unknown("machine identity preflight exceeded harness deadline")
-    if (not isinstance(saved, classifier.PersistedIdentity)
-            or saved.state is not classifier.PersistedIdentityState.PRESENT
-            or not isinstance(saved.identity, str) or not saved.identity.strip()):
-        return unknown("persisted principal identity unavailable")
     if not isinstance(raw_host, str):
         return unknown("machine identity malformed")
     safe_host, _rewritten = classifier.sanitize_hostname(raw_host)
     if not safe_host:
         return unknown("machine identity unusable")
     host_identity = f"coord-reconcile:{safe_host}"
-    principal_identity = saved.identity.strip()
 
     try:
         producer_build = pin_currency.build_sha()
@@ -613,6 +639,7 @@ def measure_feed_visibility_lag(
         "team": team,
         "host_identity": host_identity,
         "principal_identity": principal_identity,
+        "principal_source": principal_source,
         "transport_authority": authority,
         "producer_build": producer_build,
         "display_label": display_label,
@@ -700,6 +727,7 @@ def measure_feed_visibility_lag(
             measurement = LagMeasurement(
                 state="DATA", team=team, host_identity=host_identity,
                 display_label=display_label, principal_identity=principal_identity,
+                principal_source=principal_source,
                 transport_authority=authority, probe_schema=PROBE_SCHEMA,
                 producer_build=producer_build, credential_provenance=None,
                 credentialed=True, observed_seconds=lag, measured_at=measured_at,

@@ -78,7 +78,10 @@ def _binding(row):
     return "evidence-sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
 
 
-def _host(name: str, *, credentialed: bool = True, label: str | None = None):
+def _host(
+    name: str, *, credentialed: bool = True, label: str | None = None,
+    principal_source: str = "env",
+):
     probe_id = hashlib.md5(name.encode()).hexdigest()
     row = {
         "schema": "coord.feed-visibility-lag.v1",
@@ -87,6 +90,7 @@ def _host(name: str, *, credentialed: bool = True, label: str | None = None):
         "host_identity": f"coord-reconcile:{name}",
         "display_label": label or name,
         "principal_identity": f"agent-{name}",
+        "principal_source": principal_source,
         "transport_authority": dict(AUTHORITY),
         "probe_schema": "coord.feed-visibility-lag-probe.v1",
         "producer_build": BUILD_SHA,
@@ -509,8 +513,8 @@ class _Now:
 def _data_measurement():
     result = migration.measure_feed_visibility_lag(
         _LagTransport(0, _Clock()), "fulcra", "display",
-        persisted=lambda: classifier.PersistedIdentity(
-            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        environ={"FULCRA_COORD_AGENT": "agent-a"},
+        persisted=lambda: pytest.fail("env identity must not consult persisted state"),
         hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.001,
         now=_Now(),
     )
@@ -523,8 +527,8 @@ def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
     transport = _LagTransport(0.3, clock)
     result = migration.measure_feed_visibility_lag(
         transport, "fulcra", "host-a",
-        persisted=lambda: classifier.PersistedIdentity(
-            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        environ={"FULCRA_COORD_AGENT": "agent-a"},
+        persisted=lambda: pytest.fail("env identity must not consult persisted state"),
         hostname=lambda: "same-machine",
         timeout_seconds=1.0, poll_seconds=0.1,
         monotonic=clock.monotonic, sleep=clock.sleep,
@@ -534,11 +538,16 @@ def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
     assert result.observed_seconds == 1.0
     assert result.credentialed is True
     assert result.host_identity == "coord-reconcile:same-machine"
+    assert result.principal_identity == "agent-a"
+    assert result.principal_source == "env"
     assert result.event_at == "2026-08-21T00:00:01Z"
     assert result.as_dict().get("probe_schema") == "coord.feed-visibility-lag-probe.v1"
     assert result.as_dict().get("producer_build") == BUILD_SHA
     assert "observed_max_seconds" not in result.as_dict()
     assert result.as_dict()["credential_provenance"] == _binding(result.as_dict())
+    probe = json.loads(transport.writes[0][1])
+    assert probe["principal_identity"] == "agent-a"
+    assert probe["principal_source"] == "env"
 
     decision = migration.evaluate_activation(
         hosts=[result.as_dict(), _host("host-b")], configured_epsilon_seconds=3.0,
@@ -546,6 +555,120 @@ def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
         exclusions=_exclusions(), cas_supported=True,
     )
     assert decision.state == "READY"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "invalid", "unbound"])
+def test_activation_rejects_missing_invalid_or_unbound_principal_source(mutation):
+    row = _host("host-a")
+    if mutation == "missing":
+        del row["principal_source"]
+        row["credential_provenance"] = _binding(row)
+    elif mutation == "invalid":
+        row["principal_source"] = "hostname"
+        row["credential_provenance"] = _binding(row)
+    else:
+        row["principal_source"] = "persisted"
+
+    decision = migration.evaluate_activation(
+        hosts=[row, _host("host-b")], configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert decision.reasons
+
+
+def test_activation_rejects_mixed_principal_source_cohort():
+    persisted = _host("host-b", principal_source="persisted")
+    decision = migration.evaluate_activation(
+        hosts=[_host("host-a", principal_source="env"), persisted],
+        configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert "measurement cohort mismatch: principal source" in decision.reasons
+
+
+@pytest.mark.parametrize("persisted_state", [
+    classifier.PersistedIdentityState.ABSENT,
+    classifier.PersistedIdentityState.UNKNOWN,
+    classifier.PersistedIdentityState.UNSUPPORTED,
+])
+def test_measurement_env_principal_wins_lazily_over_every_persisted_state(
+        persisted_state):
+    transport = _LagTransport(0, _Clock())
+
+    def forbidden_persisted():
+        raise AssertionError(f"must not consult {persisted_state.value} persisted state")
+
+    result = migration.measure_feed_visibility_lag(
+        transport, "fulcra", "display",
+        environ={"FULCRA_COORD_AGENT": "codex-coder"},
+        persisted=forbidden_persisted, hostname=lambda: "same-machine",
+        timeout_seconds=1.0, poll_seconds=0.001, now=_Now(),
+    )
+
+    assert result.state == "DATA"
+    assert result.rc == 0
+    assert result.principal_identity == "codex-coder"
+    assert result.principal_source == "env"
+    assert json.loads(transport.writes[0][1])["principal_source"] == "env"
+
+
+def test_measurement_persisted_principal_is_used_when_environment_is_absent():
+    result = migration.measure_feed_visibility_lag(
+        _LagTransport(0, _Clock()), "fulcra", "display", environ={},
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "persisted-agent"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0,
+        poll_seconds=0.001, now=_Now(),
+    )
+
+    assert result.state == "DATA"
+    assert result.rc == 0
+    assert result.principal_identity == "persisted-agent"
+    assert result.principal_source == "persisted"
+
+
+@pytest.mark.parametrize("state", [
+    classifier.PersistedIdentityState.ABSENT,
+    classifier.PersistedIdentityState.UNKNOWN,
+    classifier.PersistedIdentityState.UNSUPPORTED,
+])
+def test_measurement_missing_principal_never_falls_back_to_hostname(state):
+    transport = _LagTransport(0, _Clock())
+    result = migration.measure_feed_visibility_lag(
+        transport, "fulcra", "display", environ={},
+        persisted=lambda: classifier.PersistedIdentity(state),
+        hostname=lambda: "tempting-host-fallback", timeout_seconds=1.0,
+        poll_seconds=0.001, now=_Now(),
+    )
+
+    assert result.state == "UNKNOWN"
+    assert result.rc == 3
+    assert result.principal_identity is None
+    assert result.principal_source is None
+    assert transport.writes == []
+
+
+def test_measurement_explicit_principal_precedes_env_without_cli_flag():
+    result = migration.measure_feed_visibility_lag(
+        _LagTransport(0, _Clock()), "fulcra", "display",
+        explicit_identity="explicit-agent",
+        environ={"FULCRA_COORD_AGENT": "env-agent"},
+        persisted=lambda: pytest.fail("explicit identity must stay lazy"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0,
+        poll_seconds=0.001, now=_Now(),
+    )
+
+    assert result.state == "DATA"
+    assert result.principal_identity == "explicit-agent"
+    assert result.principal_source == "explicit"
 
 
 def test_feed_visibility_measurement_refuses_non_finite_bounds_before_write():
@@ -636,6 +759,37 @@ def test_cli_host_id_is_display_only_and_cannot_mint_attested_identity(
         ("host-a", "same-machine", "agent-a"),
         ("host-b", "same-machine", "agent-a"),
     ]
+
+
+def test_cli_env_principal_succeeds_with_absent_persisted_identity(
+        monkeypatch, capsys):
+    class CurrentTransport(_LagTransport):
+        def data_updates(self, since, *, deadline=None):
+            return {
+                "after": since,
+                "through": since,
+                "file_changes": [{
+                    "id": "3185bd09-9500-4407-bd87-013832fe55f3",
+                    "path": self.writes[-1][0], "state": "uploaded",
+                    "uploaded_at": since,
+                }],
+            }
+
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "codex-coder")
+    monkeypatch.setattr(
+        cli.config, "persisted_identity",
+        lambda: pytest.fail("env authority must not consult absent persisted state"),
+    )
+    rc = cli.cmd_measure_feed_lag(
+        Namespace(team="fulcra", host_id="display", timeout=1.0, poll=0.001),
+        CurrentTransport(0, _Clock()),
+    )
+    body = json.loads(capsys.readouterr().out)
+
+    assert rc == 0, body["reason"]
+    assert body["state"] == "DATA"
+    assert body["principal_identity"] == "codex-coder"
+    assert body["principal_source"] == "env"
 
 
 @pytest.mark.parametrize("auth_mode", ["cli", "http"])
