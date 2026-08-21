@@ -69,7 +69,24 @@ support uses CAS; one that explicitly declares CAS unsupported uses a
 last-writer-wins manifest write followed by exact read verification. Missing or
 invalid capability and manifest write/read failure are nonzero. The mandatory
 public-read freshness overlay rejects a stale raced manifest before v2 authority
-activates.
+activates. The shared public-read path validates the exact manifest and immutable
+generation bytes, queries one at-least-once `data-updates` window from
+`watermark - epsilon` through `now - epsilon`, deduplicates update identities,
+and applies only locally supported task deltas. Unsupported deltas, incomplete
+feed coverage, a changed pointer, or an unverified epsilon return typed
+`UNKNOWN` and nonzero; an overlay that was not invoked is `NOT_RUN`, never
+clean. JSON and text both expose the generation, source watermark, attested
+coverage horizon, and per-surface coverage. During the Unit 5-to-6 activation
+gate the deployed transport enters this authority with epsilon deliberately
+unverified, so migrated public reads fail closed until Unit 6 records fleet lag
+evidence.
+
+`roles status` now returns one `liveness_fact` that carries lease and presence
+observations plus both store-prefix provenance fields. Fresh holder presence and
+a lapsed lease can therefore never be rendered as confidently `VACANT`.
+Attendance is separately typed: omitting `--check-attendance` reports
+`NOT_RUN`; a requested scan that hits its cap reports `UNKNOWN` with
+`scanned`/`total`; a completed check reports its boolean result.
 
 Class A folds now enter the output boundary through
 `coord_engine.outcome.CommandOutcome`, the shared v2 state/coverage/rows/source

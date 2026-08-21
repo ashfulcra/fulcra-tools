@@ -89,3 +89,21 @@ def test_search_matches_title_desc_tags_ci():
 
 def test_search_empty_query_returns_nothing():
     assert query.search([_r("a")], "") == []
+
+
+def test_public_overlay_rows_keep_domain_fields_through_queries():
+    """The shared read may replace a row; query adapters must not narrow it."""
+    row = _r("a", assignee="me", title="Overlay title")
+    row.update({
+        "source_path": "task/a.md",
+        "canonical_mtime": "2026-08-21T00:40:00Z",
+        "future_domain_field": {"preserve": True},
+    })
+
+    board_row = query.board([row])["active"][0]
+    needs_row = query.needs_me([row], "me")[0]
+    search_row = query.search([row], "overlay")[0]
+
+    assert board_row == row
+    assert needs_row == row
+    assert search_row == row

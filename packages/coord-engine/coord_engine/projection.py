@@ -79,9 +79,9 @@ import json
 
 from typing import Any, Optional
 
-from datetime import timezone
+from datetime import datetime, timezone
 
-from . import aggregate, config, forge, generation, okf, review, review_gc
+from . import aggregate, config, forge, generation, okf, public_read, review, review_gc
 from .budget import Deadline
 from .log import get_logger
 from .roles import age_hours
@@ -269,7 +269,7 @@ def fresh_section(
 
 
 def generation_section(
-    transport: Any, team: str, key: str,
+    transport: Any, team: str, key: str, *, now: Optional[datetime] = None,
 ) -> tuple[Optional[dict[str, Any]], str]:
     """Read one section from the digest-verified current generation.
 
@@ -277,6 +277,31 @@ def generation_section(
     remain on the compatibility fence until each is migrated, but no new reader
     should treat ``summaries.json`` as its publication authority.
     """
+    if getattr(transport, "public_read_v2_enabled", None) is True:
+        authority = public_read.read_current(
+            transport,
+            team,
+            now=now or datetime.now(timezone.utc),
+            epsilon_seconds=getattr(transport, "public_read_epsilon_seconds", None),
+            epsilon_verified=getattr(
+                transport, "public_read_epsilon_verified", False,
+            ),
+        )
+        if authority.rc != 0:
+            observations = [
+                f"{item.surface}={item.state.value}"
+                + (f" ({item.reason})" if item.reason else "")
+                for item in authority.coverage
+                if item.state.value in ("UNKNOWN", "NOT_RUN")
+            ]
+            return None, "; ".join(observations) or "public read unknown"
+        if key not in authority.sections:
+            return None, f"{key} public-read section unrecognized"
+        section = authority.section(key)
+        if not isinstance(section, dict):
+            return None, f"{key} public-read section unrecognized"
+        return dict(section), ""
+
     current = generation.load_current(transport, team)
     if current is None:
         return None, "current generation absent or unverifiable"
