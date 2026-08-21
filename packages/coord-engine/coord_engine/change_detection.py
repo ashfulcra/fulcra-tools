@@ -106,7 +106,8 @@ def _namespace(team: str, path: str) -> Optional[str]:
         return "forge"
     if rest.startswith("presence/") or rest.startswith("roles/") or rest.startswith("role/"):
         return "presence_roles"
-    if rest.startswith("_coord/acks/") or rest.startswith("response/"):
+    if (rest.startswith("_coord/acks/")
+            or rest.startswith("_coord/responses/")):
         return "acknowledgments_responses"
     if rest.startswith("_coord/router/"):
         return "router_state"

@@ -36,7 +36,7 @@ INVENTORY_PREFIXES = {
     "roles": "roles/",
     "presence": "presence/",
     "acknowledgments": "_coord/acks/",
-    "responses": "response/",
+    "responses": "_coord/responses/",
 }
 
 
@@ -52,11 +52,15 @@ def _nonempty_text(value: Any) -> bool:
 def canonical_inventory_document(
     section: str, path: str, document: Mapping[str, Any],
 ) -> bool:
-    """One semantic classifier shared by generation writers and readers."""
+    """One path-and-semantic classifier shared by writers and readers."""
     doc_type = document.get("type")
+    relative_prefix = INVENTORY_PREFIXES.get(section)
+    marker = f"/{relative_prefix}" if relative_prefix else ""
+    if not marker or marker not in path:
+        return False
+    relative = path.split(marker, 1)[1]
+    parts = relative.split("/")
     if section == "roles":
-        relative = path.split("/roles/", 1)[-1]
-        parts = relative.split("/")
         if len(parts) == 1:
             role_file = parts[0]
             return (role_file.endswith(".md") and len(role_file) > len(".md")
@@ -72,11 +76,19 @@ def canonical_inventory_document(
             return doc_type == "Escalation"
         return False
     if section == "presence":
-        return doc_type == "Presence" and _nonempty_text(document.get("agent"))
+        return (len(parts) == 1 and parts[0].endswith(".md")
+                and len(parts[0]) > len(".md") and doc_type == "Presence"
+                and _nonempty_text(document.get("agent")))
     if section == "acknowledgments":
-        return doc_type == "Ack" and _nonempty_text(document.get("agent"))
+        return (len(parts) == 2 and bool(parts[0])
+                and parts[1].endswith(".md")
+                and len(parts[1]) > len(".md") and doc_type == "Ack"
+                and _nonempty_text(document.get("agent")))
     if section == "responses":
-        return (doc_type == "Response" and _nonempty_text(document.get("agent"))
+        return (len(parts) == 2 and bool(parts[0])
+                and parts[1].endswith(".md")
+                and len(parts[1]) > len(".md") and doc_type == "Response"
+                and _nonempty_text(document.get("agent"))
                 and _nonempty_text(document.get("outcome")))
     return False
 
@@ -115,6 +127,11 @@ def review_row_reason(row: Any) -> str:
         return "row state invalid"
     if not isinstance(row.get("settled"), bool):
         return "row settled invalid"
+    for key in ("of", "head"):
+        if key not in row:
+            return f"row {key} absent"
+        if row.get(key) is not None and not _nonempty_text(row.get(key)):
+            return f"row {key} invalid"
     tally_reason = review_tally_reason(row.get("tally"))
     if tally_reason:
         return tally_reason
@@ -125,7 +142,48 @@ def review_row_reason(row: Any) -> str:
         return "row/tally pending_required mismatch"
     if tally.get("required") != row.get("required"):
         return "row/tally required mismatch"
+    if tally.get("of") != row.get("of"):
+        return "row/tally of mismatch"
+    if tally.get("head") != row.get("head"):
+        return "row/tally head mismatch"
+    if row.get("settled") and (
+            row.get("state") != "APPROVED"
+            or bool(row.get("pending_required"))):
+        return "row settled invariant invalid"
     return ""
+
+
+def validated_review_projection(
+    section: Any,
+) -> Optional[tuple[dict[str, dict[str, Any]], list[str], list[str], list[str]]]:
+    """Validate all reusable/servable review-v3 nested structure once.
+
+    Schema, freshness, and completeness are outer publication facts checked by
+    their callers. This function owns the nested contract shared by producer
+    carry, generation sealing, public authority, and domain consumers.
+    """
+    if not isinstance(section, Mapping):
+        return None
+    rows = section.get("rows")
+    if not isinstance(rows, list):
+        return None
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        reason = review_row_reason(row)
+        if reason:
+            return None
+        name = str(row["name"])
+        if name in by_name:
+            return None
+        by_name[name] = dict(row)
+    slug_lists: list[list[str]] = []
+    for key in ("orphans", "orphans_unknown", "tombstones"):
+        value = section.get(key)
+        if (not isinstance(value, list)
+                or not all(_nonempty_text(slug) for slug in value)):
+            return None
+        slug_lists.append(list(value))
+    return by_name, slug_lists[0], slug_lists[1], slug_lists[2]
 
 
 def _json(value: Any) -> str:

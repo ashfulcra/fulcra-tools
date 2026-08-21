@@ -107,6 +107,28 @@ def test_every_supported_namespace_is_explicitly_covered():
     }
 
 
+def test_canonical_response_updates_share_acknowledgment_response_coverage():
+    batch = _poll(FeedTransport({"file_changes": [
+        _row(
+            "team/r/_coord/responses/task-1/20260821T010000Z-amy.md",
+            update_id="response",
+        ),
+    ]}))
+
+    assert batch.trusted is True
+    assert batch.changes[0].namespace == "acknowledgments_responses"
+    assert batch.coverage["acknowledgments_responses"].value == "DATA"
+
+
+def test_legacy_singular_response_path_is_not_canonical_coverage():
+    batch = _poll(FeedTransport({"file_changes": [
+        _row("team/r/response/task-1/amy.md", update_id="legacy-response"),
+    ]}))
+
+    assert batch.trusted is False
+    assert batch.coverage["unknown_unsupported"].value == "UNKNOWN"
+
+
 def test_duplicate_immutable_update_identity_is_consumed_once_and_sorted():
     """Replacing immutable-id dedupe with path dedupe loses legitimate lifecycles."""
     transport = FeedTransport({"file_changes": [

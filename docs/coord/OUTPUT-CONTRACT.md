@@ -119,7 +119,13 @@ Attendance has its own state: no flag is `NOT_RUN`; a requested but truncated
 scan is `UNKNOWN` with `scanned`/`total` and makes the command/public envelope
 nonzero; a completed scan carries `attended`. Inventory-backed public folds
 consume the validated generation bytes, never a later live listing of those
-same namespaces.
+same namespaces. Canonical inventory paths are exactly `presence/<file>.md`,
+`_coord/acks/<slug>/<file>.md`, and `_coord/responses/<slug>/<file>.md`; nested
+presence files, wrong extensions/depths, and the legacy singular `response/`
+namespace fail closed. Review projection v3 producer carry, generation
+validation, and domain consumers share the same nested validator for `of` and
+`head`, unique row slugs, settled invariants, and the three
+orphan/tombstone-list shapes.
 
 **Status:** clauses marked **ENFORCED** are pinned by
 `packages/coord-engine/tests/test_output_contract.py` and CI-failing;

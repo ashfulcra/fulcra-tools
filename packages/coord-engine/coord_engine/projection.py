@@ -864,9 +864,8 @@ def build_review_projection(
         log.warn("review projection: prior schema superseded; full rescan",
                  team=team, prior_schema=str(prior.get("schema")))
         prior = {}
-    elif prior and any(generation.review_row_reason(row)
-                       for row in (prior.get("rows") or [])):
-        log.warn("review projection: prior rows malformed; full rescan", team=team)
+    elif prior and generation.validated_review_projection(prior) is None:
+        log.warn("review projection: prior malformed; full rescan", team=team)
         prior = {}
     prior_rows = {str(r.get("name")): r for r in (prior.get("rows") or [])
                   if isinstance(r, dict) and r.get("name")}

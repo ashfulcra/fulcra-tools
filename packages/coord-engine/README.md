@@ -75,8 +75,13 @@ generation bytes, queries one at-least-once `data-updates` window from
 validates every sealed section before a domain handler sees it (including exact
 inventory record shape, namespace, string content, parsed frontmatter, and
 canonical document type), and applies only locally supported task deltas.
-Review projection v3 carries the complete direct-status tally; legacy v2 rows
-and v1 settled caches are rebuilt before they can be sealed as compatible.
+Presence is flat under `presence/`; acknowledgments and responses are one
+slug directory deep under `_coord/acks/` and `_coord/responses/`. The legacy
+singular `response/` path is unsupported. Review projection v3 carries the
+complete direct-status tally; its producer, publication authority, and domain
+consumers share one nested validator for act-on fields, unique row slugs,
+settled invariants, and orphan/tombstone lists. Legacy v2 rows and v1 settled
+caches are rebuilt before they can be sealed as compatible.
 Unsupported deltas, incomplete
 feed coverage, a changed pointer, or an unverified epsilon return typed
 `UNKNOWN` and nonzero; an overlay that was not invoked is `NOT_RUN`, never

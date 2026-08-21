@@ -2855,79 +2855,11 @@ def _pending_reviews_for(
         deadline=deadline, degraded_sink=degraded_sink)
 
 
-#: The only ``state`` values a review projection row may carry — exactly what
-#: ``review.tally`` emits. Anything else is not a recognizable tally and must
-#: fail validation (never be served, never derive coverage).
-_REVIEW_PROJECTION_STATES = (review.PENDING, review.APPROVED, review.CHANGES)
-
-
 def _validated_review_projection(
     section: dict[str, Any],
 ) -> "Optional[tuple[dict[str, dict[str, Any]], list[str], list[str], list[str]]]":
-    """POSITIVELY validate a ``reviews`` projection section's nested data.
-
-    Returns ``(rows_by_name, orphans, orphans_unknown, tombstones)`` only when
-    EVERY served row and slug list matches the schema exactly: ``name`` a
-    non-empty str, ``state`` one of ``review.tally``'s states, ``settled`` a real
-    bool (a truthy ``"false"`` string must never suppress a pending row),
-    ``pending_required`` a list of non-empty strs, and ``of``/``head`` PRESENT
-    keys whose value is a non-empty str or None (v2's act-on-it fields — an
-    absent key is a pre-v2 row and the section is malformed); the three slug
-    lists are lists of non-empty strs (absent -> empty). Producer INVARIANTS are enforced too
-    (round-3 P1b) — reconcile can produce neither a duplicate ``name`` (rows key
-    on the listing) nor ``settled: true`` outside a terminal
-    APPROVED-with-nothing-pending tally — so a duplicate row (last-write-wins
-    would let a later settled row silently replace a pending one) or an
-    impossible settled combination is malformed, never served. ANY violation
-    returns None — the caller then emits "projection malformed" and raw-scans,
-    loudly. Validation runs BEFORE any coverage or row is derived (round-2 P1: a
-    consumer that tolerates malformed nested values serves them silently, which
-    contradicts the loud-fallback contract)."""
-    proj_rows = section.get("rows")
-    if not isinstance(proj_rows, list):
-        return None
-    by_name: dict[str, dict[str, Any]] = {}
-    for r in proj_rows:
-        if not isinstance(r, dict):
-            return None
-        if generation.review_row_reason(r):
-            return None
-        name = r.get("name")
-        if not isinstance(name, str) or not name:
-            return None
-        if r.get("state") not in _REVIEW_PROJECTION_STATES:
-            return None
-        if not isinstance(r.get("settled"), bool):
-            return None
-        pending = r.get("pending_required")
-        if not isinstance(pending, list) or not all(
-                isinstance(x, str) and x for x in pending):
-            return None
-        for key in ("of", "head"):
-            # v2 act-on-it fields (OC5/C01): the KEY must exist on every row —
-            # None is the honest "the register doc lacks it" value, but an
-            # ABSENT key means a pre-v2 row leaked into a v2 section, and
-            # serving it would re-open the second-lookup gap this schema closed.
-            if key not in r:
-                return None
-            val = r[key]
-            if val is not None and not (isinstance(val, str) and val):
-                return None
-        if r["settled"] and (r["state"] != review.APPROVED or pending):
-            return None  # settled is ONLY a terminal APPROVED-nothing-pending
-        if name in by_name:
-            return None  # duplicate name: last-write-wins could hide work
-        by_name[name] = r
-    slug_lists: list[list[str]] = []
-    for key in ("orphans", "orphans_unknown", "tombstones"):
-        val = section.get(key)
-        if val is None:
-            val = []
-        if not isinstance(val, list) or not all(
-                isinstance(s, str) and s for s in val):
-            return None
-        slug_lists.append(val)
-    return by_name, slug_lists[0], slug_lists[1], slug_lists[2]
+    """Use the shared review-v3 validator used by producer and authority."""
+    return generation.validated_review_projection(section)
 
 
 def _pending_reviews_from_projection(

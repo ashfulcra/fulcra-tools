@@ -1370,7 +1370,7 @@ def _fixed_section_state(name: str, value: Any, *, deadline: Deadline) -> str:
         valid = (value.get("schema") == projection_mod.REVIEWS_SCHEMA
                  and value.get("complete") is True
                  and isinstance(rows, list)
-                 and all(not generation.review_row_reason(row) for row in rows))
+                 and generation.validated_review_projection(value) is not None)
         populated = bool(rows) if valid else False
     elif name == "forge":
         responsible, feedback = value.get("responsible"), value.get("feedback")
@@ -1423,7 +1423,8 @@ def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
         out[name] = generation.SectionResult(name, state, value)
     inventories = {
         "roles": f"team/{team}/roles/", "presence": f"team/{team}/presence/",
-        "acknowledgments": f"team/{team}/_coord/acks/", "responses": f"team/{team}/response/",
+        "acknowledgments": f"team/{team}/_coord/acks/",
+        "responses": f"team/{team}/_coord/responses/",
     }
     for name, prefix in inventories.items():
         deadline = _section_deadline(name)

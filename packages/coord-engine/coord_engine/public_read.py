@@ -107,7 +107,7 @@ class SealedGenerationTransport:
             f"team/{team}/roles/": "roles",
             f"team/{team}/presence/": "presence",
             f"team/{team}/_coord/acks/": "acknowledgments",
-            f"team/{team}/response/": "responses",
+            f"team/{team}/_coord/responses/": "responses",
         }
         self._records: dict[str, str] = {}
         for prefix, section_name in self._prefix_sections.items():
@@ -219,10 +219,8 @@ def _section_value_reason(team: str, name: str, value: Any) -> str:
             return f"reviews projection schema unsupported: {value.get('schema')}"
         if value.get("complete") is not True or not isinstance(value.get("rows"), list):
             return "reviews projection incomplete or rows invalid"
-        for index, row in enumerate(value["rows"]):
-            reason = generation.review_row_reason(row)
-            if reason:
-                return f"reviews projection row {index} {reason}"
+        if generation.validated_review_projection(value) is None:
+            return "reviews projection nested structure invalid"
         return ""
     if name == "forge":
         if value.get("schema") != generation.FORGE_PROJECTION_SCHEMA:

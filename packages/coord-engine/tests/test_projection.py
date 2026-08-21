@@ -347,6 +347,29 @@ def test_v2_prior_row_without_tally_is_rebuilt_under_v3_schema():
     assert row["tally"]["pending_required"] == []
 
 
+def test_malformed_v3_prior_missing_act_on_fields_is_rebuilt_not_carried():
+    t = CountingTransport()
+    _put_review(
+        t, "missing-fields", "alice", verdicts=[("alice", "approve")],
+        of="task/a",
+    )
+    prior = _build_reviews(t)
+    prior = deepcopy(prior)
+    prior["rows"][0].pop("of")
+    prior["rows"][0].pop("head")
+    t.reset_counts()
+
+    rebuilt = projection.build_review_projection(
+        t, TEAM, now=_now_iso(), prior=prior, settled_index=set(),
+        deadline=budget.Deadline(None), feed_changes=[],
+    )
+
+    row = rebuilt["rows"][0]
+    assert row["of"] == "task/a"
+    assert row["head"] == _HEAD
+    assert f"team/{TEAM}/review/missing-fields.md" in t.reads
+
+
 def test_settled_marker_shortcut_rebuilds_a_full_v3_tally():
     t = FakeTransport()
     _put_review(t, "marker-row", "alice", verdicts=[("alice", "approve")])

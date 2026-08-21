@@ -92,8 +92,9 @@ class FakeTransport:
         team = next((path.split("/", 2)[1] for path in self.store
                      if path.startswith("team/") and path.count("/") >= 2), "r")
         self._synthetic_detector_config = json.dumps({"data_type": COORDINATION_TYPE})
-        prefixes = ("task/", "review/", "roles/", "presence/", "response/",
-                    "_coord/acks/", "_coord/forge/", "directive/")
+        prefixes = ("task/", "review/", "roles/", "presence/",
+                    "_coord/responses/", "_coord/acks/", "_coord/forge/",
+                    "directive/")
         changes = []
         for path in sorted(self.store):
             relative = path.removeprefix(f"team/{team}/")

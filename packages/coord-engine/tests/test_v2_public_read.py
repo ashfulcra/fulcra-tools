@@ -11,7 +11,7 @@ import pytest
 from coord_engine import __version__, generation, okf, public_read, tasks
 from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
 from coord_engine.generation import SectionResult
-from coord_engine_test_helpers import FakeTransport
+from coord_engine_test_helpers import FakeTransport, needs_me_rows
 
 
 TEAM = "r"
@@ -280,7 +280,7 @@ def test_malformed_sealed_inventory_is_unknown_and_never_runs_overlay(
      {"type": "Presence", "agent": "alice"}),
     ("acknowledgments", f"team/{TEAM}/_coord/acks/a/alice.md",
      {"type": "Ack", "agent": "alice"}),
-    ("responses", f"team/{TEAM}/response/a.md",
+    ("responses", f"team/{TEAM}/_coord/responses/a/one.md",
      {"type": "Response", "agent": "alice", "outcome": "done"}),
 ])
 def test_every_inventory_section_rejects_non_string_content(
@@ -299,6 +299,61 @@ def test_every_inventory_section_rejects_non_string_content(
     assert f"{section_name} inventory record 0 content must be a string" in (
         result.coverage_by_surface("immutable-generation").reason or ""
     )
+
+
+def test_canonical_response_inventory_is_served_from_the_sealed_generation():
+    path = (
+        f"team/{TEAM}/_coord/responses/task-1/"
+        "20260821T010000Z-alice.md"
+    )
+    record = _record(path, {
+        "type": "Response", "agent": "alice", "outcome": "done",
+    }, "handled")
+    t = OverlayTransport()
+    _publish(t, values_override={"responses": {"records": [record]}})
+
+    authority = _read(t)
+
+    assert authority.rc == 0
+    sealed = public_read.SealedGenerationTransport(t, TEAM, authority)
+    assert sealed.read(path) == record["content"]
+    listing = sealed.list_dir(f"team/{TEAM}/_coord/responses/task-1/")
+    assert [(item["name"], item["is_dir"]) for item in listing] == [
+        ("20260821T010000Z-alice.md", False),
+    ]
+
+
+@pytest.mark.parametrize(("section_name", "path", "frontmatter"), [
+    ("presence", f"team/{TEAM}/presence/subdir/alice.md",
+     {"type": "Presence", "agent": "alice"}),
+    ("presence", f"team/{TEAM}/presence/alice.txt",
+     {"type": "Presence", "agent": "alice"}),
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/alice.md",
+     {"type": "Ack", "agent": "alice"}),
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/task-1/alice.txt",
+     {"type": "Ack", "agent": "alice"}),
+    ("responses", f"team/{TEAM}/_coord/responses/alice.md",
+     {"type": "Response", "agent": "alice", "outcome": "done"}),
+    ("responses", f"team/{TEAM}/_coord/responses/task-1/alice.txt",
+     {"type": "Response", "agent": "alice", "outcome": "done"}),
+])
+def test_public_authority_rejects_wrong_inventory_depth_or_extension(
+    section_name, path, frontmatter,
+):
+    content = okf.render_frontmatter(frontmatter) + "\nrecord\n"
+    t = OverlayTransport()
+    sealed = _publish(t)
+    _replace_section_value(t, sealed, section_name, {"records": [{
+        "path": path,
+        "content": content,
+        "frontmatter": okf.parse_frontmatter(content),
+    }]})
+
+    result = _read(t)
+
+    assert result.rc == 3
+    assert result.state.value == "UNKNOWN"
+    assert t.feed_starts == []
 
 
 @pytest.mark.parametrize(("section_name", "argv"), [
@@ -327,6 +382,59 @@ def test_affected_public_folds_surface_malformed_inventory_at_top_level(
     assert rc == 3
     assert payload["state"] == "UNKNOWN"
     assert payload["result"] is None
+    assert t.feed_starts == []
+
+
+def _valid_review_projection_row(name="pr1"):
+    return {
+        "name": name, "state": "PENDING", "settled": False,
+        "pending_required": ["alice"], "required": ["alice"],
+        "requested_by": "bob", "artifact": None,
+        "of": "task/a", "head": "a" * 40, "mtime": None, "size": None,
+        "tally": {
+            "state": "PENDING", "approvals": [], "changes": [],
+            "required": ["alice"], "pending_required": ["alice"],
+            "evidence": "proof", "of": "task/a", "head": "a" * 40,
+        },
+    }
+
+
+def _valid_review_projection_value():
+    return {
+        "schema": generation.REVIEW_PROJECTION_SCHEMA,
+        "generated_at": WATERMARK,
+        "complete": True,
+        "scanned": 1,
+        "total": 1,
+        "rows": [_valid_review_projection_row()],
+        "orphans": [],
+        "orphans_unknown": [],
+        "tombstones": [],
+    }
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda value: value["rows"][0].pop("of"),
+    lambda value: value["rows"][0].pop("head"),
+    lambda value: value["rows"].append(_valid_review_projection_row()),
+    lambda value: value["rows"][0].update({
+        "settled": True, "state": "PENDING",
+    }),
+    lambda value: value.update({"orphans": "pr1"}),
+    lambda value: value.update({"orphans_unknown": [""]}),
+    lambda value: value.update({"tombstones": {"pr1": True}}),
+])
+def test_public_authority_rejects_malformed_review_v3_before_overlay(mutate):
+    value = _valid_review_projection_value()
+    mutate(value)
+    t = OverlayTransport()
+    sealed = _publish(t)
+    _replace_section_value(t, sealed, "reviews", value)
+
+    result = _read(t)
+
+    assert result.rc == 3
+    assert result.state.value == "UNKNOWN"
     assert t.feed_starts == []
 
 
@@ -582,7 +690,7 @@ class CanonicalPoisonTransport(OverlayTransport):
         f"team/{TEAM}/presence/",
         f"team/{TEAM}/review/",
         f"team/{TEAM}/_coord/acks/",
-        f"team/{TEAM}/response/",
+        f"team/{TEAM}/_coord/responses/",
     )
 
     def list_dir(self, path):
@@ -671,6 +779,29 @@ def test_non_task_public_folds_read_the_sealed_generation_not_live_canonical(
     assert review_payload["result"] == {
         **review_tally, "team": TEAM, "slug": "pr1", "contract": 2,
     }
+
+
+def test_needs_me_serves_validated_review_v3_without_reopening_live_review(
+    capsys, monkeypatch,
+):
+    from coord_engine import cli
+
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    reviews = _valid_review_projection_value()
+    t = CanonicalPoisonTransport()
+    t.poisoned = False
+    _publish(t, values_override={"reviews": reviews})
+    t.poisoned = True
+
+    rc = cli.main([
+        "needs-me", TEAM, "--agent", "alice", "--json",
+    ], transport=t)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    rows = needs_me_rows(payload["result"])
+    assert any(row.get("type") == "review-pending"
+               and row.get("name") == "pr1" for row in rows)
 
 
 def test_generation_backed_checked_truncation_is_top_level_unknown(
