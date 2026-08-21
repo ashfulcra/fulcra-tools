@@ -76,8 +76,11 @@ validates every sealed section before a domain handler sees it (including exact
 inventory record shape, namespace, string content, parsed frontmatter, and
 canonical document type), and applies only locally supported task deltas.
 Presence is flat under `presence/`; acknowledgments and responses are one
-slug directory deep under `_coord/acks/` and `_coord/responses/`. The legacy
-singular `response/` path is unsupported. Review projection v3 carries the
+slug directory deep under `_coord/acks/` and `_coord/responses/`. Slugs match
+`[a-z0-9]+(?:-[a-z0-9]+)*`; leaf names start alphanumeric, use only
+alphanumerics/`_`/`-`, and end in one final `.md`. Dot/traversal segments,
+file-shaped intermediate components, hidden leaves, and the legacy singular
+`response/` path are unsupported. Review projection v3 carries the
 complete direct-status tally; its producer, publication authority, and domain
 consumers share one nested validator for act-on fields, unique row slugs,
 settled invariants, and orphan/tombstone lists. Legacy v2 rows and v1 settled
@@ -201,8 +204,15 @@ acknowledgments/responses, and projection metadata. `CLEAR`, `DATA`,
 `UNKNOWN`, and `NOT_RUN` are distinct facts: any malformed envelope, timeout,
 permission/read doubt, incomplete namespace, or unsupported team path is
 `UNKNOWN`, triggers the named full-scan recovery, and never advances the
-watermark. A record count only triggers one bounded cursor read to materialize
-immutable record identities; no identity is inferred from a count. The concrete
+watermark. A record count is only a zero/nonzero detector signal, never a
+cardinality, threshold, diff, or identity. Persistent live pairs of reported
+count to enumerated identities (`2721 -> 9`, `1444 -> 0`, `2737 -> 25`) make
+numeric equality invalid. A positive signal must materialize at least one
+immutable identity in one bounded attested cursor read or coverage is
+`UNKNOWN`; a zero signal becomes CLEAR only when that cursor window proves it.
+Bootstrap without a prior record boundary reports record coverage `NOT_RUN`
+and lets the named canonical recovery pass establish the inventory; a public
+overlay has no such recovery licence and remains nonzero. The concrete
 count key always comes from the stored `_coord/bus-v3/records.json` authority:
 the host-local `COORD_RECORDS_TYPE` writer/test override cannot redirect
 detection. That authority read and its optional one retry spend the detector's

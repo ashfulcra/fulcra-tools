@@ -120,13 +120,20 @@ timestamps, deduplicates by immutable update identity, and sorts deterministical
 
 Record namespaces are different from file changes: `data-updates` file-change
 rows carry identities, but record changes are reported only as
-`{data_type: count}`. A nonzero count for a coordination channel is therefore a
-detection signal only. The detector MUST
-materialize identities with one bounded channel read using the queue's existing
-cursor contract before it deduplicates those records. If that read cannot prove
-its boundary or fit the remaining budget, coverage for the record namespace is
-`UNKNOWN`; the count alone is never promoted into an identity or a complete
-change batch.
+`{data_type: count}`. The count is only a zero/nonzero detection signal, never
+cardinality, a magnitude threshold, a diff, or an identity. Persistent live
+measurements include `2721 -> 9`, `1444 -> 0`, and `2737 -> 25` reported-count
+to enumerated-identity pairs, so equality or count subtraction is invalid.
+For a nonzero coordination signal, the detector MUST materialize identities
+with one bounded channel read using the queue's existing cursor contract before
+it deduplicates those records. A positive signal whose enumeration is missing
+or empty is `UNKNOWN`, not a silent no-op. A reported zero is not proof either:
+only an attested empty cursor window establishes CLEAR. Bootstrap without a
+prior record boundary reports that surface `NOT_RUN` and delegates to the named
+canonical recovery pass; an ordinary public overlay has no recovery licence.
+If enumeration cannot prove its boundary or fit the remaining budget, coverage
+for the record namespace is `UNKNOWN`; the count alone is never promoted into
+an identity or a complete change batch.
 
 The detector assigns every recognized update to a namespace:
 
@@ -291,7 +298,10 @@ The suite MUST pin every previously observed failure flavor:
 | Two builders consume identical batch | identical generation id and bytes |
 | Projection row contradicts canonical changed doc | overlay applies delta or returns `UNKNOWN` |
 | Renderer truncates rows | coverage and exit status remain truthful |
-| Record namespace reports only a count | identities materialized by one bounded channel read, or record coverage `UNKNOWN` |
+| Record count disagrees with attested enumeration (`2721 -> 9`, `2737 -> 25`) | enumerated immutable identities decide DATA; numeric count equality, subtraction, and thresholds are never authority |
+| Record count is positive but enumeration is absent/empty (`1444 -> 0`) | record coverage `UNKNOWN`, no publish/clean overlay, nonzero |
+| Record count is zero | zero alone proves nothing; an attested empty cursor window may establish CLEAR, otherwise `NOT_RUN`/`UNKNOWN` and never a clean public overlay |
+| Ack/response inventory contains dot/traversal, file-shaped slug, hidden leaf, wrong depth, or invalid extension | immutable-generation coverage `UNKNOWN`, freshness overlay `NOT_RUN`, nonzero |
 | Canonical document is written but not yet visible in the feed | exclude wall-clock now from the bounded-staleness claim; report the coverage horizon, or return `UNKNOWN` if the lag bound is unproven |
 | `continuity park` sees a held role lease with no role document | nonzero; report could-not-write distinctly from nothing-to-write; never success-shaped |
 | Role status derives a holder from lease fallback but `continuity park` would refuse that same role | status and park use one holder fact or return `UNKNOWN`; readers and writers cannot disagree |

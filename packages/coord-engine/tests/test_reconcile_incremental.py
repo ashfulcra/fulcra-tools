@@ -97,6 +97,12 @@ class CountingTransport:
             return json.dumps({"data_type": COORDINATION_TYPE}), "ok"
         return None, "absent"
 
+    def records_cursor(self, _data_type, since, *, deadline=None):
+        """Attest the empty synthetic record window used by feed fixtures."""
+        if not isinstance(since, str):
+            return None
+        return {"after": since, "through": since, "records": []}
+
     def list_dir(self, prefix):
         self.lists.append(prefix)
         if self.fail_list:

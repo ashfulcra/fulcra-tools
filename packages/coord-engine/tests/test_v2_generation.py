@@ -320,6 +320,8 @@ def test_canonical_presence_ack_and_response_inventories_seal_as_data():
      "---\ntype: Presence\nagent: amy\n---\n"),
     ("presence", "presence/amy.txt",
      "---\ntype: Presence\nagent: amy\n---\n"),
+    ("presence", "presence/.hidden.md",
+     "---\ntype: Presence\nagent: amy\n---\n"),
     ("acknowledgments", "_coord/acks/amy.md",
      "---\ntype: Ack\nagent: amy\n---\n"),
     ("acknowledgments", "_coord/acks/task-1/amy.txt",
@@ -328,8 +330,24 @@ def test_canonical_presence_ack_and_response_inventories_seal_as_data():
      "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
     ("responses", "_coord/responses/task-1/amy.txt",
      "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("acknowledgments", "_coord/acks/../amy.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/./amy.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/task.md/amy.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("acknowledgments", "_coord/acks/task-1/.hidden.md",
+     "---\ntype: Ack\nagent: amy\n---\n"),
+    ("responses", "_coord/responses/../amy.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("responses", "_coord/responses/./amy.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("responses", "_coord/responses/task.md/amy.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
+    ("responses", "_coord/responses/task-1/.hidden.md",
+     "---\ntype: Response\nagent: amy\noutcome: done\n---\n"),
 ])
-def test_flat_inventory_namespaces_reject_wrong_depth_or_extension(
+def test_flat_inventory_namespaces_reject_noncanonical_components(
     section, relative_path, document,
 ):
     sections = _generation_sections_for_inventory_documents({

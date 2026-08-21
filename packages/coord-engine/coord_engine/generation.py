@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import re
 from typing import Any, Mapping, Optional
 
 from . import __version__
@@ -38,6 +39,8 @@ INVENTORY_PREFIXES = {
     "acknowledgments": "_coord/acks/",
     "responses": "_coord/responses/",
 }
+_CANONICAL_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_CANONICAL_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.md")
 
 
 def inventory_prefix(team: str, section: str) -> Optional[str]:
@@ -47,6 +50,16 @@ def inventory_prefix(team: str, section: str) -> Optional[str]:
 
 def _nonempty_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _canonical_slug(value: str) -> bool:
+    """A generated task/directive slug is lowercase words joined by hyphens."""
+    return _CANONICAL_SLUG.fullmatch(value) is not None
+
+
+def _canonical_filename(value: str) -> bool:
+    """Inventory leaves are visible, flat, extension-final markdown names."""
+    return _CANONICAL_FILENAME.fullmatch(value) is not None
 
 
 def canonical_inventory_document(
@@ -76,18 +89,16 @@ def canonical_inventory_document(
             return doc_type == "Escalation"
         return False
     if section == "presence":
-        return (len(parts) == 1 and parts[0].endswith(".md")
-                and len(parts[0]) > len(".md") and doc_type == "Presence"
+        return (len(parts) == 1 and _canonical_filename(parts[0])
+                and doc_type == "Presence"
                 and _nonempty_text(document.get("agent")))
     if section == "acknowledgments":
-        return (len(parts) == 2 and bool(parts[0])
-                and parts[1].endswith(".md")
-                and len(parts[1]) > len(".md") and doc_type == "Ack"
+        return (len(parts) == 2 and _canonical_slug(parts[0])
+                and _canonical_filename(parts[1]) and doc_type == "Ack"
                 and _nonempty_text(document.get("agent")))
     if section == "responses":
-        return (len(parts) == 2 and bool(parts[0])
-                and parts[1].endswith(".md")
-                and len(parts[1]) > len(".md") and doc_type == "Response"
+        return (len(parts) == 2 and _canonical_slug(parts[0])
+                and _canonical_filename(parts[1]) and doc_type == "Response"
                 and _nonempty_text(document.get("agent"))
                 and _nonempty_text(document.get("outcome")))
     return False

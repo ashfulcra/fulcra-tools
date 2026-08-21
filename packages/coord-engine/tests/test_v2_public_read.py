@@ -18,6 +18,7 @@ TEAM = "r"
 NOW = datetime(2026, 8, 21, 1, 0, tzinfo=timezone.utc)
 WATERMARK = "2026-08-21T00:30:00Z"
 HORIZON = "2026-08-21T00:59:30Z"
+_DEFAULT_RECORD_WINDOW = object()
 OVERLAP_START = "2026-08-21T00:29:30Z"
 
 
@@ -58,7 +59,7 @@ class OverlayTransport(FakeTransport):
     public_read_epsilon_seconds = 30.0
     public_read_epsilon_verified = True
 
-    def __init__(self, envelope=None):
+    def __init__(self, envelope=None, *, record_window=_DEFAULT_RECORD_WINDOW):
         super().__init__()
         self.envelope = envelope if envelope is not None else {
             "after": OVERLAP_START,
@@ -67,6 +68,12 @@ class OverlayTransport(FakeTransport):
             "file_changes": [],
         }
         self.feed_starts = []
+        self.record_calls = 0
+        self.record_window = (
+            {"after": self.envelope.get("after", OVERLAP_START),
+             "through": self.envelope.get("through", HORIZON), "records": []}
+            if record_window is _DEFAULT_RECORD_WINDOW else record_window
+        )
 
     def data_updates(self, since, *, deadline=None):
         self.feed_starts.append(since)
@@ -74,6 +81,10 @@ class OverlayTransport(FakeTransport):
             "data_type": "MomentAnnotation/test-reconcile",
         })
         return self.envelope
+
+    def records_cursor(self, _channel, _since, *, deadline=None):
+        self.record_calls += 1
+        return self.record_window
 
 
 def _publish(t, *, rows=(), watermark=WATERMARK, values_override=None):
@@ -301,25 +312,29 @@ def test_every_inventory_section_rejects_non_string_content(
     )
 
 
-def test_canonical_response_inventory_is_served_from_the_sealed_generation():
-    path = (
-        f"team/{TEAM}/_coord/responses/task-1/"
-        "20260821T010000Z-alice.md"
-    )
-    record = _record(path, {
-        "type": "Response", "agent": "alice", "outcome": "done",
-    }, "handled")
+@pytest.mark.parametrize(("section_name", "path", "frontmatter", "body"), [
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/task-1/alice.md",
+     {"type": "Ack", "agent": "alice"}, "seen"),
+    ("responses",
+     f"team/{TEAM}/_coord/responses/task-1/20260821T010000Z-alice.md",
+     {"type": "Response", "agent": "alice", "outcome": "done"},
+     "handled"),
+])
+def test_canonical_ack_and_response_inventories_are_served_from_sealed_generation(
+    section_name, path, frontmatter, body,
+):
+    record = _record(path, frontmatter, body)
     t = OverlayTransport()
-    _publish(t, values_override={"responses": {"records": [record]}})
+    _publish(t, values_override={section_name: {"records": [record]}})
 
     authority = _read(t)
 
     assert authority.rc == 0
     sealed = public_read.SealedGenerationTransport(t, TEAM, authority)
     assert sealed.read(path) == record["content"]
-    listing = sealed.list_dir(f"team/{TEAM}/_coord/responses/task-1/")
+    listing = sealed.list_dir(path.rsplit("/", 1)[0] + "/")
     assert [(item["name"], item["is_dir"]) for item in listing] == [
-        ("20260821T010000Z-alice.md", False),
+        (path.rsplit("/", 1)[1], False),
     ]
 
 
@@ -327,6 +342,8 @@ def test_canonical_response_inventory_is_served_from_the_sealed_generation():
     ("presence", f"team/{TEAM}/presence/subdir/alice.md",
      {"type": "Presence", "agent": "alice"}),
     ("presence", f"team/{TEAM}/presence/alice.txt",
+     {"type": "Presence", "agent": "alice"}),
+    ("presence", f"team/{TEAM}/presence/.hidden.md",
      {"type": "Presence", "agent": "alice"}),
     ("acknowledgments", f"team/{TEAM}/_coord/acks/alice.md",
      {"type": "Ack", "agent": "alice"}),
@@ -336,8 +353,24 @@ def test_canonical_response_inventory_is_served_from_the_sealed_generation():
      {"type": "Response", "agent": "alice", "outcome": "done"}),
     ("responses", f"team/{TEAM}/_coord/responses/task-1/alice.txt",
      {"type": "Response", "agent": "alice", "outcome": "done"}),
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/../alice.md",
+     {"type": "Ack", "agent": "alice"}),
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/./alice.md",
+     {"type": "Ack", "agent": "alice"}),
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/task.md/alice.md",
+     {"type": "Ack", "agent": "alice"}),
+    ("acknowledgments", f"team/{TEAM}/_coord/acks/task-1/.hidden.md",
+     {"type": "Ack", "agent": "alice"}),
+    ("responses", f"team/{TEAM}/_coord/responses/../alice.md",
+     {"type": "Response", "agent": "alice", "outcome": "done"}),
+    ("responses", f"team/{TEAM}/_coord/responses/./alice.md",
+     {"type": "Response", "agent": "alice", "outcome": "done"}),
+    ("responses", f"team/{TEAM}/_coord/responses/task.md/alice.md",
+     {"type": "Response", "agent": "alice", "outcome": "done"}),
+    ("responses", f"team/{TEAM}/_coord/responses/task-1/.hidden.md",
+     {"type": "Response", "agent": "alice", "outcome": "done"}),
 ])
-def test_public_authority_rejects_wrong_inventory_depth_or_extension(
+def test_public_authority_rejects_noncanonical_inventory_components(
     section_name, path, frontmatter,
 ):
     content = okf.render_frontmatter(frontmatter) + "\nrecord\n"
@@ -354,6 +387,7 @@ def test_public_authority_rejects_wrong_inventory_depth_or_extension(
     assert result.rc == 3
     assert result.state.value == "UNKNOWN"
     assert t.feed_starts == []
+    assert result.coverage_by_surface("freshness-overlay").state.value == "NOT_RUN"
 
 
 @pytest.mark.parametrize(("section_name", "argv"), [
@@ -468,6 +502,33 @@ def test_feed_that_does_not_attest_the_overlap_or_horizon_is_unknown():
         assert result.rc == 3
         assert result.coverage_horizon is None
         assert expected in (result.coverage_by_surface("freshness-overlay").reason or "")
+
+
+@pytest.mark.parametrize("record_window", [
+    None,
+    {"after": OVERLAP_START, "through": HORIZON, "records": []},
+])
+def test_nonzero_coordination_signal_without_enumerated_records_is_unknown(
+    record_window,
+):
+    """Measured nonzero count plus no identities must never become clean."""
+    t = OverlayTransport({
+        "after": OVERLAP_START,
+        "through": HORIZON,
+        "data_types": {"MomentAnnotation/test-reconcile": 1444},
+        "file_changes": [],
+    }, record_window=record_window)
+    _publish(t)
+
+    result = _read(t)
+
+    assert t.record_calls == 1
+    assert result.rc == 3
+    assert result.state.value == "UNKNOWN"
+    assert result.coverage_horizon is None
+    overlay = result.coverage_by_surface("freshness-overlay")
+    assert overlay.state.value == "UNKNOWN"
+    assert "feed coverage UNKNOWN" in (overlay.reason or "")
 
 
 def test_supported_task_delta_is_applied_and_overlap_redelivery_is_idempotent():

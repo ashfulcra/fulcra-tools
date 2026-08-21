@@ -529,6 +529,15 @@ def read_current(
             ), sections=section_values,
             generation_id=generation_id, watermark=watermark_text,
         )
+    if any(getattr(state, "value", state) not in generation.COMPLETE_STATES
+           for state in batch.coverage.values()):
+        return _unknown(
+            coverage=_coverage(
+                CoverageState.CLEAR, CoverageState.CLEAR, CoverageState.UNKNOWN,
+                overlay_reason="freshness overlay coverage was not run to completion",
+            ), sections=section_values,
+            generation_id=generation_id, watermark=watermark_text,
+        )
     attested, reason = _envelope_attests_window(
         batch.envelope, start=start, horizon=horizon,
     )

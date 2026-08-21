@@ -670,8 +670,21 @@ it (not on PyPI).
     inventory records cannot be missing, malformed, outside their canonical
     namespace, or non-string, and content/frontmatter/type must agree. Presence
     is exactly `presence/<file>.md`; acknowledgments and responses are exactly
-    `_coord/acks/<slug>/<file>.md` and `_coord/responses/<slug>/<file>.md` — the
-    legacy singular `response/` namespace is not authoritative coverage.
+    `_coord/acks/<slug>/<file>.md` and `_coord/responses/<slug>/<file>.md`.
+    Canonical slugs match `[a-z0-9]+(?:-[a-z0-9]+)*`; canonical leaf names
+    start with an alphanumeric, contain only alphanumerics/`_`/`-`, and end in
+    one final `.md`. Dot/traversal segments, file-shaped intermediate
+    components, hidden leaves, and the legacy singular `response/` namespace
+    are not authoritative coverage.
+    `data-updates` record counts are detector signals only, never cardinality,
+    a diff, a threshold, or an identity. Live measurements persistently showed
+    `2721 -> 9`, `1444 -> 0`, and `2737 -> 25` count/enumeration pairs. A
+    positive signal therefore requires a bounded attested enumeration with at
+    least one immutable identity; positive-with-none is `UNKNOWN`/nonzero. A
+    zero signal is not proof of CLEAR: a bounded enumeration must prove the
+    window, or bootstrap reports record coverage `NOT_RUN` and uses the named
+    canonical recovery pass. The public-read overlay has no recovery licence,
+    so NOT_RUN/UNKNOWN coverage stays nonzero.
     Review projection v3 rows carry the full direct-query tally; one shared
     validator requires `of`/`head`, unique row slugs, settled invariants, and
     all three orphan/tombstone slug lists before producer carry, publication,

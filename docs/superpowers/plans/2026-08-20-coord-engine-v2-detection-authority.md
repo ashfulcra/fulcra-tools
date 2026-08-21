@@ -171,7 +171,7 @@ unreadable, and unsupported inputs never collapse into one another.
 ## Unit 3: Normalized Change Detector
 
 **Invariant:** Ordinary detection consumes one normalized feed batch; record
-counts are only triggers for bounded identity materialization.
+counts are only zero/nonzero detector signals, never magnitude or identity.
 
 **Files:**
 
@@ -186,9 +186,11 @@ counts are only triggers for bounded identity materialization.
 - [ ] Write red tests for envelope validation, namespace coverage, immutable
   identity dedup, deterministic sorting, budget expiry, unknown namespaces, and
   no-envelope transport failures.
-- [ ] Write the record-count test: a coordination-channel count invokes exactly
-  one bounded cursor read; missing identities or an unproven boundary yields
-  record coverage `UNKNOWN`.
+- [ ] Write the record-count tests: measured nonzero/enumeration disagreements
+  (`2721 -> 9`, `2737 -> 25`) trust the attested immutable identities rather
+  than numeric equality; positive-with-none (`1444 -> 0`) and an unproven
+  boundary yield record coverage `UNKNOWN`. A zero count is not proof of CLEAR:
+  an attested empty cursor window or the named bootstrap recovery is required.
 - [ ] Implement `ChangeDetector.poll(...) -> ChangeBatch` and transport seams.
 - [ ] Adapt reconcile incremental discovery to consume `ChangeBatch`; retain the
   named full-scan recovery and periodic drift check on any doubt.

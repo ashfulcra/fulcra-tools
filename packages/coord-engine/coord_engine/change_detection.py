@@ -155,14 +155,16 @@ def _file_identity(row: Mapping[str, Any]) -> Optional[str]:
 
 
 def _record_window(
-    value: Any, *, prior_watermark: Optional[str], count: int,
+    value: Any, *, prior_watermark: Optional[str],
 ) -> Optional[tuple[str, list[Mapping[str, Any]]]]:
     """Accept only a server-attested, exact record cursor window.
 
     The detector cannot turn a local observation time into a cursor boundary.
     ``after`` must prove the requested boundary, ``through`` must prove the
-    returned horizon, and the number of raw rows must exactly match the count
-    signal before any immutable-id deduplication occurs.
+    returned horizon, and raw rows must carry their own identities. The
+    ``data_types`` count is only a detector signal: production measurements show
+    it persistently disagrees with cursor enumeration, so it is never an exact
+    cardinality, threshold, diff, or substitute identity.
     """
     if not isinstance(value, Mapping) or not isinstance(prior_watermark, str):
         return None
@@ -174,7 +176,7 @@ def _record_window(
     end = _instant({"uploaded_at": through}, "uploaded")
     if requested is None or start is None or end is None or start[0] != requested[0] or end[0] < start[0]:
         return None
-    if len(rows) != count or any(not isinstance(row, Mapping) for row in rows):
+    if any(not isinstance(row, Mapping) for row in rows):
         return None
     for row in rows:
         at = _instant({"uploaded_at": row.get("recorded_at")}, "uploaded")
@@ -282,7 +284,16 @@ class ChangeDetector:
         if record_count is None:
             return _unknown()
         channel, count = record_count
-        if count:
+        # A cursor window needs a prior boundary.  On bootstrap, a zero signal
+        # cannot supply one and therefore cannot claim CLEAR; the named recovery
+        # scan may establish canonical section coverage later in the pipeline.
+        # A positive signal without a boundary is UNKNOWN because observed data
+        # could not be materialized.
+        if prior_watermark is None:
+            if count > 0:
+                return _unknown()
+            coverage["acknowledgments_responses"] = Coverage.NOT_RUN
+        else:
             if deadline.expired():
                 return _unknown()
             materialize = getattr(self.transport, "records_cursor", None)
@@ -294,11 +305,16 @@ class ChangeDetector:
                 return _unknown()
             if deadline.expired():
                 return _unknown()
-            window = _record_window(cursor, prior_watermark=prior_watermark, count=count)
+            window = _record_window(cursor, prior_watermark=prior_watermark)
             if window is None:
                 return _unknown()
-            _through, rows = window
-            for row in rows:
+            _through, record_rows = window
+            # A positive signal that materializes no identities is an observed
+            # disagreement, not a clean no-op. A zero signal is not proof either:
+            # only this enumerated window can establish CLEAR or DATA.
+            if count > 0 and not record_rows:
+                return _unknown()
+            for row in record_rows:
                 identity = records.immutable_record_identity(row)
                 if identity is None:
                     return _unknown()
@@ -312,7 +328,8 @@ class ChangeDetector:
                     instants[update_id] = instant
                     changes.append(Change(update_id, "record:" + identity, "recorded", at,
                                           "acknowledgments_responses", _freeze(dict(row))))
-            coverage["acknowledgments_responses"] = Coverage.DATA
+            if record_rows:
+                coverage["acknowledgments_responses"] = Coverage.DATA
 
         trusted = not any(value is Coverage.UNKNOWN for value in coverage.values())
         changes.sort(key=lambda change: (instants[change.update_id], change.path, change.update_id))

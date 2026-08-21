@@ -120,6 +120,12 @@ class FakeTransport:
     def records(self, _data_type, _since, _until):
         return []
 
+    def records_cursor(self, _data_type, since, *, deadline=None):
+        """Attest the empty synthetic record window used by reconcile fixtures."""
+        if not isinstance(since, str):
+            return None
+        return {"after": since, "through": since, "records": []}
+
     def write(self, path, content):
         self.store[path] = content
         return True

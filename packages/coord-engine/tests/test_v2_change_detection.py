@@ -13,19 +13,24 @@ CHECKPOINT_TYPE = "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49"
 LIVE_ENVELOPE_FIXTURE = (
     Path(__file__).parent / "fixtures" / "live_data_updates_2026-08-20T2013Z.min.json"
 )
+_DEFAULT_RECORD_WINDOW = object()
 
 
 class FeedTransport:
     """Small real-boundary double: one envelope call and optional record cursor."""
 
     def __init__(
-        self, envelope, records=None, *, data_type=COORDINATION_TYPE,
+        self, envelope, records=_DEFAULT_RECORD_WINDOW, *, data_type=COORDINATION_TYPE,
         supply_default_count=True,
     ):
         if isinstance(envelope, dict) and supply_default_count and "data_types" not in envelope:
             envelope = {"data_types": {data_type: 0}, **envelope}
         self.envelope = envelope
-        self.record_rows = records
+        self.record_rows = (
+            {"after": "2026-08-20T11:00:00Z",
+             "through": "2026-08-20T12:00:00Z", "records": []}
+            if records is _DEFAULT_RECORD_WINDOW else records
+        )
         self.data_type = data_type
         self.feed_calls = 0
         self.record_calls = 0
@@ -320,8 +325,8 @@ def test_expired_budget_and_unknown_path_make_coverage_unknown():
     assert unknown.coverage["unknown_unsupported"].value == "UNKNOWN"
 
 
-def test_nonzero_record_count_materializes_real_identities_once_before_dedupe():
-    """A count is a trigger, never an identity; a short cursor response is UNKNOWN."""
+def test_record_count_is_only_a_signal_and_never_an_identity_or_magnitude():
+    """Measured counts disagree with enumeration; enumerated IDs are authority."""
     transport = FeedTransport(
         {"file_changes": [], "data_types": {COORDINATION_TYPE: 2}},
         records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
@@ -335,13 +340,63 @@ def test_nonzero_record_count_materializes_real_identities_once_before_dedupe():
     assert [change.update_id for change in batch.changes] == ["record:r-1", "record:r-2"]
     assert batch.coverage["acknowledgments_responses"].value == "DATA"
 
-    short = _poll(FeedTransport(
-        {"file_changes": [], "data_types": {COORDINATION_TYPE: 2}},
-        records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
-                 "records": [{"id": "r-1", "recorded_at": "2026-08-20T12:00:01Z"}]},
-    ))
-    assert short.trusted is False
-    assert short.coverage["acknowledgments_responses"].value == "UNKNOWN"
+    for reported_count, enumerated_count in ((2721, 9), (2737, 25)):
+        measured = _poll(FeedTransport(
+            {"file_changes": [],
+             "data_types": {COORDINATION_TYPE: reported_count}},
+            records=_attested_records(enumerated_count),
+        ))
+        assert measured.trusted is True
+        assert len(measured.changes) == enumerated_count
+        assert all(change.update_id.startswith("record:live-record-")
+                   for change in measured.changes)
+
+
+def test_zero_record_count_does_not_suppress_attested_enumerated_records():
+    """A reported zero is not proof that the enumerated cursor window is empty."""
+    transport = FeedTransport(
+        {"file_changes": [], "data_types": {COORDINATION_TYPE: 0}},
+        records=_attested_records(1),
+    )
+
+    batch = _poll(transport)
+
+    assert transport.record_calls == 1
+    assert batch.trusted is True
+    assert [change.update_id for change in batch.changes] == ["record:live-record-1"]
+    assert batch.coverage["acknowledgments_responses"].value == "DATA"
+
+
+def test_zero_record_signal_without_a_prior_boundary_is_not_proof_of_clear():
+    """Bootstrap may recover canonically, but the zero count did not check records."""
+    from coord_engine.change_detection import ChangeDetector
+
+    transport = FeedTransport({
+        "through": "2026-08-20T12:00:00Z",
+        "file_changes": [],
+        "data_types": {COORDINATION_TYPE: 0},
+    })
+
+    batch = ChangeDetector(transport).poll("r", None, Deadline.open(5.0))
+
+    assert batch.trusted is True
+    assert transport.record_calls == 0
+    assert batch.coverage["acknowledgments_responses"].value == "NOT_RUN"
+
+
+def test_nonzero_record_signal_without_materialized_identities_is_unknown():
+    """A nonzero detector signal may not degrade to a silent no-op."""
+    for records in (
+        None,
+        {"after": "2026-08-20T11:00:00Z",
+         "through": "2026-08-20T12:00:00Z", "records": []},
+    ):
+        batch = _poll(FeedTransport(
+            {"file_changes": [], "data_types": {COORDINATION_TYPE: 1444}},
+            records=records,
+        ))
+        assert batch.trusted is False
+        assert batch.coverage["acknowledgments_responses"].value == "UNKNOWN"
 
 
 def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel():
@@ -358,7 +413,7 @@ def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel
     }))
     assert outside.trusted is False
 
-    excessive = _poll(FeedTransport(
+    count_mismatch = _poll(FeedTransport(
         {"file_changes": [], "data_types": {COORDINATION_TYPE: 1}},
         records={"after": "2026-08-20T11:00:00Z", "through": "2026-08-20T12:00:02Z",
                  "records": [
@@ -366,7 +421,10 @@ def test_record_cursor_requires_an_attested_exact_boundary_and_supported_channel
                      {"id": "r-2", "recorded_at": "2026-08-20T12:00:02Z"},
                  ]},
     ))
-    assert excessive.trusted is False
+    assert count_mismatch.trusted is True
+    assert [change.update_id for change in count_mismatch.changes] == [
+        "record:r-1", "record:r-2",
+    ]
 
     unsupported = _poll(ConfiguredFeedTransport({
         "file_changes": [], "data_types": {CHECKPOINT_TYPE: 0},
