@@ -91,18 +91,27 @@ remains a compatibility cache for unmigrated readers; it is not evidence that a
 newer generation became current. Consumers must not infer success from a cache
 write or an event's timestamp.
 
-## v2 public-read authority
+## Dormant v2 public-read candidate
 
-The migrated public folds (`status`, `board`, `needs-me`, `search`, `inbox`,
+When a later release separately activates generation-backed serving, the
+migrated public folds (`status`, `board`, `needs-me`, `search`, `inbox`,
 `digest`, `asks`, review status, roles status, presence show, and `briefing`)
-enter one shared authority before their existing domain renderer. It validates
+may enter one shared authority before their existing domain renderer. The
+candidate validates
 the exact five-field current manifest, digest-verifies the named immutable
 generation, then obtains one bounded `data-updates` window over
 `[watermark - epsilon, now - epsilon]`. At-least-once update identities are
 deduplicated. A named canonical task delta may be applied; any unsupported
 post-watermark namespace or unproven coverage returns `UNKNOWN` with a reconcile
 recovery action and a nonzero exit. The mutable pointer is read again after the
-overlay, and changed bytes reject the read.
+overlay, and changed bytes reject the read. These mechanics specify the dormant
+candidate, not the active `2.0.0` serving path.
+
+The tagged `2.0.0` build still sets the deployed transport's
+`public_read_v2_enabled` flag to true. As a result, migrated folds currently
+return `UNKNOWN` on unverified epsilon before their canonical handlers run.
+That mismatch blocks fleet adoption until an exact-head follow-up disables the
+wrapper. It does not turn epsilon into a `2.0.0` prerequisite.
 
 The public envelope adds `state`, sorted `coverage`, `coverage_horizon`,
 `generation`, `watermark`, and `result` without narrowing the result's existing
@@ -112,7 +121,8 @@ licensed, `result` is null, the uninvoked leg is `NOT_RUN`, and rc is 3. Text
 prints the same authority metadata and surface states. JSON stdout remains
 exactly one parseable value in both success and failure modes.
 
-Role status seals role assignment and holder presence into `liveness_fact`,
+When the candidate is activated, role status seals role assignment and holder
+presence into `liveness_fact`,
 naming both observations and the lease/presence prefixes that produced them. A
 fresh presence observation plus a stale lease is never confidently `VACANT`.
 Attendance has its own state: no flag is `NOT_RUN`; a requested but truncated
@@ -262,3 +272,26 @@ A conforming consumer:
 
 A clause flip without its fixture flip — or the reverse — is a review
 CHANGES by policy.
+
+## Coord-engine 2.0 truthfulness release
+
+`2.0.0` makes the existing canonical-read surfaces truthful before changing
+where they read from. Typed outcomes, body/rc agreement, deterministic identity
+precedence, and the distinctions among empty, tombstoned, unreadable, and
+unknown are release behavior. Consumers must continue to treat required
+incomplete coverage and degraded fallbacks as nonzero.
+
+Generation-backed public serving is deliberately dormant, so epsilon is not a
+release or fleet-adoption prerequisite and must not be presented as a blocked
+`2.0.0` gate. The transport keeps `public_read_epsilon_verified` false; no
+current generation or generation-backed authority is implied by the version.
+Cursor schema 2 remains separately gated by fleet version fencing and proven
+CAS support.
+
+Fleet adoption is proven functionally: exact released-build identity for every
+live host within the stated SLA, evidenced exclusions, and two credentialed
+hosts running `queue`, `needs-me`, review, forge, roles, presence, and reconcile
+through canonical paths. Release, fleet adoption, generation serving, and
+cursor-v2 activation are separate claims and require separate evidence. The
+tagged release's still-enabled wrapper means the functional adoption claim is
+currently blocked pending the serving-disable follow-up described above.

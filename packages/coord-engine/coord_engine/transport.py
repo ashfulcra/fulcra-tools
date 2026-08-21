@@ -196,10 +196,10 @@ class FulcraFileTransport:
     """Real transport backed by the ``fulcra-api file`` CLI."""
 
     conditional_writes_supported = False
-    # Unit 5 is deliberately load-bearing after Unit 4's non-CAS publication:
-    # a deployed reader enters the freshness authority, but remains UNKNOWN
-    # until Unit 6 records the fleet lag measurement and flips the attestation.
-    public_read_v2_enabled = True
+    # Generation construction ships in 2.0, but public generation serving is a
+    # separately activated authority.  Deployed readers stay on canonical
+    # paths until that activation is explicitly reviewed and proven fleetwide.
+    public_read_v2_enabled = False
     public_read_epsilon_seconds = 30.0
     public_read_epsilon_verified = False
 
