@@ -9856,12 +9856,9 @@ def cmd_stash_list(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_measure_feed_lag(args: argparse.Namespace, transport: Any) -> int:
     """Emit one host-neutral, secret-free feed visibility measurement."""
-    identity = migration.trusted_measurement_identity(
-        transport, persisted=config.persisted_identity(), hostname=socket.gethostname,
-    )
     result = migration.measure_feed_visibility_lag(
         transport, args.team, args.host_id,
-        identity=identity,
+        persisted=config.persisted_identity, hostname=socket.gethostname,
         timeout_seconds=args.timeout, poll_seconds=args.poll,
     )
     jsonutil.print_json(result.as_dict())

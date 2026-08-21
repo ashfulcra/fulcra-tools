@@ -6,6 +6,7 @@ import json
 from argparse import Namespace
 from datetime import datetime, timezone
 import hashlib
+import time
 
 import pytest
 
@@ -57,20 +58,42 @@ def test_explicit_non_v1_bootstrap_schema_fails_closed():
 
 
 EVIDENCE_AT = "2026-08-21T00:00:00Z"
+AUTHORITY = {
+    "data_type": "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041",
+    "api_version": "v1alpha1",
+}
 
 
-def _host(name: str, version: str = "2.0.0", *, credentialed: bool = True,
-          label: str | None = None):
-    return {
+def _binding(row):
+    payload = {key: value for key, value in row.items()
+               if key != "credential_provenance"}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "evidence-sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _host(name: str, *, credentialed: bool = True, label: str | None = None):
+    probe_id = hashlib.md5(name.encode()).hexdigest()
+    row = {
+        "schema": "coord.feed-visibility-lag.v1",
+        "state": "DATA",
+        "team": "fulcra",
         "host_identity": f"coord-reconcile:{name}",
         "display_label": label or name,
         "principal_identity": f"agent-{name}",
-        "credential_provenance": "sha256:" + hashlib.sha256(name.encode()).hexdigest(),
-        "engine_version": version,
+        "transport_authority": dict(AUTHORITY),
+        "credential_provenance": None,
         "credentialed": credentialed,
-        "observed_max_seconds": 2.5,
+        "observed_seconds": 2.5,
         "measured_at": EVIDENCE_AT,
+        "probe_id": probe_id,
+        "probe_path": f"team/fulcra/_coord/projections/lag-probes/{probe_id}.json",
+        "event_at": "2026-08-21T00:00:01Z",
+        "observed_at": "2026-08-21T00:00:03.500000Z",
+        "update_id": "3185bd09-9500-4407-bd87-013832fe55f3",
+        "reason": None,
     }
+    row["credential_provenance"] = _binding(row)
+    return row
 
 
 def _exclusions():
@@ -166,7 +189,6 @@ def test_two_credentialed_hosts_can_prove_the_phase1_gate_without_claiming_relea
 def test_display_labels_cannot_turn_one_attested_machine_into_two_hosts():
     first = _host("same-machine", label="host-a")
     second = _host("same-machine", label="host-b")
-    second["principal_identity"] = "another-session"
     decision = migration.evaluate_activation(
         hosts=[first, second], configured_epsilon_seconds=3.0,
         fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
@@ -183,6 +205,69 @@ def test_measurement_host_identity_must_have_canonical_machine_shape():
     forged["host_identity"] = "caller-controlled-label"
     decision = migration.evaluate_activation(
         hosts=[forged, _host("host-b")], configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert decision.reasons
+
+
+def test_activation_consumes_exact_lag_measurement_schema_not_synthetic_maximum():
+    synthetic = _host("host-a")
+    synthetic["observed_max_seconds"] = synthetic.pop("observed_seconds")
+    synthetic["credential_provenance"] = _binding(synthetic)
+    decision = migration.evaluate_activation(
+        hosts=[synthetic, _host("host-b")], configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert decision.reasons
+
+
+@pytest.mark.parametrize("missing", [
+    "event_at", "observed_at", "update_id", "probe_path", "transport_authority",
+])
+def test_handcrafted_measurement_missing_lifecycle_or_probe_evidence_is_unknown(missing):
+    row = _host("host-a")
+    row.pop(missing)
+    row["credential_provenance"] = _binding(row)
+    decision = migration.evaluate_activation(
+        hosts=[row, _host("host-b")], configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert decision.reasons
+
+
+def test_arbitrary_sha256_provenance_cannot_pass_measurement_gate():
+    row = _host("host-a")
+    row["credential_provenance"] = "evidence-sha256:" + "a" * 64
+    decision = migration.evaluate_activation(
+        hosts=[row, _host("host-b")], configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+
+    assert decision.state == "UNKNOWN"
+    assert decision.ready is False
+    assert decision.reasons
+
+
+def test_non_json_measurement_field_is_unknown_not_an_exception():
+    row = _host("host-a")
+    row["display_label"] = object()
+    row["credential_provenance"] = "evidence-sha256:" + "a" * 64
+
+    decision = migration.evaluate_activation(
+        hosts=[row, _host("host-b")], configured_epsilon_seconds=3.0,
         fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
         exclusions=_exclusions(), cas_supported=True,
     )
@@ -280,7 +365,10 @@ class _LagTransport:
         self.clock = clock
         self.writes = []
 
-    def write(self, path, content):
+    def read_classified(self, _path, *, deadline=None):
+        return json.dumps(AUTHORITY), "ok"
+
+    def write(self, path, content, *, deadline=None):
         self.writes.append((path, content))
         return True
 
@@ -289,12 +377,10 @@ class _LagTransport:
             return {"after": since, "through": since, "file_changes": []}
         path = self.writes[-1][0]
         return {"after": since, "through": "2026-08-21T00:00:10Z",
-                "file_changes": [{"id": "probe-1", "path": path,
+                "file_changes": [{"id": "3185bd09-9500-4407-bd87-013832fe55f3",
+                                  "path": path,
                                   "state": "uploaded",
                                   "uploaded_at": "2026-08-21T00:00:01Z"}]}
-
-    def _access_token(self):
-        return "credential-for-tests"
 
 
 class _Now:
@@ -309,15 +395,12 @@ class _Now:
 
 def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
     clock = _Clock()
-    identity = migration.trusted_measurement_identity(
-        _LagTransport(0.3, clock),
-        persisted=classifier.PersistedIdentity(
+    transport = _LagTransport(0.3, clock)
+    result = migration.measure_feed_visibility_lag(
+        transport, "fulcra", "host-a",
+        persisted=lambda: classifier.PersistedIdentity(
             classifier.PersistedIdentityState.PRESENT, "agent-a"),
         hostname=lambda: "same-machine",
-    )
-    result = migration.measure_feed_visibility_lag(
-        _LagTransport(0.3, clock), "fulcra", "host-a",
-        identity=identity,
         timeout_seconds=1.0, poll_seconds=0.1,
         monotonic=clock.monotonic, sleep=clock.sleep,
         now=_Now(),
@@ -327,20 +410,25 @@ def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
     assert result.credentialed is True
     assert result.host_identity == "coord-reconcile:same-machine"
     assert result.event_at == "2026-08-21T00:00:01Z"
+    assert "observed_max_seconds" not in result.as_dict()
+    assert result.as_dict()["credential_provenance"] == _binding(result.as_dict())
+
+    decision = migration.evaluate_activation(
+        hosts=[result.as_dict(), _host("host-b")], configured_epsilon_seconds=3.0,
+        fleet=_fleet(), fleet_sla_seconds=300, evidence_measured_at=EVIDENCE_AT,
+        exclusions=_exclusions(), cas_supported=True,
+    )
+    assert decision.state == "READY"
 
 
 def test_feed_visibility_measurement_refuses_non_finite_bounds_before_write():
     clock = _Clock()
     transport = _LagTransport(0.3, clock)
-    identity = migration.trusted_measurement_identity(
-        transport,
-        persisted=classifier.PersistedIdentity(
-            classifier.PersistedIdentityState.PRESENT, "agent-a"),
-        hostname=lambda: "same-machine",
-    )
     result = migration.measure_feed_visibility_lag(
         transport, "fulcra", "host-a",
-        identity=identity,
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine",
         timeout_seconds=1.0, poll_seconds=float("inf"),
         monotonic=clock.monotonic, sleep=clock.sleep,
         now=lambda: datetime(2026, 8, 21, tzinfo=timezone.utc),
@@ -376,14 +464,11 @@ def test_lag_harness_rejects_unattested_or_malformed_feed_body_and_rc(envelope):
             return json.loads(json.dumps(envelope).replace("PROBE", path))
 
     transport = Malformed(0, clock)
-    identity = migration.trusted_measurement_identity(
-        transport,
-        persisted=classifier.PersistedIdentity(
+    result = migration.measure_feed_visibility_lag(
+        transport, "fulcra", "display-only",
+        persisted=lambda: classifier.PersistedIdentity(
             classifier.PersistedIdentityState.PRESENT, "agent-a"),
         hostname=lambda: "same-machine",
-    )
-    result = migration.measure_feed_visibility_lag(
-        transport, "fulcra", "display-only", identity=identity,
         timeout_seconds=1.0, poll_seconds=0.1,
         monotonic=clock.monotonic, sleep=clock.sleep, now=_Now(),
     )
@@ -398,10 +483,12 @@ def test_cli_host_id_is_display_only_and_cannot_mint_attested_identity(
         monkeypatch, capsys):
     captured = []
 
-    def fake_measure(_transport, _team, display_label, *, identity, **_kwargs):
-        captured.append((display_label, identity.host_identity))
+    def capture_measure(_transport, _team, display_label, *, persisted, hostname,
+                        **_kwargs):
+        saved = persisted()
+        captured.append((display_label, hostname(), saved.identity))
         return migration.LagMeasurement.unknown(
-            identity=identity, display_label=display_label, reason="test stop",
+            display_label=display_label, reason="test stop",
             measured_at=EVIDENCE_AT, probe_id="probe",
         )
 
@@ -409,7 +496,7 @@ def test_cli_host_id_is_display_only_and_cannot_mint_attested_identity(
     monkeypatch.setattr(cli.config, "persisted_identity", lambda: classifier.PersistedIdentity(
         classifier.PersistedIdentityState.PRESENT, "agent-a"))
     monkeypatch.setattr(cli.socket, "gethostname", lambda: "same-machine")
-    monkeypatch.setattr(migration, "measure_feed_visibility_lag", fake_measure)
+    monkeypatch.setattr(migration, "measure_feed_visibility_lag", capture_measure)
     for label in ("host-a", "host-b"):
         rc = cli.cmd_measure_feed_lag(
             Namespace(team="fulcra", host_id=label, timeout=1.0, poll=0.1),
@@ -419,6 +506,57 @@ def test_cli_host_id_is_display_only_and_cannot_mint_attested_identity(
         capsys.readouterr()
 
     assert captured == [
-        ("host-a", "coord-reconcile:same-machine"),
-        ("host-b", "coord-reconcile:same-machine"),
+        ("host-a", "same-machine", "agent-a"),
+        ("host-b", "same-machine", "agent-a"),
     ]
+
+
+@pytest.mark.parametrize("auth_mode", ["cli", "http"])
+def test_token_refresh_or_auth_mode_is_not_credential_provenance(auth_mode):
+    clock = _Clock()
+
+    class RotatingTokenTransport(_LagTransport):
+        mode = auth_mode
+
+        def _access_token(self):
+            raise AssertionError("bearer token must not be read or hashed")
+
+    result = migration.measure_feed_visibility_lag(
+        RotatingTokenTransport(0.3, clock), "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.1,
+        monotonic=clock.monotonic, sleep=clock.sleep, now=_Now(),
+    )
+    assert result.state == "DATA"
+    assert result.rc == 0
+
+
+@pytest.mark.parametrize("slow_phase", ["auth", "write"])
+def test_entire_harness_timeout_covers_slow_preflight_and_upload(slow_phase):
+    class Slow(_LagTransport):
+        def read_classified(self, path, *, deadline=None):
+            if slow_phase == "auth":
+                time.sleep(0.08)
+            return super().read_classified(path, deadline=deadline)
+
+        def write(self, path, content, *, deadline=None):
+            if slow_phase == "write":
+                time.sleep(0.08)
+            return super().write(path, content, deadline=deadline)
+
+    transport = Slow(0, _Clock())
+    started = time.monotonic()
+    result = migration.measure_feed_visibility_lag(
+        transport, "fulcra", "display",
+        persisted=lambda: classifier.PersistedIdentity(
+            classifier.PersistedIdentityState.PRESENT, "agent-a"),
+        hostname=lambda: "same-machine", timeout_seconds=0.01, poll_seconds=0.001,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.as_dict()["state"] == "UNKNOWN"
+    assert result.rc == 3
+    assert elapsed < 0.20
+    if slow_phase == "auth":
+        assert transport.writes == []

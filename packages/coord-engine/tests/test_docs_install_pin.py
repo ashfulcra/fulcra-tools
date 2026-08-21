@@ -124,9 +124,14 @@ def test_v2_evidence_templates_pin_attested_identity_and_age_consistency():
         encoding="utf-8")
     for token in (
         "display-only", "host_identity", "principal_identity",
-        "credential_provenance", "event_at", "update_id",
+        "credential_provenance", "transport_authority", "probe_path",
+        "observed_seconds", "event_at", "observed_at", "update_id",
+        "evidence-sha256", "entire harness deadline",
     ):
         assert token in epsilon
+    assert '"schema": "coord.feed-visibility-lag.v1"' in epsilon
+    assert "observed_max_seconds" not in epsilon
+    assert "bearer token" not in epsilon.lower()
     for token in (
         "measured_at", "five-second", "host_identity", "provenance",
         "Ash operator ruling", "measured fleet census",

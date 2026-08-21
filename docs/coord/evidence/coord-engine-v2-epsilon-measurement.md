@@ -10,43 +10,64 @@ rows and the configured epsilon is at least the largest observed value.
 Run once per credentialed host. `--host-id` is a display-only label; it cannot
 attest a host or make two runs on one machine count twice. The harness derives
 `host_identity` from the sanitized machine identity, requires a persisted
-`principal_identity`, and binds both to a one-way `credential_provenance`
-fingerprint from the transport's real authentication seam:
+`principal_identity`, reads stable non-secret `transport_authority` from the
+canonical team configuration, and binds the complete probe evidence to an
+`evidence-sha256` `credential_provenance`. The binding does not read or hash a
+transient access credential, so token refresh and authentication mode changes
+cannot manufacture a second host identity:
 
 ```bash
 coord-engine measure-feed-lag fulcra --host-id host-a --timeout 30 --poll 0.25
 ```
 
-Record the complete one-value JSON output below. Never record tokens, account
-identifiers, machine paths, or other credentials. Each successful row includes
-the stable feed `update_id`, authoritative lifecycle `event_at`, local
-`observed_at`, and the lag calculated between those timestamps; a path-only
-`files` response is not evidence.
+Record each complete one-value JSON output without reshaping it. The producer's
+`coord.feed-visibility-lag.v1` row is the only schema accepted by the activation
+fence; there is no parallel aggregate or hand-authored maximum schema. Never
+record secrets or machine paths. Each successful row includes the stable feed
+`update_id`, exact correlated `probe_path`, authoritative lifecycle `event_at`,
+local `observed_at`, and `observed_seconds` calculated between those timestamps;
+a path-only `files` response is not evidence.
 
 ```json
 {
-  "schema": "coord.feed-visibility-lag-evidence.v1",
-  "status": "BLOCKED",
-  "measurements": [],
-  "required_measurement_fields": [
-    "host_identity",
-    "display_label",
-    "principal_identity",
-    "credential_provenance",
-    "update_id",
-    "event_at",
-    "observed_at",
-    "observed_seconds"
-  ],
-  "observed_max_seconds": null,
-  "configured_epsilon_seconds": null,
-  "measured_at": null
+  "schema": "coord.feed-visibility-lag.v1",
+  "state": "DATA",
+  "team": "fulcra",
+  "host_identity": "coord-reconcile:<canonical-host>",
+  "display_label": "host-a",
+  "principal_identity": "<persisted-principal>",
+  "transport_authority": {
+    "data_type": "<canonical-data-type>",
+    "api_version": "<canonical-api-version>"
+  },
+  "credential_provenance": "evidence-sha256:<64 lowercase hex characters>",
+  "credentialed": true,
+  "observed_seconds": "<finite nonnegative seconds>",
+  "measured_at": "<aware UTC instant>",
+  "probe_id": "<32 lowercase hex characters>",
+  "probe_path": "team/fulcra/_coord/projections/lag-probes/<probe_id>.json",
+  "event_at": "<aware authoritative feed instant>",
+  "observed_at": "<aware local observation instant>",
+  "update_id": "<canonical UUID>",
+  "reason": null
 }
 ```
 
 The harness writes one nonce document and polls for that exact immutable path.
 Only a comparable `after`/`through` window with a supported lifecycle state,
 stable update identity, and aware authoritative event timestamp is accepted.
-Timeout, malformed feed output, or an unproven write is `UNKNOWN` with rc 3.
+The entire harness deadline starts before identity/authentication preflight and
+covers canonical-authority acquisition, probe upload, feed polling, and final
+verification. Every transport operation receives only its remaining budget; an
+operation without deadline support is refused before it starts. Timeout,
+malformed feed output, missing stable authority, or an unproven write is
+`UNKNOWN` with rc 3.
+
+Activation revalidates every row exactly: field set, canonical host and update
+identities, stable authority, probe/path correlation, evidence binding, aware
+timestamps, and the finite nonnegative lag derived from
+`observed_at - event_at`. The configured epsilon lives in release configuration,
+not in these measurement rows, and must cover the maximum of two distinct valid
+rows.
 An unmeasured or one-host epsilon is not a conservative estimate; it is no
 bound at all and blocks activation.

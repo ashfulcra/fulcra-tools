@@ -8,9 +8,10 @@ licensed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import math
 import re
@@ -18,13 +19,15 @@ import time
 import uuid
 from typing import Any, Callable, Mapping, Optional
 
-from . import change_detection, classifier, generation, jsonutil
+from . import change_detection, classifier, generation, jsonutil, records
 
 
 TARGET_VERSION = "2.0.0"
 AGE_TOLERANCE_SECONDS = 5.0
-_CREDENTIAL_PROVENANCE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ATTESTED_HOST_IDENTITY = re.compile(r"^coord-reconcile:[A-Za-z0-9:_.-]+$")
+_PROBE_ID = re.compile(r"^[0-9a-f]{32}$")
+_PROVENANCE = re.compile(r"^evidence-sha256:[0-9a-f]{64}$")
+LAG_TOLERANCE_SECONDS = 0.001
 
 # Exclusion is evidence, not omission. Values are the operator-approved reason
 # class; the evidence document must additionally carry measured timestamps/ages
@@ -63,33 +66,19 @@ class ActivationDecision:
 
 
 @dataclass(frozen=True)
-class MeasurementIdentity:
-    state: str
-    host_identity: Optional[str] = None
-    principal_identity: Optional[str] = None
-    credential_provenance: Optional[str] = None
-    reason: Optional[str] = None
-
-    @property
-    def credentialed(self) -> bool:
-        return (
-            self.state == "DATA"
-            and isinstance(self.credential_provenance, str)
-            and _CREDENTIAL_PROVENANCE.fullmatch(self.credential_provenance) is not None
-        )
-
-
-@dataclass(frozen=True)
 class LagMeasurement:
     state: str
+    team: Optional[str]
     host_identity: Optional[str]
     display_label: Optional[str]
     principal_identity: Optional[str]
+    transport_authority: Optional[Mapping[str, str]]
     credential_provenance: Optional[str]
     credentialed: bool
     observed_seconds: Optional[float]
     measured_at: str
     probe_id: str
+    probe_path: str
     event_at: Optional[str] = None
     observed_at: Optional[str] = None
     update_id: Optional[str] = None
@@ -103,14 +92,20 @@ class LagMeasurement:
         return {
             "schema": "coord.feed-visibility-lag.v1",
             "state": self.state,
+            "team": self.team,
             "host_identity": self.host_identity,
             "display_label": self.display_label,
             "principal_identity": self.principal_identity,
+            "transport_authority": (
+                dict(self.transport_authority)
+                if isinstance(self.transport_authority, Mapping) else None
+            ),
             "credential_provenance": self.credential_provenance,
             "credentialed": self.credentialed,
             "observed_seconds": self.observed_seconds,
             "measured_at": self.measured_at,
             "probe_id": self.probe_id,
+            "probe_path": self.probe_path,
             "event_at": self.event_at,
             "observed_at": self.observed_at,
             "update_id": self.update_id,
@@ -119,55 +114,17 @@ class LagMeasurement:
 
     @classmethod
     def unknown(
-        cls, *, identity: MeasurementIdentity, display_label: Optional[str],
-        reason: str, measured_at: str, probe_id: str,
+        cls, *, display_label: Optional[str], reason: str, measured_at: str,
+        probe_id: str, team: Optional[str] = None, probe_path: str = "",
+        host_identity: Optional[str] = None,
+        principal_identity: Optional[str] = None,
+        transport_authority: Optional[Mapping[str, str]] = None,
     ) -> "LagMeasurement":
         return cls(
-            "UNKNOWN", identity.host_identity, display_label,
-            identity.principal_identity, identity.credential_provenance,
-            identity.credentialed, None, measured_at, probe_id, reason=reason,
+            "UNKNOWN", team, host_identity, display_label, principal_identity,
+            transport_authority, None, False, None, measured_at, probe_id,
+            probe_path, reason=reason,
         )
-
-
-def trusted_measurement_identity(
-    transport: Any, *, persisted: classifier.PersistedIdentity,
-    hostname: Callable[[], str],
-) -> MeasurementIdentity:
-    """Bind one machine, persisted principal, and real transport credential.
-
-    Display labels are intentionally absent from this seam. The credential is
-    fingerprinted and discarded; evidence receives provenance, never the token.
-    """
-    if (not isinstance(persisted, classifier.PersistedIdentity)
-            or persisted.state is not classifier.PersistedIdentityState.PRESENT
-            or not isinstance(persisted.identity, str)
-            or not persisted.identity.strip()):
-        return MeasurementIdentity(
-            "UNKNOWN", reason="persisted principal identity unavailable"
-        )
-    try:
-        raw_host = hostname()
-    except Exception:
-        return MeasurementIdentity("UNKNOWN", reason="machine identity unavailable")
-    if not isinstance(raw_host, str):
-        return MeasurementIdentity("UNKNOWN", reason="machine identity malformed")
-    safe_host, _rewritten = classifier.sanitize_hostname(raw_host)
-    if not safe_host:
-        return MeasurementIdentity("UNKNOWN", reason="machine identity unusable")
-    token_reader = getattr(transport, "_access_token", None)
-    if not callable(token_reader):
-        return MeasurementIdentity("UNKNOWN", reason="credential provenance unavailable")
-    try:
-        token = token_reader()
-    except Exception:
-        token = None
-    if not isinstance(token, str) or not token.strip():
-        return MeasurementIdentity("UNKNOWN", reason="credential provenance unavailable")
-    fingerprint = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
-    return MeasurementIdentity(
-        "DATA", f"coord-reconcile:{safe_host}", persisted.identity.strip(),
-        f"sha256:{fingerprint}",
-    )
 
 
 def read_v1_bootstrap(raw: Any) -> BootstrapResult:
@@ -204,6 +161,85 @@ def read_v1_bootstrap(raw: Any) -> BootstrapResult:
     return BootstrapResult("DATA", sections)
 
 
+_MEASUREMENT_KEYS = frozenset({
+    "schema", "state", "team", "host_identity", "display_label",
+    "principal_identity", "transport_authority", "credential_provenance",
+    "credentialed", "observed_seconds", "measured_at", "probe_id",
+    "probe_path", "event_at", "observed_at", "update_id", "reason",
+})
+
+
+def _measurement_provenance(row: Mapping[str, Any]) -> Optional[str]:
+    payload = {key: value for key, value in row.items()
+               if key != "credential_provenance"}
+    try:
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return None
+    return "evidence-sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _valid_update_id(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except (ValueError, AttributeError):
+        return False
+
+
+def _valid_transport_authority(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"data_type", "api_version"}
+        and isinstance(value.get("data_type"), str)
+        and bool(value["data_type"].strip())
+        and isinstance(value.get("api_version"), str)
+        and bool(value["api_version"].strip())
+    )
+
+
+def _valid_measurement_row(row: Mapping[str, Any]) -> bool:
+    if (set(row) != _MEASUREMENT_KEYS
+            or row.get("schema") != "coord.feed-visibility-lag.v1"
+            or row.get("state") != "DATA" or row.get("reason") is not None
+            or row.get("credentialed") is not True):
+        return False
+    team = row.get("team")
+    host_identity = row.get("host_identity")
+    principal = row.get("principal_identity")
+    probe_id = row.get("probe_id")
+    probe_path = row.get("probe_path")
+    observed = row.get("observed_seconds")
+    provenance = row.get("credential_provenance")
+    if (not isinstance(team, str) or not team.strip()
+            or not isinstance(host_identity, str)
+            or _ATTESTED_HOST_IDENTITY.fullmatch(host_identity) is None
+            or not isinstance(principal, str) or not principal.strip()
+            or not _valid_transport_authority(row.get("transport_authority"))
+            or not isinstance(probe_id, str) or _PROBE_ID.fullmatch(probe_id) is None
+            or probe_path != (
+                f"team/{team}/_coord/projections/lag-probes/{probe_id}.json"
+            )
+            or not _valid_update_id(row.get("update_id"))
+            or not isinstance(observed, (int, float)) or isinstance(observed, bool)
+            or not math.isfinite(float(observed)) or float(observed) < 0
+            or not isinstance(provenance, str)
+            or _PROVENANCE.fullmatch(provenance) is None
+            or provenance != _measurement_provenance(row)):
+        return False
+    measured_at = _parse_aware_utc(row.get("measured_at"))
+    event_at = _parse_aware_utc(row.get("event_at"))
+    observed_at = _parse_aware_utc(row.get("observed_at"))
+    if (measured_at is None or event_at is None or observed_at is None
+            or not (measured_at <= event_at <= observed_at)):
+        return False
+    derived = (observed_at - event_at).total_seconds()
+    return abs(derived - float(observed)) <= LAG_TOLERANCE_SECONDS
+
+
 def evaluate_activation(
     *, hosts: list[Mapping[str, Any]], configured_epsilon_seconds: Any,
     fleet: Mapping[str, Mapping[str, Any]], fleet_sla_seconds: Any,
@@ -225,19 +261,7 @@ def evaluate_activation(
             reasons.append("host measurement evidence malformed")
             continue
         host_identity = row.get("host_identity")
-        principal = row.get("principal_identity")
-        provenance = row.get("credential_provenance")
-        observed = row.get("observed_max_seconds")
-        measured_at = _parse_aware_utc(row.get("measured_at"))
-        if (row.get("credentialed") is not True
-                or not isinstance(host_identity, str) or not host_identity.strip()
-                or _ATTESTED_HOST_IDENTITY.fullmatch(host_identity.strip()) is None
-                or not isinstance(principal, str) or not principal.strip()
-                or not isinstance(provenance, str)
-                or _CREDENTIAL_PROVENANCE.fullmatch(provenance) is None
-                or not isinstance(observed, (int, float))
-                or isinstance(observed, bool) or not math.isfinite(float(observed))
-                or float(observed) < 0 or measured_at is None):
+        if not _valid_measurement_row(row):
             reasons.append("credentialed host measurement evidence malformed")
             continue
         host_identity = host_identity.strip()
@@ -310,7 +334,7 @@ def evaluate_activation(
             or configured_epsilon_seconds <= 0):
         return ActivationDecision("UNKNOWN", False, False,
                                   ("configured epsilon unavailable",))
-    observed_max = max(float(row["observed_max_seconds"]) for row in measured.values())
+    observed_max = max(float(row["observed_seconds"]) for row in measured.values())
     if float(configured_epsilon_seconds) < observed_max:
         return ActivationDecision("REFUSED", False, False,
                                   ("epsilon is below observed visibility lag",))
@@ -352,32 +376,48 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _accepts_deadline(operation: Any) -> bool:
+    if not callable(operation):
+        return False
+    try:
+        params = inspect.signature(operation).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.name == "deadline" or param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in params
+    )
+
+
 def measure_feed_visibility_lag(
-    transport: Any, team: str, display_label: str, *, identity: MeasurementIdentity,
+    transport: Any, team: str, display_label: str, *,
+    persisted: Callable[[], classifier.PersistedIdentity],
+    hostname: Callable[[], str],
     timeout_seconds: float = 30.0,
     poll_seconds: float = 0.25,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> LagMeasurement:
-    """Write one nonce and bound the time until that exact path is feed-visible."""
+    """Measure one probe under a single preflight-to-verification deadline."""
+    start = monotonic()
     measured_at = _iso(now())
     probe_id = uuid.uuid4().hex
     path = f"team/{team}/_coord/projections/lag-probes/{probe_id}.json"
-    content = jsonutil.dumps({
-        "schema": "coord.feed-visibility-lag-probe.v1",
-        "id": probe_id,
-        "host_identity": identity.host_identity,
-        "principal_identity": identity.principal_identity,
-        "display_label": display_label,
-        "written_at": measured_at,
-    })
-    if not identity.credentialed:
+
+    host_identity: Optional[str] = None
+    principal_identity: Optional[str] = None
+    authority: Optional[dict[str, str]] = None
+
+    def unknown(reason: str) -> LagMeasurement:
         return LagMeasurement.unknown(
-            identity=identity, display_label=display_label,
-            reason=identity.reason or "trusted measurement identity unavailable",
-            measured_at=measured_at, probe_id=probe_id,
+            team=team, host_identity=host_identity,
+            principal_identity=principal_identity,
+            transport_authority=authority, display_label=display_label,
+            reason=reason, measured_at=measured_at, probe_id=probe_id,
+            probe_path=path,
         )
+
     if (not isinstance(timeout_seconds, (int, float))
             or isinstance(timeout_seconds, bool)
             or not math.isfinite(float(timeout_seconds))
@@ -386,12 +426,7 @@ def measure_feed_visibility_lag(
             or isinstance(poll_seconds, bool)
             or not math.isfinite(float(poll_seconds))
             or poll_seconds <= 0):
-        return LagMeasurement.unknown(
-            identity=identity, display_label=display_label,
-            reason="positive finite bounds required", measured_at=measured_at,
-            probe_id=probe_id,
-        )
-    start = monotonic()
+        return unknown("positive finite bounds required")
 
     class _Bound:
         def remaining(self) -> float:
@@ -401,45 +436,88 @@ def measure_feed_visibility_lag(
             return self.remaining() <= 0.0
 
     bound = _Bound()
+
+    # A method that cannot receive the shared remaining budget is not licensed
+    # to start: falling back to its COORD_TRANSPORT_TIMEOUT would expand this
+    # harness's caller-selected bound.
+    reader = getattr(transport, "read_classified", None)
+    writer = getattr(transport, "write", None)
+    feed = getattr(transport, "data_updates", None)
+    if not all(_accepts_deadline(op) for op in (reader, writer, feed)):
+        return unknown("transport operation lacks shared deadline support")
+
     try:
-        persisted = transport.write(path, content)
+        saved = persisted()
+        raw_host = hostname()
     except Exception:
-        persisted = False
-    if persisted is not True:
-        return LagMeasurement.unknown(
-            identity=identity, display_label=display_label,
-            reason="probe write did not persist", measured_at=measured_at,
-            probe_id=probe_id,
-        )
+        return unknown("persisted principal or machine identity unavailable")
+    if bound.expired():
+        return unknown("identity preflight exceeded harness deadline")
+    if (not isinstance(saved, classifier.PersistedIdentity)
+            or saved.state is not classifier.PersistedIdentityState.PRESENT
+            or not isinstance(saved.identity, str) or not saved.identity.strip()):
+        return unknown("persisted principal identity unavailable")
+    if not isinstance(raw_host, str):
+        return unknown("machine identity malformed")
+    safe_host, _rewritten = classifier.sanitize_hostname(raw_host)
+    if not safe_host:
+        return unknown("machine identity unusable")
+    host_identity = f"coord-reconcile:{safe_host}"
+    principal_identity = saved.identity.strip()
+
+    config, status = records.load_canonical_config_classified(
+        transport, team, deadline=bound,
+    )
+    if bound.expired():
+        return unknown("transport authority preflight exceeded harness deadline")
+    if status != "ok" or not isinstance(config, Mapping):
+        return unknown("stable canonical transport authority unavailable")
+    candidate_authority = {
+        "data_type": config.get("data_type"),
+        "api_version": config.get("api_version"),
+    }
+    if not _valid_transport_authority(candidate_authority):
+        return unknown("stable canonical transport authority malformed")
+    authority = {
+        "data_type": str(candidate_authority["data_type"]),
+        "api_version": str(candidate_authority["api_version"]),
+    }
+
+    content = jsonutil.dumps({
+        "schema": "coord.feed-visibility-lag-probe.v1",
+        "id": probe_id,
+        "team": team,
+        "host_identity": host_identity,
+        "principal_identity": principal_identity,
+        "transport_authority": authority,
+        "display_label": display_label,
+        "written_at": measured_at,
+    })
+    if bound.expired():
+        return unknown("harness deadline expired before probe upload")
+    try:
+        landed = writer(path, content, deadline=bound)
+    except Exception:
+        landed = False
+    if bound.expired():
+        return unknown("probe upload exceeded harness deadline")
+    if landed is not True:
+        return unknown("probe write did not persist")
     while True:
-        elapsed = monotonic() - start
-        if elapsed >= timeout_seconds:
-            return LagMeasurement.unknown(
-                identity=identity, display_label=display_label,
-                reason="feed visibility bound expired", measured_at=measured_at,
-                probe_id=probe_id,
-            )
+        if bound.expired():
+            return unknown("feed visibility bound expired")
         try:
-            reader = getattr(transport, "data_updates", None)
-            if not callable(reader):
-                raise TypeError("authoritative data-updates seam unavailable")
-            result = reader(measured_at, deadline=bound)
+            result = feed(measured_at, deadline=bound)
         except Exception:
             result = None
+        if bound.expired():
+            return unknown("feed read exceeded harness deadline")
         if not isinstance(result, Mapping):
-            return LagMeasurement.unknown(
-                identity=identity, display_label=display_label,
-                reason="data-updates envelope unavailable", measured_at=measured_at,
-                probe_id=probe_id,
-            )
+            return unknown("data-updates envelope unavailable")
         window, reason = change_detection._feed_window(result, measured_at)
         rows = result.get("file_changes")
         if window is None or not isinstance(rows, list):
-            return LagMeasurement.unknown(
-                identity=identity, display_label=display_label,
-                reason=reason or "data-updates file_changes unavailable",
-                measured_at=measured_at, probe_id=probe_id,
-            )
+            return unknown(reason or "data-updates file_changes unavailable")
         start_at = _parse_aware_utc(window[0])
         through_at = _parse_aware_utc(window[1])
         matched: list[tuple[str, datetime, str]] = []
@@ -453,7 +531,7 @@ def measure_feed_visibility_lag(
             instant = change_detection._instant(row, state) if isinstance(state, str) else None
             if (not isinstance(raw_path, str) or not raw_path.strip()
                     or state not in ("uploaded", "archived", "deleted")
-                    or update_id is None or instant is None
+                    or not _valid_update_id(update_id) or instant is None
                     or start_at is None or through_at is None
                     or not (start_at <= instant[0] <= through_at)):
                 reason = "data-updates lifecycle row is unattested or malformed"
@@ -467,30 +545,25 @@ def measure_feed_visibility_lag(
         else:
             reason = ""
         if reason:
-            return LagMeasurement.unknown(
-                identity=identity, display_label=display_label, reason=reason,
-                measured_at=measured_at, probe_id=probe_id,
-            )
+            return unknown(reason)
         if matched:
             if len(matched) != 1:
-                return LagMeasurement.unknown(
-                    identity=identity, display_label=display_label,
-                    reason="probe update identity is not unique",
-                    measured_at=measured_at, probe_id=probe_id,
-                )
+                return unknown("probe update identity is not unique")
             update_id, event_instant, event_at = matched[0]
             observed_instant = now().astimezone(timezone.utc)
             lag = (observed_instant - event_instant).total_seconds()
             if not math.isfinite(lag) or lag < 0:
-                return LagMeasurement.unknown(
-                    identity=identity, display_label=display_label,
-                    reason="authoritative event timestamp is after observation",
-                    measured_at=measured_at, probe_id=probe_id,
-                )
-            return LagMeasurement(
-                "DATA", identity.host_identity, display_label,
-                identity.principal_identity, identity.credential_provenance,
-                True, lag, measured_at, probe_id, event_at,
-                _iso(observed_instant), update_id,
+                return unknown("authoritative event timestamp is after observation")
+            measurement = LagMeasurement(
+                "DATA", team, host_identity, display_label, principal_identity,
+                authority, None, True, lag, measured_at, probe_id, path,
+                event_at, _iso(observed_instant), update_id,
             )
-        sleep(min(float(poll_seconds), timeout_seconds - elapsed))
+            return replace(
+                measurement,
+                credential_provenance=_measurement_provenance(measurement.as_dict()),
+            )
+        remaining = bound.remaining()
+        if remaining <= 0:
+            return unknown("feed visibility bound expired")
+        sleep(min(float(poll_seconds), remaining))

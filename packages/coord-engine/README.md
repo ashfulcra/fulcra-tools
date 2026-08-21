@@ -249,8 +249,10 @@ proven CAS. Public v2 reads remain fail-closed while epsilon is unverified.
 Measure feed visibility with `coord-engine measure-feed-lag TEAM --host-id
 DISPLAY-ONLY-LABEL` on at least two credentialed hosts. The label does not
 attest identity: the harness binds sanitized machine identity, persisted
-principal, and transport credential provenance, and accepts only fully attested
-feed lifecycle envelopes. Then complete the
+principal, and stable non-secret canonical transport authority into the exact
+probe evidence; transient access credentials are neither recorded nor hashed.
+Its single deadline covers authority preflight, upload, feed polling, and
+verification, and it accepts only fully attested feed lifecycle envelopes. Then complete the
 [epsilon evidence](../../docs/coord/evidence/coord-engine-v2-epsilon-measurement.md)
 and [fleet verification](../../docs/coord/evidence/coord-engine-v2-fleet-verification.md).
 The current templates are explicitly BLOCKED; therefore the package version,

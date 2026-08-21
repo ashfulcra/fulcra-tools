@@ -136,6 +136,35 @@ def test_read_classified_does_not_start_past_supplied_deadline(monkeypatch):
     assert calls == []
 
 
+def test_write_uses_remaining_deadline_not_transport_default(monkeypatch):
+    """Probe upload must not reopen the transport's broader default timeout."""
+    from types import SimpleNamespace
+    from coord_engine import transport as tr
+
+    t = tr.FulcraFileTransport(command=["fulcra-api"], timeout=30)
+    observed = []
+
+    def bounded_run(args, *, timeout=None):
+        observed.append((args, timeout))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(t, "_run", bounded_run)
+    assert t.write("team/r/probe.json", "{}", deadline=Deadline.open(0.5)) is True
+    assert observed[0][0][0] == "upload"
+    assert 0 < observed[0][1] <= 0.5
+
+
+def test_write_does_not_start_past_supplied_deadline(monkeypatch):
+    from coord_engine import transport as tr
+
+    t = tr.FulcraFileTransport(command=["fulcra-api"], timeout=30)
+    calls = []
+    monkeypatch.setattr(t, "_run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    assert t.write("team/r/probe.json", "{}", deadline=Deadline.open(0.0)) is False
+    assert calls == []
+
+
 def test_records_cursor_without_a_server_attested_boundary_is_unknown(monkeypatch):
     """A local clock cannot prove which records the cursor window covered."""
     from coord_engine import transport as tr

@@ -746,19 +746,28 @@ class FulcraFileTransport:
             lifecycle_requested=lifecycle_since is not None,
         )
 
-    def write(self, path: str, content: str) -> bool:
+    def write(
+        self, path: str, content: str, *,
+        deadline: Optional[budget_mod.Deadline] = None,
+    ) -> bool:
         # contract: True on success, False on any REMOTE failure (incl. timeout/exec
         # error) — the upload subprocess. NOTE: staging the content to a local
         # tempfile happens first and can still raise OSError (disk full, bad perms);
         # that surfaces to the caller rather than returning False.
+        if deadline is not None and deadline.expired():
+            return False
         with tempfile.NamedTemporaryFile(
             "w", suffix=".tmp", delete=False, encoding="utf-8"
         ) as fh:
             fh.write(content)
             local = fh.name
         try:
-            cp = self._run(["upload", local, path])
-            return cp.returncode == 0
+            remaining = None if deadline is None else deadline.remaining()
+            if remaining is not None and remaining <= 0.0:
+                return False
+            cp = self._run(["upload", local, path], timeout=remaining)
+            return (cp.returncode == 0
+                    and not (deadline is not None and deadline.expired()))
         except TransportError:
             return False
         finally:
