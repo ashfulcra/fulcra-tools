@@ -562,6 +562,10 @@ def test_verb_terminal_directive_stale_summary_excluded(capsys):
     assert cli.main(["respond", "x", "acceptance-ping", "--outcome", "done",
                      "--evidence", "acceptance recorded", "--agent",
                      "claude-code:Ashs-MBP-Work:fulcra-tools"], transport=t) == 0
+    # Model the documented stale-summary incident: the downstream feed missed
+    # this same-minute rewrite, so reconcile must defend against its old row.
+    task_path = "team/x/task/acceptance-ping.md"
+    t._feed_snapshot[task_path] = t.store[task_path]
     _reconcile(t)  # reuses the STALE 'proposed' row (mtime-minute unchanged)
     # Precondition: the leak SHAPE is real — doc done, summaries row stale-proposed.
     from coord_engine import aggregate as _agg

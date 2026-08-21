@@ -35,6 +35,8 @@ class CountingTransport:
     normalized ``{path, state, uploaded_at}`` shape (never the raw ``full_name``
     feed — that normalization is the transport's job, see transport.updates)."""
 
+    conditional_writes_supported = True
+
     def __init__(self):
         self.store: dict[str, str] = {}
         self.mtimes: dict[str, str] = {}
@@ -85,6 +87,7 @@ class CountingTransport:
         if self._feed is None:
             return None
         return {
+            "through": since or "2026-07-01T12:00:00Z",
             "data_types": {COORDINATION_TYPE: 0},
             "file_changes": list(self._feed),
         }
@@ -123,6 +126,12 @@ class CountingTransport:
         self.store[path] = content
         return True
 
+    def write_if_unchanged(self, path, content, expected):
+        if self.store.get(path) != expected:
+            return False
+        self.store[path] = content
+        return True
+
     def delete(self, path):
         return self.store.pop(path, None) is not None
 
@@ -150,7 +159,7 @@ def _rows_by_name(agg):
 
 # --- feed-unavailable ⇒ full pass ------------------------------------------
 
-def test_feed_unavailable_falls_back_to_full_pass():
+def test_feed_unavailable_fails_closed_without_advancing_current():
     t = CountingTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     _run(t, "2026-07-01T12:00:00Z")            # seed (full scan)
@@ -159,13 +168,13 @@ def test_feed_unavailable_falls_back_to_full_pass():
     t.set_feed(None)
     t.lists.clear()
     res = _run(t, "2026-07-01T12:30:00Z")
-    assert not res.get("incremental")           # fell back to full scan
-    assert t.lists                               # a full listing was taken
-    assert {r["name"] for r in _agg(t)["rows"]} == {"a", "b"}
+    assert res["degraded"] is True
+    assert "team/r/task/" not in t.lists
+    assert {r["name"] for r in _agg(t)["rows"]} == {"a"}
 
 
-def test_untrusted_batch_full_recovery_does_not_advance_the_watermark():
-    """A recovery listing repairs rows but cannot claim feed completeness."""
+def test_untrusted_batch_does_not_advance_the_watermark_or_rows():
+    """Unknown detector evidence preserves the last sealed generation."""
     t = CountingTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     _run(t, "2026-07-01T12:00:00Z")
@@ -174,12 +183,13 @@ def test_untrusted_batch_full_recovery_does_not_advance_the_watermark():
     assert reason is None and before is not None
     t.put("team/r/task/b.md", _task("Bravo", "active"))
     t.set_feed(None)
-    _run(t, "2026-07-01T12:30:00Z")
+    result = _run(t, "2026-07-01T12:30:00Z")
     after, reason = reconcile._parse_reconcile_cursor(
         _agg(t)[reconcile.RECONCILE_CURSOR_KEY])
     assert reason is None and after is not None
+    assert result["degraded"] is True
     assert after["watermark"] == before["watermark"]
-    assert {row["name"] for row in _agg(t)["rows"]} == {"a", "b"}
+    assert {row["name"] for row in _agg(t)["rows"]} == {"a"}
 
 
 def test_stale_cursor_drift_recovery_keeps_the_existing_feed_frontier():
@@ -302,7 +312,7 @@ def test_incremental_discovery_consumes_one_normalized_batch():
 
 
 def test_reconcile_never_bypasses_the_detector_with_a_legacy_raw_feed():
-    """A transport without data_updates must recover by listing, not call updates."""
+    """A transport without data_updates fails closed and never calls updates."""
     t = CountingTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     _run(t, "2026-07-01T12:00:00Z")
@@ -311,9 +321,9 @@ def test_reconcile_never_bypasses_the_detector_with_a_legacy_raw_feed():
     t.updates = lambda *_args, **_kwargs: calls.append("updates") or []
     t.lists.clear()
     result = _run(t, "2026-07-01T12:30:00Z")
-    assert result["incremental"] is not True
+    assert result["degraded"] is True
     assert calls == []
-    assert "team/r/task/" in t.lists
+    assert "team/r/task/" not in t.lists
 
 
 # --- a deleted shard drops its row without a full listing ------------------

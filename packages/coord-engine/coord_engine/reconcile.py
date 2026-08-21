@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import __version__, aggregate, config, health as health_mod, jsonutil, model, okf, review
+from . import __version__, aggregate, config, generation, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .change_detection import ChangeBatch, ChangeDetector
@@ -86,9 +86,9 @@ def summaries_path(team: str) -> str:
     return f"team/{team}/_coord/summaries.json"
 
 
-def projection_progress_path(team: str) -> str:
-    """Private convergence state; never a reader-serving aggregate."""
-    return f"team/{team}/_coord/projection-build-progress.json"
+def projection_progress_path(team: str, build_id: str = "root") -> str:
+    """Private, immutable-build convergence state; never reader-serving."""
+    return f"team/{team}/_coord/projections/builds/{build_id}.json"
 
 
 def _acks_prefix(team: str) -> str:
@@ -913,14 +913,14 @@ def _publication_generation(aggregate_doc: Any) -> Optional[str]:
 
 
 def _load_projection_progress(
-        transport: Any, team: str, prior_agg: Any) -> dict[str, Any]:
+        transport: Any, team: str, build_id: str) -> dict[str, Any]:
     """Load private partial-build state only for the current public base.
 
     Binding the shard to the public generation prevents a completed publish
     from being followed by an older partial cursor, including when both hosts
     used the same wall-clock second.
     """
-    raw = transport.read(projection_progress_path(team))
+    raw = transport.read(projection_progress_path(team, build_id))
     if not raw:
         return {}
     try:
@@ -929,8 +929,7 @@ def _load_projection_progress(
         return {}
     if (not isinstance(progress, dict)
             or progress.get("schema") != projection_mod.BUILD_PROGRESS_SCHEMA
-            or progress.get("base_generation")
-                != _publication_generation(prior_agg)):
+            or progress.get("base_generation") != build_id):
         return {}
     return progress
 
@@ -1266,6 +1265,215 @@ def _rows_diverged(incremental_rows: list, full_rows: list) -> list[str]:
                   if inc.get(name) != full.get(name))
 
 
+def _generation_value(value: Any) -> Any:
+    """Drop writer-local stamps before sealing a deterministic generation."""
+    if isinstance(value, dict):
+        return {str(k): _generation_value(v) for k, v in value.items()
+                if k not in {"generated_at", "reconcile_host",
+                             projection_mod.FENCE_GENERATION_KEY}}
+    if isinstance(value, list):
+        return [_generation_value(item) for item in value]
+    return value
+
+
+def _nonempty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _canonical_section_document(section: str, path: str,
+                                document: dict[str, Any]) -> bool:
+    """Validate that parsed canonical frontmatter belongs to its sealed section."""
+    doc_type = document.get("type")
+    if section == "roles":
+        relative = path.split("/roles/", 1)[-1]
+        parts = relative.split("/")
+        if len(parts) == 1:
+            role_file = parts[0]
+            return (role_file.endswith(".md") and len(role_file) > len(".md")
+                    and doc_type == "Role")
+        if (len(parts) != 3 or not parts[0]
+                or parts[0].endswith(".md")
+                or not parts[2].endswith(".md")
+                or len(parts[2]) <= len(".md")):
+            return False
+        if parts[1] == "leases":
+            return doc_type == "Lease" and _nonempty_text(document.get("agent"))
+        if parts[1] == "escalations":
+            return doc_type == "Escalation"
+        return False
+    if section == "presence":
+        return doc_type == "Presence" and _nonempty_text(document.get("agent"))
+    if section == "acknowledgments":
+        return doc_type == "Ack" and _nonempty_text(document.get("agent"))
+    if section == "responses":
+        return (doc_type == "Response" and _nonempty_text(document.get("agent"))
+                and _nonempty_text(document.get("outcome")))
+    return False
+
+
+def _tree_section(transport: Any, prefix: str, *, section: str,
+                  deadline: Deadline) -> tuple[str, dict[str, Any]]:
+    """Read every canonical shard recursively under one section deadline."""
+    if deadline.expired():
+        return "UNKNOWN", {"records": []}
+    try:
+        entries = transport.list_dir(prefix)
+    except Exception:
+        return "UNKNOWN", {"records": []}
+    if deadline.expired() or not isinstance(entries, list):
+        return "UNKNOWN", {"records": []}
+    rows: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return "UNKNOWN", {"records": []}
+        name = entry.get("name")
+        if not isinstance(name, str) or not name or name.startswith("/") or ".." in name.split("/"):
+            return "UNKNOWN", {"records": []}
+        is_dir = bool(entry.get("is_dir")) or name.endswith("/")
+        child = prefix + name
+        if is_dir:
+            state, value = _tree_section(transport, child, section=section, deadline=deadline)
+            if state == "UNKNOWN":
+                return state, value
+            rows.extend(value["records"])
+            continue
+        if deadline.expired():
+            return "UNKNOWN", {"records": []}
+        classified = getattr(transport, "read_classified", None)
+        if callable(classified):
+            raw, read_state = classified(child, deadline=deadline)
+            if read_state != "ok" or not isinstance(raw, str):
+                return "UNKNOWN", {"records": []}
+        else:
+            raw = transport.read(child)
+            if not isinstance(raw, str):
+                return "UNKNOWN", {"records": []}
+        if deadline.expired():
+            return "UNKNOWN", {"records": []}
+        # The immutable generation contains canonical bytes, but a successful
+        # read alone is not a proof those bytes are a canonical document.  Parse
+        # them before sealing so malformed source content cannot be published
+        # as a complete view.
+        document = okf.parse_frontmatter(raw)
+        if (not isinstance(document, dict)
+                or not _canonical_section_document(section, child, document)
+                or deadline.expired()):
+            return "UNKNOWN", {"records": []}
+        rows.append({"path": child, "content": raw, "frontmatter": document})
+    records = sorted(rows, key=lambda row: row["path"])
+    return ("DATA" if records else "CLEAR"), {"records": records}
+
+
+def _coverage_state(batch: ChangeBatch, namespaces: tuple[str, ...]) -> str:
+    """Return the detector's typed coverage without collapsing CLEAR to DATA."""
+    if not batch.trusted:
+        return "UNKNOWN"
+    coverage = batch.coverage
+    states: list[str] = []
+    for namespace in namespaces:
+        state = coverage.get(namespace)
+        value = getattr(state, "value", state)
+        if value not in generation.COMPLETE_STATES:
+            return str(value or "UNKNOWN")
+        states.append(str(value))
+    return "DATA" if "DATA" in states else "CLEAR"
+
+
+def _section_deadline(name: str) -> Deadline:
+    """Open a fresh bounded read budget for exactly one sealed section."""
+    del name
+    return Deadline.open(projection_mod.build_budget())
+
+
+def _fixed_section_state(name: str, value: Any, *, deadline: Deadline) -> str:
+    """Validate folded canonical data and retain its CLEAR/DATA distinction."""
+    if deadline.expired() or not isinstance(value, dict):
+        return "UNKNOWN"
+    if name == "tasks":
+        rows = value.get("rows")
+        valid = (isinstance(rows, list)
+                 and all(isinstance(row, dict) and _nonempty_text(row.get("name"))
+                         and _nonempty_text(row.get("status")) for row in rows))
+        populated = bool(rows) if valid else False
+    elif name == "reviews":
+        rows = value.get("rows")
+        valid = (value.get("schema") == projection_mod.REVIEWS_SCHEMA
+                 and value.get("complete") is True
+                 and isinstance(rows, list)
+                 and all(isinstance(row, dict) and _nonempty_text(row.get("name"))
+                         and _nonempty_text(row.get("state")) for row in rows))
+        populated = bool(rows) if valid else False
+    elif name == "forge":
+        responsible, feedback = value.get("responsible"), value.get("feedback")
+        valid = (value.get("schema") == projection_mod.FORGE_SCHEMA
+                 and value.get("complete") is True
+                 and isinstance(responsible, dict) and isinstance(feedback, dict)
+                 and all(_nonempty_text(pr) and isinstance(agents, list)
+                         and all(_nonempty_text(agent) for agent in agents)
+                         for pr, agents in responsible.items())
+                 and all(_nonempty_text(pr) and isinstance(items, list)
+                         and all(isinstance(item, dict) and _nonempty_text(item.get("id"))
+                                 and (item.get("author") is None
+                                      or _nonempty_text(item.get("author")))
+                                 for item in items)
+                         for pr, items in feedback.items()))
+        populated = bool(responsible or feedback) if valid else False
+    else:
+        return "UNKNOWN"
+    if deadline.expired() or not valid:
+        return "UNKNOWN"
+    return "DATA" if populated else "CLEAR"
+
+
+def _generation_sections(transport: Any, team: str, *, batch: ChangeBatch,
+                         rows: list[dict[str, Any]], proj_state: dict[str, Any]
+                         ) -> dict[str, generation.SectionResult]:
+    """Build all required sections under independent deadlines.
+
+    Each section, including the completed task/review/forge folds, receives a
+    distinct deadline before its result is validated and sealed.  A slow source
+    cannot consume another required section's chance to prove completion.
+    """
+    out: dict[str, generation.SectionResult] = {}
+    fixed = {
+        "tasks": ("tasks", {"rows": _generation_value(rows)}),
+        "reviews": ("reviews", _generation_value(proj_state.get(projection_mod.REVIEWS_KEY, {}))),
+        "forge": ("forge", _generation_value(proj_state.get(projection_mod.FORGE_KEY, {}))),
+    }
+    coverage = {
+        "tasks": ("tasks",), "reviews": ("reviews",), "forge": ("forge",),
+        "roles": ("presence_roles",), "presence": ("presence_roles",),
+        "acknowledgments": ("acknowledgments_responses",),
+        "responses": ("acknowledgments_responses",),
+    }
+    for name, (_section_key, value) in fixed.items():
+        deadline = _section_deadline(name)
+        feed_state = _coverage_state(batch, coverage[name])
+        state = (feed_state if feed_state not in generation.COMPLETE_STATES
+                 else _fixed_section_state(name, value, deadline=deadline))
+        out[name] = generation.SectionResult(name, state, value)
+    inventories = {
+        "roles": f"team/{team}/roles/", "presence": f"team/{team}/presence/",
+        "acknowledgments": f"team/{team}/_coord/acks/", "responses": f"team/{team}/response/",
+    }
+    for name, prefix in inventories.items():
+        deadline = _section_deadline(name)
+        state, value = _tree_section(
+            transport, prefix, section=name, deadline=deadline)
+        feed_state = _coverage_state(batch, coverage[name])
+        if feed_state not in generation.COMPLETE_STATES:
+            state = feed_state
+        out[name] = generation.SectionResult(name, state, value)
+    return out
+
+
+def _generation_watermark(batch: ChangeBatch, prior: Optional[generation.Generation]) -> str:
+    """The manifest carries only a feed-attested frontier, never event time."""
+    del prior
+    watermark = getattr(batch, "watermark", None)
+    return watermark if isinstance(watermark, str) and watermark else ""
+
+
 def reconcile(
     transport: Any,
     team: str,
@@ -1325,6 +1533,25 @@ def reconcile(
         team, prior_cursor.get("watermark") if prior_cursor else None,
         detector_deadline,
     )
+    # A detector failure is UNKNOWN, never an invitation to present a full scan
+    # as clean.  This is unconditional: compatibility mode cannot bypass the
+    # generation authority or return a successful rc for untrusted evidence.
+    if not batch.trusted:
+        reason = "change detection UNKNOWN; current generation preserved"
+        result = {"degraded": True, "reason": reason, "tasks": len(prior_rows),
+                  "warnings": [reason], "rows": prior_rows}
+        _write_health_shard(transport, team, host=host, now=now,
+                            result=result, log=log)
+        log.error("reconcile aborted: change detection UNKNOWN", team=team)
+        return result
+    if batch.trusted and not _generation_watermark(batch, None):
+        reason = "feed watermark UNKNOWN; current generation preserved"
+        result = {"degraded": True, "reason": reason, "tasks": len(prior_rows),
+                  "warnings": [reason], "rows": prior_rows}
+        _write_health_shard(transport, team, host=host, now=now,
+                            result=result, log=log)
+        log.error("reconcile aborted: feed watermark absent", team=team)
+        return result
     # Fast path — the one normalized batch positively proves NOTHING changed —
     # only when NOT owed a full/drift pass.
     # It still advances the E1 cursor after independently confirming the feed
@@ -1504,7 +1731,11 @@ def reconcile(
     # The public aggregate is atomic, but an incomplete review section is also
     # the builder's durable scan frontier. Resume that frontier from a private
     # shard bound to the exact public generation it was derived from.
-    build_progress = _load_projection_progress(transport, team, prior_agg)
+    current_generation = generation.load_current(transport, team)
+    progress_build_id = generation.build_id(
+        current_generation.id if current_generation else None,
+        _generation_watermark(batch, current_generation), batch)
+    build_progress = _load_projection_progress(transport, team, progress_build_id)
     built_current = {
         projection_mod.REVIEWS_KEY: False,
         projection_mod.FORGE_KEY: False,
@@ -1568,7 +1799,7 @@ def reconcile(
     if all(built_current.values()):
         progress = {
             "schema": projection_mod.BUILD_PROGRESS_SCHEMA,
-            "base_generation": _publication_generation(prior_agg),
+            "base_generation": progress_build_id,
             "generated_at": now,
             projection_mod.REVIEWS_KEY:
                 proj_state[projection_mod.REVIEWS_KEY],
@@ -1576,7 +1807,7 @@ def reconcile(
                 proj_state[projection_mod.FORGE_KEY],
         }
         if not transport.write(
-                projection_progress_path(team), jsonutil.dumps(progress)):
+                projection_progress_path(team, progress_build_id), jsonutil.dumps(progress)):
             warnings.append("projection build progress write failed")
 
     # Review + forge publication is all-or-nothing. A section that exhausted its
@@ -1613,10 +1844,12 @@ def reconcile(
                   team=team, reason=reason)
         return result
 
-    publication_generation = f"{__version__}:{host}:{now}"
+    # Compatibility fence for summaries.json readers.  It is derived from the
+    # sealed detector input (not host/session/time); current.json remains the
+    # authoritative publication pointer introduced below.
+    publication_generation = generation._batch_digest(batch)
     for key, _schema in projection_mod.REQUIRED_SECTIONS:
-        proj_state[key][
-            projection_mod.FENCE_GENERATION_KEY] = publication_generation
+        proj_state[key][projection_mod.FENCE_GENERATION_KEY] = publication_generation
     proj_state[projection_mod.PUBLICATION_FENCE_KEY] = {
         "schema": projection_mod.PUBLICATION_FENCE_SCHEMA,
         "generation": publication_generation,
@@ -1699,6 +1932,38 @@ def reconcile(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
     )
+    # Unit 4's generation is the publication authority.  The legacy aggregate
+    # remains a compatibility cache for existing readers, and is written only
+    # after the immutable generation and digest-bound current manifest verify.
+    publication = None
+    if batch.trusted and _generation_watermark(batch, None):
+        prior_generation = current_generation
+        sealed = generation.build_generation(
+            prior_generation=prior_generation.id if prior_generation else None,
+            source_watermark=_generation_watermark(batch, prior_generation),
+            batch=batch,
+            sections=_generation_sections(transport, team, batch=batch, rows=rows,
+                                          proj_state=proj_state),
+            engine_version=__version__,
+        )
+        publication = generation.publish(transport, team, sealed)
+    if publication is not None and not publication.published:
+        reason = "generation publication refused: " + publication.reason
+        warnings.append(reason)
+        # A detector that cannot yet produce a sealed ChangeBatch is the
+        # rollout/mixed-fleet compatibility case.  Preserve summaries.json for
+        # its established readers, but never advance current.json.  Once the
+        # detector is trusted, an incomplete section is a real bounded-build
+        # failure and remains nonzero as required by the v2 authority contract.
+        result = {
+            "degraded": True, "reason": reason, "tasks": len(rows),
+            "warnings": warnings, "rows": rows,
+        }
+        _write_health_shard(transport, team, host=host, now=now,
+                            result=result, log=log)
+        log.error("reconcile generation publication refused", team=team,
+                  reason=publication.reason)
+        return result
     if not transport.write(summaries_path(team), jsonutil.dumps(agg)):
         warnings.append("summaries.json write failed")
 

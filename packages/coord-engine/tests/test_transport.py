@@ -52,6 +52,17 @@ def test_write_returns_false_on_timeout():
     assert _slow().write("/x.md", "content") is False
 
 
+def test_conditional_write_fails_closed_when_file_api_has_no_atomic_cas(monkeypatch):
+    """A production last-writer-wins upload must never impersonate CAS."""
+    t = tr.FulcraFileTransport(command=["unused"])
+    called = []
+    monkeypatch.setattr(t, "write", lambda *args: called.append(args) or True)
+
+    assert t.conditional_writes_supported is False
+    assert t.write_if_unchanged("team/r/_coord/projections/current.json", "new", None) is False
+    assert called == []
+
+
 def test_stat_returns_none_on_timeout():
     assert _slow().stat("/x.md") is None
 

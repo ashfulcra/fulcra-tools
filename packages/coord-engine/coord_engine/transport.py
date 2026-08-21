@@ -195,6 +195,8 @@ def parse_stat_output(text: str) -> dict[str, Any]:
 class FulcraFileTransport:
     """Real transport backed by the ``fulcra-api file`` CLI."""
 
+    conditional_writes_supported = False
+
     def __init__(
         self, command: Optional[list[str]] = None, *, timeout: Optional[float] = None
     ):
@@ -758,6 +760,18 @@ class FulcraFileTransport:
                 os.unlink(local)
             except OSError:
                 pass
+
+    def write_if_unchanged(self, path: str, content: str,
+                           expected: Optional[str]) -> bool:
+        """Fail-closed CAS seam for callers that require conditional writes.
+
+        The deployed ``fulcra-api file upload`` surface is last-writer-wins and
+        does not expose an If-Match/version precondition.  Returning ``False``
+        matches ``conditional_writes_supported``: a client-side
+        read/compare/write sequence must never impersonate CAS.
+        """
+        del path, content, expected
+        return False
 
     def stat(self, path: str) -> Optional[dict[str, Any]]:
         # contract: None on any failure (incl. timeout/exec error).

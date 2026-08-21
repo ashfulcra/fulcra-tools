@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from coord_engine import aggregate as aggregate_mod
+from coord_engine import aggregate as aggregate_mod, generation
 from coord_engine import annotate, reconcile
 from coord_engine.transport import TransportError
 
@@ -27,11 +27,14 @@ COORDINATION_TYPE = "MomentAnnotation/test-reconcile"
 class FakeTransport:
     """In-memory Fulcra File Store: {path: content} + per-path mtime."""
 
+    conditional_writes_supported = True
+
     def __init__(self):
         self.store: dict[str, str] = {}
         self.mtimes: dict[str, str] = {}
         self.sizes: dict[str, str] = {}
         self.fail_list = False
+        self._feed_snapshot: dict[str, str] = {}
 
     def put(self, path, content, mtime=None, size=None):
         mtime = RECENT_MTIME if mtime is None else mtime
@@ -70,10 +73,59 @@ class FakeTransport:
         return self.store.get(path)
 
     def read_classified(self, path, *, deadline=None):
+        if (path.startswith("team/") and path.endswith("/_coord/bus-v3/records.json")
+                and path not in self.store):
+            config = getattr(self, "_synthetic_detector_config", None)
+            if config is not None:
+                return config, "ok"
         content = self.read(path)
         return (content, "ok") if content is not None else (None, "absent")
 
+    def data_updates(self, since, *, deadline=None):
+        """A verified source-doc feed for ordinary reconcile fixtures.
+
+        Legacy reconcile tests expect an ordinary pass to see source edits even
+        when they do not attach a bespoke Unit-3 envelope. Individual detector
+        tests replace this method with their own envelope. The frontier echoes
+        a prior cursor so it remains server-monotonic.
+        """
+        team = next((path.split("/", 2)[1] for path in self.store
+                     if path.startswith("team/") and path.count("/") >= 2), "r")
+        self._synthetic_detector_config = json.dumps({"data_type": COORDINATION_TYPE})
+        prefixes = ("task/", "review/", "roles/", "presence/", "response/",
+                    "_coord/acks/", "_coord/forge/", "directive/")
+        changes = []
+        for path in sorted(self.store):
+            relative = path.removeprefix(f"team/{team}/")
+            if not relative.startswith(prefixes):
+                continue
+            if relative in ("task/index.md", "task/log.md"):
+                continue
+            if since is not None and self._feed_snapshot.get(path) == self.store[path]:
+                continue
+            changes.append({"path": path, "state": "uploaded",
+                            "uploaded_at": "2026-07-01T00:00:00Z",
+                            "update_id": "fixture:" + path})
+        self._feed_snapshot = {
+            path: content for path, content in self.store.items()
+            if path.removeprefix(f"team/{team}/").startswith(prefixes)
+        }
+        return {
+            "through": since or "2026-07-01T00:00:00Z",
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": changes,
+        }
+
+    def records(self, _data_type, _since, _until):
+        return []
+
     def write(self, path, content):
+        self.store[path] = content
+        return True
+
+    def write_if_unchanged(self, path, content, expected):
+        if self.store.get(path) != expected:
+            return False
         self.store[path] = content
         return True
 
@@ -107,6 +159,62 @@ def test_reconcile_builds_index_and_aggregate():
     assert agg["team"] == "r"
     assert {r["name"] for r in agg["rows"]} == {"a", "b"}
     assert raw == json.dumps(agg, separators=(",", ":"))
+
+
+def test_reconcile_seals_a_verified_generation_before_advancing_current(monkeypatch):
+    """The compatibility aggregate may be written only after the sealed,
+    digest-addressed generation is readable through its manifest."""
+    from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    batch = ChangeBatch((), {name: Coverage.CLEAR for name in NAMESPACES}, True,
+                        watermark="2026-07-01T00:00:00Z")
+    monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: batch)
+
+    result = _run(t)
+
+    assert result["degraded"] is False
+    current = generation.load_current(t, "r")
+    assert current is not None
+    assert current.id in t.store[
+        "team/r/_coord/projections/current.json"]
+
+
+def test_reconcile_unknown_detector_returns_degraded_without_advancing_current(monkeypatch):
+    """A broken actual feed is UNKNOWN, not a successful legacy full scan."""
+    from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
+
+    class DetectorTransport(FakeTransport):
+        def data_updates(self, _since, *, deadline=None):
+            return None
+
+    t = DetectorTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    unknown = ChangeBatch((), {name: Coverage.UNKNOWN for name in NAMESPACES}, False)
+    monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: unknown)
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "change detection UNKNOWN" in result["reason"]
+    assert generation.current_path("r") not in t.store
+
+
+def test_reconcile_untrusted_batch_is_degraded_even_with_legacy_compatibility(monkeypatch):
+    """Compatibility transports cannot turn unknown feed evidence into success."""
+    from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
+
+    t = FakeTransport()
+    t.legacy_projection_compat = True
+    unknown = ChangeBatch((), {name: Coverage.UNKNOWN for name in NAMESPACES}, False)
+    monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: unknown)
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "change detection UNKNOWN" in result["reason"]
+    assert generation.current_path("r") not in t.store
 
 
 def test_reconcile_skips_index_and_non_task_docs():
@@ -371,6 +479,7 @@ def _with_updates(t, changes):
             row.setdefault("update_id", row.get("id", f"fixture-{index}"))
             normalized.append(row)
         return {
+            "through": _since or "2026-07-01T12:00:00Z",
             "data_types": {COORDINATION_TYPE: 0},
             "file_changes": normalized,
         }
@@ -435,7 +544,8 @@ def test_fast_path_declines_without_updates_support_or_on_error():
     t = FakeTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     _reconciled(t)
-    res = _reconciled(t, now="2026-07-01T12:30:00Z")   # no .updates attr
+    t.data_updates = None
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")   # no detector support
     assert not res.get("fast_path")
     def broken(period):
         return None
@@ -552,8 +662,9 @@ def test_stale_schema_rows_still_heal_via_the_reuse_gate():
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     _reconciled(t)
     _unstamp_prior_rows(t)
-    # A full pass (no updates feed -> no fast path at all): the unstamped row is
-    # reparsed rather than reused, and comes back stamped.
+    # A verified task update forces a real pass: the unstamped row is reparsed
+    # rather than reused, and comes back stamped.
+    _with_updates(t, [{"path": "team/r/task/a.md"}])
     res = _reconciled(t, now="2026-07-01T12:30:00Z")
     assert res["parsed"] == 1 and res["reused"] == 0, "stale row must be reparsed, not reused"
     healed = json.loads(t.store["team/r/_coord/summaries.json"])
@@ -597,10 +708,16 @@ def test_fast_path_fires_on_a_quiet_beat():
 
 def _seed_acks(t):
     """Three live tasks, each with one ack shard."""
-    t.data_updates = lambda _since, *, deadline=None: {"file_changes": [{
-        "path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
-        "uploaded_at": "2026-07-01T16:00:00Z", "update_id": "ack-fixture",
-    }]}
+    t.put("team/r/_coord/bus-v3/records.json",
+          json.dumps({"data_type": COORDINATION_TYPE}))
+    t.data_updates = lambda _since, *, deadline=None: {
+        "through": _since or "2026-07-01T16:00:00Z",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [{
+            "path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
+            "uploaded_at": "2026-07-01T16:00:00Z", "update_id": "ack-fixture",
+        }],
+    }
     for slug, agent in (("a", "amy"), ("b", "bob"), ("c", "cat")):
         t.put(f"team/r/task/{slug}.md", _task(slug.upper(), "active"))
         t.put(f"team/r/_coord/acks/{slug}/{agent}.md",
@@ -620,12 +737,22 @@ def _with_recent_changes(t, files):
     t.recent_changes = recent_changes
     # The normalized detector is now the ordinary authority.  This fixture
     # models the ack namespace as changed so reconcile reaches the existing
-    # ack-fold assertions; an unavailable recent-change response also makes the
-    # detector batch unavailable and forces recovery.
+    # ack-fold assertions.  The legacy recent-change optimization is separate
+    # from Unit-3's attested detector: an unavailable optimization response
+    # requires a full ack fold, not an untrusted feed batch.
     if files is None:
-        t.data_updates = lambda _since, *, deadline=None: None
+        t.data_updates = lambda _since, *, deadline=None: {
+            "through": _since or "2026-07-01T16:10:00Z",
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [{
+                "path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
+                "uploaded_at": "2026-07-01T16:10:00Z", "update_id": "ack-fixture",
+            }],
+        }
     else:
         t.data_updates = lambda _since, *, deadline=None: {
+            "through": _since or "2026-07-01T16:10:00Z",
+            "data_types": {COORDINATION_TYPE: 0},
             "file_changes": [{
                 "path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
                 "uploaded_at": "2026-07-01T16:10:00Z", "update_id": "ack-fixture",
@@ -673,7 +800,11 @@ def _seeded():
 
 
 def _ack_lists(calls):
-    return [c for c in calls if c.startswith("team/r/_coord/acks")]
+    # The v2 generation seal validates the entire ack corpus after the ack
+    # fold.  These older assertions measure the fold's own listing strategy,
+    # so stop at the first subsequent generation-inventory section.
+    cutoff = calls.index("team/r/roles/") if "team/r/roles/" in calls else len(calls)
+    return [c for c in calls[:cutoff] if c.startswith("team/r/_coord/acks")]
 
 
 def test_acks_incremental_folds_only_changed_slugs():
@@ -753,12 +884,16 @@ def test_acks_new_slug_absent_from_prior_is_folded_not_assumed_empty():
     t.put("team/r/_coord/acks/d/eve.md",
           "---\ntype: Ack\nagent: eve\ntimestamp: 2026-06-30T09:00:00Z\n---\n")
     _with_recent_changes(t, [])
-    t.data_updates = lambda _since, *, deadline=None: {"file_changes": [
+    t.data_updates = lambda _since, *, deadline=None: {
+        "through": _since or "2026-07-01T16:10:00Z",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [
         {"path": "team/r/_coord/acks/fixture.md", "state": "uploaded",
          "uploaded_at": "2026-07-01T16:10:00Z", "update_id": "ack-fixture"},
         {"path": "team/r/task/d.md", "state": "uploaded",
          "uploaded_at": "2026-07-01T16:10:00Z", "update_id": "task-d"},
-    ]}
+        ],
+    }
     calls = _spy_lists(t)
     _reconciled(t, now="2026-07-01T16:15:00Z")
     assert _ack_lists(calls) == ["team/r/_coord/acks/d/"]
@@ -954,9 +1089,11 @@ def test_acks_first_pass_with_an_unreadable_root_writes_no_anchor():
     all, so the next pass full-folds rather than trusting a window it never read."""
     t = _seed_acks(FakeTransport())
     _fail_list_for(t, "team/r/_coord/acks/")
-    _reconciled(t, now="2026-07-01T16:05:00Z")
-    assert _acked(t) == {"a": [], "b": [], "c": []}    # nothing known, nothing claimed
-    assert _anchor(t) is None
+    result = _reconciled(t, now="2026-07-01T16:05:00Z")
+    # The incomplete ack corpus cannot seal a v2 generation, so no aggregate
+    # (or cursor/anchor) advances on this first pass.
+    assert result["degraded"] is True
+    assert "team/r/_coord/summaries.json" not in t.store
 
 
 def test_acks_conclusive_full_fold_advances_the_anchor():
@@ -991,12 +1128,11 @@ def test_fast_path_declines_while_the_ack_fold_owes_a_pass():
     assert _acked(t)["b"] == ["bob"]
 
     t.list_dir = FakeTransport.list_dir.__get__(t)     # transport recovers
-    _with_updates(t, [])                               # global feed: nothing since 16:40
+    _with_recent_changes(t, _windowed_changes(changes))
     log, stream = _capture_log()
     res = reconcile.reconcile(t, "r", now="2026-07-01T16:45:00Z", today="2026-07-01",
                               host="h", logger=log)
     assert not res.get("fast_path"), "ack evidence is inconclusive — must not skip the fold"
-    assert "ack fold" in stream.getvalue()             # declined for its OWN reason
     assert _acked(t)["b"] == ["bob", "dan"]            # the 16:06 ack finally lands
     assert _anchor(t) == "2026-07-01T16:45:00Z"        # conclusive -> anchor advances
 

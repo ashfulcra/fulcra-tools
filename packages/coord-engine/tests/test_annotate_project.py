@@ -450,6 +450,9 @@ def test_cli_project_partial_failure_survives_intervening_reconcile(capsys, monk
 
     # INTERVENING reconcile: a and b unchanged -> diff is []. Old code overwrote
     # pending with [] and lost b; merge-and-carry drops the landed a but carries b.
+    # Force a trusted task envelope so this is a full reconcile rather than the
+    # v2 detector's no-change fast path; canonical task values remain unchanged.
+    t._feed_snapshot.pop("team/r/task/a.md", None)
     assert cli.main(["reconcile", "r"], transport=t) == 0
     pend = json.loads(t.store[annotate.pending_path("r")])["transitions"]
     assert [x["task_id"] for x in pend] == ["b"]

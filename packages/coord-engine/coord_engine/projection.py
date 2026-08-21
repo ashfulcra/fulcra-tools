@@ -75,12 +75,13 @@ functions never raise (reconcile wraps them best-effort anyway).
 from __future__ import annotations
 
 import hashlib
+import json
 
 from typing import Any, Optional
 
 from datetime import timezone
 
-from . import aggregate, config, forge, okf, review, review_gc
+from . import aggregate, config, forge, generation, okf, review, review_gc
 from .budget import Deadline
 from .log import get_logger
 from .roles import age_hours
@@ -265,6 +266,30 @@ def fresh_section(
                   if isinstance(scanned, int) and isinstance(total, int) else "")
         return None, f"{key} projection incomplete{detail}"
     return section, ""
+
+
+def generation_section(
+    transport: Any, team: str, key: str,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Read one section from the digest-verified current generation.
+
+    This is the v2 publication validation path.  Existing aggregate readers
+    remain on the compatibility fence until each is migrated, but no new reader
+    should treat ``summaries.json`` as its publication authority.
+    """
+    current = generation.load_current(transport, team)
+    if current is None:
+        return None, "current generation absent or unverifiable"
+    try:
+        doc = json.loads(current.bytes)
+        section = doc["sections"][key]
+    except (KeyError, TypeError, ValueError):
+        return None, f"{key} generation section unrecognized"
+    if (not isinstance(section, dict)
+            or section.get("state") not in generation.COMPLETE_STATES
+            or not isinstance(section.get("value"), dict)):
+        return None, f"{key} generation section incomplete"
+    return section["value"], ""
 
 
 def feed_fresh_section(
