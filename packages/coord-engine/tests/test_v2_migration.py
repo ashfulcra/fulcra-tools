@@ -7,6 +7,7 @@ import json
 from argparse import Namespace
 from datetime import datetime, timezone
 import hashlib
+from pathlib import Path
 import time
 
 import pytest
@@ -64,6 +65,9 @@ AUTHORITY = {
     "api_version": "v1alpha1",
 }
 BUILD_SHA = "c3f4680a93a135520b6ffaf767ef46e1fe97a798"
+LIVE_ENVELOPE_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "live_data_updates_2026-08-20T2013Z.min.json"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -557,6 +561,48 @@ def test_feed_visibility_measurement_is_bounded_and_reports_observed_lag():
     assert decision.state == "READY"
 
 
+def test_lag_measurement_uses_positive_probe_row_from_exact_live_envelope():
+    """Removing synthetic envelope boundaries must not break point observation."""
+    fixture = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
+    event_at = "2026-08-20T20:04:27.095791Z"
+
+    class LiveEnvelopeTransport(_LagTransport):
+        def __init__(self):
+            super().__init__(0, _Clock())
+            self.feed_requests = []
+
+        def data_updates(self, since, *, deadline=None):
+            self.feed_requests.append(since)
+            envelope = json.loads(json.dumps(fixture))
+            envelope["file_changes"][0]["full_name"] = "/" + self.writes[-1][0]
+            return envelope
+
+    class LiveNow:
+        def __init__(self):
+            self.values = iter((
+                datetime(2026, 8, 20, 20, 4, 26, tzinfo=timezone.utc),
+                datetime(2026, 8, 20, 20, 4, 29, 95791, tzinfo=timezone.utc),
+            ))
+
+        def __call__(self):
+            return next(self.values)
+
+    transport = LiveEnvelopeTransport()
+    result = migration.measure_feed_visibility_lag(
+        transport, "fulcra", "host-a",
+        environ={"FULCRA_COORD_AGENT": "agent-a"},
+        persisted=lambda: pytest.fail("env identity must not consult persisted state"),
+        hostname=lambda: "same-machine", timeout_seconds=1.0, poll_seconds=0.1,
+        monotonic=transport.clock.monotonic, sleep=transport.clock.sleep,
+        now=LiveNow(),
+    )
+
+    assert result.state == "DATA"
+    assert result.update_id == fixture["file_changes"][0]["id"]
+    assert result.event_at == event_at
+    assert transport.feed_requests == ["6 seconds"]
+
+
 @pytest.mark.parametrize("mutation", ["missing", "invalid", "unbound"])
 def test_activation_rejects_missing_invalid_or_unbound_principal_source(mutation):
     row = _host("host-a")
@@ -765,13 +811,12 @@ def test_cli_env_principal_succeeds_with_absent_persisted_identity(
         monkeypatch, capsys):
     class CurrentTransport(_LagTransport):
         def data_updates(self, since, *, deadline=None):
+            event_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             return {
-                "after": since,
-                "through": since,
                 "file_changes": [{
                     "id": "3185bd09-9500-4407-bd87-013832fe55f3",
                     "path": self.writes[-1][0], "state": "uploaded",
-                    "uploaded_at": since,
+                    "uploaded_at": event_at,
                 }],
             }
 

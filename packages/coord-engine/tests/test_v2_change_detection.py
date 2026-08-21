@@ -98,6 +98,23 @@ def test_invalid_envelope_is_unknown_before_any_rows_are_consumed():
     assert batch.coverage["tasks"].value == "UNKNOWN"
 
 
+def test_exact_live_envelope_cannot_certify_a_complete_detector_window():
+    """Live rows are facts, but the envelope attests no outer coverage window."""
+    from coord_engine.change_detection import ChangeDetector
+
+    envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
+    transport = FeedTransport(envelope)
+    transport.envelope = envelope
+
+    batch = ChangeDetector(transport).poll(
+        "fulcra", "2026-08-20T20:00:00Z", Deadline.open(5.0),
+    )
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert batch.reason == "data-updates coverage boundary unavailable or unparseable"
+
+
 def test_every_supported_namespace_is_explicitly_covered():
     """Dropping a path family from normalization must make its coverage doubtful."""
     transport = FeedTransport({"file_changes": [

@@ -39,6 +39,7 @@ _AUTHORITY_VERSIONED_FIELDS = (
     "cursor_generation", "cursor_activated_at",
 )
 LAG_TOLERANCE_SECONDS = 0.001
+FEED_QUERY_SKEW_SECONDS = 5.0
 
 # Exclusion is evidence, not omission. Values are the operator-approved reason
 # class; the evidence document must additionally carry measured timestamps/ages
@@ -655,25 +656,23 @@ def measure_feed_visibility_lag(
         return unknown("probe upload exceeded harness deadline")
     if landed is not True:
         return unknown("probe write did not persist")
+    feed_period = f"{math.ceil(float(timeout_seconds) + FEED_QUERY_SKEW_SECONDS)} seconds"
     while True:
         if bound.expired():
             return unknown("feed visibility bound expired")
         try:
-            result = feed(measured_at, deadline=bound)
+            result = feed(feed_period, deadline=bound)
         except Exception:
             result = None
         if bound.expired():
             return unknown("feed read exceeded harness deadline")
         if not isinstance(result, Mapping):
             return unknown("data-updates envelope unavailable")
-        window, reason = change_detection._feed_window(result, measured_at)
         rows = result.get("file_changes")
         if bound.expired():
             return unknown("feed envelope validation exceeded harness deadline")
-        if window is None or not isinstance(rows, list):
-            return unknown(reason or "data-updates file_changes unavailable")
-        start_at = _parse_aware_utc(window[0])
-        through_at = _parse_aware_utc(window[1])
+        if not isinstance(rows, list):
+            return unknown("data-updates file_changes unavailable")
         matched: list[tuple[str, datetime, str]] = []
         for row in rows:
             if bound.expired():
@@ -687,10 +686,8 @@ def measure_feed_visibility_lag(
             instant = change_detection._instant(row, state) if isinstance(state, str) else None
             if (not isinstance(raw_path, str) or not raw_path.strip()
                     or state not in ("uploaded", "archived", "deleted")
-                    or not _valid_update_id(update_id) or instant is None
-                    or start_at is None or through_at is None
-                    or not (start_at <= instant[0] <= through_at)):
-                reason = "data-updates lifecycle row is unattested or malformed"
+                    or not _valid_update_id(update_id) or instant is None):
+                reason = "data-updates lifecycle row is malformed"
                 break
             normalized_path = raw_path.strip().lstrip("/")
             if normalized_path == path:

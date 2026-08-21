@@ -76,9 +76,13 @@ a path-only `files` response is not evidence.
 }
 ```
 
-The harness writes one nonce document and polls for that exact immutable path.
-Only a comparable `after`/`through` window with a supported lifecycle state,
-stable update identity, and aware authoritative event timestamp is accepted.
+The harness writes one nonce document and polls a bounded relative-period feed
+for that exact immutable path. The live envelope does not attest `after` or
+`through`, so the measurement makes no complete-window or negative-coverage
+claim. It accepts `DATA` only after exactly one uploaded lifecycle row for the
+unique probe path appears with a stable update identity and aware authoritative
+event timestamp. Absence, duplicate matches, or any malformed lifecycle row is
+`UNKNOWN`/nonzero.
 The entire harness deadline starts before identity/authentication preflight and
 covers canonical-authority acquisition, probe upload, feed polling, and final
 observation, serialization, hashing, result construction, and renderer return.

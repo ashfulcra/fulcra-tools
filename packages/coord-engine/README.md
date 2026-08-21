@@ -255,7 +255,8 @@ Both hosts must report one exact team/authority/probe-schema/build cohort; case
 or caller-normalized aliases are not equivalent. Its single deadline covers
 authority preflight, upload, feed polling, final observation, hashing,
 serialization, and rendering, and it accepts only fully attested feed lifecycle
-envelopes. Then complete the
+rows for its exact unique probe path. It does not treat the live envelope as an
+attested complete window or use absence as evidence. Then complete the
 [epsilon evidence](../../docs/coord/evidence/coord-engine-v2-epsilon-measurement.md)
 and [fleet verification](../../docs/coord/evidence/coord-engine-v2-fleet-verification.md).
 The current templates are explicitly BLOCKED; therefore the package version,
