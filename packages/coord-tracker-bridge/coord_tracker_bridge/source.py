@@ -197,6 +197,38 @@ class EngineCapability:
     timeout: float | None = None
 
 
+#: Envelope fields coord-engine 2.0.x emits alongside a payload. They describe
+#: the READ, not the work, so they are never rows and never lanes.
+_ENVELOPE_SCALARS = frozenset({
+    "contract", "health", "source", "degraded", "basis", "as_of",
+    "scanned", "total", "sv",
+})
+
+
+def _unwrap_envelope(payload: Any) -> Any:
+    """Return the rows a 2.0.x envelope wraps, or the payload unchanged.
+
+    coord-engine's truthfulness work gave read verbs a standard envelope —
+    ``{contract, health, source, degraded, basis, rows}`` — where the payload
+    that used to BE the top-level list now sits under ``rows``. Verbs that
+    return a mapping of lanes (``board``) keep their shape and merely gain the
+    scalars, which :data:`_ENVELOPE_SCALARS` skips.
+
+    Deliberately narrow: a dict is unwrapped ONLY when it carries a list
+    ``rows`` AND at least one envelope scalar. Anything else is returned
+    untouched so genuinely unknown shapes still fail closed — a bridge that
+    shrugs at a shape it does not understand is how a partial read gets
+    mistaken for a complete one.
+    """
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("rows"), list)
+        and any(key in payload for key in _ENVELOPE_SCALARS)
+    ):
+        return payload["rows"]
+    return payload
+
+
 class EngineSourceAdapter:
     """Read coord-engine through its JSON process boundary, capability by capability."""
 
@@ -388,8 +420,15 @@ class EngineSourceAdapter:
                 continue
             normalized: list[WorkRecord] = []
             normalization_error: str | None = None
+            payload = _unwrap_envelope(payload)
             if capability.name == "tasks" and isinstance(payload, dict):
                 for lane, rows in payload.items():
+                    if lane in _ENVELOPE_SCALARS:
+                        # Envelope metadata sitting beside the lanes, not a lane
+                        # of rows. coord-engine 2.0.x added `contract: 2` to
+                        # `board --json`; reading it as a lane degraded the whole
+                        # tasks capability (measured live 2026-08-22).
+                        continue
                     if not isinstance(rows, list):
                         normalization_error = f"$.{lane}: expected list, got {type(rows).__name__}"
                         break
