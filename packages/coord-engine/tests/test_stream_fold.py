@@ -375,3 +375,26 @@ def test_state_write_failure_is_unknown_nonzero_not_a_checkpoint():
     assert out.state is OutcomeState.UNKNOWN and out.rc != 0, (
         "the architecture claims a durable cursor; failing to persist it "
         "cannot be a successful checkpoint")
+
+
+def test_owed_human_output_never_truncates_the_slug(monkeypatch, capsys):
+    """The slug IS the operand (coord-maintainer, 2026-08-22).
+
+    `owed`'s human rendering cut slugs at 88 chars, and this bus mints 89-char
+    slugs whenever the title is long — so the cut removed exactly the last
+    character OF THE HASH SUFFIX, on 68 of 207 live rows, with nothing marking
+    the loss. A reader copying a slug out of the recommended surface would
+    paste one character short of the value `--closes` requires.
+    """
+    from argparse import Namespace
+    long_slug = ("correction-to-my-p0-two-of-my-three-claims-do-not-survive-"
+                 "re-testing-the-manifes-0f0374e9")
+    assert len(long_slug) == 89, "fixture must reproduce the real 89-char shape"
+    rows = [_rec("a", "2026-08-21T20:00:00+00:00",
+                 _payload(to="alice", kind="directive", slug=long_slug))]
+    t = StreamOnlyTransport(rows); _cfg_store(t)
+    monkeypatch.setattr(cli, "_identity", lambda *a, **k: "alice")
+    cli.cmd_owed(Namespace(team=TEAM, agent="alice", json=False), t)
+    printed = capsys.readouterr().out
+    assert long_slug in printed, (
+        "the full slug must appear verbatim: a truncated slug is not a slug")

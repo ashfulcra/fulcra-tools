@@ -1682,7 +1682,13 @@ def cmd_owed(args: argparse.Namespace, transport: Any) -> int:
         for cov in out.coverage:
             print(f"  {cov.surface}: {cov.reason or cov.state.value}")
         for row in out.rows:
-            print(f"  [{row.get('pri')}] {row.get('at','')}  {row.get('slug','')[:88]}")
+            # THE SLUG IS THE OPERAND (coord-maintainer, 2026-08-22): this line
+            # cut slugs at 88 chars and the bus mints 89-char slugs for long
+            # titles, so the cut removed the last character OF THE HASH SUFFIX
+            # on 68 of 207 live rows, silently. A reader copying from the
+            # surface we tell agents to use would paste a slug one character
+            # short of what `--closes` requires. Never truncate an identifier.
+            print(f"  [{row.get('pri')}] {row.get('at','')}  {row.get('slug','')}")
     return out.rc
 
 
