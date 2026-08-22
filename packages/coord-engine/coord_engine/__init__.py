@@ -13,4 +13,4 @@ Every stateful fold is here (deterministic + tested), never prose the agent eyeb
 Design: ``docs/coord/proposals/teams-convergence/``.
 """
 
-__version__ = "2.0.2"
+__version__ = "2.0.3"
