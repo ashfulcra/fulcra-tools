@@ -130,3 +130,62 @@ def test_source_contract_degradation_suppresses_absence_close(source_case):
     assert any(change.kind is ChangeKind.CLOSE for change in healthy_plan.changes)
     assert not any(change.kind is ChangeKind.CLOSE for change in degraded_plan.changes)
     assert any(diagnostic.code == "close-suppressed" for diagnostic in degraded_plan.diagnostics)
+
+
+# --- engine envelope contract v2 (coord-engine 2.0.x), 2026-08-22 ------------
+#
+# The engine adopted a standard envelope during the truthfulness work:
+# scalar `contract`, plus `health`/`source`/`degraded`/`basis` alongside the
+# payload. The adapter predates it and read live 2.0.2 as schema-degraded:
+#   tasks -> "$.contract: expected list, got int"   (board gained contract: 2)
+#   asks  -> "$: expected list, got dict"           (asks became an envelope)
+# Measured on team fulcra 2026-08-22: board keys were
+# active/waiting/blocked/proposed (lists) + contract=2; asks was
+# {contract, health, source, degraded, basis, rows}. A degraded capability
+# cannot authorize absence-based closes, so this silently narrowed coverage —
+# the asks lane was invisible entirely.
+
+def _engine_source(payloads):
+    """EngineSourceAdapter wired to canned per-capability payloads."""
+    from coord_tracker_bridge import source as source_mod
+
+    class _Canned(source_mod.EngineSourceAdapter):
+        def _read(self, capability):  # type: ignore[override]
+            return payloads.get(capability.name), None
+
+    return _Canned("fulcra")
+
+
+def _task_row(name="t-1", status="active"):
+    return {"id": name, "name": name, "title": "x", "status": status,
+            "assignee": "alice", "owner": "coord-boss", "priority": "P2"}
+
+
+def test_board_envelope_scalar_is_not_a_lane():
+    """`contract: 2` sits beside the lanes; it is metadata, not a lane of rows."""
+    snap = _engine_source({
+        "tasks": {"active": [_task_row()], "waiting": [], "blocked": [],
+                  "proposed": [], "contract": 2},
+    }).snapshot()
+    schema = [d for d in snap.diagnostics if d.code == "source-schema-degraded"]
+    assert not schema, f"envelope scalar must not degrade the lane read: {schema}"
+    assert any(r.source.item_id == "t-1" for r in snap.items), "the lane row must survive"
+
+
+def test_asks_envelope_rows_are_read():
+    """`asks --json` returns an envelope; the rows live under `rows`."""
+    snap = _engine_source({
+        "asks": {"contract": 2, "health": "CLEAR", "source": "raw-scan",
+                 "degraded": [], "basis": [],
+                 "rows": [_task_row(name="ask-1", status="open")]},
+    }).snapshot()
+    schema = [d for d in snap.diagnostics if d.code == "source-schema-degraded"]
+    assert not schema, f"the asks envelope must be read, not degraded: {schema}"
+    assert any(r.source.item_id == "ask-1" for r in snap.items)
+
+
+def test_a_genuinely_wrong_shape_still_degrades():
+    """The fix must not turn into blanket tolerance — unknown shapes fail closed."""
+    snap = _engine_source({"asks": "not-a-payload"}).snapshot()
+    assert [d for d in snap.diagnostics if d.code == "source-schema-degraded"], (
+        "a scalar payload is not an envelope and must still degrade")
