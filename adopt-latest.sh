@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="896fa537dec89ebb159087cbbec7c2290bd8960a"   # coord-engine 2.0.2: closes name whom they discharge (`for` field) — every terminal transition emits its close (self-done, tell --closes, supersede, abandon, terminal update), broadcast terminal closes discharge every recipient ("*" -> "all"), third-party authority closes work. Unblocks fleet cutover seeding.
+PIN="57909052144bd8b250a88f475b2826be2b70606f"   # coord-engine 2.0.3: 673 reconcile recovery — the detector-UNKNOWN it recovers from is the LIVE condition (fulcra-api emits no data-updates coverage boundary), verified firing 2026-08-22; plus 674 owed slug truncation. Cold-start build budget (COORD_PROJECTION_BUILD_BUDGET, default 240s) is a separate open P1.
 VER="pp-0a093dba"
 # TYPE mirrors the CURRENT channel in _coord/bus-v3/records.json — when the authority moves, update BOTH (2026-08-04 cutover lesson: this line silently pinned the OLD channel)
 TYPE="MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
