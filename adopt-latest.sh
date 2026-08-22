@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="59cb228b19144d3ddd56ca9fc20316c30158ae24"   # coord-engine 2.0.1: units 1-3 truthfulness spine live, generation serving dormant (public_read_v2_enabled=False, pinned), the stream fold (`owed`, per-responder closes, fyi events, no ghost closes). Stream-vs-file agreement is the port acceptance test.
+PIN="896fa537dec89ebb159087cbbec7c2290bd8960a"   # coord-engine 2.0.2: closes name whom they discharge (`for` field) — every terminal transition emits its close (self-done, tell --closes, supersede, abandon, terminal update), broadcast terminal closes discharge every recipient ("*" -> "all"), third-party authority closes work. Unblocks fleet cutover seeding.
 VER="pp-0a093dba"
 # TYPE mirrors the CURRENT channel in _coord/bus-v3/records.json — when the authority moves, update BOTH (2026-08-04 cutover lesson: this line silently pinned the OLD channel)
 TYPE="MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
