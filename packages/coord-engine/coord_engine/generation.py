@@ -310,6 +310,7 @@ def _batch_digest(batch: Any) -> str:
     coverage = dict(getattr(batch, "coverage", {}))
     return _digest({"trusted": bool(getattr(batch, "trusted", False)),
                     "watermark": getattr(batch, "watermark", None),
+                    "recovery_snapshot": getattr(batch, "recovery_snapshot", None),
                     "changes": sorted(changes, key=lambda row: (
                         row["update_id"], row["path"], row["state"], row["at"])),
                     "coverage": coverage})
@@ -410,6 +411,33 @@ def load_current(transport: Any, team: str) -> Optional[Generation]:
     return Generation(doc["id"], raw, manifest["content_digest"],
                       manifest["source_watermark"], dict(manifest["schemas"]),
                       manifest["engine_version"], True, ())
+
+
+def seals_batch(
+    current: Generation,
+    *,
+    source_watermark: str,
+    batch: Any,
+    engine_version: str,
+) -> bool:
+    """Whether ``current`` already seals this exact normalized build input.
+
+    Recovery batches include their canonical section fingerprint in
+    ``_batch_digest``.  Comparing that digest lets reconcile reuse an identical
+    recovery generation without chaining a new identity solely because the
+    previous recovery generation became ``prior_generation_id``.
+    """
+    if (current.source_watermark != source_watermark
+            or current.engine_version != engine_version):
+        return False
+    try:
+        doc = json.loads(current.bytes)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(doc, dict)
+        and doc.get("normalized_update_digest") == _batch_digest(batch)
+    )
 
 
 def publish(transport: Any, team: str, generation: Generation, *,

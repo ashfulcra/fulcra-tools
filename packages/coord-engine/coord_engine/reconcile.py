@@ -14,13 +14,20 @@ fully testable without the network.
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
 from . import __version__, aggregate, config, generation, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
-from .change_detection import ChangeBatch, ChangeDetector
+from .change_detection import (
+    ChangeBatch,
+    ChangeDetector,
+    Coverage,
+    NAMESPACES,
+    detector_recovery_reason,
+)
 from .log import get_logger
 from .roles import age_hours
 from .tasks import agent_key
@@ -1444,6 +1451,32 @@ def _generation_watermark(batch: ChangeBatch, prior: Optional[generation.Generat
     return watermark if isinstance(watermark, str) and watermark else ""
 
 
+def _recovery_batch(
+    original: ChangeBatch,
+    watermark: str,
+    *,
+    sections: Optional[dict[str, generation.SectionResult]] = None,
+) -> ChangeBatch:
+    """Seal the named full-scan recovery at the last proven feed frontier."""
+    snapshot = None
+    if sections is not None:
+        canonical = {
+            name: sections[name].document() for name in sorted(sections)
+        }
+        snapshot = sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    return ChangeBatch(
+        (),
+        {name: Coverage.CLEAR for name in NAMESPACES},
+        True,
+        original.envelope,
+        watermark,
+        "detector-full-scan: " + str(original.reason or "window UNKNOWN"),
+        snapshot,
+    )
+
+
 def reconcile(
     transport: Any,
     team: str,
@@ -1496,17 +1529,27 @@ def reconcile(
 
     # Unit 3's detection authority: ordinary reconciliation consumes ONE
     # normalized envelope before deciding whether the task fold may be
-    # incremental.  Any doubt stays in the batch and forces the named full scan;
-    # no later branch is permitted to re-query the raw feed.
+    # incremental. Doubt stays in the batch; only the exact outer-window reason
+    # family with a prior proven frontier may enter the named full scan. No later
+    # branch is permitted to re-query the raw feed.
     detector_deadline = Deadline.open(getattr(transport, "timeout", 30.0))
     batch = ChangeDetector(transport).poll(
         team, prior_cursor.get("watermark") if prior_cursor else None,
         detector_deadline,
     )
+    recovery_reason = detector_recovery_reason(batch)
+    recovery_watermark = (
+        prior_cursor.get("watermark") if prior_cursor is not None else None
+    )
+    recovery_requested = (
+        recovery_reason is not None
+        and isinstance(recovery_watermark, str)
+        and bool(recovery_watermark)
+    )
     # A detector failure is UNKNOWN, never an invitation to present a full scan
     # as clean.  This is unconditional: compatibility mode cannot bypass the
     # generation authority or return a successful rc for untrusted evidence.
-    if not batch.trusted:
+    if not batch.trusted and not recovery_requested:
         reason = "change detection UNKNOWN; current generation preserved"
         result = {"degraded": True, "reason": reason, "tasks": len(prior_rows),
                   "warnings": [reason], "rows": prior_rows}
@@ -1642,6 +1685,19 @@ def reconcile(
         if cursor_reason:
             log.info("reconcile: full scan (cursor unusable)", team=team,
                      reason=cursor_reason)
+        if recovery_requested:
+            recovery_warning = (
+                "detector-full-scan recovery: canonical surfaces rebuilt; "
+                "feed watermark preserved at the last proven frontier"
+            )
+            warnings.append(recovery_warning)
+            log.warn(
+                "reconcile: named detector recovery full scan",
+                team=team,
+                reason=recovery_reason,
+                watermark=recovery_watermark,
+            )
+            batch = _recovery_batch(batch, recovery_watermark)
 
     # --- retention sub-pass (enabled by default) ---
     # the fold budgets. Precedence: --retention-days flag > COORD_RETENTION_DAYS >
@@ -1817,6 +1873,13 @@ def reconcile(
     # Compatibility fence for summaries.json readers.  It is derived from the
     # sealed detector input (not host/session/time); current.json remains the
     # authoritative publication pointer introduced below.
+    generation_sections = _generation_sections(
+        transport, team, batch=batch, rows=rows, proj_state=proj_state,
+    )
+    if recovery_requested:
+        batch = _recovery_batch(
+            batch, recovery_watermark, sections=generation_sections,
+        )
     publication_generation = generation._batch_digest(batch)
     for key, _schema in projection_mod.REQUIRED_SECTIONS:
         proj_state[key][projection_mod.FENCE_GENERATION_KEY] = publication_generation
@@ -1908,15 +1971,26 @@ def reconcile(
     publication = None
     if batch.trusted and _generation_watermark(batch, None):
         prior_generation = current_generation
-        sealed = generation.build_generation(
-            prior_generation=prior_generation.id if prior_generation else None,
-            source_watermark=_generation_watermark(batch, prior_generation),
-            batch=batch,
-            sections=_generation_sections(transport, team, batch=batch, rows=rows,
-                                          proj_state=proj_state),
-            engine_version=__version__,
+        source_watermark = _generation_watermark(batch, prior_generation)
+        recovery_already_current = (
+            recovery_requested
+            and prior_generation is not None
+            and generation.seals_batch(
+                prior_generation,
+                source_watermark=source_watermark,
+                batch=batch,
+                engine_version=__version__,
+            )
         )
-        publication = generation.publish(transport, team, sealed)
+        if not recovery_already_current:
+            sealed = generation.build_generation(
+                prior_generation=prior_generation.id if prior_generation else None,
+                source_watermark=source_watermark,
+                batch=batch,
+                sections=generation_sections,
+                engine_version=__version__,
+            )
+            publication = generation.publish(transport, team, sealed)
     if publication is not None and not publication.published:
         reason = "generation publication refused: " + publication.reason
         warnings.append(reason)
@@ -1946,7 +2020,7 @@ def reconcile(
         "reconciled", team=team, tasks=len(rows), reused=reused, parsed=parsed,
         transitions=len(transitions), warnings=len(warnings),
     )
-    return {
+    result = {
         "degraded": False,
         "tasks": len(rows),
         "reused": reused,
@@ -1957,3 +2031,6 @@ def reconcile(
         "incremental": incremental,
         "drift_detected": drift_detected,
     }
+    if recovery_requested:
+        result["recovery"] = "detector-full-scan"
+    return result

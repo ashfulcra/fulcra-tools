@@ -98,6 +98,20 @@ def test_invalid_envelope_is_unknown_before_any_rows_are_consumed():
     assert batch.coverage["tasks"].value == "UNKNOWN"
 
 
+def test_captured_live_envelope_preserves_the_named_boundary_recovery_reason():
+    """The captured platform shape must keep routing to the named recovery."""
+    envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
+    transport = FeedTransport(envelope)
+    # FeedTransport normally supplies synthetic test-only boundaries. Exercise
+    # the captured two-key envelope exactly as the production CLI emits it.
+    transport.envelope = envelope
+
+    batch = _poll(transport, team="fulcra")
+
+    assert batch.trusted is False
+    assert batch.reason == "data-updates coverage boundary unavailable or unparseable"
+
+
 def test_every_supported_namespace_is_explicitly_covered():
     """Dropping a path family from normalization must make its coverage doubtful."""
     transport = FeedTransport({"file_changes": [
