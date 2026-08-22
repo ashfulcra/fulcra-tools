@@ -231,6 +231,78 @@ def test_reconcile_untrusted_batch_is_degraded_even_with_legacy_compatibility(mo
     assert generation.current_path("r") not in t.store
 
 
+def test_reconcile_named_boundary_recovery_restores_absent_generation_substrate():
+    """The live two-key feed shape triggers one canonical recovery scan.
+
+    Recovery reuses the last proven feed frontier: the full scan repairs the
+    canonical rows and generation substrate, but cannot manufacture progress in
+    a feed whose outer boundary/frontier remain unproven.
+    """
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    first = _run(t)
+    assert first["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY
+    ]
+
+    # Reproduce the live outage shape: summaries survives, while the immutable
+    # generation and its current pointer are both absent.
+    for path in list(t.store):
+        if path.startswith("team/r/_coord/projections/"):
+            t.store.pop(path)
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+
+    def boundaryless_data_updates(_since, *, deadline=None):
+        return {
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [],
+        }
+
+    t.data_updates = boundaryless_data_updates
+    result = _run(t)
+
+    assert result["degraded"] is False
+    assert result["recovery"] == "detector-full-scan"
+    assert any("detector-full-scan" in warning for warning in result["warnings"])
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert {row["name"] for row in aggregate["rows"]} == {"a", "b"}
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == before["watermark"]
+    current = generation.load_current(t, "r")
+    assert current is not None
+    assert generation.generation_path("r", current.id) in t.store
+
+
+def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
+    """Only the approved outer-window reason family may enter the full scan."""
+    from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
+
+    class CountingFakeTransport(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.task_listings = 0
+
+        def list_dir(self, prefix):
+            if prefix == "team/r/task/":
+                self.task_listings += 1
+            return super().list_dir(prefix)
+
+    t = CountingFakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    unknown = ChangeBatch(
+        (), {name: Coverage.UNKNOWN for name in NAMESPACES}, False,
+        reason="record cursor window unavailable or malformed",
+    )
+    monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: unknown)
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "recovery" not in result
+    assert t.task_listings == 0
+    assert generation.current_path("r") not in t.store
+
+
 def test_reconcile_skips_index_and_non_task_docs():
     t = FakeTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))

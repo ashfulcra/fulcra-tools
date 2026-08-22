@@ -310,6 +310,7 @@ def _batch_digest(batch: Any) -> str:
     coverage = dict(getattr(batch, "coverage", {}))
     return _digest({"trusted": bool(getattr(batch, "trusted", False)),
                     "watermark": getattr(batch, "watermark", None),
+                    "recovery_snapshot": getattr(batch, "recovery_snapshot", None),
                     "changes": sorted(changes, key=lambda row: (
                         row["update_id"], row["path"], row["state"], row["at"])),
                     "coverage": coverage})

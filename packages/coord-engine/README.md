@@ -64,7 +64,14 @@ zero-whitespace serializer; its parsed values and degradation markers are
 unchanged. The dormant generation-serving candidate uses
 `_coord/projections/current.json` as its projection pointer; it names a
 digest-verified immutable generation. Reconcile advances it only after every required section is complete
-and the feed frontier is attested. A transport that proves conditional-write
+and the feed frontier is attested. One narrow recovery exists for an established
+reconcile cursor whose outer `data-updates` envelope omits or cannot parse its
+coverage boundary/frontier: reconcile performs a visibly labelled
+`detector-full-scan`, rebuilds every canonical section, and may republish missing
+`current.json`/immutable-generation substrate. It preserves the last proven
+watermark and seals the canonical snapshot into generation identity; it never
+invents feed progress. Every other detector `UNKNOWN` still aborts without a
+canonical scan or pointer advance. A transport that proves conditional-write
 support uses CAS; one that explicitly declares CAS unsupported uses a
 last-writer-wins manifest write followed by exact read verification. Missing or
 invalid capability and manifest write/read failure are nonzero. The mandatory

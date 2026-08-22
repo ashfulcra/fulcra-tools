@@ -1035,11 +1035,16 @@ it (not on PyPI).
     `COORD_ACKS_FULL_EVERY` passes (default 72) bounds anything the query could miss.
   - **Reconcile's own pass is a feed delta, not a directory scan.** It consumes `data-updates`
     since a durable cursor (`reconcile_cursor` — watermark + processed ledger) and reads ONLY the
-    changed shards. The full `list_dir(task/)` scan stays as (a) the fail-closed fallback on ANY
-    cursor/feed doubt and (b) a scheduled drift self-check (every `COORD_RECONCILE_FULL_EVERY`
+    changed shards. The full `list_dir(task/)` scan stays as (a) a scheduled drift self-check (every `COORD_RECONCILE_FULL_EVERY`
     passes) whose divergences are logged LOUD and rebuilt from the full scan, never silently
-    absorbed; an incremental row is stamped byte-identically to a full-scan row. **Ship-gate: a new
-    reconcile fast path takes the full scan on ANY doubt, keeps the periodic drift check, and its
+    absorbed and (b) one named recovery for an established cursor when the outer feed coverage
+    boundary/frontier alone is unavailable or unparseable. That `detector-full-scan` recovery is
+    visible in the result/log, rebuilds canonical sections (including absent generation substrate),
+    seals the rebuilt snapshot into generation identity, and preserves the old proven watermark;
+    it fabricates no feed advance. Every other detector UNKNOWN aborts before listing canonical
+    tasks. An incremental row is stamped byte-identically to a full-scan row. **Ship-gate: a new
+    reconcile fast path keeps the periodic drift check, restricts recovery to that exact reason
+    family with a prior proven watermark, and its
     cursor key is cut from `build_aggregate`'s passthrough and recomputed in full every pass.**
   - **summaries.json is one shared doc written by many hosts at many versions — a top-level key
     added in version N is wiped by any host older than N**, which rebuilds the document from the

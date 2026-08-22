@@ -67,9 +67,27 @@ class ChangeBatch:
     # after the outer feed and record cursor prove one contiguous window.
     watermark: Optional[str] = None
     reason: Optional[str] = None
+    # Named reconcile recovery seals a canonical snapshot rather than a proven
+    # feed window.  Its digest keeps generation identity content-specific while
+    # the feed watermark deliberately stays at the last proven frontier.
+    recovery_snapshot: Optional[str] = None
 
     def for_namespace(self, namespace: str) -> tuple[Change, ...]:
         return tuple(change for change in self.changes if change.namespace == namespace)
+
+
+FEED_BOUNDARY_UNKNOWN = "data-updates coverage boundary unavailable or unparseable"
+FEED_FRONTIER_UNKNOWN = "data-updates coverage frontier unavailable or unparseable"
+RECOVERABLE_FEED_WINDOW_REASONS = frozenset({
+    FEED_BOUNDARY_UNKNOWN,
+    FEED_FRONTIER_UNKNOWN,
+})
+
+
+def detector_recovery_reason(batch: ChangeBatch) -> Optional[str]:
+    """Return the approved named-recovery reason, never a generic UNKNOWN."""
+    reason = batch.reason
+    return reason if not batch.trusted and reason in RECOVERABLE_FEED_WINDOW_REASONS else None
 
 
 def _unknown(reason: Optional[str] = None) -> ChangeBatch:
@@ -231,9 +249,9 @@ def _feed_window(
     boundary = _instant({"uploaded_at": envelope.get("after")}, "uploaded")
     frontier = _instant({"uploaded_at": envelope.get("through")}, "uploaded")
     if boundary is None:
-        return None, "data-updates coverage boundary unavailable or unparseable"
+        return None, FEED_BOUNDARY_UNKNOWN
     if frontier is None:
-        return None, "data-updates coverage frontier unavailable or unparseable"
+        return None, FEED_FRONTIER_UNKNOWN
     if prior_watermark is not None:
         prior = _instant({"uploaded_at": prior_watermark}, "uploaded")
         if prior is None:
