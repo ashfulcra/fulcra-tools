@@ -1382,13 +1382,25 @@ def cmd_task_update(args: argparse.Namespace, transport: Any) -> int:
     except tasks.TaskError as e:
         print(f"task update failed: {e}", file=sys.stderr)
         return 1
-    transport.write(path, out)
+    written = transport.write(path, out)
+    if written and args.status in tasks.TERMINAL_STATUSES:
+        # `update --status done/abandoned` is a close like any other (round 3):
+        # it must emit, or the stream replays the obligation open forever.
+        _emit_task_close(args, transport, doc=out)
     print(f"updated {args.name}" + (f" → {args.status}" if args.status else ""))
     return 0
 
 
-def _task_apply(args, transport, **kw) -> int:
-    """Shared read-modify-write for the dedicated lifecycle verbs."""
+def _task_apply(args, transport, *, close_event: bool = False, **kw) -> int:
+    """Shared read-modify-write for the dedicated lifecycle verbs.
+
+    ``close_event=True`` marks a TERMINAL transition (supersede, abandon):
+    after the write lands, the close is emitted to the stream naming the
+    ASSIGNEE it discharges — round 3 (2026-08-21): these verbs closed the doc
+    and emitted nothing, so the assignee's stream fold replayed the obligation
+    open forever, and the sender-attributed close could never have worked
+    anyway because the closer is usually not the assignee.
+    """
     path = _task_path(args.team, args.name)
     try:
         out = tasks.apply_update(transport.read(path), now=_iso(_now()), **kw)
@@ -1396,9 +1408,23 @@ def _task_apply(args, transport, **kw) -> int:
         verb = getattr(args, "verb", getattr(args, "task_command", "update"))
         print(f"task {verb} failed: {e}", file=sys.stderr)
         return 1
-    transport.write(path, out)
+    written = transport.write(path, out)
+    if close_event and written:
+        _emit_task_close(args, transport, doc=out)
     print(f"{getattr(args, 'verb', 'updated')} {args.name}")
     return 0
+
+
+def _emit_task_close(args, transport, *, doc: str) -> None:
+    """Emit the stream close for a terminal doc transition, best-effort."""
+    fm = okf.parse_frontmatter(doc) or {}
+    responder = _identity(getattr(args, "agent", None))
+    _emit_response_companion(
+        transport, args.team, slug=args.name,
+        owner=str(fm.get("owner") or ""),
+        responder=responder,
+        shard_ptr=f"task/{args.name}.md",
+        for_agent=str(fm.get("assignee") or "") or responder)
 
 
 def cmd_task_block(args: argparse.Namespace, transport: Any) -> int:
@@ -1440,7 +1466,7 @@ def cmd_task_supersede(args: argparse.Namespace, transport: Any) -> int:
                           "evidence": f"superseded by {args.by} ({reason})"}
     if getattr(args, "record", None):
         kw["superseded_record_id"] = args.record
-    return _task_apply(args, transport, **kw)
+    return _task_apply(args, transport, close_event=True, **kw)
 
 
 def cmd_task_pause(args: argparse.Namespace, transport: Any) -> int:
@@ -1448,7 +1474,8 @@ def cmd_task_pause(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_task_abandon(args: argparse.Namespace, transport: Any) -> int:
-    return _task_apply(args, transport, status="abandoned", evidence=args.reason)
+    return _task_apply(args, transport, close_event=True,
+                       status="abandoned", evidence=args.reason)
 
 
 def cmd_task_assign(args: argparse.Namespace, transport: Any) -> int:
@@ -1627,11 +1654,13 @@ def cmd_task_done(args: argparse.Namespace, transport: Any) -> int:
     # closes an obligation emits its close. Best-effort like every companion —
     # the doc is truth, the event is delivery.
     fm = okf.parse_frontmatter(out) or {}
+    responder = _identity(getattr(args, "agent", None))
     _emit_response_companion(
         transport, args.team, slug=args.name,
         owner=str(fm.get("owner") or ""),
-        responder=_identity(getattr(args, "agent", None)),
-        shard_ptr=f"task/{args.name}.md")
+        responder=responder,
+        shard_ptr=f"task/{args.name}.md",
+        for_agent=str(fm.get("assignee") or "") or responder)
     return 0
 
 
@@ -5092,7 +5121,8 @@ def _emit_dispatch_companion(transport: Any, args: argparse.Namespace, *,
 
 
 def _emit_response_companion(transport: Any, team: str, *, slug: str,
-                             owner: str, responder: str, shard_ptr: str) -> bool:
+                             owner: str, responder: str, shard_ptr: str,
+                             for_agent: Optional[str] = None) -> bool:
     """One ``v:1`` bus event telling the ASKER their directive was answered.
 
     THE MIRROR OF THE DISPATCH COMPANION, and it was missing. `tell` emits a
@@ -5111,24 +5141,45 @@ def _emit_response_companion(transport: Any, team: str, *, slug: str,
     the two closure paths had opposite notification behaviour and the
     recommended one was the silent one.
 
-    Returns True ONLY when an event was actually emitted, so the caller can tell
-    the truth about delivery instead of asserting it. Best-effort by design: the
-    shard is the record and this is delivery, so a bus that is down or
-    unconfigured degrades to file-plane-only and NEVER fails the respond.
+    Returns True ONLY when a distinct OWNER was actually notified, so the
+    caller can tell the truth about delivery instead of asserting it.
+
+    THE CLOSE EMITS EVEN WHEN THERE IS NOBODY TO TELL (2026-08-21, pilot
+    round-trip probe): this event is dual-purpose. It notifies the asker AND it
+    is the close the stream fold discharges by — so a self-answered, unowned,
+    or backlog-parked task must still emit it, addressed to the responder
+    themselves, or the fold replays the obligation open forever. The pilot
+    caught exactly that: a self-assigned probe closed in the doc and stayed
+    open in the seeded stream fold. ``for_agent`` names whose copy discharges
+    (the assignee); it defaults to the responder.
+
+    Best-effort by design: the shard is the record and this is delivery, so a
+    bus that is down or unconfigured degrades to file-plane-only and NEVER
+    fails the respond.
+
+    ``for_agent`` arrives in TASK-PLANE vocabulary (the doc's assignee) and is
+    translated to stream vocabulary here: a broadcast task stores ``"*"``, the
+    stream's broadcast token is ``"all"``, and emitting ``"*"`` verbatim would
+    match no reader — a terminal transition on a broadcast would close NOBODY
+    (codex-reviewer, PR 671 round 2).
     """
-    if not owner or owner in (directives.BACKLOG, responder):
-        # Nobody to tell: unowned, parked, or you answered your own ask.
-        return False
+    if for_agent == directives.EVERYONE:
+        for_agent = records.BROADCAST
     cfg, _status = records.load_config_classified(transport, team)
     if not cfg:
         print("record: no bus-v3 records config — the response rides the file "
               "plane only")
         return False
+    owner_notified = bool(owner) and owner not in (directives.BACKLOG, responder)
     try:
-        to = records.BROADCAST if owner == directives.EVERYONE else owner
+        if owner == directives.EVERYONE:
+            to = records.BROADCAST
+        else:
+            to = owner if owner_notified else responder
         ok = records.emit_event(
             transport, cfg, sender=responder, to=to, kind="response",
-            priority="P2", slug=slug, ptr=shard_ptr, team=team)
+            priority="P2", slug=slug, ptr=shard_ptr, team=team,
+            for_agent=for_agent or responder)
     except Exception as e:
         print(f"record: response companion not emitted ({e}) — the response "
               f"rides the file plane only", file=sys.stderr)
@@ -5137,7 +5188,7 @@ def _emit_response_companion(transport: Any, team: str, *, slug: str,
         print("record: response companion emission failed — the response rides "
               "the file plane only")
         return False
-    return True
+    return owner_notified
 
 
 def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
@@ -5265,6 +5316,17 @@ def _close_answered_directive(transport: Any, args: argparse.Namespace, *,
               f"{(got or {}).get('status')!r}). The row is still open; retry.",
               file=sys.stderr)
         return 1
+    # THE CLOSE MUST REACH THE STREAM (round 3, 2026-08-21): this verb closed
+    # the doc and emitted nothing, so the answered directive stayed open in
+    # the REPLIER's stream fold forever. Same duty as `task done`: everything
+    # that closes an obligation emits its close. Best-effort — the doc is
+    # truth, the event is delivery.
+    _emit_response_companion(
+        transport, args.team, slug=target,
+        owner=str(fm.get("owner") or ""),
+        responder=agent,
+        shard_ptr=f"task/{target}.md",
+        for_agent=agent)
     print(f"closed {target} — answered by {reply_slug}")
     return 0
 

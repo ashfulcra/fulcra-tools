@@ -95,10 +95,19 @@ def test_the_event_points_at_the_response_shard(emitted):
     assert not ptr.startswith(f"team/{TEAM}/"), "ptr is team-relative"
 
 
-def test_answering_your_OWN_directive_notifies_nobody(emitted):
+def test_answering_your_OWN_directive_notifies_nobody_but_still_closes(emitted, capsys):
+    # Round 3 (2026-08-21 pilot probe): "nobody to tell" used to mean "emit
+    # nothing", and a self-answered task then replayed open in the stream fold
+    # forever. The close still emits — addressed to yourself, discharging your
+    # own copy — while the delivery line stays honest about the owner's queue.
     t = _seed(FakeTransport(), owner="coord-opus-worker")
     assert cli.cmd_respond(_args(), t) == 0
-    assert emitted == []
+    assert len(emitted) == 1
+    call = emitted[0]
+    assert call["to"] == "coord-opus-worker", "self-addressed: nobody else is told"
+    assert call["for_agent"] == "coord-opus-worker"
+    assert "NOT delivered to the owner's queue" in capsys.readouterr().out, (
+        "the delivery line must not claim an owner was notified")
 
 
 def test_a_bus_failure_NEVER_fails_the_respond(monkeypatch):
