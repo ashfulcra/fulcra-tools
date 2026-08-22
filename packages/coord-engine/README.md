@@ -70,7 +70,10 @@ coverage boundary/frontier: reconcile performs a visibly labelled
 `detector-full-scan`, rebuilds every canonical section, and may republish missing
 `current.json`/immutable-generation substrate. It preserves the last proven
 watermark and seals the canonical snapshot into generation identity; it never
-invents feed progress. Every other detector `UNKNOWN` still aborts without a
+invents feed progress. Cold start publishes one generation from an absent
+manifest; later identical recoveries recognize that sealed snapshot and reuse
+the current generation instead of chaining on `prior_generation_id`. Every
+other detector `UNKNOWN` still aborts without a
 canonical scan or pointer advance. A transport that proves conditional-write
 support uses CAS; one that explicitly declares CAS unsupported uses a
 last-writer-wins manifest write followed by exact read verification. Missing or

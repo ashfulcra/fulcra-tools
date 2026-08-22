@@ -1041,7 +1041,9 @@ it (not on PyPI).
     boundary/frontier alone is unavailable or unparseable. That `detector-full-scan` recovery is
     visible in the result/log, rebuilds canonical sections (including absent generation substrate),
     seals the rebuilt snapshot into generation identity, and preserves the old proven watermark;
-    it fabricates no feed advance. Every other detector UNKNOWN aborts before listing canonical
+    it fabricates no feed advance. An absent manifest cold-starts exactly one generation; an
+    identical later recovery reuses that generation rather than minting a chain whose only change
+    is `prior_generation_id`. Every other detector UNKNOWN aborts before listing canonical
     tasks. An incremental row is stamped byte-identically to a full-scan row. **Ship-gate: a new
     reconcile fast path keeps the periodic drift check, restricts recovery to that exact reason
     family with a prior proven watermark, and its

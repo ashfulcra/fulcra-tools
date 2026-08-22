@@ -1971,14 +1971,26 @@ def reconcile(
     publication = None
     if batch.trusted and _generation_watermark(batch, None):
         prior_generation = current_generation
-        sealed = generation.build_generation(
-            prior_generation=prior_generation.id if prior_generation else None,
-            source_watermark=_generation_watermark(batch, prior_generation),
-            batch=batch,
-            sections=generation_sections,
-            engine_version=__version__,
+        source_watermark = _generation_watermark(batch, prior_generation)
+        recovery_already_current = (
+            recovery_requested
+            and prior_generation is not None
+            and generation.seals_batch(
+                prior_generation,
+                source_watermark=source_watermark,
+                batch=batch,
+                engine_version=__version__,
+            )
         )
-        publication = generation.publish(transport, team, sealed)
+        if not recovery_already_current:
+            sealed = generation.build_generation(
+                prior_generation=prior_generation.id if prior_generation else None,
+                source_watermark=source_watermark,
+                batch=batch,
+                sections=generation_sections,
+                engine_version=__version__,
+            )
+            publication = generation.publish(transport, team, sealed)
     if publication is not None and not publication.published:
         reason = "generation publication refused: " + publication.reason
         warnings.append(reason)

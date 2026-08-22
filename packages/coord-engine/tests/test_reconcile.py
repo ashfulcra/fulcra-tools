@@ -271,6 +271,24 @@ def test_reconcile_named_boundary_recovery_restores_absent_generation_substrate(
     current = generation.load_current(t, "r")
     assert current is not None
     assert generation.generation_path("r", current.id) in t.store
+    generation_paths = {
+        path for path in t.store
+        if path.startswith("team/r/_coord/projections/generations/")
+    }
+    assert len(generation_paths) == 1
+
+    # A persistent boundaryless envelope must not turn the unchanged recovery
+    # snapshot into an endless chain whose only difference is prior_generation.
+    manifest = t.store[generation.current_path("r")]
+    repeated = _run(t)
+
+    assert repeated["degraded"] is False
+    assert repeated["recovery"] == "detector-full-scan"
+    assert t.store[generation.current_path("r")] == manifest
+    assert {
+        path for path in t.store
+        if path.startswith("team/r/_coord/projections/generations/")
+    } == generation_paths
 
 
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
