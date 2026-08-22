@@ -318,6 +318,41 @@ def test_update_to_a_terminal_status_emits_the_close(emitted):
     assert len(closes) == 1 and closes[0]["slug"] == "t-4"
 
 
+def test_broadcast_terminal_close_discharges_every_recipient():
+    # Round-3 review finding (codex-reviewer, PR 671 r2): a broadcast task
+    # stores assignee "*", which flowed into ``for`` verbatim and matched no
+    # reader — a terminal transition on a broadcast closed NOBODY. The
+    # all-close names the stream broadcast token and discharges every copy.
+    rows = [
+        _rec("a", "2026-08-21T20:00:00+00:00",
+             _payload(to=records.BROADCAST, kind="directive", slug="all-1")),
+        {"id": "b", "recorded_at": "2026-08-21T20:01:00+00:00",
+         "sources": ["coord-boss"],
+         "note": _payload(to=records.BROADCAST, kind="response", slug="all-1",
+                          for_agent=records.BROADCAST)},
+    ]
+    for reader in ("alice", "bob"):
+        t = StreamOnlyTransport(rows); _cfg_store(t)
+        out = stream_fold.fold(t, TEAM, reader, now=NOW)
+        assert out.rows == (), (
+            f"an all-close must discharge {reader}'s broadcast copy")
+
+
+def test_task_plane_broadcast_token_is_translated_at_the_emit_boundary(emitted):
+    # The doc says assignee "*"; the stream says "all". Emitting "*" verbatim
+    # closes nobody, so the boundary must translate.
+    from argparse import Namespace
+    t = DocTransport({f"team/{TEAM}/task/b-1.md":
+                      _task_doc(owner="owner", assignee="*")})
+    rc = cli.cmd_task_done(
+        Namespace(team=TEAM, name="b-1", evidence="done", agent="coord-boss"), t)
+    assert rc == 0
+    closes = [k for k in emitted if k["kind"] == "response"]
+    assert len(closes) == 1
+    assert closes[0]["for_agent"] == records.BROADCAST, (
+        'a broadcast close must carry the stream token "all", never "*"')
+
+
 def test_update_to_a_live_status_emits_nothing(emitted):
     from argparse import Namespace
     t = DocTransport({f"team/{TEAM}/task/t-5.md": _task_doc()})

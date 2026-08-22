@@ -5156,7 +5156,15 @@ def _emit_response_companion(transport: Any, team: str, *, slug: str,
     Best-effort by design: the shard is the record and this is delivery, so a
     bus that is down or unconfigured degrades to file-plane-only and NEVER
     fails the respond.
+
+    ``for_agent`` arrives in TASK-PLANE vocabulary (the doc's assignee) and is
+    translated to stream vocabulary here: a broadcast task stores ``"*"``, the
+    stream's broadcast token is ``"all"``, and emitting ``"*"`` verbatim would
+    match no reader — a terminal transition on a broadcast would close NOBODY
+    (codex-reviewer, PR 671 round 2).
     """
+    if for_agent == directives.EVERYONE:
+        for_agent = records.BROADCAST
     cfg, _status = records.load_config_classified(transport, team)
     if not cfg:
         print("record: no bus-v3 records config — the response rides the file "

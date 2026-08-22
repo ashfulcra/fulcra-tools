@@ -21,7 +21,8 @@ Event semantics (see :mod:`coord_engine.records`):
   supersede or abandon is sent by someone who is not the assignee), and events
   without ``for`` fall back to the sender via the record's ``sources``, so a
   close by bob never discharges alice's copy of a broadcast (codex-coder
-  round 2, 2026-08-21).
+  round 2, 2026-08-21). ``for = "all"`` is the authority close of a broadcast
+  task — the doc went terminal, so every recipient's copy drops.
 - Everything else on the track is data, not control plane, and is skipped by
   :func:`records.parse_payload` returning None.
 
@@ -126,8 +127,12 @@ def apply_events(state: dict[str, Any], rows: list[dict[str, Any]],
             # explicitly (round-3: a supersede or abandon is sent by someone
             # who is NOT the assignee), and events without it fall back to the
             # sender — bob answering a broadcast must not discharge alice's
-            # obligation (round-2 finding 2).
-            if (ev.get("for") or records.sender_of(rec)) == agent:
+            # obligation (round-2 finding 2). ``for = "all"`` is the AUTHORITY
+            # close of a broadcast task: the doc itself went terminal, so every
+            # recipient's copy drops (r2 review of PR 671: the task-plane "*"
+            # matched no reader and a broadcast terminal close closed nobody).
+            target = ev.get("for") or records.sender_of(rec)
+            if target in (agent, records.BROADCAST):
                 state["open"].pop(slug, None)
     state["seen"] = sorted(seen)[-SEEN_CAP:]
     return fresh
