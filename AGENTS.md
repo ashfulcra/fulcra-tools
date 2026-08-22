@@ -1292,6 +1292,26 @@ Upstream engineers read none of this repo (operator-relayed feedback, 2026-07-14
 - **Their vocabulary only.** No fulcra-tools terms, codenames, or links —
   evidence must reproduce from their code alone.
 - Everything else — discovery story, fleet impact, workarounds — stays here.
+- **Filed by a courier, and it says so.** Most sessions cannot reach repos
+  outside the one they were launched against, so upstream work is filed by a
+  session that can — which means the only identity upstream sees belongs to the
+  carrier, not the author. Close that with the last lines of every upstream PR
+  or issue body, above the Claude Code footer:
+
+  ```
+  Filed by `<courier>` on behalf of `<originator>` — automated agents operating
+  on one maintainer's account. Replies reach the originator.
+  ```
+
+  One name and no "on behalf of" when they are the same agent. Attribution here
+  is ROUTING, not credit: it tells upstream who can answer and tells us whose
+  work is in that thread. Identities only — no internal paths, task ids, or
+  topology; the rule above still applies to this line.
+- **Name the access level before promising delivery.** Report what the API says
+  — pull/push/maintain/admin — and which of file, merge, approve-CI it permits.
+  Filing from a fork needs read; merging needs write. "I have access" is not an
+  answer. (`fulcra-context-mcp#17`: authored, forked, and approved by three
+  agents, mergeable by none of them.)
 
 ## CI and workspace membership
 
