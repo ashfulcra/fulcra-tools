@@ -395,3 +395,30 @@ def test_a_vacancy_document_with_no_readable_frontmatter_is_unknown():
     _add_bus(t)
     cli.main(["escalate", "r"], transport=t)
     assert not [e for e in _events(t) if e["kind"] == "directive"]
+
+
+def test_a_marker_naming_a_valid_but_unrelated_task_never_routes_it(capsys):
+    """codex-reviewer, 682 r4. r4 verified the marker's slug resolved to a REAL
+    task with a readable assignee — but not that it was THIS ROLE'S vacancy. So
+    a marker naming any valid task routed that task to its assignee, recorded
+    success, and left the real vacancy unannounced.
+
+    Three rounds tried to validate the proposed slug and each found another hole
+    (nonexistent, wrong-recipient, valid-but-unrelated). The candidate set is
+    derived from role/date/SLA, so the marker is not consulted for routing."""
+    t = _mint_without_bus()
+    real = _real_slug(t)
+    t.put("team/r/task/unrelated-real-task.md",
+          "---\ntype: Task\nassignee: mallory\nstatus: proposed\n"
+          "priority: P1\n---\n# unrelated\n")
+    t.put(_delivery_path(), json.dumps(
+        {"delivered": False, "slug": "unrelated-real-task", "to": "mallory"}))
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert not [e for e in evs if e["slug"] == "unrelated-real-task"], (
+        "a marker routed an unrelated real task as if it were the vacancy")
+    assert not [e for e in evs if e["to"] == "mallory"], evs
+    assert [e for e in evs if e["slug"] == real and e["to"] == "alice"], (
+        "the real vacancy is still absent from its intended recipient's stream")
+    assert "not a vacancy slug derived for this role and date" in capsys.readouterr().err

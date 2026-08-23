@@ -11132,11 +11132,20 @@ def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
     # from the TASK DOCUMENT — the durable obligation — and the marker only
     # proposes which document to look at. A proposal that does not resolve to a
     # real document is discarded, not followed.
-    candidates: list[str] = []
-    if dstate and isinstance(dstate.get("slug"), str) and dstate["slug"]:
-        candidates.append(dstate["slug"])
-    candidates.extend(c for c in _vacancy_slug_candidates(role, today, sla)
-                      if c not in candidates)
+    # THE CANDIDATE SET IS DERIVED, NEVER PROPOSED (codex-reviewer, 682 r4).
+    # r4 probed the marker's slug first and verified only that it resolved to a
+    # real task with a readable assignee — not that it was THIS ROLE'S vacancy.
+    # So a stale or corrupt marker naming any valid task routed THAT task to its
+    # assignee, recorded delivery success, and left the real vacancy unannounced.
+    #
+    # The marker's slug was only ever an optimisation: the day's candidate set is
+    # already deterministic and bounded (two titles, branching on `attended`), so
+    # probing it finds the same document without trusting anything. Every round
+    # of this fix that tried to VALIDATE the proposed slug found another hole —
+    # nonexistent, then wrong-recipient, then valid-but-unrelated. Not selecting
+    # on it removes the class instead of the instance. The marker now carries
+    # delivery STATE only; routing comes from (role, date, sla) and the document.
+    candidates: list[str] = _vacancy_slug_candidates(role, today, sla)
     slug = to = None
     for cand in candidates:
         doc = transport.read(_task_path(team, cand))
@@ -11160,6 +11169,10 @@ def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
         print(f"escalate: {role} delivery marker names recipient "
               f"{dstate.get('to')!r} but the vacancy document assigns "
               f"{to!r} — routing on the document", file=sys.stderr)
+    if dstate and dstate.get("slug") and dstate.get("slug") != slug:
+        print(f"escalate: {role} delivery marker names slug "
+              f"{dstate.get('slug')!r}, which is not a vacancy slug derived for "
+              f"this role and date — ignored, using {slug!r}", file=sys.stderr)
     ok = _emit_escalation_event(transport, team, to=to, slug=slug,
                                 ptr=f"task/{slug}.md")
     if ok is not None:
