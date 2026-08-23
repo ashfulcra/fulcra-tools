@@ -997,6 +997,60 @@ def _role_doc_path(team: str, role: str) -> str:
     return f"team/{team}/roles/{role}.md"
 
 
+def _reviews_newest_first(root: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order review dirs so a BUDGETED attendance scan spends itself on the
+    recent ones.
+
+    Attendance asks a purely RECENCY question — "did a holder file a verdict
+    inside the SLA window" — and the scan answered it by walking
+    ``reviews[:budget]`` in whatever order the store listed, which is LEXICAL.
+    Measured on the live store 2026-08-23: 569 review dirs, and
+    `pr-677-release-2-0-3` — holding codex-reviewer's verdict from 15:38Z, nine
+    hours inside its 12h SLA — sat at lexical position 407. The scan stops around
+    24. That verdict was not merely missed; it was unreachable, and so was every
+    other recent one, because recency and alphabetical order are unrelated.
+
+    The consequence was not a slow scan, it was an INERT FIX. `attended` exists
+    precisely to stop false vacancy P1s (see this module's `_role_attended` and
+    tests/test_roles_attendance.py, whose docstring is the original incident),
+    but it can only ever return True if the scan reaches the dir holding the
+    work. It could not, so every acting role with a lapsed lease escalated as
+    "attendance UNVERIFIED" — including codex-reviewer at 2026-08-23T00:41Z,
+    nine hours after the verdict that explained it.
+
+    The recency signal is ALREADY IN THIS LISTING and costs nothing extra: the
+    review DOC (``<slug>.md``) sits beside its dir in the same root listing and
+    carries an mtime, while directory entries carry none. Ordering by that doc
+    mtime puts pr-677 at rank 1 of 340 instead of 407 of 569.
+
+    This ORDERS, it never FILTERS. Dirs with no datable doc (229 of 569 live —
+    archived or doc-less) keep their listing order and follow the dated ones, so
+    the scanned SET at any budget is the same size and the coverage the caller
+    reports stays honest. A cut scan still returns UNKNOWN, never "absent", so
+    no truth claim rests on this ordering — only the odds of answering at all.
+    """
+    dirs = [e for e in root if e.get("is_dir")]
+    doc_mtime: dict[str, Any] = {}
+    for e in root:
+        if e.get("is_dir"):
+            continue
+        name = e.get("name") or ""
+        if not name.endswith(".md"):
+            continue
+        raw = e.get("mtime")
+        mt = router.parse_store_mtime(raw) or router.parse_iso(raw)
+        if mt is not None:
+            doc_mtime[name[:-3]] = mt
+    dated, undated = [], []
+    for i, e in enumerate(dirs):
+        mt = doc_mtime.get((e.get("name") or "").rstrip("/"))
+        (dated if mt is not None else undated).append((mt, i, e))
+    # `i` breaks ties on identical mtimes so the order is total and stable —
+    # a comparison that fell through to the dict would raise, not reorder.
+    dated.sort(key=lambda t: (t[0], -t[1]), reverse=True)
+    return [e for _, _, e in dated] + [e for _, _, e in undated]
+
+
 def _verdict_activity_index(
     transport: Any, team: str, *, budget: int = 40,
     deadline: Optional["Deadline"] = None,
@@ -1028,12 +1082,12 @@ def _verdict_activity_index(
     """
     index: dict[str, Any] = {}
     try:
-        reviews = [e for e in transport.list_dir(f"team/{team}/review/")
-                   if e.get("is_dir")]
+        root = transport.list_dir(f"team/{team}/review/")
     except TransportError:
         # Root listing failed: nothing was scanned, and this is NOT a deadline
         # cut. Every return below states its own cut reason for the same reason.
         return index, 0, 0, False, False
+    reviews = _reviews_newest_first(root)
     total = len(reviews)
     scanned = 0
     undatable = False
