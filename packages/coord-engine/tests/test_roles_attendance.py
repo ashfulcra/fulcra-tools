@@ -522,3 +522,99 @@ def test_the_SECOND_sweep_of_a_closed_loop_is_still_degraded(capsys):
     assert "undelivered=1" in err2, "the count must survive the write being skipped"
     assert "still has an UNDELIVERED notice" in err2
     assert "NOT because anyone received it" in err2
+
+
+# --- the scan must spend its budget on the RECENT reviews -------------------
+#
+# coord-boss, 2026-08-23. The `attended` plumbing above is correct and has been
+# since it landed — and it was INERT in production the whole time. `escalate`
+# escalated codex-reviewer as VACANT at 00:41Z; the verdict that explained it
+# was filed at 2026-08-22T15:38Z, nine hours inside a 12h SLA, and the sweep
+# never saw it. Not a budget shortfall: `pr-677-release-2-0-3` was lexical
+# position 407 of 569 review dirs, and the scan walks `reviews[:budget]` from
+# the top. Recency and alphabetical order are unrelated, so the dir holding
+# recent work was unreachable at ANY budget short of a full 569-dir fan-out.
+#
+# Ordering by the review doc's mtime — already in the same root listing, so
+# free — put that dir at rank 1 of 340.
+
+def test_the_scan_reaches_a_recent_review_that_sorts_LAST_alphabetically():
+    """THE regression. The recent verdict is in the alphabetically last dir and
+    the budget admits one dir: lexical order can never find it."""
+    from datetime import datetime, timezone
+
+    since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
+    tree = {
+        "team/fulcra/review/": [
+            {"name": "aaa-old/", "is_dir": True, "mtime": None},
+            {"name": "zzz-recent/", "is_dir": True, "mtime": None},
+            {"name": "aaa-old.md", "mtime": "2026-07-01 09:00AM UTC"},
+            {"name": "zzz-recent.md", "mtime": "2026-08-07 07:30AM UTC"},
+        ],
+        "team/fulcra/review/aaa-old/verdicts/": [
+            {"name": "abc--codex-reviewer.md", "mtime": "2026-07-01 09:00AM UTC"},
+        ],
+        "team/fulcra/review/zzz-recent/verdicts/": [
+            {"name": "def--codex-reviewer.md", "mtime": "2026-08-07 07:37AM UTC"},
+        ],
+    }
+    attended, scanned, total = _attended(
+        tree, ["codex-reviewer"], since, budget=1)
+    assert attended is True, (
+        "the one dir the budget bought was spent on the alphabetically-first "
+        "review instead of the recent one — the false-vacancy vector")
+    assert (scanned, total) == (1, 2)
+
+
+def test_ordering_is_not_filtering_every_dir_survives():
+    """A dir with no datable doc must keep its place in the scan SET — ordering
+    that dropped it would shrink coverage while still reporting it as total."""
+    from coord_engine import cli
+
+    root = [
+        {"name": "dated-old/", "is_dir": True},
+        {"name": "undated-a/", "is_dir": True},
+        {"name": "dated-new/", "is_dir": True},
+        {"name": "undated-b/", "is_dir": True},
+        {"name": "dated-old.md", "mtime": "2026-07-01 09:00AM UTC"},
+        {"name": "dated-new.md", "mtime": "2026-08-07 07:30AM UTC"},
+        {"name": "undated-a.md", "mtime": "not a timestamp"},
+    ]
+    out = [e["name"] for e in cli._reviews_newest_first(root)]
+    assert out == ["dated-new/", "dated-old/", "undated-a/", "undated-b/"]
+    assert sorted(out) == ["dated-new/", "dated-old/", "undated-a/", "undated-b/"], (
+        "ordering must never drop a review dir")
+
+
+def test_a_listing_with_no_dated_docs_keeps_its_original_order():
+    """The live store has 229 of 569 dirs with no datable doc, and every
+    existing test in this file builds dirs without docs. Neither may be
+    reordered into a different scan than the one they asserted on."""
+    from coord_engine import cli
+
+    root = [{"name": f"slug-{i}/", "is_dir": True} for i in range(5)]
+    assert cli._reviews_newest_first(root) == root
+
+
+def test_escalate_finds_the_holders_work_past_the_budget_horizon(capsys):
+    """End to end, on the ACTING path, at the live shape: many stale reviews
+    plus one recent one that sorts last. Before ordering, this minted the P1
+    that codex-reviewer actually received."""
+    t = _team_with_stale_lease()
+    # 44 old reviews — more than the 40-dir budget — all sorting before "zzz".
+    for i in range(44):
+        t.put(f"team/r/review/pr{i:02d}.md", "---\ntype: Review\n---\nr",
+              mtime="2026-07-01 09:00AM UTC")
+        v = f"team/r/review/pr{i:02d}/verdicts/abc--somebody-else.md"
+        t.put(v, "---\nverdict: approved\n---\n", mtime="2026-07-01 09:00AM UTC")
+    t.put("team/r/review/zzz-recent.md", "---\ntype: Review\n---\nr",
+          mtime="2026-08-07 07:30AM UTC")
+    v = "team/r/review/zzz-recent/verdicts/def--codex-reviewer.md"
+    t.put(v, "---\nverdict: approved\n---\n", mtime="2026-08-07 07:37AM UTC")
+
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    err = capsys.readouterr().err
+    assert "Escalation suppressed" in err
+    assert not _tasks(t), (
+        "the holder's verdict was inside the SLA window and the scan had the "
+        "budget to reach it — only the ORDER hid it")
