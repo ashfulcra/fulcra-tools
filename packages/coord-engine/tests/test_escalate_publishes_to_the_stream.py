@@ -422,3 +422,40 @@ def test_a_marker_naming_a_valid_but_unrelated_task_never_routes_it(capsys):
     assert [e for e in evs if e["slug"] == real and e["to"] == "alice"], (
         "the real vacancy is still absent from its intended recipient's stream")
     assert "not a vacancy slug derived for this role and date" in capsys.readouterr().err
+
+
+def test_a_delivered_true_marker_for_an_unrelated_task_does_not_suppress(capsys):
+    """codex-reviewer, 682 r5. r5 fixed the REDELIVERY path to derive its own
+    candidates and left the SUPPRESSION fast path trusting `delivered` alone —
+    so the same unrelated-task marker with the opposite boolean still
+    short-circuited, reported "event delivered", emitted nothing, and left the
+    real vacancy permanently absent.
+
+    One predicate now answers "is this proof", so the two consumers cannot
+    diverge again."""
+    t = _mint_without_bus()
+    real = _real_slug(t)
+    t.put("team/r/task/unrelated-real-task.md",
+          "---\ntype: Task\nassignee: mallory\nstatus: proposed\n"
+          "priority: P1\n---\n# unrelated\n")
+    t.put(_delivery_path(), json.dumps(
+        {"delivered": True, "slug": "unrelated-real-task", "to": "mallory"}))
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert [e for e in evs if e["slug"] == real and e["to"] == "alice"], (
+        "a delivered:true marker for an unrelated task suppressed the real "
+        "vacancy's redelivery — permanent loss")
+    assert not [e for e in evs if e["to"] == "mallory"], evs
+
+
+def test_a_delivered_true_marker_for_the_real_vacancy_still_suppresses(capsys):
+    """The predicate must still confirm genuine delivery, or every sweep
+    re-publishes forever."""
+    t = _team()
+    cli.main(["escalate", "r"], transport=t)
+    t.records.clear()
+    capsys.readouterr()
+    cli.main(["escalate", "r"], transport=t)
+    assert not [e for e in _events(t) if e["kind"] == "directive"]
+    assert "event delivered" in capsys.readouterr().err

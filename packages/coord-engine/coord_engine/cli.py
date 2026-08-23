@@ -11109,6 +11109,29 @@ def _vacancy_slug_candidates(role: str, today: str, sla: float) -> list[str]:
     return [tasks.slugify(t) for t in titles]
 
 
+def _delivery_confirmed(dstate: Optional[dict[str, Any]], role: str,
+                        today: str, sla: float) -> bool:
+    """Is this marker PROOF that today's vacancy reached the stream?
+
+    ONE predicate, used by every consumer, because the bug it closes is
+    consumers diverging (codex-reviewer, 682 r5). r5 fixed the redelivery path
+    to derive its own candidate set, and left the SUPPRESSION fast path trusting
+    `dstate.get("delivered")` by itself — so a well-typed marker
+    {"delivered": true, "slug": "unrelated-real-task", "to": "mallory"} still
+    short-circuited, reported "event delivered", emitted nothing, and left the
+    real vacancy permanently absent. Same unrelated-task marker, opposite
+    boolean, same permanent loss.
+
+    Confirmation requires the marker to be claiming delivery OF THIS ROLE'S
+    VACANCY: `delivered` a real boolean True, and `slug` one of the two
+    candidates derived for this role/date/SLA. Anything else is UNKNOWN, which
+    routes into the derived redelivery path — the safe direction.
+    """
+    if not dstate or dstate.get("delivered") is not True:
+        return False
+    return dstate.get("slug") in _vacancy_slug_candidates(role, today, sla)
+
+
 def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
                           sla: float, *, dstate: Optional[dict[str, Any]],
                           maintainer: str) -> Optional[bool]:
@@ -11304,7 +11327,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                 # failure is permanent, since the mint branch below can never
                 # run again for this role today.
                 dstate = _read_escalation_delivery(transport, args.team, role, today)
-                if dstate is not None and dstate.get("delivered"):
+                if _delivery_confirmed(dstate, role, today, sla):
                     print(f"escalate: {role} already escalated today "
                           f"(marker {today}, event delivered) — repeat "
                           f"suppressed", file=sys.stderr)
@@ -11484,7 +11507,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             # marker by design, so it arrives here every sweep. Without this the
             # closed-loop case had the permanent-loss hole too.
             dstate = _read_escalation_delivery(transport, args.team, role, today)
-            if dstate is None or not dstate.get("delivered"):
+            if not _delivery_confirmed(dstate, role, today, sla):
                 ok = _emit_escalation_event(transport, args.team, to=maintainer,
                                             slug=slug, ptr=f"task/{slug}.md")
                 if ok is not None:
