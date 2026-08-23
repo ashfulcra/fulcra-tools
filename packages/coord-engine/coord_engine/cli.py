@@ -11109,7 +11109,42 @@ def _vacancy_slug_candidates(role: str, today: str, sla: float) -> list[str]:
     return [tasks.slugify(t) for t in titles]
 
 
-def _delivery_confirmed(dstate: Optional[dict[str, Any]], role: str,
+def _resolve_vacancy(transport: Any, team: str, role: str, today: str,
+                     sla: float) -> tuple[Optional[str], Optional[str]]:
+    """Today's vacancy for this role as (slug, assignee), from the DOCUMENT.
+
+    THE single place routing facts are derived. Seven rounds of this fix each
+    proved a SUBSET of what "this marker is proof" requires — the boolean, then
+    the field types, then that the slug referenced something real, then that it
+    was this role's vacancy — and each time the field left unchecked was the next
+    hole. `to` was the last one (codex-reviewer, 682 r6): a marker carrying the
+    REAL vacancy slug with `to: mallory` was accepted as proof that Alice's
+    vacancy had reached the stream.
+
+    So confirmation is no longer a list of field checks that can be incomplete.
+    Both the suppression predicate and the redelivery path resolve the vacancy
+    HERE, and a marker is proof only if it equals what this function computes
+    right now. There is no field left to forget, because nothing is read off the
+    marker at all.
+
+    Returns (None, None) when no candidate resolves to a document whose assignee
+    can be read — UNKNOWN, which routes into redelivery rather than suppression.
+    """
+    for cand in _vacancy_slug_candidates(role, today, sla):
+        doc = transport.read(_task_path(team, cand))
+        if doc is None:
+            continue
+        fm = okf.parse_frontmatter(doc)
+        if fm is None:
+            continue
+        assignee = fm.get("assignee")
+        if isinstance(assignee, str) and assignee:
+            return cand, assignee
+    return None, None
+
+
+def _delivery_confirmed(transport: Any, team: str,
+                        dstate: Optional[dict[str, Any]], role: str,
                         today: str, sla: float) -> bool:
     """Is this marker PROOF that today's vacancy reached the stream?
 
@@ -11129,7 +11164,10 @@ def _delivery_confirmed(dstate: Optional[dict[str, Any]], role: str,
     """
     if not dstate or dstate.get("delivered") is not True:
         return False
-    return dstate.get("slug") in _vacancy_slug_candidates(role, today, sla)
+    slug, to = _resolve_vacancy(transport, team, role, today, sla)
+    if slug is None:
+        return False
+    return dstate.get("slug") == slug and dstate.get("to") == to
 
 
 def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
@@ -11168,21 +11206,7 @@ def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
     # nonexistent, then wrong-recipient, then valid-but-unrelated. Not selecting
     # on it removes the class instead of the instance. The marker now carries
     # delivery STATE only; routing comes from (role, date, sla) and the document.
-    candidates: list[str] = _vacancy_slug_candidates(role, today, sla)
-    slug = to = None
-    for cand in candidates:
-        doc = transport.read(_task_path(team, cand))
-        if doc is None:
-            continue
-        fm = okf.parse_frontmatter(doc)
-        if fm is None:
-            # A vacancy document we cannot parse cannot tell us who it is for.
-            # UNKNOWN, never "send it somewhere plausible".
-            continue
-        assignee = fm.get("assignee")
-        if isinstance(assignee, str) and assignee:
-            slug, to = cand, assignee
-            break
+    slug, to = _resolve_vacancy(transport, team, role, today, sla)
     if slug is None or to is None:
         print(f"escalate: {role} has today's marker but no vacancy document "
               f"whose assignee can be read — cannot redeliver, and NOT recording "
@@ -11327,7 +11351,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                 # failure is permanent, since the mint branch below can never
                 # run again for this role today.
                 dstate = _read_escalation_delivery(transport, args.team, role, today)
-                if _delivery_confirmed(dstate, role, today, sla):
+                if _delivery_confirmed(transport, args.team, dstate, role, today, sla):
                     print(f"escalate: {role} already escalated today "
                           f"(marker {today}, event delivered) — repeat "
                           f"suppressed", file=sys.stderr)
@@ -11507,7 +11531,7 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             # marker by design, so it arrives here every sweep. Without this the
             # closed-loop case had the permanent-loss hole too.
             dstate = _read_escalation_delivery(transport, args.team, role, today)
-            if not _delivery_confirmed(dstate, role, today, sla):
+            if not _delivery_confirmed(transport, args.team, dstate, role, today, sla):
                 ok = _emit_escalation_event(transport, args.team, to=maintainer,
                                             slug=slug, ptr=f"task/{slug}.md")
                 if ok is not None:

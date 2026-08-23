@@ -459,3 +459,37 @@ def test_a_delivered_true_marker_for_the_real_vacancy_still_suppresses(capsys):
     cli.main(["escalate", "r"], transport=t)
     assert not [e for e in _events(t) if e["kind"] == "directive"]
     assert "event delivered" in capsys.readouterr().err
+
+
+def test_a_delivered_marker_with_the_right_slug_but_wrong_recipient_is_not_proof():
+    """codex-reviewer, 682 r6. The predicate proved the SLUG and ignored `to`,
+    so a marker carrying the real vacancy slug with `to: mallory` was accepted
+    as proof that alice's vacancy had reached the stream — no directive emitted,
+    redelivery permanently suppressed.
+
+    Seven rounds each proved a SUBSET of what "this marker is proof" requires.
+    Confirmation is now equality against a freshly resolved (slug, assignee), so
+    there is no field left to forget."""
+    t = _mint_without_bus()
+    real = _real_slug(t)
+    t.put(_delivery_path(),
+          json.dumps({"delivered": True, "slug": real, "to": "mallory"}))
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert [e for e in evs if e["slug"] == real and e["to"] == "alice"], (
+        "a wrong-recipient marker was accepted as proof — alice's vacancy is "
+        "permanently absent from her stream")
+
+
+def test_confirmation_is_equality_against_the_document_not_the_marker():
+    """A marker that matches the resolved (slug, assignee) exactly IS proof —
+    otherwise every sweep republishes forever."""
+    t = _team()
+    cli.main(["escalate", "r"], transport=t)
+    real = _real_slug(t)
+    state = json.loads(t.store[_delivery_path()])
+    assert state == {"delivered": True, "slug": real, "to": "alice"}, state
+    t.records.clear()
+    cli.main(["escalate", "r"], transport=t)
+    assert not [e for e in _events(t) if e["kind"] == "directive"]
