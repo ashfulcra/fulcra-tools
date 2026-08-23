@@ -11119,20 +11119,47 @@ def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
     obligation rather than creating a second one — which is why retrying is
     safe and dropping the retry was not.
     """
-    slug = str(dstate.get("slug")) if dstate and dstate.get("slug") else None
-    to = str(dstate.get("to")) if dstate and dstate.get("to") else maintainer
-    if not slug:
-        # Pre-delivery-state marker: find which of the day's two possible
-        # documents actually exists.
-        for cand in _vacancy_slug_candidates(role, today, sla):
-            if transport.read(_task_path(team, cand)) is not None:
-                slug = cand
-                break
-    if not slug:
-        print(f"escalate: {role} has today's marker but no delivery record and "
-              f"no matching vacancy document — cannot redeliver; state UNKNOWN",
-              file=sys.stderr)
+    # THE MARKER IS A HINT; THE DOCUMENT IS THE AUTHORITY (codex-reviewer, 682
+    # r3). Round three validated the marker's SHAPE and then still routed on its
+    # contents: a well-typed
+    # {"delivered": false, "slug": "role-vacant-nonexistent", "to": "mallory"}
+    # made the sweep emit a directive to mallory pointing at a task that does
+    # not exist, report success, and write a delivered marker that suppressed
+    # every retry — while the real vacancy sat under its own slug, still absent
+    # from the stream of the agent it was actually for.
+    #
+    # Type-checking a claim is not verifying it. Routing evidence is now taken
+    # from the TASK DOCUMENT — the durable obligation — and the marker only
+    # proposes which document to look at. A proposal that does not resolve to a
+    # real document is discarded, not followed.
+    candidates: list[str] = []
+    if dstate and isinstance(dstate.get("slug"), str) and dstate["slug"]:
+        candidates.append(dstate["slug"])
+    candidates.extend(c for c in _vacancy_slug_candidates(role, today, sla)
+                      if c not in candidates)
+    slug = to = None
+    for cand in candidates:
+        doc = transport.read(_task_path(team, cand))
+        if doc is None:
+            continue
+        fm = okf.parse_frontmatter(doc)
+        if fm is None:
+            # A vacancy document we cannot parse cannot tell us who it is for.
+            # UNKNOWN, never "send it somewhere plausible".
+            continue
+        assignee = fm.get("assignee")
+        if isinstance(assignee, str) and assignee:
+            slug, to = cand, assignee
+            break
+    if slug is None or to is None:
+        print(f"escalate: {role} has today's marker but no vacancy document "
+              f"whose assignee can be read — cannot redeliver, and NOT recording "
+              f"a delivery that did not happen; state UNKNOWN", file=sys.stderr)
         return False
+    if dstate and dstate.get("to") and dstate.get("to") != to:
+        print(f"escalate: {role} delivery marker names recipient "
+              f"{dstate.get('to')!r} but the vacancy document assigns "
+              f"{to!r} — routing on the document", file=sys.stderr)
     ok = _emit_escalation_event(transport, team, to=to, slug=slug,
                                 ptr=f"task/{slug}.md")
     if ok is not None:

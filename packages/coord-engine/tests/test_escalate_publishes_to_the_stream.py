@@ -323,3 +323,75 @@ def test_a_wellformed_not_delivered_marker_redelivers_with_its_slug():
     cli.main(["escalate", "r"], transport=t)
     evs = [e for e in _events(t) if e["kind"] == "directive"]
     assert len(evs) == 1 and evs[0]["slug"] == slug
+
+
+# --- routing evidence comes from the DOCUMENT, never from the marker --------
+#
+# codex-reviewer, 682 r3. r2 validated the marker's SHAPE and then still routed
+# on its contents. A well-typed marker naming a slug that does not exist and a
+# recipient nobody assigned made the sweep emit a directive to that stranger,
+# pointing at a nonexistent task, report redelivery success, and write a
+# delivered marker that suppressed every retry — while the real vacancy sat
+# under its own slug, still absent from the stream of the agent it was for.
+#
+# Type-checking a claim is not verifying it.
+
+def _real_slug(t: _BusTransport) -> str:
+    return [p for p in t.store if "/task/role-vacant-" in p][0].rsplit("/", 1)[1][:-3]
+
+
+def test_a_marker_naming_a_nonexistent_task_never_routes_to_its_recipient():
+    """THE regression: a well-typed lie must not become a real directive."""
+    t = _mint_without_bus()
+    real = _real_slug(t)
+    t.put(_delivery_path(), json.dumps(
+        {"delivered": False, "slug": "role-vacant-nonexistent", "to": "mallory"}))
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert not [e for e in evs if e["to"] == "mallory"], (
+        "emitted a directive to a recipient the vacancy document never named")
+    assert not [e for e in evs if e["slug"] == "role-vacant-nonexistent"], (
+        "emitted a pointer to a task that does not exist")
+    # and the REAL obligation still reaches its real assignee
+    assert [e for e in evs if e["slug"] == real and e["to"] == "alice"], (
+        "the real vacancy is still absent from its intended recipient's stream")
+
+
+def test_a_marker_recipient_that_disagrees_with_the_document_loses(capsys):
+    """Right slug, wrong recipient: the document's assignee is authoritative."""
+    t = _mint_without_bus()
+    real = _real_slug(t)
+    t.put(_delivery_path(),
+          json.dumps({"delivered": False, "slug": real, "to": "mallory"}))
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert len(evs) == 1 and evs[0]["to"] == "alice", evs
+    assert "routing on the document" in capsys.readouterr().err
+
+
+def test_an_unreadable_vacancy_document_fails_closed_without_claiming_delivery(capsys):
+    """If no document can say who the vacancy is for, redelivery must not
+    invent a recipient — and must not record a delivery that did not happen."""
+    t = _mint_without_bus()
+    for p in [k for k in list(t.store) if "/task/role-vacant-" in k]:
+        del t.store[p]
+    t.put(_delivery_path(), json.dumps(
+        {"delivered": False, "slug": "role-vacant-gone", "to": "mallory"}))
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    assert not [e for e in _events(t) if e["kind"] == "directive"]
+    assert "state UNKNOWN" in capsys.readouterr().err
+    state = json.loads(t.store[_delivery_path()])
+    assert state["delivered"] is False, "recorded a delivery that never happened"
+
+
+def test_a_vacancy_document_with_no_readable_frontmatter_is_unknown():
+    """A document we cannot parse cannot name its own assignee."""
+    t = _mint_without_bus()
+    doc = [p for p in t.store if "/task/role-vacant-" in p][0]
+    t.put(doc, "this is not frontmatter")
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    assert not [e for e in _events(t) if e["kind"] == "directive"]
