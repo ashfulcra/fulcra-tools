@@ -11137,6 +11137,30 @@ def _resolve_vacancy(transport: Any, team: str, role: str, today: str,
         fm = okf.parse_frontmatter(doc)
         if fm is None:
             continue
+        # NEVER RESURRECT A TERMINAL OBLIGATION (coord-maintainer, 2026-08-23).
+        # 2.0.5 made opens emit, and redelivery then replayed opens for
+        # documents that had ALREADY been answered. During the broken window the
+        # open never reached the stream, so when the agent closed the row their
+        # close had nothing to answer and emitted nothing. Redelivery now
+        # replays the open into a fold that has never seen a close for it: the
+        # obligation is terminal in the document and OPEN in the stream,
+        # permanently.
+        #
+        # The `abandoned` case is strictly worse and is why this checks ANY
+        # terminal state rather than emitting a compensating close for `done`:
+        # `abandoned -> done` is an illegal transition, so a resurrected
+        # abandoned row cannot be discharged by ANY action its holder can take.
+        # It is a P1 they are required to carry and forbidden to answer.
+        #
+        # A terminal document is not a live obligation, so there is nothing to
+        # deliver. Skip it and keep looking — the day's other candidate may be
+        # the live one.
+        # Normalised the same way cli.py already reads a doc status elsewhere:
+        # these documents are hand-editable, so case and stray whitespace are
+        # real, and a status that fails to match here fails OPEN into a
+        # resurrection.
+        if str(fm.get("status") or "").strip().lower() in tasks.TERMINAL_STATUSES:
+            continue
         assignee = fm.get("assignee")
         if isinstance(assignee, str) and assignee:
             return cand, assignee

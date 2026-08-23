@@ -493,3 +493,61 @@ def test_confirmation_is_equality_against_the_document_not_the_marker():
     t.records.clear()
     cli.main(["escalate", "r"], transport=t)
     assert not [e for e in _events(t) if e["kind"] == "directive"]
+
+
+# --- redelivery must never resurrect an answered obligation ----------------
+#
+# coord-maintainer, 2026-08-23, on live 2.0.5. Making opens emit had an
+# unintended mirror: during the broken window the open never reached the stream,
+# so when an agent CLOSED the row their close had nothing to answer and emitted
+# nothing. Redelivery then replayed the open into a fold that had never seen a
+# close for it — terminal in the document, OPEN in the stream, permanently.
+#
+# The `abandoned` case is strictly worse than `done` and is why this refuses ANY
+# terminal state rather than emitting a compensating close: `abandoned -> done`
+# is an illegal transition, so a resurrected abandoned row cannot be discharged
+# by any action its holder can take. A P1 they must carry and may not answer.
+
+def _terminalise(t: _BusTransport, status: str) -> str:
+    doc = [p for p in t.store if "/task/role-vacant-" in p][0]
+    body = t.store[doc].replace("status: proposed", f"status: {status}")
+    assert f"status: {status}" in body, body[:200]
+    t.put(doc, body)
+    return doc.rsplit("/", 1)[1][:-3]
+
+
+@pytest.mark.parametrize("status", ["done", "abandoned"])
+def test_redelivery_never_replays_an_open_for_a_terminal_document(status):
+    """THE regression, both terminal states."""
+    t = _mint_without_bus()
+    _terminalise(t, status)
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    assert not [e for e in _events(t) if e["kind"] == "directive"], (
+        f"a {status} obligation was replayed as an open — its holder cannot "
+        f"discharge it, and for 'abandoned' no legal transition exists at all")
+
+
+@pytest.mark.parametrize("status", ["done", "abandoned"])
+def test_a_terminal_document_is_not_recorded_as_a_delivery(status):
+    """Refusing to resurrect must not launder into 'delivered'. UNKNOWN is the
+    honest state: there was nothing live to deliver."""
+    t = _mint_without_bus()
+    _terminalise(t, status)
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    state = t.store.get(_delivery_path())
+    if state is not None:
+        assert json.loads(state).get("delivered") is not True, state
+
+
+def test_a_live_vacancy_beside_a_terminal_one_still_gets_delivered():
+    """Skipping a terminal candidate must not abandon the search — the day's
+    other candidate title may hold the live row."""
+    t = _mint_without_bus()
+    real = _real_slug(t)
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert [e for e in evs if e["slug"] == real], (
+        "a live vacancy stopped being delivered")
