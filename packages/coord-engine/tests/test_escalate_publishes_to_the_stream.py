@@ -143,3 +143,109 @@ def test_already_escalated_today_says_so_instead_of_going_silent(capsys):
     err = capsys.readouterr().err
     assert "already escalated today" in err, err
     assert "repeat suppressed" in err, err
+
+
+# --- delivery is not the same fact as document existence -------------------
+#
+# codex-reviewer, 682 r1. The first emit was attempted ONLY inside
+# `if transport.read(dst) is None`. A sweep that wrote the document but could
+# not emit — no bus config, a failed record write, a crash between the two —
+# left the daily marker in place, and every later sweep short-circuited on that
+# marker without ever reaching the emit again. The first failure was PERMANENT:
+# the vacancy stayed invisible to every fold even after the bus came back, which
+# is exactly the incident the emit was added to close.
+#
+# They reproduced it with the fixtures above: run once with no bus, add the
+# config, run again -> `already escalated today` and zero events. Both runs rc 0.
+
+def _add_bus(t: _BusTransport) -> None:
+    t.put("team/r/_coord/bus-v3/records.json", BUS_CONFIG)
+
+
+def test_a_vacancy_undelivered_while_the_bus_was_down_is_delivered_on_recovery(capsys):
+    """THE regression codex-reviewer asked for."""
+    t = _team(with_bus=False)
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert not _events(t), "no bus, so nothing should have been published yet"
+    assert [p for p in t.store if "/task/role-vacant-" in p]
+
+    _add_bus(t)
+    capsys.readouterr()
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert len(evs) == 1, (
+        "the bus recovered and the vacancy is still not on the stream — the "
+        "first delivery failure was permanent")
+    assert evs[0]["to"] == "alice"
+    assert evs[0]["slug"].startswith("role-vacant-")
+    assert "redelivery SUCCEEDED" in capsys.readouterr().err
+
+
+def test_redelivery_reuses_the_original_slug_so_one_obligation_stays_one():
+    """The fold keys `open` on the slug. A retry that minted a new slug would
+    open a SECOND obligation nobody could discharge — which is why retrying is
+    only safe because it is slug-idempotent."""
+    t = _team(with_bus=False)
+    cli.main(["escalate", "r"], transport=t)
+    doc = [p for p in t.store if "/task/role-vacant-" in p][0]
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    ev = [e for e in _events(t) if e["kind"] == "directive"][0]
+    assert doc.endswith(f"{ev['slug']}.md")
+    assert len([p for p in t.store if "/task/role-vacant-" in p]) == 1
+
+
+def test_once_delivered_a_later_sweep_does_not_republish():
+    """Redelivery is driven by delivery STATE, not by running again."""
+    t = _team()
+    cli.main(["escalate", "r"], transport=t)
+    assert len([e for e in _events(t) if e["kind"] == "directive"]) == 1
+    t.records.clear()
+    cli.main(["escalate", "r"], transport=t)
+    cli.main(["escalate", "r"], transport=t)
+    assert not [e for e in _events(t) if e["kind"] == "directive"]
+
+
+def test_a_configured_bus_that_keeps_failing_is_counted_as_undelivered(capsys):
+    """An unattended caller keys on rc. A retry that silently failed and then
+    reported a clean sweep would be the 577 laundering defect again.
+
+    The bus is CONFIGURED here and its writes fail — a real delivery failure,
+    which is a different thing from a team that has no event plane at all."""
+    t = _team()
+    t.record_write = lambda *a, **k: False  # type: ignore[assignment]
+    cli.main(["escalate", "r"], transport=t)
+    capsys.readouterr()
+    rc = cli.main(["escalate", "r"], transport=t)
+    err = capsys.readouterr().err
+    assert "redelivery FAILED" in err, err
+    assert rc == 3, "a vacancy nobody's fold can see must not report rc 0"
+
+
+def test_a_team_with_no_event_plane_is_not_an_incident_every_sweep(capsys):
+    """No bus-v3 config is a deployment shape, not a delivery failure. Failing
+    closed on it would make rc 3 permanent for file-plane-only teams, and an
+    alarm that fires on every run is worth as much as no alarm."""
+    t = _team(with_bus=False)
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["escalate", "r"], transport=t) == 0, (
+        "a team with no event plane took rc 3 on a routine repeat sweep")
+    assert "no event plane" in capsys.readouterr().err
+
+
+def test_a_marker_from_an_engine_with_no_delivery_record_still_redelivers(capsys):
+    """Markers written before delivery state existed carry no slug. Absent is
+    UNKNOWN, never 'delivered' — the day's two candidate titles are probed to
+    find the document that actually exists."""
+    t = _team(with_bus=False)
+    cli.main(["escalate", "r"], transport=t)
+    # simulate a pre-delivery-state engine: drop the delivery record entirely
+    for k in [p for p in list(t.store) if "escalation-delivery" in p]:
+        del t.store[k]
+    _add_bus(t)
+    capsys.readouterr()
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert len(evs) == 1, (
+        "a legacy marker with no delivery record was treated as delivered")

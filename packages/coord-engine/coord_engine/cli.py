@@ -1193,6 +1193,60 @@ def _escalation_marker_path(team: str, role: str, date: str) -> str:
     return f"team/{team}/roles/{role}/escalations/{date}.md"
 
 
+def _escalation_delivery_path(team: str, role: str, date: str) -> str:
+    """Where DELIVERY is recorded, separately from whether the task exists.
+
+    codex-reviewer, 682 r1: keying redelivery on the task document made the
+    first failure PERMANENT. The mint branch runs only when the doc is absent,
+    so a sweep that wrote the doc but could not emit (no bus config, a failed
+    record write, a crash between the two) left the daily marker in place — and
+    every later sweep short-circuited on that marker and never reached the emit
+    again. The vacancy stayed invisible to every fold even after the bus
+    recovered, which is precisely the incident the emit was added to close.
+
+    Document existence answers "was this escalated today". It cannot answer "did
+    anyone's fold hear about it". Two questions, two records.
+
+    Deliberately NOT under ``roles/<role>/escalations/``: that prefix is the
+    suppressor, and the closed-loop path leaves it empty on purpose so an
+    undeliverable notice re-surfaces every sweep. A delivery record living there
+    would be one refactor away from being read as a suppressor.
+    """
+    return f"team/{team}/_coord/bus-v3/escalation-delivery/{role}/{date}.json"
+
+
+def _read_escalation_delivery(transport: Any, team: str, role: str,
+                              date: str) -> Optional[dict[str, Any]]:
+    """Delivery state, or None when it was never recorded.
+
+    None is UNKNOWN, never "delivered": a marker written by an engine older than
+    this one has no delivery record, and treating that silence as success would
+    reintroduce the permanent loss by a different door.
+    """
+    raw = transport.read(_escalation_delivery_path(team, role, date))
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _write_escalation_delivery(transport: Any, team: str, role: str, date: str,
+                               *, slug: str, to: str, delivered: bool) -> None:
+    """Record delivery state. Best-effort: a failure here costs a duplicate
+    event on a later sweep, which is noise — the alternative, a lost vacancy,
+    is not."""
+    try:
+        transport.write(_escalation_delivery_path(team, role, date),
+                        json.dumps({"slug": slug, "to": to,
+                                    "delivered": bool(delivered)},
+                                   sort_keys=True))
+    except Exception:
+        pass
+
+
 def _role_liveness_fact(
     transport: Any,
     team: str,
@@ -10972,21 +11026,31 @@ def _is_self_addressed_vacancy(maintainer: str, leases: Any) -> bool:
 
 
 def _emit_escalation_event(transport: Any, team: str, *, to: str,
-                           slug: str, ptr: str) -> bool:
+                           slug: str, ptr: str) -> Optional[bool]:
     """Publish an engine-minted vacancy directive to the event plane.
 
-    Returns whether the record landed. Never raises and never fails the sweep:
-    the DOCUMENT is the durable obligation and the event is delivery, so a bus
-    that is down must not stop a vacancy from being recorded. A silent failure
-    here is still reported, because "the alarm fired but nobody's fold heard
-    it" is precisely the condition this function exists to end.
+    TRI-STATE, and the distinction is load-bearing:
+      True  — the record landed.
+      False — there IS an event plane and the write to it FAILED. A real
+              delivery failure: retry it, and fail the sweep closed.
+      None  — this team has NO bus-v3 config at all. Nothing was delivered
+              because there is nowhere to deliver to. That is a deployment
+              shape, not an incident, and it must NOT count as undelivered:
+              a team running file-plane-only would otherwise take rc 3 on
+              every sweep forever, and an alarm that fires on every run is
+              worth exactly as much as no alarm (the same reasoning this
+              module already applies to the attendance count cap).
+
+    Never raises and never fails the sweep: the DOCUMENT is the durable
+    obligation and the event is delivery, so a bus that is down must not stop a
+    vacancy from being recorded.
     """
     cfg = records.load_config(transport, team)
     if cfg is None:
         print("escalate: no bus-v3 records config — the vacancy directive rides "
               "the file plane only and will NOT appear in any stream fold",
               file=sys.stderr)
-        return False
+        return None
     try:
         ok = records.emit_event(
             transport, cfg, sender=_host(), to=to, kind="directive",
@@ -11000,6 +11064,55 @@ def _emit_escalation_event(transport: Any, team: str, *, to: str,
         print(f"escalate: vacancy directive event did NOT land — the document "
               f"stands, but {to}'s stream fold will not open it", file=sys.stderr)
     return bool(ok)
+
+
+def _vacancy_slug_candidates(role: str, today: str, sla: float) -> list[str]:
+    """Both titles cmd_escalate can mint for a role on a day, as slugs.
+
+    Needed only for markers written BEFORE delivery state existed, which carry
+    no slug. The title branches on `attended`, so a day has two possible slugs
+    and exactly one of them has a document on disk. Probing two paths is cheaper
+    and far more honest than guessing one.
+    """
+    titles = [
+        f"ROLE VACANT {today}: {role} UNATTENDED past {sla:g}h SLA "
+        f"— no holder work found",
+        f"ROLE VACANT {today}: {role} lease lapsed past {sla:g}h SLA "
+        f"(attendance UNVERIFIED)",
+    ]
+    return [tasks.slugify(t) for t in titles]
+
+
+def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
+                          sla: float, *, dstate: Optional[dict[str, Any]],
+                          maintainer: str) -> Optional[bool]:
+    """Re-emit today's vacancy event for a role whose delivery never landed.
+
+    Returns whether the event is now on the stream. Idempotent by slug: the
+    fold keys `open` on the slug, so a duplicate event re-opens the SAME
+    obligation rather than creating a second one — which is why retrying is
+    safe and dropping the retry was not.
+    """
+    slug = str(dstate.get("slug")) if dstate and dstate.get("slug") else None
+    to = str(dstate.get("to")) if dstate and dstate.get("to") else maintainer
+    if not slug:
+        # Pre-delivery-state marker: find which of the day's two possible
+        # documents actually exists.
+        for cand in _vacancy_slug_candidates(role, today, sla):
+            if transport.read(_task_path(team, cand)) is not None:
+                slug = cand
+                break
+    if not slug:
+        print(f"escalate: {role} has today's marker but no delivery record and "
+              f"no matching vacancy document — cannot redeliver; state UNKNOWN",
+              file=sys.stderr)
+        return False
+    ok = _emit_escalation_event(transport, team, to=to, slug=slug,
+                                ptr=f"task/{slug}.md")
+    if ok is not None:
+        _write_escalation_delivery(transport, team, role, today,
+                                   slug=slug, to=to, delivered=bool(ok))
+    return ok
 
 
 def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
@@ -11117,9 +11230,38 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             # suppressing the repeat. A silent skip that produces a confident
             # wrong reading in a careful reader is a defect in the OUTPUT.
             if marker_exists:
-                print(f"escalate: {role} already escalated today "
-                      f"(marker {today}) — repeat suppressed, NOT re-checked",
-                      file=sys.stderr)
+                # REDELIVERY, before the suppression takes effect. The repeat is
+                # suppressed; the DELIVERY is not, because they are different
+                # questions and only one of them was ever answered here
+                # (codex-reviewer, 682 r1). A vacancy whose event never landed
+                # is retried on every sweep until it does — otherwise the first
+                # failure is permanent, since the mint branch below can never
+                # run again for this role today.
+                dstate = _read_escalation_delivery(transport, args.team, role, today)
+                if dstate is not None and dstate.get("delivered"):
+                    print(f"escalate: {role} already escalated today "
+                          f"(marker {today}, event delivered) — repeat "
+                          f"suppressed", file=sys.stderr)
+                else:
+                    redelivered = _redeliver_escalation(
+                        transport, args.team, role, today, sla,
+                        dstate=dstate, maintainer=str(reg.get("maintainer")
+                                                      or _human()))
+                    if redelivered is None:
+                        print(f"escalate: {role} already escalated today "
+                              f"(marker {today}); this team has no event plane, "
+                              f"so the vacancy lives on the file plane only",
+                              file=sys.stderr)
+                    else:
+                        print(f"escalate: {role} already escalated today "
+                              f"(marker {today}) but its event had NOT been "
+                              f"delivered — redelivery "
+                              + ("SUCCEEDED, the vacancy is now on the stream"
+                                 if redelivered else
+                                 "FAILED, it remains invisible to every fold"),
+                              file=sys.stderr)
+                        if not redelivered:
+                            undelivered += 1
             else:
                 print(f"escalate: {role} not due — lease is fresh inside its "
                       f"{sla:g}h SLA", file=sys.stderr)
@@ -11247,8 +11389,17 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             # stream, the other never CLOSES. Same root cause: engine-written
             # obligations bypassed the event plane, which only became
             # load-bearing when folds went forward-only at the cutover.
-            _emit_escalation_event(transport, args.team, to=maintainer,
-                                   slug=slug, ptr=f"task/{slug}.md")
+            emitted = _emit_escalation_event(
+                transport, args.team, to=maintainer,
+                slug=slug, ptr=f"task/{slug}.md")
+            # Delivery is recorded whether or not it succeeded, so a later sweep
+            # knows there is something to retry AND which slug to retry with.
+            # The slug is not recomputable later: its title depends on the
+            # `attended` value at mint time, which varies between sweeps.
+            if emitted is not None:
+                _write_escalation_delivery(transport, args.team, role, today,
+                                           slug=slug, to=maintainer,
+                                           delivered=bool(emitted))
             print(f"escalated {role} -> {maintainer}"
                   + (" (UNDELIVERED: closed loop)" if self_addressed else ""))
             if self_addressed:
@@ -11262,6 +11413,21 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                       f"it is — an undelivered notice must not be recorded as "
                       f"a delivery.", file=sys.stderr)
         else:
+            # Same redelivery duty as the marker branch above, and this is the
+            # ONLY path a self-addressed vacancy ever takes: it writes no daily
+            # marker by design, so it arrives here every sweep. Without this the
+            # closed-loop case had the permanent-loss hole too.
+            dstate = _read_escalation_delivery(transport, args.team, role, today)
+            if dstate is None or not dstate.get("delivered"):
+                ok = _emit_escalation_event(transport, args.team, to=maintainer,
+                                            slug=slug, ptr=f"task/{slug}.md")
+                if ok is not None:
+                    _write_escalation_delivery(transport, args.team, role, today,
+                                               slug=slug, to=maintainer,
+                                               delivered=bool(ok))
+                    print(f"escalate: {role}'s existing directive had NOT been "
+                          f"delivered to the stream — redelivery "
+                          + ("SUCCEEDED" if ok else "FAILED"), file=sys.stderr)
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
             if self_addressed:
                 print(f"escalate: {role} still has an UNDELIVERED notice — its "
