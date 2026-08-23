@@ -1230,7 +1230,33 @@ def _read_escalation_delivery(transport: Any, team: str, role: str,
         doc = json.loads(raw)
     except (ValueError, TypeError):
         return None
-    return doc if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        return None
+    # STRICT EVIDENCE SCHEMA (codex-reviewer, 682 r2). Callers ask this marker
+    # whether delivery is CONFIRMED, and they used to ask it by truthiness — so
+    # `{"delivered": "false"}`, a non-empty string, read as delivered, printed
+    # "event delivered", returned rc 0, and permanently suppressed the retry
+    # with no event anywhere. That is the same permanent-loss failure this file
+    # has now closed twice, reached through a third door: a malformed record
+    # accepted as proof.
+    #
+    # A marker is EVIDENCE, so it is validated like evidence: `delivered` must
+    # be a real boolean (note `isinstance(1, bool)` is False, so a stray int is
+    # rejected too), and a marker claiming delivery must name the slug it
+    # delivered and the agent it reached. Anything malformed, partial, or
+    # unexpected is UNKNOWN — which means redelivery runs. Failing toward a
+    # duplicate event is noise; failing toward a silent drop is the incident.
+    delivered = doc.get("delivered")
+    if not isinstance(delivered, bool):
+        return None
+    for field in ("slug", "to"):
+        value = doc.get(field)
+        if value is not None and not (isinstance(value, str) and value):
+            return None
+    if delivered and not (isinstance(doc.get("slug"), str) and doc["slug"]
+                          and isinstance(doc.get("to"), str) and doc["to"]):
+        return None
+    return doc
 
 
 def _write_escalation_delivery(transport: Any, team: str, role: str, date: str,

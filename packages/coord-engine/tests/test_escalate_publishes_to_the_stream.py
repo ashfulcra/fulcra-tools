@@ -249,3 +249,77 @@ def test_a_marker_from_an_engine_with_no_delivery_record_still_redelivers(capsys
     evs = [e for e in _events(t) if e["kind"] == "directive"]
     assert len(evs) == 1, (
         "a legacy marker with no delivery record was treated as delivered")
+
+
+# --- the delivery marker is EVIDENCE, so it is validated like evidence ------
+#
+# codex-reviewer, 682 r2. `_read_escalation_delivery` returned any JSON object
+# and callers tested `dstate.get("delivered")` by TRUTHINESS, so the malformed
+# marker {"delivered": "false"} -- a non-empty string -- read as confirmed
+# delivery. The sweep printed "event delivered", returned rc 0, and permanently
+# suppressed the retry with no directive event anywhere. Same permanent loss the
+# r1 and r2 fixes each closed, reached through a third door: a malformed record
+# accepted as proof.
+
+import pytest
+
+
+def _delivery_path(role: str = "reviewer") -> str:
+    from coord_engine import cli as _cli
+    return _cli._escalation_delivery_path("r", role, _cli._now().strftime("%Y-%m-%d"))
+
+
+def _mint_without_bus() -> _BusTransport:
+    t = _team(with_bus=False)
+    cli.main(["escalate", "r"], transport=t)
+    return t
+
+
+@pytest.mark.parametrize("payload", [
+    '{"delivered": "false", "slug": "role-vacant-x", "to": "alice"}',
+    '{"delivered": "true", "slug": "role-vacant-x", "to": "alice"}',
+    '{"delivered": 1, "slug": "role-vacant-x", "to": "alice"}',
+    '{"delivered": true}',
+    '{"delivered": true, "slug": "", "to": "alice"}',
+    '{"delivered": true, "slug": "role-vacant-x"}',
+    '{"delivered": true, "slug": "role-vacant-x", "to": ""}',
+    '{"delivered": true, "slug": 7, "to": "alice"}',
+    'not json at all',
+    '[]',
+    '{}',
+])
+def test_a_malformed_delivery_marker_is_unknown_so_redelivery_runs(payload):
+    """THE regression: none of these may be read as confirmed delivery."""
+    t = _mint_without_bus()
+    t.put(_delivery_path(), payload)
+    _add_bus(t)
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert [e for e in _events(t) if e["kind"] == "directive"], (
+        f"marker {payload!r} was accepted as proof of delivery — the vacancy is "
+        f"permanently absent from the stream")
+
+
+def test_a_wellformed_delivered_marker_is_still_honoured(capsys):
+    """Validation must not turn every marker into UNKNOWN — that would
+    re-publish the obligation on every sweep forever."""
+    t = _team()
+    cli.main(["escalate", "r"], transport=t)
+    t.records.clear()
+    capsys.readouterr()
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert not [e for e in _events(t) if e["kind"] == "directive"]
+    assert "event delivered" in capsys.readouterr().err
+
+
+def test_a_wellformed_not_delivered_marker_redelivers_with_its_slug():
+    """delivered:false is VALID evidence — of non-delivery. Its slug must be
+    reused rather than discarded, so the retry re-opens the same obligation."""
+    t = _mint_without_bus()
+    doc = [p for p in t.store if "/task/role-vacant-" in p][0]
+    slug = doc.rsplit("/", 1)[1][:-3]
+    t.put(_delivery_path(),
+          json.dumps({"delivered": False, "slug": slug, "to": "alice"}))
+    _add_bus(t)
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert len(evs) == 1 and evs[0]["slug"] == slug
