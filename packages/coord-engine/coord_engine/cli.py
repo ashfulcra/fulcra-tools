@@ -10971,6 +10971,37 @@ def _is_self_addressed_vacancy(maintainer: str, leases: Any) -> bool:
     return maintainer in {str(l.get("agent") or "") for l in (leases or [])}
 
 
+def _emit_escalation_event(transport: Any, team: str, *, to: str,
+                           slug: str, ptr: str) -> bool:
+    """Publish an engine-minted vacancy directive to the event plane.
+
+    Returns whether the record landed. Never raises and never fails the sweep:
+    the DOCUMENT is the durable obligation and the event is delivery, so a bus
+    that is down must not stop a vacancy from being recorded. A silent failure
+    here is still reported, because "the alarm fired but nobody's fold heard
+    it" is precisely the condition this function exists to end.
+    """
+    cfg = records.load_config(transport, team)
+    if cfg is None:
+        print("escalate: no bus-v3 records config — the vacancy directive rides "
+              "the file plane only and will NOT appear in any stream fold",
+              file=sys.stderr)
+        return False
+    try:
+        ok = records.emit_event(
+            transport, cfg, sender=_host(), to=to, kind="directive",
+            priority="P1", slug=slug, ptr=ptr, team=team)
+    except Exception as e:  # a bus write must never lose the vacancy record
+        print(f"escalate: vacancy directive event failed to emit ({e}) — the "
+              f"document stands, but {to}'s stream fold will not open it",
+              file=sys.stderr)
+        return False
+    if not ok:
+        print(f"escalate: vacancy directive event did NOT land — the document "
+              f"stands, but {to}'s stream fold will not open it", file=sys.stderr)
+    return bool(ok)
+
+
 def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     """Role-vacancy sweep: for every role doc, if vacancy past SLA and no marker
     today, write the marker + a P1 directive to the role's maintainer.
@@ -11075,6 +11106,23 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         marker_exists = transport.read(marker_path) is not None
         if not roles.escalation_due(leases, now=now, sla_hours=sla,
                                     marker_exists_today=marker_exists):
+            # NAME THE REASON. This branch used to `continue` in total silence,
+            # and `escalated=0` was then the only thing an operator saw. Those
+            # are three different worlds — already escalated today, lease still
+            # fresh, nothing due — and one integer could not tell them apart.
+            # coord-maintainer, 2026-08-23: ran the sweep against a role 44h
+            # past its SLA, saw a clean rc 0 and `0 escalated`, and reasonably
+            # concluded the alarm had gone quiet on a real vacancy. It had not;
+            # the role was escalated at 00:41:50Z and today's marker was
+            # suppressing the repeat. A silent skip that produces a confident
+            # wrong reading in a careful reader is a defect in the OUTPUT.
+            if marker_exists:
+                print(f"escalate: {role} already escalated today "
+                      f"(marker {today}) — repeat suppressed, NOT re-checked",
+                      file=sys.stderr)
+            else:
+                print(f"escalate: {role} not due — lease is fresh inside its "
+                      f"{sla:g}h SLA", file=sys.stderr)
             continue
         # W2 gated semantic change (dormant while the gate is BLOCKED): a lapsed
         # session holder is explained absence — suppress, and SAY so (never
@@ -11103,6 +11151,19 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                 transport, args.team,
                 [str(l.get("agent")) for l in (leases or [])],
                 since=anchor - timedelta(hours=sla), index=att_index)
+        # THE PER-ROLE VERDICT (coord-maintainer's ask, 2026-08-23). `attended`
+        # is a THREE-valued answer and the sweep used to publish only its
+        # aggregate effect. FOUND and NOT-FOUND are conclusions; UNKNOWN is the
+        # honest "I could not see far enough", and it is the one that must never
+        # be read as either. Printing it per role is what lets a reader tell an
+        # attending fleet from a scan that ran out of budget — the distinction
+        # `escalated=0` silently collapsed.
+        print(f"escalate: {role} attendance "
+              + ("FOUND" if attended is True else
+                 "NOT-FOUND" if attended is False else
+                 "UNKNOWN-within-budget")
+              + f" (scanned {a_scanned}/{a_total}, sla {sla:g}h)",
+              file=sys.stderr)
         if not roles.escalation_due(leases, now=now, sla_hours=sla,
                                     marker_exists_today=marker_exists,
                                     attended=attended):
@@ -11167,6 +11228,27 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if transport.read(dst) is None:
             transport.write(dst, content)
             escalated += 1
+            # PUBLISH IT TO THE EVENT PLANE. Until 2.0.5 this branch wrote the
+            # document and told the bus NOTHING: the only "emit" anywhere in
+            # cmd_escalate is emit_envelope, which is a stdout summary line, not
+            # a record. Under the FILE plane that was invisible, because
+            # `needs-me` enumerated task docs and therefore found engine-written
+            # ones. Under the STREAM plane a fold's `open` set is built ONLY
+            # from directive events, so a P1 minted here entered NOBODY's fold —
+            # not the assignee's, not anyone's. coord-maintainer hit this at
+            # 2026-08-23T06:50Z: they tested for the presence of a ROLE VACANT
+            # row by reading their owed fold, saw silence, and concluded the
+            # alarm had gone quiet. The row existed. The obligation had simply
+            # never been published to the plane they were reading.
+            #
+            # Mirror of the retention gap (reconcile._run_retention archives a
+            # quiet `proposed` task and likewise emits nothing, so an obligation
+            # silently stops being dischargeable). One path never OPENS on the
+            # stream, the other never CLOSES. Same root cause: engine-written
+            # obligations bypassed the event plane, which only became
+            # load-bearing when folds went forward-only at the cutover.
+            _emit_escalation_event(transport, args.team, to=maintainer,
+                                   slug=slug, ptr=f"task/{slug}.md")
             print(f"escalated {role} -> {maintainer}"
                   + (" (UNDELIVERED: closed loop)" if self_addressed else ""))
             if self_addressed:
