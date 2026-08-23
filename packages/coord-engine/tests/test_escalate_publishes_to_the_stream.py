@@ -551,3 +551,75 @@ def test_a_live_vacancy_beside_a_terminal_one_still_gets_delivered():
     evs = [e for e in _events(t) if e["kind"] == "directive"]
     assert [e for e in evs if e["slug"] == real], (
         "a live vacancy stopped being delivered")
+
+
+# --- the self-addressed path is the one that skipped the guard -------------
+#
+# codex-reviewer, 685 r1 P1. The terminal filter lived in _resolve_vacancy, and
+# the self-addressed branch emitted the slug computed further up — bypassing the
+# resolver entirely. A self-addressed vacancy writes no daily marker by design,
+# so it lands in that branch EVERY sweep, and it republished its own terminal
+# task as a fresh open: exactly the permanently-undischargeable row this change
+# exists to prevent, recreated by the one path that skipped the guard.
+
+SELF_ROLE_DOC = "---\ntype: Role\nsla_hours: 12\nmaintainer: arcbot\n---\n"
+SELF_LEASE = ("---\ntype: Lease\nagent: arcbot\n"
+              "timestamp: 2020-01-01T00:00:00Z\n---\n")
+
+
+def _self_addressed_team() -> _BusTransport:
+    """maintainer IS the lapsed holder — the closed-loop case, which writes no
+    daily marker and therefore retries on every sweep."""
+    t = _BusTransport()
+    t.put("team/r/roles/arc.md", SELF_ROLE_DOC)
+    t.put("team/r/roles/arc/leases/arcbot.md", SELF_LEASE)
+    t.put("team/r/_coord/bus-v3/records.json", BUS_CONFIG)
+    return t
+
+
+@pytest.mark.parametrize("status", ["done", "abandoned"])
+def test_the_self_addressed_retry_never_resurrects_a_terminal_task(status):
+    """THE r1 P1 regression, both terminal states."""
+    t = _self_addressed_team()
+    cli.main(["escalate", "r"], transport=t)
+    doc = [p for p in t.store if "/task/role-vacant-" in p][0]
+    t.put(doc, t.store[doc].replace("status: proposed", f"status: {status}"))
+    t.records.clear()
+    cli.main(["escalate", "r"], transport=t)
+    assert not [e for e in _events(t) if e["kind"] == "directive"], (
+        f"the self-addressed retry republished a {status} vacancy as a fresh "
+        f"open — undischargeable for 'abandoned'")
+
+
+def test_the_self_addressed_retry_still_redelivers_a_live_vacancy():
+    """Terminal-awareness must not break the closed-loop retry it was added to."""
+    t = _self_addressed_team()
+    t.record_write = lambda *a, **k: False  # type: ignore[assignment]
+    cli.main(["escalate", "r"], transport=t)
+    slug = [p for p in t.store if "/task/role-vacant-" in p][0].rsplit("/", 1)[1][:-3]
+    del t.record_write  # bus recovers
+    t.records.clear()
+    cli.main(["escalate", "r"], transport=t)
+    evs = [e for e in _events(t) if e["kind"] == "directive"]
+    assert [e for e in evs if e["slug"] == slug and e["to"] == "arcbot"], evs
+
+
+# --- a completed obligation is not an undelivered one ----------------------
+#
+# codex-reviewer, 685 r1 P2. Skipping a terminal document made
+# _redeliver_escalation return False, which the caller read as a delivery
+# FAILURE: it printed that the vacancy remained invisible, incremented
+# `undelivered`, and returned rc 3 on every future sweep. A permanent false
+# alarm manufactured by correctly refusing to resurrect.
+
+@pytest.mark.parametrize("status", ["done", "abandoned"])
+def test_a_terminal_vacancy_is_not_reported_as_undelivered(status, capsys):
+    t = _mint_without_bus()
+    _terminalise(t, status)
+    _add_bus(t)
+    rc = cli.main(["escalate", "r"], transport=t)
+    err = capsys.readouterr().err
+    assert "redelivery FAILED" not in err, err
+    assert "already answered" in err, err
+    assert "undelivered=0" in err, err
+    assert rc == 0, "a completed obligation must not fail the sweep closed"
