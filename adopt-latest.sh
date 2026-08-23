@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="0976cd815d6f88a02adca00e10b6a9eb265b8939"   # coord-engine 2.0.4: 679 attendance scan recency — the `attended` check that suppresses false ROLE VACANT P1s was INERT in production, because the scan read a LEXICAL prefix of 569 review dirs to answer a RECENCY question and the dir holding recent work sat at position 407. Measured at the same 24/569 coverage: reviewers found 6 -> 18, attended None -> True. Cold-start build budget (COORD_PROJECTION_BUILD_BUDGET, default 240s) is a separate open P1.
+PIN="8c7cd7e9dfcb0d6e570c06da617f34801faac060"   # coord-engine 2.0.5: 682 engine-minted vacancies now reach the STREAM. cmd_escalate wrote its ROLE VACANT doc with a bare transport.write and called emit_event zero times, so a P1 minted by the engine entered NOBODY's fold — invisible under the file plane because needs-me enumerated docs, load-bearing the moment folds went forward-only. Delivery is tracked separately from task existence and retried until it lands; confirmation is equality against a freshly resolved (slug, assignee) from the document. Seven review rounds, every block correct. Cold-start build budget (COORD_PROJECTION_BUILD_BUDGET) and the forge section refusal remain separate open P1s.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
