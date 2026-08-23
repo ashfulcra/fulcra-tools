@@ -37,7 +37,17 @@
 # loudly instead of deleting it.
 set -u
 PIN="0976cd815d6f88a02adca00e10b6a9eb265b8939"   # coord-engine 2.0.4: 679 attendance scan recency — the `attended` check that suppresses false ROLE VACANT P1s was INERT in production, because the scan read a LEXICAL prefix of 569 review dirs to answer a RECENCY question and the dir holding recent work sat at position 407. Measured at the same 24/569 coverage: reviewers found 6 -> 18, attended None -> True. Cold-start build budget (COORD_PROJECTION_BUILD_BUDGET, default 240s) is a separate open P1.
-VER="pp-0a093dba"
+# DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
+# durable adoption-claim marker in the store, so a VER that does not move with
+# PIN makes every agent whose rc and rescued-step count match its last rollout
+# read its OWN previous marker and skip the claim — the fleet still installs the
+# new pin, but convergence goes invisible exactly when a pin PR is trying to
+# move it. Shipped as `pp-0a093dba` across the 2.0.3 AND 2.0.4 pins (it matches
+# neither pin's sha, so it had already desynced by hand), and five agents were
+# holding `adopted-pp-0a093dba-<agent>-rc0.txt` markers that would have
+# suppressed their 2.0.4 claims (codex-reviewer, 681 r1). Deriving it removes
+# the hand-edit step that produced that, rather than correcting one instance.
+VER="pp-$(printf %.8s "$PIN")"
 # TYPE mirrors the CURRENT channel in _coord/bus-v3/records.json — when the authority moves, update BOTH (2026-08-04 cutover lesson: this line silently pinned the OLD channel)
 TYPE="MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
 
