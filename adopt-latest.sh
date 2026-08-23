@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="57909052144bd8b250a88f475b2826be2b70606f"   # coord-engine 2.0.3: 673 reconcile recovery — the detector-UNKNOWN it recovers from is the LIVE condition (fulcra-api emits no data-updates coverage boundary), verified firing 2026-08-22; plus 674 owed slug truncation. Cold-start build budget (COORD_PROJECTION_BUILD_BUDGET, default 240s) is a separate open P1.
+PIN="0976cd815d6f88a02adca00e10b6a9eb265b8939"   # coord-engine 2.0.4: 679 attendance scan recency — the `attended` check that suppresses false ROLE VACANT P1s was INERT in production, because the scan read a LEXICAL prefix of 569 review dirs to answer a RECENCY question and the dir holding recent work sat at position 407. Measured at the same 24/569 coverage: reviewers found 6 -> 18, attended None -> True. Cold-start build budget (COORD_PROJECTION_BUILD_BUDGET, default 240s) is a separate open P1.
 VER="pp-0a093dba"
 # TYPE mirrors the CURRENT channel in _coord/bus-v3/records.json — when the authority moves, update BOTH (2026-08-04 cutover lesson: this line silently pinned the OLD channel)
 TYPE="MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
