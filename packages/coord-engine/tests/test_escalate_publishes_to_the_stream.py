@@ -541,16 +541,56 @@ def test_a_terminal_document_is_not_recorded_as_a_delivery(status):
         assert json.loads(state).get("delivered") is not True, state
 
 
+def _other_candidate(t: _BusTransport, real: str) -> str:
+    """The day's OTHER candidate slug — the title branches on `attended`, so a
+    role has exactly two possible vacancy slugs per day."""
+    from coord_engine import cli as _cli
+    cands = _cli._vacancy_slug_candidates(
+        "reviewer", _cli._now().strftime("%Y-%m-%d"), 12.0)
+    other = [c for c in cands if c != real]
+    assert other, cands
+    return other[0]
+
+
 def test_a_live_vacancy_beside_a_terminal_one_still_gets_delivered():
     """Skipping a terminal candidate must not abandon the search — the day's
-    other candidate title may hold the live row."""
+    other candidate title may hold the live row.
+
+    codex-reviewer, 685 r2: this test previously created only ONE document and
+    so never exercised its own stated scenario. Both candidates now exist."""
     t = _mint_without_bus()
     real = _real_slug(t)
+    other = _other_candidate(t, real)
+    # the OTHER candidate is the terminal one; the real row stays live
+    t.put(f"team/r/task/{other}.md",
+          "---\ntype: Task\nassignee: alice\nstatus: done\n"
+          "priority: P1\n---\n# answered\n")
     _add_bus(t)
     cli.main(["escalate", "r"], transport=t)
     evs = [e for e in _events(t) if e["kind"] == "directive"]
     assert [e for e in evs if e["slug"] == real], (
-        "a live vacancy stopped being delivered")
+        "a live vacancy beside a terminal sibling stopped being delivered")
+
+
+@pytest.mark.parametrize("other_body", [
+    "not-frontmatter",
+    "---\ntype: Task\nstatus: proposed\npriority: P1\n---\n# no assignee\n",
+])
+def test_an_unresolvable_sibling_outranks_a_terminal_candidate(other_body, capsys):
+    """THE r2 regression. One candidate answered, the other EXISTING but
+    unreadable, must not report "already answered" and exit clean — the
+    unreadable one may still be a live P1."""
+    t = _mint_without_bus()
+    real = _terminalise(t, "done")
+    t.put(f"team/r/task/{_other_candidate(t, real)}.md", other_body)
+    _add_bus(t)
+    rc = cli.main(["escalate", "r"], transport=t)
+    err = capsys.readouterr().err
+    assert "already answered" not in err, (
+        "a terminal candidate outvoted an unreadable sibling — absence of "
+        "evidence was treated as evidence that nothing is owed")
+    assert "state UNKNOWN" in err, err
+    assert rc == 3, "an unresolvable candidate must fail the sweep closed"
 
 
 # --- the self-addressed path is the one that skipped the guard -------------

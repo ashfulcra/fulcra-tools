@@ -11140,13 +11140,23 @@ def _resolve_vacancy(transport: Any, team: str, role: str, today: str,
     not an undelivered live one, so the distinction rides in the return rather
     than in the caller's guesswork.
     """
+    # UNKNOWN OUTRANKS TERMINAL (codex-reviewer, 685 r2). r1 remembered a
+    # terminal candidate but not that ANOTHER candidate document EXISTED and
+    # could not be resolved. With one candidate `done` and the other corrupt,
+    # the loop fell through to "already answered", recorded no failure and
+    # exited rc 0 — while the unreadable one may still be a live P1. A document
+    # we could not read is not evidence that nothing is owed; it is the absence
+    # of evidence, and it must fail closed into redelivery rather than be
+    # outvoted by its answered sibling.
     terminal: Optional[str] = None
+    unreadable = False
     for cand in _vacancy_slug_candidates(role, today, sla):
         doc = transport.read(_task_path(team, cand))
         if doc is None:
-            continue
+            continue  # never existed — not evidence of anything
         fm = okf.parse_frontmatter(doc)
         if fm is None:
+            unreadable = True  # EXISTS but unreadable: UNKNOWN, not absent
             continue
         # NEVER RESURRECT A TERMINAL OBLIGATION (coord-maintainer, 2026-08-23).
         # 2.0.5 made opens emit, and redelivery then replayed opens for
@@ -11176,6 +11186,11 @@ def _resolve_vacancy(transport: Any, team: str, role: str, today: str,
         assignee = fm.get("assignee")
         if isinstance(assignee, str) and assignee:
             return cand, assignee, "live"
+        # Non-terminal document with no readable assignee: it exists and may be
+        # live, but nothing here can say who for. UNKNOWN, same as unreadable.
+        unreadable = True
+    if unreadable:
+        return None, None, "unresolved"
     if terminal is not None:
         return terminal, None, "terminal"
     return None, None, "unresolved"
