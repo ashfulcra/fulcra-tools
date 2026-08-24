@@ -206,6 +206,11 @@ under `skills/`, each package with its own README, build, and tests.
   successor to resume from the PREVIOUS checkpoint believing it current,
   exactly when parking matters most. **Any caller of `transport.write` must
   treat `False` as failure**; it is not a Falsy-but-fine return.
+- A task-directory listing that returns rc 0 is not automatically complete.
+  When the trusted feed fold still corroborates tasks omitted by a full-scan
+  listing, `reconcile` fails closed and preserves the current generation,
+  summaries, and index. This catches the live intermittent-empty listing shape;
+  do not turn that disagreement back into authoritative task deletions.
 - Audit every existing READER before you change what a marker MEANS. A
   marker's meaning is fixed by everything that acts on it, not by the writer's
   intent, so a new state or a new field is a change to every consumer at once.

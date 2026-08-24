@@ -1705,6 +1705,38 @@ def reconcile(
             return {"degraded": True, "reason": str(e), "tasks": 0}
         rows, warnings, reused, parsed = _full_scan_task_rows(
             transport, team, listing, prior_by_name, last_reconcile_iso, log)
+        # A directory listing can return rc 0 with only a tiny prefix of the
+        # real directory.  The feed-folded rows are the independently
+        # corroborated task set for this pass.  Never let a full scan turn an
+        # uncorroborated listing omission into task deletions: a later clean pass
+        # can retry, while the current generation stays intact.  Without a
+        # conclusive incremental fold there is no independent evidence to
+        # distinguish a partial listing from stale legacy/orphan rows, so the
+        # existing authoritative full-scan behavior remains unchanged.
+        reference_names = (
+            set(aggregate.rows_by_name(inc[0])) if inc is not None else set()
+        )
+        listed_names = set(aggregate.rows_by_name(rows))
+        uncorroborated_missing = sorted(reference_names - listed_names)
+        if uncorroborated_missing:
+            reason = (
+                "task listing implausibly shrank; current generation preserved: "
+                f"{len(uncorroborated_missing)} corroborated task(s) absent"
+            )
+            result = {
+                "degraded": True,
+                "reason": reason,
+                "tasks": len(prior_rows),
+                "warnings": [reason],
+                "rows": prior_rows,
+            }
+            _write_health_shard(
+                transport, team, host=host, now=now, result=result, log=log)
+            log.error(
+                "reconcile aborted: implausibly shrunken task listing",
+                team=team, missing=len(uncorroborated_missing),
+            )
+            return result
         if batch.trusted and (prior_cursor is None or not stale):
             new_cursor = {"watermark": now, "processed": {}, "streak": 0}
         elif prior_cursor is not None:
