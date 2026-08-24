@@ -650,7 +650,11 @@ it (not on PyPI).
     is `_coord/projections/current.json`: a builder write/read-verifies immutable
     `generations/<digest>.json` first, then writes and read-verifies the digest-bound manifest. Required
     `UNKNOWN`/incomplete sections or an unattested feed frontier stay recovery progress and never advance
-    current; reconcile exits nonzero. A transport that proves conditional-write support uses CAS to fence a
+    current; reconcile exits nonzero. Private review/forge recovery is keyed by
+    the content-bearing public projection base, not by a detector watermark or
+    batch digest; positive feed changes invalidate only affected review rows,
+    while forge is rebuilt from current canonical inputs. A transport that proves
+    conditional-write support uses CAS to fence a
     moved pointer. A transport that explicitly declares CAS unsupported may use one last-writer-wins
     manifest write only after the complete deterministic immutable generation verifies, and must verify the
     exact manifest read-back; missing/invalid capability and write/read failure remain nonzero. Because a
