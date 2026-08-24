@@ -11110,7 +11110,7 @@ def _vacancy_slug_candidates(role: str, today: str, sla: float) -> list[str]:
 
 
 def _resolve_vacancy(transport: Any, team: str, role: str, today: str,
-                     sla: float) -> tuple[Optional[str], Optional[str]]:
+                     sla: float) -> tuple[Optional[str], Optional[str], str]:
     """Today's vacancy for this role as (slug, assignee), from the DOCUMENT.
 
     THE single place routing facts are derived. Seven rounds of this fix each
@@ -11127,20 +11127,73 @@ def _resolve_vacancy(transport: Any, team: str, role: str, today: str,
     right now. There is no field left to forget, because nothing is read off the
     marker at all.
 
-    Returns (None, None) when no candidate resolves to a document whose assignee
-    can be read — UNKNOWN, which routes into redelivery rather than suppression.
+    Returns ``(slug, assignee, state)`` where state is one of:
+      "live"       — a real, still-open vacancy that owes delivery
+      "terminal"   — the day's vacancy exists but was already ANSWERED
+      "unresolved" — nothing readable; UNKNOWN, so redelivery is attempted
+
+    TERMINAL IS NOT A FAILURE, and conflating them was the r1 defect here
+    (codex-reviewer, 685 r1 P2): returning a bare False for a completed
+    obligation made the caller report "redelivery FAILED", increment
+    `undelivered` and return rc 3 on EVERY future sweep — a permanent false
+    alarm created by correctly refusing to resurrect. A completed obligation is
+    not an undelivered live one, so the distinction rides in the return rather
+    than in the caller's guesswork.
     """
+    # UNKNOWN OUTRANKS TERMINAL (codex-reviewer, 685 r2). r1 remembered a
+    # terminal candidate but not that ANOTHER candidate document EXISTED and
+    # could not be resolved. With one candidate `done` and the other corrupt,
+    # the loop fell through to "already answered", recorded no failure and
+    # exited rc 0 — while the unreadable one may still be a live P1. A document
+    # we could not read is not evidence that nothing is owed; it is the absence
+    # of evidence, and it must fail closed into redelivery rather than be
+    # outvoted by its answered sibling.
+    terminal: Optional[str] = None
+    unreadable = False
     for cand in _vacancy_slug_candidates(role, today, sla):
         doc = transport.read(_task_path(team, cand))
         if doc is None:
-            continue
+            continue  # never existed — not evidence of anything
         fm = okf.parse_frontmatter(doc)
         if fm is None:
+            unreadable = True  # EXISTS but unreadable: UNKNOWN, not absent
+            continue
+        # NEVER RESURRECT A TERMINAL OBLIGATION (coord-maintainer, 2026-08-23).
+        # 2.0.5 made opens emit, and redelivery then replayed opens for
+        # documents that had ALREADY been answered. During the broken window the
+        # open never reached the stream, so when the agent closed the row their
+        # close had nothing to answer and emitted nothing. Redelivery now
+        # replays the open into a fold that has never seen a close for it: the
+        # obligation is terminal in the document and OPEN in the stream,
+        # permanently.
+        #
+        # The `abandoned` case is strictly worse and is why this checks ANY
+        # terminal state rather than emitting a compensating close for `done`:
+        # `abandoned -> done` is an illegal transition, so a resurrected
+        # abandoned row cannot be discharged by ANY action its holder can take.
+        # It is a P1 they are required to carry and forbidden to answer.
+        #
+        # A terminal document is not a live obligation, so there is nothing to
+        # deliver. Skip it and keep looking — the day's other candidate may be
+        # the live one.
+        # Normalised the same way cli.py already reads a doc status elsewhere:
+        # these documents are hand-editable, so case and stray whitespace are
+        # real, and a status that fails to match here fails OPEN into a
+        # resurrection.
+        if str(fm.get("status") or "").strip().lower() in tasks.TERMINAL_STATUSES:
+            terminal = cand
             continue
         assignee = fm.get("assignee")
         if isinstance(assignee, str) and assignee:
-            return cand, assignee
-    return None, None
+            return cand, assignee, "live"
+        # Non-terminal document with no readable assignee: it exists and may be
+        # live, but nothing here can say who for. UNKNOWN, same as unreadable.
+        unreadable = True
+    if unreadable:
+        return None, None, "unresolved"
+    if terminal is not None:
+        return terminal, None, "terminal"
+    return None, None, "unresolved"
 
 
 def _delivery_confirmed(transport: Any, team: str,
@@ -11164,15 +11217,15 @@ def _delivery_confirmed(transport: Any, team: str,
     """
     if not dstate or dstate.get("delivered") is not True:
         return False
-    slug, to = _resolve_vacancy(transport, team, role, today, sla)
-    if slug is None:
+    slug, to, state = _resolve_vacancy(transport, team, role, today, sla)
+    if state != "live":
         return False
     return dstate.get("slug") == slug and dstate.get("to") == to
 
 
 def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
                           sla: float, *, dstate: Optional[dict[str, Any]],
-                          maintainer: str) -> Optional[bool]:
+                          maintainer: str) -> Any:
     """Re-emit today's vacancy event for a role whose delivery never landed.
 
     Returns whether the event is now on the stream. Idempotent by slug: the
@@ -11206,8 +11259,15 @@ def _redeliver_escalation(transport: Any, team: str, role: str, today: str,
     # nonexistent, then wrong-recipient, then valid-but-unrelated. Not selecting
     # on it removes the class instead of the instance. The marker now carries
     # delivery STATE only; routing comes from (role, date, sla) and the document.
-    slug, to = _resolve_vacancy(transport, team, role, today, sla)
-    if slug is None or to is None:
+    slug, to, state = _resolve_vacancy(transport, team, role, today, sla)
+    if state == "terminal":
+        # Already answered. Nothing is owed, so this is not a delivery failure
+        # and must not be counted as one — see _resolve_vacancy's docstring.
+        print(f"escalate: {role}'s vacancy for today was already answered "
+              f"({slug}) — nothing to deliver, not resurrecting it",
+              file=sys.stderr)
+        return "terminal"
+    if state != "live" or to is None:
         print(f"escalate: {role} has today's marker but no vacancy document "
               f"whose assignee can be read — cannot redeliver, and NOT recording "
               f"a delivery that did not happen; state UNKNOWN", file=sys.stderr)
@@ -11360,7 +11420,9 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                         transport, args.team, role, today, sla,
                         dstate=dstate, maintainer=str(reg.get("maintainer")
                                                       or _human()))
-                    if redelivered is None:
+                    if redelivered == "terminal":
+                        pass  # answered already; the note is printed by the helper
+                    elif redelivered is None:
                         print(f"escalate: {role} already escalated today "
                               f"(marker {today}); this team has no event plane, "
                               f"so the vacancy lives on the file plane only",
@@ -11530,17 +11592,33 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
             # ONLY path a self-addressed vacancy ever takes: it writes no daily
             # marker by design, so it arrives here every sweep. Without this the
             # closed-loop case had the permanent-loss hole too.
+            # ROUTED THROUGH THE SAME TERMINAL-AWARE RESOLVER as the marker
+            # branch (codex-reviewer, 685 r1 P1). This branch used to emit the
+            # `slug` computed further up, bypassing the resolver entirely — so a
+            # self-addressed vacancy, which writes no daily marker by design and
+            # therefore lands here EVERY sweep, republished its own terminal task
+            # as a fresh open. Exactly the permanently-undischargeable row this
+            # PR exists to prevent, recreated by the one path that skipped the
+            # guard. One retry, one resolver.
             dstate = _read_escalation_delivery(transport, args.team, role, today)
             if not _delivery_confirmed(transport, args.team, dstate, role, today, sla):
-                ok = _emit_escalation_event(transport, args.team, to=maintainer,
-                                            slug=slug, ptr=f"task/{slug}.md")
-                if ok is not None:
-                    _write_escalation_delivery(transport, args.team, role, today,
-                                               slug=slug, to=maintainer,
-                                               delivered=bool(ok))
-                    print(f"escalate: {role}'s existing directive had NOT been "
-                          f"delivered to the stream — redelivery "
-                          + ("SUCCEEDED" if ok else "FAILED"), file=sys.stderr)
+                r_slug, r_to, r_state = _resolve_vacancy(
+                    transport, args.team, role, today, sla)
+                if r_state == "terminal":
+                    print(f"escalate: {role}'s vacancy for today was already "
+                          f"answered ({r_slug}) — nothing to deliver, not "
+                          f"resurrecting it", file=sys.stderr)
+                elif r_state == "live" and r_to:
+                    ok = _emit_escalation_event(transport, args.team, to=r_to,
+                                                slug=r_slug,
+                                                ptr=f"task/{r_slug}.md")
+                    if ok is not None:
+                        _write_escalation_delivery(transport, args.team, role,
+                                                   today, slug=r_slug, to=r_to,
+                                                   delivered=bool(ok))
+                        print(f"escalate: {role}'s existing directive had NOT been "
+                              f"delivered to the stream — redelivery "
+                              + ("SUCCEEDED" if ok else "FAILED"), file=sys.stderr)
             print(f"re-escalation suppressed for {role} (today's directive already exists)")
             if self_addressed:
                 print(f"escalate: {role} still has an UNDELIVERED notice — its "
