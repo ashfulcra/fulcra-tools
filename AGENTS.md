@@ -440,7 +440,9 @@ it (not on PyPI).
   expected, ruling a mismatch to be noise, or narrating why a source need not be
   opened — is the moment to run both defences. That impulse precedes the wrong
   conclusion in every logged instance, which is what makes it useful: it is
-  available while the answer can still change.
+  available while the answer can still change. Everywhere else a wrong
+  inference is additive and leaves the measurement standing; here it
+  silently deletes the evidence that you were wrong.
   Corollary for any bug whose subject is a wrong reading: assume your own
   verification of it carries the same defect, and check the instrument before you
   trust what it told you.
