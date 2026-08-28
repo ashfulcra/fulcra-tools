@@ -5967,19 +5967,36 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
               "budget (needs-me, inbox, briefing), not here.", file=sys.stderr)
     # Probes get their full allowance regardless of what setup cost.
     fold_dl = Deadline.open(_obligation_budget())
+    # The four row-derived components are only different views over the same
+    # needs-me fold.  Compute that fold lazily so a budget-starved early
+    # component does not spend transport work, then reuse the exact answer for
+    # every later view.  Each component still checks the shared deadline BEFORE
+    # consulting this cache: a warm result must never turn a starved component
+    # into known-empty.
+    needs_me_cache: "Optional[list[dict[str, Any]]]" = None
+    needs_me_failure: "Optional[str]" = None
 
     def _rows_probe(kinds: "tuple[str, ...]"):
         def probe():
+            nonlocal needs_me_cache, needs_me_failure
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
             if fold_dl.expired():
                 return P(state=S.UNREADABLE,
                          detail="obligation probe budget exhausted — raise "
                                 "COORD_OBLIGATION_BUDGET")
-            mine = _needs_me_rows(transport, team, agent, rows, now=now,
-                                  held_roles=held_roles, include_history=False,
-                                  aggregate_doc=agg_doc,
-                                  feed_evidence=feed_evidence)
+            if needs_me_failure is not None:
+                return P(state=S.UNREADABLE, detail=needs_me_failure)
+            if needs_me_cache is None:
+                try:
+                    needs_me_cache = _needs_me_rows(
+                        transport, team, agent, rows, now=now,
+                        held_roles=held_roles, include_history=False,
+                        aggregate_doc=agg_doc, feed_evidence=feed_evidence)
+                except Exception as exc:
+                    needs_me_failure = f"needs-me fold failed: {exc}"
+                    return P(state=S.UNREADABLE, detail=needs_me_failure)
+            mine = needs_me_cache
             owed = [r for r in mine
                     if not str(r.get("type") or "").endswith("-source")
                     and (not kinds or (r.get("kind") or "task") in kinds)]
