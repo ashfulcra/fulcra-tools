@@ -27,8 +27,9 @@ the layers they want. OKF v0.1 explicitly permits the typed frontmatter and synt
 
 ## Architecture
 Each capability is a **skill** (agent-facing interface + genuinely-conventional prose); the
-consistency-critical folds live in the shared **`coord-engine`** tool the skills invoke via
-`uv tool run coord-engine …` (the same way skills already invoke `fulcra-api`). Decision + rationale:
+consistency-critical folds live in the shared **`coord-engine`** tool the skills invoke as the
+bare `coord-engine …` binary after `uv tool install` (`uvx` / `uv tool run` cannot resolve it — it
+is not on PyPI). Decision + rationale:
 [`proposals/teams-convergence/03-packaging-decision.md`](proposals/teams-convergence/03-packaging-decision.md).
 
 | Layer | Skill | Engine command(s) | Adds |
