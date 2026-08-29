@@ -6280,10 +6280,112 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
 
 
 
+
+# --- obligations checkpoint: the open set as of a stated instant --------------
+# The piece that lets the stream fold answer COMPLETELY instead of only for its
+# window. Shape: {"v": 1, "as_of": ISO, "open": [{"slug","ptr","priority"}...],
+# "seeded_by": "corpus-fold" | "stream-fold"}. Seeded ONCE by the corpus walk
+# (the 111s fold, run deliberately and off the wake path), then ADVANCED by
+# every clean stream run — so the expensive enumeration happens once per agent
+# plus repair, not once per wake.
+
+
+def _obligations_checkpoint_path(team: str, agent: str) -> str:
+    return f"team/{team}/_coord/agents/{agent}/obligations-checkpoint.json"
+
+
+def _load_obligations_checkpoint(transport: Any, team: str,
+                                 agent: str) -> "Optional[dict[str, Any]]":
+    """The checkpoint, or None when absent/unreadable/malformed.
+
+    None means "no trustworthy claim about the past exists" — the stream fold
+    then reports everything before its window as UNKNOWN, exactly as it did
+    before checkpoints existed. A malformed checkpoint must never pass as a
+    recent empty one: that would convert a parse error into "nothing was owed".
+    """
+    raw = transport.read(_obligations_checkpoint_path(team, agent))
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or doc.get("v") != 1:
+        return None
+    as_of, open_rows = doc.get("as_of"), doc.get("open")
+    if not isinstance(as_of, str) or not as_of or not isinstance(open_rows, list):
+        return None
+    rows = []
+    for row in open_rows:
+        if not isinstance(row, dict) or not row.get("slug"):
+            return None  # a checkpoint with unreadable rows proves nothing
+        rows.append({"slug": str(row["slug"]),
+                     "ptr": str(row.get("ptr") or f"task/{row['slug']}.md"),
+                     "priority": str(row.get("priority") or "P2")})
+    return {"as_of": as_of, "open": rows,
+            "seeded_by": str(doc.get("seeded_by") or "unknown")}
+
+
+def _save_obligations_checkpoint(transport: Any, team: str, agent: str, *,
+                                 as_of: str, open_rows: list, seeded_by: str) -> bool:
+    doc = {"v": 1, "as_of": as_of, "seeded_by": seeded_by,
+           "open": [{"slug": r["slug"], "ptr": r.get("ptr"),
+                     "priority": r.get("priority", "P2")} for r in open_rows]}
+    try:
+        return bool(transport.write(
+            _obligations_checkpoint_path(team, agent), json.dumps(doc, sort_keys=True)))
+    except Exception:
+        return False
+
+
+def cmd_obligations_seed(args: argparse.Namespace, transport: Any) -> int:
+    """`obligations --seed-checkpoint`: run the corpus fold ONCE, deliberately,
+    and write its answer down as the checkpoint the stream fold starts from.
+
+    This is the one sanctioned use of the enumerating fold going forward: a
+    seed or a repair, invoked on purpose and off the wake path — never the
+    per-wake answer to "what do I owe". It refuses to write on UNKNOWN or
+    INVALID: a checkpoint seeded from a degraded fold would launder the
+    degradation into a clean-looking past.
+    """
+    now = _iso(_now())
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, args.agent, now=now),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    if result.state is not obligations_mod.ObligationState.CLEAR and \
+            result.state is not obligations_mod.ObligationState.DATA:
+        print(f"obligations seed: REFUSED — corpus fold is {result.state.value}, "
+              "and a checkpoint seeded from a degraded fold would launder the "
+              "degradation into a clean-looking past. Fix or raise "
+              "COORD_OBLIGATION_BUDGET and retry.", file=sys.stderr)
+        return 3
+    rows = [{"slug": str(r.get("slug") or r.get("id") or ""),
+             "ptr": str(r.get("ptr") or "") or None,
+             "priority": str(r.get("priority") or r.get("pri") or "P2")}
+            for r in result.owed if (r.get("slug") or r.get("id"))]
+    if not _save_obligations_checkpoint(transport, args.team, args.agent,
+                                        as_of=now, open_rows=rows,
+                                        seeded_by="corpus-fold"):
+        print("obligations seed: checkpoint write FAILED — nothing recorded",
+              file=sys.stderr)
+        return 3
+    back = _load_obligations_checkpoint(transport, args.team, args.agent)
+    if back is None or back["as_of"] != now:
+        print("obligations seed: read-back mismatch — the checkpoint did not "
+              "land; treat as not seeded", file=sys.stderr)
+        return 3
+    print(f"obligations seed: checkpoint written as of {now} — "
+          f"{len(rows)} open obligation(s); the stream fold now answers "
+          "completely from here forward")
+    return 0
+
+
 def cmd_obligations_dispatch(args: argparse.Namespace, transport: Any) -> int:
     """Route `obligations` to the corpus fold or the --stream path. A named
     function, not a lambda: the activity-classification pin requires every
     registered command to be classifiable by name."""
+    if getattr(args, "seed_checkpoint", False):
+        return cmd_obligations_seed(args, transport)
     if getattr(args, "stream", False):
         return cmd_obligations_stream(args, transport)
     return cmd_obligations(args, transport)
@@ -6323,11 +6425,19 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
               f"({cfg_status})", file=sys.stderr)
         return 3
 
+    checkpoint = _load_obligations_checkpoint(transport, args.team, agent)
     cursor = records.load_cursor(transport, args.team, agent)
     now = _now()
     lookback_h = int(getattr(args, "lookback_hours", 0) or 168)
     since = None
-    if cursor and cursor.get("last_read"):
+    if checkpoint:
+        # The checkpoint is the authority for everything before its as_of, so
+        # the window starts THERE — not at the queue cursor, which tracks a
+        # different consumer (the delivery read) and may be ahead of the last
+        # obligation fold. Reading from the older instant re-covers events the
+        # queue consumed but this fold never saw.
+        since = checkpoint["as_of"]
+    elif cursor and cursor.get("last_read"):
         since = str(cursor["last_read"])
     floor = _iso(now - timedelta(hours=lookback_h))
     # THE CURSOR IS THE START, and the floor applies only when there is no
@@ -6355,6 +6465,12 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
     # An FYI opens NOTHING — measured 2026-08-21, most of 92 stream-only "opens"
     # were FYIs replayed as permanent obligations.
     opened: dict[str, dict[str, Any]] = {}
+    if checkpoint:
+        # Seed the fold with the past: the checkpoint open set as of its
+        # instant. Window events then open and close on top of it.
+        for row in checkpoint["open"]:
+            opened[row["slug"]] = {"slug": row["slug"], "ptr": row["ptr"],
+                                   "kind": "directive", "fyi": False}
     for ev in events:
         slug, kind = ev.get("slug"), ev.get("kind")
         if not slug:
@@ -6380,8 +6496,9 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
                          "priority": str(fm.get("priority") or "P2"),
                          "blocked_on": str(fm.get("blocked_on") or "") or None})
 
+    origin = ("checkpoint " + checkpoint["as_of"] + " + window") if checkpoint else "window only"
     print(f"obligations --stream: {len(owed)} owed from {len(events)} event(s) "
-          f"in [{start}, {until}] — {len(opened)} open slug(s), "
+          f"in [{start}, {until}] ({origin}) — {len(opened)} open slug(s), "
           f"{len(opened)} doc read(s)")
     for row in sorted(owed, key=lambda r: r["priority"]):
         blocked = f"  blocked_on={row['blocked_on']}" if row["blocked_on"] else ""
@@ -6389,9 +6506,18 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
     for slug in unresolved:
         print(f"  ! {slug}: ptr unreadable — cannot claim discharged",
               file=sys.stderr)
-    print(f"  ! anything opened before {start} is OUTSIDE this window and "
-          "UNKNOWN here — the checkpoint half of the design is not built yet",
-          file=sys.stderr)
+    if not checkpoint:
+        print(f"  ! NO CHECKPOINT: anything opened before {start} is UNKNOWN "
+              "here. Seed one deliberately with obligations --seed-checkpoint "
+              "(runs the corpus fold once, off the wake path)", file=sys.stderr)
+    elif not unresolved:
+        # A clean fold ADVANCES the checkpoint, so the corpus walk never runs
+        # again for this agent outside seed and repair. Advance only on clean:
+        # an unresolved ptr means the open set is not fully known, and a
+        # checkpoint that guesses converts one bad read into a durable lie.
+        _save_obligations_checkpoint(
+            transport, args.team, agent, as_of=until, open_rows=owed,
+            seeded_by="stream-fold")
     return 3 if unresolved else 0
 
 
@@ -12359,6 +12485,10 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("obligations",
                         help="terminal answer: does this agent owe work?")
     ob.add_argument("team"); ob.add_argument("--agent", required=True)
+    ob.add_argument("--seed-checkpoint", action="store_true",
+                    help="run the corpus fold ONCE and write its open set as "
+                         "the checkpoint the --stream fold starts from; the "
+                         "sanctioned use of the enumerating fold")
     ob.add_argument("--stream", action="store_true",
                     help="follow the signal to the doc: read this agent's "
                          "channel forward from its cursor and open only the "
