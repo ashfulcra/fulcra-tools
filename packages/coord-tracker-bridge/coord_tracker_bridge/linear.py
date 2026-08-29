@@ -261,6 +261,7 @@ LABELS_QUERY = """query Labels($team:ID!,$after:String){issueLabels(filter:{team
 PROJECTS_QUERY = """query Projects($team:ID!,$after:String){projects(filter:{accessibleTeams:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 COMMENTS_QUERY = """query Comments($issue:ID!,$after:String){comments(filter:{issue:{id:{eq:$issue}}},first:100,after:$after){nodes{id body createdAt user{id}} pageInfo{hasNextPage endCursor}}}"""
 ISSUE_LABELS_QUERY = """query IssueLabels($issue:String!,$after:String){issue(id:$issue){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}"""
+USERS_QUERY = """query Users($after:String){users(first:100,after:$after){nodes{id name displayName email} pageInfo{hasNextPage endCursor}}}"""
 EVENTS_QUERY = """query InboundEvents($team:ID!,$after:String){auditEntries(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id type createdAt actor{id} metadata} pageInfo{hasNextPage endCursor}}}"""
 SCHEMA_QUERY = """query Schema($team:String!){team(id:$team){id key states{nodes{id name type}}}}"""
 # team(id:) is a direct node lookup taking String!, unlike the filter comparators
@@ -347,9 +348,18 @@ class ResourcePlan:
 class LinearTrackerAdapter:
     provider = "linear"
 
-    def __init__(self, client: LinearClient, team_id: str) -> None:
+    def __init__(
+        self, client: LinearClient, team_id: str,
+        *, linear_users: Mapping[str, str] | None = None,
+    ) -> None:
         self.client = client
         self.team_id = team_id
+        # coord name -> the Linear email or user id it means. EXPLICIT only:
+        # an unmapped name never becomes an assignment, because writing the
+        # wrong human onto a card in a tracker of record is the one failure
+        # this map exists to make impossible.
+        self.linear_users = dict(linear_users or {})
+        self._user_ids: dict[str, str] | None = None
         self._metadata_by_source: dict[str, dict[str, Any]] = {}
         self._description_by_source: dict[str, str] = {}
         self._capability_by_source: dict[str, str] = {}
@@ -363,6 +373,37 @@ class LinearTrackerAdapter:
 
     def list_issues(self) -> list[Mapping[str, Any]]:
         return self.client.paginate("Issues", ISSUES_QUERY, "issues", {"team": self.team_id})
+
+    def list_users(self) -> list[Mapping[str, Any]]:
+        return self.client.paginate("Users", USERS_QUERY, "users", {})
+
+    def _assignee_id(self, name: str) -> str:
+        """Resolve a coord name to a Linear user id, or refuse."""
+        mapped = self.linear_users.get(name.strip().lower())
+        if not mapped:
+            raise ResourceMissing(
+                f"no linear_users entry for {name!r}: add one to the policy "
+                "rather than letting the bridge guess which human it means"
+            )
+        if self._user_ids is None:
+            index: dict[str, str] = {}
+            for user in self.list_users():
+                uid = str(user.get("id") or "")
+                if not uid:
+                    continue
+                index[uid.lower()] = uid
+                for key in ("email", "displayName", "name"):
+                    value = str(user.get(key) or "").strip().lower()
+                    if value:
+                        index.setdefault(value, uid)
+            self._user_ids = index
+        resolved = self._user_ids.get(mapped.strip().lower())
+        if not resolved:
+            raise ResourceMissing(
+                f"linear_users maps {name!r} to {mapped!r}, which matches no "
+                "user in this Linear workspace"
+            )
+        return resolved
 
     def list_labels(self) -> list[Mapping[str, Any]]:
         return self.client.paginate("Labels", LABELS_QUERY, "issueLabels", {"team": self.team_id})
@@ -653,14 +694,22 @@ class LinearTrackerAdapter:
                 output["projectId"] = projects[project]
             else:
                 output["projectId"] = None
+        if "tracker_assignee" in fields:
+            # The projection decided WHO; this only resolves the id. A null
+            # clears the assignee, which is what an item that stopped waiting
+            # on the operator must do — otherwise their queue only ever grows.
+            wanted_assignee = fields["tracker_assignee"]
+            output["assigneeId"] = (
+                self._assignee_id(str(wanted_assignee)) if wanted_assignee else None
+            )
         if "due_at" in fields:
             output["dueDate"] = fields["due_at"]
         if "semantic_state" in fields:
             output["stateId"] = self._state_id(str(fields["semantic_state"]))
 
         internal_names = {
-            "owner", "assignee", "origin", "workstream", "source_lane",
-            "policy_version", "policy_hash"
+            "owner", "assignee", "blocked_on", "origin", "workstream",
+            "source_lane", "policy_version", "policy_hash"
         }
         internal = dict(self._metadata_by_source.get(source.key, {}))
         internal.update({key: fields[key] for key in internal_names if key in fields})

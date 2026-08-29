@@ -8,7 +8,7 @@ from coord_tracker_bridge import load_policy
 def test_bundled_policy_is_versioned_and_hashed():
     policy = load_policy()
 
-    assert policy.version == "2"
+    assert policy.version == "3"
     assert len(policy.hash) == 64
     assert policy.owns("labels") == "merge"
     assert policy.included_lanes == frozenset({

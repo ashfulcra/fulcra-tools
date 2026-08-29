@@ -193,7 +193,11 @@ def _service(args: argparse.Namespace) -> BridgeService:
     )
     return BridgeService(
         source,
-        LinearTrackerAdapter(LinearClient(HttpxGraphQLTransport(api_key)), args.linear_team_id),
+        LinearTrackerAdapter(
+            LinearClient(HttpxGraphQLTransport(api_key)),
+            args.linear_team_id,
+            linear_users=policy.linear_users,
+        ),
         policy,
         args.state_dir / f"{state_key}.json",
         args.state_dir / "leases",

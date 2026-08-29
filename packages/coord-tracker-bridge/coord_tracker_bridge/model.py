@@ -74,6 +74,11 @@ class WorkRecord:
     description: str = ""
     owner: str | None = None
     assignee: str | None = None
+    # Who the item waits on. Dropped by every earlier version of this package,
+    # which is why "blocked on the operator" could not be projected at all: the
+    # engine classifies it (coord_engine.query.blocked_on_human) and the
+    # projection had no field to carry the answer in.
+    blocked_on: str | None = None
     workstream: str | None = None
     origin: str | None = None
     tags: tuple[str, ...] = ()

@@ -23,6 +23,7 @@ from coord_tracker_bridge import (
 )
 from coord_tracker_bridge.linear import (
     ISSUE_LABELS_QUERY,
+    ResourceMissing,
     append_source_metadata,
     parse_bridge_metadata,
     parse_source_metadata,
@@ -763,3 +764,69 @@ def test_an_EMPTY_nodes_list_is_still_a_legitimate_empty_page():
     client = LinearClient(FakeTransport([_paginate_page([], {"hasNextPage": False})]))
 
     assert client.paginate("Issues", "query", "issues") == []
+
+
+# --- assignment resolution -------------------------------------------------
+# assigneeId appeared NOWHERE in this package: the fleet's assignee was written
+# into a description comment instead of Linear's own field, so nothing was ever
+# assigned to anyone and no Linear view could filter on it.
+
+def test_an_unmapped_name_refuses_rather_than_guessing_a_human():
+    adapter = LinearTrackerAdapter(LinearClient(_users_transport()), "team", linear_users={})
+    with pytest.raises(ResourceMissing) as excinfo:
+        adapter._assignee_id("ash")
+    assert "linear_users" in str(excinfo.value)
+
+
+def test_a_mapped_name_resolves_to_the_linear_user_id():
+    adapter = LinearTrackerAdapter(
+        LinearClient(_users_transport()), "team",
+        linear_users={"ash": "ash@fulcradynamics.com"},
+    )
+    assert adapter._assignee_id("ash") == "user-1"
+    assert adapter._assignee_id("ASH") == "user-1"
+
+
+def test_a_mapping_that_matches_no_workspace_user_refuses():
+    """NEGATIVE CONTROL: a stale map must fail loud, not silently drop the
+    assignment and leave the operator's queue empty for a config typo."""
+    adapter = LinearTrackerAdapter(
+        LinearClient(_users_transport()), "team",
+        linear_users={"ash": "typo@example.com"},
+    )
+    with pytest.raises(ResourceMissing) as excinfo:
+        adapter._assignee_id("ash")
+    assert "matches no" in str(excinfo.value)
+
+
+def test_the_user_index_is_fetched_once_and_cached():
+    transport = _users_transport()
+    adapter = LinearTrackerAdapter(
+        LinearClient(transport), "team", linear_users={"ash": "ash@fulcradynamics.com"},
+    )
+    adapter._assignee_id("ash")
+    adapter._assignee_id("ash")
+    assert transport.calls == 1
+
+
+class _UsersTransport:
+    """One page of users; counts calls so caching can be asserted."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def post(self, payload):
+        self.calls += 1
+        return GraphQLResponse(200, {"data": {"users": {
+            "nodes": [
+                {"id": "user-1", "name": "Ash Kalb", "displayName": "ash",
+                 "email": "ash@fulcradynamics.com"},
+                {"id": "user-2", "name": "Someone Else", "displayName": "someone",
+                 "email": "someone@example.com"},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}}, {})
+
+
+def _users_transport():
+    return _UsersTransport()

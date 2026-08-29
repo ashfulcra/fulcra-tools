@@ -1,6 +1,12 @@
 {
-  "version": "2",
-  "included_lanes": ["active", "blocked", "backlog", "asks", "threads-missed"],
+  "version": "3",
+  "included_lanes": [
+    "active",
+    "blocked",
+    "backlog",
+    "asks",
+    "threads-missed"
+  ],
   "lane_states": {
     "active": "started",
     "blocked": "started",
@@ -8,7 +14,11 @@
     "asks": "unstarted",
     "threads-missed": "unstarted"
   },
-  "priority": {"P1": 1, "P2": 3, "P3": 4},
+  "priority": {
+    "P1": 1,
+    "P2": 3,
+    "P3": 4
+  },
   "managed_labels": [
     "lane:active",
     "lane:blocked",
@@ -16,11 +26,15 @@
     "kind:task",
     "kind:directive",
     "origin:ash",
-    "origin:fleet"
+    "origin:fleet",
+    "blocked-on-ash"
   ],
   "max_managed_labels": 16,
   "workstream_projects": {},
-  "included_origins": ["ash", "fleet"],
+  "included_origins": [
+    "ash",
+    "fleet"
+  ],
   "close_absent": true,
   "field_ownership": {
     "title": "source",
@@ -37,6 +51,12 @@
     "source_identity": "source",
     "source_capability": "source",
     "policy_version": "source",
-    "policy_hash": "source"
+    "policy_hash": "source",
+    "tracker_assignee": "source"
+  },
+  "human": "ash",
+  "blocked_on_human_label": "blocked-on-ash",
+  "linear_users": {
+    "ash": "ash@fulcradynamics.com"
   }
 }

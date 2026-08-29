@@ -268,3 +268,68 @@ def test_moving_managed_item_out_of_allowlist_closes_it_from_positive_evidence()
     assert [(change.kind, change.provider_id) for change in plan.changes] == [
         (ChangeKind.CLOSE, "LIN-task-1")
     ]
+
+
+# --- waiting on the operator ----------------------------------------------
+# The projection computed an assignee for 42 of 63 changes and then buried all
+# of them in a description comment, and dropped `blocked_on` entirely, so work
+# parked on the operator was invisible in the tracker they actually use.
+
+import pytest
+
+from coord_tracker_bridge.projection import waits_on_human, _desired
+from coord_tracker_bridge.policy import load_policy
+
+
+def _rec(**kw):
+    base = dict(
+        source=SourceIdentity("coord-engine", "fulcra/tasks", "t1"),
+        capability="tasks", title="t", lane="active",
+    )
+    base.update(kw)
+    return WorkRecord(**base)
+
+
+@pytest.mark.parametrize("record", [
+    _rec(blocked_on="user:ash"),
+    _rec(blocked_on="USER:Ash"),
+    _rec(blocked_on="user:"),
+    _rec(blocked_on="waiting on ash for the 409A"),
+    _rec(tags=("needs:human",)),
+    _rec(lane="blocked", assignee="ash"),
+])
+def test_work_waiting_on_the_operator_is_recognised(record):
+    assert waits_on_human(record, "ash")
+
+
+@pytest.mark.parametrize("record", [
+    _rec(blocked_on="codex-coder"),
+    _rec(blocked_on="user:someone-else"),
+    _rec(),
+    _rec(lane="blocked", assignee="codex-coder"),
+    _rec(assignee="ash"),
+])
+def test_work_not_waiting_on_the_operator_is_left_alone(record):
+    """NEGATIVE CONTROL. Over-assigning to the operator makes the queue useless
+    in the other direction — a list of everything is a list of nothing."""
+    assert not waits_on_human(record, "ash")
+
+
+def test_no_configured_human_means_nothing_is_ever_assigned():
+    assert not waits_on_human(_rec(blocked_on="user:ash"), "")
+
+
+def test_the_desired_state_labels_and_assigns_operator_blocked_work():
+    policy = load_policy()
+    fields = _desired(_rec(blocked_on="user:ash"), policy)
+    assert fields["tracker_assignee"] == "ash"
+    assert policy.blocked_on_human_label in fields["labels"]
+    assert fields["blocked_on"] == "user:ash"
+
+
+def test_agent_blocked_work_clears_rather_than_keeps_an_operator_assignment():
+    """An item that STOPS waiting on the operator has to clear, or their queue
+    only ever grows and stops meaning anything."""
+    fields = _desired(_rec(blocked_on="codex-coder"), load_policy())
+    assert fields["tracker_assignee"] is None
+    assert load_policy().blocked_on_human_label not in fields["labels"]

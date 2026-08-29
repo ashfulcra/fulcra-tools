@@ -25,6 +25,13 @@ class Policy:
     included_origins: frozenset[str]
     close_absent: bool
     field_ownership: Mapping[str, str]
+    # The operator's coord name, the label put on anything waiting on them, and
+    # the explicit name -> Linear-user map. The map is REQUIRED for assignment:
+    # agent names are not Linear users, and a bridge that guessed which human a
+    # name meant would write a wrong identity into a tracker of record.
+    human: str
+    blocked_on_human_label: str | None
+    linear_users: Mapping[str, str]
     document: Mapping[str, Any]
     hash: str
 
@@ -43,6 +50,16 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
     if max_labels <= 0 or len(labels) > max_labels:
         raise ValueError("managed label taxonomy exceeds max_managed_labels")
     ownership = {str(k): str(v) for k, v in raw.get("field_ownership", {}).items()}
+    human = str(raw.get("human", "")).strip()
+    blocked_label = str(raw.get("blocked_on_human_label", "")).strip() or None
+    if blocked_label and blocked_label not in labels:
+        raise ValueError("blocked_on_human_label must be declared in managed_labels")
+    if blocked_label and not human:
+        raise ValueError("blocked_on_human_label requires human")
+    linear_users = {str(k).strip().lower(): str(v).strip()
+                    for k, v in (raw.get("linear_users") or {}).items()}
+    if any(not k or not v for k, v in linear_users.items()):
+        raise ValueError("linear_users entries must be non-empty on both sides")
     invalid = set(ownership.values()) - OWNERSHIP_VALUES
     if invalid:
         raise ValueError(f"invalid field ownership values: {sorted(invalid)}")
@@ -75,6 +92,9 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         included_origins=frozenset(str(v) for v in raw.get("included_origins", [])),
         close_absent=bool(raw.get("close_absent", True)),
         field_ownership=MappingProxyType(ownership),
+        human=human,
+        blocked_on_human_label=blocked_label,
+        linear_users=MappingProxyType(linear_users),
         document=MappingProxyType(document),
         hash=hashlib.sha256(canonical).hexdigest(),
     )

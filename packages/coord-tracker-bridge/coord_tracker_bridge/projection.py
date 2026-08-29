@@ -33,9 +33,48 @@ class Plan:
     diagnostics: tuple[Diagnostic, ...]
 
 
+_USER_PREFIX = "user:"
+
+
+def waits_on_human(item: WorkRecord, human: str) -> bool:
+    """Does this item wait on the OPERATOR rather than on an agent?
+
+    A deliberate re-statement of ``coord_engine.query.blocked_on_human``'s
+    rules, and it resolves the same way that one does: ambiguity SURFACES.
+    A false positive is a card the operator can wave off; a false negative is
+    a decision parked on them that nothing ever shows them, which is the whole
+    reason this projection exists.
+
+    Only the typed and named forms count here. A bare ``blocked_on`` naming
+    something unrecognised is left to the engine's own classifier, which has
+    the roster this module does not.
+    """
+    if not human:
+        return False
+    target = human.strip().lower()
+    raw = (item.blocked_on or "").strip()
+    if raw.lower().startswith(_USER_PREFIX):
+        return (raw[len(_USER_PREFIX):].strip().lower() or target) == target
+    tokens = {token.strip().lower() for token in raw.replace(",", " ").split() if token.strip()}
+    if target in tokens:
+        return True
+    if "needs:human" in item.tags:
+        return True
+    return item.lane == "blocked" and (item.assignee or "").strip().lower() == target
+
+
 def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
     labels = tuple(label for label in policy.managed_labels if label in item.tags)
+    # The operator asked for exactly one thing of this projection: that work
+    # waiting on THEM be visible as theirs. So a human-blocked item carries the
+    # label AND is assigned to them in the tracker; everything else leaves the
+    # tracker's assignee alone rather than inventing a Linear identity for an
+    # agent that has none.
+    human_blocked = waits_on_human(item, policy.human)
+    if human_blocked and policy.blocked_on_human_label:
+        labels = tuple(dict.fromkeys((*labels, policy.blocked_on_human_label)))
     return {
+        "tracker_assignee": policy.human if human_blocked else None,
         "title": item.title,
         "description": item.description,
         "semantic_state": policy.lane_states[item.lane],
@@ -45,6 +84,7 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
         "due_at": item.due_at.isoformat() if item.due_at else None,
         "owner": item.owner,
         "assignee": item.assignee,
+        "blocked_on": item.blocked_on,
         "origin": item.origin,
         "workstream": item.workstream,
         "source_identity": item.source.to_dict(),
