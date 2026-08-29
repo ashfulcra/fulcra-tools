@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .assignments import (
     DEFAULT_DELIVERY_CAP,
@@ -84,10 +84,90 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Credential resolution. The bridge originally read exactly one variable,
+# LINEAR_API_KEY, and nothing else. When that credential stopped
+# authenticating the projection went silently stale (last successful sync
+# 2026-07-31) while three other working Linear credentials sat unused in the
+# same environment -- and because this file named only the broken one, every
+# operator and agent who read the code to find "the" credential landed on it.
+# Resolution is therefore a list whose order is the preference, LINEAR_KEY_ENV
+# names one explicitly, and an auth failure says which variable it used.
+LINEAR_KEY_ENV_VARS: tuple[str, ...] = (
+    "LINEAR_PERSONAL_KEY",
+    "LINEAR_PERSONAL_KEY_2",
+    "COORD_BRIDGE_DEVELOPER_TOKEN",
+    "LINEAR_API_KEY",
+)
+
+_AUTH_FAILURE_MARKERS = (
+    "http_status=401",
+    "http_status=403",
+    "AUTHENTICATION_ERROR",
+    "FORBIDDEN",
+)
+
+
+def _linear_key_candidates(env: Mapping[str, str]) -> list[str]:
+    """Candidate variable names in resolution order; LINEAR_KEY_ENV wins."""
+    override = (env.get("LINEAR_KEY_ENV") or "").strip()
+    return [override] if override else list(LINEAR_KEY_ENV_VARS)
+
+
+def _resolve_linear_key(env: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """Return (variable name, credential) for the first candidate that is set.
+
+    The name comes back with the value because an auth failure is only
+    diagnosable if the operator can see WHICH of the several credentials
+    usually present in the environment was the one actually sent.
+    """
+    env = os.environ if env is None else env
+    for name in _linear_key_candidates(env):
+        value = (env.get(name) or "").strip()
+        if value:
+            return name, value
+    raise LinearError(
+        "no Linear credential in the environment: set one of "
+        + ", ".join(_linear_key_candidates(env))
+        + ", or name the variable to use in LINEAR_KEY_ENV"
+    )
+
+
+def _looks_like_auth_failure(message: str) -> bool:
+    upper = message.upper()
+    return any(marker.upper() in upper for marker in _AUTH_FAILURE_MARKERS)
+
+
+def _auth_failure_hint(env: Mapping[str, str] | None = None) -> str:
+    """Name the credential that was used, and the ones that were not.
+
+    Never includes a credential value -- only variable names. This is the
+    line whose absence turned one dead credential into a month of silently
+    stale projection: the failure said 401, not 401-using-LINEAR_API_KEY-
+    while-LINEAR_PERSONAL_KEY-sat-right-there.
+    """
+    env = os.environ if env is None else env
+    try:
+        used, _value = _resolve_linear_key(env)
+    except LinearError:
+        return ""
+    others = [
+        name
+        for name in LINEAR_KEY_ENV_VARS
+        if name != used and (env.get(name) or "").strip()
+    ]
+    hint = f" [credential came from {used}"
+    if others:
+        hint += (
+            f"; also set but not tried: {', '.join(others)}"
+            "; select one with LINEAR_KEY_ENV=<name>"
+        )
+    return hint + "]"
+
+
 def _service(args: argparse.Namespace) -> BridgeService:
-    api_key = os.environ.get("LINEAR_API_KEY")
-    if not api_key or not args.linear_team_id:
-        raise LinearError("LINEAR_API_KEY and --linear-team-id/LINEAR_TEAM_ID are required")
+    if not args.linear_team_id:
+        raise LinearError("--linear-team-id/LINEAR_TEAM_ID is required")
+    _key_env, api_key = _resolve_linear_key()
     policy = load_policy(args.policy)
     state_key = f"{args.source}-{args.coord_team}-{args.linear_team_id}-{policy.hash[:12]}"
     source = (
@@ -136,13 +216,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             # Deliberately does NOT build a BridgeService: no ledger, no lease,
             # no tracker adapter, so no write path exists to reach. The client
             # is wrapped in a transport that refuses any non-query document.
-            api_key = os.environ.get("LINEAR_API_KEY")
-            if not api_key or not args.linear_team_id:
-                raise LinearError(
-                    "LINEAR_API_KEY and --linear-team-id/LINEAR_TEAM_ID are required")
+            if not args.linear_team_id:
+                raise LinearError("--linear-team-id/LINEAR_TEAM_ID is required")
+            _key_env, api_key = _resolve_linear_key()
             client = LinearClient(ReadOnlyTransport(HttpxGraphQLTransport(api_key)))
             result = fetch_inbox(client, args.linear_team_id)
             print(render_fold(result, team_id=args.linear_team_id))
+            # The read verbs fold every failure into UNKNOWN, so an auth
+            # failure here never reaches main's handler. Say which credential
+            # was sent anyway: an operator who sees only "http_status=401"
+            # cannot tell a revoked key from the wrong variable.
+            if result.unknown and _looks_like_auth_failure(result.detail or ""):
+                print(
+                    f"coord-tracker-bridge: Linear rejected the credential{_auth_failure_hint()}",
+                    file=sys.stderr,
+                )
             # UNKNOWN must not exit 0: a caller scripting this verb has to be
             # able to tell "Ash has no work" from "I could not read the board".
             return 3 if result.unknown else 0
@@ -150,10 +238,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.phase == "linear-assignments":
             # Same shape as linear-inbox: no BridgeService, so no ledger, no
             # lease and no tracker adapter exist to reach a Linear write with.
-            api_key = os.environ.get("LINEAR_API_KEY")
-            if not api_key or not args.linear_team_id:
-                raise LinearError(
-                    "LINEAR_API_KEY and --linear-team-id/LINEAR_TEAM_ID are required")
+            if not args.linear_team_id:
+                raise LinearError("--linear-team-id/LINEAR_TEAM_ID is required")
+            _key_env, api_key = _resolve_linear_key()
             client = LinearClient(ReadOnlyTransport(HttpxGraphQLTransport(api_key)))
             state_path = (
                 args.state_dir
@@ -171,6 +258,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cap=args.delivery_cap,
             )
             print(outcome.text)
+            if _looks_like_auth_failure(outcome.text or ""):
+                print(
+                    f"coord-tracker-bridge: Linear rejected the credential{_auth_failure_hint()}",
+                    file=sys.stderr,
+                )
             return outcome.code
 
         service = _service(args)
@@ -201,7 +293,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"applied": result.applied, "plan": _plan_json(result.plan)}, sort_keys=True, default=str))
         return 0
     except (LinearError, LeaseHeld, ValueError) as exc:
-        print(f"coord-tracker-bridge: {type(exc).__name__}: {exc}", file=sys.stderr)
+        message = f"coord-tracker-bridge: {type(exc).__name__}: {exc}"
+        if isinstance(exc, LinearError) and _looks_like_auth_failure(str(exc)):
+            message += _auth_failure_hint()
+        print(message, file=sys.stderr)
         return 2
 
 

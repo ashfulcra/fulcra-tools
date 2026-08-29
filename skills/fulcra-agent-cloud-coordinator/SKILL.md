@@ -50,7 +50,7 @@ In claude.ai/code, create an **environment** for the repo
 - **Network**: *Full*, or *Custom* allowing at minimum `fulcra.us.auth0.com`
   and `api.fulcradynamics.com` (the bus), plus anything your duties call.
 - **Secrets via environment config, never via chat or files**: add env vars
-  (e.g. `LINEAR_API_KEY`) in the environment's configuration. Duty scripts
+  (e.g. `LINEAR_PERSONAL_KEY`) in the environment's configuration. Duty scripts
   materialize their own 0600 env files from injected vars on each container
   (see §4) — a fresh container needs zero secret handling.
 - **Setup script** (optional but recommended): restore duty tooling from the

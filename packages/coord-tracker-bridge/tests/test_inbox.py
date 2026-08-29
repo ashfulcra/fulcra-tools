@@ -947,3 +947,38 @@ def test_redact_tolerates_a_malformed_labels_block():
     for labels in (None, {}, {"nodes": None}, {"nodes": ["not-a-dict"]}, "nope"):
         node = {"identifier": "BUS-1", "labels": labels}
         tool.redact(node)          # must not raise
+
+
+def test_an_auth_failure_through_the_CLI_names_the_credential_it_used(monkeypatch, capsys):
+    """The read verbs fold every failure into UNKNOWN, so a 401 never reaches
+    main's handler. Without this line the operator sees http_status=401 and no
+    way to tell a revoked key from the wrong variable -- which is how one dead
+    credential kept the projection stale for a month."""
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "dead")
+    monkeypatch.setenv("LINEAR_PERSONAL_KEY_2", "spare")
+    monkeypatch.setenv("LINEAR_KEY_ENV", "LINEAR_API_KEY")
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: object())
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    monkeypatch.setattr(
+        _cli, "fetch_inbox",
+        lambda *a, **k: Result(UNKNOWN, detail="http_status=401, graphql_codes=AUTHENTICATION_ERROR"),
+    )
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    captured = capsys.readouterr()
+    assert "UNKNOWN" in captured.out
+    assert "LINEAR_API_KEY" in captured.err and "LINEAR_PERSONAL_KEY_2" in captured.err
+    assert "dead" not in captured.err and "spare" not in captured.err
+
+
+def test_a_non_auth_failure_gets_no_credential_hint(monkeypatch, capsys):
+    """NEGATIVE CONTROL: an outage must not be dressed up as a credential
+    problem -- blaming the wrong component is the failure mode being fixed."""
+    from coord_tracker_bridge import cli as _cli
+    monkeypatch.setenv("LINEAR_API_KEY", "dead")
+    monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: object())
+    monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
+    monkeypatch.setattr(_cli, "fetch_inbox",
+                        lambda *a, **k: Result(UNKNOWN, detail="http_status=500"))
+    assert _cli.main(["linear-inbox", "--linear-team-id", TEAM]) == 3
+    assert "credential came from" not in capsys.readouterr().err

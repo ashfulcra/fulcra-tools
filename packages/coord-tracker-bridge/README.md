@@ -71,8 +71,26 @@ an object; each entry in `hosts` becomes a health record keyed by the stable
 
 ## Run phases
 
-Set `LINEAR_API_KEY` and either `LINEAR_TEAM_ID` or `--linear-team-id`. Then use
-the phases in order:
+Set a Linear credential and either `LINEAR_TEAM_ID` or `--linear-team-id`. Then
+use the phases in order:
+
+The credential is resolved from the first of these variables that is set:
+
+| Order | Variable | Notes |
+| --- | --- | --- |
+| 1 | `LINEAR_PERSONAL_KEY` | personal API key (`lin_api_…`), sent as-is |
+| 2 | `LINEAR_PERSONAL_KEY_2` | spare personal key |
+| 3 | `COORD_BRIDGE_DEVELOPER_TOKEN` | OAuth app token, acts as the app, not you |
+| 4 | `LINEAR_API_KEY` | historical name; kept working, no longer preferred |
+
+`LINEAR_KEY_ENV=<variable name>` overrides the order and uses exactly that one.
+
+The order is not cosmetic. This bridge originally read `LINEAR_API_KEY` and
+nothing else; when that one credential stopped authenticating, the projection
+went stale for a month while three working credentials sat unused in the same
+environment, and the only symptom was `http_status=401`. A 401 now also prints
+which variable it used and which others were present, so the next failure is
+diagnosable from its own output.
 
 ```bash
 coord-tracker-bridge plan --coord-team fulcra
