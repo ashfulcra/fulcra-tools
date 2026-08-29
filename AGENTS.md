@@ -1258,6 +1258,40 @@ team-store material, not repo material. The generic doctrine:
   reminder on the team bus. Never let a token value reach argv, stdout, shell
   history, a repo file, a scheduler plist, a log, or a chat transcript.
 
+### Parking work on the operator requires `blocked_on: user:ash`
+
+If an item cannot move until Ash does something — a decision, an OAuth flow, a
+merge word, access he alone can grant — that fact goes in the task's
+`blocked_on` field, in that exact typed form:
+
+```sh
+coord-engine task update <team> <slug> --blocked-on "user:ash" \
+  --next "<the specific thing only he can do>"
+```
+
+Not in the description. Not in `next_action` alone. Not in a chat message to
+him. The typed field is the only form anything downstream can read.
+
+**Why it is a rule and not a preference.** `coord_engine.query.blocked_on_human`
+classifies human-blocked work, `briefing` and `needs-me` reserve their FIRST
+section for it, and the Linear bridge projects it as the `blocked-on-ash` label
+plus a real Linear assignee, so it lands in his own queue in the tracker he
+actually reads. Every one of those surfaces reads the same field. Measured
+2026-08-29: of 94 items in a live projection, **2 carried `blocked_on` at all
+and exactly 1 reached him** — while the operator's standing complaint was that
+work blocked on him never reaches him. The pipe was built and empty. An
+unrecorded block is indistinguishable from work nobody is waiting on.
+
+- Set it when you park the item, in the same command that parks it — not on a
+  later sweep, because a sweep only finds what someone already wrote down.
+- **Clear it the moment he unblocks you.** `--blocked-on ""`. A queue that only
+  grows stops being read, and then a real block hides in the pile.
+- `needs:human` as a tag, or a `blocked` row assigned to him, are recognised
+  legacy shapes — but write the typed form in anything new.
+- Deliberately parked and NOT to be re-raised (the do-not-re-nag list) still
+  gets the field, with the reason in it. Silent is not the same as parked.
+
+
 ### Which credential, and which variable holds it (canonical)
 
 The one canonical home for "which variable do I use". **Names only** — no
