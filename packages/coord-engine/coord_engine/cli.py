@@ -1507,9 +1507,11 @@ def cmd_task_start(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_task_update(args: argparse.Namespace, transport: Any) -> int:
     path = _task_path(args.team, args.name)
+    prior = transport.read(path)
+    before = _blocked_on_of(prior)
     try:
         out = tasks.apply_update(
-            transport.read(path), now=_iso(_now()), status=args.status, summary=args.summary,
+            prior, now=_iso(_now()), status=args.status, summary=args.summary,
             next_action=args.next, assignee=args.assignee, blocked_on=args.blocked_on,
             priority=args.priority, evidence=args.evidence,
         )
@@ -1517,6 +1519,9 @@ def cmd_task_update(args: argparse.Namespace, transport: Any) -> int:
         print(f"task update failed: {e}", file=sys.stderr)
         return 1
     written = transport.write(path, out)
+    if written:
+        _emit_blocked_signal(args, transport, before=before,
+                             after=_blocked_on_of(out), doc=out)
     if written and args.status in tasks.TERMINAL_STATUSES:
         # `update --status done/abandoned` is a close like any other (round 3):
         # it must emit, or the stream replays the obligation open forever.
@@ -1536,17 +1541,80 @@ def _task_apply(args, transport, *, close_event: bool = False, **kw) -> int:
     anyway because the closer is usually not the assignee.
     """
     path = _task_path(args.team, args.name)
+    prior = transport.read(path)
+    before = _blocked_on_of(prior)
     try:
-        out = tasks.apply_update(transport.read(path), now=_iso(_now()), **kw)
+        out = tasks.apply_update(prior, now=_iso(_now()), **kw)
     except tasks.TaskError as e:
         verb = getattr(args, "verb", getattr(args, "task_command", "update"))
         print(f"task {verb} failed: {e}", file=sys.stderr)
         return 1
     written = transport.write(path, out)
+    if written:
+        # Covers `task block`, `task unblock` and every other lifecycle verb
+        # routed here — the signal must not depend on which verb was used.
+        _emit_blocked_signal(args, transport, before=before,
+                             after=_blocked_on_of(out), doc=out)
     if close_event and written:
         _emit_task_close(args, transport, doc=out)
     print(f"{getattr(args, 'verb', 'updated')} {args.name}")
     return 0
+
+
+
+def _blocked_on_of(doc: Optional[str]) -> str:
+    """The ``blocked_on`` value of a task doc, normalized for comparison."""
+    if not doc:
+        return ""
+    fm = okf.parse_frontmatter(doc) or {}
+    return str(fm.get("blocked_on") or "").strip()
+
+
+def _emit_blocked_signal(args, transport, *, before: str, after: str,
+                         doc: str) -> None:
+    """Announce a change in what a task waits on. Best-effort, never fatal.
+
+    THE POINT OF THIS FUNCTION. ``blocked_on`` was read by seven modules and
+    announced by none, so every consumer that wanted "what is blocked, and on
+    whom" had to enumerate the whole task corpus — the fold-by-enumeration the
+    stream architecture rejects. In practice that meant only one bespoke
+    tracker bridge ever surfaced it, and only into one tracker. As an event it
+    is available to anything reading the bus forward from a cursor: a tracker
+    projection, a dashboard, a phone notification, a peer agent across the
+    mesh, or the blocker themselves.
+
+    Addressed to the BLOCKER (``to``), not to the assignee: the whole value is
+    telling whoever is holding something up that they are. Both directions are
+    emitted — a new block and a clear — because a block announced but never
+    retracted leaves every downstream queue growing forever.
+    """
+    if before == after:
+        return
+    fm = okf.parse_frontmatter(doc) or {}
+    target = after or before
+    if not target:
+        return
+    state = "blocked" if after else "cleared"
+    # `user:<name>` is the typed human form; anything else is an agent or role
+    # name. Strip the prefix for addressing, keep it raw in `on` so a consumer
+    # applies its own classifier rather than inheriting ours.
+    to = target.split()[0] if target.split() else target
+    if to.lower().startswith("user:"):
+        to = to[len("user:"):] or to
+    cfg, _status = records.load_config_classified(transport, args.team)
+    if not cfg:
+        return
+    try:
+        records.emit_event(
+            transport, cfg, sender=_identity(getattr(args, "agent", None)),
+            to=to, kind="blocked", priority=str(fm.get("priority") or "P2"),
+            slug=args.name, ptr=f"task/{args.name}.md",
+            on=(after or before), state=state, team=args.team)
+    except Exception as e:
+        # The doc is the truth and the event is delivery: a bus that is down
+        # degrades latency, never the record of what is blocked.
+        print(f"record: blocked signal not emitted ({e}) — the block rides the "
+              f"file plane only", file=sys.stderr)
 
 
 def _emit_task_close(args, transport, *, doc: str) -> None:
