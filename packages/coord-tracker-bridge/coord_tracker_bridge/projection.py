@@ -77,7 +77,11 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
         "tracker_assignee": policy.human if human_blocked else None,
         "title": item.title,
         "description": item.description,
-        "semantic_state": policy.lane_states[item.lane],
+        # An item pulled in by the operator override can come from a lane the
+        # policy never mapped (`proposed` is the common one), so this cannot be
+        # a bare subscript. "unstarted" is the honest reading of a lane that was
+        # never meant to project: filed, not started.
+        "semantic_state": policy.lane_states.get(item.lane, "unstarted"),
         "priority": policy.priority.get(item.priority, policy.priority.get("P2", 3)),
         "labels": labels,
         "project": policy.workstream_projects.get(item.workstream or ""),
@@ -126,7 +130,14 @@ def build_plan(
 
     for item in sorted(snapshot.items, key=lambda value: value.source):
         key = item.source.key
-        if item.lane not in policy.included_lanes:
+        # Work waiting on the operator projects REGARDLESS of lane. Measured
+        # 2026-08-29: 577 of ~700 items sat in the `proposed` lane, which is
+        # excluded, and every newly filed P1 is born there — so an item parked
+        # on the operator was dropped before anything could notice it was
+        # parked on them. Lane exclusion is a volume control for fleet chatter;
+        # it must never be able to hide the operator's own queue.
+        waits_on_operator = waits_on_human(item, policy.human)
+        if item.lane not in policy.included_lanes and not waits_on_operator:
             diagnostics.append(Diagnostic(item.capability, "lane-excluded", item.lane))
             existing = managed_by_source.get(key)
             if existing and not existing.closed:
@@ -137,7 +148,11 @@ def build_plan(
                     MappingProxyType({}),
                 ))
             continue
-        if policy.included_origins and item.origin not in policy.included_origins:
+        # Same reasoning as the lane override: an origin filter is there to keep
+        # foreign chatter out of the tracker, not to decide what the operator is
+        # allowed to see is waiting on them.
+        if (policy.included_origins and item.origin not in policy.included_origins
+                and not waits_on_operator):
             diagnostics.append(Diagnostic(item.capability, "origin-excluded", item.source.key))
             continue
         existing = managed_by_source.get(key)

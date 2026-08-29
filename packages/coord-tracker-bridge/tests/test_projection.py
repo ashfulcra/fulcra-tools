@@ -333,3 +333,61 @@ def test_agent_blocked_work_clears_rather_than_keeps_an_operator_assignment():
     fields = _desired(_rec(blocked_on="codex-coder"), load_policy())
     assert fields["tracker_assignee"] is None
     assert load_policy().blocked_on_human_label not in fields["labels"]
+
+
+def test_an_excluded_lane_cannot_hide_work_waiting_on_the_operator():
+    """THE REGRESSION. 577 of ~700 fleet items sat in the excluded `proposed`
+    lane, and every newly filed P1 is born there, so an item parked on the
+    operator was dropped before anything could see it was parked on them."""
+    policy = load_policy()
+    assert "proposed" not in policy.included_lanes
+    item = _rec(lane="proposed", blocked_on="user:ash")
+    snapshot = Snapshot(items=(item,), complete=True, diagnostics=(),
+                        capabilities={"tasks": CapabilityState.COMPLETE},
+                        observed_at=datetime(2026, 8, 29, tzinfo=timezone.utc))
+    plan = build_plan(snapshot, (), BridgeLedger(), policy)
+    assert [c.kind for c in plan.changes] == [ChangeKind.CREATE]
+    assert plan.changes[0].fields["tracker_assignee"] == "ash"
+
+
+def test_an_excluded_lane_still_excludes_everything_else():
+    """NEGATIVE CONTROL: the override is for the operator's queue only. If it
+    leaked, one sync would push 577 cards into a curated board."""
+    policy = load_policy()
+    snapshot = Snapshot(items=(_rec(lane="proposed"),), complete=True,
+                        diagnostics=(), capabilities={"tasks": CapabilityState.COMPLETE},
+                        observed_at=datetime(2026, 8, 29, tzinfo=timezone.utc))
+    plan = build_plan(snapshot, (), BridgeLedger(), policy)
+    assert plan.changes == ()
+    assert [d.code for d in plan.diagnostics] == ["lane-excluded"]
+
+
+def test_an_excluded_origin_cannot_hide_work_waiting_on_the_operator_either():
+    policy = load_policy()
+    item = _rec(lane="active", origin="somewhere-else", blocked_on="user:ash")
+    snapshot = Snapshot(items=(item,), complete=True, diagnostics=(),
+                        capabilities={"tasks": CapabilityState.COMPLETE},
+                        observed_at=datetime(2026, 8, 29, tzinfo=timezone.utc))
+    plan = build_plan(snapshot, (), BridgeLedger(), policy)
+    assert [c.kind for c in plan.changes] == [ChangeKind.CREATE]
+
+
+def test_an_excluded_origin_still_excludes_everything_else():
+    """NEGATIVE CONTROL, the origin twin."""
+    policy = load_policy()
+    snapshot = Snapshot(items=(_rec(lane="active", origin="somewhere-else"),),
+                        complete=True, diagnostics=(),
+                        capabilities={"tasks": CapabilityState.COMPLETE},
+                        observed_at=datetime(2026, 8, 29, tzinfo=timezone.utc))
+    plan = build_plan(snapshot, (), BridgeLedger(), policy)
+    assert plan.changes == ()
+    assert [d.code for d in plan.diagnostics] == ["origin-excluded"]
+
+
+def test_an_unmapped_lane_projects_as_unstarted_rather_than_crashing():
+    """The override can pull an item out of a lane the policy never mapped, so
+    the state lookup cannot be a bare subscript."""
+    policy = load_policy()
+    assert "proposed" not in policy.lane_states
+    fields = _desired(_rec(lane="proposed", blocked_on="user:ash"), policy)
+    assert fields["semantic_state"] == "unstarted"
