@@ -6485,25 +6485,45 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
     # An FYI opens NOTHING — measured 2026-08-21, most of 92 stream-only "opens"
     # were FYIs replayed as permanent obligations.
     opened: dict[str, dict[str, Any]] = {}
+    carried: dict[str, dict[str, Any]] = {}
     if checkpoint:
         # Seed the fold with the past: the checkpoint open set as of its
         # instant. Window events then open and close on top of it.
         for row in checkpoint["open"]:
             opened[row["slug"]] = {"slug": row["slug"], "ptr": row["ptr"],
                                    "kind": "directive", "fyi": False}
+            carried[row["slug"]] = row
+    touched: set = set()
     for ev in events:
         slug, kind = ev.get("slug"), ev.get("kind")
         if not slug:
             continue
         if kind == "directive" and not ev.get("fyi"):
             opened.setdefault(slug, ev)
+            touched.add(slug)
         elif kind in ("response", "verdict"):
             opened.pop(slug, None)
+            touched.add(slug)
 
-    # Follow the ptr. THIS is the line the whole design turns on: one read per
-    # open obligation, not one read per document in the fleet.
+    # Follow the ptr — but ONLY for slugs the window touched. THIS is what
+    # makes the run proportional to new events: a checkpoint row with no
+    # window activity carries forward with its stored fields, unread. The
+    # first live seeded run proved why (2026-08-29): re-verifying every
+    # carried row read 225 docs in 136.6s — proportional to the open set,
+    # not to what changed, which is the corpus fold's disease in miniature.
+    # The trade is explicit: an obligation closed WITHOUT an emitted event
+    # stays owed here until the periodic re-seed reconciles it. That is the
+    # correct pressure — the missing close event is the defect, and hiding
+    # it by re-reading everything every run would subsidize silent closers.
     owed, unresolved = [], []
     for slug, ev in opened.items():
+        if slug in carried and slug not in touched:
+            row = carried[slug]
+            owed.append({"slug": slug, "ptr": row.get("ptr"),
+                         "priority": row.get("priority", "P2"),
+                         "blocked_on": row.get("blocked_on") or None,
+                         "verified": "checkpoint"})
+            continue
         ptr = ev.get("ptr") or f"task/{slug}.md"
         doc = transport.read(f"team/{args.team}/{ptr}")
         if doc is None:
@@ -6514,12 +6534,14 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
         if str(fm.get("status") or "") not in tasks.TERMINAL_STATUSES:
             owed.append({"slug": slug, "ptr": ptr,
                          "priority": str(fm.get("priority") or "P2"),
-                         "blocked_on": str(fm.get("blocked_on") or "") or None})
+                         "blocked_on": str(fm.get("blocked_on") or "") or None,
+                         "verified": "doc"})
 
+    reads = sum(1 for r in owed if r.get("verified") == "doc") + len(unresolved)
     origin = ("checkpoint " + checkpoint["as_of"] + " + window") if checkpoint else "window only"
     print(f"obligations --stream: {len(owed)} owed from {len(events)} event(s) "
           f"in [{start}, {until}] ({origin}) — {len(opened)} open slug(s), "
-          f"{len(opened)} doc read(s)")
+          f"{reads} doc read(s)")
     for row in sorted(owed, key=lambda r: r["priority"]):
         blocked = f"  blocked_on={row['blocked_on']}" if row["blocked_on"] else ""
         print(f"  - [{row['priority']}] {row['slug']}{blocked}")

@@ -262,3 +262,42 @@ def test_a_clean_stream_run_carries_the_gaps_forward_not_drops_them(capsys):
     saved = json.loads(t.store[CKPT])
     assert saved["unknown_components"] == ["forge_feedback"], (
         "advancing the checkpoint must not silently discharge a named gap")
+
+
+def test_carried_rows_are_not_reread_so_the_run_is_proportional_to_events(capsys):
+    """THE SECOND COST CLAIM, from the first live seeded run: re-verifying
+    every carried row read 225 docs in 136.6s — proportional to the open set,
+    the corpus disease in miniature. A checkpoint row with no window activity
+    must carry forward UNREAD."""
+    t = StreamTransport([])
+    rows = [{"slug": f"old-{i}", "ptr": f"task/old-{i}.md", "priority": "P2"}
+            for i in range(50)]
+    t.put(CKPT, _checkpoint(open_rows=rows))
+    rc, out = _run(t, capsys)
+    assert rc == 0
+    assert "50 owed" in out.out
+    assert t.task_doc_reads() == [], "no window activity => zero doc reads"
+    assert "0 doc read(s)" in out.out
+
+
+def test_a_window_event_on_a_carried_slug_triggers_exactly_one_read(capsys):
+    t = StreamTransport([_event(kind="response", slug="old-1",
+                                ptr="task/old-1.md")])
+    rows = [{"slug": f"old-{i}", "ptr": f"task/old-{i}.md"} for i in range(5)]
+    t.put(CKPT, _checkpoint(open_rows=rows))
+    rc, out = _run(t, capsys)
+    assert rc == 0
+    assert "4 owed" in out.out          # old-1 discharged by the response
+    assert t.task_doc_reads() == []     # a close needs no doc read at all
+
+
+def test_the_stale_carry_tradeoff_is_the_repair_loops_job(capsys):
+    """DOCUMENTED TRADE: a doc closed WITHOUT an emitted event stays owed until
+    re-seed. The missing close event is the defect being surfaced; re-reading
+    everything every run would subsidize silent closers."""
+    t = StreamTransport([])
+    t.put(CKPT, _checkpoint(open_rows=[{"slug": "closed-silently",
+                                        "ptr": "task/closed-silently.md"}]))
+    t.put(f"team/{TEAM}/task/closed-silently.md", _doc(status="done"))
+    rc, out = _run(t, capsys)
+    assert "1 owed" in out.out  # honest: the stream never saw a close
