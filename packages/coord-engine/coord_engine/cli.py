@@ -6230,13 +6230,17 @@ def _load_obligations_checkpoint(transport: Any, team: str,
         rows.append({"slug": str(row["slug"]),
                      "ptr": str(row.get("ptr") or f"task/{row['slug']}.md"),
                      "priority": str(row.get("priority") or "P2")})
+    unk = doc.get("unknown_components")
     return {"as_of": as_of, "open": rows,
+            "unknown_components": [str(u) for u in unk] if isinstance(unk, list) else [],
             "seeded_by": str(doc.get("seeded_by") or "unknown")}
 
 
 def _save_obligations_checkpoint(transport: Any, team: str, agent: str, *,
-                                 as_of: str, open_rows: list, seeded_by: str) -> bool:
+                                 as_of: str, open_rows: list, seeded_by: str,
+                                 unknown_components: "Optional[list[str]]" = None) -> bool:
     doc = {"v": 1, "as_of": as_of, "seeded_by": seeded_by,
+           "unknown_components": sorted(unknown_components or []),
            "open": [{"slug": r["slug"], "ptr": r.get("ptr"),
                      "priority": r.get("priority", "P2")} for r in open_rows]}
     try:
@@ -6260,20 +6264,36 @@ def cmd_obligations_seed(args: argparse.Namespace, transport: Any) -> int:
     result = obligations_mod.fold(
         _obligation_probes(transport, args.team, args.agent, now=now),
         expected=obligations_mod.OBLIGATION_COMPONENTS)
-    if result.state is not obligations_mod.ObligationState.CLEAR and \
-            result.state is not obligations_mod.ObligationState.DATA:
-        print(f"obligations seed: REFUSED — corpus fold is {result.state.value}, "
-              "and a checkpoint seeded from a degraded fold would launder the "
-              "degradation into a clean-looking past. Fix or raise "
-              "COORD_OBLIGATION_BUDGET and retry.", file=sys.stderr)
+    degraded = sorted(set(result.degraded) | set(result.malformed))
+    # The components whose open rows the stream fold takes over from this
+    # checkpoint. A gap in one of THESE is a gap in the checkpoint's own
+    # subject matter; a gap elsewhere (forge, roles) is recorded by name and
+    # surfaced on every stream answer, but must not chain this seed on an
+    # unrelated standing defect.
+    stream_served = {"tasks", "directives", "blocks", "reminders"}
+    unseedable = sorted(set(degraded) & stream_served)
+    if unseedable and not getattr(args, "seed_partial", False):
+        print(f"obligations seed: REFUSED — corpus fold is {result.state.value} "
+              f"and the degraded set {degraded} includes stream-served "
+              f"component(s) {unseedable}, whose open rows this checkpoint "
+              "exists to carry. Seeding would launder that gap into a "
+              "clean-looking past. Fix the fold, or pass --seed-partial to "
+              "write a checkpoint that NAMES the unknown components — the "
+              "stream fold will then report them as UNKNOWN every run rather "
+              "than clear.", file=sys.stderr)
         return 3
+    if degraded:
+        print(f"obligations seed: proceeding with named gaps {degraded} — "
+              "these components stay UNKNOWN in every stream answer until the "
+              "underlying fold is fixed and the checkpoint is re-seeded")
     rows = [{"slug": str(r.get("slug") or r.get("id") or ""),
              "ptr": str(r.get("ptr") or "") or None,
              "priority": str(r.get("priority") or r.get("pri") or "P2")}
             for r in result.owed if (r.get("slug") or r.get("id"))]
     if not _save_obligations_checkpoint(transport, args.team, args.agent,
                                         as_of=now, open_rows=rows,
-                                        seeded_by="corpus-fold"):
+                                        seeded_by="corpus-fold",
+                                        unknown_components=degraded):
         print("obligations seed: checkpoint write FAILED — nothing recorded",
               file=sys.stderr)
         return 3
@@ -6414,6 +6434,11 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
     for slug in unresolved:
         print(f"  ! {slug}: ptr unreadable — cannot claim discharged",
               file=sys.stderr)
+    if checkpoint and checkpoint.get("unknown_components"):
+        print("  ! UNKNOWN components carried from the seed: "
+              + ", ".join(checkpoint["unknown_components"])
+              + " — the corpus fold could not read these when the checkpoint "
+              "was written; they are not covered by this answer", file=sys.stderr)
     if not checkpoint:
         print(f"  ! NO CHECKPOINT: anything opened before {start} is UNKNOWN "
               "here. Seed one deliberately with obligations --seed-checkpoint "
@@ -6425,7 +6450,8 @@ def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
         # checkpoint that guesses converts one bad read into a durable lie.
         _save_obligations_checkpoint(
             transport, args.team, agent, as_of=until, open_rows=owed,
-            seeded_by="stream-fold")
+            seeded_by="stream-fold",
+            unknown_components=checkpoint.get("unknown_components") or [])
     return 3 if unresolved else 0
 
 
@@ -12393,6 +12419,10 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("obligations",
                         help="terminal answer: does this agent owe work?")
     ob.add_argument("team"); ob.add_argument("--agent", required=True)
+    ob.add_argument("--seed-partial", action="store_true",
+                    help="allow --seed-checkpoint to proceed when stream-served "
+                         "components are degraded, writing their names into the "
+                         "checkpoint as permanently-surfaced UNKNOWNs")
     ob.add_argument("--seed-checkpoint", action="store_true",
                     help="run the corpus fold ONCE and write its open set as "
                          "the checkpoint the --stream fold starts from; the "
