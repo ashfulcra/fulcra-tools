@@ -43,6 +43,7 @@ touching. First failing probe is where your setup gap is.
 | Touching coord conventions? | — | — | [Coordinate on the bus](#coordinate-on-the-bus) |
 | Touching the platform surface? | — | — | [Fulcra platform surface & records](#fulcra-platform-surface--records) |
 | Touching CI / hooks? | — | — | [CI and workspace membership](#ci-and-workspace-membership) |
+| Reaching an external service (Linear, forge, a tracker)? | `env \| grep -io '^[a-z_]*linear[a-z_0-9]*'` (names only) | you can name every credential variable that exists BEFORE you use one — and note a service grep alone is NOT the full set, since a credential can be named after its consumer (`COORD_BRIDGE_DEVELOPER_TOKEN` holds a Linear token) | [Which credential, and which variable holds it](#which-credential-and-which-variable-holds-it-canonical) — one variable out of several is not the set |
 
 ## Layout
 
@@ -1256,6 +1257,65 @@ team-store material, not repo material. The generic doctrine:
 - Agents **cannot mint tokens** — an expiring token needs an armed operator
   reminder on the team bus. Never let a token value reach argv, stdout, shell
   history, a repo file, a scheduler plist, a log, or a chat transcript.
+
+### Which credential, and which variable holds it (canonical)
+
+The one canonical home for "which variable do I use". **Names only** — no
+credential value belongs in this repo, this file included.
+
+**Linear** — `coord-tracker-bridge` resolves these in order, first one set wins:
+
+| Order | Variable | What it is |
+| --- | --- | --- |
+| 1 | `LINEAR_PERSONAL_KEY` | personal API key, sent as-is (no `Bearer`) |
+| 2 | `LINEAR_PERSONAL_KEY_2` | spare personal key, same identity |
+| 3 | `COORD_BRIDGE_DEVELOPER_TOKEN` | OAuth app token — acts as the app, not as you |
+| 4 | `LINEAR_API_KEY` | historical name. **Currently returns 401.** Last only for compatibility |
+
+`LINEAR_KEY_ENV=<variable name>` overrides the order and uses exactly that one.
+Team id: `LINEAR_TEAM_ID` (team "Agent Bus").
+
+Why this table exists: the bridge read `LINEAR_API_KEY` and nothing else. That
+credential stopped authenticating, and the Linear projection sat stale from
+2026-07-31 to 2026-08-29 while three working credentials sat unused in the same
+environment. The failure said `http_status=401` and nothing else, so it read as
+a revoked key rather than as the wrong variable — twice, a week apart, costing
+hours of the operator's time each time. Fixed in code
+(`packages/coord-tracker-bridge/coord_tracker_bridge/cli.py`,
+`_resolve_linear_key`) and written here because a fact that lives only in a
+commit message or a chat transcript is not captured.
+
+### Never conclude a credential is dead from one variable
+
+Earned three separate times. Before claiming any key is revoked or expired, or
+that a container cannot authenticate:
+
+1. **Enumerate every candidate** — `env | grep -i <service>` piped to print
+   variable NAMES only, never a value. One variable out of five is not the set.
+2. **Test each one independently** and record which identity each authenticates
+   as. Two variables can both work and be two different actors.
+3. **Prove the transport innocent** before blaming a proxy or the network — a
+   sentinel round-trip that shows the request arrives unmodified.
+4. Only then is "the credential is dead" a finding rather than a guess.
+
+A conclusion drawn from one variable when several exist is not a finding. It is
+an assumption that blames something else while the ground truth was one command
+away — the failure mode this whole section exists to stop.
+
+### Environment facts are captured facts
+
+An environment fact — which variable, which host, which account, which of
+several near-identical things is the live one — is **discovered once and
+written down once**, in its canonical home here, in the same change that
+discovered it. Not in a commit message, not in a chat reply, not only in the
+team store. The test is whether a fresh clone with no conversation history
+answers the question. If re-deriving it costs a debugging session, it was
+never captured.
+
+Corollary for code: a module that reads an environment variable **documents
+which variable and why** at the point it reads it. A credential lookup with no
+comment is how the wrong variable survives a year of review.
+
 
 ## Documentation rules (standing, operator-set)
 

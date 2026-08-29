@@ -1,4 +1,20 @@
-"""Command-line entry point exposing the bridge's three explicit phases."""
+"""Command-line entry point for the bridge.
+
+Phases (all explicit, none implied by another):
+
+- ``plan`` / ``adopt-markers`` / ``apply-resources`` / ``sync`` — the write
+  pipeline, each gated behind its own verb so nothing mutates Linear as a side
+  effect of a read.
+- ``linear-inbox`` / ``linear-assignments`` — read verbs. They build no
+  ``BridgeService``, so no ledger, lease or tracker adapter exists for a write
+  path to reach, and their transport refuses any non-query document.
+
+Credentials: see ``_resolve_linear_key``. The canonical table of which
+variable holds which Linear credential lives in the repo's ``AGENTS.md``
+("Which credential, and which variable holds it") and in
+``packages/coord-tracker-bridge/README.md``; this module must never grow a
+second copy of it (one canonical home per fact) and must never log a value.
+"""
 
 from __future__ import annotations
 
