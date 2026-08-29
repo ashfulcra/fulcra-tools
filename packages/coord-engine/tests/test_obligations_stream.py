@@ -235,3 +235,30 @@ def test_a_malformed_checkpoint_is_ignored_never_trusted(capsys):
     t.put(CKPT, "{not json")
     rc, out = _run(t, capsys)
     assert "NO CHECKPOINT" in out.err
+
+
+def test_unknown_components_from_the_seed_are_surfaced_on_every_stream_run(capsys):
+    """A gap the seed could not see must be repeated on every answer built on
+    that seed — silence about a named gap is how a degraded fold becomes a
+    clean-looking one."""
+    t = StreamTransport([])
+    t.put(CKPT, json.dumps({"v": 1, "as_of": "2026-08-29T12:00:00Z",
+                            "seeded_by": "corpus-fold",
+                            "unknown_components": ["forge_feedback"],
+                            "open": []}))
+    rc, out = _run(t, capsys)
+    assert "forge_feedback" in out.err and "not covered" in out.err
+
+
+def test_a_clean_stream_run_carries_the_gaps_forward_not_drops_them(capsys):
+    t = StreamTransport([_event()])
+    t.put(f"team/{TEAM}/task/a-thing.md", _doc())
+    t.put(CKPT, json.dumps({"v": 1, "as_of": "2026-08-29T12:00:00Z",
+                            "seeded_by": "corpus-fold",
+                            "unknown_components": ["forge_feedback"],
+                            "open": []}))
+    rc, out = _run(t, capsys)
+    assert rc == 0
+    saved = json.loads(t.store[CKPT])
+    assert saved["unknown_components"] == ["forge_feedback"], (
+        "advancing the checkpoint must not silently discharge a named gap")
