@@ -143,12 +143,13 @@ def test_an_unreadable_window_is_UNKNOWN_not_empty(capsys):
     assert rc == 3 and "UNKNOWN" in out.err
 
 
-def test_the_window_floor_is_reported_so_the_gap_is_never_silent(capsys):
-    """This path answers for its window only. Anything older is the checkpoint's
-    job, which does not exist yet — so it must say UNKNOWN rather than clear."""
+def test_the_gap_before_the_window_is_never_silent_without_a_checkpoint(capsys):
+    """Without a checkpoint this path answers for its window only, and must say
+    so rather than reading as clear. (Originally asserted the pre-checkpoint
+    wording; the invariant is the same — the gap is named, never implied.)"""
     t = StreamTransport([])
     rc, out = _run(t, capsys)
-    assert "OUTSIDE this window and UNKNOWN" in out.err
+    assert "NO CHECKPOINT" in out.err and "UNKNOWN" in out.err
 
 
 def test_blocked_on_is_carried_onto_the_owed_row(capsys):
@@ -156,3 +157,81 @@ def test_blocked_on_is_carried_onto_the_owed_row(capsys):
     t.put(f"team/{TEAM}/task/a-thing.md", _doc(blocked_on="user:ash"))
     rc, out = _run(t, capsys)
     assert "blocked_on=user:ash" in out.out
+
+
+# --- the checkpoint: completeness, not just speed ----------------------------
+
+CKPT = f"team/{TEAM}/_coord/agents/{AGENT}/obligations-checkpoint.json"
+
+
+def _checkpoint(as_of="2026-08-29T12:00:00Z", open_rows=None):
+    return json.dumps({"v": 1, "as_of": as_of, "seeded_by": "corpus-fold",
+                       "open": open_rows if open_rows is not None else []})
+
+
+def test_a_checkpointed_obligation_survives_into_an_empty_window(capsys):
+    """THE COMPLETENESS CLAIM: an obligation opened before the window is owed
+    via the checkpoint, with zero window events."""
+    t = StreamTransport([])
+    t.put(CKPT, _checkpoint(open_rows=[{"slug": "old-thing",
+                                        "ptr": "task/old-thing.md",
+                                        "priority": "P1"}]))
+    t.put(f"team/{TEAM}/task/old-thing.md", _doc())
+    rc, out = _run(t, capsys)
+    assert rc == 0
+    assert "1 owed" in out.out and "old-thing" in out.out
+    assert "NO CHECKPOINT" not in out.err
+
+
+def test_a_window_response_discharges_a_checkpointed_obligation(capsys):
+    t = StreamTransport([_event(kind="response", slug="old-thing",
+                                ptr="task/old-thing.md")])
+    t.put(CKPT, _checkpoint(open_rows=[{"slug": "old-thing",
+                                        "ptr": "task/old-thing.md"}]))
+    rc, out = _run(t, capsys)
+    assert rc == 0 and "0 owed" in out.out
+
+
+def test_the_window_starts_at_the_checkpoint_not_the_queue_cursor(capsys):
+    """The queue cursor tracks the DELIVERY consumer and can be ahead of the
+    last obligation fold; starting there would skip events the queue consumed
+    but this fold never saw."""
+    t = StreamTransport([])
+    t.put(CKPT, _checkpoint(as_of="2026-08-29T12:00:00Z"))
+    t.put(records.cursor_path(TEAM, AGENT),
+          json.dumps({"v": 1, "last_read": "2026-08-29T18:00:00Z", "seen_ids": []}))
+    rc, out = _run(t, capsys)
+    assert "[2026-08-29T12:00:00Z," in out.out
+
+
+def test_a_clean_stream_fold_advances_the_checkpoint(capsys):
+    t = StreamTransport([_event()])
+    t.put(f"team/{TEAM}/task/a-thing.md", _doc())
+    t.put(CKPT, _checkpoint())
+    rc, out = _run(t, capsys)
+    assert rc == 0
+    saved = json.loads(t.store[CKPT])
+    assert saved["seeded_by"] == "stream-fold"
+    assert saved["as_of"] > "2026-08-29T12:00:00Z"
+    assert [r["slug"] for r in saved["open"]] == ["a-thing"]
+
+
+def test_an_unclean_fold_does_NOT_advance_the_checkpoint(capsys):
+    """NEGATIVE CONTROL, the one that matters: an unresolved ptr means the open
+    set is not fully known, and a checkpoint that guesses converts one bad read
+    into a durable lie."""
+    t = StreamTransport([_event()])  # doc never written -> ptr unreadable
+    t.put(CKPT, _checkpoint())
+    rc, out = _run(t, capsys)
+    assert rc == 3
+    saved = json.loads(t.store[CKPT])
+    assert saved["seeded_by"] == "corpus-fold", "checkpoint must be untouched"
+    assert saved["as_of"] == "2026-08-29T12:00:00Z"
+
+
+def test_a_malformed_checkpoint_is_ignored_never_trusted(capsys):
+    """A parse error must not read as 'nothing was owed as of then'."""
+    t = StreamTransport([])
+    t.put(CKPT, "{not json")
+    rc, out = _run(t, capsys)
+    assert "NO CHECKPOINT" in out.err
