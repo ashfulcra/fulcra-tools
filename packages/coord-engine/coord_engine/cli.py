@@ -6278,6 +6278,123 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+
+
+def cmd_obligations_dispatch(args: argparse.Namespace, transport: Any) -> int:
+    """Route `obligations` to the corpus fold or the --stream path. A named
+    function, not a lambda: the activity-classification pin requires every
+    registered command to be classifiable by name."""
+    if getattr(args, "stream", False):
+        return cmd_obligations_stream(args, transport)
+    return cmd_obligations(args, transport)
+
+
+def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
+    """`obligations --stream`: follow the signal to the doc, never scan the corpus.
+
+    THE POINT, and it is Ash's, repeated for six weeks before it was built: the
+    bus payload has ALWAYS carried ``ptr``. The signal already names the exact
+    document an obligation lives in. The default obligations path ignores it —
+    it loads a reconcile-built summaries index and folds the whole fleet, so its
+    cost is proportional to accumulated history rather than to what changed.
+    Measured on this box 2026-08-29: the stream read is 8.3s and CLEAR while the
+    corpus fold is 111.0s with 5 of 7 probes UNREADABLE, against 3,159 task docs
+    and 950 review entries.
+
+    This path instead: read my own channel forward from my own durable cursor,
+    keep the events addressed to me, and open ONLY the documents their ``ptr``
+    names. Cost is proportional to new events plus the handful of docs they
+    point at.
+
+    WHAT IT HONESTLY IS NOT: complete on its own. A windowed read answers for
+    the window, so an obligation opened before it is invisible here. That is the
+    checkpoint half of the design and it is NOT built yet — so anything earlier
+    than the window is reported UNKNOWN, never clear. A fold that cannot see far
+    enough must say so; that failure is the whole reason this work exists.
+    """
+    agent = _declared_identity(getattr(args, "agent", None))
+    if not agent:
+        print("obligations --stream: --agent or FULCRA_COORD_AGENT required",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        print(f"obligations --stream: UNKNOWN — records config unreadable "
+              f"({cfg_status})", file=sys.stderr)
+        return 3
+
+    cursor = records.load_cursor(transport, args.team, agent)
+    now = _now()
+    lookback_h = int(getattr(args, "lookback_hours", 0) or 168)
+    since = None
+    if cursor and cursor.get("last_read"):
+        since = str(cursor["last_read"])
+    floor = _iso(now - timedelta(hours=lookback_h))
+    # THE CURSOR IS THE START, and the floor applies only when there is no
+    # cursor. I first wrote this as `min(cursor, floor)` — copied from the mesh
+    # sweep, where widening is the safe direction because that sweep is the only
+    # reader and must never miss. Here it is the WRONG direction and it defeated
+    # the whole point: it re-read a week of fleet events on every run and blew
+    # past a 2-minute timeout. A cursor that cannot shrink the window is not a
+    # cursor. What is older than the cursor is the checkpoint's job, and until
+    # that exists this path says UNKNOWN about it rather than pretending.
+    start = since or floor
+    until = _iso(now)
+
+    raw = transport.records(cfg["data_type"], start, until)
+    if raw is None:
+        print("obligations --stream: UNKNOWN — window unreadable, cursor untouched",
+              file=sys.stderr)
+        return 3
+    events = records.events_for(raw, agent)
+    if events is None:
+        print("obligations --stream: UNKNOWN — events unparseable", file=sys.stderr)
+        return 3
+
+    # Fold the window: a directive opens, a response/verdict naming me closes.
+    # An FYI opens NOTHING — measured 2026-08-21, most of 92 stream-only "opens"
+    # were FYIs replayed as permanent obligations.
+    opened: dict[str, dict[str, Any]] = {}
+    for ev in events:
+        slug, kind = ev.get("slug"), ev.get("kind")
+        if not slug:
+            continue
+        if kind == "directive" and not ev.get("fyi"):
+            opened.setdefault(slug, ev)
+        elif kind in ("response", "verdict"):
+            opened.pop(slug, None)
+
+    # Follow the ptr. THIS is the line the whole design turns on: one read per
+    # open obligation, not one read per document in the fleet.
+    owed, unresolved = [], []
+    for slug, ev in opened.items():
+        ptr = ev.get("ptr") or f"task/{slug}.md"
+        doc = transport.read(f"team/{args.team}/{ptr}")
+        if doc is None:
+            # Absent-or-unreadable is ambiguous and must not read as discharged.
+            unresolved.append(slug)
+            continue
+        fm = okf.parse_frontmatter(doc) or {}
+        if str(fm.get("status") or "") not in tasks.TERMINAL_STATUSES:
+            owed.append({"slug": slug, "ptr": ptr,
+                         "priority": str(fm.get("priority") or "P2"),
+                         "blocked_on": str(fm.get("blocked_on") or "") or None})
+
+    print(f"obligations --stream: {len(owed)} owed from {len(events)} event(s) "
+          f"in [{start}, {until}] — {len(opened)} open slug(s), "
+          f"{len(opened)} doc read(s)")
+    for row in sorted(owed, key=lambda r: r["priority"]):
+        blocked = f"  blocked_on={row['blocked_on']}" if row["blocked_on"] else ""
+        print(f"  - [{row['priority']}] {row['slug']}{blocked}")
+    for slug in unresolved:
+        print(f"  ! {slug}: ptr unreadable — cannot claim discharged",
+              file=sys.stderr)
+    print(f"  ! anything opened before {start} is OUTSIDE this window and "
+          "UNKNOWN here — the checkpoint half of the design is not built yet",
+          file=sys.stderr)
+    return 3 if unresolved else 0
+
+
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     agent = _identity(args.agent)
     if args.ack:
@@ -12242,8 +12359,16 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("obligations",
                         help="terminal answer: does this agent owe work?")
     ob.add_argument("team"); ob.add_argument("--agent", required=True)
+    ob.add_argument("--stream", action="store_true",
+                    help="follow the signal to the doc: read this agent's "
+                         "channel forward from its cursor and open only the "
+                         "documents the events' ptr names, instead of folding "
+                         "the whole task corpus")
+    ob.add_argument("--lookback-hours", type=int, default=168,
+                    help="window floor for --stream (default 168h); the window "
+                         "is the OLDER of the cursor and this floor")
     add_json(ob)
-    ob.set_defaults(func=cmd_obligations)
+    ob.set_defaults(func=cmd_obligations_dispatch)
 
     sc = sub.add_parser("search", help="substring search over tasks")
     sc.add_argument("team"); sc.add_argument("query"); add_json(sc)
@@ -12870,6 +12995,7 @@ def build_parser() -> argparse.ArgumentParser:
 #: the extracted command modules are imported — see the note down there; that
 #: ordering is load-bearing, not cosmetic.
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
+    cmd_obligations_dispatch, cmd_obligations_stream,
     cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_owed, cmd_briefing,
     cmd_presence_show, cmd_review_status, cmd_health, cmd_doctor,
     cmd_obligations, cmd_roles_status, cmd_continuity_resume,

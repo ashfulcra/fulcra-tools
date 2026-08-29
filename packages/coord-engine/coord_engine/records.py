@@ -422,6 +422,18 @@ def events_for(records: Optional[list], agent: str) -> Optional[list[dict[str, A
             "priority": payload["pri"],
             "ptr": payload["ptr"],
             "to": payload["to"],
+            # `parse_payload` preserves these and this projection used to drop
+            # them, so every consumer reading the stream through here was blind
+            # to the difference between a NOTIFICATION and an OBLIGATION. That
+            # is the 2026-08-21 measurement — most of 92 stream-only "opens"
+            # were FYIs replayed as permanent obligations — and the cause was
+            # here, one layer below where it was diagnosed. `for` names whom a
+            # close discharges; `on`/`state` carry the blocked signal. A fold
+            # that cannot see them cannot be correct no matter how it is written.
+            "fyi": payload.get("fyi") is True,
+            "for": payload.get("for"),
+            "on": payload.get("on"),
+            "state": payload.get("state"),
             "from": sender_of(rec),
             "recorded_at": rec.get("recorded_at"),
             "record_id": rec.get("id"),
