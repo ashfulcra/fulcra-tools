@@ -1331,6 +1331,14 @@ def _tree_section(transport: Any, prefix: str, *, section: str,
         # them before sealing so malformed source content cannot be published
         # as a complete view.
         document = okf.parse_frontmatter(raw)
+        # A file that is not inventory at all (a documented-optional courtesy
+        # index) is SKIPPED, not sealed and not fatal. Real corruption still
+        # fails the whole section below — the all-or-nothing rule is what stops
+        # a partial view publishing as complete, and it stays.
+        if (isinstance(document, dict)
+                and generation.ignorable_inventory_file(
+                    section, child, document)):
+            continue
         if (not isinstance(document, dict)
                 or not generation.canonical_inventory_document(
                     section, child, document)
