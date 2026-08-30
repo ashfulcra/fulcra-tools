@@ -5762,8 +5762,21 @@ def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
     fm["tags"] = tags + [f"intent:{principal}"]
     fm["intent_by"] = intent_by  # None omitted by render_frontmatter (undeclared)
     content = okf.render_frontmatter(fm) + "\n" + split[1]
-    return _write_directive(transport, args, slug=slug, content=content,
-                            payload=payload, assignee=principal, not_before=None)
+    rc = _write_directive(transport, args, slug=slug, content=content,
+                          payload=payload, assignee=principal, not_before=None)
+    # Third instance of pr-630 root cause #2 (fixed for `tell` 2026-08-06 and for
+    # `review request` 2026-08-14 after it was bitten live). Without this, intent
+    # wrote the durable doc and returned, so the obligation existed ONLY as a
+    # file: absent from the annotation stream, and therefore invisible to every
+    # stream consumer — a source that does not emit is not slow on the channel,
+    # it is missing from it, and no cursor advance can surface it. Same contract
+    # as the other two: fresh-write-only (never on the dedupe or the in-place
+    # --by window update, where a second event is indistinguishable from new
+    # work), and best-effort so an unconfigured bus degrades to file-plane-only
+    # rather than failing the intent.
+    if rc == 0 and getattr(args, "_directive_outcome", None) == "written":
+        _emit_dispatch_companion(transport, args, slug=slug, assignee=principal)
+    return rc
 
 
 def _directed_inbox(transport: Any, team: str, agent: str,
