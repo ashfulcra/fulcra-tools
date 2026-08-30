@@ -164,6 +164,32 @@ transport bounds.
   snapshot or checkpoint-ref failure makes the command nonzero. rc 0 means all
   selected role saves completed, while rc 2 means a complete fold found no
   fresh held role.
+- **Every obligation-opening verb must EMIT, or it is absent from the stream.**
+  The durable document is the obligation; the `v:1` companion event is its
+  delivery. A verb that writes the doc and returns leaves work that exists only
+  as a file — invisible to the queue read, to `obligations --stream`, and to any
+  per-identity cursor fold, because those read the stream forward from a cursor
+  and never enumerate files to discover work. A source that does not emit is not
+  slow on the channel, it is missing from it, and no cursor advance recovers it.
+  This defect has been fixed three times, each found only after it bit: `tell`
+  (2026-08-06), `review request` (2026-08-14, bitten live on agent-skills
+  pr-176), and `intent` (2026-08-30). The contract every emitting path shares —
+  emit on a VERIFIED FRESH write only (never on a dedupe or an in-place window
+  update, where a second event is indistinguishable from new work), and
+  best-effort, so an unconfigured bus degrades to file-plane-only rather than
+  failing the verb.
+
+  Audited 2026-08-30, by reading the call sites rather than assuming:
+  `tell`/`_create_directive`, `review request`, `remind` (via the scheduled
+  timer record) and `intent` all emit. `later` is deliberately silent and says
+  so — it captures to `@backlog`, which gets no delivery event. The obligation
+  components with **no event source at all** are `forge_feedback` (nothing
+  emits) and `role_duties` (implied by holding a lease rather than opened by an
+  event; the nearest event is the `claim`). Those two, not `reviews`, are the
+  real remaining stream gaps: review REQUESTS emit as directives, so a
+  `reviews` entry in a checkpoint's `unknown_components` is a HISTORICAL
+  seed-coverage gap (the corpus fold could not read them when the checkpoint was
+  written), dischargeable only by a re-seed once the reviews fold is healthy.
 - **Structured logs** to stderr (`$COORD_LOG_LEVEL`).
 
 ## Environment / tuning
