@@ -1336,6 +1336,20 @@ A conclusion drawn from one variable when several exist is not a finding. It is
 an assumption that blames something else while the ground truth was one command
 away — the failure mode this whole section exists to stop.
 
+### Refreshing the Fulcra token: write only the four accepted keys
+
+`~/.config/fulcra/credentials.json` is loaded strictly by the installed
+`fulcra-api` CLI (0.1.35): `FulcraCredentials` accepts exactly
+`access_token`, `access_token_expiration`, `refresh_token`,
+`refresh_token_expiration`. The raw Auth0 refresh-grant response also carries
+`id_token`/`id_token_expiration`; saving that response verbatim makes **every**
+`fulcra-api` invocation crash with `TypeError ... unexpected keyword argument
+'id_token'` at startup (earned 2026-08-30, after the 08-30 manual token
+refresh). When refreshing by hand, filter the response to those four keys
+before writing the file. `coord-engine` keeps working through such a break
+only if a token reaches it another way — do not read its survival as proof
+the credentials file is fine.
+
 ### Environment facts are captured facts
 
 An environment fact — which variable, which host, which account, which of
