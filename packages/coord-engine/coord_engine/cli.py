@@ -2222,7 +2222,63 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 3
     print(f"review conclude: {args.slug} CONCLUDED on {len(verdicts)} verdict(s)")
+    _close_review_request_rows(
+        transport, args.team, args.slug,
+        why=(f"review concluded on {len(verdicts)} verdict(s); terminal marker "
+             f"{review_gc.CONCLUDED_MARKER} written and read back"),
+        agent=getattr(args, "sender", None))
     return 0
+
+
+def _close_review_request_rows(transport: Any, team: str, slug: str, *,
+                               why: str, agent: "Optional[str]") -> None:
+    """Close the review-request rows for a slug whose review just concluded.
+
+    SETTLE-TIME CLOSE. The divergence between a finished review and an open
+    request row is what the residue sweep exists to clean up; the cheapest place
+    to never open it is here, the moment a DECISION verb records a terminal
+    marker. Only the decision verbs call this. The fold and projection settle
+    writers are CACHES in build paths that must not mutate task state, so their
+    rows stay the scheduled sweep's job.
+
+    Best-effort and LOUD. The marker is the durable truth and the rows are
+    bookkeeping, so a failure here must not fail the closure the caller just
+    verified — but a SILENT failure rebuilds the exact backlog this exists to
+    prevent, so every failure prints and names the recovery.
+    """
+    from . import model
+
+    try:
+        rows, ok, reason = _load_rows_status(transport, team)
+    except TransportError as e:
+        print(f"review rows unreadable ({type(e).__name__}) — {slug} is closed "
+              f"but its request row(s) are NOT; run `review residue {team}` later",
+              file=sys.stderr)
+        return
+    if not ok:
+        print(f"review rows DEGRADED ({reason}) — {slug} is closed but its "
+              f"request row(s) are NOT; run `review residue {team}` later",
+              file=sys.stderr)
+        return
+
+    wanted = _REVIEW_REQUEST_TITLE_PREFIX + slug
+    closed = failed = 0
+    for r in rows or []:
+        if str(r.get("title") or "").strip() != wanted:
+            continue
+        if r.get("status") not in model.OPEN_STATUSES:
+            continue
+        ns = argparse.Namespace(team=team, name=str(r.get("id") or ""),
+                                evidence=why, agent=agent)
+        if cmd_task_done(ns, transport) == 0:
+            closed += 1
+        else:
+            failed += 1
+    if failed:
+        print(f"{failed} review-request row(s) for {slug} did NOT close; "
+              f"run `review residue {team}` to finish", file=sys.stderr)
+    if closed:
+        print(f"  closed {closed} review-request row(s) for {slug}")
 
 
 def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
@@ -2315,6 +2371,11 @@ def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
             return 1
     print(f"review close: {slug} closed as MERGED at {sha[:12]} "
           f"(marker {path})")
+    _close_review_request_rows(
+        transport, args.team, slug,
+        why=(f"review closed as MERGED at {sha[:12]}; settle marker written "
+             f"and verified field-by-field against what was requested"),
+        agent=getattr(args, "sender", None))
     return 0
 
 
@@ -12470,6 +12531,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "never retired. Defaults to the origin remote.")
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
+    rvw = rvsub.add_parser(
+        "residue",
+        help="close review-request rows whose review already reached a "
+             "terminal state (DRY RUN by default)")
+    rvw.add_argument("team")
+    rvw.add_argument("--apply", action="store_true",
+                     help="actually close the rows; without it sweep only "
+                          "prints what it would close")
+    rvw.add_argument("--agent", "-a", default=None,
+                     help="closing identity for the close events")
+    rvw.set_defaults(func=cmd_review_residue)
     rvv = rvsub.add_parser(
         "verdict", help="file YOUR verdict for a review round (writes the same "
                         "canonical shard `review request` prints)")
@@ -13271,3 +13343,104 @@ _ACTIVITY_READ_FUNCS = _ACTIVITY_READ_FUNCS | frozenset({
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main(sys.argv[1:]))
+
+
+def _sweep_one(transport: Any, team: str, slug: str) -> "review_gc.Disposition":
+    """Disposition for ONE review slug. Transport failure is UNKNOWN, not empty."""
+    try:
+        entries = transport.list_dir(_verdicts_prefix(team, slug))
+    except TransportError:
+        return review_gc.Disposition(
+            review_gc.RESIDUE_UNKNOWN, "listing-raised",
+            "verdicts listing raised — closes nothing")
+    names = {(e.get("name") or "") for e in (entries or [])}
+    fm: Any = None
+    if SETTLED_MARKER in names:
+        try:
+            fm = okf.parse_frontmatter(
+                transport.read(_settled_marker_path(team, slug))) or {}
+        except TransportError:
+            return review_gc.Disposition(
+                review_gc.RESIDUE_UNKNOWN, "marker-unreadable",
+                "settle marker unreadable — closes nothing")
+    return review_gc.residue_disposition(
+        names, settled_marker=SETTLED_MARKER, marker_fm=fm)
+
+
+def cmd_review_residue(args: argparse.Namespace, transport: Any) -> int:
+    """Close review-request rows whose review already reached a terminal state.
+
+    DRY RUN unless ``--apply``. This is not a one-time backfill: a review that
+    settles through the fold's APPROVED cache is settled by a pure build path
+    that must not mutate task state, so nothing closes those rows at settle
+    time and new ones appear for as long as reviews get approved.
+    """
+    from . import model
+
+    rows, ok, reason = _load_rows_status(transport, args.team)
+    if not ok:
+        # A partial view of the rows cannot tell a closed row from an unread
+        # one, and this verb closes things. UNKNOWN is not empty.
+        print(f"review residue: rows fold DEGRADED ({reason}) — refusing to "
+              f"close anything on a partial view", file=sys.stderr)
+        return 2
+
+    buckets: "dict[str, list[tuple[str, str, str]]]" = {}
+    by_answer: "dict[str, int]" = {}
+    scanned = 0
+    for r in rows or []:
+        if r.get("status") not in model.OPEN_STATUSES:
+            continue
+        title = str(r.get("title") or "")
+        if not title.startswith(_REVIEW_REQUEST_TITLE_PREFIX):
+            continue
+        slug = title[len(_REVIEW_REQUEST_TITLE_PREFIX):].strip()
+        if not slug:
+            continue
+        scanned += 1
+        d = _sweep_one(transport, args.team, slug)
+        buckets.setdefault(d.kind, []).append(
+            (str(r.get("id") or ""), slug, d.why))
+        if d.kind == review_gc.RESIDUE_CLOSE:
+            by_answer[d.answer] = by_answer.get(d.answer, 0) + 1
+
+    closable = buckets.get(review_gc.RESIDUE_CLOSE, [])
+    print(f"review residue [{'APPLY' if args.apply else 'DRY RUN'}] team={args.team}")
+    # A MEASURED POPULATION, EVERY RUN. A sweep with nothing to close and a
+    # sweep that has stopped detecting print the same `closed 0` otherwise, and
+    # this fleet has shipped that shape three times in one week. The scanned
+    # count is the quantity that separates them.
+    print(f"  scanned             : {scanned} open review-request row(s)")
+    print(f"  closable            : {len(closable)}")
+    if by_answer:
+        detail = "  ".join(f"{k}={v}" for k, v in sorted(by_answer.items()))
+        print(f"      by answer       : {detail}")
+    for key, label in ((review_gc.RESIDUE_UNRESOLVED, "unresolved-marker"),
+                       (review_gc.RESIDUE_UNKNOWN_PROVENANCE, "unknown-provenance"),
+                       (review_gc.RESIDUE_UNKNOWN, "UNKNOWN")):
+        items = buckets.get(key, [])
+        # NAMED, NEVER COUNTED. A shrinking count is indistinguishable from a
+        # detector that stopped detecting; a named list is auditable.
+        print(f"  {label:20s}: {len(items)}")
+        for _rid, slug, why in sorted(items, key=lambda t: t[1]):
+            print(f"      - {slug} — {why}")
+    print(f"  genuinely open      : {len(buckets.get(review_gc.RESIDUE_OPEN, []))}")
+
+    if not args.apply:
+        for _rid, slug, why in sorted(closable, key=lambda t: t[1]):
+            print(f"  would close: {slug} — {why}")
+        return 0
+
+    failed = 0
+    for rid, slug, why in sorted(closable, key=lambda t: t[1]):
+        ns = argparse.Namespace(
+            team=args.team, name=rid,
+            evidence=f"residue sweep: {why}",
+            agent=getattr(args, "agent", None))
+        # Reuse `task done` rather than reimplementing it: it refuses a ghost
+        # close on a failed write and emits the close companion, and a sweep
+        # that skipped either would be a bulk version of both bugs.
+        if cmd_task_done(ns, transport) != 0:
+            failed += 1
+    print(f"  closed {len(closable) - failed}, FAILED {failed}")
+    return 1 if failed else 0
