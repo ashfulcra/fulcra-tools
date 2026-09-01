@@ -274,3 +274,74 @@ def render_plan(verdicts: list[Verdict], *, applying: bool) -> str:
     if not applying and retirable:
         lines.append("  (dry run — re-run with --apply to write markers)")
     return "\n".join(lines)
+
+
+#: :func:`sweep_disposition` answers. The residue sweep CLOSES task rows, so the
+#: expensive failure is not "residue survives another pass", it is "a row was
+#: closed while its review still owed a verdict".
+SWEEP_CLOSE = "close"
+SWEEP_OPEN = "open"
+SWEEP_UNRESOLVED = "unresolved-marker"
+SWEEP_UNKNOWN_PROVENANCE = "unknown-provenance"
+SWEEP_UNKNOWN = "unknown"
+
+
+def sweep_disposition(names: Any, *, settled_marker: str,
+                      marker_fm: Any = None,
+                      listing_ok: bool = True) -> "tuple[str, str]":
+    """What a residue sweep may do with ONE review-request row, and why.
+
+    ONE decision function, for the same reason :data:`TERMINAL_MARKERS` is a set.
+    The sweep is the THIRD reader to short-circuit on ``.settled``, and the first
+    two each had to be fixed separately when presence-alone proved unsound (595
+    r4 in the register projection, then again in the fan-out obligation scan). A
+    rule that lives in the sweep is a rule the next reader silently lacks, so the
+    rule lives here and the sweep asks it.
+
+    Returns ``(disposition, justification)``. The justification is recorded on
+    every closure, because a closure that says only "terminal" is
+    self-certifying: nobody can later audit it against the marker it claims to
+    have read. That self-certification is what made the original 95-row count
+    look safe.
+
+    ``.settled`` is never honoured on presence. It carries an APPROVED CLAIM and
+    this reader acts on the claim, so it goes through
+    :func:`review.settle_shortcircuit` exactly as the other two readers do.
+    """
+    from . import review
+
+    if not listing_ok:
+        return SWEEP_UNKNOWN, "verdicts listing unreadable — closes nothing"
+    try:
+        settled_present = settled_marker in (names or [])
+    except TypeError:
+        return SWEEP_UNKNOWN, "verdicts listing not enumerable — closes nothing"
+
+    if is_terminal(names):
+        found = ", ".join(sorted(m for m in TERMINAL_MARKERS if m in names))
+        return SWEEP_CLOSE, f"terminal marker present: {found}"
+
+    if not settled_present:
+        return SWEEP_OPEN, "no terminal marker and no settle marker"
+
+    fm = marker_fm if isinstance(marker_fm, dict) else {}
+    answer = review.settle_shortcircuit(fm, names)
+    if answer == review.SETTLE_MERGED:
+        return SWEEP_CLOSE, "settled: merged — merge evidence, unconditional"
+    if answer == review.SETTLE_CACHE:
+        return (SWEEP_CLOSE,
+                "settled: cache — evidence digest recomputed over the current "
+                "listing and matched")
+
+    # SETTLE_NO from here. One of its causes is not a stale marker at all: a
+    # marker with an APPROVED state and NO ``evidence`` KEY cannot have been
+    # written by the engine, because `settled_marker_fields` always emits that
+    # key when there is no merge sha (the renderer omits None, not ""). Unknown
+    # provenance is quarantined rather than merely unresolved: no automation
+    # closes a row behind a marker nothing in this codebase could have written.
+    if str(fm.get("state") or "") == review.APPROVED and "evidence" not in fm:
+        return (SWEEP_UNKNOWN_PROVENANCE,
+                "APPROVED marker carrying no evidence KEY — not producible by "
+                "any engine write path; provenance unknown, quarantined")
+    return (SWEEP_UNRESOLVED,
+            "settle marker present but does not license a skip")
