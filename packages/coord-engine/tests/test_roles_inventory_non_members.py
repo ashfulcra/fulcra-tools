@@ -78,11 +78,27 @@ def test_an_unknown_file_under_roles_still_fails_closed():
     assert _ignorable("something.md", doc) is False
 
 
-def test_an_index_named_file_with_a_role_ish_type_is_not_ignorable():
-    """The skip is keyed to the DECLARED type, not merely the filename, so a
-    misfiled document cannot hide behind the name `index.md`."""
+def test_an_index_named_file_that_is_real_inventory_is_not_ignorable():
+    """Inventory always wins over the skip. A document at `roles/index.md`
+    that classifies as a Role definition is a MEMBER — were a role ever
+    actually named "index", it must be folded, not silently dropped."""
     doc = {"type": "Role", "title": "sneaky"}
+    assert _member("index.md", doc) is True
     assert _ignorable("index.md", doc) is False
+
+
+def test_an_untyped_courtesy_index_is_ignorable():
+    """The skip is keyed to the PATH, not the declared type.
+
+    The first version of this predicate also required `type: RolesIndex`,
+    which left the bug live for exactly the people it was written for: the
+    `fulcra-agent-roles` skill tells a human to write this index by hand and
+    never tells them to type it. An untyped index froze their whole fleet.
+    """
+    assert _ignorable("index.md", {"title": "Fulcra coord roles"}) is True
+    assert _ignorable("index.md", {}) is True
+    assert _ignorable("index.md", {"type": "Index"}) is True
+    assert _member("index.md", {"title": "Fulcra coord roles"}) is False
 
 
 def test_a_rolesindex_type_elsewhere_is_not_ignorable():
@@ -176,3 +192,30 @@ def test_a_corrupt_role_document_still_makes_the_section_unknown():
     state, value = _roles_section(files)
     assert state == "UNKNOWN"
     assert value["records"] == []
+
+
+# --- the prefix table must not be edit-sensitive ---------------------------
+
+def test_the_section_marker_tolerates_a_prefix_without_a_trailing_slash():
+    """Every classifier splits on this marker and reads what follows as the
+    relative path. A prefix that lost its trailing slash would not fail — it
+    would shift every relative path by the missing characters and quietly
+    reclassify the section, so the marker normalises instead of trusting the
+    table's punctuation."""
+    assert generation._section_marker("roles") == "/roles/"
+    original = dict(generation.INVENTORY_PREFIXES)
+    try:
+        generation.INVENTORY_PREFIXES["roles"] = "roles"
+        assert generation._section_marker("roles") == "/roles/"
+        assert _member("coord-boss.md", {"type": "Role"}) is True
+        assert _ignorable("index.md", {"type": "RolesIndex"}) is True
+    finally:
+        generation.INVENTORY_PREFIXES.clear()
+        generation.INVENTORY_PREFIXES.update(original)
+
+
+def test_an_unknown_section_has_no_marker_and_classifies_nothing():
+    assert generation._section_marker("no-such-section") == ""
+    assert generation.canonical_inventory_document(
+        "no-such-section", "team/fulcra/roles/coord-boss.md", {"type": "Role"},
+    ) is False

@@ -62,32 +62,57 @@ def _canonical_filename(value: str) -> bool:
     return _CANONICAL_FILENAME.fullmatch(value) is not None
 
 
+def _section_marker(section: str) -> str:
+    """The path fragment that separates a team prefix from a section-relative
+    path, always slash-terminated.
+
+    Every classifier here splits on this fragment and reads what follows as the
+    relative path, so a value in ``INVENTORY_PREFIXES`` that lost its trailing
+    slash would not fail — it would silently shift every relative path by the
+    missing characters (``"roles"`` turns ``roles/x.md`` into a relative
+    ``"/x.md"``) and quietly reclassify a whole section. Normalising here means
+    the table can be edited without knowing that coupling.
+    """
+    relative_prefix = INVENTORY_PREFIXES.get(section)
+    if not relative_prefix:
+        return ""
+    return "/" + relative_prefix.strip("/") + "/"
+
+
 #: Files that legitimately live inside an inventory tree without BEING
 #: inventory. They are skipped by the tree reader rather than failing the
 #: section — a distinction that costs nothing for real corruption (which stays
 #: fail-closed) and prevents a documented-optional courtesy file from keeping
 #: every fold in the fleet stale.
 #:
-#: Only ``roles/index.md`` declaring ``type: RolesIndex`` qualifies today. Our
-#: own published ``fulcra-agent-roles`` skill calls that file "optional human
+#: Only the exact top-level path ``roles/index.md`` qualifies today. Our own
+#: published ``fulcra-agent-roles`` skill calls that file "optional human
 #: courtesy", so anyone following our documentation was silently breaking
 #: their own reconcile publication (found 2026-08-30, after weeks of refusals
-#: in team/fulcra). Both the exact top-level path AND the declared type must
-#: match, so a misfiled document cannot hide behind the filename.
+#: in team/fulcra).
+#:
+#: The test is the PATH, not the declared type. The first version of this
+#: predicate also required ``type: RolesIndex``, which left the bug live for
+#: exactly the people it was written for: the skill tells a human to write that
+#: index by hand and never tells them to type it, so an untyped courtesy index
+#: still froze every fold in their fleet. A misfiled document cannot hide
+#: behind the filename anyway, because a document that IS canonical inventory
+#: at this path is never skipped (see the guard below) and everything else at
+#: this one path is, by construction, not inventory.
 def ignorable_inventory_file(
     section: str, path: str, document: Mapping[str, Any],
 ) -> bool:
     """True for a file that is not inventory and must not fail the section."""
     if section != "roles":
         return False
-    relative_prefix = INVENTORY_PREFIXES.get(section)
-    marker = f"/{relative_prefix}" if relative_prefix else ""
+    marker = _section_marker(section)
     if not marker or marker not in path:
         return False
-    relative = path.split(marker, 1)[1]
-    if relative != "index.md":
+    if path.split(marker, 1)[1] != "index.md":
         return False
-    return document.get("type") == "RolesIndex"
+    # Inventory always wins: were a role ever legitimately named "index", its
+    # definition would classify here and must be folded, not skipped.
+    return not canonical_inventory_document(section, path, document)
 
 
 def canonical_inventory_document(
@@ -95,8 +120,7 @@ def canonical_inventory_document(
 ) -> bool:
     """One path-and-semantic classifier shared by writers and readers."""
     doc_type = document.get("type")
-    relative_prefix = INVENTORY_PREFIXES.get(section)
-    marker = f"/{relative_prefix}" if relative_prefix else ""
+    marker = _section_marker(section)
     if not marker or marker not in path:
         return False
     relative = path.split(marker, 1)[1]
