@@ -2222,7 +2222,63 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 3
     print(f"review conclude: {args.slug} CONCLUDED on {len(verdicts)} verdict(s)")
+    _close_review_request_rows(
+        transport, args.team, args.slug,
+        why=(f"review concluded on {len(verdicts)} verdict(s); terminal marker "
+             f"{review_gc.CONCLUDED_MARKER} written and read back"),
+        agent=getattr(args, "sender", None))
     return 0
+
+
+def _close_review_request_rows(transport: Any, team: str, slug: str, *,
+                               why: str, agent: "Optional[str]") -> None:
+    """Close the review-request rows for a slug whose review just concluded.
+
+    SETTLE-TIME CLOSE. The divergence between a finished review and an open
+    request row is what the residue sweep exists to clean up; the cheapest place
+    to never open it is here, the moment a DECISION verb records a terminal
+    marker. Only the decision verbs call this. The fold and projection settle
+    writers are CACHES in build paths that must not mutate task state, so their
+    rows stay the scheduled sweep's job.
+
+    Best-effort and LOUD. The marker is the durable truth and the rows are
+    bookkeeping, so a failure here must not fail the closure the caller just
+    verified — but a SILENT failure rebuilds the exact backlog this exists to
+    prevent, so every failure prints and names the recovery.
+    """
+    from . import model
+
+    try:
+        rows, ok, reason = _load_rows_status(transport, team)
+    except TransportError as e:
+        print(f"review rows unreadable ({type(e).__name__}) — {slug} is closed "
+              f"but its request row(s) are NOT; run `review sweep {team}` later",
+              file=sys.stderr)
+        return
+    if not ok:
+        print(f"review rows DEGRADED ({reason}) — {slug} is closed but its "
+              f"request row(s) are NOT; run `review sweep {team}` later",
+              file=sys.stderr)
+        return
+
+    wanted = _REVIEW_REQUEST_TITLE_PREFIX + slug
+    closed = failed = 0
+    for r in rows or []:
+        if str(r.get("title") or "").strip() != wanted:
+            continue
+        if r.get("status") not in model.OPEN_STATUSES:
+            continue
+        ns = argparse.Namespace(team=team, name=str(r.get("id") or ""),
+                                evidence=why, agent=agent)
+        if cmd_task_done(ns, transport) == 0:
+            closed += 1
+        else:
+            failed += 1
+    if failed:
+        print(f"{failed} review-request row(s) for {slug} did NOT close; "
+              f"run `review sweep {team}` to finish", file=sys.stderr)
+    if closed:
+        print(f"  closed {closed} review-request row(s) for {slug}")
 
 
 def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
@@ -2315,6 +2371,11 @@ def cmd_review_close(args: argparse.Namespace, transport: Any) -> int:
             return 1
     print(f"review close: {slug} closed as MERGED at {sha[:12]} "
           f"(marker {path})")
+    _close_review_request_rows(
+        transport, args.team, slug,
+        why=(f"review closed as MERGED at {sha[:12]}; settle marker written "
+             f"and verified field-by-field against what was requested"),
+        agent=getattr(args, "sender", None))
     return 0
 
 
