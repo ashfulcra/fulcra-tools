@@ -1065,6 +1065,21 @@ it (not on PyPI).
     the pre-2026-08-21 code said the same thing in a comment. The fix is upstream: two
     echo fields on the `data-updates` response. Until then, budget every fold for a full
     scan and never read "incremental" in this document as a description of production.
+  - **Correction, same day, 2026-09-01: the missing window is SURVIVABLE, and the upstream
+    fields are no longer the leading fix.** `0dae562d` added an escape hatch — the named
+    boundary/frontier UNKNOWN family triggers a canonical recovery scan **when a prior proven
+    watermark exists**, preserving that watermark; every other detector UNKNOWN stays
+    fail-closed. So the correct statement is not "2.0.x cannot reconcile against the current
+    API" but "2.0.x cannot reconcile when the envelope window is missing AND no prior cursor
+    watermark is available on that pass". Measured both sides on the same store the same day:
+    this container took the recovery branch (`named detector recovery full scan`, watermark
+    `2026-09-01T09:00:45Z`) and PUBLISHED generation `078d2e60`; a second host aborted 167
+    consecutive passes on `change detection UNKNOWN` while the store carried a usable
+    `reconcile_cursor` watermark. One genuine deadlock survives: a host with NO prior watermark
+    can never obtain one, because obtaining one needs a trusted batch which needs the absent
+    fields — a **cold-start trap**, not a total outage. Do not pin back to "before the
+    requirement" to escape this; `0dae562d` is the recovery, and removing it makes a stuck host
+    strictly worse.
   - **summaries.json is one shared doc written by many hosts at many versions — a top-level key
     added in version N is wiped by any host older than N**, which rebuilds the document from the
     key set it knows and writes it over everyone else's (this is how `acks_folded_through` kept
