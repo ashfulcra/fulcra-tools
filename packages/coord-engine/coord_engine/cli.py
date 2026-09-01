@@ -2167,12 +2167,35 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
     #
     # Fails CLOSED. A candidate we cannot read or parse is not evidence of a
     # review, and this is the write that ends a row's life.
+    # HEAD-SCOPED VERDICTS COUNT ON AN UNBOUND REVIEW (coord-boss ruling
+    # `three-rulings-your-withdrawal-is-half-right-and-i-measured-which-half-hold-the-b-804e53c7`).
+    # codex-reviewer's old-head guard is SUPERSEDED FOR UNBOUND ROWS ONLY; it
+    # keeps its teeth on bound rows and its reproduction still asserts there.
+    # The gate used to ask `parse_verdict_filename(name, head=None)`, which
+    # returns None for a name that CARRIES a head — so it failed closed on MORE
+    # information than it asked for, and called a review with five verdicts
+    # "abandonment, no applicable verdict". A verdict naming the exact head it
+    # reviewed is strictly better evidence than one naming nothing; refusing it
+    # punished the reviewer for being more precise than the request.
+    #
+    # This widens which NAMES are candidates. It does not weaken 643 r2: every
+    # candidate is still READ, must still carry a recognized verdict and a
+    # reviewer, and an unrelated `notes.md` is still rejected — by its contents,
+    # exactly as before.
     verdicts: list[str] = []
     unreadable: list[str] = []
+    heads_seen: list[str] = []
     for name in sorted(n for n in names if n.endswith(".md")):
         parsed = review.parse_verdict_filename(name)
+        name_head = None
         if parsed is None:
-            continue                      # head-scoped, or not a verdict name
+            stem = name[:-3]
+            name_head = (review.normalize_head(stem.split("--", 1)[0])
+                         if "--" in stem else None)
+            if name_head:
+                parsed = review.parse_verdict_filename(name, head=name_head)
+        if parsed is None:
+            continue                      # not a verdict name in either form
         reviewer = parsed[0]
         raw = transport.read(prefix + name)
         if raw is None:
@@ -2184,6 +2207,13 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
         if not (vfm.get("reviewer") or reviewer):
             continue                      # no reviewer identity to credit
         verdicts.append(name)
+        # RECORD THE HEAD WE ACTUALLY FOUND. The document is the evidence, so
+        # its own `head:` wins; the filename is only the fallback. Without this
+        # the conclusion says "concluded on N verdicts" and names nothing an
+        # auditor could check it against.
+        vhead = review.normalize_head(vfm.get("head")) or name_head
+        if vhead and vhead not in heads_seen:
+            heads_seen.append(vhead)
 
     if unreadable:
         print(f"review conclude: {len(unreadable)} candidate shard(s) in "
@@ -2202,6 +2232,7 @@ def cmd_review_conclude(args: argparse.Namespace, transport: Any) -> int:
         "schema": "review-concluded/v1",
         "state": "CONCLUDED",
         "verdicts": sorted(verdicts),
+        **({"heads": sorted(heads_seen)} if heads_seen else {}),
         "closed_by": args.sender or _human(),
         "reason": args.reason or ("review concluded; head unbound and no merge "
                                   "evidence available to bind a closure to"),

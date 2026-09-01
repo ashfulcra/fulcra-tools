@@ -1192,11 +1192,27 @@ def test_conclude_REFUSES_a_row_whose_head_is_BOUND():
     assert _conclude(t) == 2 and not t.written, "it concluded a bound-head row"
 
 
-def test_conclude_REFUSES_when_only_an_OLD_HEAD_shard_exists():
-    """The reproduction codex ran: `old-head--codex-reviewer.md` is scoped to a
-    head this row does not have, so it cannot be the verdict that concluded it.
-    Counting it lets a stale shard stand in for work nobody did."""
-    t = _ConcT([("b" * 40) + "--codex-reviewer.md"], V1_DOC)
+def test_conclude_REFUSES_an_OLD_HEAD_shard_on_a_BOUND_row():
+    """codex-reviewer's guard, NARROWED — not withdrawn.
+
+    The reproduction codex ran, in its original words: `old-head--codex-reviewer.md`
+    is scoped to a head this row does not have, so it cannot be the verdict that
+    concluded it; counting it lets a stale shard stand in for work nobody did.
+    That defect was real and this assertion is the one that recorded it.
+
+    It is now **SUPERSEDED FOR UNBOUND ROWS ONLY** (coord-boss,
+    `three-rulings-your-withdrawal-is-half-right-and-i-measured-which-half-hold-the-b-804e53c7`).
+    On a row with NO head, "a head this row does not have" is true of EVERY head,
+    so staleness is a comparison with nothing to compare against — and the verb
+    was calling five real verdicts "abandonment" on that basis. Where the
+    comparison IS meaningful, this test: the row HAS a head, the shard names a
+    different one, and conclude still refuses. The guard keeps its teeth exactly
+    where its reproduction had them.
+
+    The unbound half now concludes, and is pinned in
+    `tests/test_conclude_head_scoped.py`.
+    """
+    t = _ConcT([("b" * 40) + "--codex-reviewer.md"], V2_DOC)
     assert _conclude(t) == 2 and not t.written, "an old-head shard was counted"
 
 
