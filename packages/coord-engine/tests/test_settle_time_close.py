@@ -122,7 +122,7 @@ def test_a_degraded_rows_fold_closes_nothing_and_says_so(
     assert cli.cmd_review_close(_close_args(), _with_review(FakeTransport())) == 0
     assert wired == [], "a partial view of the rows must close none of them"
     err = capsys.readouterr().err
-    assert "review sweep" in err, "a silent skip rebuilds the backlog"
+    assert "review residue" in err, "a silent skip rebuilds the backlog"
 
 
 def test_unreadable_rows_do_not_fail_the_verified_closure(
@@ -133,7 +133,7 @@ def test_unreadable_rows_do_not_fail_the_verified_closure(
     rc = cli.cmd_review_close(_close_args(), _with_review(FakeTransport()))
     assert rc == 0, ("the marker is the durable truth and it was verified; "
                      "bookkeeping must not fail a real closure")
-    assert "review sweep" in capsys.readouterr().err
+    assert "review residue" in capsys.readouterr().err
 
 
 def test_a_failed_row_close_is_loud_and_still_does_not_fail_the_verb(

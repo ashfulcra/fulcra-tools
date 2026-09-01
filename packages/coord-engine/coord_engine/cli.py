@@ -2252,12 +2252,12 @@ def _close_review_request_rows(transport: Any, team: str, slug: str, *,
         rows, ok, reason = _load_rows_status(transport, team)
     except TransportError as e:
         print(f"review rows unreadable ({type(e).__name__}) — {slug} is closed "
-              f"but its request row(s) are NOT; run `review sweep {team}` later",
+              f"but its request row(s) are NOT; run `review residue {team}` later",
               file=sys.stderr)
         return
     if not ok:
         print(f"review rows DEGRADED ({reason}) — {slug} is closed but its "
-              f"request row(s) are NOT; run `review sweep {team}` later",
+              f"request row(s) are NOT; run `review residue {team}` later",
               file=sys.stderr)
         return
 
@@ -2276,7 +2276,7 @@ def _close_review_request_rows(transport: Any, team: str, slug: str, *,
             failed += 1
     if failed:
         print(f"{failed} review-request row(s) for {slug} did NOT close; "
-              f"run `review sweep {team}` to finish", file=sys.stderr)
+              f"run `review residue {team}` to finish", file=sys.stderr)
     if closed:
         print(f"  closed {closed} review-request row(s) for {slug}")
 
@@ -12532,7 +12532,7 @@ def build_parser() -> argparse.ArgumentParser:
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
     rvw = rvsub.add_parser(
-        "sweep",
+        "residue",
         help="close review-request rows whose review already reached a "
              "terminal state (DRY RUN by default)")
     rvw.add_argument("team")
@@ -12541,7 +12541,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "prints what it would close")
     rvw.add_argument("--agent", "-a", default=None,
                      help="closing identity for the close events")
-    rvw.set_defaults(func=cmd_review_sweep)
+    rvw.set_defaults(func=cmd_review_residue)
     rvv = rvsub.add_parser(
         "verdict", help="file YOUR verdict for a review round (writes the same "
                         "canonical shard `review request` prints)")
@@ -13351,7 +13351,7 @@ def _sweep_one(transport: Any, team: str, slug: str) -> "review_gc.Disposition":
         entries = transport.list_dir(_verdicts_prefix(team, slug))
     except TransportError:
         return review_gc.Disposition(
-            review_gc.SWEEP_UNKNOWN, "listing-raised",
+            review_gc.RESIDUE_UNKNOWN, "listing-raised",
             "verdicts listing raised — closes nothing")
     names = {(e.get("name") or "") for e in (entries or [])}
     fm: Any = None
@@ -13361,13 +13361,13 @@ def _sweep_one(transport: Any, team: str, slug: str) -> "review_gc.Disposition":
                 transport.read(_settled_marker_path(team, slug))) or {}
         except TransportError:
             return review_gc.Disposition(
-                review_gc.SWEEP_UNKNOWN, "marker-unreadable",
+                review_gc.RESIDUE_UNKNOWN, "marker-unreadable",
                 "settle marker unreadable — closes nothing")
-    return review_gc.sweep_disposition(
+    return review_gc.residue_disposition(
         names, settled_marker=SETTLED_MARKER, marker_fm=fm)
 
 
-def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
+def cmd_review_residue(args: argparse.Namespace, transport: Any) -> int:
     """Close review-request rows whose review already reached a terminal state.
 
     DRY RUN unless ``--apply``. This is not a one-time backfill: a review that
@@ -13381,7 +13381,7 @@ def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
     if not ok:
         # A partial view of the rows cannot tell a closed row from an unread
         # one, and this verb closes things. UNKNOWN is not empty.
-        print(f"review sweep: rows fold DEGRADED ({reason}) — refusing to "
+        print(f"review residue: rows fold DEGRADED ({reason}) — refusing to "
               f"close anything on a partial view", file=sys.stderr)
         return 2
 
@@ -13401,11 +13401,11 @@ def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
         d = _sweep_one(transport, args.team, slug)
         buckets.setdefault(d.kind, []).append(
             (str(r.get("id") or ""), slug, d.why))
-        if d.kind == review_gc.SWEEP_CLOSE:
+        if d.kind == review_gc.RESIDUE_CLOSE:
             by_answer[d.answer] = by_answer.get(d.answer, 0) + 1
 
-    closable = buckets.get(review_gc.SWEEP_CLOSE, [])
-    print(f"review sweep [{'APPLY' if args.apply else 'DRY RUN'}] team={args.team}")
+    closable = buckets.get(review_gc.RESIDUE_CLOSE, [])
+    print(f"review residue [{'APPLY' if args.apply else 'DRY RUN'}] team={args.team}")
     # A MEASURED POPULATION, EVERY RUN. A sweep with nothing to close and a
     # sweep that has stopped detecting print the same `closed 0` otherwise, and
     # this fleet has shipped that shape three times in one week. The scanned
@@ -13415,16 +13415,16 @@ def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
     if by_answer:
         detail = "  ".join(f"{k}={v}" for k, v in sorted(by_answer.items()))
         print(f"      by answer       : {detail}")
-    for key, label in ((review_gc.SWEEP_UNRESOLVED, "unresolved-marker"),
-                       (review_gc.SWEEP_UNKNOWN_PROVENANCE, "unknown-provenance"),
-                       (review_gc.SWEEP_UNKNOWN, "UNKNOWN")):
+    for key, label in ((review_gc.RESIDUE_UNRESOLVED, "unresolved-marker"),
+                       (review_gc.RESIDUE_UNKNOWN_PROVENANCE, "unknown-provenance"),
+                       (review_gc.RESIDUE_UNKNOWN, "UNKNOWN")):
         items = buckets.get(key, [])
         # NAMED, NEVER COUNTED. A shrinking count is indistinguishable from a
         # detector that stopped detecting; a named list is auditable.
         print(f"  {label:20s}: {len(items)}")
         for _rid, slug, why in sorted(items, key=lambda t: t[1]):
             print(f"      - {slug} — {why}")
-    print(f"  genuinely open      : {len(buckets.get(review_gc.SWEEP_OPEN, []))}")
+    print(f"  genuinely open      : {len(buckets.get(review_gc.RESIDUE_OPEN, []))}")
 
     if not args.apply:
         for _rid, slug, why in sorted(closable, key=lambda t: t[1]):
