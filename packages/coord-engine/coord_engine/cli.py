@@ -12470,6 +12470,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "never retired. Defaults to the origin remote.")
     rvg.add_argument("--from", dest="sender", help="acting agent (for the marker)")
     rvg.set_defaults(func=cmd_review_gc)
+    rvw = rvsub.add_parser(
+        "sweep",
+        help="close review-request rows whose review already reached a "
+             "terminal state (DRY RUN by default)")
+    rvw.add_argument("team")
+    rvw.add_argument("--apply", action="store_true",
+                     help="actually close the rows; without it sweep only "
+                          "prints what it would close")
+    rvw.add_argument("--agent", "-a", default=None,
+                     help="closing identity for the close events")
+    rvw.set_defaults(func=cmd_review_sweep)
     rvv = rvsub.add_parser(
         "verdict", help="file YOUR verdict for a review round (writes the same "
                         "canonical shard `review request` prints)")
@@ -13271,3 +13282,86 @@ _ACTIVITY_READ_FUNCS = _ACTIVITY_READ_FUNCS | frozenset({
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main(sys.argv[1:]))
+
+
+def _sweep_one(transport: Any, team: str, slug: str) -> "tuple[str, str]":
+    """Disposition for ONE review slug. Transport failure is UNKNOWN, not empty."""
+    try:
+        entries = transport.list_dir(_verdicts_prefix(team, slug))
+    except TransportError:
+        return review_gc.SWEEP_UNKNOWN, "verdicts listing raised — closes nothing"
+    names = {(e.get("name") or "") for e in (entries or [])}
+    fm: Any = None
+    if SETTLED_MARKER in names:
+        try:
+            fm = okf.parse_frontmatter(
+                transport.read(_settled_marker_path(team, slug))) or {}
+        except TransportError:
+            return (review_gc.SWEEP_UNKNOWN,
+                    "settle marker unreadable — closes nothing")
+    return review_gc.sweep_disposition(
+        names, settled_marker=SETTLED_MARKER, marker_fm=fm)
+
+
+def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
+    """Close review-request rows whose review already reached a terminal state.
+
+    DRY RUN unless ``--apply``. This is not a one-time backfill: a review that
+    settles through the fold's APPROVED cache is settled by a pure build path
+    that must not mutate task state, so nothing closes those rows at settle
+    time and new ones appear for as long as reviews get approved.
+    """
+    rows, ok, reason = _load_rows_status(transport, args.team)
+    if not ok:
+        # A partial view of the rows cannot tell a closed row from an unread
+        # one, and this verb closes things. UNKNOWN is not empty.
+        print(f"review sweep: rows fold DEGRADED ({reason}) — refusing to "
+              f"close anything on a partial view", file=sys.stderr)
+        return 2
+
+    buckets: "dict[str, list[tuple[str, str, str]]]" = {}
+    for r in rows or []:
+        if r.get("status") not in model.OPEN_STATUSES:
+            continue
+        title = str(r.get("title") or "")
+        if not title.startswith(_REVIEW_REQUEST_TITLE_PREFIX):
+            continue
+        slug = title[len(_REVIEW_REQUEST_TITLE_PREFIX):].strip()
+        if not slug:
+            continue
+        disposition, why = _sweep_one(transport, args.team, slug)
+        buckets.setdefault(disposition, []).append(
+            (str(r.get("id") or ""), slug, why))
+
+    closable = buckets.get(review_gc.SWEEP_CLOSE, [])
+    print(f"review sweep [{'APPLY' if args.apply else 'DRY RUN'}] team={args.team}")
+    print(f"  closable            : {len(closable)}")
+    for key, label in ((review_gc.SWEEP_UNRESOLVED, "unresolved-marker"),
+                       (review_gc.SWEEP_UNKNOWN_PROVENANCE, "unknown-provenance"),
+                       (review_gc.SWEEP_UNKNOWN, "UNKNOWN")):
+        items = buckets.get(key, [])
+        # NAMED, NEVER COUNTED. A shrinking count is indistinguishable from a
+        # detector that stopped detecting; a named list is auditable.
+        print(f"  {label:20s}: {len(items)}")
+        for _rid, slug, why in sorted(items, key=lambda t: t[1]):
+            print(f"      - {slug} — {why}")
+    print(f"  genuinely open      : {len(buckets.get(review_gc.SWEEP_OPEN, []))}")
+
+    if not args.apply:
+        for _rid, slug, why in sorted(closable, key=lambda t: t[1]):
+            print(f"  would close: {slug} — {why}")
+        return 0
+
+    failed = 0
+    for rid, slug, why in sorted(closable, key=lambda t: t[1]):
+        ns = argparse.Namespace(
+            team=args.team, name=rid,
+            evidence=f"residue sweep: {why}",
+            agent=getattr(args, "agent", None))
+        # Reuse `task done` rather than reimplementing it: it refuses a ghost
+        # close on a failed write and emits the close companion, and a sweep
+        # that skipped either would be a bulk version of both bugs.
+        if cmd_task_done(ns, transport) != 0:
+            failed += 1
+    print(f"  closed {len(closable) - failed}, FAILED {failed}")
+    return 1 if failed else 0

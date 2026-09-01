@@ -65,7 +65,7 @@ EXPECTED_WRITES = {
     "cmd_task_supersede",
     "cmd_review_request", "cmd_review_restore", "cmd_review_close",
     "cmd_review_conclude",
-    "cmd_review_gc",
+    "cmd_review_gc", "cmd_review_sweep",
     # Added 2026-08-10. This test flagged it as unclassified the moment the verb
     # existed, which is the whole design: filing a verdict now counts as
     # activity by default rather than by anyone remembering.
