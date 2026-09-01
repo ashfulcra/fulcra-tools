@@ -1350,6 +1350,35 @@ before writing the file. `coord-engine` keeps working through such a break
 only if a token reaches it another way — do not read its survival as proof
 the credentials file is fine.
 
+### Two `coord-engine` installs, and only one of them can publish
+
+A coord container can carry the engine twice, and `which coord-engine` finds
+the wrong one for publication:
+
+- `/root/.local/bin/coord-engine` — the **uv tool** install, pinned. Its
+  `dist-info/direct_url.json` names the exact commit it was built from
+  (measured 2026-09-01: `985a4be36a29e3e0fcc3065e729d96b3a4604c8d`). This is
+  what `adopt-latest.sh` installs and what `doctor --self` reports on, so it
+  is the right thing for every routine bus command — and it is *behind* any
+  fix that has not been pinned yet.
+- `<repo>/.venv/bin/coord-engine` — the **editable** install, importing
+  straight out of `packages/coord-engine/coord_engine/`. It carries whatever
+  is in the working tree, including unpinned fixes.
+
+`doctor --self` reporting `CURRENT` says the pinned tool matches the fleet
+version fence. It says nothing about whether that build contains a fix you
+made an hour ago. Test the loaded module, never the version string:
+
+```
+/root/.local/share/uv/tools/coord-engine/bin/python3 -c \
+  "import coord_engine.generation as g; print(g.__file__, hasattr(g,'<symbol>'))"
+```
+
+Consequence, earned 2026-09-01: while a publication fix is unpinned, only the
+editable engine can advance the projections generation. Running `reconcile`
+through the PATH engine reproduces the same refusal every other host is
+already producing, and looks like the fix failed.
+
 ### Environment facts are captured facts
 
 An environment fact — which variable, which host, which account, which of
