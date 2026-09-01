@@ -13284,12 +13284,14 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main(sys.argv[1:]))
 
 
-def _sweep_one(transport: Any, team: str, slug: str) -> "tuple[str, str]":
+def _sweep_one(transport: Any, team: str, slug: str) -> "review_gc.Disposition":
     """Disposition for ONE review slug. Transport failure is UNKNOWN, not empty."""
     try:
         entries = transport.list_dir(_verdicts_prefix(team, slug))
     except TransportError:
-        return review_gc.SWEEP_UNKNOWN, "verdicts listing raised — closes nothing"
+        return review_gc.Disposition(
+            review_gc.SWEEP_UNKNOWN, "listing-raised",
+            "verdicts listing raised — closes nothing")
     names = {(e.get("name") or "") for e in (entries or [])}
     fm: Any = None
     if SETTLED_MARKER in names:
@@ -13297,8 +13299,9 @@ def _sweep_one(transport: Any, team: str, slug: str) -> "tuple[str, str]":
             fm = okf.parse_frontmatter(
                 transport.read(_settled_marker_path(team, slug))) or {}
         except TransportError:
-            return (review_gc.SWEEP_UNKNOWN,
-                    "settle marker unreadable — closes nothing")
+            return review_gc.Disposition(
+                review_gc.SWEEP_UNKNOWN, "marker-unreadable",
+                "settle marker unreadable — closes nothing")
     return review_gc.sweep_disposition(
         names, settled_marker=SETTLED_MARKER, marker_fm=fm)
 
@@ -13311,6 +13314,8 @@ def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
     that must not mutate task state, so nothing closes those rows at settle
     time and new ones appear for as long as reviews get approved.
     """
+    from . import model
+
     rows, ok, reason = _load_rows_status(transport, args.team)
     if not ok:
         # A partial view of the rows cannot tell a closed row from an unread
@@ -13320,6 +13325,8 @@ def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
         return 2
 
     buckets: "dict[str, list[tuple[str, str, str]]]" = {}
+    by_answer: "dict[str, int]" = {}
+    scanned = 0
     for r in rows or []:
         if r.get("status") not in model.OPEN_STATUSES:
             continue
@@ -13329,13 +13336,24 @@ def cmd_review_sweep(args: argparse.Namespace, transport: Any) -> int:
         slug = title[len(_REVIEW_REQUEST_TITLE_PREFIX):].strip()
         if not slug:
             continue
-        disposition, why = _sweep_one(transport, args.team, slug)
-        buckets.setdefault(disposition, []).append(
-            (str(r.get("id") or ""), slug, why))
+        scanned += 1
+        d = _sweep_one(transport, args.team, slug)
+        buckets.setdefault(d.kind, []).append(
+            (str(r.get("id") or ""), slug, d.why))
+        if d.kind == review_gc.SWEEP_CLOSE:
+            by_answer[d.answer] = by_answer.get(d.answer, 0) + 1
 
     closable = buckets.get(review_gc.SWEEP_CLOSE, [])
     print(f"review sweep [{'APPLY' if args.apply else 'DRY RUN'}] team={args.team}")
+    # A MEASURED POPULATION, EVERY RUN. A sweep with nothing to close and a
+    # sweep that has stopped detecting print the same `closed 0` otherwise, and
+    # this fleet has shipped that shape three times in one week. The scanned
+    # count is the quantity that separates them.
+    print(f"  scanned             : {scanned} open review-request row(s)")
     print(f"  closable            : {len(closable)}")
+    if by_answer:
+        detail = "  ".join(f"{k}={v}" for k, v in sorted(by_answer.items()))
+        print(f"      by answer       : {detail}")
     for key, label in ((review_gc.SWEEP_UNRESOLVED, "unresolved-marker"),
                        (review_gc.SWEEP_UNKNOWN_PROVENANCE, "unknown-provenance"),
                        (review_gc.SWEEP_UNKNOWN, "UNKNOWN")):

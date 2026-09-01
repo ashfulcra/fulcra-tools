@@ -286,9 +286,21 @@ SWEEP_UNKNOWN_PROVENANCE = "unknown-provenance"
 SWEEP_UNKNOWN = "unknown"
 
 
+class Disposition(NamedTuple):
+    """What the sweep may do with one row, WHY, and the machine-readable answer.
+
+    ``answer`` exists so a scheduled run can report closures split by cause
+    without parsing its own prose. A detector that reports only a total cannot
+    be told apart from a detector that stopped detecting.
+    """
+    kind: str
+    answer: str
+    why: str
+
+
 def sweep_disposition(names: Any, *, settled_marker: str,
                       marker_fm: Any = None,
-                      listing_ok: bool = True) -> "tuple[str, str]":
+                      listing_ok: bool = True) -> "Disposition":
     """What a residue sweep may do with ONE review-request row, and why.
 
     ONE decision function, for the same reason :data:`TERMINAL_MARKERS` is a set.
@@ -311,27 +323,32 @@ def sweep_disposition(names: Any, *, settled_marker: str,
     from . import review
 
     if not listing_ok:
-        return SWEEP_UNKNOWN, "verdicts listing unreadable — closes nothing"
+        return Disposition(SWEEP_UNKNOWN, "unreadable",
+                           "verdicts listing unreadable — closes nothing")
     try:
         settled_present = settled_marker in (names or [])
     except TypeError:
-        return SWEEP_UNKNOWN, "verdicts listing not enumerable — closes nothing"
+        return Disposition(SWEEP_UNKNOWN, "not-enumerable",
+                           "verdicts listing not enumerable — closes nothing")
 
     if is_terminal(names):
         found = ", ".join(sorted(m for m in TERMINAL_MARKERS if m in names))
-        return SWEEP_CLOSE, f"terminal marker present: {found}"
+        return Disposition(SWEEP_CLOSE, found,
+                           f"terminal marker present: {found}")
 
     if not settled_present:
-        return SWEEP_OPEN, "no terminal marker and no settle marker"
+        return Disposition(SWEEP_OPEN, "none",
+                           "no terminal marker and no settle marker")
 
     fm = marker_fm if isinstance(marker_fm, dict) else {}
     answer = review.settle_shortcircuit(fm, names)
     if answer == review.SETTLE_MERGED:
-        return SWEEP_CLOSE, "settled: merged — merge evidence, unconditional"
+        return Disposition(SWEEP_CLOSE, answer,
+                           "settled: merged — merge evidence, unconditional")
     if answer == review.SETTLE_CACHE:
-        return (SWEEP_CLOSE,
-                "settled: cache — evidence digest recomputed over the current "
-                "listing and matched")
+        return Disposition(SWEEP_CLOSE, answer,
+                           "settled: cache — evidence digest recomputed over "
+                           "the current listing and matched")
 
     # SETTLE_NO from here. One of its causes is not a stale marker at all: a
     # marker with an APPROVED state and NO ``evidence`` KEY cannot have been
@@ -340,8 +357,9 @@ def sweep_disposition(names: Any, *, settled_marker: str,
     # provenance is quarantined rather than merely unresolved: no automation
     # closes a row behind a marker nothing in this codebase could have written.
     if str(fm.get("state") or "") == review.APPROVED and "evidence" not in fm:
-        return (SWEEP_UNKNOWN_PROVENANCE,
-                "APPROVED marker carrying no evidence KEY — not producible by "
-                "any engine write path; provenance unknown, quarantined")
-    return (SWEEP_UNRESOLVED,
-            "settle marker present but does not license a skip")
+        return Disposition(SWEEP_UNKNOWN_PROVENANCE, "no-evidence-key",
+                           "APPROVED marker carrying no evidence KEY — not "
+                           "producible by any engine write path; provenance "
+                           "unknown, quarantined")
+    return Disposition(SWEEP_UNRESOLVED, answer,
+                       "settle marker present but does not license a skip")
