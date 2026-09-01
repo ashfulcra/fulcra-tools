@@ -1051,6 +1051,20 @@ it (not on PyPI).
     reconcile fast path keeps the periodic drift check, restricts recovery to that exact reason
     family with a prior proven watermark, and its
     cursor key is cut from `build_aggregate`'s passthrough and recomputed in full every pass.**
+  - **Measured 2026-09-01: that named recovery is not the exception, it is every pass.**
+    `ChangeDetector.poll` requires the `data-updates` envelope to attest its own window
+    (`after` = the requested boundary, `through` = the coverage frontier). The Fulcra
+    platform does not emit them: `fulcra_api.core.data_updates` is documented as returning
+    exactly two keys, `data_types` and `file_changes`, and a live poll against
+    `team/fulcra` returns `trusted=False`, `reason="data-updates coverage boundary
+    unavailable or unparseable"`, with all thirteen namespaces UNKNOWN. So the feed delta
+    above describes a path the fleet has never taken — every host full-scans every pass,
+    which is why `fast_path: false` and a ~4-minute review projection are the normal
+    reading on all three reconcile hosts. This is fail-CLOSED and correct (the detector
+    refuses to invent a frontier from a local clock); it is not a bug to route around, and
+    the pre-2026-08-21 code said the same thing in a comment. The fix is upstream: two
+    echo fields on the `data-updates` response. Until then, budget every fold for a full
+    scan and never read "incremental" in this document as a description of production.
   - **summaries.json is one shared doc written by many hosts at many versions — a top-level key
     added in version N is wiped by any host older than N**, which rebuilds the document from the
     key set it knows and writes it over everyone else's (this is how `acks_folded_through` kept
