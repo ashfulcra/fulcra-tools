@@ -723,6 +723,16 @@ it (not on PyPI).
   fan-out uses `budget.Deadline` for its deadline check (never a hand-rolled
   `time.monotonic() >= deadline`) and `budget.degraded_row` for its marker**, so the whole family
   keeps one `>=` boundary and one degraded shape.
+- **Ship-gate: a verb that mutates durable state does not ship on decision-function tests alone.**
+  It ships with at least one test that invokes the ACTUATOR end to end, or with a recorded live dry
+  run against a real team. `review residue` shipped its decision function under thirteen passing
+  tests while the command itself was dead on a `NameError` — `model` is imported locally in `cli.py`
+  and the verb used it unqualified. Nothing in the suite touched the command, so a green suite sat
+  over a completely broken verb; only running it against the real team found it. A green suite over
+  a broken command is the same false-clear as an empty queue over 257 owed obligations: the
+  instrument answered a question nobody asked. When you add such a test, VERIFY IT DISCRIMINATES —
+  neuter the wiring and watch it fail — because a test that passes either way is the thing it was
+  written to prevent.
 - **The public-read failure contract — UNKNOWN is loud, never a clean-empty.** Every aggregate-backed
   public read (`status`, `board`, `needs-me`, `search`, `inbox`, the `agents`/`digest`/`asks`/
   `briefing` bundles) folds the summaries index via `_load_rows_status`, whose `ok` bit is **False
