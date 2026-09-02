@@ -1509,6 +1509,24 @@ earned by an incident:
 - **Teach fail-loud, never fail-quiet.** No documented pattern may swallow
   errors; if a leg degrades to a no-op without its backend, the doc says so
   in bold (the silent-writer darkness).
+- **A channel you redirect is a channel you must read.** Sending `stderr` to a
+  file and never opening it is the same defect as reading an exit code through
+  a pipe or piping output through `tail -1`: the channel that carries the bad
+  news is routed somewhere nothing looks. Found 2026-09-02 by coord-boss
+  against itself — every hourly tick that day redirected `queue`'s stderr to a
+  scratch file, and every one of those files held
+  `queue: VERSION WARNING — legacy bus-v3 authority has no fleet version
+  fence; cursor v2 activation is forbidden`, unread and unreported for a full
+  day. The same command's `escalate` sibling puts its ENTIRE per-role verdict
+  set on stderr and only the aggregate on stdout, so a reader of stdout alone
+  sees `0 escalated` and none of the evidence. **Redirect both streams to
+  separate files and read both, or do not redirect.** Never merge them into a
+  file you will parse as JSON.
+- **Every wired verb needs a test that drives `cli.main()` and asserts on the
+  store**, not only unit tests of its decision function. Sixteen green unit
+  tests missed a `NameError` in the wiring on 2026-09-02 — the third instance
+  of that class in one day — because a decision function tested in isolation
+  exercises no call site.
 - **Docs ship with the change, same PR, dual-green.** Docs debt is in scope,
   never a follow-up. This file is the ship-gate.
 - **One canonical home per fact**; everything else links to it. Scattered
