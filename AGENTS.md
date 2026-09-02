@@ -248,6 +248,18 @@ under `skills/`, each package with its own README, build, and tests.
   SUPPRESSOR and is never written for a notice that reached nobody, a
   closed-loop role re-surfaces every sweep, `escalate` reports
   `undelivered=N`, and the verb exits 3.
+- **Every wired verb needs at least one test that drives `cli.main()` and
+  asserts on the store** — not only unit tests of its decision function. A
+  decision function tested in isolation exercises no call site, so a defect in
+  the WIRING is invisible to it. Measured cost: three debugging cycles in one
+  day. The clearest instance — `task retire-phantom` had 16 green unit tests
+  while the verb raised `NameError: name 'phantom' is not defined` at its real
+  entry point, because the import had landed inside a *local* `from . import`
+  in another function instead of at module scope. The same shape had already
+  produced a `model` NameError in this file. Unit tests cannot see it; one test
+  calling `cli.main([...])` sees it immediately. Corollary: a decision function
+  that nothing calls is not a shipped capability, however green its tests.
+
 - **`escalate` does not restate a vacancy that is already on the board.** The
   vacancy title embeds the date, so the slug differs every day and the
   `transport.read(dst) is None` check can never match across days; the daily
