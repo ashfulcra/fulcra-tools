@@ -715,6 +715,22 @@ it (not on PyPI).
     verdicts listing, or any shard is unreadable, rather than printing a partial APPROVED — a
     degraded transport can never green-light a merge.
 
+  - **`COORD_REVIEW_FOLD_BUDGET` alone is close to useless — the review leg is clamped by the
+    SHARED briefing budget it inherits.** The fold's own comment says it (*"the tail deliberately
+    inherits the drained shared budget"*), and it is measured: live on a 364-slug board,
+    2.67x the leg's own budget bought 1.47x coverage (36→53 slugs), while holding the leg at 120
+    and raising **only** `COORD_BRIEFING_BUDGET` took 53→104. Raise the shared budget, not the
+    leg's. This is a trap in plain sight: tune the obvious knob in isolation, watch the number
+    barely move, and conclude the fold is broken in some deeper way. Measured 2026-09-02 by
+    coord-maintainer.
+  - **And budget cannot reach completion at all on that board.** At fold 300 / briefing 600 a
+    single `needs-me` pass exceeded a ten-minute ceiling — while the wake loop runs it every tick.
+    **A fold that cannot finish within its own cadence is not fixable by a larger number.** What
+    remains is per-slug COST: settled-skip (a `.settled` marker makes a terminal review cost zero
+    further reads), and, if review counts keep growing, moving the fold to the reconcile pre-fold —
+    which is also the only option that satisfies the zero-enumeration rule. Treat any proposal to
+    raise a budget here as rejected until the terminal-but-unmarked split is measured.
+
   These budgets rest on **hard per-op boundedness**: every transport subprocess runs in its own
   process group and is SIGKILLed whole on timeout; the per-op bound is `COORD_TRANSPORT_TIMEOUT`
   (default 30s) — run it TIGHT on a resident bus reader (e.g. 8s). Every `COORD_*` tuning knob, the
