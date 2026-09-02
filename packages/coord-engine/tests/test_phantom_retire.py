@@ -74,3 +74,55 @@ def test_evidence_is_present_even_when_REFUSING():
 def test_a_missing_control_is_not_treated_as_a_clean_one():
     with pytest.raises(ValueError):
         phantom.retirement_decision(probe=NOT_FOUND, control=None)
+
+
+# --- listing-derived probes: the RAISING listing is the evidence ------------
+#
+# coord-boss: "it needs the raising listing as its evidence, never a falsy read,
+# and it must refuse rather than guess when the control does not come back
+# clean." `transport.read` returns None for BOTH missing and failed — which is
+# why `tell --closes` can only say "absent or unreadable". `list_dir` RAISES on
+# transport failure, so a listing that RETURNS is itself the positive control:
+# it proves the store answered in the same pass that established the absence.
+
+
+def test_a_returned_listing_without_the_slug_is_an_explicit_absence():
+    p = phantom.probe_from_listing(["other-a.md", "other-b.md"], "gone")
+    assert p.found is False
+
+
+def test_a_returned_listing_containing_the_slug_says_present():
+    p = phantom.probe_from_listing(["gone.md", "other.md"], "gone")
+    assert p.found is True
+
+
+def test_an_EMPTY_listing_is_UNKNOWN_not_absence():
+    """An empty task directory on a board with hundreds of tasks is not
+    evidence that one slug is gone — it is evidence something is wrong."""
+    assert phantom.probe_from_listing([], "gone").found is None
+
+
+def test_a_listing_of_None_is_UNKNOWN():
+    assert phantom.probe_from_listing(None, "gone").found is None
+
+
+def test_the_listing_is_its_own_control_when_it_returns_entries():
+    assert phantom.control_from_listing(["a.md"]).found is True
+
+
+def test_an_empty_or_missing_listing_is_NOT_a_clean_control():
+    assert phantom.control_from_listing([]).found is None
+    assert phantom.control_from_listing(None).found is None
+
+
+def test_end_to_end_listing_absence_retires():
+    names = ["kept-a.md", "kept-b.md", "kept-c.md"]
+    d = phantom.retirement_decision(probe=phantom.probe_from_listing(names, "gone"),
+                                    control=phantom.control_from_listing(names))
+    assert d.retire is True
+
+
+def test_end_to_end_empty_listing_REFUSES():
+    d = phantom.retirement_decision(probe=phantom.probe_from_listing([], "gone"),
+                                    control=phantom.control_from_listing([]))
+    assert d.retire is False

@@ -87,3 +87,39 @@ def retirement_decision(*, probe: Probe, control: Probe) -> Decision:
 def _render(p: Probe) -> str:
     state = {True: "FOUND", False: "NOT_FOUND", None: "UNKNOWN"}[p.found]
     return f"{state}({p.detail})" if p.detail else state
+
+
+def probe_from_listing(names: "Optional[list[str]]", slug: str) -> Probe:
+    """Absence derived from a directory LISTING, not from a read.
+
+    ``transport.read`` returns None for BOTH a missing file and a failed read,
+    which is why the existing close path can only report "absent or unreadable".
+    ``list_dir`` RAISES on transport failure, so a listing that RETURNS is
+    evidence the store answered — and membership in it is then decisive.
+
+    An EMPTY listing is UNKNOWN, never absence. An empty task directory on a
+    board carrying hundreds of tasks is not evidence that one slug is gone; it
+    is evidence something is wrong, and treating it as absence would retire
+    every obligation at once. Callers pass ``None`` when the listing raised.
+    """
+    if not names:                      # None (raised) or [] (implausible)
+        return Probe(found=None,
+                     detail="listing empty or unavailable — UNKNOWN, not absence")
+    target = f"{slug}.md"
+    if target in names or slug in names:
+        return Probe(found=True, detail=f"{target} present in listing")
+    return Probe(found=False,
+                 detail=f"{target} absent from a listing of {len(names)} entries")
+
+
+def control_from_listing(names: "Optional[list[str]]") -> Probe:
+    """The listing is its OWN positive control.
+
+    A listing that returned entries proves the store was answering in the SAME
+    pass that established the absence — which is exactly the same-pass control
+    the retirement record has to carry, obtained without a second round trip and
+    without nominating some other document as a canary.
+    """
+    if not names:
+        return Probe(found=None, detail="no entries — store not demonstrably answering")
+    return Probe(found=True, detail=f"listing returned {len(names)} entries")
