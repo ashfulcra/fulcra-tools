@@ -1408,6 +1408,33 @@ editable engine can advance the projections generation. Running `reconcile`
 through the PATH engine reproduces the same refusal every other host is
 already producing, and looks like the fix failed.
 
+### Refreshing the Fulcra token: the expiry must be NAIVE UTC
+
+The four accepted keys are only half the contract. `access_token_expiration` must
+be a **timezone-naive** ISO string in UTC — exactly what the CLI itself writes,
+e.g. `2026-09-02T07:15:57.404995` with no offset. Writing an *aware* value
+(`…+00:00`) is accepted by the file but makes every authenticated call die with
+`Error: can't compare offset-naive and offset-aware datetimes`, because the CLI
+compares it against a naive `utcnow()`. Earned 2026-09-02 doing a routine
+proactive refresh: the grant succeeded, the file had the right four keys, and the
+CLI was still broken until the timestamp shape matched.
+
+The working recipe, end to end:
+
+- endpoint `https://${FULCRA_OIDC_DOMAIN}/oauth/token`, default domain
+  `fulcra.us.auth0.com`; `client_id` from `FULCRA_OIDC_CLIENT_ID`, whose default
+  lives in `fulcra_api/core.py`; `grant_type=refresh_token`.
+- go through the agent proxy (`HTTPS_PROXY`) with the CA bundle at
+  `/root/.ccr/ca-bundle.crt`. Never disable verification.
+- the response **still contains `id_token`** — observed on every refresh so far —
+  so filter to the four keys; see the section above for what happens otherwise.
+- `refresh_token_expiration` is legitimately `None` here; carry it forward rather
+  than inventing one, and reuse the old `refresh_token` when the response omits a
+  new one.
+- back the file up first, and verify with `auth print-access-token` **plus** one
+  authenticated call. `print-access-token` alone is not proof: it reads the file,
+  and the datetime comparison that breaks fails on the *call* path.
+
 ### Environment facts are captured facts
 
 An environment fact — which variable, which host, which account, which of
