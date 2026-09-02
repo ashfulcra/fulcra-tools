@@ -2186,23 +2186,46 @@ def test_briefing_shared_budget_bounds_pending_review_fold(capsys, monkeypatch):
                for r in out["pending_reviews"]), out["pending_reviews"]
 
 
-def test_bundled_review_deadline_retains_reservable_budget(monkeypatch):
-    """The bundled absolute clamp must not disable the classification reserve."""
-    seen = []
-    original = cli.Deadline.reserve
+def test_bundled_clamp_still_bounds_dir_classification(monkeypatch):
+    """The bundled absolute clamp must not let dir classification run unbudgeted.
 
-    def spy_reserve(self, fraction):
-        seen.append(self._budget)
-        return original(self, fraction)
+    RETIRED MECHANISM, PROPERTY KEPT (coord-boss ruling b610f8aa). This was
+    `test_bundled_review_deadline_retains_reservable_budget`, and it SPIED on
+    `Deadline.reserve` to assert the reserve received a budget in (0, 2.0].
+    That was pure mechanism: classification no longer reserves a half of the
+    tail budget at all, because reserving half the tail's budget IS spending the
+    tail's budget — which made tail coverage depend on orphan count.
 
-    monkeypatch.setattr(cli.Deadline, "reserve", spy_reserve)
-    t = FakeTransport()
-    cli._pending_reviews_for(
-        t, "r", "me", deadline_seconds=5.0,
-        deadline=_time.monotonic() + 2.0)
+    Its docstring intent survives and is asserted DIRECTLY here, without naming
+    `reserve`: under a bundled absolute clamp, classification is still bounded,
+    so a degraded transport cannot buy an unbounded run of per-dir listings.
+    """
+    class _Clock(FakeTransport):
+        """Charges fake monotonic time for ghost-dir verdict listings only."""
 
-    assert seen and seen[0] is not None
-    assert 0 < seen[0] <= 2.0
+        def __init__(self):
+            super().__init__()
+            self.clock = 0.0
+            self.ghost_lists: list[str] = []
+
+        def list_dir(self, prefix):
+            if "/verdicts/" in prefix and "ghost-" in prefix:
+                self.ghost_lists.append(prefix)
+                self.clock += 3.0
+            return super().list_dir(prefix)
+
+    t = _Clock()
+    for i in range(6):
+        t.put(f"team/r/review/ghost-{i}/verdicts/keep.md", "---\ntype: Verdict\n---\n")
+    monkeypatch.setattr(cli.budget_mod.time, "monotonic", lambda: t.clock)
+
+    cli._pending_reviews_for(t, "r", "me", deadline_seconds=5.0,
+                             deadline=2.0)   # bundled clamp: 2s remaining
+
+    assert t.ghost_lists, "classification never ran at all — test is vacuous"
+    assert len(t.ghost_lists) < 6, (
+        f"the bundled clamp did not bound classification: {len(t.ghost_lists)} "
+        f"of 6 ghost dirs were listed at 3s each against a 2s clamp")
 
 
 def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):

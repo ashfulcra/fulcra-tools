@@ -1273,16 +1273,32 @@ def test_dir_classification_runs_under_the_fold_budget(capsys, monkeypatch):
     # unclassified. The doc scan then inherits a clock at 6s against the full 8s
     # deadline — room to serve pr-live, deterministically.
     out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=8.0)
+    # SQUEEZE ARITHMETIC RETIRED, SAFETY CLAIM KEPT (coord-boss ruling b610f8aa).
+    # The exact counts above — 4 unclassified, exactly 2 ghost listings — encoded
+    # classification running FIRST on a reserved half of the tail budget. That
+    # reservation was the defect: reserving half the tail's budget IS spending
+    # the tail's budget, and it made tail coverage depend on orphan count
+    # (25/22/17/13 across 0/5/15/30 orphans). Classification now runs on what the
+    # tail leaves over, so the squeeze no longer exists to measure.
+    #
+    # The SAFETY property this test was really about is unchanged and still
+    # asserted below: tombstones on a degraded transport must never buy N x
+    # timeout of unbudgeted listings, and a real pending review must still be
+    # served. Only the arithmetic that assumed the old order is gone.
+    ghost_lists = [p for p in t.lists if "/verdicts/" in p and "ghost-" in p]
+    assert len(ghost_lists) < 6, (
+        "classification ran unbudgeted — six ghost dirs on a degraded transport "
+        "bought N x timeout of listings, which is the thing this test exists to "
+        "prevent")
     agg = [r for r in out if r.get("type") == "review-orphan-degraded"
            and r.get("unclassified")]
-    assert len(agg) == 1 and agg[0]["unclassified"] == 4, \
-        f"breach must emit ONE aggregate unclassified row for the 4 refused, got {out}"
-    ghost_lists = [p for p in t.lists if "/verdicts/" in p and "ghost-" in p]
-    assert len(ghost_lists) < 6, "classification must stop at the deadline, not run out"
-    assert len(ghost_lists) == 2, \
-        f"the reserved 4s half buys 2 x 3s listings, got {len(ghost_lists)}"
+    assert len(agg) == 1, (
+        f"a cut must roll the remaining dirs into ONE aggregate row so the gap "
+        f"stays visible rather than vanishing, got {out}")
     assert any(r.get("type") == "review-pending" and r.get("name") == "pr-live"
-               for r in out), "doc-scan rows must still be served after the breach"
+               for r in out), (
+        "the load-bearing doc scan must still serve a real pending review — now "
+        "guaranteed by ordering rather than squeezed out of a reserved half")
 
 
 def test_review_status_on_tombstone_says_tombstone_not_retry(capsys):
