@@ -204,3 +204,94 @@ def escalation_due(
     # somebody has to answer for; whether it *should* alarm differently is a
     # separate ruling with a real cost, not a side effect of renaming a state.
     return classify(leases, now=now, sla_hours=sla_hours) in (VACANT, LAPSED)
+
+
+#: Title prefix of the ROLE VACANT family. The slug family is a CONTRACT (dedupe
+#: key, existing queries), so this parses the contract rather than replacing it.
+VACANCY_TITLE_PREFIX = "ROLE VACANT "
+
+
+def vacancy_role_of(title: str) -> Optional[str]:
+    """The role a ``ROLE VACANT`` title is about, or None if it is not one.
+
+    Title shape, both variants::
+
+        ROLE VACANT <date>: <role> lease lapsed past <sla>h SLA (attendance UNVERIFIED)
+        ROLE VACANT <date>: <role> UNATTENDED past <sla>h SLA — no holder work found
+
+    The role is the first whitespace-delimited token after ``": "``. Role names
+    contain hyphens but never spaces, so this is EXACT — deliberately not a
+    prefix or substring test. A prefix test would let ``codex-reviewer``
+    suppress ``codex-reviewer-2``; slug-prefix collisions have silently dropped
+    messages on this bus before, and an identity transform used to SUPPRESS an
+    alarm has to be injective or it hides the alarm it was not asked to hide."""
+    if not isinstance(title, str) or not title.startswith(VACANCY_TITLE_PREFIX):
+        return None
+    _, sep, rest = title.partition(": ")
+    if not sep or not rest:
+        return None
+    return rest.split(" ", 1)[0] or None
+
+
+#: Slug form of the same family, as `tasks.new_task_doc` renders it:
+#: ``role-vacant-<yyyy>-<mm>-<dd>-<role>-lease-lapsed-...`` / ``-unattended-...``
+VACANCY_SLUG_PREFIX = "role-vacant-"
+_VACANCY_SLUG_MARKERS = ("-lease-lapsed-", "-unattended-")
+
+
+def vacancy_role_of_slug(slug: str) -> Optional[str]:
+    """The role a ROLE VACANT *slug* is about, or None if it is not one.
+
+    The mint path can enumerate the task directory cheaply but would have to
+    READ every document to see titles, so the guard has to recognise the slug
+    form too. Fixing only the title form would leave the sibling broken in the
+    one place the guard actually runs.
+
+    Role names are already lowercase and hyphenated, so they survive
+    slugification unchanged; the role is the span between the date and the
+    first family marker. Same injectivity requirement as ``vacancy_role_of``:
+    an exact span, never a prefix test."""
+    if not isinstance(slug, str) or not slug.startswith(VACANCY_SLUG_PREFIX):
+        return None
+    rest = slug[len(VACANCY_SLUG_PREFIX):]
+    # strip "yyyy-mm-dd-"
+    if len(rest) < 11 or rest[4] != "-" or rest[7] != "-" or rest[10] != "-":
+        return None
+    rest = rest[11:]
+    cut = min((i for i in (rest.find(m) for m in _VACANCY_SLUG_MARKERS)
+               if i > 0), default=-1)
+    if cut <= 0:
+        return None
+    return rest[:cut] or None
+
+
+def _vacancy_role(identifier: str) -> Optional[str]:
+    """Role behind either representation. Unrecognised input is None, never a
+    guess — a wrong guess here SUPPRESSES an alarm."""
+    return vacancy_role_of(identifier) or vacancy_role_of_slug(identifier)
+
+
+def vacancy_already_open(open_titles: list[str], role: str) -> bool:
+    """True iff a vacancy row for exactly ``role`` is already open.
+
+    STATE-CHANGE TRIGGERING (coord-boss ruling, 2026-09-02). The vacancy title
+    embeds the date, so every sweep mints a NEW slug and cli's existing
+    ``transport.read(dst) is None`` guard can never match across days;
+    ``marker_exists_today`` suppresses only WITHIN a day. Measured consequence:
+    117 open rows carrying 12 distinct facts, growing 2-6 rows/day fleetwide.
+    A standing alarm that restates itself daily trains readers to ignore it —
+    the same failure the ``attended`` tri-state was added to prevent.
+
+    This does NOT silence the first notice for a role. It silences the second
+    and later restatements of a fact already on the board.
+
+    ``open_titles`` of None RAISES. A listing that could not be read is UNKNOWN,
+    and rendering UNKNOWN as "nothing is open" is precisely the decision that
+    mints a row — the caller must confirm absence with a listing that fails
+    loudly, never with a falsy read."""
+    if open_titles is None:
+        raise ValueError(
+            "vacancy_already_open: open_titles is None (UNKNOWN). Refusing to "
+            "treat an unreadable listing as an empty board — confirm absence "
+            "with a raising list, not a falsy read.")
+    return any(_vacancy_role(t) == role for t in open_titles)

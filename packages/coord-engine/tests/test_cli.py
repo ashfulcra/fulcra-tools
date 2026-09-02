@@ -1556,19 +1556,45 @@ def test_cli_escalate_vacant_role_once_per_day(capsys):
     assert "0 escalated" in capsys.readouterr().out
 
 
-def test_cli_escalate_renotifies_next_day_with_new_directive(capsys):
+def test_cli_escalate_does_NOT_remint_while_a_vacancy_row_is_open(capsys):
+    """RETIRED CONTRACT, replaced deliberately (coord-boss ruling 871f06f7).
+
+    This test was `test_cli_escalate_renotifies_next_day_with_new_directive`,
+    and it asserted the opposite: that a second day mints a NEW directive
+    document. It encoded a CONFLATION of two mechanisms that share a name.
+
+    Re-notify is defined in `directives.py` as "a strict filter OVER inbox" —
+    a READ-SIDE fold that writes nothing, where "acking hides an item for that
+    agent and stops re-notify". It re-SURFACES one durable directive until
+    somebody acks it.
+
+    What `escalate` did instead was re-MINT: the title embeds the date and the
+    slug derives from the title, so every sweep wrote a new document. Measured
+    consequence: 117 open ROLE VACANT rows carrying 12 distinct facts, growing
+    2-6 rows/day fleetwide.
+
+    Suppressing the re-mint costs no visibility, which is the whole point: the
+    standing row is unacked, so the fold keeps surfacing it every wake without
+    any new document. The first notice for a role still mints — see
+    `tests/test_vacancy_guard_is_wired.py`, which also covers the closed-loop
+    exemption (a notice addressed to the role's own lapsed holder reached
+    nobody, so there the repeat IS the delivery and the guard stands down).
+    """
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
           "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
-    # day-1 marker from "yesterday" + yesterday's directive already exist
+    # yesterday's marker + yesterday's directive already exist
     t.put("team/r/roles/reviewer/escalations/2026-07-01.md", "---\ntype: Escalation\n---\n")
     t.put("team/r/task/role-vacant-2026-07-01-reviewer-unattended-past-24h-sla.md",
           "---\ntype: Task\ntitle: old\nstatus: proposed\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
-    out = capsys.readouterr().out
-    assert "escalated reviewer -> ash" in out          # a NEW day-scoped directive
-    todays = [p for p in t.store if p.startswith("team/r/task/role-vacant-") and "2026-07-01" not in p]
-    assert len(todays) == 1
+    todays = [p for p in t.store
+              if p.startswith("team/r/task/role-vacant-") and "2026-07-01" not in p]
+    assert todays == [], (
+        "a second document was minted for a vacancy already on the board")
+    assert "ALREADY OPEN" in capsys.readouterr().err, (
+        "the suppressor must announce itself — silence is indistinguishable "
+        "from a sweep that never ran")
 
 
 def test_cli_escalate_held_role_no_escalation(capsys):
