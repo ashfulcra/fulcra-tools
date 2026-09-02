@@ -1448,6 +1448,20 @@ directories — converting a careful reader into a confident wrong one. Found
 entry. Both controls behave there — a present child appears, an absent one does
 not.
 
+**The converse holds, and it is a valid probe:** `file stat` against a **file**
+path is exactly what `stat` addresses, and it *does* discriminate — a present
+file returns bytes plus `Uploaded` plus `Version`, an absent one returns an
+explicit `File not found`, where `file list` could not have answered at all.
+Used that way on 2026-09-02 it separated five phantom obligations from 55 real
+ones. So do not read the heading as "never stat": the rule is about
+**directories**. Before overturning a stat result with this section, apply the
+same-function check — ask whether the target was a file or a directory.
+
+**Either way, one read is not enough.** `File not found` under a degraded
+transport is indistinguishable from a genuine absence, so any write made on the
+strength of a not-found must carry a positive control from the *same pass*, and
+must record that control in the artifact rather than only in the report.
+
 **And it only reaches one level.** `file list` returns an identical empty result
 for a real-but-empty directory and for a path that was never created, so once the
 parent resolves a directory as PRESENT, the same question about *its* child is
