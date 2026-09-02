@@ -39,7 +39,7 @@ from . import (
     continuity_audit, digest as digest_mod, directives, forge as forge_mod,
     generation,
     health as health_mod, jsonutil, okf, outcome as outcome_mod, presence,
-    projection as projection_mod, public_read,
+    phantom, projection as projection_mod, public_read,
     handoff, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
@@ -1635,6 +1635,86 @@ def _archive_months_status(transport: Any, team: str) -> tuple[list[str], str]:
 
 def _archive_months(transport: Any, team: str) -> list[str]:
     return _archive_months_status(transport, team)[0]
+
+
+def _retired_path(team: str, slug: str) -> str:
+    return f"team/{team}/_coord/retired/{slug}.md"
+
+
+def cmd_task_retire_phantom(args: argparse.Namespace, transport: Any) -> int:
+    """Retire an obligation whose backing task document does not exist.
+
+    A PHANTOM is an open obligation in the stream fold with no document behind
+    it. `tell --closes` cannot retire one: it resolves the close THROUGH the
+    document, so the missing document is exactly what blocks closing it. Its
+    gate is right for a TYPO'd slug — closing a name nobody owns ghost-closes —
+    but a phantom is the opposite case: the slug is real and already in the
+    holder's fold, and only the document is gone.
+
+    EVIDENCE IS THE RAISING LISTING, never a falsy read. `transport.read`
+    returns None for both a missing file and a failed one, which is why the
+    existing gate can only report "absent or unreadable". `list_dir` raises, so
+    a listing that RETURNS proves the store answered — and it is therefore its
+    own same-pass positive control.
+
+    Refuses on every ambiguity. Retiring is NOT discharging, and the record says
+    so in those words.
+    """
+    agent = _identity(getattr(args, "agent", None))
+    slug = args.name
+    try:
+        entries = transport.list_dir(f"team/{args.team}/task/")
+        names = [str(e.get("name") or "") for e in entries]
+    except Exception as exc:  # noqa: BLE001 — the raise IS the evidence
+        print(f"retire-phantom: the task listing raised ({type(exc).__name__}) "
+              f"— REFUSED. An unreadable store tells us nothing, and retiring "
+              f"on no knowledge drops a live obligation.", file=sys.stderr)
+        return 3
+
+    decision = phantom.retirement_decision(
+        probe=phantom.probe_from_listing(names, slug),
+        control=phantom.control_from_listing(names))
+    if not decision.retire:
+        print(f"retire-phantom: {slug}: {decision.why}", file=sys.stderr)
+        print(f"retire-phantom: evidence: {decision.evidence}", file=sys.stderr)
+        return 2
+
+    now = _now()
+    body = okf.render_frontmatter({
+        "type": "PhantomRetirement", "slug": slug, "retired_by": agent,
+        "timestamp": now, "outcome": "document-absent",
+    }) + (
+        f"\n{decision.why}\n\n"
+        f"Evidence (one pass): {decision.evidence}\n\n"
+        f"This records that the backing document is ABSENT. It is NOT a claim "
+        f"that the work was done — the obligation is undischarged and was "
+        f"undischargeable.\n")
+    transport.write(_retired_path(args.team, slug), body)
+
+    # THE DEMOTION. The fold's open set is built from directive events and
+    # closed by response events, so this close IS the demotion — no new
+    # annotation channel, and nothing added to the fold's read path.
+    emitted = None
+    cfg, _st = records.load_config_classified(transport, args.team)
+    if cfg:
+        try:
+            emitted = records.emit_event(
+                transport, cfg, sender=agent, to=agent, kind="response",
+                priority="P2", slug=slug,
+                ptr=f"_coord/retired/{slug}.md", team=args.team,
+                for_agent=agent)
+        except Exception as e:  # noqa: BLE001
+            emitted = False
+            print(f"retire-phantom: close event NOT emitted ({e}) — the record "
+                  f"landed but the fold will keep the obligation OPEN",
+                  file=sys.stderr)
+    if cfg and not emitted:
+        print("retire-phantom: close event failed — record written, fold NOT "
+              "updated; re-run once the bus is reachable", file=sys.stderr)
+        return 3
+    print(f"retire-phantom: {slug} retired as document-absent "
+          f"({'fold closed' if emitted else 'file plane only'})")
+    return 0
 
 
 def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
@@ -12574,6 +12654,12 @@ def build_parser() -> argparse.ArgumentParser:
     tab = tksub.add_parser("abandon", help="abandon (requires --reason)")
     tab.add_argument("team"); tab.add_argument("name"); tab.add_argument("--reason", "-r", required=True)
     tab.set_defaults(func=cmd_task_abandon, verb="abandon")
+    trp = tksub.add_parser(
+        "retire-phantom",
+        help="retire an obligation whose task document is absent (evidence: the raising listing)")
+    trp.add_argument("team"); trp.add_argument("name")
+    trp.add_argument("--agent", "-a")
+    trp.set_defaults(func=cmd_task_retire_phantom, verb="retire-phantom")
     trs = tksub.add_parser("restore", help="move an archived task back to the hot path")
     trs.add_argument("team"); trs.add_argument("name")
     trs.set_defaults(func=cmd_task_restore, verb="restore")

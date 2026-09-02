@@ -61,7 +61,10 @@ EXPECTED_WRITES = {
     "cmd_intent", "cmd_later", "cmd_remind",
     "cmd_reconcile", "cmd_acceptance_pair",
     "cmd_task_start", "cmd_task_update", "cmd_task_block", "cmd_task_pause",
-    "cmd_task_abandon", "cmd_task_assign", "cmd_task_restore", "cmd_task_done",
+    "cmd_task_abandon",
+    # Writes a PhantomRetirement record and emits the close event that retires
+    # the obligation in the fold — a durable write on both planes.
+    "cmd_task_retire_phantom", "cmd_task_assign", "cmd_task_restore", "cmd_task_done",
     "cmd_task_supersede",
     "cmd_review_request", "cmd_review_restore", "cmd_review_close",
     "cmd_review_conclude",
