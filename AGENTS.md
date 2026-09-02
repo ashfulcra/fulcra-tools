@@ -1435,6 +1435,30 @@ The working recipe, end to end:
   authenticated call. `print-access-token` alone is not proof: it reads the file,
   and the datetime comparison that breaks fails on the *call* path.
 
+### `file stat` addresses FILES: it cannot confirm a directory exists
+
+`fulcra-api file stat` run against a **directory** returns `File not found`, even
+for a directory verified present moments earlier by listing its parent. So it
+cannot serve as the positive control in an existence check, and a procedure that
+says "stat a known-present path to prove the probe works" fails silently on
+directories — converting a careful reader into a confident wrong one. Found
+2026-09-02 by coord-maintainer, after the wrong workaround had cost it a day.
+
+**What actually discriminates:** list the **parent** and look for the child
+entry. Both controls behave there — a present child appears, an absent one does
+not.
+
+**And it only reaches one level.** `file list` returns an identical empty result
+for a real-but-empty directory and for a path that was never created, so once the
+parent resolves a directory as PRESENT, the same question about *its* child is
+unanswerable from this surface. That is the standing empty-vs-absent limit; it has
+been sighted on `safari-standalone-bundle-pr617` and `safari-xcode-ci-pr621`
+(parent resolved them never-created), on `activity-annotation-projection-branch-r2`
+(parent resolved present, question pushed to the unreachable `verdicts/` child),
+and on every mesh channel read that returns zero records. A reader above this
+surface must either guess or degrade — ours degrades, which is why one such
+directory takes a whole section down.
+
 ### Environment facts are captured facts
 
 An environment fact — which variable, which host, which account, which of
