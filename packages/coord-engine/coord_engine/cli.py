@@ -3524,7 +3524,9 @@ def _pending_reviews_raw(
     # load-bearing tail doc scan keeps the other half — a visibility-only pass must
     # never starve the critical one. It runs AFTER the head so the caller's own
     # reviews are never behind orphan classification.
-    classify_dl = tail_dl.reserve(0.5)
+    # The dir SELECTION is free — `entries` and `slug_entries` are already in
+    # memory. Only `_classify_orphan_dir` costs transport, so selection happens
+    # here and the SPENDING happens after the tail.
     settled_index = rec._load_settled_index(transport, team)
     doc_slugs = {(e.get("name") or "")[:-3] for e in slug_entries}
     dir_slugs = []
@@ -3534,17 +3536,45 @@ def _pending_reviews_raw(
         oslug = (e.get("name") or "").rstrip("/")
         if oslug and oslug not in doc_slugs and oslug not in settled_index:
             dir_slugs.append(oslug)
-    for i, oslug in enumerate(dir_slugs):
-        if classify_dl.expired():
-            out.append({"type": "review-orphan-degraded",
-                        "unclassified": len(dir_slugs) - i})
-            break
-        kind = _classify_orphan_dir(transport, team, oslug)
-        if kind == "orphan":
-            out.append({"type": "review-orphan", "name": oslug})
-        elif kind == "unknown":
-            out.append({"type": "review-orphan-degraded", "name": oslug})
-        # tombstone -> silently skipped
+
+    def _classify_dirs() -> None:
+        """Classify dir-only slugs on whatever budget the TAIL LEFT OVER.
+
+        THE FIX (reviews-fold row, P1, blocked four days). This used to run
+        BEFORE the tail on ``tail_dl.reserve(0.5)``. The old comment said a
+        visibility-only pass must never starve the critical one: the intent was
+        right and the mechanism still starved it, because reserving half the
+        tail's budget IS spending the tail's budget. Measured on the ReviewClock
+        harness at fixed tail size, budget and per-op cost, varying ONLY the
+        orphan count:
+
+            0 orphans -> 25 tail slugs scanned
+            5 orphans -> 22
+           15 orphans -> 17
+           30 orphans -> 13   + review-orphan-degraded
+
+        Monotonic: thirty dir-only orphans HALVED the load-bearing scan, both
+        markers co-occurred (the shape reported on two independent hosts), and
+        that is why ``obligations`` never reached rc 0 anywhere.
+
+        Classification now spends only what the tail did not, so tail coverage
+        is independent of how many orphan dirs exist. When the tail drains the
+        budget this degrades FIRST — the correct priority, because an
+        unclassified dir is a visibility gap while an unscanned review is an
+        obligation nobody is told about. It still ALWAYS emits its marker, so
+        the gap stays loud instead of silently disappearing.
+        """
+        for i, oslug in enumerate(dir_slugs):
+            if tail_dl is not None and tail_dl.expired():
+                out.append({"type": "review-orphan-degraded",
+                            "unclassified": len(dir_slugs) - i})
+                return
+            kind = _classify_orphan_dir(transport, team, oslug)
+            if kind == "orphan":
+                out.append({"type": "review-orphan", "name": oslug})
+            elif kind == "unknown":
+                out.append({"type": "review-orphan-degraded", "name": oslug})
+            # tombstone -> silently skipped
 
     # --- TAIL: the remaining reviews, under the (possibly drained) shared budget --
     # PHASE-LOCAL tail counters. ``review-fold-degraded`` describes TAIL truncation
@@ -3566,6 +3596,7 @@ def _pending_reviews_raw(
         if (head_scanned or tail_scanned) and tail_dl.expired():
             out.append(budget_mod.degraded_row(
                 "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
+            _classify_dirs()
             return out
         outcome = _scan_one(e, tail_dl)
         tail_scanned += 1
@@ -3574,7 +3605,10 @@ def _pending_reviews_raw(
         if outcome == "budget":
             out.append(budget_mod.degraded_row(
                 "review-fold-degraded", tail_scanned, tail_total, tail_skipped))
+            _classify_dirs()
             return out
+
+    _classify_dirs()
 
     if degraded_roles:
         # A role's lease read degraded: the agent might be a holder we couldn't
