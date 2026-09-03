@@ -23,12 +23,27 @@ BOT = "bot-actor-id"
 ASH = "ash-user-id"
 
 
-def record(item_id: str = "needs-a-spend-decision-0000dead", *, capability="asks", closed=False):
+def record(
+    item_id: str = "needs-a-spend-decision-0000dead",
+    *,
+    capability="asks",
+    closed=False,
+    consumer: str | None = "ash",
+    lane: str | None = None,
+):
+    """An ask card. `consumer` is the human it is blocked on — None means the
+    card never named one, which must NOT resolve to a default person."""
+
+    fields = {"identifier": "BUS-1"}
+    if consumer is not None:
+        fields["blocked_on_user"] = consumer
+    if lane is not None:
+        fields["source_lane"] = lane
     return ManagedRecord(
         provider_id=f"prov-{item_id}",
         source=SourceIdentity("coord-engine", "fulcra/asks", item_id),
         capability=capability,
-        fields={"identifier": "BUS-1"},
+        fields=fields,
         closed=closed,
     )
 
@@ -79,6 +94,58 @@ def test_only_ask_cards_are_read() -> None:
     )
     assert plan.replies == ()
     assert plan.cards == 0
+
+
+def test_a_bare_workspace_ask_is_read_by_its_LANE() -> None:
+    """On a plain fulcra-workspaces space an ask is a task document whose lane
+    was derived to asks — its capability is honestly still "tasks". Keying on
+    capability would work on coord-engine and silently do nothing here."""
+
+    plan = collect_replies(
+        [record(capability="tasks", lane="asks")], comments(comment("c1", ASH)),
+        bot_user_id=BOT, state=AnswerState(),
+    )
+    assert plan.cards == 1
+    assert [r.slug for r in plan.replies] == ["needs-a-spend-decision-0000dead"]
+
+
+def test_a_card_naming_no_consumer_is_never_attributed() -> None:
+    """Settling it would file the answer under whoever the runner defaults to."""
+
+    plan = collect_replies(
+        [record(consumer=None)], comments(comment("c1", ASH)),
+        bot_user_id=BOT, state=AnswerState(),
+    )
+    assert plan.replies == ()
+    assert plan.unattributed == ("prov-needs-a-spend-decision-0000dead",)
+
+
+def test_each_answer_is_attributed_to_ITS_OWN_consumer(tmp_path: Path) -> None:
+    """The bug this replaces: one global --human filed every reply under one
+    name, so a second consumer's decision was recorded as the first's."""
+
+    runner = Runner()
+    path = tmp_path / "s.json"
+    AnswerState(seeded=True).save(path)
+    records = [
+        record("ash-ask-0000dead", consumer="ash"),
+        record("liz-ask-0000beef", consumer="liz"),
+    ]
+    seen: dict[str, list[dict]] = {
+        "prov-ash-ask-0000dead": [comment("c1", ASH, created="2026-09-03T10:00:00Z")],
+        "prov-liz-ask-0000beef": [comment("c2", "liz-user-id", created="2026-09-03T10:01:00Z")],
+    }
+    code, _ = run_answers(
+        records=records,
+        read_comments=lambda issue_id: seen[issue_id],
+        bot_user_id=BOT,
+        state_path=path,
+        dispatcher=EngineAnswerDispatcher(team="fulcra", runner=runner),
+        deliver=True,
+    )
+    assert code == 0
+    humans = {argv[3]: argv[argv.index("--human") + 1] for argv in runner.calls}
+    assert humans == {"ash-ask-0000dead": "ash", "liz-ask-0000beef": "liz"}
 
 
 def test_an_unattributable_comment_is_skipped_not_answered() -> None:

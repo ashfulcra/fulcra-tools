@@ -82,8 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--human",
         default=os.environ.get("FULCRA_COORD_HUMAN", "human"),
         help=(
-            "linear-answers: operator handle passed to `coord-engine answer`. MUST "
-            "match the handle the asks fold uses, or the answer settles nothing"
+            "DEPRECATED for linear-answers: the consumer is read from each card's "
+            "own metadata, so one run can serve many humans. Retained only for "
+            "callers that still pass it; it no longer decides attribution"
         ),
     )
     parser.add_argument(
@@ -222,9 +223,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_comments=adapter.list_comments,
                 bot_user_id=adapter.viewer_id(),
                 state_path=state_path,
-                dispatcher=EngineAnswerDispatcher(
-                    team=args.coord_team, human=args.human
-                ),
+                # No global human: each answer is attributed to the consumer
+                # named on its own card. A run-wide handle would file a second
+                # person's decision under the first person's name.
+                dispatcher=EngineAnswerDispatcher(team=args.coord_team),
                 post_comment=adapter.add_comment,
                 deliver=args.deliver,
                 seed=args.seed,

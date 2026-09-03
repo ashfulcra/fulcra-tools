@@ -43,10 +43,15 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
             item.lane, policy.priority.get(item.priority, policy.priority.get("P2", 3))
         ),
         "labels": labels,
-        "project": policy.project_for(item.lane, item.workstream),
+        "project": policy.project_for(item.lane, item.workstream, item.blocked_on_user),
         "due_at": item.due_at.isoformat() if item.due_at else None,
         "owner": item.owner,
         "assignee": item.assignee,
+        # Rides in the card's own metadata so the return leg can attribute an
+        # answer to the person it was actually blocked on, rather than to one
+        # global handle. With more than one consumer, a global handle records
+        # somebody else's decision under the wrong name.
+        "blocked_on_user": item.blocked_on_user,
         "origin": item.origin,
         "workstream": item.workstream,
         "source_identity": item.source.to_dict(),

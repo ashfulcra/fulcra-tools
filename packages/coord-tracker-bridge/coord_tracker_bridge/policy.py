@@ -31,6 +31,17 @@ class Policy:
     #: of the fleet's queue", which is a far lower bar than what Urgent implies
     #: on a human board — 41 Urgent cards at once is the same as none.
     lane_priority: Mapping[str, int]
+    #: The human consumers this deployment serves: coord handle -> display name.
+    #: They are two different things — `ash` is an identity the bus resolves,
+    #: "Ash" is what a person reads on a board — and collapsing them would name
+    #: projects after handles. Every consumer gets their own rendering of a
+    #: `{consumer}` lane project, and the resource plan creates all of them up
+    #: front: `sync` refuses a non-empty resource plan, so a consumer first seen
+    #: mid-run would otherwise halt the run partway through.
+    consumers: Mapping[str, str]
+    #: Where a row lands when its consumer cannot be resolved. Named, not blank:
+    #: unattributed work must be visibly somebody's to triage.
+    unassigned_consumer: str
     included_origins: frozenset[str]
     close_absent: bool
     field_ownership: Mapping[str, str]
@@ -49,12 +60,44 @@ class Policy:
         cards have already been written.
         """
 
-        return tuple(sorted({*self.workstream_projects.values(), *self.lane_projects.values()}))
+        names: set[str] = set(self.workstream_projects.values())
+        for template in self.lane_projects.values():
+            if "{consumer}" not in template:
+                names.add(template)
+                continue
+            # Every configured consumer, plus the triage destination for rows
+            # whose consumer never resolved.
+            for who in (*self.consumers.values(), self.unassigned_consumer):
+                names.add(template.format(consumer=who))
+        return tuple(sorted(names))
 
-    def project_for(self, lane: str, workstream: str | None) -> str | None:
-        """Lane wins: it is the specific claim, the workstream is the general one."""
+    def project_for(
+        self, lane: str, workstream: str | None, consumer: str | None = None
+    ) -> str | None:
+        """Which Linear project this row belongs in.
 
-        return self.lane_projects.get(lane) or self.workstream_projects.get(workstream or "")
+        Lane wins over workstream: it is the specific claim. A lane project may
+        carry `{consumer}`, which is how one policy serves many humans — each
+        gets their own "blocked on me" view from the same configuration.
+
+        A row whose consumer is unresolved renders the template with
+        `unassigned_consumer` rather than dropping the placeholder: it must land
+        somewhere a person will triage it, never in a named person's view and
+        never in a project literally called "Blocked on {consumer}".
+        """
+
+        template = self.lane_projects.get(lane)
+        if template is None:
+            return self.workstream_projects.get(workstream or "") or None
+        if "{consumer}" not in template:
+            return template
+        if not consumer:
+            return template.format(consumer=self.unassigned_consumer)
+        # An unconfigured handle still gets a view rather than vanishing into
+        # triage: the row DID name a person, we just have no display name for
+        # them. Falling back to the handle is honest; dropping them is not.
+        return template.format(consumer=self.consumers.get(consumer, consumer))
+
 
 
 def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
@@ -88,6 +131,23 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         )
     lane_projects = {str(k): str(v) for k, v in raw.get("lane_projects", {}).items()}
     lane_priority = {str(k): int(v) for k, v in raw.get("lane_priority", {}).items()}
+    consumers = {
+        str(handle).strip(): str(display).strip()
+        for handle, display in (raw.get("consumers", {}) or {}).items()
+    }
+    if any(not handle or not display for handle, display in consumers.items()):
+        raise ValueError("consumers entries need a non-empty handle and display name")
+    unassigned_consumer = str(raw.get("unassigned_consumer", "someone")).strip()
+    if not unassigned_consumer:
+        raise ValueError("unassigned_consumer must be non-empty")
+    if unassigned_consumer in consumers.values():
+        # Otherwise unattributed rows silently pile into a real person's view.
+        raise ValueError("unassigned_consumer must not name a configured consumer")
+    if any("{consumer}" in template for template in lane_projects.values()) and not consumers:
+        raise ValueError(
+            "a {consumer} lane project requires a non-empty consumers list: with none "
+            "configured the resource plan cannot create the per-person projects"
+        )
     # A lane mapping outside the allowlist is dead config that reads as
     # configured. Fail loudly at load rather than silently never firing.
     for name, mapping in (("lane_projects", lane_projects), ("lane_priority", lane_priority)):
@@ -109,6 +169,8 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         ),
         lane_projects=MappingProxyType(lane_projects),
         lane_priority=MappingProxyType(lane_priority),
+        consumers=MappingProxyType(consumers),
+        unassigned_consumer=unassigned_consumer,
         included_origins=frozenset(str(v) for v in raw.get("included_origins", [])),
         close_absent=bool(raw.get("close_absent", True)),
         field_ownership=MappingProxyType(ownership),

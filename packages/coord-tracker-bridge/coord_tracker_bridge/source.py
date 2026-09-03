@@ -619,6 +619,15 @@ class TeamsSourceAdapter:
             return None, self._diagnostic(path, "teams-schema-degraded"), claimed_id
         origin = sanitize_text(fields.get("origin"), limit=100).strip()
         workstream = sanitize_text(fields.get("workstream"), limit=200).strip()
+        # A bare workspace has no `asks` fold — that is a coord-engine concept.
+        # But "blocked on a named person" is expressible in the base convention
+        # with the SAME typed spelling the engine uses, and deriving the lane
+        # here is what gives a plain fulcra-workspaces space a "blocked on me"
+        # view at all. Symmetric with the engine source deriving `backlog` from
+        # proposed/waiting + `assignee: @backlog`.
+        blocked_on_user = EngineSourceAdapter._blocked_on_user(fields)
+        if lane == "blocked" and blocked_on_user:
+            lane = "asks"
         return WorkRecord(
             source=SourceIdentity(self.provider, f"{self.team}/tasks", item_id),
             capability="tasks",
@@ -633,6 +642,7 @@ class TeamsSourceAdapter:
             tags=tuple(sanitize_text(tag, limit=100) for tag in tags),
             archived=archived,
             due_at=None,
+            blocked_on_user=blocked_on_user,
         ), None, claimed_id
 
     def snapshot(self) -> Snapshot:

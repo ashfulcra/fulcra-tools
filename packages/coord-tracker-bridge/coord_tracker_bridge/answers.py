@@ -75,6 +75,11 @@ class Reply:
     author_id: str
     body: str
     created_at: str
+    #: The human this card was blocked on — whose answer this therefore is.
+    #: Carried per-reply, never taken from a global default, because with more
+    #: than one consumer a global handle files one person's decision under
+    #: another's name.
+    consumer: str
     repeat: str = NEW
 
     @property
@@ -136,12 +141,40 @@ class AnswerState:
         return POSSIBLE_REPEAT if comment_id in self.attempted else NEW
 
 
+#: The lane an operator-blocking row projects into, on either substrate.
+ASKS_LANE = "asks"
+
+
+def is_ask(record: ManagedRecord) -> bool:
+    """Is this card an operator ask, on either substrate?
+
+    coord-engine gives it capability "asks"; a bare workspace gives it a task
+    document with lane derived to asks. Either is an ask.
+    """
+
+    lane = str((record.fields or {}).get("source_lane") or "").strip()
+    return lane == ASKS_LANE or record.capability == ASKS_LANE
+
+
+def consumer_of(record: ManagedRecord) -> str | None:
+    """WHICH human this card is blocked on, or None when unresolved.
+
+    None is never "the default human": an answer attributed to the wrong person
+    is worse than an answer that waits for triage.
+    """
+
+    value = str((record.fields or {}).get("blocked_on_user") or "").strip()
+    return value or None
+
+
 @dataclass(frozen=True, slots=True)
 class Plan:
     replies: tuple[Reply, ...]
     considered: int
     cards: int
     cold_start: bool
+    #: Cards carrying a reply we refused to attribute — no consumer named.
+    unattributed: tuple[str, ...] = ()
 
 
 def collect_replies(
@@ -154,10 +187,16 @@ def collect_replies(
     """Gather operator replies on ask cards. A read failure raises, never empties."""
 
     replies: list[Reply] = []
+    unattributed: list[str] = []
     considered = 0
     cards = 0
     for record in records:
-        if record.capability != "asks" or record.closed:
+        # Filter on the LANE, not the capability. On coord-engine an ask arrives
+        # with capability "asks"; on a bare fulcra-workspaces space it is a task
+        # document whose lane was DERIVED to asks, so its capability is honestly
+        # still "tasks". Keying on capability would make the return leg work for
+        # one substrate and silently do nothing on the other.
+        if record.closed or not is_ask(record):
             continue
         cards += 1
         for node in read_comments(record.provider_id):
@@ -177,6 +216,13 @@ def collect_replies(
             body = sanitize_text(node.get("body"), limit=ANSWER_LIMIT).strip()
             if not body:
                 continue
+            consumer = consumer_of(record)
+            if consumer is None:
+                # The card never named whose decision this is. Settling it would
+                # attribute the answer to whoever the runner happens to default
+                # to, so it waits for triage instead.
+                unattributed.append(record.provider_id)
+                continue
             replies.append(Reply(
                 comment_id=comment_id,
                 issue_id=record.provider_id,
@@ -185,11 +231,12 @@ def collect_replies(
                 author_id=author,
                 body=body,
                 created_at=str(node.get("createdAt") or ""),
+                consumer=consumer,
                 repeat=repeat,
             ))
     replies.sort(key=lambda item: (item.created_at, item.comment_id))
     cold = not state.seeded and not state.confirmed and not state.attempted
-    return Plan(tuple(replies), considered, cards, cold)
+    return Plan(tuple(replies), considered, cards, cold, tuple(dict.fromkeys(unattributed)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +248,6 @@ class EngineAnswerDispatcher:
     """
 
     team: str
-    human: str = "human"
     runner: CommandRunner = subprocess_runner
     timeout: float = 60.0
     command: tuple[str, ...] = ("coord-engine",)
@@ -210,7 +256,7 @@ class EngineAnswerDispatcher:
         argv = (
             *self.command, "answer", self.team, reply.slug,
             "--with", reply.body,
-            "--human", self.human,
+            "--human", reply.consumer,
         )
         code, stdout, stderr = self.runner(argv, self.timeout)
         if code != 0:

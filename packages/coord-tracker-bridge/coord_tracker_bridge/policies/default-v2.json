@@ -9,8 +9,10 @@
     "threads-missed": "unstarted"
   },
   "priority": {"P1": 2, "P2": 3, "P3": 4},
-  "lane_projects": {"asks": "Blocked on Ash"},
+  "lane_projects": {"asks": "Blocked on {consumer}"},
   "lane_priority": {"asks": 1},
+  "consumers": {"ash": "Ash"},
+  "unassigned_consumer": "someone",
   "managed_labels": [
     "lane:active",
     "lane:blocked",

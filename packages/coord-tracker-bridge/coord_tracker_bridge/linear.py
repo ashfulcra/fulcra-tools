@@ -703,7 +703,7 @@ class LinearTrackerAdapter:
 
         internal_names = {
             "owner", "assignee", "origin", "workstream", "source_lane",
-            "policy_version", "policy_hash"
+            "blocked_on_user", "policy_version", "policy_hash"
         }
         internal = dict(self._metadata_by_source.get(source.key, {}))
         internal.update({key: fields[key] for key in internal_names if key in fields})
