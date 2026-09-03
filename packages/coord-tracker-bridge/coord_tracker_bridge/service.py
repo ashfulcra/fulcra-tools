@@ -196,6 +196,20 @@ class BridgeService:
             capability_by_source = {
                 item.source.key: item.capability for item in bridge_plan.snapshot.items
             }
+            # Record observation BEFORE any mutation. Every row this snapshot
+            # actually contains is evidence that its ledger entry's source is
+            # real, and only that evidence lets a LATER run read the row's
+            # absence as a deletion. Persist it even when the plan is empty:
+            # the provenance is the point, not the changes.
+            observed_at = bridge_plan.snapshot.observed_at.isoformat()
+            # NOT any(...): a generator short-circuits on the first True and
+            # would leave the rest of the snapshot unrecorded.
+            marked = [
+                ledger.mark_observed(item.source, observed_at)
+                for item in bridge_plan.snapshot.items
+            ]
+            if any(marked):
+                ledger.save(self.ledger_path)
             applied = 0
             for change in bridge_plan.projection.changes:
                 lease.refresh()
@@ -211,6 +225,13 @@ class BridgeService:
                     tracker_record_id=provider_id,
                     policy_version=self.policy.version,
                     policy_hash=self.policy.hash,
+                    # A change built from a snapshot row IS an observation; a
+                    # close of an absent row is not, so it keeps the prior stamp.
+                    last_observed_at=(
+                        observed_at
+                        if change.source.key in capability_by_source
+                        else (prior.last_observed_at if prior else None)
+                    ),
                 ))
                 # Persist after every provider mutation. A crash before this write
                 # converges because adapters discover source metadata on retry.

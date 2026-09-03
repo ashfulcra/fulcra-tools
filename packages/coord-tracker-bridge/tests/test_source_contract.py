@@ -121,7 +121,12 @@ def test_source_contract_degradation_suppresses_absence_close(source_case):
     record = ManagedRecord("LIN-missing", missing, "tasks", {}, False)
     policy = load_policy()
     ledger = BridgeLedger([
-        LedgerEntry(missing, "tasks", "linear", "LIN-missing", policy.version, policy.hash)
+        LedgerEntry(
+            missing, "tasks", "linear", "LIN-missing", policy.version, policy.hash,
+            # Seen in an earlier fold, so its absence now is a deletion the
+            # healthy plan must act on — which is what this test asserts.
+            last_observed_at="2026-09-02T00:00:00+00:00",
+        )
     ])
 
     healthy_plan = build_plan(healthy, [record], ledger, policy)

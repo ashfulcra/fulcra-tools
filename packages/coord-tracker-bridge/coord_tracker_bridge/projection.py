@@ -125,7 +125,17 @@ def build_plan(
         existing = managed_by_source.get(key)
         if existing is None or existing.closed or not policy.close_absent:
             continue
-        if snapshot.absence_is_authoritative(entry.capability):
+        if not entry.observed:
+            # The enumeration being complete says the FOLD saw everything; it
+            # says nothing about an entry whose row this bridge has never seen
+            # present. Identity healed from provider metadata lands here: it
+            # proves the Linear card exists, not that a source row ever did.
+            # Closing on that reads adoption as deletion, which is how a first
+            # sync arms a mass close of every card it just adopted.
+            diagnostics.append(
+                Diagnostic(entry.capability, "close-suppressed-never-observed", key)
+            )
+        elif snapshot.absence_is_authoritative(entry.capability):
             changes.append(Change(ChangeKind.CLOSE, entry.source, existing.provider_id, MappingProxyType({})))
         else:
             diagnostics.append(

@@ -29,9 +29,19 @@ def item(item_id: str, *, title: str = "Task", capability: str = "tasks", archiv
     )
 
 
-def ledger_entry(item_id: str, capability: str = "tasks") -> LedgerEntry:
+def ledger_entry(
+    item_id: str, capability: str = "tasks", *, observed: str | None = "2026-09-02T00:00:00+00:00"
+) -> LedgerEntry:
+    """A ledger entry for a row this bridge has SEEN, unless told otherwise.
+
+    `observed` is load-bearing for every absence-close assertion below: an entry
+    whose source row was never observed present cannot authorize a close, so a
+    fixture that omits it is testing adoption, not deletion.
+    """
+
     return LedgerEntry(
-        source(item_id), capability, "linear", f"LIN-{item_id}", POLICY.version, POLICY.hash
+        source(item_id), capability, "linear", f"LIN-{item_id}", POLICY.version, POLICY.hash,
+        last_observed_at=observed,
     )
 
 
@@ -205,6 +215,7 @@ def test_create_is_suppressed_when_same_slug_is_also_closed():
         "LIN-terminal-task",
         POLICY.version,
         POLICY.hash,
+        last_observed_at="2026-09-02T00:00:00+00:00",
     )
 
     plan = build_plan(
