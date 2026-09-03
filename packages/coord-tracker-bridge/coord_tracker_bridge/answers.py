@@ -1,0 +1,334 @@
+"""`linear-answers` — carry the operator's replies from Linear back to the bus.
+
+LINEAR IS A MESSAGING SURFACE, NEVER THE COORDINATION AUTHORITY (Ash, 2026-09-03:
+"Coordination stays on the bus. Linear is a messaging surface."). An ask goes OUT
+as a card; the operator's reply comes back IN and is settled on the bus by
+`coord-engine answer`. The card is the envelope, not the record — an ask is not
+answered because a comment exists, it is answered when the bus says so.
+
+WHY THIS IS NOT THE INBOUND DIRECTION BUS-24 RULES OUT. BUS-24 (operator-seeded,
+ash 2026-07-15) forbids putting WORK into Linear for agents to pick up. This
+carries no work: it is the return leg of a loop the fleet itself opened, closing
+an obligation the fleet raised. Nothing here can create a task, assign an agent,
+or originate a directive; the only bus verb it can reach is `answer`.
+
+THE BOT MUST NOT ANSWER ITSELF. Coord Bridge comments on these cards — that is
+how a confirmation gets back to the operator — so a reader that took every
+comment as an answer would feed its own confirmations back into the bus forever.
+Authorship is checked against the bridge's own actor id, on the comment about to
+be processed, not on what the caller meant.
+
+A COLD START REFUSES TO DELIVER. With no state every historical comment reads as
+new, and on a board of long-lived asks that replays months of conversation into
+`coord-engine answer` in one pass. `--seed` adopts the current comments as the
+baseline without sending anything — the same shape as linear-assignments, for the
+same reason.
+
+A DISPATCH HAS THREE OUTCOMES. `coord-engine answer` can settle the ask and then
+fail to report it, so the attempt is recorded BEFORE the transport runs and a
+retry whose comment is still marked says POSSIBLE RE-DELIVERY: not "new", which
+under-claims, and not "repeat", which over-claims.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+from .model import ManagedRecord
+from .source import CommandRunner, sanitize_text, subprocess_runner
+
+OK = "ok"
+EMPTY = "empty"
+UNKNOWN = "unknown"
+
+#: Outcome of one attempt to settle an answer on the bus.
+NEW = "new"
+POSSIBLE_REPEAT = "possible-repeat"
+CONFIRMED = "confirmed"
+
+#: Bound on one reply carried to the bus. A Linear comment has no length limit
+#: worth trusting, and the answer rides an argv.
+ANSWER_LIMIT = 4000
+
+
+class AnswersError(RuntimeError):
+    """The run proves nothing. Never rendered as 'no answers'."""
+
+
+class DispatchFailed(AnswersError):
+    """The transport reported failure. Distinct from an UNKNOWN outcome."""
+
+
+@dataclass(frozen=True, slots=True)
+class Reply:
+    """One operator comment on one ask card, not yet settled on the bus."""
+
+    comment_id: str
+    issue_id: str
+    identifier: str
+    slug: str
+    author_id: str
+    body: str
+    created_at: str
+    repeat: str = NEW
+
+    @property
+    def fingerprint(self) -> str:
+        """Stable identity of this reply, independent of when it was read."""
+
+        return self.comment_id
+
+
+@dataclass(slots=True)
+class AnswerState:
+    """Durable record of which comments have been carried to the bus.
+
+    `attempted` is written before a dispatch and cleared only by a CONFIRMED
+    outcome, so an ambiguous attempt is never silently retried as a first send.
+    """
+
+    seeded: bool = False
+    confirmed: dict[str, str] = field(default_factory=dict)
+    attempted: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def load(cls, path: Path) -> AnswerState:
+        if not path.exists():
+            return cls()
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise AnswersError("answer state root must be an object")
+        return cls(
+            seeded=bool(raw.get("seeded", False)),
+            confirmed=dict(raw.get("confirmed") or {}),
+            attempted=dict(raw.get("attempted") or {}),
+        )
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            {"seeded": self.seeded, "confirmed": self.confirmed, "attempted": self.attempted},
+            sort_keys=True, indent=2,
+        ) + "\n"
+        fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(staged, path)
+        finally:
+            try:
+                os.unlink(staged)
+            except FileNotFoundError:
+                pass
+
+    def classify(self, comment_id: str) -> str | None:
+        """None once settled; otherwise how a send should announce itself."""
+
+        if comment_id in self.confirmed:
+            return None
+        return POSSIBLE_REPEAT if comment_id in self.attempted else NEW
+
+
+@dataclass(frozen=True, slots=True)
+class Plan:
+    replies: tuple[Reply, ...]
+    considered: int
+    cards: int
+    cold_start: bool
+
+
+def collect_replies(
+    records: Iterable[ManagedRecord],
+    read_comments,
+    *,
+    bot_user_id: str,
+    state: AnswerState,
+) -> Plan:
+    """Gather operator replies on ask cards. A read failure raises, never empties."""
+
+    replies: list[Reply] = []
+    considered = 0
+    cards = 0
+    for record in records:
+        if record.capability != "asks" or record.closed:
+            continue
+        cards += 1
+        for node in read_comments(record.provider_id):
+            considered += 1
+            comment_id = str(node.get("id") or "").strip()
+            user = node.get("user")
+            author = str((user or {}).get("id") or "").strip()
+            if not comment_id or not author:
+                # A comment we cannot attribute is not evidence that the operator
+                # said anything. Skipping it is safe; answering it is not.
+                continue
+            if author == bot_user_id:
+                continue
+            repeat = state.classify(comment_id)
+            if repeat is None:
+                continue
+            body = sanitize_text(node.get("body"), limit=ANSWER_LIMIT).strip()
+            if not body:
+                continue
+            replies.append(Reply(
+                comment_id=comment_id,
+                issue_id=record.provider_id,
+                identifier=str(record.fields.get("identifier") or record.provider_id),
+                slug=record.source.item_id,
+                author_id=author,
+                body=body,
+                created_at=str(node.get("createdAt") or ""),
+                repeat=repeat,
+            ))
+    replies.sort(key=lambda item: (item.created_at, item.comment_id))
+    cold = not state.seeded and not state.confirmed and not state.attempted
+    return Plan(tuple(replies), considered, cards, cold)
+
+
+@dataclass(frozen=True, slots=True)
+class EngineAnswerDispatcher:
+    """Settle one ask on the bus via `coord-engine answer`.
+
+    The ONLY bus verb this module can reach. It unblocks the ask and hands it
+    back to its owner; it cannot create work.
+    """
+
+    team: str
+    human: str = "human"
+    runner: CommandRunner = subprocess_runner
+    timeout: float = 60.0
+    command: tuple[str, ...] = ("coord-engine",)
+
+    def deliver(self, reply: Reply) -> None:
+        argv = (
+            *self.command, "answer", self.team, reply.slug,
+            "--with", reply.body,
+            "--human", self.human,
+        )
+        code, stdout, stderr = self.runner(argv, self.timeout)
+        if code != 0:
+            raise DispatchFailed(
+                f"coord-engine answer for {reply.slug} failed (rc {code}): "
+                f"{(stderr or stdout).strip()[:300]}"
+            )
+
+
+def confirmation_body(reply: Reply) -> str:
+    """What Coord Bridge says back on the card once the bus has the answer."""
+
+    return (
+        "Carried to the bus — this ask is settled and handed back to its owner.\n\n"
+        f"`coord-engine answer` accepted your reply for `{reply.slug}`.\n\n"
+        "The bus is the record; this card is the envelope. It closes on the next "
+        "sync once the row leaves the asks lane."
+    )
+
+
+def render(plan: Plan, *, delivered: int | None = None, note: str = "") -> str:
+    mode = "delivered" if delivered is not None else "preview"
+    lines = [
+        f"linear answers: {plan.cards} open ask card(s), {plan.considered} comment(s) read, "
+        f"{len(plan.replies)} to carry ({mode})"
+    ]
+    if plan.cold_start:
+        lines.append(
+            "  COLD START: no baseline has ever been recorded, so every comment "
+            "below reads as new. Nothing is delivered from a cold start — run "
+            "with --seed to adopt the current comments as the baseline."
+        )
+    for reply in plan.replies:
+        flag = " [POSSIBLE RE-DELIVERY]" if reply.repeat is POSSIBLE_REPEAT else ""
+        first = reply.body.splitlines()[0] if reply.body else ""
+        lines.append(f"  {reply.identifier}  {reply.slug[:44]}{flag}")
+        lines.append(f"      {first[:96]}")
+    if note:
+        lines.append(f"  {note}")
+    return "\n".join(lines)
+
+
+def unknown(detail: str) -> str:
+    return (
+        f"linear answers: UNKNOWN — {detail}. This is not 'no answers'; nothing "
+        "was carried to the bus and no comment was marked."
+    )
+
+
+def run_answers(
+    *,
+    records: Sequence[ManagedRecord],
+    read_comments,
+    bot_user_id: str,
+    state_path: Path,
+    dispatcher: EngineAnswerDispatcher,
+    post_comment=None,
+    deliver: bool = False,
+    seed: bool = False,
+    cap: int = 25,
+) -> tuple[int, str]:
+    """Carry operator replies to the bus. Returns (exit code, rendered report).
+
+    Exit codes extend the linear-inbox contract: 0 succeeded, 3 UNKNOWN (proves
+    nothing — never "no answers"), 2 a deliberate refusal.
+    """
+
+    state = AnswerState.load(state_path)
+    try:
+        plan = collect_replies(
+            records, read_comments, bot_user_id=bot_user_id, state=state
+        )
+    except Exception as exc:  # a partial read cannot authorize an answer
+        return 3, unknown(f"reading ask comments failed ({type(exc).__name__}: {exc})")
+
+    if seed:
+        for reply in plan.replies:
+            state.confirmed[reply.comment_id] = "seeded"
+        state.seeded = True
+        state.save(state_path)
+        return 0, render(plan, note=(
+            f"SEEDED: {len(plan.replies)} existing comment(s) adopted as the "
+            "baseline. Nothing was carried to the bus."))
+
+    if not deliver:
+        return 0, render(plan, note="preview only — pass --deliver to carry these to the bus")
+
+    if plan.cold_start:
+        return 2, render(plan, note=(
+            "REFUSED: cold start. Delivering now would replay every historical "
+            "comment as an answer. Run with --seed first."))
+
+    if len(plan.replies) > cap:
+        return 2, render(plan, note=(
+            f"REFUSED WHOLE: {len(plan.replies)} replies exceeds --delivery-cap "
+            f"{cap}. Nothing was carried; raise the cap deliberately."))
+
+    carried = 0
+    for reply in plan.replies:
+        # Written BEFORE the transport: `coord-engine answer` can settle the ask
+        # and then fail to report it, so a raise is not evidence nothing landed.
+        state.attempted[reply.comment_id] = reply.slug
+        state.save(state_path)
+        try:
+            dispatcher.deliver(reply)
+        except Exception as exc:
+            return 3, render(plan, delivered=carried, note=(
+                f"STOPPED at {reply.identifier} ({exc}) — that one's outcome is "
+                "UNKNOWN and stays marked; everything after it is still owed."))
+        state.confirmed[reply.comment_id] = reply.slug
+        state.attempted.pop(reply.comment_id, None)
+        state.save(state_path)
+        carried += 1
+        if post_comment is not None:
+            try:
+                post_comment(reply.issue_id, confirmation_body(reply))
+            except Exception:
+                # The answer IS on the bus; a missing courtesy comment must not
+                # unwind it or stop the run. The bus is the record.
+                pass
+    return 0, render(plan, delivered=carried)

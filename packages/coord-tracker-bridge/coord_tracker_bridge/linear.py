@@ -261,6 +261,10 @@ LABELS_QUERY = """query Labels($team:ID!,$after:String){issueLabels(filter:{team
 PROJECTS_QUERY = """query Projects($team:ID!,$after:String){projects(filter:{accessibleTeams:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 COMMENTS_QUERY = """query Comments($issue:ID!,$after:String){comments(filter:{issue:{id:{eq:$issue}}},first:100,after:$after){nodes{id body createdAt user{id}} pageInfo{hasNextPage endCursor}}}"""
 ISSUE_LABELS_QUERY = """query IssueLabels($issue:String!,$after:String){issue(id:$issue){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}"""
+#: Who this token acts AS. linear-answers needs it to exclude the bridge's own
+#: comments: it posts confirmations on the very cards it reads, so a reader that
+#: trusted every comment would feed its own words back into the bus forever.
+VIEWER_QUERY = """query Viewer{viewer{id name}}"""
 EVENTS_QUERY = """query InboundEvents($team:ID!,$after:String){auditEntries(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id type createdAt actor{id} metadata} pageInfo{hasNextPage endCursor}}}"""
 SCHEMA_QUERY = """query Schema($team:String!){team(id:$team){id key states{nodes{id name type}}}}"""
 # team(id:) is a direct node lookup taking String!, unlike the filter comparators
@@ -399,6 +403,18 @@ class LinearTrackerAdapter:
 
     def list_comments(self, issue_id: str) -> list[Mapping[str, Any]]:
         return self.client.paginate("Comments", COMMENTS_QUERY, "comments", {"issue": issue_id})
+
+    def viewer_id(self) -> str:
+        """The actor this token writes as. Missing is an error, never a blank."""
+
+        data = self.client.execute("Viewer", VIEWER_QUERY, {})
+        viewer = (data or {}).get("viewer")
+        identity = str((viewer or {}).get("id") or "").strip()
+        if not identity:
+            # A blank here would make every comment look like somebody else's,
+            # including the bridge's own confirmations.
+            raise LinearError("Viewer: the API returned no actor id for this token")
+        return identity
 
     def list_issue_labels(self, issue_id: str) -> list[Mapping[str, Any]]:
         nodes: list[Mapping[str, Any]] = []

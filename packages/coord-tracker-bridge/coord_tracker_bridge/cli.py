@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .answers import EngineAnswerDispatcher, run_answers
 from .assignments import (
     DEFAULT_DELIVERY_CAP,
     EngineTellDispatcher,
@@ -16,6 +17,7 @@ from .assignments import (
     run_assignments,
 )
 from .lease import LeaseHeld
+from .ledger import BridgeLedger
 from .inbox import ReadOnlyTransport, fetch_inbox, render_fold
 from .linear import HttpxGraphQLTransport, LinearClient, LinearError, LinearTrackerAdapter
 from .policy import load_policy
@@ -29,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         "phase",
         choices=(
             "plan", "adopt-markers", "apply-resources", "sync",
-            "linear-inbox", "linear-assignments",
+            "linear-inbox", "linear-assignments", "linear-answers",
         ),
     )
     parser.add_argument(
@@ -77,11 +79,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="linear-assignments: the --from identity on dispatched directives",
     )
     parser.add_argument(
+        "--human",
+        default=os.environ.get("FULCRA_COORD_HUMAN", "human"),
+        help=(
+            "linear-answers: operator handle passed to `coord-engine answer`. MUST "
+            "match the handle the asks fold uses, or the answer settles nothing"
+        ),
+    )
+    parser.add_argument(
         "--roster-path",
         default="team/fulcra/_coord/roster-nicknames.md",
         help="linear-assignments: the nickname roster document in the coord store",
     )
     return parser
+
+
+def _ledger_for(args: argparse.Namespace, policy) -> BridgeLedger:
+    """The same ledger `plan`/`sync` use, loaded read-only.
+
+    `list_managed_records` takes it to cross-check provider identity; answers
+    never writes it. Coordination state stays where sync owns it.
+    """
+
+    state_key = f"{args.source}-{args.coord_team}-{args.linear_team_id}-{policy.hash[:12]}"
+    path = args.state_dir / f"{state_key}.json"
+    return BridgeLedger.load(path) if path.exists() else BridgeLedger()
 
 
 def _service(args: argparse.Namespace) -> BridgeService:
@@ -130,8 +152,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.dry_run and args.phase != "adopt-markers":
             raise ValueError("--dry-run is only valid with adopt-markers")
-        if (args.deliver or args.seed) and args.phase != "linear-assignments":
-            raise ValueError("--deliver/--seed are only valid with linear-assignments")
+        if (args.deliver or args.seed) and args.phase not in (
+            "linear-assignments", "linear-answers"
+        ):
+            raise ValueError(
+                "--deliver/--seed are only valid with linear-assignments/linear-answers")
         if args.phase == "linear-inbox":
             # Deliberately does NOT build a BridgeService: no ledger, no lease,
             # no tracker adapter, so no write path exists to reach. The client
@@ -172,6 +197,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(outcome.text)
             return outcome.code
+
+        if args.phase == "linear-answers":
+            # Needs a WRITE-capable client, unlike linear-inbox/-assignments: it
+            # posts a confirmation comment back on the card. It still cannot
+            # touch the projection — it builds no BridgeService and the only bus
+            # verb it can reach is `coord-engine answer`, which settles an ask
+            # and hands it back to its owner. Linear carries the message; the bus
+            # remains the record.
+            api_key = os.environ.get("LINEAR_API_KEY")
+            if not api_key or not args.linear_team_id:
+                raise LinearError(
+                    "LINEAR_API_KEY and --linear-team-id/LINEAR_TEAM_ID are required")
+            adapter = LinearTrackerAdapter(
+                LinearClient(HttpxGraphQLTransport(api_key)), args.linear_team_id
+            )
+            policy = load_policy(args.policy)
+            state_path = (
+                args.state_dir
+                / f"answers-{args.coord_team}-{args.linear_team_id}.json"
+            )
+            code, text = run_answers(
+                records=adapter.list_managed_records(_ledger_for(args, policy)),
+                read_comments=adapter.list_comments,
+                bot_user_id=adapter.viewer_id(),
+                state_path=state_path,
+                dispatcher=EngineAnswerDispatcher(
+                    team=args.coord_team, human=args.human
+                ),
+                post_comment=adapter.add_comment,
+                deliver=args.deliver,
+                seed=args.seed,
+                cap=args.delivery_cap,
+            )
+            print(text)
+            return code
 
         service = _service(args)
         if args.phase == "plan":
