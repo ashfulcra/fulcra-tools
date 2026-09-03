@@ -34,7 +34,14 @@ class Plan:
 
 
 def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
-    labels = tuple(label for label in policy.managed_labels if label in item.tags)
+    labels = [label for label in policy.managed_labels if label in item.tags]
+    # The per-consumer label is DERIVED, not copied from a source tag: it is
+    # what a saved Linear view filters on, and no source row carries it.
+    if item.blocked_on_user or item.lane in policy.consumer_lanes:
+        consumer_label = policy.label_for_consumer(item.blocked_on_user)
+        if consumer_label and consumer_label not in labels:
+            labels.append(consumer_label)
+    labels = tuple(labels)
     return {
         "title": item.title,
         "description": item.description,
@@ -73,7 +80,7 @@ def _diff(desired: Mapping[str, Any], actual: Mapping[str, Any], policy: Policy)
             continue
         current = actual.get(field)
         if owner == "merge" and field == "labels":
-            managed = set(policy.managed_labels)
+            managed = set(policy.all_managed_labels)
             tracker_owned = tuple(label for label in tuple(current or ()) if label not in managed)
             wanted = tuple(dict.fromkeys((*tracker_owned, *tuple(wanted or ()))))
         if current != wanted:

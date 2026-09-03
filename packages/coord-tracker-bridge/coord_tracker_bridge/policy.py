@@ -31,6 +31,13 @@ class Policy:
     #: `blocked_on: user:ash` while the asks fold surfaced only 12, so 15
     #: things blocking the operator were nowhere in his "blocked on me" view.
     consumer_project: str | None
+    #: Per-consumer LABEL, e.g. "blocked-on-{consumer}". A saved Linear view
+    #: filters on labels, not on projects — the operator's own "Blocked on
+    #: Ash" view (created 2026-07-21) keys on `blocked-on-ash`, so a bridge
+    #: that only set a project put 27 cards somewhere his bookmark could not
+    #: see. Rendered from the HANDLE, not the display name: a label is an
+    #: identifier, and `blocked-on-ash` is what already exists.
+    consumer_label: str | None
     #: Lanes that are a consumer view even when no human is named — an ask is
     #: blocked on a person by definition, so an unnamed one is triage, not
     #: an ordinary lane row.
@@ -113,6 +120,30 @@ class Policy:
             or None
         )
 
+    def label_for_consumer(self, consumer: str | None) -> str | None:
+        """The label that puts this row in that person's saved view."""
+
+        if not self.consumer_label:
+            return None
+        return self.consumer_label.format(consumer=consumer or self.unassigned_consumer)
+
+    @property
+    def all_managed_labels(self) -> tuple[str, ...]:
+        """Configured labels PLUS every per-consumer label this policy can set.
+
+        The merge in `_diff` preserves any label outside this set as
+        tracker-owned, so a consumer label missing from it would be treated as a
+        human's own label and never reconciled.
+        """
+
+        names = list(self.managed_labels)
+        if self.consumer_label:
+            for who in (*self.consumers, self.unassigned_consumer):
+                rendered = self.consumer_label.format(consumer=who)
+                if rendered not in names:
+                    names.append(rendered)
+        return tuple(names)
+
     def linear_user_for(self, consumer: str | None) -> str | None:
         """The Linear account to assign this row to, or None to leave it alone.
 
@@ -182,6 +213,9 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         # Otherwise unattributed rows silently pile into a real person's view.
         raise ValueError("unassigned_consumer must not name a configured consumer")
     consumer_project = str(raw.get("consumer_project", "") or "").strip() or None
+    consumer_label = str(raw.get("consumer_label", "") or "").strip() or None
+    if consumer_label and "{consumer}" not in consumer_label:
+        raise ValueError("consumer_label must contain the {consumer} placeholder")
     consumer_lanes = frozenset(
         str(value).strip() for value in raw.get("consumer_lanes", ["asks"])
     )
@@ -218,6 +252,7 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         ),
         lane_projects=MappingProxyType(lane_projects),
         consumer_project=consumer_project,
+        consumer_label=consumer_label,
         consumer_lanes=consumer_lanes,
         lane_priority=MappingProxyType(lane_priority),
         consumers=MappingProxyType(consumers),

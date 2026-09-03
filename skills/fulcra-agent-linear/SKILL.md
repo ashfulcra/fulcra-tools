@@ -52,6 +52,7 @@ Consumers are configuration, not code. In your policy:
 ```json
 {
   "consumer_project": "Blocked on {consumer}",
+  "consumer_label":   "blocked-on-{consumer}",
   "consumer_lanes": ["asks"],
   "consumers": {
     "ash": { "display": "Ash",  "linear_user": "1fb93548-…" },
@@ -70,6 +71,26 @@ Consumers are configuration, not code. In your policy:
   already assigned to that person in the target org.
 - `unassigned_consumer` is where rows land when nobody is named. It must not
   collide with a real consumer, or unattributed work piles into their view.
+
+**Set both the project and the label.** They reach different surfaces, and only
+one of them reaches a saved view:
+
+| | reaches |
+|---|---|
+| `consumer_project` | the project page, and grouping in board views |
+| `consumer_label` | **saved custom views**, which filter on labels |
+| `linear_user` | My Issues, inbox, notifications, mobile |
+
+A Linear saved view filters on labels; **a project is not reachable from one**.
+This is not theoretical — an operator kept reporting an empty "blocked on me"
+view while the project sat there holding 27 correctly-projected, correctly-
+assigned cards. His bookmark was a custom view keyed on the label
+`blocked-on-ash`, which the bridge had never written. Two objects, nearly the
+same name, and every "it's fixed" report measured the one he wasn't reading.
+
+The label renders from the **handle** (`blocked-on-ash`), not the display name:
+a label is an identifier. Ask which URL your consumers actually have open before
+believing a view is populated.
 
 ### 2. Mark what is blocked on a person
 

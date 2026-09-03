@@ -38,7 +38,7 @@
     "origin:ash",
     "origin:fleet"
   ],
-  "max_managed_labels": 16,
+  "max_managed_labels": 32,
   "workstream_projects": {},
   "included_origins": [
     "ash",
@@ -66,5 +66,6 @@
   "consumer_project": "Blocked on {consumer}",
   "consumer_lanes": [
     "asks"
-  ]
+  ],
+  "consumer_label": "blocked-on-{consumer}"
 }
