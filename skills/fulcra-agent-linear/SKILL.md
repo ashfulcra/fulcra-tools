@@ -71,6 +71,10 @@ Consumers are configuration, not code. In your policy:
   already assigned to that person in the target org.
 - `unassigned_consumer` is where rows land when nobody is named. It must not
   collide with a real consumer, or unattributed work piles into their view.
+- `consumer_lanes` is **only** about that triage case. A row reaches a person's
+  view by naming them, in whatever lane it sits — listing the asks lane here
+  just says "an ask with no human named is still somebody's to triage, not an
+  ordinary backlog row". Do not read it as the rule that selects the view.
 
 **Set both the project and the label.** They reach different surfaces, and only
 one of them reaches a saved view:
@@ -91,6 +95,13 @@ same name, and every "it's fixed" report measured the one he wasn't reading.
 The label renders from the **handle** (`blocked-on-ash`), not the display name:
 a label is an identifier. Ask which URL your consumers actually have open before
 believing a view is populated.
+
+A bot token is often forbidden from *creating* labels (`CreateLabel: FORBIDDEN`),
+and one uncreatable label fails the whole resource plan. Either create the
+per-consumer labels once by hand — the consumer has usually already made theirs,
+which is why their view exists — or grant the bot the scope. The triage
+destination deliberately has **no** label for this reason: unresolved rows reach
+the triage *project*, which is what triage reads.
 
 ### 2. Mark what is blocked on a person
 
@@ -133,6 +144,25 @@ coord-tracker-bridge linear-answers --source teams --deliver
 reads a [coord-engine](../../packages/coord-engine/README.md) fold instead; every
 rule below is identical on both.
 
+## Where a reply lands
+
+The bare workspace is the assumption, and it has no `answer` verb — its whole
+coordination primitive is `member/<name>/inbox/`, where others drop work for a
+member to pick up. So on a plain space the return leg **is an inbox drop**:
+
+```
+team/<team>/member/<owner>/inbox/<stamp>_linear-bridge_answer-<ask>.md
+```
+
+`owner` is why the task document needs that field. It is a different thing from
+the consumer: the **consumer** is the human who decides, the **owner** is the
+agent who gets unblocked by the decision. An ask naming no owner is refused
+rather than delivered to a guessed inbox.
+
+Where coord-engine *is* installed, the same reply goes to `coord-engine answer`
+instead and the engine hands the ask back to its owner. Nothing else about the
+loop changes — same reader, same state file, same three outcomes.
+
 ## Writes carry a bot identity
 
 Use an OAuth app token, never a personal key. A personal key authors every fleet
@@ -148,6 +178,13 @@ feeds its own confirmations back into the workspace forever.
 
 Each of these is here because the cheaper version failed in production.
 
+- **The reader must match the view.** Whatever rule decides that a card
+  appears in someone's "blocked on me" view must be the same rule that decides
+  the bridge reads their reply on it. These were two rules here — the view
+  filtered on the person, the reader on the asks fold — so the view held 27
+  cards and the reader saw 13, and two replies the operator left sat unread on
+  cards he was looking at. A card is answerable because it **names a human**,
+  not because of the fold it came from.
 - **`rc=0` is acceptance, not durability.** The only proof a sync settled is a
   second `plan` returning **0 changes**. A sync once reported `applied: 3` and
   the next plan proposed the same three updates forever.
@@ -172,6 +209,17 @@ Each of these is here because the cheaper version failed in production.
 - **Never let the count you showed differ from the count you apply.** `sync`
   re-plans at execution time, correctly; so a plan approved against a degraded
   read is not the plan that runs. Say what can still move.
+- **Changing the policy orphans the ledger.** State is filed under a hash of
+  the policy document, so editing the policy silently starts a fresh ledger.
+  The bridge self-heals it from the provider metadata on the cards, and the
+  absence-close gate above is what makes that safe: a healed entry has never
+  been *observed*, so nothing gets closed for being missing from the first
+  snapshot after the change. Expect one run that rewrites the hash marker on
+  every card — a real cost, and the reason a policy edit is not a free change.
+- **A crashed run leaves its lease held.** The lease has a 30-minute TTL, which
+  is correct for a run that might still be alive and wrong for one you watched
+  die. Check whether the recorded owner is still running before clearing it —
+  and never clear it because a re-run was inconvenient.
 
 ## What it deliberately cannot do
 
