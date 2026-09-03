@@ -177,6 +177,23 @@ Four walls, in the order you'll hit them:
    format, and `chmod 600` it. Refresh proactively when under ~2h remain. Auth0
    may rotate the refresh token — persist the returned one when present. Only a
    dead *refresh* token (expired or revoked) needs a fresh human device-flow tap.
+
+   **"The same format" is load-bearing, and two things about it bite (both
+   re-confirmed live 2026-09-03).** First, the token response contains
+   `id_token` on every refresh observed so far; write the response *whole* and
+   the extra key breaks every authenticated call. Keep exactly the four keys the
+   CLI writes: `access_token`, `access_token_expiration`, `refresh_token`,
+   `refresh_token_expiration` (that last is legitimately `null` — carry it
+   forward rather than inventing one). Second, `access_token_expiration` must be
+   a **timezone-naive UTC** ISO string, e.g. `2026-09-04T02:15:01.301382` with
+   no offset, because the client compares it against a naive `utcnow()`; an
+   aware value (`…+00:00`) is accepted by the file and then fails every call
+   with `can't compare offset-naive and offset-aware datetimes`.
+
+   **Verify with a real authenticated call, not with a token print.** A command
+   that only *reads* the file will succeed while the datetime comparison that
+   breaks fails on the request path — so the print looks clean and the next
+   real call dies.
 3. **Ephemeral hosts.** Two distinct failure scales (verified live 2026-07-15): a
    container **restart** kills every running process but keeps
    the filesystem — installs, `credentials.json`, scratch scripts all survive; a full
