@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .answers import EngineAnswerDispatcher, run_answers
+from .answers import EngineAnswerDispatcher, WorkspaceInboxDispatcher, run_answers
 from .assignments import (
     DEFAULT_DELIVERY_CAP,
     EngineTellDispatcher,
@@ -223,10 +223,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_comments=adapter.list_comments,
                 bot_user_id=adapter.viewer_id(),
                 state_path=state_path,
-                # No global human: each answer is attributed to the consumer
-                # named on its own card. A run-wide handle would file a second
-                # person's decision under the first person's name.
-                dispatcher=EngineAnswerDispatcher(team=args.coord_team),
+                # The return leg follows the SUBSTRATE. A bare
+                # fulcra-workspaces space has no `coord-engine answer` to settle
+                # against, so the reply is delivered into the waiting member's
+                # inbox — that convention's only coordination primitive. Neither
+                # dispatcher takes a global human: each answer is attributed to
+                # the consumer named on its own card, because a run-wide handle
+                # files a second person's decision under the first person's name.
+                dispatcher=(
+                    WorkspaceInboxDispatcher(team=args.coord_team, sender=args.sender)
+                    if args.source == "teams"
+                    else EngineAnswerDispatcher(team=args.coord_team)
+                ),
                 post_comment=adapter.add_comment,
                 deliver=args.deliver,
                 seed=args.seed,
