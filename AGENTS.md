@@ -362,6 +362,23 @@ it (not on PyPI).
   - Dedupe by record id, keep `v:1` payloads addressed to you or `all`, fetch
     documents by `ptr`, and fail closed on any error or truncation — **an
     unreadable window is UNKNOWN, never empty**.
+  - **`queue --obligations` answers with the ENUMERATING corpus fold, and its
+    zero is not trustworthy.** `_queue_obligations_fragment` (cli.py) calls
+    `_obligation_probes` unconditionally; there is no `--stream` option on
+    `queue`. So the flag that exists to prove "an empty queue is not proof
+    nothing is owed" answers over the very code path the stream architecture
+    replaced, and when its probes run out of budget it reports
+    `owed_count: 0` beside a list of degraded components — a zero computed
+    over the one or two folds that finished. Measured 2026-09-03T23:41Z on one
+    host inside one minute: `queue --obligations` said `owed_count 0`,
+    `state UNKNOWN`, five degraded; `obligations --stream` said **296 owed
+    from 139 events, 67 doc reads, one carried-UNKNOWN component**. Both
+    numbers are real and they do not contradict each other — *they are
+    different functions*, which is exactly why the same-function question is a
+    standing rule. **Ask `obligations --stream` (or `owed`) what you owe.
+    Never a corpus fold on a wake path**, and never report its degradation as
+    a fact of the environment: degradation there is the enumeration cost the
+    stream architecture exists to remove, not weather.
   - **Zero fresh events is not proof of zero durable work.** A successful
     text-mode queue read with no event rows and no obligations fold prints a
     stderr notice pointing to `coord-engine obligations <team> --agent <you>`;
