@@ -42,6 +42,12 @@ class Policy:
     #: Where a row lands when its consumer cannot be resolved. Named, not blank:
     #: unattributed work must be visibly somebody's to triage.
     unassigned_consumer: str
+    #: coord handle -> Linear user id. Without it a card lands in the right
+    #: PROJECT but is assigned to nobody, so it never appears in that
+    #: person's My Issues, inbox, notifications or phone. Measured on the
+    #: live board 2026-09-03: 226 of 229 cards unassigned, and the newest
+    #: thing in the operator's own queue was six weeks stale.
+    consumer_linear_users: Mapping[str, str]
     included_origins: frozenset[str]
     close_absent: bool
     field_ownership: Mapping[str, str]
@@ -98,6 +104,19 @@ class Policy:
         # them. Falling back to the handle is honest; dropping them is not.
         return template.format(consumer=self.consumers.get(consumer, consumer))
 
+    def linear_user_for(self, consumer: str | None) -> str | None:
+        """The Linear account to assign this row to, or None to leave it alone.
+
+        None is returned for an unresolved or unmapped consumer, and the caller
+        writes that through as "unassign": a row whose consumer changed or became
+        unresolvable must not sit in the previous person's queue claiming to be
+        theirs.
+        """
+
+        if not consumer:
+            return None
+        return self.consumer_linear_users.get(consumer)
+
 
 
 def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
@@ -131,12 +150,22 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         )
     lane_projects = {str(k): str(v) for k, v in raw.get("lane_projects", {}).items()}
     lane_priority = {str(k): int(v) for k, v in raw.get("lane_priority", {}).items()}
-    consumers = {
-        str(handle).strip(): str(display).strip()
-        for handle, display in (raw.get("consumers", {}) or {}).items()
-    }
-    if any(not handle or not display for handle, display in consumers.items()):
-        raise ValueError("consumers entries need a non-empty handle and display name")
+    consumers: dict[str, str] = {}
+    consumer_linear_users: dict[str, str] = {}
+    for handle, value in (raw.get("consumers", {}) or {}).items():
+        key = str(handle).strip()
+        if isinstance(value, Mapping):
+            display = str(value.get("display", "")).strip()
+            linear_user = str(value.get("linear_user", "")).strip()
+            if linear_user:
+                consumer_linear_users[key] = linear_user
+        else:
+            # Display-only form: the person gets a view but no card is assigned
+            # to them, so it never reaches their My Issues or notifications.
+            display = str(value).strip()
+        if not key or not display:
+            raise ValueError("consumers entries need a non-empty handle and display name")
+        consumers[key] = display
     unassigned_consumer = str(raw.get("unassigned_consumer", "someone")).strip()
     if not unassigned_consumer:
         raise ValueError("unassigned_consumer must be non-empty")
@@ -171,6 +200,7 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         lane_priority=MappingProxyType(lane_priority),
         consumers=MappingProxyType(consumers),
         unassigned_consumer=unassigned_consumer,
+        consumer_linear_users=MappingProxyType(consumer_linear_users),
         included_origins=frozenset(str(v) for v in raw.get("included_origins", [])),
         close_absent=bool(raw.get("close_absent", True)),
         field_ownership=MappingProxyType(ownership),

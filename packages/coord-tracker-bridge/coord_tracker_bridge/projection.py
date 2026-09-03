@@ -52,6 +52,9 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
         # global handle. With more than one consumer, a global handle records
         # somebody else's decision under the wrong name.
         "blocked_on_user": item.blocked_on_user,
+        # The real Linear assignee. Without it the card lands in the right
+        # project and still never reaches the person it is blocking.
+        "linear_assignee": policy.linear_user_for(item.blocked_on_user),
         "origin": item.origin,
         "workstream": item.workstream,
         "source_identity": item.source.to_dict(),

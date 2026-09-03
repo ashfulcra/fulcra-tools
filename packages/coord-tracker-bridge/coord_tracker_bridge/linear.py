@@ -256,7 +256,7 @@ class LinearClient:
         return result
 
 
-ISSUES_QUERY = """query Issues($team:ID!,$after:String){issues(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id title description priority dueDate state{id name type} project{id name}} pageInfo{hasNextPage endCursor}}}"""
+ISSUES_QUERY = """query Issues($team:ID!,$after:String){issues(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id title description priority dueDate state{id name type} project{id name} assignee{id}} pageInfo{hasNextPage endCursor}}}"""
 LABELS_QUERY = """query Labels($team:ID!,$after:String){issueLabels(filter:{team:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 PROJECTS_QUERY = """query Projects($team:ID!,$after:String){projects(filter:{accessibleTeams:{id:{eq:$team}}},first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}"""
 COMMENTS_QUERY = """query Comments($issue:ID!,$after:String){comments(filter:{issue:{id:{eq:$issue}}},first:100,after:$after){nodes{id body createdAt user{id}} pageInfo{hasNextPage endCursor}}}"""
@@ -621,6 +621,11 @@ class LinearTrackerAdapter:
                 capability=capability,
                 fields={
                     "title": issue.get("title"),
+                    # The REAL Linear assignee, not the coord one. A "blocked
+                    # on me" card that is never assigned never reaches the
+                    # person's My Issues, notifications or phone — the view
+                    # exists and is invisible where they actually look.
+                    "linear_assignee": (issue.get("assignee") or {}).get("id"),
                     "description": strip_source_metadata(description),
                     "semantic_state": state.get("type") or state.get("name"),
                     "priority": issue.get("priority"),
@@ -696,6 +701,10 @@ class LinearTrackerAdapter:
                 output["projectId"] = projects[project]
             else:
                 output["projectId"] = None
+        if "linear_assignee" in fields:
+            # None legitimately means "unassign": a row whose consumer became
+            # unresolvable must not stay in the last person's queue.
+            output["assigneeId"] = fields["linear_assignee"]
         if "due_at" in fields:
             output["dueDate"] = fields["due_at"]
         if "semantic_state" in fields:

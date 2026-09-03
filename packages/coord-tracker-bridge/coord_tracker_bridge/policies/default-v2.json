@@ -1,6 +1,12 @@
 {
   "version": "2",
-  "included_lanes": ["active", "blocked", "backlog", "asks", "threads-missed"],
+  "included_lanes": [
+    "active",
+    "blocked",
+    "backlog",
+    "asks",
+    "threads-missed"
+  ],
   "lane_states": {
     "active": "started",
     "blocked": "started",
@@ -8,10 +14,23 @@
     "asks": "unstarted",
     "threads-missed": "unstarted"
   },
-  "priority": {"P1": 2, "P2": 3, "P3": 4},
-  "lane_projects": {"asks": "Blocked on {consumer}"},
-  "lane_priority": {"asks": 1},
-  "consumers": {"ash": "Ash"},
+  "priority": {
+    "P1": 2,
+    "P2": 3,
+    "P3": 4
+  },
+  "lane_projects": {
+    "asks": "Blocked on {consumer}"
+  },
+  "lane_priority": {
+    "asks": 1
+  },
+  "consumers": {
+    "ash": {
+      "display": "Ash",
+      "linear_user": "de384373-4bd6-4fdb-959b-502c1d897b02"
+    }
+  },
   "unassigned_consumer": "someone",
   "managed_labels": [
     "lane:active",
@@ -24,7 +43,10 @@
   ],
   "max_managed_labels": 16,
   "workstream_projects": {},
-  "included_origins": ["ash", "fleet"],
+  "included_origins": [
+    "ash",
+    "fleet"
+  ],
   "close_absent": true,
   "field_ownership": {
     "title": "source",

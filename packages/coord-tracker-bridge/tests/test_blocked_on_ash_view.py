@@ -85,7 +85,8 @@ def test_policy_document_round_trips_the_new_keys() -> None:
     policy = load_policy()
     document = json.loads(json.dumps(dict(policy.document)))
     assert document["lane_projects"] == {"asks": "Blocked on {consumer}"}
-    assert document["consumers"] == {"ash": "Ash"}
+    assert document["consumers"]["ash"]["display"] == "Ash"
+    assert document["consumers"]["ash"]["linear_user"]
     assert document["lane_priority"] == {"asks": 1}
 
 
@@ -146,3 +147,49 @@ def test_a_consumer_template_without_consumers_is_refused() -> None:
 def test_a_consumer_needs_both_handle_and_display_name() -> None:
     with pytest.raises(ValueError, match="non-empty handle and display name"):
         _policy_from_mapping({**MULTI, "consumers": {"ash": "  "}})
+
+
+# --------------------------------------------------------------------------
+# reaching the person, not just the project
+# --------------------------------------------------------------------------
+
+def test_a_consumer_with_a_linear_user_gets_the_card_assigned() -> None:
+    """Measured on the live board 2026-09-03: 226 of 229 cards unassigned, and
+    the newest thing in the operator's own Linear queue was six weeks stale. A
+    project the person never opens is not a view."""
+
+    policy = _policy_from_mapping({
+        **BASE,
+        "lane_projects": {"asks": "Blocked on {consumer}"},
+        "consumers": {"ash": {"display": "Ash", "linear_user": "u-ash"}},
+    })
+    assert policy.linear_user_for("ash") == "u-ash"
+
+
+def test_display_only_consumers_still_work_but_assign_nobody() -> None:
+    """The short form is legal — you just get a view without notifications."""
+
+    policy = _policy_from_mapping({
+        **BASE,
+        "lane_projects": {"asks": "Blocked on {consumer}"},
+        "consumers": {"liz": "Liz"},
+    })
+    assert policy.project_for("asks", None, "liz") == "Blocked on Liz"
+    assert policy.linear_user_for("liz") is None
+
+
+def test_an_unresolved_consumer_assigns_nobody() -> None:
+    """Written through as unassign: a row whose consumer became unresolvable
+    must not sit in the previous person's queue claiming to be theirs."""
+
+    policy = _policy_from_mapping({
+        **BASE,
+        "lane_projects": {"asks": "Blocked on {consumer}"},
+        "consumers": {"ash": {"display": "Ash", "linear_user": "u-ash"}},
+    })
+    assert policy.linear_user_for(None) is None
+    assert policy.linear_user_for("nobody-we-know") is None
+
+
+def test_the_bundled_policy_assigns_its_consumer() -> None:
+    assert load_policy().linear_user_for("ash")
