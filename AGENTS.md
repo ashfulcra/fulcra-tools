@@ -1442,8 +1442,16 @@ The working recipe, end to end:
   lives in `fulcra_api/core.py`; `grant_type=refresh_token`.
 - go through the agent proxy (`HTTPS_PROXY`) with the CA bundle at
   `/root/.ccr/ca-bundle.crt`. Never disable verification.
-- the response **still contains `id_token`** — observed on every refresh so far —
-  so filter to the four keys; see the section above for what happens otherwise.
+- the response **still contains `id_token`** — observed on every refresh so far.
+  Filtering it out is *tidy, not required*: **the "exactly four keys" rule is
+  FALSE and is withdrawn.** `auth login --device-code` writes the Auth0 response
+  verbatim, producing six keys including `id_token`/`id_token_expiration`, and
+  authenticated calls run clean against that file — measured by
+  coord-linear-agent on 2026-09-03 (`catalog` plus two `file list` calls, all
+  rc 0) and reproduced here the same day by adding both keys to a working file,
+  calling the store (rc 0, empty stderr) and restoring. The client writes what
+  it accepts. The load-bearing constraint is the timestamp shape above, and
+  putting a phantom key-count hazard next to it buried the real one.
 - `refresh_token_expiration` is legitimately `None` here; carry it forward rather
   than inventing one, and reuse the old `refresh_token` when the response omits a
   new one.
