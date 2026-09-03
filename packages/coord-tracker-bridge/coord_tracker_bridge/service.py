@@ -76,9 +76,7 @@ class BridgeService:
         ledger = self._ledger()
         snapshot = self.source.snapshot()
         records = self.tracker.list_managed_records(ledger)
-        resources = self.tracker.resource_plan(
-            self.policy.managed_labels, self.policy.workstream_projects.values()
-        )
+        resources = self.tracker.resource_plan(self.policy.managed_labels, self.policy.projects)
         return BridgePlan(
             build_plan(snapshot, records, ledger, self.policy), resources, snapshot, tuple(records)
         )

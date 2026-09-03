@@ -39,9 +39,11 @@ def _desired(item: WorkRecord, policy: Policy) -> dict[str, Any]:
         "title": item.title,
         "description": item.description,
         "semantic_state": policy.lane_states[item.lane],
-        "priority": policy.priority.get(item.priority, policy.priority.get("P2", 3)),
+        "priority": policy.lane_priority.get(
+            item.lane, policy.priority.get(item.priority, policy.priority.get("P2", 3))
+        ),
         "labels": labels,
-        "project": policy.workstream_projects.get(item.workstream or ""),
+        "project": policy.project_for(item.lane, item.workstream),
         "due_at": item.due_at.isoformat() if item.due_at else None,
         "owner": item.owner,
         "assignee": item.assignee,

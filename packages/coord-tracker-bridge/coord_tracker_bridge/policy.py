@@ -22,6 +22,15 @@ class Policy:
     priority: Mapping[str, int]
     managed_labels: tuple[str, ...]
     workstream_projects: Mapping[str, str]
+    #: lane -> Linear project name. A workstream is the wrong key for the one
+    #: view this lane exists to produce: "what is blocked on Ash" is a property
+    #: of the LANE (asks), and asks rows carry no workstream at all, so a
+    #: workstream mapping can never gather them.
+    lane_projects: Mapping[str, str]
+    #: lane -> Linear priority, overriding the P-level map. Fleet-P1 means "top
+    #: of the fleet's queue", which is a far lower bar than what Urgent implies
+    #: on a human board — 41 Urgent cards at once is the same as none.
+    lane_priority: Mapping[str, int]
     included_origins: frozenset[str]
     close_absent: bool
     field_ownership: Mapping[str, str]
@@ -30,6 +39,22 @@ class Policy:
 
     def owns(self, field: str) -> str:
         return self.field_ownership.get(field, "source")
+
+    @property
+    def projects(self) -> tuple[str, ...]:
+        """Every Linear project this policy can assign, for the resource plan.
+
+        A project the projection names but the resource plan omits makes `sync`
+        raise ResourceMissing on the first card that wants it, after earlier
+        cards have already been written.
+        """
+
+        return tuple(sorted({*self.workstream_projects.values(), *self.lane_projects.values()}))
+
+    def project_for(self, lane: str, workstream: str | None) -> str | None:
+        """Lane wins: it is the specific claim, the workstream is the general one."""
+
+        return self.lane_projects.get(lane) or self.workstream_projects.get(workstream or "")
 
 
 def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
@@ -61,6 +86,16 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         raise ValueError(
             f"included_lanes missing lane_states: {sorted(missing_lane_states)}"
         )
+    lane_projects = {str(k): str(v) for k, v in raw.get("lane_projects", {}).items()}
+    lane_priority = {str(k): int(v) for k, v in raw.get("lane_priority", {}).items()}
+    # A lane mapping outside the allowlist is dead config that reads as
+    # configured. Fail loudly at load rather than silently never firing.
+    for name, mapping in (("lane_projects", lane_projects), ("lane_priority", lane_priority)):
+        stray = mapping.keys() - included_lanes
+        if stray:
+            raise ValueError(f"{name} names lanes outside included_lanes: {sorted(stray)}")
+    if any(not value.strip() for value in lane_projects.values()):
+        raise ValueError("lane_projects entries must name a non-empty project")
     document = json.loads(json.dumps(raw))
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     return Policy(
@@ -72,6 +107,8 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
         workstream_projects=MappingProxyType(
             {str(k): str(v) for k, v in raw.get("workstream_projects", {}).items()}
         ),
+        lane_projects=MappingProxyType(lane_projects),
+        lane_priority=MappingProxyType(lane_priority),
         included_origins=frozenset(str(v) for v in raw.get("included_origins", [])),
         close_absent=bool(raw.get("close_absent", True)),
         field_ownership=MappingProxyType(ownership),
