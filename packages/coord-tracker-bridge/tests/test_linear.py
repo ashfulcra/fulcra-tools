@@ -763,3 +763,30 @@ def test_an_EMPTY_nodes_list_is_still_a_legitimate_empty_page():
     client = LinearClient(FakeTransport([_paginate_page([], {"hasNextPage": False})]))
 
     assert client.paginate("Issues", "query", "issues") == []
+
+
+def test_a_record_carries_the_HUMAN_READABLE_card_key():
+    """The answers report has to name the card the way the operator sees it.
+
+    Without this the report listed raw issue UUIDs, so the one line a human
+    reads to go find the card named nothing they could look up on a board.
+    It is read-only: the projection never sets `identifier`, so it takes part
+    in no diff.
+    """
+
+    source = SourceIdentity("coord-engine", "fulcra/asks", "ask-1")
+    issue = {
+        "id": "8f1c-uuid", "identifier": "BUS-195", "title": "Task",
+        "description": append_source_metadata("body", source, capability="asks"),
+        "state": {"type": "started"}, "labels": {"nodes": []}, "project": None,
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False, "endCursor": None}}}),
+        response({"issue": {"labels": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}),
+    ])
+
+    records = LinearTrackerAdapter(LinearClient(transport), "team").list_managed_records(
+        BridgeLedger()
+    )
+
+    assert records[0].fields["identifier"] == "BUS-195"
