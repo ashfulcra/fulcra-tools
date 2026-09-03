@@ -32,7 +32,7 @@ def test_bundled_policy_gathers_asks_into_a_per_consumer_project() -> None:
     ("Blocked on ash") would be a second project and move live cards into it."""
 
     policy = load_policy()
-    assert policy.lane_projects["asks"] == "Blocked on {consumer}"
+    assert policy.consumer_project == "Blocked on {consumer}"
     assert policy.project_for("asks", None, "ash") == "Blocked on Ash"
 
 
@@ -84,7 +84,7 @@ def test_policy_document_round_trips_the_new_keys() -> None:
 
     policy = load_policy()
     document = json.loads(json.dumps(dict(policy.document)))
-    assert document["lane_projects"] == {"asks": "Blocked on {consumer}"}
+    assert document["consumer_project"] == "Blocked on {consumer}"
     assert document["consumers"]["ash"]["display"] == "Ash"
     assert document["consumers"]["ash"]["linear_user"]
     assert document["lane_priority"] == {"asks": 1}
@@ -96,7 +96,7 @@ def test_policy_document_round_trips_the_new_keys() -> None:
 
 MULTI = {
     **BASE,
-    "lane_projects": {"asks": "Blocked on {consumer}"},
+    "consumer_project": "Blocked on {consumer}",
     "consumers": {"ash": "Ash", "liz": "Liz"},
     "unassigned_consumer": "someone",
 }
@@ -141,7 +141,7 @@ def test_a_consumer_template_without_consumers_is_refused() -> None:
     """Otherwise the resource plan cannot create the per-person projects."""
 
     with pytest.raises(ValueError, match="requires a non-empty consumers list"):
-        _policy_from_mapping({**BASE, "lane_projects": {"asks": "Blocked on {consumer}"}})
+        _policy_from_mapping({**BASE, "consumer_project": "Blocked on {consumer}"})
 
 
 def test_a_consumer_needs_both_handle_and_display_name() -> None:
@@ -160,7 +160,7 @@ def test_a_consumer_with_a_linear_user_gets_the_card_assigned() -> None:
 
     policy = _policy_from_mapping({
         **BASE,
-        "lane_projects": {"asks": "Blocked on {consumer}"},
+        "consumer_project": "Blocked on {consumer}",
         "consumers": {"ash": {"display": "Ash", "linear_user": "u-ash"}},
     })
     assert policy.linear_user_for("ash") == "u-ash"
@@ -171,7 +171,7 @@ def test_display_only_consumers_still_work_but_assign_nobody() -> None:
 
     policy = _policy_from_mapping({
         **BASE,
-        "lane_projects": {"asks": "Blocked on {consumer}"},
+        "consumer_project": "Blocked on {consumer}",
         "consumers": {"liz": "Liz"},
     })
     assert policy.project_for("asks", None, "liz") == "Blocked on Liz"
@@ -184,7 +184,7 @@ def test_an_unresolved_consumer_assigns_nobody() -> None:
 
     policy = _policy_from_mapping({
         **BASE,
-        "lane_projects": {"asks": "Blocked on {consumer}"},
+        "consumer_project": "Blocked on {consumer}",
         "consumers": {"ash": {"display": "Ash", "linear_user": "u-ash"}},
     })
     assert policy.linear_user_for(None) is None
@@ -193,3 +193,42 @@ def test_an_unresolved_consumer_assigns_nobody() -> None:
 
 def test_the_bundled_policy_assigns_its_consumer() -> None:
     assert load_policy().linear_user_for("ash")
+
+
+# --------------------------------------------------------------------------
+# the consumer view is not a lane view
+# --------------------------------------------------------------------------
+
+def test_a_row_blocked_on_someone_lands_in_their_view_WHATEVER_lane() -> None:
+    """Measured live 2026-09-03: 27 rows carried `blocked_on: user:ash` while
+    the asks fold surfaced 12. Keying the view on the asks lane left 15 things
+    blocking the operator out of his own "blocked on me" view entirely.
+    Ash: "all 27!"."""
+
+    policy = _policy_from_mapping(MULTI)
+    for lane in ("asks", "active", "blocked", "backlog"):
+        assert policy.project_for(lane, None, "liz") == "Blocked on Liz", lane
+
+
+def test_an_ask_with_no_named_consumer_is_still_triage_not_a_lane_row() -> None:
+    """An ask is blocked on a person by definition; an unnamed one is triage."""
+
+    policy = _policy_from_mapping(MULTI)
+    assert policy.project_for("asks", None, None) == "Blocked on someone"
+
+
+def test_an_ordinary_lane_row_naming_nobody_is_not_a_consumer_row() -> None:
+    policy = _policy_from_mapping({**MULTI, "workstream_projects": {"w": "Engine"}})
+    assert policy.project_for("active", "w", None) == "Engine"
+    assert policy.project_for("active", None, None) is None
+
+
+def test_consumer_project_must_carry_the_placeholder() -> None:
+    with pytest.raises(ValueError, match="must contain the .consumer. placeholder"):
+        _policy_from_mapping({**BASE, "consumer_project": "Blocked on Ash",
+                              "consumers": {"ash": "Ash"}})
+
+
+def test_consumer_lanes_outside_the_allowlist_are_refused() -> None:
+    with pytest.raises(ValueError, match="consumer_lanes names lanes outside"):
+        _policy_from_mapping({**MULTI, "consumer_lanes": ["nonsense"]})

@@ -22,11 +22,19 @@ class Policy:
     priority: Mapping[str, int]
     managed_labels: tuple[str, ...]
     workstream_projects: Mapping[str, str]
-    #: lane -> Linear project name. A workstream is the wrong key for the one
-    #: view this lane exists to produce: "what is blocked on Ash" is a property
-    #: of the LANE (asks), and asks rows carry no workstream at all, so a
-    #: workstream mapping can never gather them.
+    #: lane -> Linear project name, for ordinary lane views.
     lane_projects: Mapping[str, str]
+    #: The per-person view, e.g. "Blocked on {consumer}". This is a CONSUMER
+    #: view, not a lane view: any row that names a human belongs in that
+    #: human's project whatever lane it sits in. Keying it on the asks lane
+    #: under-counted — measured live 2026-09-03, 27 rows carried
+    #: `blocked_on: user:ash` while the asks fold surfaced only 12, so 15
+    #: things blocking the operator were nowhere in his "blocked on me" view.
+    consumer_project: str | None
+    #: Lanes that are a consumer view even when no human is named — an ask is
+    #: blocked on a person by definition, so an unnamed one is triage, not
+    #: an ordinary lane row.
+    consumer_lanes: frozenset[str]
     #: lane -> Linear priority, overriding the P-level map. Fleet-P1 means "top
     #: of the fleet's queue", which is a far lower bar than what Urgent implies
     #: on a human board — 41 Urgent cards at once is the same as none.
@@ -67,14 +75,12 @@ class Policy:
         """
 
         names: set[str] = set(self.workstream_projects.values())
-        for template in self.lane_projects.values():
-            if "{consumer}" not in template:
-                names.add(template)
-                continue
+        names.update(self.lane_projects.values())
+        if self.consumer_project:
             # Every configured consumer, plus the triage destination for rows
             # whose consumer never resolved.
             for who in (*self.consumers.values(), self.unassigned_consumer):
-                names.add(template.format(consumer=who))
+                names.add(self.consumer_project.format(consumer=who))
         return tuple(sorted(names))
 
     def project_for(
@@ -82,9 +88,9 @@ class Policy:
     ) -> str | None:
         """Which Linear project this row belongs in.
 
-        Lane wins over workstream: it is the specific claim. A lane project may
-        carry `{consumer}`, which is how one policy serves many humans — each
-        gets their own "blocked on me" view from the same configuration.
+        The CONSUMER view wins over both lane and workstream: a row that names
+        a human belongs in that human's project whatever lane it is in. That is
+        the whole point of "all the agents blocked on me in one place".
 
         A row whose consumer is unresolved renders the template with
         `unassigned_consumer` rather than dropping the placeholder: it must land
@@ -92,17 +98,20 @@ class Policy:
         never in a project literally called "Blocked on {consumer}".
         """
 
-        template = self.lane_projects.get(lane)
-        if template is None:
-            return self.workstream_projects.get(workstream or "") or None
-        if "{consumer}" not in template:
-            return template
-        if not consumer:
-            return template.format(consumer=self.unassigned_consumer)
-        # An unconfigured handle still gets a view rather than vanishing into
-        # triage: the row DID name a person, we just have no display name for
-        # them. Falling back to the handle is honest; dropping them is not.
-        return template.format(consumer=self.consumers.get(consumer, consumer))
+        if self.consumer_project and (consumer or lane in self.consumer_lanes):
+            if not consumer:
+                return self.consumer_project.format(consumer=self.unassigned_consumer)
+            # An unconfigured handle still gets a view rather than vanishing
+            # into triage: the row DID name a person, we just have no display
+            # name for them. Falling back to the handle is honest.
+            return self.consumer_project.format(
+                consumer=self.consumers.get(consumer, consumer)
+            )
+        return (
+            self.lane_projects.get(lane)
+            or self.workstream_projects.get(workstream or "")
+            or None
+        )
 
     def linear_user_for(self, consumer: str | None) -> str | None:
         """The Linear account to assign this row to, or None to leave it alone.
@@ -172,10 +181,21 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
     if unassigned_consumer in consumers.values():
         # Otherwise unattributed rows silently pile into a real person's view.
         raise ValueError("unassigned_consumer must not name a configured consumer")
-    if any("{consumer}" in template for template in lane_projects.values()) and not consumers:
+    consumer_project = str(raw.get("consumer_project", "") or "").strip() or None
+    consumer_lanes = frozenset(
+        str(value).strip() for value in raw.get("consumer_lanes", ["asks"])
+    )
+    if consumer_project and "{consumer}" not in consumer_project:
+        raise ValueError("consumer_project must contain the {consumer} placeholder")
+    if consumer_project and not consumers:
         raise ValueError(
-            "a {consumer} lane project requires a non-empty consumers list: with none "
+            "consumer_project requires a non-empty consumers list: with none "
             "configured the resource plan cannot create the per-person projects"
+        )
+    stray_consumer_lanes = consumer_lanes - included_lanes
+    if consumer_project and stray_consumer_lanes:
+        raise ValueError(
+            f"consumer_lanes names lanes outside included_lanes: {sorted(stray_consumer_lanes)}"
         )
     # A lane mapping outside the allowlist is dead config that reads as
     # configured. Fail loudly at load rather than silently never firing.
@@ -197,6 +217,8 @@ def _policy_from_mapping(raw: Mapping[str, Any]) -> Policy:
             {str(k): str(v) for k, v in raw.get("workstream_projects", {}).items()}
         ),
         lane_projects=MappingProxyType(lane_projects),
+        consumer_project=consumer_project,
+        consumer_lanes=consumer_lanes,
         lane_priority=MappingProxyType(lane_priority),
         consumers=MappingProxyType(consumers),
         unassigned_consumer=unassigned_consumer,
