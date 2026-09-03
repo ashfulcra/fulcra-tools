@@ -178,17 +178,21 @@ Four walls, in the order you'll hit them:
    may rotate the refresh token — persist the returned one when present. Only a
    dead *refresh* token (expired or revoked) needs a fresh human device-flow tap.
 
-   **"The same format" is load-bearing, and two things about it bite (both
-   re-confirmed live 2026-09-03).** First, the token response contains
-   `id_token` on every refresh observed so far; write the response *whole* and
-   the extra key breaks every authenticated call. Keep exactly the four keys the
-   CLI writes: `access_token`, `access_token_expiration`, `refresh_token`,
-   `refresh_token_expiration` (that last is legitimately `null` — carry it
-   forward rather than inventing one). Second, `access_token_expiration` must be
-   a **timezone-naive UTC** ISO string, e.g. `2026-09-04T02:15:01.301382` with
-   no offset, because the client compares it against a naive `utcnow()`; an
-   aware value (`…+00:00`) is accepted by the file and then fails every call
-   with `can't compare offset-naive and offset-aware datetimes`.
+   **"The same format" is load-bearing in exactly one way, and it is not the
+   one you would guess.** `access_token_expiration` must be a **timezone-naive
+   UTC** ISO string, e.g. `2026-09-04T02:15:01.301382` with no offset, because
+   the client compares it against a naive `utcnow()`. An aware value
+   (`…+00:00`) is accepted by the file and then fails every authenticated call
+   with `can't compare offset-naive and offset-aware datetimes`. Measured live
+   2026-09-02 and again 2026-09-03.
+
+   **Extra keys are harmless — do not filter on our say-so.** `id_token` and
+   `id_token_expiration` ride along on the token response, and
+   `auth login --device-code` writes them into the file itself. A six-key
+   `credentials.json` runs clean: `catalog` and `file list` both return rc 0
+   against one. Measured on two independent hosts 2026-09-03, after this
+   document had claimed the opposite. The client writes what it accepts; the
+   shape of the *timestamp* is the thing to get right.
 
    **Verify with a real authenticated call, not with a token print.** A command
    that only *reads* the file will succeed while the datetime comparison that
