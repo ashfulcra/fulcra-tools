@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .model import ManagedRecord
 from .source import CommandRunner, sanitize_text, subprocess_runner
@@ -80,6 +82,11 @@ class Reply:
     #: than one consumer a global handle files one person's decision under
     #: another's name.
     consumer: str
+    #: The agent waiting on this answer. Distinct from `consumer`: the
+    #: consumer is the human who decides, the owner is who gets unblocked.
+    #: A bare workspace has no `answer` verb, so the reply is delivered to
+    #: this member's inbox — the base convention's only messaging primitive.
+    owner: str | None = None
     repeat: str = NEW
 
     @property
@@ -232,6 +239,7 @@ def collect_replies(
                 body=body,
                 created_at=str(node.get("createdAt") or ""),
                 consumer=consumer,
+                owner=str((record.fields or {}).get("owner") or "").strip() or None,
                 repeat=repeat,
             ))
     replies.sort(key=lambda item: (item.created_at, item.comment_id))
@@ -378,3 +386,71 @@ def run_answers(
                 # unwind it or stop the run. The bus is the record.
                 pass
     return 0, render(plan, delivered=carried)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceInboxDispatcher:
+    """Deliver an answer into the waiting member's inbox on a bare workspace.
+
+    `fulcra-workspaces` has no `answer` verb and no engine — its whole
+    coordination primitive is `member/<name>/inbox/`, where others drop tasks and
+    messages for that member to pick up. So on the base convention the return leg
+    IS an inbox drop, and this is the sibling of EngineAnswerDispatcher for a
+    space with no coord-engine installed.
+
+    It still cannot create work: it writes one message into the inbox of the
+    member who was already waiting on this ask. It cannot address anybody else,
+    and it names no other member.
+    """
+
+    team: str
+    sender: str = "linear-bridge"
+    runner: CommandRunner = subprocess_runner
+    timeout: float = 60.0
+    command: tuple[str, ...] = ("fulcra-api",)
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+
+    def _path(self, reply: Reply) -> str:
+        stamp = self.clock().strftime("%Y%m%d-%H%M%S")
+        slug = re.sub(r"[^a-z0-9-]+", "-", reply.slug.lower()).strip("-")[:60]
+        return (
+            f"team/{self.team}/member/{reply.owner}/inbox/"
+            f"{stamp}_{self.sender}_answer-{slug}.md"
+        )
+
+    def body(self, reply: Reply) -> str:
+        return (
+            f"# Answer from {reply.consumer}\n\n"
+            f"You were blocked on `{reply.consumer}`. They have replied in Linear "
+            f"on {reply.identifier}.\n\n"
+            f"---\n\n{reply.body}\n\n---\n\n"
+            f"- ask: `{reply.slug}`\n"
+            f"- answered by: `{reply.consumer}`\n"
+            f"- carried by: `{self.sender}`\n"
+        )
+
+    def deliver(self, reply: Reply) -> None:
+        if not reply.owner:
+            # No member to deliver to. Refusing is the point: an answer written
+            # to a guessed inbox is worse than one that waits for triage.
+            raise DispatchFailed(
+                f"ask {reply.slug} names no owner, so there is no inbox to answer into"
+            )
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", encoding="utf-8", delete=False
+        ) as handle:
+            handle.write(self.body(reply))
+            staged = handle.name
+        try:
+            argv = (*self.command, "file", "upload", staged, self._path(reply))
+            code, stdout, stderr = self.runner(argv, self.timeout)
+            if code != 0:
+                raise DispatchFailed(
+                    f"inbox delivery for {reply.slug} to {reply.owner} failed "
+                    f"(rc {code}): {(stderr or stdout).strip()[:300]}"
+                )
+        finally:
+            try:
+                os.unlink(staged)
+            except FileNotFoundError:
+                pass

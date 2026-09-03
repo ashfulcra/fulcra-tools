@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from coord_tracker_bridge.answers import (
     POSSIBLE_REPEAT,
+    Reply,
     AnswerState,
     EngineAnswerDispatcher,
     collect_replies,
@@ -308,3 +311,76 @@ def test_a_failed_confirmation_comment_does_not_unwind_the_answer(tmp_path: Path
     )
     assert code == 0
     assert AnswerState.load(path).confirmed
+
+
+# --------------------------------------------------------------------------
+# the bare-workspace return leg
+# --------------------------------------------------------------------------
+
+from datetime import UTC, datetime  # noqa: E402
+
+from coord_tracker_bridge.answers import (  # noqa: E402
+    DispatchFailed,
+    WorkspaceInboxDispatcher,
+)
+
+FIXED = lambda: datetime(2026, 9, 3, 14, 5, 9, tzinfo=UTC)  # noqa: E731
+
+
+def reply(**kw):
+    base = dict(
+        comment_id="c1", issue_id="prov-1", identifier="BUS-127",
+        slug="agent-reasoning-tick-needs-a-spend-decision-0000dead",
+        author_id=ASH, body="approved, go ahead", created_at="2026-09-03T10:00:00Z",
+        consumer="ash", owner="collect-maintainer",
+    )
+    base.update(kw)
+    return Reply(**base)
+
+
+def test_the_answer_lands_in_the_WAITING_members_inbox() -> None:
+    """fulcra-workspaces has no `answer` verb — member/<name>/inbox/ is the whole
+    coordination primitive, so on the base convention that IS the return leg."""
+
+    runner = Runner()
+    WorkspaceInboxDispatcher(team="fulcra", runner=runner, clock=FIXED).deliver(reply())
+
+    argv = runner.calls[0]
+    assert argv[:4] == ("fulcra-api", "file", "upload", argv[3])
+    assert argv[4] == (
+        "team/fulcra/member/collect-maintainer/inbox/"
+        "20260903-140509_linear-bridge_answer-agent-reasoning-tick-needs-a-spend-decision-0000dead.md"
+    )
+
+
+def test_it_delivers_to_the_OWNER_not_the_consumer() -> None:
+    """The consumer is the human who decides; the owner is who gets unblocked."""
+
+    runner = Runner()
+    WorkspaceInboxDispatcher(team="fulcra", runner=runner, clock=FIXED).deliver(
+        reply(consumer="liz", owner="coord-boss")
+    )
+    assert "/member/coord-boss/inbox/" in runner.calls[0][4]
+    assert "/member/liz/" not in runner.calls[0][4]
+
+
+def test_an_ask_with_no_owner_is_refused_not_guessed() -> None:
+    """An answer written to a guessed inbox is worse than one that waits."""
+
+    runner = Runner()
+    with pytest.raises(DispatchFailed, match="names no owner"):
+        WorkspaceInboxDispatcher(team="fulcra", runner=runner).deliver(reply(owner=None))
+    assert runner.calls == []
+
+
+def test_a_failed_upload_is_a_dispatch_failure() -> None:
+    runner = Runner(code=1)
+    with pytest.raises(DispatchFailed, match="inbox delivery"):
+        WorkspaceInboxDispatcher(team="fulcra", runner=runner, clock=FIXED).deliver(reply())
+
+
+def test_the_message_names_who_answered_and_which_ask() -> None:
+    body = WorkspaceInboxDispatcher(team="fulcra", clock=FIXED).body(reply())
+    assert "approved, go ahead" in body
+    assert "ash" in body and "BUS-127" in body
+    assert "agent-reasoning-tick-needs-a-spend-decision-0000dead" in body
