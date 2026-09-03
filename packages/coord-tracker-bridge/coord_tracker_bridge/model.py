@@ -79,6 +79,14 @@ class WorkRecord:
     tags: tuple[str, ...] = ()
     archived: bool = False
     due_at: datetime | None = None
+    #: WHICH human this row is blocked on, or None when that cannot be resolved.
+    #: The engine has carried this all along (`blocked_on: user:<name>`, written
+    #: by `later --on-user`, folded by `query.blocked_on_human`) and this bridge
+    #: dropped it — which is why the first "blocked on me" view had to hardcode
+    #: one person's name. None is NOT "blocked on the default human": a row whose
+    #: consumer cannot be resolved must reach triage, never a guessed person's
+    #: view, and its answer must never be recorded as somebody else's.
+    blocked_on_user: str | None = None
 
     def __post_init__(self) -> None:
         if not self.capability.strip() or not self.title.strip() or not self.lane.strip():

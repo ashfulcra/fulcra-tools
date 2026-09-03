@@ -197,6 +197,11 @@ class EngineCapability:
     timeout: float | None = None
 
 
+#: The engine's typed marker for "blocked on a person" (`coord_engine.query`
+#: spells it the same way). Kept as a named constant so the one place this
+#: bridge reads a human out of a record is greppable against the engine's.
+_USER_PREFIX = "user:"
+
 #: Envelope fields coord-engine 2.0.x emits alongside a payload. They describe
 #: the READ, not the work, so they are never rows and never lanes.
 _ENVELOPE_SCALARS = frozenset({
@@ -372,6 +377,29 @@ class EngineSourceAdapter:
                     return evidence
         return None
 
+    @staticmethod
+    def _blocked_on_user(row: Mapping[str, Any]) -> str | None:
+        """Which human this row is blocked on, from the TYPED form only.
+
+        `coord-engine later --on-user <name>` writes `blocked_on: user:<name>`,
+        and that prefix is the only unambiguous statement of a human in the
+        record. The engine's fold ALSO has fuzzy fallbacks — a `needs:human`
+        tag, a blocked row whose assignee equals the configured human, a bare
+        name matched against known membership — but those resolve against
+        *that* caller's `--human` default and its view of team membership.
+
+        Reimplementing them here would be a SECOND interpretation of the same
+        field, free to disagree with the engine's, and disagreement about which
+        person owns a decision is the worst place for this package to guess.
+        So an untyped block is None: unresolved, bound for triage, never
+        attributed to a person whose name we inferred.
+        """
+
+        raw = sanitize_text(row.get("blocked_on"), limit=200).strip()
+        if not raw.startswith(_USER_PREFIX):
+            return None
+        return raw[len(_USER_PREFIX):].strip() or None
+
     def _work_record(self, row: Mapping[str, Any], capability: str, lane: str) -> WorkRecord | None:
         item_id = sanitize_text(row.get("id") or row.get("name"), limit=500)
         if not item_id:
@@ -398,6 +426,7 @@ class EngineSourceAdapter:
             tags=tags,
             archived=bool(row.get("archived")),
             due_at=due_at,
+            blocked_on_user=self._blocked_on_user(row),
         )
 
     def snapshot(self) -> Snapshot:
