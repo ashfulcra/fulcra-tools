@@ -88,15 +88,38 @@ def test_an_operator_comment_is_collected() -> None:
     assert [r.slug for r in plan.replies] == ["needs-a-spend-decision-0000dead"]
 
 
-def test_only_ask_cards_are_read() -> None:
-    """A task card's comments are conversation, not an answer to an ask."""
+def test_the_reader_matches_the_VIEW_not_the_asks_fold() -> None:
+    """A card is answerable because it NAMES A HUMAN, whatever lane it sits in.
+
+    The regression this pins: the reader filtered on the asks fold while the
+    consumer's "blocked on me" view filtered on the person, so the view held 27
+    cards and the reader saw 13. Two replies the operator left on cards he was
+    looking at sat unread, and every "it's fixed" report measured the fold he
+    was not reading. A card outside the fold that still names him is his.
+    """
 
     plan = collect_replies(
-        [record(capability="tasks")], comments(comment("c1", ASH)),
+        [record(capability="tasks", consumer="ash")], comments(comment("c1", ASH)),
         bot_user_id=BOT, state=AnswerState(),
     )
-    assert plan.replies == ()
+    assert plan.cards == 1
+    assert [r.consumer for r in plan.replies] == ["ash"]
+
+
+def test_a_card_that_names_nobody_and_is_no_ask_is_not_read() -> None:
+    """The other half of the rule: matching the view is not reading everything.
+
+    An ordinary task card blocked on nothing is conversation. Nobody is waiting
+    on an answer to it, and it appears in no consumer's view.
+    """
+
+    plan = collect_replies(
+        [record(capability="tasks", consumer=None)], comments(comment("c1", ASH)),
+        bot_user_id=BOT, state=AnswerState(),
+    )
     assert plan.cards == 0
+    assert plan.replies == ()
+    assert plan.unattributed == ()
 
 
 def test_a_bare_workspace_ask_is_read_by_its_LANE() -> None:
@@ -112,8 +135,10 @@ def test_a_bare_workspace_ask_is_read_by_its_LANE() -> None:
     assert [r.slug for r in plan.replies] == ["needs-a-spend-decision-0000dead"]
 
 
-def test_a_card_naming_no_consumer_is_never_attributed() -> None:
-    """Settling it would file the answer under whoever the runner defaults to."""
+def test_an_ask_naming_no_consumer_is_read_but_never_attributed() -> None:
+    """It IS read — it sits in the triage view and a person can reply there, so
+    the reply has to surface. It is never attributed: settling it would file the
+    answer under whoever the runner happens to default to."""
 
     plan = collect_replies(
         [record(consumer=None)], comments(comment("c1", ASH)),

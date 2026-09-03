@@ -121,11 +121,18 @@ class Policy:
         )
 
     def label_for_consumer(self, consumer: str | None) -> str | None:
-        """The label that puts this row in that person's saved view."""
+        """The label that puts this row in that person's saved view.
 
-        if not self.consumer_label:
+        Only a RESOLVED consumer gets one. A triage label would have to be
+        created before first use, and a bot actor is routinely forbidden from
+        creating labels (measured live: `CreateLabel FORBIDDEN`), which would
+        fail the whole resource plan over rows nobody is waiting on. Unresolved
+        rows still reach the triage PROJECT, which is what triage reads.
+        """
+
+        if not self.consumer_label or not consumer:
             return None
-        return self.consumer_label.format(consumer=consumer or self.unassigned_consumer)
+        return self.consumer_label.format(consumer=consumer)
 
     @property
     def all_managed_labels(self) -> tuple[str, ...]:
@@ -138,7 +145,7 @@ class Policy:
 
         names = list(self.managed_labels)
         if self.consumer_label:
-            for who in (*self.consumers, self.unassigned_consumer):
+            for who in self.consumers:
                 rendered = self.consumer_label.format(consumer=who)
                 if rendered not in names:
                     names.append(rendered)

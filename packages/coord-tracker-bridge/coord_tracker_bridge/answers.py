@@ -198,12 +198,18 @@ def collect_replies(
     considered = 0
     cards = 0
     for record in records:
-        # Filter on the LANE, not the capability. On coord-engine an ask arrives
-        # with capability "asks"; on a bare fulcra-workspaces space it is a task
-        # document whose lane was DERIVED to asks, so its capability is honestly
-        # still "tasks". Keying on capability would make the return leg work for
-        # one substrate and silently do nothing on the other.
-        if record.closed or not is_ask(record):
+        # THE READER MUST MATCH THE VIEW. A card is answerable because it
+        # NAMES A HUMAN — the same rule that put it in that human's "blocked on
+        # me" view. Keying this on the asks fold alone made the view hold 27
+        # cards while the reader saw 13, so two replies the operator left sat
+        # unread on cards he was looking at, and every "it's fixed" report
+        # measured the fold he wasn't reading.
+        #
+        # An ask that names NOBODY is still read, and read for a different
+        # reason: it is in the triage view, a person can reply there, and that
+        # reply must surface as unattributed rather than vanish. Read is not
+        # answerable — nothing without a consumer is ever attributed below.
+        if record.closed or (consumer_of(record) is None and not is_ask(record)):
             continue
         cards += 1
         for node in read_comments(record.provider_id):
