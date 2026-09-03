@@ -328,14 +328,41 @@ def parse_source_metadata(description: str) -> SourceIdentity | None:
     return SourceIdentity.from_dict(value["source"]) if value else None
 
 
+#: Linear rewrites anything host-shaped in a description into an explicit
+#: markdown link wrapped in angle brackets, and it does so in two forms:
+#:   `https://x`         -> `[https://x](<https://x>)`          (label == target)
+#:   `projection.py`     -> `[projection.py](<http://projection.py>)`
+#:   `generation.py:263` -> `[generation.py:263](<http://generation.py:263>)`
+#: The second form bites hardest, because a coord description cites source files
+#: constantly and every one of them looks like a hostname to the provider.
+#: The bridge never wrote any of it, so a naive comparison finds a difference no
+#: number of writes can settle — such a card replans an UPDATE forever, bumping
+#: `updatedAt` and, through it, the assignments watermark. Collapsing is safe
+#: because the LABEL is exactly what we wrote: the target only ever adds a scheme
+#: the provider inferred, so there is no authored information in the rewrite.
+#: A genuine titled link (`[the repo](https://…)`) has a label that is not the
+#: target and no angle brackets, so it never matches.
+_PROVIDER_AUTOLINK = re.compile(
+    r"\[(?P<label>[^\]\s]+)\]\(<(?:https?://)?(?P=label)>\)"
+)
+
+
+def normalize_provider_markdown(description: str) -> str:
+    """Undo provider-side rewrites that carry no authored information."""
+
+    return _PROVIDER_AUTOLINK.sub(lambda match: match.group("label"), description)
+
+
 def strip_source_metadata(description: str) -> str:
     start = description.rfind(METADATA_PREFIX)
     if start < 0:
-        return description
+        return normalize_provider_markdown(description)
     end = description.find(METADATA_SUFFIX, start)
     if end < 0:
-        return description
-    return (description[:start] + description[end + len(METADATA_SUFFIX):]).rstrip()
+        return normalize_provider_markdown(description)
+    return normalize_provider_markdown(
+        (description[:start] + description[end + len(METADATA_SUFFIX):]).rstrip()
+    )
 
 
 @dataclass(frozen=True, slots=True)
