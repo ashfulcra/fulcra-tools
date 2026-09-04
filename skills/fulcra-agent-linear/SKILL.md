@@ -185,6 +185,16 @@ Each of these is here because the cheaper version failed in production.
   cards and the reader saw 13, and two replies the operator left sat unread on
   cards he was looking at. A card is answerable because it **names a human**,
   not because of the fold it came from.
+- **The view is wider than the verb that settles it.** Matching the reader to
+  the view is right, and it means the reader now sees rows your settle-verb has
+  no answer for — a directive that names the same human is in their view but is
+  not an *ask*. Measured live: 30 cards in the view, 11 the engine would accept.
+  So a reply there is **refused**, and a refusal is its own outcome: decided
+  before anything is written, so it leaves no mark, does not halt the replies
+  behind it, and exits **2** rather than 0. Decide it from a pre-flight *read*
+  of what the verb accepts, never by parsing a failure message — and a failed
+  read must raise, because an empty set would refuse everything and read as
+  "no verb reaches these rows".
 - **`rc=0` is acceptance, not durability.** The only proof a sync settled is a
   second `plan` returning **0 changes**. A sync once reported `applied: 3` and
   the next plan proposed the same three updates forever.
