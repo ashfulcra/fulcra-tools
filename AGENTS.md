@@ -1386,8 +1386,14 @@ commit message or a chat transcript is not captured.
 Earned three separate times. Before claiming any key is revoked or expired, or
 that a container cannot authenticate:
 
-1. **Enumerate every candidate** — `env | grep -i <service>` piped to print
-   variable NAMES only, never a value. One variable out of five is not the set.
+1. **Enumerate every candidate** — names only, never values. Use
+   `env | cut -d= -f1 | grep -i <service>`. Do NOT use a bare
+   `env | grep -i <service>`: grep matches the whole `NAME=value` line, so that
+   form prints the secrets it was reached for. Coord-boss tripped on exactly
+   this on 2026-09-04 while enumerating coord variables and dumped three live
+   bridge credentials into a session transcript. One variable out of five is
+   still not the set — the point of this step is coverage, and coverage costs
+   nothing extra in the safe form.
 2. **Test each one independently** and record which identity each authenticates
    as. Two variables can both work and be two different actors.
 3. **Prove the transport innocent** before blaming a proxy or the network — a
