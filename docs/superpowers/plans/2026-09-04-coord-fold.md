@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r9)
+# coord-fold: Coord on Annotations Implementation Plan (r10)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -43,7 +43,7 @@ G-numbers are stable across revisions so verdicts can cite them.
 - **G18–G23.** *(r2–r7)* **SUPERSEDED by G29** (coord-boss `cdfe666e`, 2026-09-04): ownership manifest, import DAG, closed call allowlist, alias-resolved launcher/enumeration/owner-op bans, required-call shape, mass ceilings. Each closed a specific counterexample (r2 shim modules, r3 one-statement wrappers, r4 `from subprocess import run as launch`, r5 `os.listdir` inside the allowlisted module + alias-bound owner ops + unreachable `fold.run`, r7 `x: object = reader.read_events` — `AnnAssign`, which no alias map handled) and left the class open. The cheap, *true* structural facts among them survive as boundary truths in Task 1 (G5–G7, ownership-defined-where-planned, DAG, tree = manifest); the rest are deleted, not kept as ceremony. Numbers retained so old verdicts still resolve.
 - **G24.** *(r5)* **The plan is gated against itself.** Task 0's script materializes every path-tagged block and runs Tasks 1–3's tests; a revision is filed only with that run green, and the filing note carries the output.
 
-- **G29.** *(r9; ruled in r8 by coord-boss `cdfe666e`, re-implemented after both reviewers escaped the in-process harness)* **THE GUARANTEE IS BEHAVIOURAL, OS-ENFORCED, AND OBSERVED AT A PROCESS BOUNDARY.** `tests/proof/run_proof.py` starts a **store server outside the sandbox** (the corpus lives in that process, loaded from a file the sandbox cannot read; it answers only the five fixed request shapes, **refuses and logs everything else**), then runs the **production** `CliPointerReader`/`CliPointerWriter` through all six verbs **inside an OS sandbox** (macOS seatbelt) that denies at the kernel: every network endpoint except the store's socket; every exec except the interpreter; every file read outside the interpreter, the package tree, and its own temp dir; every file write outside that temp dir (and `/dev/null`, a sink, allowed by literal). **Asserted both ways:** (1) the clean run — all six verbs exit 0 and every request the store received is one of `file stat`, `file download`, `get-records`, `record`, `file upload`, with zero enumeration requests; (2) the attack battery, run inside — `reader._s` does not exist on the production class, the `gc`-recovered original `posix.listdir` is denied by the kernel, `io.open('/etc/hosts')`, `/bin/ls`, reading the corpus file, and an outbound socket are denied, and a direct socket to the store asking `file list` is **logged and refused**; (3) the mutated run — `fold.run` wrapped to issue one `file list` through its own CLI — is **flagged** by the request log. **What this proves and no more:** in that run, the fold reached no store except through observed requests, none of which enumerated. **What it does not claim:** that enumeration is impossible to write, that the fold cannot detect it is under test, or that a Python process can hide anything from code running inside it. **The driver exits 3 (UNKNOWN) where no OS sandbox exists — never green by absence**; a Linux (bwrap) profile is an open infrastructure ask. Measured on this host before filing: 63/63 unit tests pass *inside* the sandbox; the proof passed all three phases.
+- **G29.** *(r9; ruled in r8 by coord-boss `cdfe666e`, re-implemented after both reviewers escaped the in-process harness)* **THE GUARANTEE IS BEHAVIOURAL, OS-ENFORCED, AND OBSERVED AT A PROCESS BOUNDARY.** `tests/proof/run_proof.py` starts a **store server outside the sandbox** (the corpus lives in that process, loaded from a file the sandbox cannot read; it answers only the five fixed request shapes, **refuses and logs everything else**), then runs the **production** `CliPointerReader`/`CliPointerWriter` through all six verbs **inside an OS sandbox** (macOS seatbelt) that denies at the kernel: every network endpoint except the store's socket; every exec except the interpreter; every file read outside the interpreter, the package tree, and its own temp dir; every file write outside that temp dir (and `/dev/null`, a sink, allowed by literal). **Asserted both ways, by name AND by semantics** *(r10, codex-coder round 9: a `get-records` whose cursor is rewritten to the epoch enumerates downstream of an allowed name)*: (1) the clean run — all six verbs exit 0, every request is one of `file stat`, `file download`, `get-records`, `record`, `file upload`, and **the store logs each `get-records` with its channel, its `since`, and the count it returned**: against a 5000-record corpus the first fold reads the corpus once, and the second fold asks from exactly the last observed record minus `OVERLAP_SECONDS` and gets back a bounded count (G31); (2) the attack battery, run inside — `reader._s` does not exist on the production class, the `gc`-recovered original `posix.listdir` is denied by the kernel, `io.open('/etc/hosts')`, `/bin/ls`, reading the corpus file, and an outbound socket are denied, and a direct socket to the store asking `file list` is **logged and refused**; (3) the mutated run — `fold.run` wrapped to issue one `file list` through its own CLI — is **flagged**; (4) **the epoch-rewrite mutation** — the production `_records` sending `since=1970-01-01T00:00:00Z` — is **flagged** by the logged semantics (wrong cursor, unbounded return) although every verb name is allowed. **What this proves and no more:** in that run, the fold reached no store except through observed requests, none of which enumerated. **What it does not claim:** that enumeration is impossible to write, that the fold cannot detect it is under test, or that a Python process can hide anything from code running inside it. **The driver exits 3 (UNKNOWN) where no OS sandbox exists — never green by absence**; a Linux (bwrap) profile is an open infrastructure ask. Measured on this host before filing: the unit suite passes *inside* the sandbox; the proof passed all four phases (numbers in Task 1 Step 5).
 - **G32.** *(r9, codex-coder round 8 — stated plainly for coord-boss to rule on)* **Anti-consolidation is no longer a claim of this plan.** Ruling `cdfe666e` superseded G18–G23; what remains (manifest symbols defined where planned, tree = manifest, DAG) does not prevent a ≤400-line `cli.py` holding production logic behind owner shims. r9 claims the fold cannot reach any store except through observed requests; it does not claim the code is well-factored. If consolidation prevention returns as an acceptance criterion, it needs a new shape (review, not gates), and that is coord-boss's call.
 - **G30.** *(r8)* **One syntactic tripwire stays, demoted.** *(r9: the in-process `denied()` harness is DELETED, not demoted — a second approximating layer is the ceremony the ruling banned.)** `tests/test_tripwire.py` scans identifiers for fast feedback in review. **It is not the guarantee and no reader may cite it as proof**; it approximates behaviour and can be walked past by any spelling the AST does not resolve. G29 is the guarantee. The plan says this in those words so no future reader mistakes it.
 - **G31.** *(r8, codex-coder round 7)* **The cursor passes irrelevant records.** The cursor is the `recorded_at` of the last **observed** record before the first **unapplied relevant** event. Records that are unparseable, foreign-schema, or addressed to someone else are observed and passed, never re-read; otherwise an agent with no recent addressed events would re-read every other agent's traffic on every pass — corpus-shaped work at rc 0. This is consistent with G26: a *gap* is an unapplied relevant event, not an irrelevant one. Test: thousands of other-agent events after the last relevant one are not re-read on the next pass.
@@ -189,19 +189,25 @@ store = json.load(open(corpus_path))          # {"docs": {path: text}, "events":
 lock = threading.Lock()
 
 
+def log(argv, returned=None):
+    with lock, open(log_path, "a") as f:
+        f.write(json.dumps({"argv": argv, "returned": returned}) + "\n")
+
+
 def handle(req):
     argv, stdin = req["argv"], req.get("stdin", "")
-    with lock, open(log_path, "a") as f:
-        f.write(json.dumps(argv) + "\n")
+    if argv[:1] == ["get-records"]:                       # SEMANTICS are logged, not just the verb (codex-coder round 9)
+        since = argv[2]
+        hits = [e for e in store["events"] if e["recorded_at"] >= since]
+        log(argv, returned=len(hits))
+        return (0, "".join(json.dumps(e) + "\n" for e in hits), "")
+    log(argv)
     if argv[:2] == ["file", "stat"]:
         p = argv[2]
         return (0, f"/{p} ({len(store['docs'][p])} bytes)\n", "") if p in store["docs"] else (1, "", f"Error: File not found in Fulcra: /{p}\n")
     if argv[:2] == ["file", "download"]:
         p = argv[2]
         return (0, store["docs"][p], "") if p in store["docs"] else (1, "", "Error: File not found\n")
-    if argv[:1] == ["get-records"]:
-        since = argv[2]
-        return (0, "".join(json.dumps(e) + "\n" for e in store["events"] if e["recorded_at"] >= since), "")
     if argv[:1] == ["record"]:
         doc = json.loads(stdin)
         with lock:
@@ -293,13 +299,19 @@ VERBS = [("fold", ["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z"
          ("close", ["close", "r", "s0", "--agent", "me", "--evidence", "team/r/_coord/responses/s0/reply.md", "--at", "2026-09-04T11:04:00Z"]),
          ("fold2", ["fold", "r", "--agent", "me", "--now", "2026-09-04T12:00:00Z"])]
 out = {"mode": mode}
+if mode == "epoch":
+    from coord_fold import transport
+    real_records = transport.CliPointerReader._records
+    def epoch_records(self, channel, since):
+        return real_records(self, channel, "1970-01-01T00:00:00Z")     # codex-coder round 9: enumeration downstream of an allowed name
+    transport.CliPointerReader._records = epoch_records
 if mode == "mutate":
     real = fold.run
     def enumerating(reader, writer, team, agent, **kw):
         subprocess.run([*cli, "file", "list", f"team/{team}/"], capture_output=True)   # the only road to a store is observed
         return real(reader, writer, team, agent, **kw)
     fold.run = enumerating
-if mode in ("verbs", "mutate"):
+if mode in ("verbs", "mutate", "epoch"):
     out["rc"] = {label: main(argv, reader=r, writer=w) for label, argv in VERBS}
 if mode == "attack":
     res = {}
@@ -356,14 +368,35 @@ ALLOWED = {("file", "stat"), ("file", "download"), ("get-records",), ("record",)
 CFG = "team/r/_coord/bus-v4/records.json"
 
 
+CORPUS_N, OVERLAP = 5000, 5                       # large corpus; OVERLAP must equal coord_fold.fold.OVERLAP_SECONDS
+BASE_EPOCH = 1788512400                           # 2026-09-04T09:00:00Z (calendar.timegm)
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
 def corpus():
-    ev = [{"id": str(i), "recorded_at": f"2026-09-04T10:{i:02d}:00Z",
-           "note": json.dumps({"v": 1, "at": f"2026-09-04T10:{i:02d}:00Z", "from": "boss", "to": "me", "kind": "open", "slug": f"s{i}", "pri": "P1", "ptr": f"team/r/task/s{i}.md"})} for i in range(5)]
+    ev = []
+    for i in range(CORPUS_N):                     # one record per second; the first five are addressed to me, the rest to others
+        at = _iso(BASE_EPOCH + i)
+        to = "me" if i < 5 else "them"
+        ev.append({"id": str(i), "recorded_at": at, "note": json.dumps({"v": 1, "at": at, "from": "boss", "to": to, "kind": "open", "slug": f"s{i}", "pri": "P1", "ptr": f"team/r/task/s{i}.md"})})
     return {"docs": {CFG: json.dumps({"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}), "team/r/_coord/responses/s0/reply.md": "done"}, "events": ev}
+
+
+LAST_CORPUS_AT = _iso(BASE_EPOCH + CORPUS_N - 1)
+EXPECTED_SINCE_2 = _iso(BASE_EPOCH + CORPUS_N - 1 - OVERLAP)   # the second fold must ask from the last observed record minus the overlap
+BOUNDED_RETURN = OVERLAP + 1 + 4                                # overlap window + the boundary record + the four records the verbs wrote
 
 
 def shape(argv):
     return tuple(argv[:2]) if argv[:1] == ["file"] else tuple(argv[:1])
+
+
+def reads(reqs):
+    """(channel, since, returned) for every get-records the store served, in order."""
+    return [(r["argv"][1], r["argv"][2], r["returned"]) for r in reqs if r["argv"][:1] == ["get-records"]]
 
 
 def main() -> int:
@@ -395,13 +428,21 @@ def main() -> int:
         requests = [json.loads(l) for l in log.read_text().splitlines()[before:]] if log.exists() else []
         return result, requests
 
+    def enumerating(reqs):
+        """A request enumerates if its verb is not allowed OR an allowed verb is used with enumerating semantics."""
+        bad = [r["argv"] for r in reqs if shape(r["argv"]) not in ALLOWED]
+        bad += [r["argv"] + [f"returned={r['returned']}"] for r in reqs if r["argv"][:1] == ["get-records"] and (r["argv"][1] != "MomentAnnotation/x" or r["argv"][2] < EXPECTED_SINCE_2 and r["returned"] > BOUNDED_RETURN)]
+        return bad
+
     try:
         res, reqs = run("verbs")
         bad_rc = {k: v for k, v in res.get("rc", {}).items() if v != 0}
-        shapes = {shape(a) for a in reqs}
-        enum = [a for a in reqs if shape(a) not in ALLOWED]
-        print(f"phase 1 clean run: rc={res.get('rc', res)} requests={len(reqs)} shapes={sorted(shapes)} enumeration={enum}")
-        if bad_rc or not reqs or enum or not shapes <= ALLOWED:
+        shapes = {shape(r["argv"]) for r in reqs}
+        rd = reads(reqs)
+        first_ok = len(rd) == 2 and rd[0][0] == "MomentAnnotation/x" and rd[0][2] == CORPUS_N                    # first observation reads the whole corpus, once
+        second_ok = len(rd) == 2 and rd[1] == ("MomentAnnotation/x", EXPECTED_SINCE_2, rd[1][2]) and rd[1][2] <= BOUNDED_RETURN   # G31: cursor semantics, bounded return
+        print(f"phase 1 clean run: rc={res.get('rc', res)} requests={len(reqs)} shapes={sorted(shapes)} get-records={rd} expected second since={EXPECTED_SINCE_2} bounded<={BOUNDED_RETURN}")
+        if bad_rc or not reqs or not shapes <= ALLOWED or not first_ok or not second_ok:
             failures.append("phase 1")
             print("phase 1 stderr tail:", res.get("stderr_tail", "")[-1200:])
         res, reqs = run("attack")
@@ -409,10 +450,15 @@ def main() -> int:
         if any(not v.startswith("denied") for v in res.get("attack", {}).values()) or not res.get("attack"):
             failures.append("phase 2")
         res, reqs = run("mutate")
-        flagged = [a for a in reqs if shape(a) not in ALLOWED]
-        print(f"phase 3 mutated fold: enumeration observed and FLAGGED = {flagged}")
+        flagged = enumerating(reqs)
+        print(f"phase 3 mutated fold (file list through its own CLI): FLAGGED = {flagged[:2]}")
         if not flagged:
             failures.append("phase 3 (the mutation was not detected — the proof cannot fail, so it proves nothing)")
+        res, reqs = run("epoch")
+        flagged = enumerating(reqs)
+        print(f"phase 4 epoch-rewritten production reader (codex-coder round 9): get-records={reads(reqs)} FLAGGED = {bool(flagged)}")
+        if not flagged:
+            failures.append("phase 4 (an allowed verb with enumerating semantics was not detected)")
     finally:
         server.terminate()
         shutil.rmtree(private, ignore_errors=True)
@@ -421,7 +467,7 @@ def main() -> int:
     if failures:
         print("PROOF FAILED:", failures)
         return 1
-    print("PROOF: in this run the fold reached no store except through observed requests, none of which enumerated; the mutated fold was flagged.")
+    print("PROOF: in this run the fold reached no store except through observed requests, none of which enumerated by name OR by semantics; both mutated folds were flagged.")
     return 0
 
 
@@ -764,7 +810,7 @@ class FakeWriter:
 
 README (not gate-relevant beyond the ceiling sentence): six verbs, the guarantee in G29's words, what it does not claim, the tripwire's demotion in G30's words, and the sentence `every module under **400 lines**`.
 
-- [ ] **Step 5: Run.** Boundary truths: 8 pass now. The proof needs Tasks 4–10 (there is no fold yet): `python tests/proof/run_proof.py` → exit 1 until then, exit 3 on a host with no sandbox — **commit failing-first**. Measured on this host at plan time, against the materialized tree: 63/63 unit tests pass *inside* the sandbox; proof phase 1 — seven verb invocations rc 0, 36 requests, shapes exactly the five, enumeration none; phase 2 — every attack denied or refused (the direct-socket `file list` logged and refused by the store); phase 3 — the mutated fold's `file list` flagged. **Mutations for the truths** (each restored): (a) give `CliPointerReader` a base class → FAILS; (b) `def _upload` on the reader → FAILS; (c) `from coord_engine import x` anywhere → FAILS; (d) an extra file under `coord_fold/` → FAILS. **Commit** — `coord-fold: scaffold, boundary truths, and the OS-sandboxed process-boundary proof (G5–G7, G29)`
+- [ ] **Step 5: Run.** Boundary truths: 8 pass now. The proof needs Tasks 4–10 (there is no fold yet): `python tests/proof/run_proof.py` → exit 1 until then, exit 3 on a host with no sandbox — **commit failing-first**. Measured on this host at plan time, against the materialized tree: the unit suite passes *inside* the sandbox; proof phase 1 — seven verb invocations rc 0, 36 requests, shapes exactly the five, the first `get-records` read the 5000-record corpus once and the second asked from the last observed record minus the overlap and got 10 back (bound 10); phase 2 — every attack denied or refused (the direct-socket `file list` logged and refused by the store); phase 3 — the mutated fold's `file list` flagged; phase 4 — the epoch-rewritten production reader flagged by semantics (5006 and 5008 returned against the bound) with every verb name allowed. **Mutations for the truths** (each restored): (a) give `CliPointerReader` a base class → FAILS; (b) `def _upload` on the reader → FAILS; (c) `from coord_engine import x` anywhere → FAILS; (d) an extra file under `coord_fold/` → FAILS. **Commit** — `coord-fold: scaffold, boundary truths, and the OS-sandboxed process-boundary proof (G5–G7, G29)`
 
 ---
 
@@ -1765,6 +1811,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r10 (2026-09-04, codex-coder CHANGES on `7cc71baa`, round 9):** the proof validated request *names* only, so an allowed `get-records` with its cursor rewritten to the epoch reread the corpus every pass and stayed green — enumeration downstream of an allowed name. Now the store logs each `get-records` with channel, `since`, and returned count; the corpus is 5000 records; phase 1 asserts the first fold reads the corpus once and the second asks from the last observed record minus the overlap and gets a bounded count; phase 4 applies the exact epoch-rewrite mutation to the production reader and must be flagged. G32 unchanged and still awaiting coord-boss's ruling — codex-coder is right that the parked build needs it before approval.
 - **r9 (2026-09-04, both reviewers CHANGES on `3c88369e`, round 8):** the in-process harness was escaped four ways in one round (originals via `gc` from the generator frame; `io.open` unlisted; the fake's corpus reachable via `reader._s.events`; the test detectable) — common cause: code inside a Python process can reach anything in it. **The harness is deleted.** The proof moves the corpus and the denial out of the process: `tests/proof/` — a store server outside the sandbox (corpus from a file the sandbox cannot read; five request shapes; logs and refuses everything else), a thin CLI client, and the **production** reader/writer driven through all six verbs inside a macOS seatbelt sandbox that denies network, exec, reads and writes at the kernel. Three phases, both ways: clean run (only fixed shapes, zero enumeration), attack battery (all denied/refused, the direct `file list` logged and refused), mutated fold (flagged). Driver exits 3 UNKNOWN with no sandbox — never green by absence. Measured before filing: 63/63 unit tests inside the sandbox; proof passed all three phases. G29 rewritten to exactly what is proven and what is not; **G32** states plainly that anti-consolidation is no longer claimed (codex-coder's ask; coord-boss's call). Task 0 runs the proof after the gates. Linux (bwrap) profile is an open infrastructure ask.
 - **r8 (2026-09-04, coord-boss `cdfe666e` + correction `7952b545`; codex-coder round 7 on `0b5fd60c`):** **The shape changed.** Seven rounds of syntactic gates each closed one spelling (the last: `x: object = reader.read_events`, an `AnnAssign` no alias map handled) and left the class open; coord-boss ruled a static check cannot prove a negative about an unrestricted Python module. G18–G23 superseded; their ceremony deleted (closed allowlist, alias maps, required-call shape, handler shape, launcher argv sets, forbidden tokens, mass caps, per-function budgets, wrapper rule, banned names — gone). **G29:** the guarantee is behavioural — `tests/harness.py` makes enumeration, process launch, file open and network absent from the test process (patched at the capability to raise a `BaseException` and count; package imported fresh under denial; `ctypes`/`pty`/`multiprocessing` unimportable), and `test_no_enumeration_harness.py` asserts both ways: the real fold and all six verbs complete with zero attempts; enumerating/launching/opening/globbing readers raise (parametrized), a swallowing one is still counted, an import-time `from posix import listdir` is denied, the real transport is inert. **G30:** one syntactic tripwire kept and demoted in those words. Boundary truths kept in `test_structural.py` (8 tests). **G31:** the cursor passes observed-irrelevant records (codex-coder's second P0); test with 3000 other-agent events. The spec's §3.4 claim corrected in the Goal. Task 0 gates: harness + truths + tripwire + ceiling + vocabulary.
 - **r7 (2026-09-04, codex-reviewer round 4 on `5d0e065b`, three P0s all mutation-confirmed):** (1) `os` and `glob` imported nowhere; `transport.save_doc` unlinks through `pathlib`; enumeration calls banned package-wide by attribute name on any receiver and by alias-resolved origin — the reviewer's exact `os.listdir('.')` in `_records` now fails three gates. (2) G23 is no longer spelling-based: `cli.py` has a closed, alias-resolved call allowlist (`CLI_ALLOWED_ORIGINS` + `CLI_ALLOWED_METHODS`; unknown callees fail); owner-only ops are judged after alias resolution (relative imports included); each required call must be an executable top-level `return`/assignment (optionally inside a top-level `try`); handlers contain no loops, `with`, comprehensions, or definitions. Mutations (g) alias-bound `checkpoint.empty` and (h) unreachable `fold.run` added to Task 3; (f)–(h) enumeration mutations added to Task 1. (3) The cursor-to-`now` P0 was fixed by r6 (G26) and is on this head. Task 0 re-run green before filing.
