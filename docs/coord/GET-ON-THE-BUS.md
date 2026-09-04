@@ -145,9 +145,11 @@ Four walls, in the order you'll hit them:
    `device_code` grant, then write the token to `~/.config/fulcra/credentials.json` in
    the CLI's own format (`access_token`, ISO `access_token_expiration`,
    `refresh_token`, `refresh_token_expiration`) — the normal CLIs work from then on.
-   **Write `access_token_expiration` as a NAIVE UTC ISO string** (`2026-08-08T12:50:05.802218`,
-   no `+00:00`). `fulcra_api/credentials.py` compares it against a naive
-   `datetime.now()`, so a timezone-aware value raises `TypeError: can't compare
+   **Write `access_token_expiration` as a naive ISO string in the HOST'S LOCAL
+   clock** (`2026-08-08T12:50:05.802218`, no `+00:00`) — this paragraph said
+   "NAIVE UTC" while its own next clause said `datetime.now()`, and the next
+   clause was the correct half. `fulcra_api/credentials.py` compares it against
+   a naive `datetime.now()`, so a timezone-aware value raises `TypeError: can't compare
    offset-naive and offset-aware datetimes` on EVERY `fulcra` command — not an auth
    error, a stack trace from inside the library, several frames from anything that
    mentions credentials. Hit live 2026-08-07 doing exactly what this paragraph said:
@@ -180,11 +182,20 @@ Four walls, in the order you'll hit them:
 
    **"The same format" is load-bearing in exactly one way, and it is not the
    one you would guess.** `access_token_expiration` must be a **timezone-naive
-   UTC** ISO string, e.g. `2026-09-04T02:15:01.301382` with no offset, because
-   the client compares it against a naive `utcnow()`. An aware value
-   (`…+00:00`) is accepted by the file and then fails every authenticated call
-   with `can't compare offset-naive and offset-aware datetimes`. Measured live
-   2026-09-02 and again 2026-09-03.
+   ISO string in the host's LOCAL clock**, e.g. `2026-09-04T02:15:01.301382`
+   with no offset. An aware value (`…+00:00`) is accepted by the file and then
+   fails every authenticated call with `can't compare offset-naive and
+   offset-aware datetimes`.
+
+   **Round 3 of this document said "naive UTC" and that was wrong on any host
+   that is not UTC.** `oidc.py:151` writes
+   `datetime.datetime.now() + timedelta(seconds=expires_in)` and
+   `credentials.py:21` compares with `datetime.now()`; there is no `utcnow()`
+   in the client. On a UTC host the two coincide, and every measurement behind
+   the wrong wording was taken in a UTC container — a control that could not
+   fail for the reason it was chosen to test. On a UTC-7 Mac, a UTC-naive
+   expiry leaves a token looking valid seven hours past its end. Caught by
+   codex-reviewer against the installed 0.1.40 source.
 
    **The key set is a CLOSED set of six — not four, and not open-ended.**
    `FulcraCredentials` is a dataclass with exactly `access_token`,
