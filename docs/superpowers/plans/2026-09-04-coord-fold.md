@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r10)
+# coord-fold: Coord on Annotations Implementation Plan (r11)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -43,9 +43,10 @@ G-numbers are stable across revisions so verdicts can cite them.
 - **G18–G23.** *(r2–r7)* **SUPERSEDED by G29** (coord-boss `cdfe666e`, 2026-09-04): ownership manifest, import DAG, closed call allowlist, alias-resolved launcher/enumeration/owner-op bans, required-call shape, mass ceilings. Each closed a specific counterexample (r2 shim modules, r3 one-statement wrappers, r4 `from subprocess import run as launch`, r5 `os.listdir` inside the allowlisted module + alias-bound owner ops + unreachable `fold.run`, r7 `x: object = reader.read_events` — `AnnAssign`, which no alias map handled) and left the class open. The cheap, *true* structural facts among them survive as boundary truths in Task 1 (G5–G7, ownership-defined-where-planned, DAG, tree = manifest); the rest are deleted, not kept as ceremony. Numbers retained so old verdicts still resolve.
 - **G24.** *(r5)* **The plan is gated against itself.** Task 0's script materializes every path-tagged block and runs Tasks 1–3's tests; a revision is filed only with that run green, and the filing note carries the output.
 
-- **G29.** *(r9; ruled in r8 by coord-boss `cdfe666e`, re-implemented after both reviewers escaped the in-process harness)* **THE GUARANTEE IS BEHAVIOURAL, OS-ENFORCED, AND OBSERVED AT A PROCESS BOUNDARY.** `tests/proof/run_proof.py` starts a **store server outside the sandbox** (the corpus lives in that process, loaded from a file the sandbox cannot read; it answers only the five fixed request shapes, **refuses and logs everything else**), then runs the **production** `CliPointerReader`/`CliPointerWriter` through all six verbs **inside an OS sandbox** (macOS seatbelt) that denies at the kernel: every network endpoint except the store's socket; every exec except the interpreter; every file read outside the interpreter, the package tree, and its own temp dir; every file write outside that temp dir (and `/dev/null`, a sink, allowed by literal). **Asserted both ways, by name AND by semantics** *(r10, codex-coder round 9: a `get-records` whose cursor is rewritten to the epoch enumerates downstream of an allowed name)*: (1) the clean run — all six verbs exit 0, every request is one of `file stat`, `file download`, `get-records`, `record`, `file upload`, and **the store logs each `get-records` with its channel, its `since`, and the count it returned**: against a 5000-record corpus the first fold reads the corpus once, and the second fold asks from exactly the last observed record minus `OVERLAP_SECONDS` and gets back a bounded count (G31); (2) the attack battery, run inside — `reader._s` does not exist on the production class, the `gc`-recovered original `posix.listdir` is denied by the kernel, `io.open('/etc/hosts')`, `/bin/ls`, reading the corpus file, and an outbound socket are denied, and a direct socket to the store asking `file list` is **logged and refused**; (3) the mutated run — `fold.run` wrapped to issue one `file list` through its own CLI — is **flagged**; (4) **the epoch-rewrite mutation** — the production `_records` sending `since=1970-01-01T00:00:00Z` — is **flagged** by the logged semantics (wrong cursor, unbounded return) although every verb name is allowed. **What this proves and no more:** in that run, the fold reached no store except through observed requests, none of which enumerated. **What it does not claim:** that enumeration is impossible to write, that the fold cannot detect it is under test, or that a Python process can hide anything from code running inside it. **The driver exits 3 (UNKNOWN) where no OS sandbox exists — never green by absence**; a Linux (bwrap) profile is an open infrastructure ask. Measured on this host before filing: the unit suite passes *inside* the sandbox; the proof passed all four phases (numbers in Task 1 Step 5).
-- **G32.** *(r9, codex-coder round 8 — stated plainly for coord-boss to rule on)* **Anti-consolidation is no longer a claim of this plan.** Ruling `cdfe666e` superseded G18–G23; what remains (manifest symbols defined where planned, tree = manifest, DAG) does not prevent a ≤400-line `cli.py` holding production logic behind owner shims. r9 claims the fold cannot reach any store except through observed requests; it does not claim the code is well-factored. If consolidation prevention returns as an acceptance criterion, it needs a new shape (review, not gates), and that is coord-boss's call.
+- **G29.** *(r9; ruled in r8 by coord-boss `cdfe666e`, re-implemented after both reviewers escaped the in-process harness)* **THE GUARANTEE IS BEHAVIOURAL, OS-ENFORCED, AND OBSERVED AT A PROCESS BOUNDARY.** `tests/proof/run_proof.py` starts a **store server outside the sandbox** (the corpus lives in that process, loaded from a file the sandbox cannot read; it answers only the five fixed request shapes, **refuses and logs everything else**), then runs the **production** `CliPointerReader`/`CliPointerWriter` through all six verbs **inside an OS sandbox** (macOS seatbelt) that denies at the kernel: every network endpoint except the store's socket; every exec except the interpreter; every file read outside the interpreter, the package tree, and its own temp dir; every file write outside that temp dir (and `/dev/null`, a sink, allowed by literal). **Asserted both ways, by name AND by semantics** *(r10, codex-coder round 9: a `get-records` whose cursor is rewritten to the epoch enumerates downstream of an allowed name)*: (1) the clean run — all six verbs exit 0, every request is one of `file stat`, `file download`, `get-records`, `record`, `file upload`, and **the store logs each `get-records` with its channel, its `since`, and the count it returned**: against a 5000-record corpus the first fold reads the corpus once, and the second fold asks from exactly the last observed record minus `OVERLAP_SECONDS` and gets back a bounded count (G31); (2) the attack battery, run inside — `reader._s` does not exist on the production class, the `gc`-recovered original `posix.listdir` is denied by the kernel, `io.open('/etc/hosts')`, `/bin/ls`, reading the corpus file, and an outbound socket are denied, and a direct socket to the store asking `file list` is **logged and refused**; (3) the mutated run — `fold.run` wrapped to issue one `file list` through its own CLI — is **flagged**; (4) **the epoch-rewrite mutation** — the production `_records` sending `since=1970-01-01T00:00:00Z` — is **flagged** by the logged semantics (wrong cursor, unbounded return) although every verb name is allowed. **What this proves and no more (coord-boss `f6ceb0c4`, the weaker true claim):** *these specific capabilities were denied by the kernel and the fold still completed* — NOT "the fold ran with no capabilities". The measured profile is allow-default with kernel denies on the capabilities that matter, because deny-default aborts the interpreter at startup on the proof host (measured, rc 134). *(r11, codex-coder round 10)* Every allowed operation is checked by **semantics**, not prefix: the driver asserts the **exact request sequence of the clean run, with paths** (measured from the run and frozen; a change to the fold changes it deliberately), a **path allowlist** for `file stat/download/upload` (the channel config, the checkpoint, the close evidence — nothing else), per-shape bounds, and — because **the store holds the agent's checkpoint** — that no `get-records` asks from before the cursor the store held at that moment minus the overlap (the first observation from an absent checkpoint is allowed by construction; the epoch rewrite is flagged because a checkpoint exists by then) — so a production reader that point-probes thousands of guessed paths (phase 5, his mutation) is flagged although every request name is allowed. **What it does not claim:** that enumeration is impossible to write, that the fold cannot detect it is under test, or that a Python process can hide anything from code running inside it. **The driver exits 3 (UNKNOWN) where no OS sandbox exists — never green by absence, never softened to a skip.** Ruling `f6ceb0c4`: **no bwrap profile is written until it can be measured** — an untested sandbox profile reads as proof and is not. macOS is the proof host; Linux CI stays UNKNOWN; **the gate is that the proof ran and passed on at least one host, recorded with which host and when** — the driver prints host, platform and UTC time in its final line and the filing note carries it. Measured on this host before filing: the unit suite passes *inside* the sandbox; the proof passed all four phases (numbers in Task 1 Step 5).
+- **G32.** *(r9; RULED by coord-boss `f6ceb0c4`, 2026-09-04T23:15Z)* **Anti-consolidation stays retired and is stated as not-a-claim. We do not check this.** Not quietly dropped, not quietly restored. If anyone wants it back it needs a **review-shaped** check — a human or agent reading the structure — and never an automated gate, because seven rounds proved the automated form cannot close the class. A plan that says *we do not check this* is stronger than one that implies it does. Ruling `cdfe666e` superseded G18–G23; what remains (manifest symbols defined where planned, tree = manifest, DAG) does not prevent a ≤400-line `cli.py` holding production logic behind owner shims. r9 claims the fold cannot reach any store except through observed requests; it does not claim the code is well-factored. The original required-review question ("can one ≤400-line `cli.py` behind owner shims satisfy the surviving checks?") is answered **yes, and by ruling that is out of scope** — codex-coder's ask that this be said outright is met here.
 - **G30.** *(r8)* **One syntactic tripwire stays, demoted.** *(r9: the in-process `denied()` harness is DELETED, not demoted — a second approximating layer is the ceremony the ruling banned.)** `tests/test_tripwire.py` scans identifiers for fast feedback in review. **It is not the guarantee and no reader may cite it as proof**; it approximates behaviour and can be walked past by any spelling the AST does not resolve. G29 is the guarantee. The plan says this in those words so no future reader mistakes it.
+- **G33.** *(r11, named property per `f6ceb0c4`)* **Denial is indifferent to how code arrives.** Because the denial is the kernel's, it holds regardless of what the source says — written module, generated module, alias, annotation, `getattr` — a property of what the process *cannot do*, not of what a gate looks for. In r8's in-process harness this surfaced as "the import machinery itself enumerates" (an uncached module could not be imported under denial); under the OS sandbox that special case is not needed and not claimed: a module the fold writes to its temp dir *can* be imported and faces the same denies.
 - **G31.** *(r8, codex-coder round 7)* **The cursor passes irrelevant records.** The cursor is the `recorded_at` of the last **observed** record before the first **unapplied relevant** event. Records that are unparseable, foreign-schema, or addressed to someone else are observed and passed, never re-read; otherwise an agent with no recent addressed events would re-read every other agent's traffic on every pass — corpus-shaped work at rc 0. This is consistent with G26: a *gap* is an unapplied relevant event, not an irrelevant one. Test: thousands of other-agent events after the last relevant one are not re-read on the next pass.
 
 ---
@@ -189,9 +190,23 @@ store = json.load(open(corpus_path))          # {"docs": {path: text}, "events":
 lock = threading.Lock()
 
 
-def log(argv, returned=None):
+CKPT_SUFFIX = "/fold/checkpoint.json"
+
+
+def held_cursor():
+    """The cursor of the checkpoint THE STORE holds right now (None before the first save)."""
+    for path, text in store["docs"].items():
+        if path.endswith(CKPT_SUFFIX):
+            try:
+                return json.loads(text).get("cursor")
+            except (ValueError, AttributeError):
+                return None
+    return None
+
+
+def log(argv, returned=None, ckpt_cursor=None):
     with lock, open(log_path, "a") as f:
-        f.write(json.dumps({"argv": argv, "returned": returned}) + "\n")
+        f.write(json.dumps({"argv": argv, "returned": returned, "ckpt_cursor": ckpt_cursor}) + "\n")
 
 
 def handle(req):
@@ -199,7 +214,7 @@ def handle(req):
     if argv[:1] == ["get-records"]:                       # SEMANTICS are logged, not just the verb (codex-coder round 9)
         since = argv[2]
         hits = [e for e in store["events"] if e["recorded_at"] >= since]
-        log(argv, returned=len(hits))
+        log(argv, returned=len(hits), ckpt_cursor=held_cursor())
         return (0, "".join(json.dumps(e) + "\n" for e in hits), "")
     log(argv)
     if argv[:2] == ["file", "stat"]:
@@ -275,8 +290,9 @@ sys.exit(r["rc"])
 
 ```python
 # packages/coord-fold/tests/proof/inside.py
-"""Runs INSIDE the OS sandbox. Modes: verbs (the clean run) | attack (the battery) | mutate (a fold
-that enumerates through its own CLI — must be FLAGGED by the request log). Prints one JSON line."""
+"""Runs INSIDE the OS sandbox. Modes: verbs (the clean run) | attack (the battery) | mutate (file list
+through its own CLI) | epoch (get-records from the epoch) | probe (2000 guessed stats). Every mutation
+must be FLAGGED by the request log. Prints one JSON line."""
 import io
 import json
 import socket
@@ -305,13 +321,20 @@ if mode == "epoch":
     def epoch_records(self, channel, since):
         return real_records(self, channel, "1970-01-01T00:00:00Z")     # codex-coder round 9: enumeration downstream of an allowed name
     transport.CliPointerReader._records = epoch_records
+if mode == "probe":
+    real = fold.run
+    def probing(reader, writer, team, agent, **kw):
+        for i in range(2000):                                     # codex-coder round 10: point-probe a namespace through an allowed name
+            reader.read_classified(f"team/{team}/task/guess-{i}.md")
+        return real(reader, writer, team, agent, **kw)
+    fold.run = probing
 if mode == "mutate":
     real = fold.run
     def enumerating(reader, writer, team, agent, **kw):
         subprocess.run([*cli, "file", "list", f"team/{team}/"], capture_output=True)   # the only road to a store is observed
         return real(reader, writer, team, agent, **kw)
     fold.run = enumerating
-if mode in ("verbs", "mutate", "epoch"):
+if mode in ("verbs", "mutate", "epoch", "probe"):
     out["rc"] = {label: main(argv, reader=r, writer=w) for label, argv in VERBS}
 if mode == "attack":
     res = {}
@@ -342,6 +365,7 @@ print(json.dumps(out))
 """THE PROOF (G29). Exit 0 = proven for this run; 1 = failed; 3 = UNKNOWN — no OS sandbox on this
 host. UNKNOWN is never green: CI must run this on a host that has one (macOS seatbelt today; a
 Linux bwrap profile is an open infrastructure ask)."""
+import calendar
 import json
 import os
 import pathlib
@@ -366,6 +390,201 @@ PROFILE = """(version 1)
 """
 ALLOWED = {("file", "stat"), ("file", "download"), ("get-records",), ("record",), ("file", "upload")}
 CFG = "team/r/_coord/bus-v4/records.json"
+CKPT = "team/r/member/me/fold/checkpoint.json"
+EVIDENCE = "team/r/_coord/responses/s0/reply.md"
+ALLOWED_PATHS = {CFG, CKPT, EVIDENCE}                 # the ONLY paths the clean run may stat/download/upload
+MAX_PER_SHAPE = {("file", "stat"): 20, ("file", "download"): 20, ("file", "upload"): 4, ("record",): 4, ("get-records",): 2}
+# The exact clean-run request sequence, MEASURED from the proof (upload temp paths and since values normalised).
+# A change to the fold changes this list deliberately, in the same commit, with the new measurement.
+EXPECTED_SEQUENCE = [
+    [
+    "file",
+    "stat",
+    "team/r/_coord/bus-v4/records.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/_coord/bus-v4/records.json",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "get-records",
+    "MomentAnnotation/x",
+    "<since>"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "upload",
+    "<tmp>",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/member/me/fold/checkpoint.json",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/_coord/bus-v4/records.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/_coord/bus-v4/records.json",
+    "/dev/stdout"
+    ],
+    [
+    "record"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/member/me/fold/checkpoint.json",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/_coord/bus-v4/records.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/_coord/bus-v4/records.json",
+    "/dev/stdout"
+    ],
+    [
+    "record"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/member/me/fold/checkpoint.json",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/_coord/bus-v4/records.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/_coord/bus-v4/records.json",
+    "/dev/stdout"
+    ],
+    [
+    "record"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/member/me/fold/checkpoint.json",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/_coord/responses/s0/reply.md"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/_coord/responses/s0/reply.md",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/_coord/bus-v4/records.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/_coord/bus-v4/records.json",
+    "/dev/stdout"
+    ],
+    [
+    "record"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/_coord/bus-v4/records.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/_coord/bus-v4/records.json",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/member/me/fold/checkpoint.json",
+    "/dev/stdout"
+    ],
+    [
+    "get-records",
+    "MomentAnnotation/x",
+    "<since>"
+    ],
+    [
+    "file",
+    "stat",
+    "team/r/member/me/fold/checkpoint.json"
+    ],
+    [
+    "file",
+    "download",
+    "team/r/member/me/fold/checkpoint.json",
+    "/dev/stdout"
+    ],
+    [
+    "file",
+    "upload",
+    "<tmp>",
+    "team/r/member/me/fold/checkpoint.json"
+    ]
+    ]
 
 
 CORPUS_N, OVERLAP = 5000, 5                       # large corpus; OVERLAP must equal coord_fold.fold.OVERLAP_SECONDS
@@ -394,6 +613,22 @@ def shape(argv):
     return tuple(argv[:2]) if argv[:1] == ["file"] else tuple(argv[:1])
 
 
+def norm(argv):
+    if argv[:2] == ["file", "upload"]:
+        return ["file", "upload", "<tmp>", argv[3]]
+    if argv[:1] == ["get-records"]:
+        return ["get-records", argv[1], "<since>"]
+    return argv
+
+
+def path_of(argv):
+    if argv[:2] in (["file", "stat"], ["file", "download"]):
+        return argv[2]
+    if argv[:2] == ["file", "upload"]:
+        return argv[3]
+    return None
+
+
 def reads(reqs):
     """(channel, since, returned) for every get-records the store served, in order."""
     return [(r["argv"][1], r["argv"][2], r["returned"]) for r in reqs if r["argv"][:1] == ["get-records"]]
@@ -401,7 +636,7 @@ def reads(reqs):
 
 def main() -> int:
     if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
-        print("PROOF UNKNOWN (rc 3): no OS sandbox on this host — this is not a pass")
+        print("PROOF UNKNOWN (rc 3): no OS sandbox on this host — this is not a pass and must never be softened to a skip; the gate is a PASSED record from a host that has one")
         return 3
     private = pathlib.Path(os.path.realpath(tempfile.mkdtemp(prefix="coord-fold-proof-")))   # realpath: seatbelt matches RESOLVED paths (/tmp -> /private/tmp); under /private/tmp: DENIED to the fold
     tmp = private / "sandbox-tmp"; tmp.mkdir()                                  # the fold's only writable place (allowed after the deny)
@@ -431,7 +666,18 @@ def main() -> int:
     def enumerating(reqs):
         """A request enumerates if its verb is not allowed OR an allowed verb is used with enumerating semantics."""
         bad = [r["argv"] for r in reqs if shape(r["argv"]) not in ALLOWED]
-        bad += [r["argv"] + [f"returned={r['returned']}"] for r in reqs if r["argv"][:1] == ["get-records"] and (r["argv"][1] != "MomentAnnotation/x" or r["argv"][2] < EXPECTED_SINCE_2 and r["returned"] > BOUNDED_RETURN)]
+        for r in reqs:
+            if r["argv"][:1] != ["get-records"]:
+                continue
+            held = r.get("ckpt_cursor")
+            floor = _iso(calendar.timegm(time.strptime(held, "%Y-%m-%dT%H:%M:%SZ")) - OVERLAP) if held else None
+            if r["argv"][1] != "MomentAnnotation/x" or (floor is not None and r["argv"][2] < floor):
+                bad.append(r["argv"] + [f"returned={r['returned']}", f"held_cursor={held}"])   # reading behind the checkpoint the store holds = re-reading the corpus
+        bad += [r["argv"] for r in reqs if path_of(r["argv"]) not in (None, *ALLOWED_PATHS)]          # point-probing a namespace (codex-coder round 10)
+        counts = {}
+        for r in reqs:
+            counts[shape(r["argv"])] = counts.get(shape(r["argv"]), 0) + 1
+        bad += [[f"{k}: {v} requests > bound {MAX_PER_SHAPE.get(k, 0)}"] for k, v in counts.items() if v > MAX_PER_SHAPE.get(k, 0)]
         return bad
 
     try:
@@ -442,9 +688,15 @@ def main() -> int:
         first_ok = len(rd) == 2 and rd[0][0] == "MomentAnnotation/x" and rd[0][2] == CORPUS_N                    # first observation reads the whole corpus, once
         second_ok = len(rd) == 2 and rd[1] == ("MomentAnnotation/x", EXPECTED_SINCE_2, rd[1][2]) and rd[1][2] <= BOUNDED_RETURN   # G31: cursor semantics, bounded return
         print(f"phase 1 clean run: rc={res.get('rc', res)} requests={len(reqs)} shapes={sorted(shapes)} get-records={rd} expected second since={EXPECTED_SINCE_2} bounded<={BOUNDED_RETURN}")
-        if bad_rc or not reqs or not shapes <= ALLOWED or not first_ok or not second_ok:
+        observed = [norm(r["argv"]) for r in reqs]
+        if observed != EXPECTED_SEQUENCE:
+            print("phase 1: request sequence differs from the measured expectation:")
+            for i, (a, b) in enumerate(zip(observed + [None] * len(EXPECTED_SEQUENCE), EXPECTED_SEQUENCE + [None] * len(observed))):
+                if a != b:
+                    print(f"  #{i}: observed={a} expected={b}")
+        if bad_rc or not reqs or not shapes <= ALLOWED or not first_ok or not second_ok or observed != EXPECTED_SEQUENCE or enumerating(reqs):
             failures.append("phase 1")
-            print("phase 1 stderr tail:", res.get("stderr_tail", "")[-1200:])
+            print("phase 1 enumerating:", enumerating(reqs)[:3], "| stderr tail:", res.get("stderr_tail", "")[-600:])
         res, reqs = run("attack")
         print("phase 2 attack battery:", json.dumps(res.get("attack", res), indent=1), "| the fold can see:", res.get("test_detectable"))
         if any(not v.startswith("denied") for v in res.get("attack", {}).values()) or not res.get("attack"):
@@ -459,6 +711,11 @@ def main() -> int:
         print(f"phase 4 epoch-rewritten production reader (codex-coder round 9): get-records={reads(reqs)} FLAGGED = {bool(flagged)}")
         if not flagged:
             failures.append("phase 4 (an allowed verb with enumerating semantics was not detected)")
+        res, reqs = run("probe")
+        flagged = enumerating(reqs)
+        print(f"phase 5 point-probing production reader (codex-coder round 10): requests={len(reqs)} FLAGGED = {bool(flagged)} e.g. {flagged[:1]}")
+        if not flagged:
+            failures.append("phase 5 (point-probing through an allowed name was not detected)")
     finally:
         server.terminate()
         shutil.rmtree(private, ignore_errors=True)
@@ -467,7 +724,9 @@ def main() -> int:
     if failures:
         print("PROOF FAILED:", failures)
         return 1
-    print("PROOF: in this run the fold reached no store except through observed requests, none of which enumerated by name OR by semantics; both mutated folds were flagged.")
+    import platform
+    print(f"PROOF PASSED on host={platform.node()} platform={platform.platform()} at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}: "
+          "these specific capabilities were denied by the kernel and the fold still completed; the clean run's request sequence matched the measured expectation; all three mutated folds were flagged.")
     return 0
 
 
@@ -810,7 +1069,7 @@ class FakeWriter:
 
 README (not gate-relevant beyond the ceiling sentence): six verbs, the guarantee in G29's words, what it does not claim, the tripwire's demotion in G30's words, and the sentence `every module under **400 lines**`.
 
-- [ ] **Step 5: Run.** Boundary truths: 8 pass now. The proof needs Tasks 4–10 (there is no fold yet): `python tests/proof/run_proof.py` → exit 1 until then, exit 3 on a host with no sandbox — **commit failing-first**. Measured on this host at plan time, against the materialized tree: the unit suite passes *inside* the sandbox; proof phase 1 — seven verb invocations rc 0, 36 requests, shapes exactly the five, the first `get-records` read the 5000-record corpus once and the second asked from the last observed record minus the overlap and got 10 back (bound 10); phase 2 — every attack denied or refused (the direct-socket `file list` logged and refused by the store); phase 3 — the mutated fold's `file list` flagged; phase 4 — the epoch-rewritten production reader flagged by semantics (5006 and 5008 returned against the bound) with every verb name allowed. **Mutations for the truths** (each restored): (a) give `CliPointerReader` a base class → FAILS; (b) `def _upload` on the reader → FAILS; (c) `from coord_engine import x` anywhere → FAILS; (d) an extra file under `coord_fold/` → FAILS. **Commit** — `coord-fold: scaffold, boundary truths, and the OS-sandboxed process-boundary proof (G5–G7, G29)`
+- [ ] **Step 5: Run.** Boundary truths: 8 pass now. The proof needs Tasks 4–10 (there is no fold yet): `python tests/proof/run_proof.py` → exit 1 until then, exit 3 on a host with no sandbox — **commit failing-first**. Measured on this host at plan time, against the materialized tree: the unit suite passes *inside* the sandbox; proof phase 1 — seven verb invocations rc 0, 36 requests, shapes exactly the five, the first `get-records` read the 5000-record corpus once and the second asked from the last observed record minus the overlap and got 10 back (bound 10); phase 2 — every attack denied or refused (the direct-socket `file list` logged and refused by the store); phase 3 — the mutated fold's `file list` flagged; phase 4 — the epoch-rewritten production reader flagged by semantics (5006 and 5008 returned against the bound) with every verb name allowed; phase 5 — a production reader point-probing 2000 guessed task paths flagged (paths outside the allowlist, `file stat` count over its bound, sequence mismatch). The clean run's exact request sequence (36 entries, paths included) is frozen in the driver from this measurement. **Mutations for the truths** (each restored): (a) give `CliPointerReader` a base class → FAILS; (b) `def _upload` on the reader → FAILS; (c) `from coord_engine import x` anywhere → FAILS; (d) an extra file under `coord_fold/` → FAILS. **Commit** — `coord-fold: scaffold, boundary truths, and the OS-sandboxed process-boundary proof (G5–G7, G29)`
 
 ---
 
@@ -849,7 +1108,7 @@ CI step in `.github/workflows/uv-workspace.yml` after the pytest step:
             packages/coord-fold/tests/test_tripwire.py \
             packages/coord-fold/tests/test_file_size_ceiling.py \
             packages/coord-fold/tests/test_no_degraded_vocabulary.py -q
-      - name: coord-fold proof (G29) — needs a macOS runner; exit 3 is UNKNOWN, not green
+      - name: coord-fold proof (G29) — macOS is the proof host (measured); Linux exits 3 UNKNOWN and that is fail-closed, never a skip
         if: runner.os == 'macOS'
         run: uv run --package coord-fold --extra dev python packages/coord-fold/tests/proof/run_proof.py
 ```
@@ -1811,6 +2070,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r11 (2026-09-04, coord-boss `f6ceb0c4` both rulings + codex-coder CHANGES on `8d8dd4cb`, round 10):** G32 ruled — retired, stated as not-a-claim, review-shaped only; infra ruled — no untested bwrap profile, macOS is the proof host, Linux stays UNKNOWN, the gate is a passed record with host and time (the driver now prints them); the claim weakened to the true one (specific capabilities denied by the kernel, fold still completed); G33 names the property (denial indifferent to how code arrives) honestly, without claiming the in-process import finding under the kernel sandbox. codex-coder's point-probe P0: the driver now asserts the exact measured request sequence with paths, a path allowlist, and per-shape bounds for all five operations; phase 5 applies his mutation (2000 guessed `file stat`s) and must be flagged.
 - **r10 (2026-09-04, codex-coder CHANGES on `7cc71baa`, round 9):** the proof validated request *names* only, so an allowed `get-records` with its cursor rewritten to the epoch reread the corpus every pass and stayed green — enumeration downstream of an allowed name. Now the store logs each `get-records` with channel, `since`, and returned count; the corpus is 5000 records; phase 1 asserts the first fold reads the corpus once and the second asks from the last observed record minus the overlap and gets a bounded count; phase 4 applies the exact epoch-rewrite mutation to the production reader and must be flagged. G32 unchanged and still awaiting coord-boss's ruling — codex-coder is right that the parked build needs it before approval.
 - **r9 (2026-09-04, both reviewers CHANGES on `3c88369e`, round 8):** the in-process harness was escaped four ways in one round (originals via `gc` from the generator frame; `io.open` unlisted; the fake's corpus reachable via `reader._s.events`; the test detectable) — common cause: code inside a Python process can reach anything in it. **The harness is deleted.** The proof moves the corpus and the denial out of the process: `tests/proof/` — a store server outside the sandbox (corpus from a file the sandbox cannot read; five request shapes; logs and refuses everything else), a thin CLI client, and the **production** reader/writer driven through all six verbs inside a macOS seatbelt sandbox that denies network, exec, reads and writes at the kernel. Three phases, both ways: clean run (only fixed shapes, zero enumeration), attack battery (all denied/refused, the direct `file list` logged and refused), mutated fold (flagged). Driver exits 3 UNKNOWN with no sandbox — never green by absence. Measured before filing: 63/63 unit tests inside the sandbox; proof passed all three phases. G29 rewritten to exactly what is proven and what is not; **G32** states plainly that anti-consolidation is no longer claimed (codex-coder's ask; coord-boss's call). Task 0 runs the proof after the gates. Linux (bwrap) profile is an open infrastructure ask.
 - **r8 (2026-09-04, coord-boss `cdfe666e` + correction `7952b545`; codex-coder round 7 on `0b5fd60c`):** **The shape changed.** Seven rounds of syntactic gates each closed one spelling (the last: `x: object = reader.read_events`, an `AnnAssign` no alias map handled) and left the class open; coord-boss ruled a static check cannot prove a negative about an unrestricted Python module. G18–G23 superseded; their ceremony deleted (closed allowlist, alias maps, required-call shape, handler shape, launcher argv sets, forbidden tokens, mass caps, per-function budgets, wrapper rule, banned names — gone). **G29:** the guarantee is behavioural — `tests/harness.py` makes enumeration, process launch, file open and network absent from the test process (patched at the capability to raise a `BaseException` and count; package imported fresh under denial; `ctypes`/`pty`/`multiprocessing` unimportable), and `test_no_enumeration_harness.py` asserts both ways: the real fold and all six verbs complete with zero attempts; enumerating/launching/opening/globbing readers raise (parametrized), a swallowing one is still counted, an import-time `from posix import listdir` is denied, the real transport is inert. **G30:** one syntactic tripwire kept and demoted in those words. Boundary truths kept in `test_structural.py` (8 tests). **G31:** the cursor passes observed-irrelevant records (codex-coder's second P0); test with 3000 other-agent events. The spec's §3.4 claim corrected in the Goal. Task 0 gates: harness + truths + tripwire + ceiling + vocabulary.
