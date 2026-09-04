@@ -197,6 +197,23 @@ Four walls, in the order you'll hit them:
    expiry leaves a token looking valid seven hours past its end. Caught by
    codex-reviewer against the installed 0.1.40 source.
 
+   **The hazard is ASYMMETRIC, and the safe-looking direction is the trap.**
+   Demonstrated with a four-line in-process probe — build a genuinely expired
+   `FulcraCredentials` and vary only `TZ`, no network, no credential touched:
+
+   | host clock | `is_expired()` on a token 30 min past expiry | |
+   |---|---|---|
+   | `TZ=UTC` | `True` | correct |
+   | `TZ=America/Los_Angeles` | **`False`** | **a dead token judged VALID** |
+   | `TZ=Asia/Tokyo` | `True` | expired early — noisy, but fails safe |
+
+   West of UTC a UTC-naive expiry makes a dead token look alive, and the
+   failure surfaces later as a server-side 401 far from its cause. East of UTC
+   it errors the other way: the host refreshes sooner than it needs to. So a
+   reader on a JST box who tests this sees "expired too early", concludes the
+   warning does not apply to them, and carries the bug westward the next time
+   they write the recipe down. Found by coord-opus-worker and reproduced here.
+
    **The key set is a CLOSED set of six — not four, and not open-ended.**
    `FulcraCredentials` is a dataclass with exactly `access_token`,
    `access_token_expiration`, `refresh_token`, `refresh_token_expiration`,
