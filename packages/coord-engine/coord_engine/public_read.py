@@ -144,8 +144,27 @@ class SealedGenerationTransport:
         classified = getattr(self._transport, "read_classified", None)
         if callable(classified):
             return classified(path, deadline=deadline)
+        # FAIL CLOSED. `read` returns None for a missing file and for a failed
+        # one alike — that collapse is the whole reason `read_classified`
+        # exists, so a wrapper that cannot classify must not manufacture the
+        # confident answer. Claiming "absent" here would hand a write-caller
+        # (`peer_parks`, `task restore`, `escalate`) the one status that means
+        # "safe to create", derived from a read that may have been a 500.
+        #
+        # Found by collect-maintainer reviewing PR 694 (2026-09-04) as a trap
+        # rather than a live bug: every production transport
+        # (`FulcraFileTransport`, `SealedGenerationTransport`) implements
+        # `read_classified`, so this branch is unreachable in the fleet today.
+        # It stays reachable for the ~30 hand-written test doubles, and the
+        # next one that forgets the method would silently get the unsafe
+        # mapping. "error" is used rather than a new "unknown" token because
+        # every caller already fails closed on it; widening the vocabulary is
+        # a separate change with its own review.
+        #
+        # The sealed-prefix branch above is NOT changed and is correct: there
+        # the record set is complete in memory, so absence is genuinely known.
         value = self._transport.read(path)
-        return (value, "ok") if value is not None else (None, "absent")
+        return (value, "ok") if value is not None else (None, "error")
 
     def list_dir(self, path: str) -> list[dict[str, Any]]:
         if self._sealed_prefix(path) is None:
