@@ -386,3 +386,39 @@ def test_a_malformed_section_must_not_seal_an_empty_prefix_either():
         f"answered {(value, status)!r} for a malformed section — malformed is "
         "not empty, and neither is absent"
     )
+
+
+# ---------------------------------------------------------------------------
+# review restore — the FIFTH site, and the one my caller audit missed.
+#
+# collect-maintainer surfaced it on 2026-09-04 while chasing stale doctrine
+# rather than while auditing callers, which is the lesson: the audit looked for
+# `is None` forks that WRITE, and this one reads `is not None` and falls THROUGH
+# to a move. Opposite polarity, same conflation, same consequence — an
+# unreadable destination reads as free and _crash_safe_move lands on top of a
+# live verdict shard.
+# ---------------------------------------------------------------------------
+
+
+def _verdict_doc(body="verdict"):
+    return f"---\ntype: Verdict\n---\n\n{body}\n"
+
+
+def test_review_restore_refuses_when_it_cannot_tell_whether_the_hot_path_is_occupied(capsys):
+    cold = f"team/{TEAM}/_coord/archive/reviews/2026-08/slug/verdicts/slug--codex.md"
+    hot = f"team/{TEAM}/review/slug/verdicts/slug--codex.md"
+    # No cold DOC on purpose: that is the single-shard branch which reaches the
+    # occupancy fork. With a doc present the family path runs instead.
+    t = ReadsError(failing_prefix=hot)
+    t.put(cold, _verdict_doc())
+    t.put(hot, _verdict_doc("LIVE"))
+
+    rc = cli.main(["review", "restore", TEAM, "slug"], transport=t)
+    err = capsys.readouterr().err
+
+    assert rc == 3, f"expected the UNKNOWN refusal, got rc={rc}: {err}"
+    assert "UNKNOWN, not free" in err, err
+    assert f"team/{TEAM}/review/slug/verdicts/slug--codex.md" not in t.writes, (
+        f"review restore wrote {t.writes} onto an UNREADABLE hot path — this "
+        "fork guards a MOVE, so a wrong answer destroys the live shard"
+    )
