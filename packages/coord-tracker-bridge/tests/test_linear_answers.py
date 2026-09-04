@@ -21,6 +21,7 @@ from coord_tracker_bridge.answers import (
     DispatchFailed,
     EngineAnswerDispatcher,
     collect_replies,
+    parse_answerable_fold,
     run_answers,
 )
 from coord_tracker_bridge.model import ManagedRecord, SourceIdentity
@@ -515,3 +516,38 @@ def test_a_failed_fold_read_is_never_read_as_nothing_is_answerable() -> None:
     dispatcher = EngineAnswerDispatcher(team="fulcra", runner=broken)
     with pytest.raises(DispatchFailed):
         dispatcher.answerable("ash")
+
+
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        ("not json at all", "not JSON"),
+        ('["a", "b"]', "a top-level list, not an object"),
+        ('{"health": "DATA"}', "no rows field -- absent is not empty"),
+        ('{"rows": "nope"}', "rows is not a list"),
+        ('{"rows": [{"id": "ok"}, "a bare string"]}', "a row that is not an object"),
+        ('{"rows": [{"id": "ok"}, {"title": "no id"}]}', "a row with no id"),
+        ('{"rows": [{"id": "ok"}, {"id": ""}]}', "a row with a blank id"),
+        ('{"rows": [{"id": "ok"}, {"id": 17}]}', "a row whose id is not a string"),
+    ],
+)
+def test_an_unreadable_fold_RAISES_rather_than_shrinking(raw: str, why: str) -> None:
+    """A shape this cannot read is a failed read, never a smaller fold.
+
+    Skipping the unreadable rows is the drop this package already ruled out for
+    the Linear transport, and it is worse here: a dropped row means its slug is
+    missing from the answerable set, so a reply on it is REFUSED and reported as
+    "no verb reaches this row" -- a false statement about the bus, printed to
+    the operator whose reply is now sitting undelivered.
+    """
+
+    with pytest.raises(DispatchFailed):
+        parse_answerable_fold(raw, consumer="ash")
+
+
+def test_a_readable_fold_yields_exactly_its_slugs() -> None:
+    found = parse_answerable_fold(
+        json.dumps({"health": "DATA", "rows": [{"id": " a-ask "}, {"id": "b-ask"}]}),
+        consumer="ash",
+    )
+    assert found == frozenset({"a-ask", "b-ask"})

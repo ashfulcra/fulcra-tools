@@ -266,6 +266,59 @@ def collect_replies(
     return Plan(tuple(replies), considered, cards, cold, tuple(dict.fromkeys(unattributed)))
 
 
+def parse_answerable_fold(raw: str, *, consumer: str) -> frozenset[str]:
+    """Turn the engine's `asks --json` output into the set of answerable slugs.
+
+    PARSE HERE, ONCE, RATHER THAN NARROWING AT EACH USE. The first version of
+    this walked the decoded JSON with `isinstance` checks inline and skipped
+    anything that did not match — which is the drop this package already ruled
+    out for the Linear transport ("A TRANSPORT DOES NOT GET TO DECIDE THAT DATA
+    LOSS IS ACCEPTABLE", linear.py). It is worse here than there: a dropped row
+    means its slug is missing from this set, so a reply on it is REFUSED and
+    reported as "no verb reaches this row" — a false statement about the bus,
+    printed to the operator whose reply is now sitting undelivered.
+
+    So every shape this cannot read raises. A malformed fold is a failed read,
+    and a failed read is UNKNOWN; it is never a smaller fold.
+    """
+
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise DispatchFailed(
+            f"the answerable fold for {consumer!r} was not JSON: {exc}"
+        ) from None
+    if not isinstance(payload, Mapping):
+        raise DispatchFailed(
+            f"the answerable fold for {consumer!r} is not an object"
+        )
+    if "rows" not in payload:
+        # NO DEFAULT. An absent `rows` is not an empty fold — it would refuse
+        # every reply and read as "nothing here is answerable", which is the
+        # same lie as rendering a failed read as "no answers".
+        raise DispatchFailed(
+            f"the answerable fold for {consumer!r} has no rows field"
+        )
+    rows = payload["rows"]
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise DispatchFailed(
+            f"the answerable fold for {consumer!r} has a non-list rows field"
+        )
+    slugs: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise DispatchFailed(
+                f"row {index} of the answerable fold for {consumer!r} is not an object"
+            )
+        slug = row.get("id")
+        if not isinstance(slug, str) or not slug.strip():
+            raise DispatchFailed(
+                f"row {index} of the answerable fold for {consumer!r} has no usable id"
+            )
+        slugs.add(slug.strip())
+    return frozenset(slugs)
+
+
 @dataclass(slots=True)
 class EngineAnswerDispatcher:
     """Settle one ask on the bus via `coord-engine answer`.
@@ -307,11 +360,7 @@ class EngineAnswerDispatcher:
                 f"reading the answerable fold for {consumer!r} failed "
                 f"(rc {code}): {(stderr or stdout).strip()[:300]}"
             )
-        payload = json.loads(stdout)
-        rows = payload.get("rows", ()) if isinstance(payload, Mapping) else payload
-        found = frozenset(
-            str(row.get("id") or "") for row in rows if isinstance(row, Mapping)
-        ) - {""}
+        found = parse_answerable_fold(stdout, consumer=consumer)
         self._answerable[consumer] = found
         return found
 
