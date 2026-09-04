@@ -1371,6 +1371,14 @@ credential value belongs in this repo, this file included.
 `LINEAR_KEY_ENV=<variable name>` overrides the order and uses exactly that one.
 Team id: `LINEAR_TEAM_ID` (team "Agent Bus").
 
+**Coord-boss does not run a Linear duty.** Ash retired it on 2026-09-04:
+*"stop your linear duty - i already told you we have a bot in your env working
+on the linear stuff."* The 3h routine is disabled, a revised instruction for
+how coord sessions interact with Linear is pending from Ash, and until it
+arrives the correct amount of Linear work for a coord session is none. Do not
+re-arm a sync, an assignments read, or a projection pass on your own
+initiative; another bot owns that lane.
+
 **There are two Linear organizations, and the bridge can only reach one.**
 Measured 2026-09-04 by asking each credential for its own `organization` and
 `teams`:
@@ -1391,12 +1399,15 @@ Two consequences that were previously mis-stated:
   over to a credential that reads an empty board — a stale projection that
   looks healthy, the exact failure this section exists to stop.
 - Marketing / Devs / G&A are **not** sibling teams the bridge could be
-  re-pointed at. They live in a different organization that no bridge
-  credential can reach, so "watch more teams" is a credential problem, not a
-  `--linear-team-id` problem. The MCP connector in a coord session sees that
-  org and *not* `BUS`: `get_issue("BUS-134")` there returns
-  `Could not find referenced Issue`, which is a workspace boundary and not a
-  missing card.
+  re-pointed at, and **they are not a gap to close**. Ash ruled on
+  2026-09-04: he is a member of two Linear organizations, and the fleet is
+  concerned with the FLEET org (Ash Agent Coordination) ONLY. FulcraDynamics
+  is out of scope. Do not file "Marketing/Devs/G&A never reach the fleet" as
+  a finding again — that framing was mine and it was wrong. The MCP connector
+  in a coord session is authenticated to that out-of-scope org, so
+  `get_issue("BUS-134")` there returns `Could not find referenced Issue`:
+  a workspace boundary, not a missing card, and not evidence about the fleet
+  board.
 
 Why this table exists: the bridge read `LINEAR_API_KEY` and nothing else. That
 credential stopped authenticating, and the Linear projection sat stale from
