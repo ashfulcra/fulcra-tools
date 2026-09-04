@@ -327,26 +327,54 @@ def append_source_metadata(
     return f"{clean.rstrip()}\n\n{marker}".lstrip()
 
 
+class CorruptMarker(LinearError):
+    """A card carries a bridge marker whose identity cannot be read.
+
+    DISTINCT FROM HAVING NO MARKER, which is what `None` means. Collapsing the
+    two is not a smaller read: an unmanaged card is one the bridge has never
+    projected, so the projection CREATES A CARD FOR IT — and doing that to a
+    card that is already the projection of that row gives the operator two cards
+    for one thing. This package spent a day removing exactly that duplication.
+
+    The ledger normally rescues this (identity is recovered by provider id), but
+    a policy edit files state under a new hash and starts an empty ledger --
+    observed live 2026-09-04 -- and with no ledger the fallback is gone. So the
+    unreadable case raises and the run stops, rather than quietly duplicating.
+    """
+
+
 def parse_bridge_metadata(description: str) -> Mapping[str, Any] | None:
+    """The bridge marker on this card, or None if it carries none.
+
+    Raises CorruptMarker when a marker IS present but unreadable.
+    """
+
     start = description.rfind(METADATA_PREFIX)
     if start < 0:
         return None
     start += len(METADATA_PREFIX)
     end = description.find(METADATA_SUFFIX, start)
     if end < 0:
-        return None
+        # An opening prefix with no terminator is a truncated marker, not an
+        # unmarked card: something wrote or rewrote this description badly.
+        raise CorruptMarker("bridge marker is not terminated")
     encoded = description[start:end]
     try:
         encoded += "=" * (-len(encoded) % 4)
         value = json.loads(base64.urlsafe_b64decode(encoded).decode())
-        if "source" not in value:  # phase-1 probe compatibility
-            value = {"source": value, "fields": {}}
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise CorruptMarker(f"bridge marker does not decode ({type(exc).__name__})") from None
+    if not isinstance(value, Mapping):
+        raise CorruptMarker("bridge marker is not an object")
+    if "source" not in value:  # phase-1 probe compatibility
+        value = {"source": value, "fields": {}}
+    try:
         SourceIdentity.from_dict(value["source"])
-        if "capability" in value and not str(value["capability"]).strip():
-            return None
-        return value
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-        return None
+    except (ValueError, TypeError, KeyError) as exc:
+        raise CorruptMarker(f"bridge marker has no usable identity ({type(exc).__name__})") from None
+    if "capability" in value and not str(value["capability"]).strip():
+        raise CorruptMarker("bridge marker has a blank capability")
+    return value
 
 
 def parse_source_metadata(description: str) -> SourceIdentity | None:

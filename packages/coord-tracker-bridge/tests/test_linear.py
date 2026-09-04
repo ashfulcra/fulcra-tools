@@ -24,6 +24,9 @@ from coord_tracker_bridge import (
 from coord_tracker_bridge.linear import (
     ISSUE_LABELS_QUERY,
     append_source_metadata,
+    CorruptMarker,
+    METADATA_PREFIX,
+    METADATA_SUFFIX,
     parse_bridge_metadata,
     parse_source_metadata,
     strip_source_metadata,
@@ -839,3 +842,59 @@ def test_a_cards_labels_paginate_to_completion():
     assert [n["name"] for n in adapter.list_issue_labels("issue-1")] == [
         "lane:blocked", "blocked-on-ash",
     ]
+
+
+@pytest.mark.parametrize(
+    ("description", "why"),
+    [
+        ("body " + METADATA_PREFIX + "eyJhIjoxfQ", "opened but never terminated"),
+        ("body " + METADATA_PREFIX + "!!!not-base64!!!" + METADATA_SUFFIX, "does not decode"),
+        ("body " + METADATA_PREFIX + base64.urlsafe_b64encode(b'"a string"').decode().rstrip("=")
+         + METADATA_SUFFIX, "decodes to a non-object"),
+        ("body " + METADATA_PREFIX + base64.urlsafe_b64encode(
+            json.dumps({"source": {"provider": "x"}, "fields": {}}).encode()
+        ).decode().rstrip("=") + METADATA_SUFFIX, "identity is incomplete"),
+        ("body " + METADATA_PREFIX + base64.urlsafe_b64encode(json.dumps({
+            "source": {"provider": "coord-engine", "namespace": "fulcra/asks", "item_id": "a"},
+            "capability": "   ", "fields": {},
+        }).encode()).decode().rstrip("=") + METADATA_SUFFIX, "blank capability"),
+    ],
+)
+def test_an_unreadable_marker_RAISES_it_does_not_read_as_unmanaged(description, why):
+    """None means "this card carries no marker". A marker that is present but
+    unreadable is a different fact, and collapsing them is not a smaller read.
+
+    An unmanaged card is one the bridge has never projected, so the projection
+    CREATES a card for it -- and doing that to a card that is already the
+    projection of that row hands the operator two cards for one thing, which is
+    the duplication this package spent a day removing. The ledger usually
+    rescues the identity by provider id, but a policy edit files state under a
+    new hash and starts an empty ledger (observed live), and then there is no
+    fallback at all.
+    """
+
+    with pytest.raises(CorruptMarker):
+        parse_bridge_metadata(description)
+
+
+def test_a_card_with_no_marker_at_all_is_simply_unmanaged():
+    """The other half: cards a human made are not corrupt, they are not ours."""
+
+    assert parse_bridge_metadata("just an ordinary description") is None
+    assert parse_source_metadata("just an ordinary description") is None
+
+
+def test_a_corrupt_marker_stops_the_read_rather_than_duplicating_the_card():
+    """End to end: the adapter must not report this card as unmanaged."""
+
+    issue = {
+        "id": "LIN-1", "identifier": "BUS-1", "title": "Task",
+        "description": "body " + METADATA_PREFIX + "!!!" + METADATA_SUFFIX,
+        "state": {"type": "started"}, "labels": {"nodes": []}, "project": None,
+    }
+    transport = FakeTransport([
+        response({"issues": {"nodes": [issue], "pageInfo": {"hasNextPage": False, "endCursor": None}}}),
+    ])
+
+    with pytest.raises(CorruptMarker):
+        LinearTrackerAdapter(LinearClient(transport), "team").list_managed_records(BridgeLedger())
