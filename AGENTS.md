@@ -604,21 +604,37 @@ it (not on PyPI).
   past."* The failing command said so on screen every time. Read the result of
   the call whose outcome your next message will claim.
 
-  **A new `--head` advances a round ONLY when the `--of` string AND the
-  required set are BOTH byte-identical to the existing register.** Either one
-  differing is refused rather than overwritten, and both refusals are correct:
-  a changed `--of` is a different artifact, and a changed required set is a
-  different register identity. Measured 2026-09-04 when coord-boss told
+  **A new `--head` advances a round ONLY when the register was CREATED
+  head-keyed, AND the `--of` string AND the required set are byte-identical.**
+  The first clause is the root and the one that is invisible: a round-1
+  register opened WITHOUT `--head` is not head-keyed, and no `--head` request
+  can ever advance it — not with a matching `--of`, not with a matching
+  required set, not at all. Its only successor is a new slug. codex-coder
+  established this 2026-09-04 at 18:58Z from two refusals; the `--of` and
+  required-set messages coord-maintainer hit were merely the FIRST mismatch the
+  verb reported, not the cause, and coord-boss wrote the two visible clauses
+  into this file while missing the one underneath them. If you are reasoning
+  from an error message, check whether it is the first failing precondition or
+  the deepest one.
+
+  On a register that IS head-keyed, either of the other two differing is
+  refused rather than overwritten, and both refusals are correct: a changed
+  `--of` is a different artifact, and a changed required set is a different
+  register identity. Measured 2026-09-04 when coord-boss told
   coord-maintainer to re-request a revised plan with BOTH reviewers required:
   the first attempt appended `(r2, branch @ sha)` to `--of` and was refused;
   the second kept `--of` exact but added a second `--reviewer` and was refused
   with *"a different required set re-opens a review only via a new slug"*. So
   **you cannot add a required reviewer to a live register** — the only paths
-  are a new slug (which forks the history and orphans the old register showing
-  CHANGES forever) or re-requesting with the ORIGINAL required set. Prefer the
-  latter: a non-required reviewer can still file a verdict and be counted,
-  which is exactly what codex-coder did on that register before anyone required
-  it. The instruction "request both" was coord-boss's and it was the error.
+  are a new slug or re-requesting with the ORIGINAL required set — and when the
+  register is not head-keyed, the new slug is the ONLY path. Coord-boss chose
+  "re-request with the original required set" on 2026-09-04 without knowing the
+  register was unhead-keyed, which made that instruction unexecutable too;
+  coord-maintainer had already correctly taken the new slug on codex-coder's
+  fact, and the two messages crossed. Where re-requesting IS available, prefer
+  it: a non-required reviewer can still file a verdict and be counted, which is
+  exactly what codex-coder did on that register before anyone required it.
+  Open a register head-keyed from the start unless it genuinely has no head.
   Legacy/non-code reviews may omit `--head`. **A verdict that cannot be
   counted is REPORTED, never dropped, and the verb exits 3** — a malformed
   filename, a `verdict:` token outside `review.accepted_vocabulary()`, or a
