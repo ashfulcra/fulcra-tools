@@ -232,9 +232,43 @@ class PointerTransport(Protocol):
     def read_events(self, channel: str, since: str) -> Iterator[Event]: ...
 ```
 
-There is no `list_dir`. There is no `glob`. A fold that wants to enumerate has
-nothing to call. The 2026-08-21 rule stops depending on a reviewer noticing and
-becomes a thing that cannot be expressed.
+There is no `list_dir`. There is no `glob`.
+
+**But this does NOT prevent enumeration, and the original version of this
+section claimed it did.** That claim was wrong and was falsified four separate
+ways over seven review rounds on 2026-09-04:
+
+1. A type removes one *method*. `os.listdir`, `os.scandir`, `os.walk` and a
+   subprocess launching the store CLI all remain, in any module.
+2. Static gates that hunt those by name are defeated by **aliasing**, and there
+   are unbounded spellings: a bare import alias, an assignment alias, an
+   annotated assignment, a local binding of an owner operation. Two reviewers
+   found a fresh one in each of three consecutive rounds; each round closed its
+   counterexample and left the class open.
+3. An **in-process** harness that patches those capabilities to raise is
+   escapable from inside the same process — originals reachable via `gc`,
+   `io.open` unlisted, the store fake leaking its corpus through a private
+   attribute, and the test itself detectable. A gate that shares an address
+   space with its subject is defeatable by its subject.
+4. Only the **kernel** can make a capability absent.
+
+So the enforcement is a **process boundary**, not a type: the fold runs under an
+OS sandbox with the store served from outside it, and a fold that completes
+there provably did not enumerate in that run. The type stays because it is cheap
+and it documents intent — but it is a convenience, not the guarantee.
+
+**The guarantee, stated at the strength it actually holds:** *these specific
+capabilities were denied by the kernel and the fold still completed.* Not "the
+fold ran with no capabilities" — a deny-default profile aborts the interpreter
+at startup, so the measured profile is allow-default with targeted kernel
+denies. And not "enumeration is impossible to write" — it is writable; it fails
+its tests.
+
+One property does hold by construction rather than by checking, and it is worth
+more than any gate here: **the import machinery itself enumerates**, so under
+denial an uncached module cannot be imported at all. That closes the
+generated-module bypass because of what the system *is*, not because something
+looks for it.
 
 A structural test asserts this directly: `assert not hasattr(fold_transport,
 "list_dir")`, and a test that the fold module's import graph never reaches the
