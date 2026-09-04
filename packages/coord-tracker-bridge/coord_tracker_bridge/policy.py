@@ -135,6 +135,22 @@ class Policy:
         return self.consumer_label.format(consumer=consumer)
 
     @property
+    def consumer_labels(self) -> frozenset[str]:
+        """Every per-consumer label this policy can set.
+
+        Separate from `all_managed_labels` because these mean something the
+        ordinary ones do not: a consumer label is a claim about the PRESENT --
+        "this is blocked on Ash" -- so a card that stops being blocked on him
+        must lose it, while `lane:blocked` is just a description of the row.
+        """
+
+        if not self.consumer_label:
+            return frozenset()
+        return frozenset(
+            self.consumer_label.format(consumer=who) for who in self.consumers
+        )
+
+    @property
     def all_managed_labels(self) -> tuple[str, ...]:
         """Configured labels PLUS every per-consumer label this policy can set.
 

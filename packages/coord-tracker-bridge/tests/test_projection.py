@@ -279,3 +279,70 @@ def test_moving_managed_item_out_of_allowlist_closes_it_from_positive_evidence()
     assert [(change.kind, change.provider_id) for change in plan.changes] == [
         (ChangeKind.CLOSE, "LIN-task-1")
     ]
+
+
+def test_closing_a_card_takes_the_consumer_label_OFF_it():
+    """A label is a claim about the PRESENT.
+
+    "blocked-on-ash" says this is blocked on Ash right now, and a closed card is
+    not. It matters because a saved Linear view filters on the LABEL, not on the
+    card's state, and the operator's view shows completed issues: measured live
+    2026-09-04, 12 cards were correctly closed, kept the label, and stayed in his
+    "blocked on me" view -- so the closes were invisible to the person they were
+    done for.
+    """
+
+    policy = load_policy()
+    source = SourceIdentity("coord-engine", "fulcra/asks", "gone-away")
+    record = ManagedRecord(
+        provider_id="LIN-1",
+        source=source,
+        capability="asks",
+        fields={"labels": ("lane:blocked", "blocked-on-ash", "kind:task")},
+        closed=False,
+    )
+    ledger = BridgeLedger()
+    ledger.upsert(LedgerEntry(
+        source=source, capability="asks", tracker_provider="linear",
+        tracker_record_id="LIN-1", policy_version=policy.version,
+        policy_hash=policy.hash, last_observed_at="2026-09-04T00:00:00+00:00",
+    ))
+
+    plan = build_plan(
+        Snapshot((), True, (), {"asks": CapabilityState.COMPLETE},
+                 datetime(2026, 9, 4, tzinfo=timezone.utc)),
+        [record], ledger, policy,
+    )
+
+    closes = [c for c in plan.changes if c.kind is ChangeKind.CLOSE]
+    assert len(closes) == 1
+    # The consumer label comes off; the descriptive ones stay as history.
+    assert closes[0].fields["labels"] == ("lane:blocked", "kind:task")
+
+
+def test_a_close_with_no_consumer_label_carries_no_field_churn():
+    """Most closes are ordinary rows nobody was blocked on. They must not
+    acquire a label write just because the close path can carry one."""
+
+    policy = load_policy()
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "gone-away")
+    record = ManagedRecord(
+        provider_id="LIN-2", source=source, capability="tasks",
+        fields={"labels": ("lane:blocked",)}, closed=False,
+    )
+    ledger = BridgeLedger()
+    ledger.upsert(LedgerEntry(
+        source=source, capability="tasks", tracker_provider="linear",
+        tracker_record_id="LIN-2", policy_version=policy.version,
+        policy_hash=policy.hash, last_observed_at="2026-09-04T00:00:00+00:00",
+    ))
+
+    plan = build_plan(
+        Snapshot((), True, (), {"tasks": CapabilityState.COMPLETE},
+                 datetime(2026, 9, 4, tzinfo=timezone.utc)),
+        [record], ledger, policy,
+    )
+
+    closes = [c for c in plan.changes if c.kind is ChangeKind.CLOSE]
+    assert len(closes) == 1
+    assert dict(closes[0].fields) == {}

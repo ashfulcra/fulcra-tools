@@ -818,11 +818,20 @@ class LinearTrackerAdapter:
 
     def apply_change(self, change: Change) -> str:
         if change.kind is ChangeKind.CLOSE:
+            # A close can carry fields: the consumer label comes off, because a
+            # saved view filters on the LABEL and not on the card's state, so a
+            # closed card that kept "blocked-on-ash" stays in that person's
+            # "blocked on me" view forever.
+            close_input: dict[str, Any] = {"stateId": self._state_id("completed")}
+            if change.fields:
+                close_input.update(
+                    self._resolved_fields(change.fields, change.source)
+                )
             self.client.execute_mutation(
                 "CloseIssue",
                 "mutation CloseIssue($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}",
                 "issueUpdate",
-                {"id": change.provider_id, "input": {"stateId": self._state_id("completed")}},
+                {"id": change.provider_id, "input": close_input},
             )
             return str(change.provider_id)
         payload = self._resolved_fields(

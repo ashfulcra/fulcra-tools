@@ -88,6 +88,25 @@ def _diff(desired: Mapping[str, Any], actual: Mapping[str, Any], policy: Policy)
     return changed
 
 
+def _close_fields(existing: ManagedRecord, policy: Policy) -> dict[str, Any]:
+    """What a CLOSE must still write: the consumer label has to come off.
+
+    A LABEL IS A CLAIM ABOUT THE PRESENT. "blocked-on-ash" says this is blocked
+    on Ash right now; a closed card is not. It matters because a saved Linear
+    view filters on the LABEL and not on the card's state, and the operator's own
+    view is set to show completed issues. Measured live 2026-09-04: 12 cards
+    were correctly closed and kept the label, so his "blocked on me" view still
+    showed 29 things when 17 were real -- the closes were invisible to him.
+
+    Only the consumer labels come off. `lane:blocked` and the rest describe what
+    the row was and stay as history.
+    """
+
+    current = tuple(existing.fields.get("labels") or ())
+    kept = tuple(label for label in current if label not in policy.consumer_labels)
+    return {"labels": kept} if kept != current else {}
+
+
 def build_plan(
     snapshot: Snapshot,
     managed_records: Iterable[ManagedRecord],
@@ -111,7 +130,7 @@ def build_plan(
                     ChangeKind.CLOSE,
                     item.source,
                     existing.provider_id,
-                    MappingProxyType({}),
+                    MappingProxyType(_close_fields(existing, policy)),
                 ))
             continue
         if policy.included_origins and item.origin not in policy.included_origins:
@@ -123,7 +142,8 @@ def build_plan(
             # not a close inferred from absence. Snapshot completeness only
             # gates the separate absent-ledger pass below.
             if existing and not existing.closed:
-                changes.append(Change(ChangeKind.CLOSE, item.source, existing.provider_id, MappingProxyType({})))
+                changes.append(Change(ChangeKind.CLOSE, item.source, existing.provider_id,
+                                      MappingProxyType(_close_fields(existing, policy))))
             continue
         wanted = _desired(item, policy)
         if existing is None:
@@ -153,7 +173,8 @@ def build_plan(
                 Diagnostic(entry.capability, "close-suppressed-never-observed", key)
             )
         elif snapshot.absence_is_authoritative(entry.capability):
-            changes.append(Change(ChangeKind.CLOSE, entry.source, existing.provider_id, MappingProxyType({})))
+            changes.append(Change(ChangeKind.CLOSE, entry.source, existing.provider_id,
+                                  MappingProxyType(_close_fields(existing, policy))))
         else:
             diagnostics.append(
                 Diagnostic(entry.capability, "close-suppressed", f"absence not authoritative for {key}")
