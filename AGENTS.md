@@ -1364,12 +1364,39 @@ credential value belongs in this repo, this file included.
 | Order | Variable | What it is |
 | --- | --- | --- |
 | 1 | `LINEAR_PERSONAL_KEY` | personal API key, sent as-is (no `Bearer`) |
-| 2 | `LINEAR_PERSONAL_KEY_2` | spare personal key, same identity |
+| 2 | `LINEAR_PERSONAL_KEY_2` | same identity, but **it cannot see team BUS** — see below |
 | 3 | `COORD_BRIDGE_DEVELOPER_TOKEN` | OAuth app token — acts as the app, not as you |
 | 4 | `LINEAR_API_KEY` | historical name. **Currently returns 401.** Last only for compatibility |
 
 `LINEAR_KEY_ENV=<variable name>` overrides the order and uses exactly that one.
 Team id: `LINEAR_TEAM_ID` (team "Agent Bus").
+
+**There are two Linear organizations, and the bridge can only reach one.**
+Measured 2026-09-04 by asking each credential for its own `organization` and
+`teams`:
+
+| Credential | Viewer | Organization | Teams it can see |
+| --- | --- | --- | --- |
+| `LINEAR_PERSONAL_KEY` | Ash Kalb | Ash Agent Coordination | `BUS`, `ABK` |
+| `LINEAR_PERSONAL_KEY_2` | Ash Kalb | Ash Agent Coordination | `ABK` only |
+| `COORD_BRIDGE_DEVELOPER_TOKEN` | Coord Bridge | Ash Agent Coordination | `BUS`, `ABK` |
+| `LINEAR_API_KEY` | — | — | 401 `AUTHENTICATION_ERROR` |
+| the Linear **MCP connector** | Ash's OAuth | **FulcraDynamics** | `Marketing`, `Devs`, `G&A` |
+
+Two consequences that were previously mis-stated:
+
+- `LINEAR_PERSONAL_KEY_2` is **not** an equivalent spare. It authenticates as
+  the same human and the same org, so every identity check passes, and it
+  still cannot see the team the bridge is pointed at. Removing key 1 fails
+  over to a credential that reads an empty board — a stale projection that
+  looks healthy, the exact failure this section exists to stop.
+- Marketing / Devs / G&A are **not** sibling teams the bridge could be
+  re-pointed at. They live in a different organization that no bridge
+  credential can reach, so "watch more teams" is a credential problem, not a
+  `--linear-team-id` problem. The MCP connector in a coord session sees that
+  org and *not* `BUS`: `get_issue("BUS-134")` there returns
+  `Could not find referenced Issue`, which is a workspace boundary and not a
+  missing card.
 
 Why this table exists: the bridge read `LINEAR_API_KEY` and nothing else. That
 credential stopped authenticating, and the Linear projection sat stale from
