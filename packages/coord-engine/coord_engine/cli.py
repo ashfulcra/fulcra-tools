@@ -6413,10 +6413,116 @@ def cmd_obligations_seed(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def cmd_obligations_repair(args: argparse.Namespace, transport: Any) -> int:
+    """`obligations --repair-unknown`: re-probe ONLY the components the
+    checkpoint carries as UNKNOWN, and clear the ones that now read.
+
+    THE DEADLOCK THIS BREAKS. A carried UNKNOWN is sticky by construction: the
+    stream fold copies ``unknown_components`` forward on every advance and
+    nothing else writes it, so the ONLY way to clear one was a full
+    ``--seed-checkpoint`` — a corpus walk over every component. When the stuck
+    component is the one whose corpus probe cannot finish inside a budget
+    (measured: the reviews leg covers 104 of 364 slugs at fold 300/briefing
+    600), the only thing that could clear the UNKNOWN is the thing that cannot
+    run. The UNKNOWN then reads as permanent when it is really unattempted, and
+    those are different claims.
+
+    Two properties make this safe to run without weakening the answer:
+
+    * **It probes a SUBSET, so the stuck component gets the whole budget**
+      instead of whatever survives six siblings. That is the measured shape of
+      the failure — the review leg starved on a budget it inherited already
+      drained — so a subset probe is not a smaller version of the same attempt.
+    * **Clearing a component MERGES its owed rows into the open set.** Marking
+      a surface covered while dropping the work it found would be a false clear
+      manufactured by the repair itself, which is the exact failure class the
+      checkpoint exists to prevent.
+
+    It is off the wake path, like ``--seed-checkpoint``: a deliberate repair,
+    never the per-wake answer. ``as_of`` is NOT advanced — this run folds no
+    events and has no claim to make about time.
+    """
+    agent = _declared_identity(getattr(args, "agent", None))
+    if not agent:
+        print("obligations --repair-unknown: --agent or FULCRA_COORD_AGENT required",
+              file=sys.stderr)
+        return 2
+    checkpoint = _load_obligations_checkpoint(transport, args.team, agent)
+    if checkpoint is None:
+        print("obligations --repair-unknown: no readable checkpoint — there is "
+              "nothing to repair yet. Seed one with obligations "
+              "--seed-checkpoint first.", file=sys.stderr)
+        return 3
+    unknown = sorted(set(checkpoint.get("unknown_components") or []))
+    if not unknown:
+        print("obligations --repair-unknown: nothing to repair — the checkpoint "
+              "carries no UNKNOWN components")
+        return 0
+
+    now = _iso(_now())
+    offered = _obligation_probes(transport, args.team, agent, now=now)
+    by_name = {c.name: c for c in offered}
+    probes = [by_name[n] for n in unknown if n in by_name]
+    # A name the registry no longer offers cannot be probed here. Clearing it
+    # would claim coverage we never established; it stays UNKNOWN and is
+    # reported by a DIFFERENT sentence, because "not offered" and "read and
+    # failed" have different remedies.
+    unoffered = [n for n in unknown if n not in by_name]
+
+    result = obligations_mod.fold(probes, expected=tuple(n for n in unknown
+                                                         if n in by_name))
+    cleared = sorted(set(result.consulted))
+    still = sorted(set(unknown) - set(cleared))
+
+    merged = {r["slug"]: r for r in checkpoint["open"]}
+    added = 0
+    for row in result.owed:
+        slug = str(row.get("slug") or row.get("id") or "")
+        if not slug or slug in merged:
+            continue
+        merged[slug] = {"slug": slug,
+                        "ptr": str(row.get("ptr") or "") or None,
+                        "priority": str(row.get("priority") or row.get("pri") or "P2")}
+        added += 1
+
+    print(f"obligations --repair-unknown: {len(unknown)} carried UNKNOWN "
+          f"({', '.join(unknown)}) — cleared {len(cleared)}, still UNKNOWN "
+          f"{len(still)}; {added} newly-open row(s) merged into the checkpoint")
+    for name in cleared:
+        print(f"  cleared: {name}")
+    for name in still:
+        detail = result.details.get(name) or "no detail"
+        if name in unoffered:
+            detail = ("component is not offered by this engine's probe "
+                      "registry — cannot be repaired here")
+        print(f"  ! still UNKNOWN: {name} — {detail}", file=sys.stderr)
+
+    if not cleared and not added:
+        print("obligations --repair-unknown: checkpoint UNCHANGED — nothing "
+              "cleared and nothing merged, so it is not rewritten",
+              file=sys.stderr)
+        return 3
+    if not _save_obligations_checkpoint(
+            transport, args.team, agent, as_of=checkpoint["as_of"],
+            open_rows=list(merged.values()), seeded_by="repair-unknown",
+            unknown_components=still):
+        print("obligations --repair-unknown: checkpoint write FAILED — nothing "
+              "recorded, the carried UNKNOWN stands", file=sys.stderr)
+        return 3
+    back = _load_obligations_checkpoint(transport, args.team, agent)
+    if back is None or sorted(back.get("unknown_components") or []) != still:
+        print("obligations --repair-unknown: read-back mismatch — treat the "
+              "repair as NOT applied", file=sys.stderr)
+        return 3
+    return 3 if still else 0
+
+
 def cmd_obligations_dispatch(args: argparse.Namespace, transport: Any) -> int:
     """Route `obligations` to the corpus fold or the --stream path. A named
     function, not a lambda: the activity-classification pin requires every
     registered command to be classifiable by name."""
+    if getattr(args, "repair_unknown", False):
+        return cmd_obligations_repair(args, transport)
     if getattr(args, "seed_checkpoint", False):
         return cmd_obligations_seed(args, transport)
     if getattr(args, "stream", False):
@@ -12554,6 +12660,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run the corpus fold ONCE and write its open set as "
                          "the checkpoint the --stream fold starts from; the "
                          "sanctioned use of the enumerating fold")
+    ob.add_argument("--repair-unknown", action="store_true",
+                    help="re-probe ONLY the components the checkpoint carries "
+                         "as UNKNOWN and clear the ones that now read, merging "
+                         "their owed rows in; breaks the deadlock where the "
+                         "only way to clear an UNKNOWN was the corpus walk "
+                         "that cannot finish. Off the wake path.")
     ob.add_argument("--stream", action="store_true",
                     help="follow the signal to the doc: read this agent's "
                          "channel forward from its cursor and open only the "
@@ -13191,6 +13303,9 @@ def build_parser() -> argparse.ArgumentParser:
 #: ordering is load-bearing, not cosmetic.
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
     cmd_obligations_dispatch, cmd_obligations_stream,
+    # NOT cmd_obligations_repair: it exists to MUTATE the checkpoint, so
+    # running it is activity. The stream fold's checkpoint advance is
+    # incidental to a read; this verb's write is the whole point.
     cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_owed, cmd_briefing,
     cmd_presence_show, cmd_review_status, cmd_health, cmd_doctor,
     cmd_obligations, cmd_roles_status, cmd_continuity_resume,
