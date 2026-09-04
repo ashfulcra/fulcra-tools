@@ -66,6 +66,57 @@ on it. A fold that wants to list a directory cannot be written.
 
 ---
 
+## 1a. Why the LAST rebuild did not fix this
+
+There is already an executed rebuild plan for this system:
+`docs/superpowers/plans/2026-08-14-collect-coord-bus-rebuild.md`, 661 lines, 80
+test-first steps, with a 446-line design beside it. It was not ignored. It was
+**executed**.
+
+Its own verified status banner records what happened:
+
+> **STATUS (verified 2026-09-04): EXECUTED, and the module layout below is NOT
+> what shipped.** [...] It names files that do not exist in the tree —
+> `coord_engine/queue.py`, `routing.py`, `operator.py`, `parking.py`,
+> `responses.py`, `review_store.py`, `fleet.py`, `cursor.py`, `acceptance.py`,
+> `output.py` [...] because the implementation consolidated into
+> `packages/coord-engine/coord_engine/cli.py` and its siblings instead.
+
+The plan called for a fold layer, a cursor layer, a routing layer and an output
+layer as **separate modules with separate responsibilities**. What shipped put
+all of them in one file. That file is now 13,848 lines and holds 56 of the
+codebase's 88 `list_dir` calls.
+
+**This is the actual mechanism of failure, and it is not a coding mistake.** Once
+every fold lives in the same module as every enumerator, sharing the same
+transport object, "do not enumerate on a fold path" has no surface to attach to.
+The enumerator is right there, already imported, already holding a live
+transport. The 2026-08-21 review gate was then asked to hold a line that the
+code's own structure had erased. It did not hold, and no amount of reviewer
+attention would have.
+
+So a design that merely *specifies* clean boundaries will be defeated the same
+way. This one has to make the boundaries **load-bearing and checkable**:
+
+1. **The fold engine is a separate package**, not a module inside
+   `coord-engine`. A package boundary survives a refactor that a module boundary
+   does not — you cannot casually reach across it, and dependency direction is
+   declared in metadata rather than implied by an import.
+2. **The no-enumeration property is a test, not a note.** A structural test
+   asserts the fold package's transport has no `list_dir`, and that the fold
+   package's import graph never reaches the enumerating transport at all. If
+   someone consolidates the packages later, that test goes red before a human
+   has to notice.
+3. **A file-size ceiling is a CI gate on the new package.** The number matters
+   less than its existence; the point is that "just put it in the big file" has
+   to fail a check rather than pass a review.
+
+Acceptance for this rebuild therefore includes *the shape of what shipped*, not
+only its behaviour. A plan whose modules dissolve into one file has not been
+implemented, however green its tests are.
+
+---
+
 ## 2. What we are building
 
 An extension of [`fulcra-workspaces`](https://github.com/fulcradynamics/agent-skills#-fulcra-workspaces),
