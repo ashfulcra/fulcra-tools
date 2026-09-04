@@ -186,18 +186,28 @@ Four walls, in the order you'll hit them:
    with `can't compare offset-naive and offset-aware datetimes`. Measured live
    2026-09-02 and again 2026-09-03.
 
-   **Extra keys are harmless — do not filter on our say-so.** `id_token` and
-   `id_token_expiration` ride along on the token response, and
-   `auth login --device-code` writes them into the file itself. A six-key
-   `credentials.json` runs clean: `catalog` and `file list` both return rc 0
-   against one. Measured on two independent hosts 2026-09-03, after this
-   document had claimed the opposite. The client writes what it accepts; the
-   shape of the *timestamp* is the thing to get right.
+   **The key set is a CLOSED set of six — not four, and not open-ended.**
+   `FulcraCredentials` is a dataclass with exactly `access_token`,
+   `access_token_expiration`, `refresh_token`, `refresh_token_expiration`,
+   `id_token`, `id_token_expiration`. Four are enough and six run clean —
+   `auth login --device-code` writes all six itself, and `catalog` and
+   `file list` return rc 0 against such a file (measured on three independent
+   hosts 2026-09-03/04, after this document had claimed a four-key limit).
+   But a **seventh key of any name** raises
+   `TypeError: FulcraCredentials.__init__() got an unexpected keyword argument`
+   and every `fulcra-api` call crashes at startup. The raw token response also
+   carries `scope`, `token_type` and `expires_in`, so **writing it verbatim
+   still breaks the client**: filter to the six named fields. Two corrections
+   live in this paragraph — the original "exactly four" was wrong, and so was
+   its first withdrawal, which read "extra keys are harmless".
 
-   **Verify with a real authenticated call, not with a token print.** A command
-   that only *reads* the file will succeed while the datetime comparison that
-   breaks fails on the request path — so the print looks clean and the next
-   real call dies.
+   **Verify with a real authenticated call, not with a token print.** The
+   advice is right; an earlier version of the reason given here was not.
+   `auth print-access-token` does **not** succeed against a bad expiry — it
+   fails with the same `TypeError`, because it evaluates the same comparison to
+   decide whether to refresh. Prefer a real call anyway: a print exercises the
+   file and the refresh decision, not the request path, so it cannot tell you
+   the credential actually works against the store.
 3. **Ephemeral hosts.** Two distinct failure scales (verified live 2026-07-15): a
    container **restart** kills every running process but keeps
    the filesystem — installs, `credentials.json`, scratch scripts all survive; a full
