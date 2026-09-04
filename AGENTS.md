@@ -1482,6 +1482,47 @@ The working recipe, end to end:
   authenticated call. `print-access-token` alone is not proof: it reads the file,
   and the datetime comparison that breaks fails on the *call* path.
 
+### A store can be HALF down, and the engine reads that as absence
+
+Measured live 2026-09-04, roughly 01:16Z-02:14Z. The Fulcra **file plane**
+returned `HTTP 500` for every path **three levels deep or more** — listings,
+downloads and stats alike — while `/team/` and `/team/fulcra/` kept answering
+and the **annotation plane was untouched**. It was global, not one team:
+`/team/insights/presence/` failed the same way. So `get-records` said the
+world was fine while every task doc, lease, presence shard and checkpoint was
+unreachable.
+
+**Probe both planes before you believe either.** A records read that succeeds
+is not evidence the file store is up, and a shallow listing that succeeds is
+not evidence a deep one will. The discriminating probe is one deep read plus
+one shallow read plus one records read, in the same pass.
+
+What that hour proved about our own code, and it is the fail-quiet family
+again:
+
+- **`transport.read` collapses "absent" and "unreadable" into `None`.** Use
+  `read_classified`, which returns `(None, "absent")` vs `(None, "error")` and
+  says in its own contract that "a degraded transport can never masquerade as a
+  missing file". Any caller whose behaviour forks on absent-vs-unreadable and
+  calls plain `read()` is a latent false-clear. `roles claim` was one: it
+  announced "role has no registered role doc" — the message that says dormancy
+  suppression and review role-routing are OFF — about a doc sitting in the
+  store at 1390 bytes, unchanged for a month.
+- **`transport.write` returns a bool, and ignoring it turns a lost write into a
+  success line.** The same claim printed `claimed coord-boss` at rc 0 for a
+  write with no version in the store between `01:14:22Z` and `02:14:45Z`.
+- **A lost write can poison LOCAL state and manufacture a false alarm.** That
+  claim still wrote its nonce to disk, so the next real claim reported
+  *"another session last claimed as coord-boss (same-id double-acting)"* — an
+  intruder alarm whose own text invites an operator to go hunting. Ground truth
+  came from `file stat`'s **version history**: no version at the phantom
+  instant. Version history is the cheapest way to prove a write did or did not
+  land, and it outranks any success line.
+
+Fixed in `roles claim` (2026-09-04). The pattern is not fixed everywhere —
+**treat any `transport.read(...) is None` branch as suspect until it has been
+read against `read_classified`.**
+
 ### `file stat` addresses FILES: it cannot confirm a directory exists
 
 `fulcra-api file stat` run against a **directory** returns `File not found`, even
