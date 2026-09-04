@@ -9109,9 +9109,37 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
+    """Claim a role lease.
+
+    THE 2026-09-04 OUTAGE IS WHY THIS READS `read_classified` AND CHECKS THE
+    WRITE. For about an hour the store returned HTTP 500 on every path three
+    levels deep or more. `transport.read` collapses "absent" and "unreadable"
+    into None, and `transport.write` returns False that nobody looked at, so
+    this verb — measured, not reasoned about — did three wrong things at once:
+
+    * printed "role 'coord-boss' has no registered role doc" while the doc sat
+      in the store at 1390 bytes, untouched since 2026-08-03. The message is
+      load-bearing: it tells the reader that dormancy suppression and review
+      role-routing are OFF for the role;
+    * printed "claimed coord-boss" and exited 0 for a write that never landed —
+      the shard's version history runs 01:14:22Z straight to 02:14:45Z;
+    * updated the LOCAL nonce state to that phantom write's nonce, so the next
+      real claim raised "another session last claimed as coord-boss" — an alarm
+      whose own text invites the reader to hunt an intruder that never existed.
+
+    An unreadable read is UNKNOWN, never absent; an unverified write is not a
+    claim. Both are the same rule, applied on the two planes.
+    """
     agent = _identity(args.agent)
     slug = tasks.agent_key(agent)
-    if okf.parse_frontmatter(transport.read(_role_doc_path(args.team, args.role))) is None:
+    doc_raw, doc_status = transport.read_classified(_role_doc_path(args.team, args.role))
+    if doc_status == "error":
+        print(f"WARNING: could not READ the role doc for {args.role!r} — this is "
+              f"UNKNOWN, not absence. Status folds and review role-routing may be "
+              f"running on defaults, and a dormant_until on this role cannot be "
+              f"seen right now. Re-check before acting on anything that depends "
+              f"on the role doc.", file=sys.stderr)
+    elif okf.parse_frontmatter(doc_raw) is None:
         print(f"note: role {args.role!r} has no registered role doc — status folds fall back "
               f"to defaults and review role-routing will NOT match this role's holders; "
               f"create team/{args.team}/roles/{args.role}.md", file=sys.stderr)
@@ -9119,7 +9147,15 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     state = _nonce_state_path(args.team, args.role, slug)
     # Same-id double-acting check: leases can't distinguish two sessions sharing one
     # id (same shard file), so compare the shard's nonce to the one THIS session wrote.
-    existing = okf.parse_frontmatter(transport.read(shard_path)) or {}
+    shard_raw, shard_status = transport.read_classified(shard_path)
+    if shard_status == "error":
+        # An unreadable shard has no nonce to compare, and silently skipping the
+        # comparison would present "check disabled" as "check passed".
+        print(f"note: the lease shard for {agent} could not be read — the "
+              f"same-id double-acting check did NOT run this pass; a second "
+              f"session claiming this role would not have been detected.",
+              file=sys.stderr)
+    existing = okf.parse_frontmatter(shard_raw) or {}
     try:
         stored = state.read_text().strip() if state.exists() else None
     except OSError:
@@ -9144,7 +9180,17 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     fm = {"type": "Lease", "title": f"{args.role} lease — {agent}", "agent": agent,
           "timestamp": _iso(_now()), "nonce": nonce,
           "summary": args.summary or ""}
-    transport.write(shard_path, okf.render_frontmatter(fm) + f"\nHolding {args.role}.\n")
+    if not transport.write(shard_path,
+                           okf.render_frontmatter(fm) + f"\nHolding {args.role}.\n"):
+        # The write did not land. Saying "claimed" here is the failure that lets
+        # a lease lapse while every log line says it was renewed — and writing
+        # the nonce locally would poison the NEXT claim's double-acting check
+        # with a nonce the store never saw.
+        print(f"roles claim: WRITE FAILED for {slug}.md — {args.role} is NOT "
+              f"claimed and the local nonce state is left untouched. The lease "
+              f"stands at whatever the store last accepted; re-run when the "
+              f"transport recovers.", file=sys.stderr)
+        return 3
     try:
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(nonce + "\n")
