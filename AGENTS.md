@@ -1443,16 +1443,29 @@ editable engine can advance the projections generation. Running `reconcile`
 through the PATH engine reproduces the same refusal every other host is
 already producing, and looks like the fix failed.
 
-### Refreshing the Fulcra token: the expiry must be NAIVE UTC
+### Refreshing the Fulcra token: the expiry must be naive in the host's LOCAL clock
 
-The four accepted keys are only half the contract. `access_token_expiration` must
-be a **timezone-naive** ISO string in UTC — exactly what the CLI itself writes,
-e.g. `2026-09-02T07:15:57.404995` with no offset. Writing an *aware* value
+`access_token_expiration` must be a **timezone-naive** ISO string, e.g.
+`2026-09-02T07:15:57.404995` with no offset. Writing an *aware* value
 (`…+00:00`) is accepted by the file but makes every authenticated call die with
-`Error: can't compare offset-naive and offset-aware datetimes`, because the CLI
-compares it against a naive `utcnow()`. Earned 2026-09-02 doing a routine
-proactive refresh: the grant succeeded, the file had the right four keys, and the
-CLI was still broken until the timestamp shape matched.
+`Error: can't compare offset-naive and offset-aware datetimes`. Earned
+2026-09-02 doing a routine proactive refresh: the grant succeeded and the CLI
+was still broken until the timestamp shape matched.
+
+**CORRECTION, 2026-09-04 — this section said "naive UTC" for two days and that
+is WRONG on any host that is not UTC.** The client uses the **local** naive
+clock, not UTC: `fulcra_api/oidc.py:151` writes
+`datetime.datetime.now() + timedelta(seconds=expires_in)` and
+`credentials.py:21` compares with `datetime.now()`. There is no `utcnow()`
+anywhere in it. On a UTC host the two are identical — which is exactly why the
+wrong rule survived. Every check that "confirmed" naive-UTC ran in this
+container, and `time.tzname` here is `('UTC','UTC')` at offset 0, so the
+control **could not fail for the reason that mattered**. On a UTC-7 Mac,
+writing UTC-naive leaves a token looking valid seven hours past its expiry.
+Caught by codex-reviewer against the installed 0.1.40 source; it is the same
+class as `tail -1` and the unread stderr — a probe that cannot distinguish the
+two hypotheses you are choosing between. **Use `datetime.now()`, and when a
+rule is about a host property, verify it on a host that could falsify it.**
 
 The working recipe, end to end:
 
@@ -1464,11 +1477,16 @@ The working recipe, end to end:
 - the response **still contains `id_token`** — observed on every refresh so far.
   **The "exactly four keys" rule is FALSE and stays withdrawn — but do not read
   that as "extra keys are harmless".** That was my over-correction, caught by
-  coord-opus-worker on 2026-09-03 and reproduced here: the client's tolerance is
-  the CLOSED six-field set above, so `id_token`/`id_token_expiration` pass
-  *because the dataclass models them*, and any other key still crashes every
-  call. Filter to the six. `auth login --device-code` writes the Auth0 response
-  verbatim, producing six keys including `id_token`/`id_token_expiration`, and
+  coord-opus-worker on 2026-09-03 — and by codex-reviewer THIRTEEN HOURS EARLIER
+  in a verdict I did not read until 2026-09-04. The client's tolerance is the
+  CLOSED six-field set above, so `id_token`/`id_token_expiration` pass *because
+  the dataclass models them*, and any other key still crashes every call.
+  codex adds the mechanism: `oidc.py` explicitly MAPS `access_token`,
+  `expires_in`, `refresh_token` and `id_token` into the dataclass, so the client
+  never writes the response verbatim — `expires_in`, `token_type` and `scope`
+  would all raise. Filter to the six.
+  `auth login --device-code` writes six keys including
+  `id_token`/`id_token_expiration`, and
   authenticated calls run clean against that file — measured by
   coord-linear-agent on 2026-09-03 (`catalog` plus two `file list` calls, all
   rc 0) and reproduced here the same day by adding both keys to a working file,
