@@ -20,6 +20,27 @@ callers that fork on None:
 
 Each of these fails toward doing MORE, which is why none of them would have
 announced itself.
+
+COVERAGE, stated exactly, because this docstring previously did not.
+
+All three guards are now exercised, each with a converse test so that widening
+a guard to refuse everything fails too. That was not true when this file was
+written: it named three call sites and contained three tests, and all three
+tests were `restore`. `peer_parks` and `escalate` appeared once each, in this
+prose, and nowhere in the assertions.
+
+collect-maintainer found that reviewing PR 694 on 2026-09-04 and confirmed it
+at full-suite scale -- deleting the `peer_parks` guard entirely left all 2777
+tests byte-identical. A file header that reads as coverage of three guards and
+delivers one is the same shape as a green gate that cannot fail, and it is
+worse than no claim, because it is what the next reader will trust when
+deciding whether a change here is safe.
+
+The two it added are the worse two to have left uncovered. Of the three,
+`restore` -- the one that was tested -- clobbers a single document.
+`peer_parks` overwrites a live role doc with a stub carrying its own maintainer
+and SLA, and `escalate` mints duplicate P1 rows AND duplicate bus events
+fleet-wide, during exactly the kind of outage that triggers the guard.
 """
 
 from __future__ import annotations
@@ -199,3 +220,91 @@ def test_public_read_will_not_claim_absent_for_a_transport_that_cannot_classify(
         f"fallback claimed {status!r} for an unclassifiable read — a write-caller "
         "treats 'absent' as permission to create over a live doc"
     )
+
+
+# ---------------------------------------------------------------------------
+# escalate — the THIRD site this file's docstring names and never exercised.
+#
+# collect-maintainer's PR 694 addendum (2026-09-04) found the gap is 2 of 3,
+# not 1, and confirmed it at full-suite scale: deleting the peer_parks guard
+# left all 2777 tests byte-identical. Its argument for why escalate is the
+# worst one to leave uncovered is the reason this test exists — all three
+# guarded sites "fail toward doing MORE", but restore (the one that WAS tested)
+# clobbers a single doc, while escalate mints duplicate P1 rows AND duplicate
+# bus events fleet-wide, during exactly the kind of outage that triggers it.
+# ---------------------------------------------------------------------------
+
+_ESC_ROLE_DOC = "---\ntype: Role\nsla_hours: 12\nmaintainer: alice\n---\n"
+_ESC_STALE_LEASE = ("---\ntype: Lease\nagent: bob\n"
+                    "timestamp: 2020-01-01T00:00:00Z\n---\n")
+
+
+class _EscalateReadsError(ReadsError):
+    """ReadsError plus a record sink, so emitted events are inspectable.
+
+    The assertion that matters most is about EVENTS, not just the document:
+    a duplicate row is noise, a duplicate event is noise delivered into every
+    fold on the bus.
+    """
+
+    def __init__(self, *, failing_prefix=""):
+        super().__init__(failing_prefix=failing_prefix)
+        self.records: list[dict] = []
+
+    def record_write(self, data_type, api_version, note, sender, **kw):
+        self.records.append({"note": note, "sender": sender})
+        return True
+
+
+def _escalate_team(failing_prefix):
+    import json
+
+    t = _EscalateReadsError(failing_prefix=failing_prefix)
+    t.put("team/r/roles/reviewer.md", _ESC_ROLE_DOC)
+    t.put("team/r/roles/reviewer/leases/bob.md", _ESC_STALE_LEASE)
+    t.put("team/r/_coord/bus-v3/records.json",
+          json.dumps({"data_type": "MomentAnnotation/test-bus",
+                      "api_version": "v1alpha1"}))
+    return t
+
+
+def test_escalate_will_not_mint_a_vacancy_row_it_cannot_tell_is_already_minted(capsys):
+    """A 500 on the day's row is not 'not minted yet'.
+
+    This branch both WRITES and EMITS, and its guard is the per-day idempotency
+    check. Read the failure as absence and the daily pass turns an outage into
+    duplicate P1 rows plus duplicate bus events, fleet-wide — alarm bloat at
+    machine speed, on the day the store is least able to absorb it.
+    """
+    t = _escalate_team(failing_prefix="team/r/task/")
+
+    cli.main(["escalate", "r"], transport=t)
+    err = capsys.readouterr().err
+
+    assert "UNKNOWN this pass" in err, err
+    assert [p for p in t.writes if p.startswith("team/r/task/")] == [], (
+        f"escalate wrote {t.writes} after an UNREADABLE day-row — that is the "
+        "duplicate vacancy row the guard exists to prevent"
+    )
+    assert t.records == [], (
+        f"escalate emitted {len(t.records)} event(s) after an UNREADABLE "
+        "day-row — a duplicate row is noise, a duplicate EVENT is noise "
+        "delivered into every fold on the bus"
+    )
+
+
+def test_escalate_still_mints_when_the_day_row_is_genuinely_absent():
+    """Positive control: the guard must not silence the alarm it protects.
+
+    Without this, widening the guard would pass the test above while turning
+    the daily vacancy pass into a no-op — a fix that looks exactly like the
+    silent-alarm incident escalate publishing was built to end.
+    """
+    t = _escalate_team(failing_prefix="\x00never-matches")
+
+    assert cli.main(["escalate", "r"], transport=t) == 0
+    assert [p for p in t.writes if p.startswith("team/r/task/")], (
+        f"escalate wrote {t.writes} — it must still mint the vacancy row when "
+        "the day-row read is a genuine 'absent'"
+    )
+    assert t.records, "the minted vacancy must still be published to the bus"
