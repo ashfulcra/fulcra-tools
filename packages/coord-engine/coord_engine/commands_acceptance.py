@@ -169,7 +169,18 @@ class _AcceptancePairAdapter:
         return self._poll_queue(self.agent, "response")
 
     def peer_parks(self) -> acceptance_pair.HopResult:
-        if self.transport.read(self.role_path) is None:
+        # ABSENT, not merely unreadable. `transport.read` returns None for both,
+        # and this branch WRITES: a transient failure would overwrite a live
+        # role doc with an ephemeral stub carrying its own maintainer and SLA.
+        # Measured 2026-09-04: the store 500'd for an hour on every path three
+        # levels deep, which is exactly where role docs live, so this was one
+        # acceptance run away from clobbering real config on a read error.
+        existing, status = self.transport.read_classified(self.role_path)
+        if status == "error":
+            return acceptance_pair.HopResult(
+                False, f"role doc at {self.role_path} is UNREADABLE, not absent — "
+                       "refusing to create an ephemeral role over it")
+        if existing is None:
             role_doc = okf.render_frontmatter({
                 "type": "Role", "policy": "shared", "sla_hours": 24,
                 "maintainer": self.agent,

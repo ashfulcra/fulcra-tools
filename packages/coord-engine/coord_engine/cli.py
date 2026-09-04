@@ -1712,7 +1712,20 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
         if transport.read(src) is None:
             continue
         dst = _task_path(args.team, args.name)
-        if transport.read(dst) is not None:
+        # ABSENT, not merely unreadable. This guard is the only thing standing
+        # between a restore and overwriting a live hot-path doc, and
+        # `transport.read` returns None for a 500 exactly as it does for a
+        # missing file — so a transient read failure used to read as "the
+        # destination is free". Measured 2026-09-04: an hour of HTTP 500s on
+        # every path three levels deep, which is where task docs live.
+        existing_dst, dst_status = transport.read_classified(dst)
+        if dst_status == "error":
+            print(f"restore refused: cannot READ {dst} to check whether it is "
+                  f"occupied — that is UNKNOWN, not free, and a restore over a "
+                  f"live doc is unrecoverable. Retry when the store answers.",
+                  file=sys.stderr)
+            return 3
+        if existing_dst is not None:
             print(f"restore failed: {args.name} already exists in the hot path", file=sys.stderr)
             return 1
         if rec._crash_safe_move(transport, src, dst):
@@ -12158,7 +12171,19 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if self_addressed:
             undelivered += 1
         dst = _task_path(args.team, slug)
-        if transport.read(dst) is None:
+        # ABSENT, not merely unreadable: this is the per-day idempotency guard
+        # for the vacancy mint, and it both WRITES and EMITS. Read a 500 as
+        # "not minted yet" and an outage turns the daily pass into duplicate
+        # P1 vacancy rows plus duplicate bus events, fleet-wide — the alarm
+        # bloat mechanism running at machine speed.
+        existing_row, row_status = transport.read_classified(dst)
+        if row_status == "error":
+            print(f"escalate: {slug} — cannot READ the day's row to tell whether "
+                  f"it was already minted; skipping rather than risk a duplicate "
+                  f"row and a duplicate event. This role is UNKNOWN this pass, "
+                  f"not clear.", file=sys.stderr)
+            continue
+        if existing_row is None:
             transport.write(dst, content)
             escalated += 1
             # PUBLISH IT TO THE EVENT PLANE. Until 2.0.5 this branch wrote the
