@@ -34,3 +34,32 @@ pythonpath = [
     "packages/labs/tests",
     "packages/media-helpers/tests",
 ]
+
+# Anti-slop patterns, enforced for Python.
+#
+# Ash, 2026-09-04: "the value of the antislop is the patterns, not the
+# language specificity." The upstream ruleset (dmmulroy/anti-slop) is an
+# Oxlint plugin, so it only ever reaches the 106 TypeScript files in
+# packages/attention/chrome. The 35k lines of Python here are where the
+# coordination engine actually lives, and the patterns translate directly.
+# The mapping is written out in docs/anti-slop-patterns-in-python.md.
+#
+# This selection is DIAGNOSTIC, not a gate. It is deliberately not wired
+# into CI: `ruff check` currently reports 597 findings across these rules,
+# and turning that into a required check would mean either mass-editing
+# 35k lines in one pass or silencing the rules to get green -- and
+# silencing a rule to make a first run pass destroys the signal the rule
+# was selected for. Run it with scripts/anti-slop-python.sh, which is the
+# one place the rule list lives as a runnable command.
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Off by default so `ruff check` stays quiet for unrelated work; opt in
+# explicitly with --select, or extend-select in a package that has cleared
+# its findings and wants to hold the line.
+select = []
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately construct broad fixtures and assert on loose shapes.
+"**/tests/**" = ["ANN401"]
