@@ -790,3 +790,52 @@ def test_a_record_carries_the_HUMAN_READABLE_card_key():
     )
 
     assert records[0].fields["identifier"] == "BUS-195"
+
+
+def _labels_page(page):
+    return response({"issue": {"labels": page}})
+
+
+@pytest.mark.parametrize(
+    ("page", "why"),
+    [
+        ({"pageInfo": {"hasNextPage": False}}, "nodes absent -- not an empty label set"),
+        ({"nodes": "nope", "pageInfo": {"hasNextPage": False}}, "nodes is not a list"),
+        ({"nodes": [{"name": "a"}, "bare"], "pageInfo": {"hasNextPage": False}}, "a node is not an object"),
+        ({"nodes": [], "pageInfo": "malformed"}, "truthy-malformed pageInfo"),
+    ],
+)
+def test_reading_a_cards_labels_RAISES_rather_than_reporting_fewer(page, why):
+    """A label the card HAS must never read as absent.
+
+    Both failure modes lie in the same direction: the projection then proposes
+    writing a label that is already there, forever, and a second plan never
+    returns zero -- which is the only proof this package accepts that a sync
+    settled. `paginate` was hardened against exactly this; the sibling method
+    that reads a card's own labels kept an unhardened copy of the loop.
+    """
+
+    adapter = LinearTrackerAdapter(LinearClient(FakeTransport([_labels_page(page)])), "team")
+    with pytest.raises(LinearError):
+        adapter.list_issue_labels("issue-1")
+
+
+def test_a_response_with_no_issue_is_a_failed_read_not_an_unlabelled_card():
+    adapter = LinearTrackerAdapter(
+        LinearClient(FakeTransport([response({"issue": None})])), "team"
+    )
+    with pytest.raises(LinearError):
+        adapter.list_issue_labels("issue-1")
+
+
+def test_a_cards_labels_paginate_to_completion():
+    adapter = LinearTrackerAdapter(LinearClient(FakeTransport([
+        _labels_page({"nodes": [{"name": "lane:blocked"}],
+                      "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}),
+        _labels_page({"nodes": [{"name": "blocked-on-ash"}],
+                      "pageInfo": {"hasNextPage": False, "endCursor": None}}),
+    ])), "team")
+
+    assert [n["name"] for n in adapter.list_issue_labels("issue-1")] == [
+        "lane:blocked", "blocked-on-ash",
+    ]

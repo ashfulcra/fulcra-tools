@@ -73,6 +73,71 @@ class HttpxGraphQLTransport:
         return GraphQLResponse(response.status_code, body, response.headers)
 
 
+def nodes_from_page(operation: str, root: str, page: object) -> list[Mapping[str, Any]]:
+    """Read one GraphQL connection page, or raise. THE only reader of a page.
+
+    A TRANSPORT DOES NOT GET TO DECIDE THAT DATA LOSS IS ACCEPTABLE.
+
+    This used to silently drop non-Mapping nodes. That is not harmless for the
+    callers that exist today: `resource_plan` computes `wanted - existing`, so a
+    dropped label lands in the CREATE list and the bridge tries to create a label
+    that is already there; and `_build_fields` raises ResourceMissing("run
+    apply-resources before sync") for a label that does exist. A silent drop
+    there is not a skipped render -- it is a false instruction to the operator.
+
+    NO DEFAULT on `nodes`. `page.get("nodes", [])` turned an ABSENT field into an
+    empty list, so the validation below never ran and a page with no `nodes` at
+    all returned a clean empty collection -- the same false CREATE instruction
+    this exists to remove (codex-reviewer, 660 r1).
+
+    A caller that genuinely wants best-effort must filter at ITS level, where the
+    promise it is making is visible. Down here, absence and unrepresentable are
+    indistinguishable to everyone above.
+
+    IT LIVES HERE BECAUSE THE LESSON DID NOT TRAVEL. All of the above was
+    written once, inside `paginate`, while `list_issue_labels` -- the sibling
+    method that decides which labels a card already carries, and therefore
+    whether `blocked-on-ash` needs writing -- kept its own unhardened copy of the
+    same loop, defaulted `nodes` to `[]`, and dropped every node it could not
+    read. One boundary, one reader.
+    """
+
+    if not isinstance(page, Mapping):
+        raise LinearError(f"{operation}: missing page {root}")
+    if "nodes" not in page:
+        raise LinearError(f"{operation}: page {root} is missing nodes")
+    raw_nodes = page["nodes"]
+    if not isinstance(raw_nodes, list):
+        raise LinearError(f"{operation}: page {root} has malformed nodes")
+    nodes: list[Mapping[str, Any]] = []
+    for node in raw_nodes:
+        if not isinstance(node, Mapping):
+            raise LinearError(f"{operation}: page {root} contains a non-object node")
+        nodes.append(node)
+    return nodes
+
+
+def next_cursor(operation: str, root: str, page: Mapping[str, Any], cursor: str | None) -> str | None:
+    """The cursor for the following page, or None when this was the last.
+
+    `or {}` rescues only FALSY values, so a truthy-malformed pageInfo (a string,
+    a list) reached `.get` and raised AttributeError -- escaping this module's
+    LinearError contract, so callers catching LinearError did not catch it.
+    """
+
+    page_info = page.get("pageInfo")
+    if page_info is None:
+        page_info = {}
+    if not isinstance(page_info, Mapping):
+        raise LinearError(f"{operation}: page {root} has malformed pageInfo")
+    if not page_info.get("hasNextPage"):
+        return None
+    following = page_info.get("endCursor")
+    if not following or following == cursor:
+        raise LinearError(f"{operation}: invalid pagination cursor")
+    return str(following)
+
+
 class LinearClient:
     """Small GraphQL client whose retry policy is bounded and test-injectable."""
 
@@ -191,54 +256,11 @@ class LinearClient:
             page_variables["after"] = cursor
             data = self.execute(operation, query, page_variables)
             page = data.get(root)
-            if not isinstance(page, Mapping):
-                raise LinearError(f"{operation}: missing page {root}")
-            # A TRANSPORT DOES NOT GET TO DECIDE THAT DATA LOSS IS ACCEPTABLE.
-            #
-            # This used to silently drop non-Mapping nodes. That is not harmless
-            # for the callers that exist today: `resource_plan` computes
-            # `wanted - existing`, so a dropped label lands in the CREATE list
-            # and the bridge tries to create a label that is already there; and
-            # `_build_fields` raises ResourceMissing("run apply-resources before
-            # sync") for a label that does exist. A silent drop there is not a
-            # skipped render — it is a false instruction to the operator.
-            #
-            # A caller that genuinely wants best-effort must filter at ITS level,
-            # where the promise it is making is visible. Down here, absence and
-            # unrepresentable are indistinguishable to everyone above.
-            # NO DEFAULT. `page.get("nodes", [])` turned an ABSENT field into an
-            # empty list, so the validation below never ran and a page with no
-            # `nodes` at all returned a clean empty collection — the same false
-            # CREATE instruction this change exists to remove (codex-reviewer,
-            # 660 r1). Writing "absent and unrepresentable are indistinguishable
-            # to callers above" in the same commit that left this default in
-            # place is the finding worth remembering.
-            if "nodes" not in page:
-                raise LinearError(f"{operation}: page {root} is missing nodes")
-            raw_nodes = page["nodes"]
-            if not isinstance(raw_nodes, list):
-                raise LinearError(f"{operation}: page {root} has malformed nodes")
-            for node in raw_nodes:
-                if not isinstance(node, Mapping):
-                    raise LinearError(
-                        f"{operation}: page {root} contains a non-object node")
-                nodes.append(node)
-
-            # `or {}` rescues only FALSY values, so a truthy-malformed pageInfo
-            # (a string, a list) reached `.get` and raised AttributeError —
-            # escaping this module's LinearError contract, so callers catching
-            # LinearError did not catch it.
-            page_info = page.get("pageInfo")
-            if page_info is None:
-                page_info = {}
-            if not isinstance(page_info, Mapping):
-                raise LinearError(f"{operation}: page {root} has malformed pageInfo")
-            if not page_info.get("hasNextPage"):
+            nodes.extend(nodes_from_page(operation, root, page))
+            following = next_cursor(operation, root, page, cursor)
+            if following is None:
                 return nodes
-            next_cursor = page_info.get("endCursor")
-            if not next_cursor or next_cursor == cursor:
-                raise LinearError(f"{operation}: invalid pagination cursor")
-            cursor = str(next_cursor)
+            cursor = following
 
     def execute_mutation(
         self,
@@ -417,21 +439,32 @@ class LinearTrackerAdapter:
         return identity
 
     def list_issue_labels(self, issue_id: str) -> list[Mapping[str, Any]]:
+        """Which labels this card already carries.
+
+        Same validated page reader as `paginate`, which this deliberately did
+        not use before: it dropped unreadable nodes and defaulted an absent
+        `nodes` to empty. Both lie in the same direction here -- a label the
+        card HAS reads as absent, so the projection proposes writing it forever
+        and a second plan never returns zero.
+        """
+
         nodes: list[Mapping[str, Any]] = []
         cursor: str | None = None
         while True:
             data = self.client.execute(
                 "IssueLabels", ISSUE_LABELS_QUERY, {"issue": issue_id, "after": cursor}
             )
-            page = ((data.get("issue") or {}).get("labels") or {})
-            nodes.extend(node for node in page.get("nodes", []) if isinstance(node, Mapping))
-            page_info = page.get("pageInfo") or {}
-            if not page_info.get("hasNextPage"):
+            issue = data.get("issue")
+            if not isinstance(issue, Mapping):
+                # NOT `or {}`: a missing issue is a failed read, and defaulting
+                # it to empty would report "this card has no labels".
+                raise LinearError("IssueLabels: response has no issue")
+            page = issue.get("labels")
+            nodes.extend(nodes_from_page("IssueLabels", "labels", page))
+            following = next_cursor("IssueLabels", "labels", page, cursor)
+            if following is None:
                 return nodes
-            next_cursor = page_info.get("endCursor")
-            if not next_cursor or next_cursor == cursor:
-                raise LinearError("IssueLabels: invalid pagination cursor")
-            cursor = str(next_cursor)
+            cursor = following
 
     def list_inbound_events(self) -> list[Mapping[str, Any]]:
         return self.client.paginate("InboundEvents", EVENTS_QUERY, "auditEntries", {"team": self.team_id})
