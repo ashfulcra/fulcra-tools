@@ -34,6 +34,7 @@ Copied from the spec and the directive. Every task's requirements include these.
 - **G14.** Rollout: coord-boss alone until a full day of ticks is clean, then one agent at a time. (spec §5.3, Ash decision — do not reopen)
 - **G15.** Never hardcode the channel. The new bus's `data_type` is resolved from `team/<team>/_coord/bus-v4/records.json` via `read_classified`. (standing wake rule)
 - **G16.** No secrets in any doc, note, or test fixture.
+- **G18.** *(added after codex-coder's CHANGES verdict on `coord-fold-plan-65761fbd`, 2026-09-04)* Every public symbol in the plan is **defined** in one named module and nowhere else; no planned module may be a shim; `cli.py` defines only command wiring; the package tree is scanned **recursively** and may contain only the planned modules; no module may load or generate code at runtime. Length, filenames, coupling and interface are each necessary and, the verdict showed, jointly insufficient — ownership is the property that actually prevents consolidation.
 - **G17.** Commits are authored as `114089064+ashfulcra@users.noreply.github.com` — the repo is PUBLIC. Never a work address.
 
 ---
@@ -56,6 +57,7 @@ packages/coord-fold/
     pointer_fake.py                   PointerFake — read_classified + read_events, NOTHING else
     test_structural_no_enumeration.py G7: no list_dir; import graph never reaches coord_engine
     test_file_size_ceiling.py         G8: every coord_fold/*.py ≤ 400 lines
+    test_ownership_manifest.py        G18: symbol→module ownership, anti-shim, recursive artifact scan  (codex-coder CHANGES verdict)
     test_no_degraded_vocabulary.py    G11: the string "degraded" is absent from coord_fold/
     test_events.py                    G1–G3
     test_checkpoint.py                G4
@@ -485,6 +487,7 @@ Two bounded unknowns replace the nine degraded families: `unread_events: N` and
           uv run --package coord-fold --extra dev python -m pytest \
             packages/coord-fold/tests/test_structural_no_enumeration.py \
             packages/coord-fold/tests/test_file_size_ceiling.py \
+            packages/coord-fold/tests/test_ownership_manifest.py \
             packages/coord-fold/tests/test_no_degraded_vocabulary.py -q
 ```
 
@@ -514,6 +517,238 @@ git -c user.name=ashfulcra -c user.email=114089064+ashfulcra@users.noreply.githu
 ```
 
 ---
+### Task 2b: Ownership manifest, anti-shim, and full-artifact scan (G18)
+
+**Why this task exists — attributed, because the next reader must know these are not paranoia.**
+codex-coder's CHANGES verdict on `coord-fold-plan-65761fbd` (2026-09-04, verdict file
+`team/fulcra/review/coord-fold-plan-65761fbd/verdicts/codex-coder.md`) produced a
+counterexample that passes **every** gate in Tasks 1, 2 and 14: six empty or shim modules
+plus one ≤399-line `cli.py` holding the entire implementation. Its reasoning: the
+dependency/import checks constrain only *coupling to coord_engine*; the two-member Protocol
+constrains only a *public interface*; the ceiling caps *length* but does not distribute
+*responsibility*; the shape test checks *filenames*, not *ownership*. That is the 2026-08-14
+consolidation reproduced **inside** the defence built against it. A second bypass, found
+unprompted: logic loaded from a non-`.py` resource or a generated module, because the other
+gates inspect only top-level `coord_fold/*.py`. coord-boss endorsed the proposed fix
+(`0b4328d6`). Three checks close both bypasses; each is a test that fails when the property
+it names is violated.
+
+**Files:**
+- Create: `packages/coord-fold/tests/test_ownership_manifest.py`
+- Modify: `.github/workflows/uv-workspace.yml` (file already added to the gates step in Task 2)
+
+**Interfaces:**
+- Produces: `OWNERSHIP` — the manifest, symbol → owning module, with the required definition
+  kind. It is the single source of truth for what each module *owns*; Tasks 3–9 must define
+  exactly these names in exactly these files, and Task 14's filename test is **subsumed** by
+  the recursive scan here.
+
+- [ ] **Step 1: Write the test (it cannot fail-first meaningfully until modules exist, so its
+  proof of discrimination is the mutation step, run after Task 9)**
+
+```python
+# packages/coord-fold/tests/test_ownership_manifest.py
+"""G18. Ownership, anti-shim, and a recursive artifact scan.
+
+WHY (codex-coder, CHANGES on coord-fold-plan-65761fbd, 2026-09-04): six empty/shim
+modules plus one <=399-line cli.py satisfy every other structural gate. Coupling,
+interface, length and filenames are each necessary and jointly insufficient. The
+property that prevents consolidation is OWNERSHIP: a named symbol is DEFINED in
+its named module, nowhere else, and the module is not a shim.
+
+Second bypass, same verdict: code arriving from a data file or a generated module,
+invisible to gates that only look at top-level *.py. Hence the recursive scan and
+the runtime-loading ban.
+"""
+from __future__ import annotations
+
+import ast
+import pathlib
+import tomllib
+
+import coord_fold
+
+PKG_DIR = pathlib.Path(coord_fold.__file__).parent
+
+# THE MANIFEST: module -> {symbol: required definition kind}.
+# "callable" = must be a def or class (a stub assignment like `x = None` is NOT ownership);
+# "value"    = a top-level assignment is acceptable.
+OWNERSHIP: dict[str, dict[str, str]] = {
+    "events.py": {"PAYLOAD_VERSION": "value", "KINDS": "value", "PRIORITIES": "value",
+                  "build_payload": "callable", "parse_event": "callable"},
+    "transport.py": {"ReadState": "value", "PointerTransport": "callable",
+                     "CliPointerTransport": "callable", "TransportUnavailable": "callable"},
+    "channel.py": {"CONFIG_PATH": "value", "ChannelUnresolved": "callable",
+                   "config_path": "callable", "resolve": "callable"},
+    "checkpoint.py": {"SCHEMA_VERSION": "value", "path": "callable", "empty": "callable",
+                      "apply": "callable", "load": "callable", "save": "callable"},
+    "fold.py": {"OVERLAP_SECONDS": "value", "FoldOutcome": "callable",
+                "FoldRefused": "callable", "run": "callable"},
+    "cli.py": {"main": "callable", "build_parser": "callable"},
+    "__init__.py": {"__version__": "value"},
+}
+# cli.py may define ONLY command wiring: these exact names, cmd_* handlers, _private helpers.
+CLI_ALLOWED_EXACT = {"main", "build_parser", "RC_OK", "RC_REFUSED", "RC_UNKNOWN"}
+CLI_ALLOWED_PREFIXES = ("cmd_", "_")
+# Code must not arrive from data or be generated at import time.
+FORBIDDEN_CALLS = {"exec", "eval", "compile", "__import__"}
+FORBIDDEN_ATTR_CALLS = {("importlib", "import_module"), ("importlib", "reload"),
+                        ("marshal", "loads"), ("runpy", "run_path"), ("runpy", "run_module"),
+                        ("types", "ModuleType")}
+
+
+def _definitions(tree: ast.Module) -> dict[str, str]:
+    """Top-level name -> 'callable' | 'value'. Top level only: nested defs are not ownership."""
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[node.name] = "callable"
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = "value"
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            out[node.target.id] = "value"
+    return out
+
+
+def _imports(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            names.update(a.asname or a.name for a in node.names)
+        elif isinstance(node, ast.Import):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return names
+
+
+def _trees() -> dict[str, ast.Module]:
+    return {p.name: ast.parse(p.read_text(), filename=str(p)) for p in PKG_DIR.glob("*.py")}
+
+
+def test_every_manifest_symbol_is_DEFINED_in_its_owning_module_with_the_right_kind():
+    trees = _trees()
+    for mod, symbols in OWNERSHIP.items():
+        defs = _definitions(trees[mod])
+        for name, kind in symbols.items():
+            assert name in defs, f"{mod} does not define {name!r} — a re-export or a move is not ownership"
+            if kind == "callable":
+                assert defs[name] == "callable", (
+                    f"{mod}: {name!r} must be a def/class, found a bare assignment (a stub is not ownership)")
+
+
+def test_no_manifest_symbol_is_defined_in_a_second_module():
+    trees = _trees()
+    for mod, symbols in OWNERSHIP.items():
+        for other, tree in trees.items():
+            if other == mod:
+                continue
+            dup = set(symbols) & set(_definitions(tree))
+            assert not dup, f"{sorted(dup)} is owned by {mod} but ALSO defined in {other}"
+
+
+def test_no_planned_module_is_a_shim():
+    """A module whose only names are imports/re-exports defines nothing and is a shim.
+    Every planned module must own something beyond what it imports."""
+    trees = _trees()
+    for mod, tree in trees.items():
+        own = set(_definitions(tree)) - _imports(tree)
+        assert own, f"{mod} defines nothing of its own — it is a shim"
+
+
+def test_cli_defines_ONLY_command_wiring():
+    for name in _definitions(_trees()["cli.py"]):
+        ok = name in CLI_ALLOWED_EXACT or name.startswith(CLI_ALLOWED_PREFIXES)
+        assert ok, f"cli.py defines {name!r} — implementation has migrated into the command file"
+
+
+def test_the_package_tree_RECURSIVELY_contains_only_the_planned_modules():
+    """Subsumes Task 14's filename check. A generated module, a subpackage, a .pyi, a data
+    file, or a .py in a subdirectory is a bypass. __pycache__ is the only tolerated noise."""
+    found = sorted(p.relative_to(PKG_DIR).as_posix() for p in PKG_DIR.rglob("*")
+                   if p.is_file() and "__pycache__" not in p.parts)
+    assert found == sorted(OWNERSHIP), (
+        f"unplanned artifacts: {sorted(set(found) - set(OWNERSHIP))}; "
+        f"missing: {sorted(set(OWNERSHIP) - set(found))}")
+
+
+def test_no_module_loads_or_generates_code_at_runtime():
+    for mod, tree in _trees().items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if isinstance(f, ast.Name) and f.id in FORBIDDEN_CALLS:
+                raise AssertionError(f"{mod} calls {f.id}() — code from data")
+            if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                    and (f.value.id, f.attr) in FORBIDDEN_ATTR_CALLS):
+                raise AssertionError(f"{mod} calls {f.value.id}.{f.attr}() — generated/loaded module")
+
+
+def test_pyproject_ships_exactly_the_package_and_no_data_or_artifacts():
+    data = tomllib.loads((PKG_DIR.parent / "pyproject.toml").read_text())
+    wheel = data["tool"]["hatch"]["build"]["targets"]["wheel"]
+    assert wheel.get("packages") == ["coord_fold"], wheel
+    for key in ("include", "artifacts", "force-include", "only-include"):
+        assert key not in wheel, f"pyproject wheel target carries {key!r}: a data/artifact channel"
+```
+
+- [ ] **Step 2: Run now — expect the tree test and manifest tests to FAIL** (Tasks 3–9 have not
+  created the modules yet; the failures name the missing files/symbols). That is correct and
+  the task is not complete until Step 4 passes after Task 9.
+
+- [ ] **Step 3: Commit the test as failing-first** — `coord-fold: ownership manifest, anti-shim and recursive artifact scan (G18, from codex-coder's CHANGES verdict) — failing until Tasks 3–9 land`
+
+- [ ] **Step 4 (after Task 9): Run — expect 7 passed.** If any symbol name in Tasks 3–9 drifted
+  from the manifest, fix the *module* to match the manifest, never the manifest to match the module.
+
+- [ ] **Step 5 (after Task 9): MUTATION-VERIFY — one mutation per bypass, each restored before the next**
+
+```bash
+# (a) THE VERDICT'S COUNTEREXAMPLE, in miniature: duplicate build_payload into cli.py.
+#     (Duplication rather than a move, so the suite still IMPORTS and the failure is an
+#     assertion, not a load error.)
+python - <<'PY'
+p="coord_fold/cli.py"; s=open(p).read()
+s += "\n\ndef build_payload(**kw):\n    return dict(kw)\n"
+open(p,"w").write(s)
+PY
+python -m pytest tests/test_ownership_manifest.py -q   # expect 2 FAIL: second-module + cli-wiring
+git checkout coord_fold/cli.py
+
+# (b) A SHIM: fold.py keeps `run` only as a re-export.
+python - <<'PY'
+p="coord_fold/fold.py"; s=open(p).read()
+s=s.replace("def run(", "def _run_impl(",1) + "\nrun = _run_impl\n"
+open(p,"w").write(s)
+PY
+python -m pytest tests/test_ownership_manifest.py -q   # expect 1 FAIL: run must be a def/class, found assignment
+git checkout coord_fold/fold.py
+
+# (c) A GENERATED / EXTRA ARTIFACT, two shapes.
+touch coord_fold/_gen.py
+python -m pytest tests/test_ownership_manifest.py -q   # expect 1 FAIL: unplanned artifacts ['_gen.py']
+rm coord_fold/_gen.py
+mkdir -p coord_fold/data && echo "x" > coord_fold/data/impl.txt
+python -m pytest tests/test_ownership_manifest.py -q   # expect 1 FAIL: unplanned artifacts ['data/impl.txt']
+rm -r coord_fold/data
+
+# (d) CODE FROM DATA.
+python - <<'PY'
+p="coord_fold/channel.py"; s=open(p).read()
+s=s.replace("import json", "import json\nimport importlib\n_x = importlib.import_module('json')",1)
+open(p,"w").write(s)
+PY
+python -m pytest tests/test_ownership_manifest.py -q   # expect 1 FAIL: channel.py calls importlib.import_module()
+git checkout coord_fold/channel.py
+```
+
+Expected: each mutation fails exactly the named test(s); `git status` clean afterwards.
+
+- [ ] **Step 6: Commit** — `coord-fold: ownership manifest green after Task 9; mutation-verified against all four bypass shapes`
+
+---
+
 
 ### Task 3: Event schema — build and parse payload v1
 
@@ -2020,40 +2255,24 @@ first host (coord-boss's). History stays at the old prefix, read-only, forever.
 
 ---
 
-### Task 14: AGENTS.md + shape-of-what-shipped acceptance
+### Task 14: AGENTS.md (shape-of-what-shipped is now Task 2b)
+
+> **Amended after codex-coder's CHANGES verdict.** The filename-only shape test originally
+> planned here is **subsumed** by Task 2b's recursive artifact scan and ownership manifest —
+> a filename check passes six empty shims. Do not create `test_shape_of_what_shipped.py`;
+> Task 2b's `test_the_package_tree_RECURSIVELY_contains_only_the_planned_modules` is the
+> acceptance. This task keeps only the AGENTS.md ship-gate.
 
 **Files:**
 - Modify: `AGENTS.md` (new section: coord-fold, the five verbs, the three gates, the two unknowns, and the dependency-direction rule old→new never)
-- Create: `packages/coord-fold/tests/test_shape_of_what_shipped.py`
 
 The directive: *"Acceptance covers THE SHAPE OF WHAT SHIPPED, not only behaviour: a plan whose modules dissolve into one file has not been implemented however green its tests are."* Make that a test.
 
-- [ ] **Step 1: Write the test**
+- [ ] **Step 1: AGENTS.md** — add under `## Setup & tests` a bullet block: the package exists; its three CI gates; the five verbs and their exit codes (0/2/3); the two unknowns and that `degraded` is banned by test; **dependency direction: `coord-engine` may read bus-v4 documents by path and may write to it via `dual_emit`, but `coord_fold` never imports `coord_engine` and the structural test enforces it**; the cutover runbook path; **and the ownership manifest** — that every public symbol has one
+  owning module, that a shim module fails, and why (codex-coder's counterexample: six empty
+  shims plus one 399-line `cli.py` passed every other gate).
 
-```python
-# packages/coord-fold/tests/test_shape_of_what_shipped.py
-"""The 2026-08-14 plan named queue.py/routing.py/cursor.py/output.py and shipped
-none of them. This asserts the module layout in the plan is the layout on disk."""
-import pathlib
-import coord_fold
-
-PLANNED = {"__init__.py", "events.py", "transport.py", "channel.py",
-           "checkpoint.py", "fold.py", "cli.py"}
-
-
-def test_the_planned_modules_exist_and_no_others_do():
-    on_disk = {p.name for p in pathlib.Path(coord_fold.__file__).parent.glob("*.py")}
-    assert on_disk == PLANNED, (f"missing={PLANNED - on_disk} unplanned={on_disk - PLANNED} — "
-                                f"an unplanned module needs a plan amendment, not a quiet add")
-```
-
-- [ ] **Step 2: Run — expect pass**
-
-- [ ] **Step 3: AGENTS.md** — add under `## Setup & tests` a bullet block: the package exists; its three CI gates; the five verbs and their exit codes (0/2/3); the two unknowns and that `degraded` is banned by test; **dependency direction: `coord-engine` may read bus-v4 documents by path and may write to it via `dual_emit`, but `coord_fold` never imports `coord_engine` and the structural test enforces it**; the cutover runbook path.
-
-- [ ] **Step 4: MUTATION-VERIFY** — `touch coord_fold/extra.py`; expect FAIL naming `unplanned={'extra.py'}`; `rm` it.
-
-- [ ] **Step 5: Commit** — `coord-fold: shape-of-what-shipped test + AGENTS.md (ship-gate)`
+- [ ] **Step 2: Commit** — `coord-fold: AGENTS.md (ship-gate)`
 
 ---
 
@@ -2077,8 +2296,16 @@ Push on these specifically. Each has a recommendation so the review is of a posi
 - Does not delete anything. Bus-v3 is frozen, not removed.
 - Does not earn back any of the 37 killed verbs. Each returns only by directive.
 
+## Revision log
+
+- **r2 (2026-09-04, after codex-coder CHANGES on `coord-fold-plan-65761fbd`):** added G18 and
+  Task 2b (ownership manifest with definition kinds, anti-shim, `cli.py` wiring-only, recursive
+  artifact scan, runtime-code-loading ban, pyproject artifact-channel ban); Task 14's filename
+  shape test subsumed. Both bypasses in the verdict now have a test that goes red; mutation (a)
+  in Task 2b reproduces the verdict's own counterexample.
+
 ## Self-review (writing-plans checklist)
 
-1. **Spec coverage.** §3.1 → Task 3. §3.2 (files addressed only by ptr) → G2 + Tasks 6/8 never list. §3.3 → Tasks 5/6. §3.4 → Tasks 1/4. §4 → Tasks 6/9/10. §5.1 steps 1–5 → Tasks 11/12/13 + runbook. §5.2 → runbook step 6. §5.3 → runbook step 5. §6 → verb table. §7 (inbox reconciler) → **not in this plan**; it is a post-cutover reconciler and is named as follow-up work, not silently dropped. §8 → G9/G10 in every task, G11 Task 10. §9 → open questions. §1a.1–3 → Tasks 1/2/14.
+1. **Spec coverage.** §3.1 → Task 3. §3.2 (files addressed only by ptr) → G2 + Tasks 6/8 never list. §3.3 → Tasks 5/6. §3.4 → Tasks 1/4. §4 → Tasks 6/9/10. §5.1 steps 1–5 → Tasks 11/12/13 + runbook. §5.2 → runbook step 6. §5.3 → runbook step 5. §6 → verb table. §7 (inbox reconciler) → **not in this plan**; it is a post-cutover reconciler and is named as follow-up work, not silently dropped. §8 → G9/G10 in every task, G11 Task 10. §9 → open questions. §1a.1–3 → Tasks 1/2/2b (Task 14 now AGENTS.md only).
 2. **Placeholder scan.** One deliberate non-placeholder that reads like one: Task 4 Step 4's stdin key set says "EDIT THIS SET" — it is a golden comparison against a named file and line, with the instruction to copy rather than guess. It is a checkable step, not a TODO.
 3. **Type consistency.** `read_classified` returns `(str|None, "ok"|"absent"|"error")` in Tasks 1/4/5/8 alike. `write_event(cfg, payload, *, sender)` in Tasks 4/7/8. `cp.path/empty/load/save/apply` names match across 5/6/8/9/11/13. Exit codes 0/2/3 are the same three in every verb.
