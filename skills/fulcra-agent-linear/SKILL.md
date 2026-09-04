@@ -43,6 +43,10 @@ to the agent that was waiting, and the card closes on the next sync.
 > 226 of 229 cards unassigned, and the newest thing in the operator's own Linear
 > queue was six weeks stale — while the project sat there, correct and unread.
 
+**One row, one card.** A person's queue is only readable if each thing in it
+appears once. That is a real constraint on identity, not a nicety — see the
+first rule below.
+
 ## Setup
 
 ### 1. Say who the consumers are
@@ -178,6 +182,38 @@ feeds its own confirmations back into the workspace forever.
 
 Each of these is here because the cheaper version failed in production.
 
+- **One source row must project ONE card, whatever your source calls it.** If
+  your identity includes the *fold*, view, or query a row came from, a source
+  that legitimately surfaces one row in two places gives you two cards for one
+  thing. Measured live: a workspace surfaces a row blocked on a human both as a
+  blocked task and as an ask — correctly — and the bridge keyed identity on
+  fold+id, so the operator's view held **30 cards for 15 real rows, 12 of them
+  doubled**. He cannot tell which copy to answer, and answering one leaves its
+  twin sitting there looking unanswered. Collapse on the row's own id, and pick
+  the winning fold explicitly: prefer the one your *settle-verb* is defined
+  over, so the card left in the view is the one that can be acted on.
+- **A label is a claim about the present, so a close must remove it.** Closing a
+  card does not remove its labels, and a saved view filters on labels, **not on
+  state** — a viewer whose view shows completed issues keeps seeing every card
+  you correctly closed. Measured live: 12 correct closes stayed in the
+  operator's view, so the fix was invisible to the person it was done for. Strip
+  the consumer label on close, and converge — a rule that only fires on the
+  transition leaves everything closed earlier still claiming to block them.
+- **An unreadable marker is not an unmanaged record.** Whatever you stamp on a
+  card to recognise it later, "no marker" and "a marker I cannot read" are
+  different facts. Collapse them and an unreadable card reads as *not yours*, so
+  the projection creates a second card for a row it already projected — the same
+  duplication as the first rule, arriving by a different door. Your ledger
+  usually rescues the identity, but a policy edit orphans the ledger (below), so
+  the two failures line up rather than cancel. Refuse the run instead.
+- **A silent drop at a read boundary becomes a false instruction.** Parse
+  provider responses once, at the boundary, and raise on any shape you cannot
+  read — never filter to the parts that happen to match. A dropped label reads as
+  a label the card lacks, so the projection writes it again forever and a second
+  plan never returns zero. This is worth auditing across *every* read you have,
+  not just the one that bit you: the same package had this hardened in one
+  method and unhardened in the method beside it, which is the one that decides
+  whether the consumer's label is on a card.
 - **The reader must match the view.** Whatever rule decides that a card
   appears in someone's "blocked on me" view must be the same rule that decides
   the bridge reads their reply on it. These were two rules here — the view
