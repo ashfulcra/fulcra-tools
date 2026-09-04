@@ -250,7 +250,8 @@ under `skills/`, each package with its own README, build, and tests.
   `undelivered=N`, and the verb exits 3.
 - **`escalate` does not restate a vacancy that is already on the board.** The
   vacancy title embeds the date, so the slug differs every day and the
-  `transport.read(dst) is None` check can never match across days; the daily
+  per-slug existence check on `dst` (a classified `read_classified(dst)` since
+  PR 694; a bare `read(dst) is None` before it) can never match across days; the daily
   marker suppresses only WITHIN a day. Measured result: 117 open ROLE VACANT
   rows carrying 12 distinct facts, growing 2-6/day fleetwide. A state-change
   guard (`roles.vacancy_already_open`) now skips minting while a row for that
