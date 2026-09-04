@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax (`- [ ]`) for tracking.
 
+> **STATUS (verified 2026-09-04): EXECUTED, and the module layout below is NOT
+> what shipped.** This plan is kept as the record of intent. It names files that
+> do not exist in the tree — `coord_engine/queue.py`, `routing.py`,
+> `operator.py`, `parking.py`, `responses.py`, `review_store.py`, `fleet.py`,
+> `cursor.py`, `acceptance.py`, `output.py`, their paired tests, and
+> `scripts/run-live-acceptance.sh` / `scripts/export-reference-fixtures.sh` —
+> because the implementation consolidated into `packages/coord-engine/coord_engine/cli.py`
+> and its siblings instead. **Do not go looking for those paths; read the plan
+> for its reasoning, not its file list.**
+
 **Goal:** Build a clean-room implementation that interoperates with the shipped
 Fulcra Agent Coordination Bus and provides the Collect plugin host without relying
 on a broker, resident coordination daemon, or hidden model inference.

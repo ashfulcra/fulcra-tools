@@ -5,6 +5,13 @@
 > implement this plan task-by-task. Use `superpowers:test-driven-development`
 > for every behavior change. Steps use checkbox syntax (`- [ ]`) for tracking.
 
+> **STATUS (verified 2026-09-04): EXECUTED across units 1-6, and some paths
+> below were never created.** Kept as the record of intent. `packages/coord-engine/tests/test_v2_migration.py`,
+> `scripts/adopt-latest.sh` (the live one is the STORE copy at
+> `team/<team>/_coord/bus-v3/adopt-latest.sh`, which is the runtime authority),
+> and the `docs/coord/evidence/` files named here do not exist in the tree.
+> **Read this plan for its reasoning, not its file list.**
+
 **Goal:** Ship coord-engine `2.0.0` with one truthful change-detection authority,
 typed command outcomes, immutable projection generations, bounded-staleness
 overlays, and a fleet-verified release gate.
