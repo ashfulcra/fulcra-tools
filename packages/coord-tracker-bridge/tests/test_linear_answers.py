@@ -8,6 +8,8 @@ is not an answer because a comment exists — it is an answer when
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ from coord_tracker_bridge.answers import (
     POSSIBLE_REPEAT,
     Reply,
     AnswerState,
+    DispatchFailed,
     EngineAnswerDispatcher,
     collect_replies,
     run_answers,
@@ -59,15 +62,38 @@ def comment(cid, author, body="approved, go ahead", created="2026-09-03T10:00:00
     return {"id": cid, "body": body, "createdAt": created, "user": {"id": author}}
 
 
-class Runner:
-    """Records argv instead of shelling out."""
+#: The fixture slugs the engine is treated as willing to answer by default.
+#: Named rather than wildcarded: "the engine accepts everything" is the one
+#: thing the pre-flight read exists to disprove, so a test that needs a row
+#: OUTSIDE the fold has to say so, and cannot get it by accident.
+ANSWERABLE = {
+    "needs-a-spend-decision-0000dead",
+    "ash-ask-0000dead",
+    "liz-ask-0000beef",
+}
 
-    def __init__(self, code: int = 0):
+
+class Runner:
+    """Records argv instead of shelling out.
+
+    It answers two commands. `asks` is the dispatcher's pre-flight read of which
+    rows the engine will accept an answer for. `answer` is the dispatch itself,
+    and only those calls land in `calls` — the probe is kept separate so an
+    assertion about what was dispatched is not diluted by a read.
+    """
+
+    def __init__(self, code: int = 0, answerable: set[str] | None = None):
         self.calls: list[tuple[str, ...]] = []
+        self.probes: list[tuple[str, ...]] = []
         self.code = code
+        self.answerable = ANSWERABLE if answerable is None else answerable
 
     def __call__(self, argv, timeout):
-        self.calls.append(tuple(argv))
+        argv = tuple(argv)
+        if "asks" in argv:
+            self.probes.append(argv)
+            return 0, json.dumps({"rows": [{"id": s} for s in sorted(self.answerable)]}), ""
+        self.calls.append(argv)
         return self.code, "", "" if self.code == 0 else "boom"
 
 
@@ -409,3 +435,83 @@ def test_the_message_names_who_answered_and_which_ask() -> None:
     assert "approved, go ahead" in body
     assert "ash" in body and "BUS-127" in body
     assert "agent-reasoning-tick-needs-a-spend-decision-0000dead" in body
+
+
+def test_a_row_the_engine_has_no_verb_for_is_REFUSED_not_stopped_on(tmp_path: Path) -> None:
+    """The view is wider than `coord-engine answer`.
+
+    A card reaches a person's "blocked on me" view by naming them, in any lane.
+    `answer` settles only rows in the engine's waiting-for-operator ask fold —
+    measured live 2026-09-04, 30 cards in the view and 11 answerable. So a reply
+    on a directive naming the same human is a row this dispatcher has no verb
+    for. That must not read as UNKNOWN: nothing was written, a retry changes
+    nothing, and the replies AFTER it are not implicated.
+    """
+
+    runner = Runner(answerable={"ash-ask-0000dead"})
+    path = tmp_path / "s.json"
+    AnswerState(seeded=True).save(path)
+    records = [
+        record("a-directive-0000beef", consumer="ash"),   # outside the fold
+        record("ash-ask-0000dead", consumer="ash"),       # inside it
+    ]
+    seen = {
+        "prov-a-directive-0000beef": [comment("c1", ASH, created="2026-09-03T10:00:00Z")],
+        "prov-ash-ask-0000dead": [comment("c2", ASH, created="2026-09-03T10:01:00Z")],
+    }
+    code, report = run_answers(
+        records=records,
+        read_comments=lambda issue_id: seen[issue_id],
+        bot_user_id=BOT,
+        state_path=path,
+        dispatcher=EngineAnswerDispatcher(team="fulcra", runner=runner),
+        deliver=True,
+    )
+
+    # 2 is a deliberate refusal: replies the operator wrote are undelivered, so
+    # this is not success -- but it is not 3 either, which would prove nothing.
+    assert code == 2
+    assert "REFUSED 1" in report
+    # The refusal did NOT stop the reply behind it.
+    assert [argv[3] for argv in runner.calls] == ["ash-ask-0000dead"]
+    # And it left no mark: a mark means "this might have landed".
+    state = AnswerState.load(path)
+    assert state.attempted == {}
+    assert list(state.confirmed.values()) == ["ash-ask-0000dead"]
+
+
+def test_a_refused_reply_is_never_announced_as_a_possible_re_delivery(tmp_path: Path) -> None:
+    """A mark claims the transport MIGHT have settled it. A refusal proves it
+    did not, so leaving one marked would over-claim on every future run — and
+    the run after a delivery path exists would say POSSIBLE RE-DELIVERY for an
+    answer that has never gone anywhere."""
+
+    path = tmp_path / "s.json"
+    AnswerState(seeded=True).save(path)
+    records = [record("a-directive-0000beef", consumer="ash")]
+    run_answers(
+        records=records,
+        read_comments=comments(comment("c1", ASH)),
+        bot_user_id=BOT,
+        state_path=path,
+        dispatcher=EngineAnswerDispatcher(team="fulcra", runner=Runner(answerable=set())),
+        deliver=True,
+    )
+
+    plan = collect_replies(
+        records, comments(comment("c1", ASH)),
+        bot_user_id=BOT, state=AnswerState.load(path),
+    )
+    assert [r.repeat for r in plan.replies] == ["new"]
+
+
+def test_a_failed_fold_read_is_never_read_as_nothing_is_answerable() -> None:
+    """An empty set would refuse every reply and report it as "no verb reaches
+    these rows" -- the same lie as rendering a failed read as "no answers"."""
+
+    def broken(argv, timeout):
+        return 1, "", "engine unreachable"
+
+    dispatcher = EngineAnswerDispatcher(team="fulcra", runner=broken)
+    with pytest.raises(DispatchFailed):
+        dispatcher.answerable("ash")

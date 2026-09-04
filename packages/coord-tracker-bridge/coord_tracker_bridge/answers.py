@@ -66,6 +66,19 @@ class DispatchFailed(AnswersError):
     """The transport reported failure. Distinct from an UNKNOWN outcome."""
 
 
+class DispatchRefused(AnswersError):
+    """The transport PROVABLY did nothing, and would do nothing on a retry.
+
+    Not the same as DispatchFailed. A failure might have settled the answer and
+    then failed to report it, which is why an attempt is marked before the
+    transport runs and a retry announces POSSIBLE RE-DELIVERY. A refusal is
+    decided BEFORE anything is written — the reply names a row this transport
+    has no verb for — so marking it would over-claim forever, and halting the
+    run on it would leave every later reply owed for a reason that will never
+    change. It is recorded, unmarked, and the run continues.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Reply:
     """One operator comment on one ask card, not yet settled on the bus."""
@@ -253,20 +266,61 @@ def collect_replies(
     return Plan(tuple(replies), considered, cards, cold, tuple(dict.fromkeys(unattributed)))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class EngineAnswerDispatcher:
     """Settle one ask on the bus via `coord-engine answer`.
 
     The ONLY bus verb this module can reach. It unblocks the ask and hands it
     back to its owner; it cannot create work.
+
+    THE VIEW IS WIDER THAN THIS VERB. A card reaches a person's "blocked on me"
+    view by naming them, in any lane; `answer` settles only the rows the engine
+    holds in its waiting-for-operator ask fold. Measured live 2026-09-04: 30
+    cards in the view, 11 answerable. So a reply on a directive that names the
+    same human is a row this dispatcher HAS NO VERB FOR, and it says so by
+    refusing up front rather than by failing after the fact — a pre-flight read
+    of the fold, never a parse of an error message.
     """
 
     team: str
     runner: CommandRunner = subprocess_runner
     timeout: float = 60.0
     command: tuple[str, ...] = ("coord-engine",)
+    #: consumer -> the slugs the engine will accept an answer for. Read once
+    #: per consumer per run; a run is short and the fold does not move under it.
+    _answerable: dict[str, frozenset[str]] = field(default_factory=dict)
+
+    def answerable(self, consumer: str) -> frozenset[str]:
+        """Which of this consumer's rows `coord-engine answer` will accept.
+
+        A read failure raises rather than returning an empty set: an empty set
+        would refuse every reply and read as "nothing was answerable", which is
+        the same lie as rendering a failed read as "no answers".
+        """
+
+        if consumer in self._answerable:
+            return self._answerable[consumer]
+        argv = (*self.command, "asks", self.team, "--human", consumer, "--json")
+        code, stdout, stderr = self.runner(argv, self.timeout)
+        if code != 0:
+            raise DispatchFailed(
+                f"reading the answerable fold for {consumer!r} failed "
+                f"(rc {code}): {(stderr or stdout).strip()[:300]}"
+            )
+        payload = json.loads(stdout)
+        rows = payload.get("rows", ()) if isinstance(payload, Mapping) else payload
+        found = frozenset(
+            str(row.get("id") or "") for row in rows if isinstance(row, Mapping)
+        ) - {""}
+        self._answerable[consumer] = found
+        return found
 
     def deliver(self, reply: Reply) -> None:
+        if reply.slug not in self.answerable(reply.consumer):
+            raise DispatchRefused(
+                f"{reply.slug} is not a waiting-for-operator ask for "
+                f"{reply.consumer!r}; `coord-engine answer` has no verb for it"
+            )
         argv = (
             *self.command, "answer", self.team, reply.slug,
             "--with", reply.body,
@@ -369,6 +423,7 @@ def run_answers(
             f"{cap}. Nothing was carried; raise the cap deliberately."))
 
     carried = 0
+    refused: list[str] = []
     for reply in plan.replies:
         # Written BEFORE the transport: `coord-engine answer` can settle the ask
         # and then fail to report it, so a raise is not evidence nothing landed.
@@ -376,6 +431,17 @@ def run_answers(
         state.save(state_path)
         try:
             dispatcher.deliver(reply)
+        except DispatchRefused as exc:
+            # PROVABLY nothing was written, and a retry changes nothing. Unmark
+            # it — a mark means "this might have landed", and leaving one here
+            # makes every future run announce POSSIBLE RE-DELIVERY for an answer
+            # that never went anywhere. Then keep going: the refusal is about
+            # THIS row, and halting would owe every later reply for a reason
+            # that has nothing to do with them.
+            state.attempted.pop(reply.comment_id, None)
+            state.save(state_path)
+            refused.append(f"{reply.identifier}: {exc}")
+            continue
         except Exception as exc:
             return 3, render(plan, delivered=carried, note=(
                 f"STOPPED at {reply.identifier} ({exc}) — that one's outcome is "
@@ -391,6 +457,13 @@ def run_answers(
                 # The answer IS on the bus; a missing courtesy comment must not
                 # unwind it or stop the run. The bus is the record.
                 pass
+    if refused:
+        # Exit 2, not 0: replies the operator wrote are still undelivered, and a
+        # run that returned success would report that as "done".
+        return 2, render(plan, delivered=carried, note=(
+            f"REFUSED {len(refused)} repl(y/ies) — no verb reaches these rows, "
+            "and nothing was marked, so a later run with a delivery path for "
+            "them starts clean:\n      " + "\n      ".join(refused)))
     return 0, render(plan, delivered=carried)
 
 
