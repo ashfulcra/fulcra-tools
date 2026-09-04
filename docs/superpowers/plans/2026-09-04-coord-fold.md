@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r5)
+# coord-fold: Coord on Annotations Implementation Plan (r6)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -23,14 +23,18 @@ G-numbers are stable across revisions so verdicts can cite them.
 - **G1.** `kind` is a closed set: `open`, `close`, `claim`, `release`, `note`.
 - **G2.** `ptr` is one file path — never a directory or glob, never absent on `open` or `close`.
 - **G3.** Event payload v1 fields, exactly: `v`, `at`, `from`, `to`, `kind`, `slug`, `pri`, `ptr`.
-- **G4.** Checkpoint v1 fields, exactly: `v`, `cursor`, `open`, `unread_events`, `unreadable_pointers`, `seen`. `seen` is a stated sixth field pending Ruling 1.
+- **G4.** Checkpoint v1 fields, exactly: `v`, `cursor`, `open`, `unread_events`, `unreadable_pointers`, `seen`, `generation`, `writer`. `seen` dedupes the boundary event because the cursor is inclusive (Ruling 1); `generation`/`writer` carry lost-update detection (Ruling 2).
 - **G5.** `PointerTransport` exposes exactly `read_classified` and `read_events`.
 - **G6.** Separate uv workspace package; `pyproject.toml` must not depend on `coord-engine`.
 - **G7.** No enumeration method on reader, writer, or fakes; the import graph never reaches `coord_engine`.
 - **G8.** 400 lines per `.py` under `coord_fold/`, recursive, as a CI gate.
 - **G9.** Every fold test drives `coord_fold.cli.main([...])` and asserts on the stored checkpoint in the fake store.
 - **G10.** Every test file is mutation-verified.
-- **G11.** No output path may emit the string `degraded`. Two **bounded-per-observed-state** diagnostics replace it: `unread_events: N` (bounded by the unread window) and `unreadable_pointers: [slug]` (bounded by the open set). They are not asymptotically corpus-independent and the plan does not claim they are. An unknown never reads as clear.
+- **G11.** No output path may emit the string `degraded`. Two diagnostics replace it, and they mean different things. `unreadable_pointers: [slug]` is an UNKNOWN (a read that did not answer) and exits 3. `unread_events: N` is a **remainder, not a failure, and exits 0** (Ruling 4, below). An unknown never reads as clear.
+- **G25.** *(r6, Ruling 4 — its own paragraph, because it is the distinction Ash asked for.)* **A capped pass is not degraded.** Ash said he must stop seeing failures reading degraded file folds. The corpus fold's *partial* meant "I gave up part way through something I should not have been walking", and its remainder was bounded by **corpus size**, so it grew forever. The stream fold's *partial* means "I applied 500 of 700 new events, the cursor is here, 200 remain", and the remainder is bounded by **new events**, so the next pass gets them. Same shape of answer, opposite meaning. A pass that hits `max_events` applies what it read, advances the cursor to the last applied event (G26), reports `unread_events: N`, and **exits 0** — it did exactly what it promised and said so. The word `degraded` may not go near it. The **only** error is a pass that applies zero events while events exist: that is no progress, and it exits non-zero.
+- **G26.** *(r6, Ruling 1)* **Lossless cursor.** The cursor advances to the `recorded_at` of the **last successfully applied event** — never to `now`, never past a gap. The cursor is the only durable claim of coverage this design makes; if it could pass unapplied events, `unread_events` would become the sole record of the gap and any pass that lost that counter would silently claim coverage it never had — the failure class this rebuild exists to end, reintroduced in the one field everything trusts. Checkable consequence, made a test: re-running a fold from the stored cursor yields the same open set.
+- **G27.** *(r6, Ruling 2)* **Lost-update detection, not CAS.** The store has no compare-and-swap (AGENTS.md records this); requiring one would build on a guarantee the platform does not offer, which reads as safety and is not. The checkpoint carries `writer` and a monotonic `generation`; a fold loads, computes, **re-reads before writing**, and if the generation moved it **refuses** — exit non-zero, visible, no silent retry — and never overwrites. It cannot prevent the race; it refuses to lose the update, which is the honest ceiling. The contended case is one agent running twice (two hosts, a duplicated cron) — the same double-acting condition coord already alarms on via the lease nonce — so the refusal says that **by name**.
+- **G28.** *(r6, Ruling 3)* **No compaction in v1; never delete events.** Bound the fold *work*, not the stream *history*. A fold away for a month reads a month of events: O(new events since *its* cursor), correct by definition. Compaction is a second source of truth that can disagree with the stream — precisely what this design removes — and it would arrive with no measurement forcing it. If catch-up cost ever becomes real, the fix is a snapshot that is derivable, discardable, and provably equal to a replay from empty; built then, against a number, not now.
 - **G12.** Six verbs: `emit`, `fold`, `claim`, `release`, `close`, `status`.
 - **G13.** Parallel bus proven then cut over: seed, dual-emit, shadow, cut over after N agreeing passes spanning ≥24h with observed transitions, freeze.
 - **G14.** coord-boss alone first, then one agent at a time.
@@ -59,7 +63,7 @@ packages/coord-fold/
     transport.py                      PointerTransport, ReadState, TransportUnavailable, CliPointerReader, CliPointerWriter
     channel.py                        CONFIG_PATH, ChannelUnresolved, config_path, resolve
     checkpoint.py                     SCHEMA_VERSION, path, empty, apply, load, save
-    fold.py                           OVERLAP_SECONDS, FoldOutcome, FoldRefused, run
+    fold.py                           OVERLAP_SECONDS, FoldOutcome, FoldRefused, FoldContended, run
     cli.py                            main, build_parser, RC_*, cmd_* (six), _now, _default_transports,
                                       _row_sort_key, _render_open, _report_unknowns, _emit_kind, _owed_row
   tests/
@@ -603,7 +607,7 @@ OWNERSHIP: dict[str, dict[str, str]] = {
     "transport.py": {"ReadState": "value", "PointerTransport": "callable", "TransportUnavailable": "callable", "CliPointerReader": "callable", "CliPointerWriter": "callable"},
     "channel.py": {"CONFIG_PATH": "value", "ChannelUnresolved": "callable", "config_path": "callable", "resolve": "callable"},
     "checkpoint.py": {"SCHEMA_VERSION": "value", "path": "callable", "empty": "callable", "apply": "callable", "load": "callable", "save": "callable"},
-    "fold.py": {"OVERLAP_SECONDS": "value", "FoldOutcome": "callable", "FoldRefused": "callable", "run": "callable"},
+    "fold.py": {"OVERLAP_SECONDS": "value", "FoldOutcome": "callable", "FoldRefused": "callable", "FoldContended": "callable", "run": "callable"},
     "cli.py": {"main": "callable", "build_parser": "callable"},
     "__init__.py": {"__version__": "value"},
 }
@@ -627,7 +631,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     "events.py": set(), "transport.py": set(), "__init__.py": set(),
 }
 OWNER_MODULES = {"events.py", "transport.py", "channel.py", "checkpoint.py", "fold.py"}
-STDLIB_BASE = {"__future__", "argparse", "datetime", "json", "sys", "typing"}
+STDLIB_BASE = {"__future__", "argparse", "datetime", "json", "sys", "typing", "uuid"}
 STDLIB_EXTRA = {"transport.py": {"subprocess", "os", "tempfile"}}
 THIRD_PARTY_ALLOWED = {"fulcra_common"}
 BANNED_NAMES = {"getattr", "setattr", "delattr", "hasattr", "globals", "vars", "locals", "eval", "exec", "compile", "__import__"}
@@ -882,7 +886,7 @@ git checkout coord_fold/events.py
 # (e) r5: INLINE the fold into cmd_fold, drop the fold.run call
 python - <<'PY'
 p="coord_fold/cli.py"; s=open(p).read()
-s=s.replace("        out = fold.run(reader, writer, args.team, args.agent, now=args.now, max_events=args.max_events, verify_pointers=args.verify_pointers)",
+s=s.replace("        out = fold.run(reader, writer, args.team, args.agent, now=args.now, writer_id=f\"{args.agent}:{uuid.uuid4().hex[:8]}\", max_events=args.max_events, verify_pointers=args.verify_pointers)",
             "        st, _ = checkpoint.load(reader, args.team, args.agent)\n        out = fold.FoldOutcome(st or checkpoint.empty(args.now), 'ok', 0, 0, 0)",1)
 open(p,"w").write(s)
 PY
@@ -1099,8 +1103,9 @@ def _ev(kind, slug="s1", rid="r1", **kw):
     return b
 
 
-def test_empty_has_exactly_the_six_fields():
-    assert set(cp.empty(NOW)) == {"v", "cursor", "open", "unread_events", "unreadable_pointers", "seen"}
+def test_empty_has_exactly_the_eight_fields():
+    assert set(cp.empty(NOW)) == {"v", "cursor", "open", "unread_events", "unreadable_pointers", "seen", "generation", "writer"}
+    assert cp.empty(NOW)["generation"] == 0
 
 
 def test_open_adds_close_and_release_remove_claim_annotates():
@@ -1132,7 +1137,7 @@ def test_load_states_and_save_roundtrip():
 
 ```python
 # packages/coord-fold/coord_fold/checkpoint.py
-"""One durable checkpoint per agent (spec §3.3). Six stated fields (G4; see Ruling 1)."""
+"""One durable checkpoint per agent (spec §3.3). Eight fields (G4): generation/writer carry lost-update detection (G27)."""
 from __future__ import annotations
 
 import json
@@ -1151,7 +1156,8 @@ def path(team: str, agent: str) -> str:
 
 
 def empty(now: str) -> dict[str, Any]:
-    return {"v": SCHEMA_VERSION, "cursor": now, "open": {}, "unread_events": 0, "unreadable_pointers": [], "seen": []}
+    return {"v": SCHEMA_VERSION, "cursor": now, "open": {}, "unread_events": 0, "unreadable_pointers": [], "seen": [],
+            "generation": 0, "writer": ""}
 
 
 def apply(state: dict[str, Any], ev: dict[str, Any]) -> None:
@@ -1238,10 +1244,20 @@ def test_events_for_someone_else_do_not_land_but_broadcast_does():
     _run(st); assert set(_ckpt(st)["open"]) == {"b"}
 
 
-def test_a_second_fold_reads_only_forward():
+def test_cursor_is_the_last_applied_event_never_now():
+    """G26 / Ruling 1."""
     st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")]); _run(st)
+    assert _ckpt(st)["cursor"] == "2026-09-04T10:00:00Z"
     st.events.append(_rec("close", "a", "2026-09-04T11:30:00Z", "2"))
-    _run(st, now="2026-09-04T12:00:00Z"); assert _ckpt(st)["open"] == {} and _ckpt(st)["cursor"] == "2026-09-04T12:00:00Z"
+    _run(st, now="2026-09-04T12:00:00Z"); assert _ckpt(st)["open"] == {} and _ckpt(st)["cursor"] == "2026-09-04T11:30:00Z"
+    _run(st, now="2026-09-04T13:00:00Z"); assert _ckpt(st)["cursor"] == "2026-09-04T11:30:00Z"
+
+
+def test_rerunning_from_the_stored_cursor_yields_the_same_open_set():
+    """G26's checkable consequence."""
+    st = _team([_rec("open", f"s{i}", f"2026-09-04T10:{i:02d}:00Z", str(i)) for i in range(6)] + [_rec("close", "s2", "2026-09-04T10:07:00Z", "x")])
+    _run(st); first = _ckpt(st)["open"]
+    _run(st, now="2026-09-04T12:00:00Z"); assert _ckpt(st)["open"] == first == {f"s{i}": first[f"s{i}"] for i in (0, 1, 3, 4, 5)}
 
 
 def test_a_failed_event_read_does_not_advance_the_cursor_and_exits_3(capsys):
@@ -1249,10 +1265,38 @@ def test_a_failed_event_read_does_not_advance_the_cursor_and_exits_3(capsys):
     assert _run(st) == 3 and cp.path("r", "me") not in st.saved and "degraded" not in capsys.readouterr().out.lower()
 
 
-def test_more_events_than_the_cap_leaves_a_bounded_unread_count_and_exits_3():
+def test_a_capped_pass_is_a_remainder_not_an_error(capsys):
+    """G25 / Ruling 4: exit 0, cursor at the last applied event, unread_events is the bounded remainder."""
     st = _team([_rec("open", f"s{i}", f"2026-09-04T10:{i:02d}:00Z", str(i)) for i in range(7)])
-    assert _run(st, "--max-events", "5") == 3
+    assert _run(st, "--max-events", "5") == 0
     c = _ckpt(st); assert c["unread_events"] == 2 and len(c["open"]) == 5 and c["cursor"] == "2026-09-04T10:04:00Z"
+    out = capsys.readouterr(); assert "2 events remain" in out.out and "degraded" not in (out.out + out.err).lower()
+    assert _run(st, "--max-events", "5", now="2026-09-04T12:00:00Z") == 0 and len(_ckpt(st)["open"]) == 7 and _ckpt(st)["unread_events"] == 0
+
+
+def test_zero_progress_with_events_present_is_the_only_error(capsys):
+    st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")])
+    assert _run(st, "--max-events", "0") == 2 and "no progress" in capsys.readouterr().err and cp.path("r", "me") not in st.saved
+
+
+def test_a_concurrent_writer_is_refused_by_name_and_nothing_is_overwritten(capsys):
+    """G27 / Ruling 2: the generation moves between load and the re-read before write."""
+    st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")]); _run(st)
+    assert _ckpt(st)["generation"] == 1 and _ckpt(st)["writer"].startswith("me:")
+    r = FakeReader(st); calls = []; orig = r.read_classified
+    def bumping(path):
+        body, state = orig(path)
+        if path == cp.path("r", "me"):
+            calls.append(path)
+            if len(calls) == 2:
+                other = json.loads(body); other["generation"] += 1; other["writer"] = "me:other-host"; body = json.dumps(other)
+        return body, state
+    r.read_classified = bumping
+    before = st.saved[cp.path("r", "me")]
+    st.events.append(_rec("close", "a", "2026-09-04T11:30:00Z", "2"))
+    assert main(["fold", "r", "--agent", "me", "--now", "2026-09-04T12:00:00Z"], reader=r, writer=FakeWriter(st)) == 2
+    err = capsys.readouterr().err
+    assert "acting twice" in err and "me:other-host" in err and st.saved[cp.path("r", "me")] == before
 
 
 def test_corrupt_checkpoint_is_refused_and_untouched(capsys):
@@ -1275,7 +1319,12 @@ def test_verify_pointers_records_an_absent_pointer_and_default_reads_none():
 
 ```python
 # packages/coord-fold/coord_fold/fold.py
-"""One pass: read forward from the cursor, apply, persist, report (spec §3.3). O(new events)."""
+"""One pass: read forward from the cursor, apply, re-read, persist, report (spec §3.3). O(new events).
+
+Ruling 1 (G26): the cursor is the recorded_at of the LAST APPLIED event, never now.
+Ruling 2 (G27): re-read before write; a moved generation is refused BY NAME, never overwritten.
+Ruling 4 (G25): hitting max_events is a remainder (rc 0); zero progress with events present is the only error.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -1286,6 +1335,7 @@ from .transport import PointerTransport, TransportUnavailable
 
 OVERLAP_SECONDS = 5
 _BROADCAST = "all"
+_EPOCH = "1970-01-01T00:00:00Z"
 
 
 class FoldOutcome(NamedTuple):
@@ -1300,12 +1350,16 @@ class FoldRefused(RuntimeError):
     pass
 
 
+class FoldContended(RuntimeError):
+    """The checkpoint generation moved under this pass: this agent is acting twice."""
+
+
 def _minus_overlap(iso: str) -> str:
     dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     return (dt - timedelta(seconds=OVERLAP_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: str,
+def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: str, writer_id: str,
         max_events: int = 5000, verify_pointers: bool = False) -> FoldOutcome:
     cfg = channel.resolve(reader, team)
     state, source = cp.load(reader, team, agent)
@@ -1314,12 +1368,11 @@ def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: st
     if source == "error":
         raise TransportUnavailable("checkpoint unreadable")
     if source == "fresh":
-        state, since = cp.empty(now), "1970-01-01T00:00:00Z"
-    else:
-        since = _minus_overlap(state["cursor"])
+        state = cp.empty(_EPOCH)
+    generation = int(state.get("generation", 0))
     applied = unread = 0
-    last_at = state["cursor"] if source == "ok" else now
-    for rec in reader.read_events(cfg["data_type"], since):
+    last_at = state["cursor"]
+    for rec in reader.read_events(cfg["data_type"], _minus_overlap(state["cursor"])):
         ev = events.parse_event(rec)
         if ev is None or (ev["to"] not in (agent, _BROADCAST) and ev["from"] != agent):
             continue
@@ -1329,17 +1382,27 @@ def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: st
         cp.apply(state, ev)
         applied += 1
         last_at = ev.get("recorded_at") or ev["at"]
+    if applied == 0 and unread:
+        raise FoldRefused(f"no progress: {unread} events present and none applied (max_events={max_events})")
+    state["cursor"] = last_at
     state["unread_events"] = unread
-    state["cursor"] = last_at if unread else now
     state["unreadable_pointers"] = []
     if verify_pointers:
         for slug, row in state["open"].items():
             _body, st = reader.read_classified(row["ptr"])
             if st != "ok":
                 state["unreadable_pointers"].append(slug)
+    again, src2 = cp.load(reader, team, agent)
+    if src2 == "error":
+        raise TransportUnavailable("checkpoint re-read before write did not answer; not writing")
+    if src2 == "ok" and int(again.get("generation", 0)) != generation:
+        raise FoldContended(f"{agent} is acting twice (two hosts or a duplicated cron): checkpoint generation moved "
+                            f"{generation} -> {again.get('generation')} by writer {again.get('writer')!r} under this pass; not overwriting")
+    state["generation"] = generation + 1
+    state["writer"] = writer_id
     if not cp.save(writer, team, agent, state):
         raise TransportUnavailable("checkpoint save failed")
-    return FoldOutcome(state, source, applied, unread, 3 if (unread or state["unreadable_pointers"]) else 0)
+    return FoldOutcome(state, source, applied, unread, 3 if state["unreadable_pointers"] else 0)
 ```
 
 ```python
@@ -1349,6 +1412,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import uuid
 from datetime import datetime, timezone
 
 from . import channel, checkpoint, events, fold
@@ -1384,7 +1448,7 @@ def _render_open(state: dict) -> str:
 
 def _report_unknowns(state: dict) -> None:
     if state.get("unread_events"):
-        print(f"fold: {state['unread_events']} events unread past {state['cursor']} — the answer is missing those", file=sys.stderr)
+        print(f"fold: applied through {state['cursor']}; {state['unread_events']} events remain — bounded by new events, the next pass gets them")
     for slug in state.get("unreadable_pointers", []):
         print(f"fold: pointer for {slug} unreadable — that one row is UNKNOWN", file=sys.stderr)
 
@@ -1413,9 +1477,12 @@ def _owed_row(reader, team, agent, slug) -> tuple:
 
 def cmd_fold(args, reader, writer) -> int:
     try:
-        out = fold.run(reader, writer, args.team, args.agent, now=args.now, max_events=args.max_events, verify_pointers=args.verify_pointers)
+        out = fold.run(reader, writer, args.team, args.agent, now=args.now, writer_id=f"{args.agent}:{uuid.uuid4().hex[:8]}", max_events=args.max_events, verify_pointers=args.verify_pointers)
     except (channel.ChannelUnresolved, fold.FoldRefused) as exc:
         print(f"fold: refused — {exc}", file=sys.stderr)
+        return RC_REFUSED
+    except fold.FoldContended as exc:
+        print(f"fold: REFUSED, not overwriting — {exc}", file=sys.stderr)
         return RC_REFUSED
     except TransportUnavailable as exc:
         print(f"fold: UNKNOWN — event read did not complete ({exc}); cursor not advanced", file=sys.stderr)
@@ -1484,7 +1551,7 @@ def cmd_status(args, reader, writer) -> int:
     print(f"status [{args.agent}] cursor={state['cursor']} open={len(state['open'])}")
     print(_render_open(state))
     _report_unknowns(state)
-    return RC_UNKNOWN if (state.get("unread_events") or state.get("unreadable_pointers")) else RC_OK
+    return RC_UNKNOWN if state.get("unreadable_pointers") else RC_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1531,7 +1598,7 @@ if __name__ == "__main__":
 
 (`cli.py` above is the complete file for all six verbs; Tasks 8–10 add only their tests. This is deliberate: a single tagged block is what Task 0 materializes, and round 4 showed that "add to cli.py" prose blocks are exactly what a gate cannot see.)
 
-Run — 9 passed. Mutations: (a) swallow `TransportUnavailable` in the read loop → failed-read test FAILS; (b) drop the addressee filter → someone-else test FAILS; (c) force `verify_pointers=False` → absent-pointer test FAILS. **Commit** — `coord-fold: fold verb, six-verb cli wiring, --verify-pointers (G9, G20, G23)`
+Run — 13 passed. Mutations: (a) swallow `TransportUnavailable` in the read loop → failed-read test FAILS; (b) drop the addressee filter → someone-else test FAILS; (c) force `verify_pointers=False` → absent-pointer test FAILS; (d) `state["cursor"] = now` → cursor-never-now FAILS (Ruling 1); (e) skip the re-read → concurrent-writer FAILS (Ruling 2); (f) treat the cap as rc 3 → capped-pass FAILS (Ruling 4). **Commit** — `coord-fold: fold verb, six-verb cli wiring, --verify-pointers (G9, G20, G23)`
 
 ---
 
@@ -1665,8 +1732,8 @@ def test_status_prints_open_rows_and_exits_0(capsys):
     assert _m(_st(s)) == 0 and "[P1] s" in capsys.readouterr().out
 
 
-def test_status_exits_3_on_either_unknown(capsys):
-    s = cp.empty("T"); s["unread_events"] = 12; assert _m(_st(s)) == 3 and "12 events unread" in capsys.readouterr().err
+def test_status_exits_3_only_on_an_unknown_and_reports_a_remainder_at_0(capsys):
+    s = cp.empty("T"); s["unread_events"] = 12; assert _m(_st(s)) == 0 and "12 events remain" in capsys.readouterr().out
     s = cp.empty("T"); s["unreadable_pointers"] = ["s9"]; assert _m(_st(s)) == 3 and "pointer for s9" in capsys.readouterr().err
 
 
@@ -1710,12 +1777,14 @@ The package, its four gate files and CI step; six verbs and exit codes; the two 
 
 ---
 
-## Items that need a ruling before implementation
+## Rulings (decided by coord-boss, directive 722f8f29, 2026-09-04T21:17Z) — reasoning attached
 
-1. **Lossless cursor.** Whether `get-records` orders by `recorded_at` with a stable tiebreak is an **upstream fact** nobody has. Proposal: measure it (two records with identical `recorded_at`, read back twice). If stable and monotone: `OVERLAP_SECONDS = 0`, drop `seen`, G4 back to five fields. Otherwise keep the ring; G4 stays at six.
-2. **Single writer / lost update.** Two hosts folding as the same agent race. **Honest scope (round 4):** the proposed re-read-then-refuse check is lost-update *detection*, not CAS — two writers can both pass the re-read and both write. True CAS needs a store primitive (conditional put on version), which is upstream. Proposal: ship detection (writer id + `written_at`; refuse if a newer foreign write appeared since load; the store's versioning makes the loser recoverable) and file the CAS primitive upstream as its own ask.
-3. **Retention / backlog.** Open question 3's snapshot event. Out of scope until ruled.
-4. **`max_events`.** The CLI returns the whole window in one call, so the cap bounds *apply* work and the unread count is exact; the read itself is bounded only by the window, which is item 3. Stated, not claimed.
+Each ruling is a Global Constraint above so verdicts can cite it; the reasoning is repeated here so the next reader knows *why*, or someone will helpfully add the refused things back.
+
+1. **Lossless cursor — YES (G26).** Cursor = `recorded_at` of the last successfully applied event; never `now`, never past a gap. Why: the cursor is the only durable claim of coverage; a cursor that can pass unapplied events makes `unread_events` the sole record of the gap, and a lost counter then silently claims coverage — the exact failure class this rebuild ends. Test: re-run from the stored cursor yields the same open set (`test_rerunning_from_the_stored_cursor_yields_the_same_open_set`). `seen` stays: the cursor is inclusive, so the boundary event is re-read and deduped; `OVERLAP_SECONDS` stays for client-stamped `recorded_at` skew. The upstream ordering question (stable tiebreak on `get-records`) is still unmeasured and still worth measuring; it no longer gates the design.
+2. **Detection, not CAS (G27).** The store has no compare-and-swap; the checkpoint carries `writer` + monotonic `generation`; a pass re-reads before writing and **refuses by name** if the generation moved: "*agent* is acting twice (two hosts or a duplicated cron)" — the double-acting condition the lease nonce already alarms on. Exit non-zero, visible, no silent retry, never overwrite. It refuses to *lose* the update; it cannot *prevent* the race, and the plan says so.
+3. **No compaction in v1; never delete events (G28).** Bound the work, not the history. Compaction is a second source of truth; it arrives only against a measured number, as a derivable, discardable snapshot provably equal to replay-from-empty.
+4. **`max_events` — bound required; hitting it is not an error and not degraded (G25).** Apply what was read, cursor to the last applied event, `unread_events: N`, exit 0, printed on stdout as a remainder. The only error: zero applied while events exist → `FoldRefused("no progress")`, non-zero.
 
 ## What this plan does not do (spec §10)
 
@@ -1724,11 +1793,12 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r6 (2026-09-04, coord-boss directive 722f8f29 — the four rulings, all decided; r5 accepted as filed):** G25–G28 added with reasoning; G4 grows to eight fields (`generation`, `writer`); `fold.run` takes `writer_id`, sets the cursor to the last applied event (never `now`), re-reads before writing and raises `FoldContended` by name, and treats a capped pass as rc 0 with the only error being zero progress; `FoldContended` joins the manifest; `status` exits 3 only on `unreadable_pointers`; `test_cli_fold` grows from 9 to 13 tests (cursor-never-now, rerun-idempotence, capped-pass-is-a-remainder, zero-progress, concurrent-writer-refused-by-name); mutation (e)'s target line tracks the new `fold.run` call. Task 0 re-run green before filing.
 - **r5 (2026-09-04, after round-4 CHANGES from both reviewers @ `21dc909c`):** (1) **Materialized the plan against itself** (Task 0) and fixed what actually failed — six failures, four more than predicted: a `/dev/stdout` constant the argv test did not allow; tuple-unpacked `RC_*` the definition scanner could not see; a `lambda` in `_render_open` (now `_row_sort_key`, a manifest name); `getattr` in `main` (now a shared parent parser, so `args.now`/`args.at` always exist); the wrapper rule flagging same-module one-liners (now scoped to cross-module delegation); and a `cli.py` node ceiling of 900 against a *measured* 1456 (now 1800, with the guarantee moved to G23). (2) **Launcher-alias bypass closed** (G22): launcher imports confined to `transport.py` per-module; launcher calls detected by resolving import *and assignment* aliases in the AST; forbidden subcommand tokens scanned in every module; mutation (b) in Task 1 is the exact `from subprocess import run as launch` form. (3) **Required call edges and owner-only operations** (G23): each handler must call its named owner operation and `cli.py` may never apply/empty/save a checkpoint, parse an event, or read events; mutation (e) in Task 3 inlines the fold into `cmd_fold`. (4) `cli.py` is a single tagged block; "add to cli.py" prose blocks are gone because a gate cannot see them. (5) G11 and Ruling 2 reworded to what is true: bounded per observed state, and detection rather than CAS. (6) **Found by Task 0 on r5 itself, before filing:** the materializer's fence regex spelled a literal fence marker and so truncated its own block (now built as `"`" * 3`); `_owed_row` returned one `None` for both *not owed* and *checkpoint unreadable*, so `claim/release/close` would have said *refused* on an UNKNOWN — it now returns `(row, load_state)` and the handlers exit 3 on `error`; `build_parser` exceeded the per-function budgets and is data-driven; the three budgets are set from the measured wiring (see G21).
 
 ## Self-review
 
 1. **Spec coverage.** §3.1→T4. §3.2→G2, T7/T9 never list. §3.3→T6/T7. §3.4→T1. §4→T7/T10/T11. §5→T12–T14 + runbook. §6→verb table, T9 (`release`). §7→T3 allowlist. §8→G9/G10, T11. §9→rulings + `release`. §1a→T1/T2/T3/T0.
 2. **Placeholder scan.** The golden key set in T5 names its source file and line. Tasks 12–14 reference r3's code by commit rather than repeating it; they are old-side and outside Task 0's gate, and the plan says so.
-3. **Type consistency.** `reader`/`writer` everywhere; `read_classified → (str|None, ReadState)` in T1/T5/T6/T7/T9; `write_event(cfg, payload, *, sender)` in T1/T7/T8; `checkpoint.path/empty/apply/load/save` identical in T6/T7; exit codes 0/2/3 in every verb; T3's manifest names exactly what T1/T4–T7 define, including `_row_sort_key`.
+3. **Type consistency.** `reader`/`writer` everywhere; `fold.run(..., now=, writer_id=, max_events=, verify_pointers=)` identical in T7's code, T7's tests and T3's mutation (e); `read_classified → (str|None, ReadState)` in T1/T5/T6/T7/T9; `write_event(cfg, payload, *, sender)` in T1/T7/T8; `checkpoint.path/empty/apply/load/save` identical in T6/T7; exit codes 0/2/3 in every verb; T3's manifest names exactly what T1/T4–T7 define, including `_row_sort_key`.
 4. **Self-gate.** Task 0 was run against this file before filing; the output is in the filing note.
