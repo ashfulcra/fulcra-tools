@@ -346,3 +346,58 @@ def test_a_close_with_no_consumer_label_carries_no_field_churn():
     closes = [c for c in plan.changes if c.kind is ChangeKind.CLOSE]
     assert len(closes) == 1
     assert dict(closes[0].fields) == {}
+
+
+def test_a_card_closed_BEFORE_the_rule_existed_still_loses_the_claim():
+    """A fix that only fires on the close transition leaves every card closed
+    earlier still claiming to block the person, and a saved view filtering on
+    the label still shows it. Measured live: 12 such cards. Convergence means
+    the rule is about the world's state, not about the moment it changed."""
+
+    policy = load_policy()
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "closed-yesterday")
+    record = ManagedRecord(
+        provider_id="LIN-3", source=source, capability="tasks",
+        fields={"labels": ("lane:blocked", "blocked-on-ash")},
+        closed=True,
+    )
+    ledger = BridgeLedger()
+    ledger.upsert(LedgerEntry(
+        source=source, capability="tasks", tracker_provider="linear",
+        tracker_record_id="LIN-3", policy_version=policy.version,
+        policy_hash=policy.hash, last_observed_at="2026-09-04T00:00:00+00:00",
+    ))
+
+    plan = build_plan(
+        Snapshot((), True, (), {"tasks": CapabilityState.COMPLETE},
+                 datetime(2026, 9, 4, tzinfo=timezone.utc)),
+        [record], ledger, policy,
+    )
+
+    assert [c.kind for c in plan.changes] == [ChangeKind.UPDATE]
+    assert plan.changes[0].fields["labels"] == ("lane:blocked",)
+
+
+def test_an_ordinary_closed_card_is_left_alone():
+    """Convergence must not mean touching every closed card forever."""
+
+    policy = load_policy()
+    source = SourceIdentity("coord-engine", "fulcra/tasks", "closed-and-clean")
+    record = ManagedRecord(
+        provider_id="LIN-4", source=source, capability="tasks",
+        fields={"labels": ("lane:blocked",)}, closed=True,
+    )
+    ledger = BridgeLedger()
+    ledger.upsert(LedgerEntry(
+        source=source, capability="tasks", tracker_provider="linear",
+        tracker_record_id="LIN-4", policy_version=policy.version,
+        policy_hash=policy.hash, last_observed_at="2026-09-04T00:00:00+00:00",
+    ))
+
+    plan = build_plan(
+        Snapshot((), True, (), {"tasks": CapabilityState.COMPLETE},
+                 datetime(2026, 9, 4, tzinfo=timezone.utc)),
+        [record], ledger, policy,
+    )
+
+    assert plan.changes == ()

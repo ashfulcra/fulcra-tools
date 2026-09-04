@@ -160,7 +160,22 @@ def build_plan(
         if key in items_by_source:
             continue
         existing = managed_by_source.get(key)
-        if existing is None or existing.closed or not policy.close_absent:
+        if existing is None or not policy.close_absent:
+            continue
+        if existing.closed:
+            # ALREADY closed, and the rule above only fires on the transition.
+            # A card closed BEFORE that rule existed still carries the consumer
+            # label, and a saved view filtering on the label still shows it --
+            # so a fix that only applies going forward leaves the operator's
+            # view wrong about everything already done. Converge instead:
+            # anything still claiming to block a person, that no longer does,
+            # gets the claim removed whatever state it is in.
+            stale = _close_fields(existing, policy)
+            if stale:
+                changes.append(Change(
+                    ChangeKind.UPDATE, entry.source, existing.provider_id,
+                    MappingProxyType(stale),
+                ))
             continue
         if not entry.observed:
             # The enumeration being complete says the FOLD saw everything; it
