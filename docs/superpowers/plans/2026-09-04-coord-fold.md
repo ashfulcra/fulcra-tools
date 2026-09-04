@@ -35,6 +35,12 @@ Copied from the spec and the directive. Every task's requirements include these.
 - **G15.** Never hardcode the channel. The new bus's `data_type` is resolved from `team/<team>/_coord/bus-v4/records.json` via `read_classified`. (standing wake rule)
 - **G16.** No secrets in any doc, note, or test fixture.
 - **G18.** *(added after codex-coder's CHANGES verdict on `coord-fold-plan-65761fbd`, 2026-09-04)* Every public symbol in the plan is **defined** in one named module and nowhere else; no planned module may be a shim; `cli.py` defines only command wiring; the package tree is scanned **recursively** and may contain only the planned modules; no module may load or generate code at runtime. Length, filenames, coupling and interface are each necessary and, the verdict showed, jointly insufficient — ownership is the property that actually prevents consolidation.
+- **G19.** *(r3, from both round-2 verdicts)* **Allowed import DAG, tested.** The only permitted intra-package edges are: `cli → {fold, channel, events, checkpoint, transport}`, `fold → {channel, checkpoint, events, transport}`, `channel → {transport}`, `checkpoint → {transport}`; `events`, `transport`, `__init__` import nothing from the package. **No owner module may import `cli`.** Any other edge fails a test.
+- **G20.** *(r3)* **Exact definition manifest for `cli.py` and a forwarding-wrapper ban.** `cli.py` may define exactly `{main, build_parser, RC_OK, RC_REFUSED, RC_UNKNOWN, cmd_emit, cmd_fold, cmd_claim, cmd_close, cmd_release, cmd_status, _now, _default_transports, _render_open, _report_unknowns, _emit_kind, _owed_row}` — no wildcard prefix. A manifest callable in any owner module whose body is a single `return <call>` into another module is a **forwarding wrapper** and fails. Both verdicts' counterexample — every private definition in `cli.py`, one-line wrappers in the owners — is mutation (e) in Task 2c.
+- **G21.** *(r3)* **Complexity ceilings, recursive:** per module ≤ 400 lines (G8), ≤ 16 KB, and ≤ 1500 AST nodes; `cli.py` ≤ 900 AST nodes. The numbers are choices; a length cap alone lets 399 dense lines carry the whole engine.
+- **G22.** *(r3, codex-reviewer P0)* **The Protocol is a capability boundary.** The fold receives a `CliPointerReader` whose public surface is exactly `read_classified`/`read_events` and whose private surface is exactly `{_stat, _download, _records}`, each hard-wiring its `fulcra-api` subcommand. There is **no generic argv runner** anywhere in the package, and the set of `fulcra-api` subcommand string literals in `transport.py` is exactly `{"file", "stat", "download", "get-records", "record", "upload"}` — a test fails on `"list"`. Writes live on a separate `CliPointerWriter`.
+- **G12 (amended r3).** Six verbs: `emit`, `fold`, `claim`, `release`, `close`, `status`. `release` asserts *not mine* (holder gives an obligation back); `close` asserts *done with evidence*. Both verdicts and open question 4 asked for it.
+
 - **G17.** Commits are authored as `114089064+ashfulcra@users.noreply.github.com` — the repo is PUBLIC. Never a work address.
 
 ---
@@ -52,12 +58,13 @@ packages/coord-fold/
     channel.py                        resolve data_type from bus-v4/records.json    (G15)
     checkpoint.py                     schema v1, load, save, apply_event            (G4)
     fold.py                           fold(): read forward, apply, persist          (§3.3)
-    cli.py                            emit / fold / claim / close / status          (G12)
+    cli.py                            emit / fold / claim / release / close / status (G12, six)
   tests/
     pointer_fake.py                   PointerFake — read_classified + read_events, NOTHING else
     test_structural_no_enumeration.py G7: no list_dir; import graph never reaches coord_engine
     test_file_size_ceiling.py         G8: every coord_fold/*.py ≤ 400 lines
     test_ownership_manifest.py        G18: symbol→module ownership, anti-shim, recursive artifact scan  (codex-coder CHANGES verdict)
+    test_dag_and_delegation.py        G19–G21: import DAG, forwarding-wrapper ban, complexity ceilings  (round-2 verdicts, both)
     test_no_degraded_vocabulary.py    G11: the string "degraded" is absent from coord_fold/
     test_events.py                    G1–G3
     test_checkpoint.py                G4
@@ -488,6 +495,7 @@ Two bounded unknowns replace the nine degraded families: `unread_events: N` and
             packages/coord-fold/tests/test_structural_no_enumeration.py \
             packages/coord-fold/tests/test_file_size_ceiling.py \
             packages/coord-fold/tests/test_ownership_manifest.py \
+            packages/coord-fold/tests/test_dag_and_delegation.py \
             packages/coord-fold/tests/test_no_degraded_vocabulary.py -q
 ```
 
@@ -587,9 +595,14 @@ OWNERSHIP: dict[str, dict[str, str]] = {
     "cli.py": {"main": "callable", "build_parser": "callable"},
     "__init__.py": {"__version__": "value"},
 }
-# cli.py may define ONLY command wiring: these exact names, cmd_* handlers, _private helpers.
-CLI_ALLOWED_EXACT = {"main", "build_parser", "RC_OK", "RC_REFUSED", "RC_UNKNOWN"}
-CLI_ALLOWED_PREFIXES = ("cmd_", "_")
+# cli.py may define EXACTLY these names. No wildcard prefix — both round-2 verdicts showed
+# that ("cmd_", "_") admits the whole implementation as private functions.
+CLI_EXACT_DEFINITIONS = {
+    "main", "build_parser", "RC_OK", "RC_REFUSED", "RC_UNKNOWN",
+    "cmd_emit", "cmd_fold", "cmd_claim", "cmd_close", "cmd_release", "cmd_status",
+    "_now", "_default_transports", "_render_open", "_report_unknowns", "_emit_kind", "_owed_row",
+}
+
 # Code must not arrive from data or be generated at import time.
 FORBIDDEN_CALLS = {"exec", "eval", "compile", "__import__"}
 FORBIDDEN_ATTR_CALLS = {("importlib", "import_module"), ("importlib", "reload"),
@@ -656,10 +669,13 @@ def test_no_planned_module_is_a_shim():
         assert own, f"{mod} defines nothing of its own — it is a shim"
 
 
-def test_cli_defines_ONLY_command_wiring():
-    for name in _definitions(_trees()["cli.py"]):
-        ok = name in CLI_ALLOWED_EXACT or name.startswith(CLI_ALLOWED_PREFIXES)
-        assert ok, f"cli.py defines {name!r} — implementation has migrated into the command file"
+def test_cli_defines_EXACTLY_the_allowed_names():
+    """r3: an exact set, not a prefix. Any extra definition in cli.py — public, private,
+    or cmd_-prefixed — is implementation migrating into the command file."""
+    defined = set(_definitions(_trees()["cli.py"]))
+    extra = defined - CLI_EXACT_DEFINITIONS
+    assert not extra, f"cli.py defines names outside its exact manifest: {sorted(extra)}"
+
 
 
 def test_the_package_tree_RECURSIVELY_contains_only_the_planned_modules():
@@ -748,6 +764,189 @@ Expected: each mutation fails exactly the named test(s); `git status` clean afte
 - [ ] **Step 6: Commit** — `coord-fold: ownership manifest green after Task 9; mutation-verified against all four bypass shapes`
 
 ---
+
+### Task 2c: Import DAG, forwarding-wrapper ban, complexity ceilings (G19–G21)
+
+**Why — attributed.** Round-2 verdicts from **both** codex-reviewer and codex-coder on
+`coord-fold-plan-r2-65761fbd` @ `849e05fb`: Task 2b's `CLI_ALLOWED_PREFIXES = ("cmd_", "_")`
+lets every private definition live in `cli.py`; one-line forwarding functions with the required
+public names in `events.py`, `fold.py`, `checkpoint.py` and the other owners are real
+`FunctionDef` nodes (kind check passes), count as own definitions (anti-shim passes), duplicate
+no manifest symbol, and pass the wiring check because underscore names were allowed. The same
+one-file implementation with ceremonial wrappers. Three properties close it: **direction** (an
+owner may never import `cli`, so a wrapper has nothing to forward to), **exactness** (`cli.py`'s
+definitions are an exact set), and **mass** (a complexity ceiling, not only a line count).
+
+**Files:**
+- Create: `packages/coord-fold/tests/test_dag_and_delegation.py`
+- Modify: `packages/coord-fold/tests/test_ownership_manifest.py` (Task 2b's allowlist → exact set; see the amended Task 2b code)
+- Modify: `.github/workflows/uv-workspace.yml` (add the new test file to the gates step)
+
+- [ ] **Step 1: Write the test**
+
+```python
+# packages/coord-fold/tests/test_dag_and_delegation.py
+"""G19–G21. Direction, exactness of delegation, and mass.
+
+WHY (both round-2 verdicts, 2026-09-04): with a private-name wildcard, cli.py can hold
+the entire implementation behind one-line wrappers in the owner modules, and every
+ownership/anti-shim/length gate stays green. Ownership without DIRECTION is a naming
+convention. These tests make direction and mass properties of the package.
+"""
+from __future__ import annotations
+
+import ast
+import pathlib
+
+import coord_fold
+
+PKG_DIR = pathlib.Path(coord_fold.__file__).parent
+
+# THE DAG. module -> set of package modules it may import. Absent key = may import none.
+ALLOWED_EDGES: dict[str, set[str]] = {
+    "cli.py": {"fold", "channel", "events", "checkpoint", "transport"},
+    "fold.py": {"channel", "checkpoint", "events", "transport"},
+    "channel.py": {"transport"},
+    "checkpoint.py": {"transport"},
+    "events.py": set(),
+    "transport.py": set(),
+    "__init__.py": set(),
+}
+OWNER_MODULES = {"events.py", "transport.py", "channel.py", "checkpoint.py", "fold.py"}
+STDLIB_ALLOWED = {"__future__", "argparse", "ast", "datetime", "json", "os", "subprocess",
+                  "sys", "tempfile", "typing"}
+THIRD_PARTY_ALLOWED = {"fulcra_common"}
+MAX_BYTES = 16 * 1024
+MAX_AST_NODES = 1500
+MAX_AST_NODES_CLI = 900
+
+
+def _tree(name: str) -> ast.Module:
+    return ast.parse((PKG_DIR / name).read_text(), filename=name)
+
+
+def _package_imports(tree: ast.Module) -> set[str]:
+    """Names of sibling modules imported via `from . import x` / `from .x import y`."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 1:
+            if node.module:
+                out.add(node.module.split(".")[0])
+            else:
+                out.update(a.name for a in node.names)
+    return out
+
+
+def _absolute_imports(tree: ast.Module) -> set[str]:
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            out.add(node.module.split(".")[0])
+    return out
+
+
+def test_every_intra_package_import_is_an_allowed_edge():
+    for mod, allowed in ALLOWED_EDGES.items():
+        got = _package_imports(_tree(mod))
+        bad = got - allowed
+        assert not bad, f"{mod} imports {sorted(bad)} — not an allowed edge of the DAG"
+
+
+def test_no_owner_module_imports_cli():
+    """The direction rule that defeats forwarding: a wrapper has nothing to forward to."""
+    for mod in OWNER_MODULES:
+        assert "cli" not in _package_imports(_tree(mod)), f"{mod} imports cli"
+
+
+def test_absolute_imports_are_stdlib_or_fulcra_common_only():
+    """Also the composition-root exclusion proof for the inbox reconciler (spec §7): it
+    cannot be imported here because nothing outside this allowlist can be."""
+    for p in PKG_DIR.glob("*.py"):
+        got = _absolute_imports(ast.parse(p.read_text()))
+        bad = got - STDLIB_ALLOWED - THIRD_PARTY_ALLOWED
+        assert not bad, f"{p.name} imports {sorted(bad)} — outside the allowlist"
+
+
+def _is_forwarding_wrapper(fn: ast.FunctionDef) -> bool:
+    """Body is exactly one `return <call>` whose callee is an attribute of an imported
+    module (`mod.f(...)`) or a bare name that is not defined in this module."""
+    body = [n for n in fn.body if not isinstance(n, ast.Expr) or not isinstance(n.value, ast.Constant)]
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return False
+    val = body[0].value
+    return isinstance(val, ast.Call) and isinstance(val.func, (ast.Attribute, ast.Name))
+
+
+def test_no_manifest_callable_is_a_forwarding_wrapper():
+    from test_ownership_manifest import OWNERSHIP
+    for mod, symbols in OWNERSHIP.items():
+        tree = _tree(mod)
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and symbols.get(node.name) == "callable":
+                assert not _is_forwarding_wrapper(node), (
+                    f"{mod}.{node.name} is a one-line forwarding wrapper — the implementation lives elsewhere")
+
+
+def test_complexity_ceilings_recursive():
+    for p in PKG_DIR.rglob("*.py"):
+        if "__pycache__" in p.parts:
+            continue
+        size = p.stat().st_size
+        nodes = sum(1 for _ in ast.walk(ast.parse(p.read_text())))
+        cap = MAX_AST_NODES_CLI if p.name == "cli.py" else MAX_AST_NODES
+        assert size <= MAX_BYTES, f"{p.name} is {size} bytes (> {MAX_BYTES})"
+        assert nodes <= cap, f"{p.name} has {nodes} AST nodes (> {cap}) — mass has concentrated"
+```
+
+Add the file to the CI gates step in `uv-workspace.yml` next to `test_ownership_manifest.py`.
+
+- [ ] **Step 2: Run — expect failures naming missing modules until Tasks 3–9 land; the DAG,
+  wrapper and ceiling assertions are proven by the mutation step after Task 9.**
+
+- [ ] **Step 3 (after Task 9): Run — expect 5 passed.**
+
+- [ ] **Step 4 (after Task 9): MUTATION-VERIFY — the verdicts' counterexample, plus one per property**
+
+```bash
+# (e) THE VERDICTS' COUNTEREXAMPLE: implementation in cli.py, forwarding wrapper in the owner.
+python - <<'PY'
+c="coord_fold/cli.py"; s=open(c).read()
+s += "\n\ndef _build_payload_impl(**kw):\n    return dict(kw)\n"
+open(c,"w").write(s)
+e="coord_fold/events.py"; t=open(e).read()
+t=t.replace("def build_payload(", "def _real_build_payload(",1)
+t += "\nfrom . import cli as _cli\n\ndef build_payload(**kw):\n    return _cli._build_payload_impl(**kw)\n"
+open(e,"w").write(t)
+PY
+python -m pytest tests/test_dag_and_delegation.py tests/test_ownership_manifest.py -q
+# expect >=3 FAIL: events.py imports cli (DAG + direction), build_payload is a forwarding wrapper,
+# cli.py defines _build_payload_impl outside its exact set
+git checkout coord_fold/cli.py coord_fold/events.py
+
+# (f) MASS: pad cli.py with dense one-line statements under the 400-line ceiling.
+python - <<'PY'
+c="coord_fold/cli.py"; s=open(c).read()
+s += "\n" + "; ".join(f"_p{i}=[{i}]*{i}" for i in range(1, 220)) + "\n"
+open(c,"w").write(s)
+PY
+python -m pytest tests/test_dag_and_delegation.py -q          # expect 1 FAIL: cli.py AST nodes > 900
+git checkout coord_fold/cli.py
+
+# (g) DIRECTION only: an otherwise-innocent `from . import cli` in checkpoint.py.
+python - <<'PY'
+p="coord_fold/checkpoint.py"; s=open(p).read()
+open(p,"w").write(s.replace("import json", "import json\nfrom . import cli  # noqa",1))
+PY
+python -m pytest tests/test_dag_and_delegation.py -q          # expect 2 FAIL: DAG edge + owner-imports-cli
+git checkout coord_fold/checkpoint.py
+```
+
+- [ ] **Step 5: Commit** — `coord-fold: import DAG, forwarding-wrapper ban, complexity ceilings (G19–G21) — mutation-verified against the round-2 counterexample`
+
+---
+
 
 
 ### Task 3: Event schema — build and parse payload v1
@@ -1053,6 +1252,134 @@ If the old transport's keys differ from the set above, change **both** `write_ev
 - [ ] **Step 7: Commit** — `coord-fold: channel resolution from bus-v4/records.json + write_event with golden-compared keys (G15)`
 
 ---
+
+#### Task 4 amendment (r3, G22): the Protocol becomes a capability boundary
+
+codex-reviewer's second P0: `CliPointerTransport._run(*args)` is a generic argv runner, so any
+method — or any future edit — can invoke `fulcra-api file list` through it; the two-method
+Protocol constrains the *interface* while the *capability* to enumerate sits one private call
+away. Fix: **split reader from writer, and seal each subcommand into its own method.**
+
+Replace the `CliPointerTransport` class in `transport.py` with:
+
+```python
+class _Cli:
+    """Shared launcher. It takes NO subcommand from callers: each public method below
+    hard-wires its own. There is deliberately no method that accepts free argv."""
+
+    def __init__(self, cli: list[str], timeout: float = 60.0) -> None:
+        self._cli = list(cli)
+        self._timeout = timeout
+
+    def _stat(self, path: str) -> tuple[int, str, str]:
+        return self.__exec("file", "stat", path)
+
+    def _download(self, path: str) -> tuple[int, str, str]:
+        return self.__exec("file", "download", path, "/dev/stdout")
+
+    def _records(self, channel: str, since: str) -> tuple[int, str, str]:
+        return self.__exec("get-records", channel, since, "2999-01-01T00:00:00Z")
+
+    def _record(self, doc: str) -> tuple[int, str, str]:
+        return self.__exec("record", stdin=doc)
+
+    def _upload(self, local: str, remote: str) -> tuple[int, str, str]:
+        return self.__exec("file", "upload", local, remote)
+
+    def __exec(self, *argv: str, stdin: str | None = None) -> tuple[int, str, str]:
+        # Name-mangled: not reachable as `t._run` / `t._exec` from outside the class.
+        try:
+            p = subprocess.run([*self._cli, *argv], input=stdin, capture_output=True,
+                               text=True, timeout=self._timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 127, "", str(exc)
+        return p.returncode, p.stdout, p.stderr
+
+
+class CliPointerReader(_Cli):
+    """What a fold is handed. Exactly read_classified and read_events. Nothing else."""
+
+    def read_classified(self, path: str) -> tuple[str | None, ReadState]:
+        rc, _out, err = self._stat(path)
+        if rc != 0:
+            return (None, "absent") if "File not found" in err else (None, "error")
+        rc, out, _err = self._download(path)
+        return (out, "ok") if rc == 0 else (None, "error")
+
+    def read_events(self, channel: str, since: str) -> Iterator[dict]:
+        rc, out, _err = self._records(channel, since)
+        if rc != 0:
+            raise TransportUnavailable(f"get-records rc={rc}")
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise TransportUnavailable(f"malformed record line: {exc}") from exc
+
+
+class CliPointerWriter(_Cli):
+    """What emit/claim/close/release and the checkpoint save are handed."""
+
+    def write_event(self, channel_cfg: dict[str, str], payload: dict, *, sender: str) -> bool:
+        doc = {"data_type": channel_cfg["data_type"], "api_version": channel_cfg["api_version"],
+               "note": json.dumps(payload, separators=(",", ":")), "source": sender,
+               "recorded_at": payload["at"]}
+        rc, _o, _e = self._record(json.dumps(doc))
+        return rc == 0
+
+    def save_doc(self, path: str, text: str) -> bool:
+        import os, tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write(text); tmp = f.name
+        try:
+            rc, _o, _e = self._upload(tmp, path)
+            return rc == 0
+        finally:
+            os.unlink(tmp)
+```
+
+`fold.run` is typed to `PointerTransport` and receives a **reader**; `cli._default_transports()`
+returns `(CliPointerReader(...), CliPointerWriter(...))`; `PointerFake` in tests gains the same
+split (`PointerFakeReader` / `PointerFakeWriter` over one shared store). Add to Task 1's
+structural test:
+
+```python
+def test_the_reader_has_exactly_the_protocol_methods_and_sealed_privates():
+    from coord_fold.transport import CliPointerReader, CliPointerWriter
+    pub = {n for n in dir(CliPointerReader) if not n.startswith("_")}
+    assert pub == {"read_classified", "read_events"}, pub
+    priv = {n for n in vars(CliPointerReader) | vars(CliPointerReader.__mro__[1])
+            if n.startswith("_") and not n.startswith("__")}
+    assert priv == {"_stat", "_download", "_records", "_record", "_upload", "_cli", "_timeout"}, priv
+    assert not hasattr(CliPointerReader, "write_event") and not hasattr(CliPointerReader, "save_doc")
+    assert not hasattr(CliPointerWriter, "read_events")
+
+
+def test_transport_subcommand_literals_are_a_fixed_set_with_no_list():
+    import ast
+    src = (PKG_DIR / "transport.py").read_text()
+    tree = ast.parse(src)
+    literals = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    subcmds = literals & {"file", "stat", "download", "get-records", "record", "upload", "list", "ls", "glob", "search"}
+    assert subcmds == {"file", "stat", "download", "get-records", "record", "upload"}, subcmds
+
+
+def test_no_method_accepts_free_argv():
+    import ast, inspect
+    from coord_fold import transport
+    tree = ast.parse(inspect.getsource(transport))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.args.vararg and node.name != "__exec":
+            raise AssertionError(f"{node.name} accepts *args — a free argv runner")
+```
+
+Mutation for this amendment (run after Task 4): add `def _run(self, *args): return self.__exec(*args)` to `_Cli` → `test_no_method_accepts_free_argv` FAILS; add the literal `"list"` anywhere in `transport.py` → the literal-set test FAILS. Restore both.
+
+---
+
 
 ### Task 5: Checkpoint schema v1 — load, save, apply
 
@@ -1441,7 +1768,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _default_transport() -> CliPointerTransport:
+def _default_transports() -> CliPointerTransport:  # r3: returns (reader, writer) per Task 4 amendment
     from fulcra_common.client import find_fulcra_cli
     cli = find_fulcra_cli()
     if not cli:
@@ -1498,7 +1825,7 @@ def main(argv: list[str] | None = None, *, transport=None) -> int:
     args = build_parser().parse_args(argv)
     if getattr(args, "now", None) is None:
         args.now = _now()
-    t = transport if transport is not None else _default_transport()
+    t = transport if transport is not None else _default_transports()
     return int(args.func(args, t))
 
 
@@ -1533,6 +1860,59 @@ git checkout coord_fold/fold.py
 - [ ] **Step 7: Commit** — `coord-fold: fold verb — read forward, apply, persist; CLI-driven tests on the stored checkpoint (G9)`
 
 ---
+
+### Task 6b: `fold --verify-pointers` — populate `unreadable_pointers` (r3, codex-reviewer P1)
+
+`unreadable_pointers` was declared in G4 and never written. This makes it real, bounded by the
+number of OPEN rows (never the corpus), and opt-in so the default fold stays O(events).
+
+**Files:** modify `coord_fold/fold.py`, `coord_fold/cli.py`; add tests to `tests/test_cli_fold.py`.
+
+- [ ] **Step 1: Failing tests**
+
+```python
+def test_verify_pointers_records_an_ABSENT_pointer_by_slug_and_exits_3():
+    t = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1", ptr="team/r/task/gone.md")])
+    rc = main(["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z", "--verify-pointers"], transport=t)
+    assert rc == 3 and _ckpt(t)["unreadable_pointers"] == ["a"]
+
+
+def test_verify_pointers_leaves_a_readable_pointer_alone():
+    t = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")])
+    t.docs["team/r/task/a.md"] = "---\ntype: Task\n---\n"
+    rc = main(["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z", "--verify-pointers"], transport=t)
+    assert rc == 0 and _ckpt(t)["unreadable_pointers"] == []
+
+
+def test_without_the_flag_no_pointer_is_read():
+    t = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")])
+    reads = []
+    orig = t.read_classified
+    t.read_classified = lambda p: (reads.append(p), orig(p))[1]
+    main(["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z"], transport=t)
+    assert not any("/task/" in p for p in reads), "default fold read a pointer"
+```
+
+- [ ] **Step 2: Implement** — in `fold.run` add `verify_pointers: bool = False`; after applying
+  events and before save:
+
+```python
+    state["unreadable_pointers"] = []
+    if verify_pointers:
+        for slug, row in state["open"].items():          # bounded by OPEN rows, never corpus
+            _body, st = transport.read_classified(row["ptr"])
+            if st != "ok":
+                state["unreadable_pointers"].append(slug)
+```
+
+  and `rc = 3 if (unread or state["unreadable_pointers"]) else 0`. Add `--verify-pointers` to
+  the `fold` parser and pass it through.
+
+- [ ] **Step 3: Run — expect 3 passed. Mutation:** make `verify_pointers` unconditionally `False`
+  inside `run` → the first test FAILS. Restore. **Commit.**
+
+---
+
 
 ### Task 7: `emit`
 
@@ -1769,6 +2149,34 @@ parser additions:
 - [ ] **Step 6: Commit** — `coord-fold: claim + close verbs; close reads its evidence and refuses absent, reports unreadable`
 
 ---
+
+### Task 8b: `release` — the sixth verb (r3, G12 amended)
+
+`release` asserts *not mine* and hands the obligation back to its `from`; it is not `close`,
+which asserts *done*. The checkpoint already applies `release` by removing the row (Task 5).
+
+- [ ] **Step 1: Failing test** (append to `tests/test_cli_claim_close.py`)
+
+```python
+def test_release_emits_a_release_event_and_the_next_fold_drops_the_row():
+    t = _folded()
+    assert main(["release", "r", "s", "--agent", "me", "--at", T1], transport=t) == 0
+    assert t.written[-1]["payload"]["kind"] == "release"
+    main(["fold", "r", "--agent", "me", "--now", T2], transport=t)
+    assert json.loads(t.saved[cp.path("r", "me")])["open"] == {}
+
+
+def test_release_of_a_slug_i_do_not_owe_is_refused():
+    t = _folded()
+    assert main(["release", "r", "not-mine", "--agent", "me"], transport=t) == 2
+```
+
+- [ ] **Step 2: Implement** — `cmd_release` mirrors `cmd_claim` with `kind="release"` and
+  `to=row["from"]`; register `release` beside `claim`. **Run — 2 passed. Mutation:** change
+  `kind="release"` to `kind="note"` → first test FAILS. Restore. **Commit.**
+
+---
+
 
 ### Task 9: `status`
 
@@ -2255,6 +2663,31 @@ first host (coord-boss's). History stays at the old prefix, read-only, forever.
 
 ---
 
+#### Task 13 amendment (r3, codex-reviewer P1): the comparator compares tuples and the gate needs time and transition coverage
+
+Replace the agreement check with a tuple comparison and add coverage requirements:
+
+```python
+    def _rows(open_map):
+        return {s: (r.get("pri"), r.get("ptr")) for s, r in open_map.items()}
+    old_rows, new_rows = _rows(state.get("open", {})), _rows(json.loads(raw).get("open", {}))
+    if old_rows == new_rows:
+        line, rc = f"{ts} AGREE n={len(old_rows)}", 0
+    else:
+        diff = sorted(s for s in set(old_rows) | set(new_rows) if old_rows.get(s) != new_rows.get(s))
+        line, rc = f"{ts} DIVERGE slugs={diff}", 1
+```
+
+And the cutover check in the runbook becomes a verb, `obligations cutover-ready <team> --agent <a>`
+(old side), which reads the comparator log and exits 0 only if **all** hold: the trailing run of
+`AGREE` lines is ≥ N; the first and last of them are ≥ 24h apart by their timestamps; and within
+that window the new checkpoint's `open` set has both **grown** and **shrunk** at least once
+(an open and a close were observed end-to-end). Tests: 24 AGREE lines 1 minute apart → not
+ready; 24 lines 25h apart with no transition → not ready; with a grow and a shrink → ready.
+
+---
+
+
 ### Task 14: AGENTS.md (shape-of-what-shipped is now Task 2b)
 
 > **Amended after codex-coder's CHANGES verdict.** The filename-only shape test originally
@@ -2289,6 +2722,30 @@ Push on these specifically. Each has a recommendation so the review is of a posi
 
 ---
 
+## Items that need a ruling before implementation (r3, from codex-reviewer's round-2 P0s)
+
+These are event-correctness contracts, not test gaps. The plan **proposes**; it does not decide.
+
+1. **Lossless cursor.** `read_events(channel, since)` is a timestamp filter over `get-records`
+   output. Whether that endpoint orders by `recorded_at` with a stable tiebreak, and whether a
+   record can appear with a `recorded_at` earlier than one already returned, is an **upstream
+   fact** nobody in this thread has. Proposal: measure it (write two records with identical
+   `recorded_at`, read back twice, compare order); if ordering is stable and monotone, set
+   `OVERLAP_SECONDS = 0` and drop `_seen`; if not, keep the overlap and the id ring **and amend
+   G4 to six fields with this as the stated reason**. Until measured, the plan keeps the ring.
+2. **Single writer / lost update.** One checkpoint per agent, overwritten on save. Two hosts
+   folding as the same agent race. Proposal: the checkpoint carries `writer` (host id) and
+   `written_at`; `save` first re-reads and **refuses** if `written_at` is newer than the value
+   loaded at the start of this fold and `writer` differs — the loser exits 3 and re-folds. The
+   store versions every upload (measured 2026-09-02), so the lost version is recoverable.
+3. **Retention / backlog.** A fold away for a month reads a month; a team channel grows with
+   downtime. Proposal is open question 3's snapshot event; not in scope until ruled.
+4. **`max_events` semantics.** The CLI returns the whole window in one call, so the read cost
+   is one invocation regardless; the cap bounds *apply* work and the unread count is exact
+   because the read already happened. The unbounded part is the window size itself — which is
+   item 3. The plan states this rather than claiming the cap bounds the read.
+
+
 ## What this plan does not do (mirrors spec §10)
 
 - Does not fix the pre-fence publication overwrite. Orthogonal: a stream fold does not read the aggregate.
@@ -2304,8 +2761,19 @@ Push on these specifically. Each has a recommendation so the review is of a posi
   shape test subsumed. Both bypasses in the verdict now have a test that goes red; mutation (a)
   in Task 2b reproduces the verdict's own counterexample.
 
+- **r3 (2026-09-04, after round-2 CHANGES from BOTH codex-reviewer and codex-coder on
+  `coord-fold-plan-r2-65761fbd` @ `849e05fb`):** G19–G22 and G12 amended; Task 2c (import DAG,
+  no owner imports `cli`, stdlib/fulcra_common-only absolute imports as the §7 composition-root
+  proof, forwarding-wrapper detector, byte + AST ceilings); Task 2b's `cli.py` allowlist made an
+  exact set; Task 4 amended (reader/writer split, sealed per-subcommand methods, no free-argv
+  runner, subcommand-literal set with no `list`); Task 6b (`--verify-pointers` populates
+  `unreadable_pointers`); Task 8b (`release`); Task 13 amended (tuple comparison; cutover needs
+  ≥24h span and observed open+close transitions). Four event-correctness items moved to a
+  "needs a ruling" section with proposals rather than resolved silently. Mutation (e) in Task 2c
+  is the verdicts' own counterexample.
+
 ## Self-review (writing-plans checklist)
 
-1. **Spec coverage.** §3.1 → Task 3. §3.2 (files addressed only by ptr) → G2 + Tasks 6/8 never list. §3.3 → Tasks 5/6. §3.4 → Tasks 1/4. §4 → Tasks 6/9/10. §5.1 steps 1–5 → Tasks 11/12/13 + runbook. §5.2 → runbook step 6. §5.3 → runbook step 5. §6 → verb table. §7 (inbox reconciler) → **not in this plan**; it is a post-cutover reconciler and is named as follow-up work, not silently dropped. §8 → G9/G10 in every task, G11 Task 10. §9 → open questions. §1a.1–3 → Tasks 1/2/2b (Task 14 now AGENTS.md only).
+1. **Spec coverage.** §3.1 → Task 3. §3.2 (files addressed only by ptr) → G2 + Tasks 6/8 never list. §3.3 → Tasks 5/6. §3.4 → Tasks 1/4. §4 → Tasks 6/9/10. §5.1 steps 1–5 → Tasks 11/12/13 + runbook. §5.2 → runbook step 6. §5.3 → runbook step 5. §6 → verb table. §7 (inbox reconciler) → **not in this plan**; it is a post-cutover reconciler and is named as follow-up work, not silently dropped. §8 → G9/G10 in every task, G11 Task 10. §9 → open questions. §1a.1–3 → Tasks 1/2/2b/2c (Task 14 now AGENTS.md only). §6 → verb table + Task 8b (six verbs).
 2. **Placeholder scan.** One deliberate non-placeholder that reads like one: Task 4 Step 4's stdin key set says "EDIT THIS SET" — it is a golden comparison against a named file and line, with the instruction to copy rather than guess. It is a checkable step, not a TODO.
 3. **Type consistency.** `read_classified` returns `(str|None, "ok"|"absent"|"error")` in Tasks 1/4/5/8 alike. `write_event(cfg, payload, *, sender)` in Tasks 4/7/8. `cp.path/empty/load/save/apply` names match across 5/6/8/9/11/13. Exit codes 0/2/3 are the same three in every verb.
