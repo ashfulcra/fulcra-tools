@@ -212,6 +212,7 @@ def test_public_read_will_not_claim_absent_for_a_transport_that_cannot_classify(
     wrapped._team = TEAM
     wrapped._prefix_sections = {}
     wrapped._records = {}
+    wrapped._sealed = set()  # nothing sealed: the branch under test is below it
 
     value, status = wrapped.read_classified("team/fulcra/roles/anything/role.md")
 
@@ -308,3 +309,80 @@ def test_escalate_still_mints_when_the_day_row_is_genuinely_absent():
         "the day-row read is a genuine 'absent'"
     )
     assert t.records, "the minted vacancy must still be published to the bus"
+
+
+# ---------------------------------------------------------------------------
+# The sealed path — where I was wrong and collect-maintainer was right.
+#
+# Re-reviewing PR 694 on 2026-09-04 it answered a question I had asked it
+# directly: whether sealing a prefix is safe because "the record set is complete
+# in memory, so absence is genuinely known". It is not. Completeness was
+# ASSUMED, never checked. `_sealed_prefix` matched on the path string alone
+# against a hardcoded dict, while `__init__` skipped a section silently whenever
+# its records were missing or malformed — so a section that failed to load left
+# its prefix sealed over zero records, and every read under it answered a
+# confident "absent" for a file that exists.
+#
+# That is the same conflation this whole file exists to kill, reached through
+# the sealed path instead of the transport, and it lands on a write-caller:
+# peer_parks sees status != "error" with existing is None and stubs over a live
+# role doc. Incomplete sections are live on this fleet — reconcile on
+# Ashs-MBP-Work reports "publication refused: incomplete required section(s)"
+# every pass.
+# ---------------------------------------------------------------------------
+
+
+def _authority(sections):
+    from coord_engine.public_read import OutcomeState, PublicReadResult
+
+    return PublicReadResult(
+        state=OutcomeState.DATA, coverage=(), sections=sections,
+        coverage_horizon=None, generation=None, watermark=None,
+    )
+
+
+def _sealed_over(sections):
+    from coord_engine.public_read import SealedGenerationTransport
+
+    backing = FakeTransport()
+    backing.put(f"team/{TEAM}/roles/live.md", "REAL LIVE CONTENT")
+    return SealedGenerationTransport(backing, TEAM, _authority(sections))
+
+
+def test_a_section_that_loaded_still_answers_from_the_seal():
+    """Positive control: sealing must keep working when the section is there."""
+    t = _sealed_over({"roles": {"records": [
+        {"path": f"team/{TEAM}/roles/live.md", "content": "SEALED CONTENT"},
+    ]}})
+
+    assert t.read_classified(f"team/{TEAM}/roles/live.md") == ("SEALED CONTENT", "ok")
+
+
+def test_a_section_that_did_not_load_must_not_seal_an_empty_prefix():
+    """collect-maintainer's repro, as a test.
+
+    An authority whose roles section is absent used to answer (None, 'absent')
+    for a role doc sitting in the store — handing a write-caller the one status
+    that means safe to create.
+    """
+    t = _sealed_over({})  # no roles section at all
+
+    value, status = t.read_classified(f"team/{TEAM}/roles/live.md")
+
+    assert (value, status) == ("REAL LIVE CONTENT", "ok"), (
+        f"sealed an unloaded section and answered {(value, status)!r} — an "
+        "unsealed prefix reading the real store is correct-but-slower; a sealed "
+        "empty one is confidently wrong"
+    )
+
+
+def test_a_malformed_section_must_not_seal_an_empty_prefix_either():
+    """The other way __init__ skips silently: records present but not a list."""
+    t = _sealed_over({"roles": {"records": "not-a-list"}})
+
+    value, status = t.read_classified(f"team/{TEAM}/roles/live.md")
+
+    assert (value, status) == ("REAL LIVE CONTENT", "ok"), (
+        f"answered {(value, status)!r} for a malformed section — malformed is "
+        "not empty, and neither is absent"
+    )
