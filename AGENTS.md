@@ -1401,14 +1401,16 @@ away — the failure mode this whole section exists to stop.
 ### Refreshing the Fulcra token: write only the four accepted keys
 
 `~/.config/fulcra/credentials.json` is loaded strictly by the installed
-`fulcra-api` CLI (0.1.35): `FulcraCredentials` accepts exactly
-`access_token`, `access_token_expiration`, `refresh_token`,
-`refresh_token_expiration`. The raw Auth0 refresh-grant response also carries
-`id_token`/`id_token_expiration`; saving that response verbatim makes **every**
-`fulcra-api` invocation crash with `TypeError ... unexpected keyword argument
-'id_token'` at startup (earned 2026-08-30, after the 08-30 manual token
-refresh). When refreshing by hand, filter the response to those four keys
-before writing the file. `coord-engine` keeps working through such a break
+`fulcra-api` CLI: `FulcraCredentials` is a dataclass whose field set is a
+**CLOSED set of exactly six** — `access_token`, `access_token_expiration`,
+`refresh_token`, `refresh_token_expiration`, `id_token`, `id_token_expiration`.
+Four of them are enough; all six are fine; a **seventh of any name raises**
+`TypeError: FulcraCredentials.__init__() got an unexpected keyword argument`
+at startup, so every `fulcra-api` invocation crashes. The raw Auth0
+refresh-grant response carries `scope`, `token_type` and `expires_in` on top of
+the tokens, so **saving it verbatim still breaks the client** — filter to the
+six named fields before writing the file. Measured directly 2026-09-04:
+four keys OK, six keys OK, a seventh (`scope`) TypeError. `coord-engine` keeps working through such a break
 only if a token reaches it another way — do not read its survival as proof
 the credentials file is fine.
 
@@ -1460,8 +1462,12 @@ The working recipe, end to end:
 - go through the agent proxy (`HTTPS_PROXY`) with the CA bundle at
   `/root/.ccr/ca-bundle.crt`. Never disable verification.
 - the response **still contains `id_token`** — observed on every refresh so far.
-  Filtering it out is *tidy, not required*: **the "exactly four keys" rule is
-  FALSE and is withdrawn.** `auth login --device-code` writes the Auth0 response
+  **The "exactly four keys" rule is FALSE and stays withdrawn — but do not read
+  that as "extra keys are harmless".** That was my over-correction, caught by
+  coord-opus-worker on 2026-09-03 and reproduced here: the client's tolerance is
+  the CLOSED six-field set above, so `id_token`/`id_token_expiration` pass
+  *because the dataclass models them*, and any other key still crashes every
+  call. Filter to the six. `auth login --device-code` writes the Auth0 response
   verbatim, producing six keys including `id_token`/`id_token_expiration`, and
   authenticated calls run clean against that file — measured by
   coord-linear-agent on 2026-09-03 (`catalog` plus two `file list` calls, all
