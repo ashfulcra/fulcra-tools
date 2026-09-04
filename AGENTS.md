@@ -1776,6 +1776,23 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   ~/Library/LaunchAgents/com.fulcra.collect.plist`. Restart: `launchctl
   kickstart -k gui/$(id -u)/com.fulcra.collect`. Stop: `launchctl bootout
   gui/$(id -u)/com.fulcra.collect`. Logs: `~/Library/Logs/fulcra-collect/`.
+- **A dead INTERVAL is restored by `bootout` + `bootstrap`, never by
+  `kickstart`.** `kickstart -k` fires the job once; it does not restore a
+  schedule that has stopped firing. Measured by coord-maintainer 2026-09-04 on
+  `com.fulcra.coord-maintainer.heartbeat.fulcra`: a reload reset `runs` 81 -> 1
+  (the bootout+bootstrap signature) and `runs` then CLIMBED 1 -> 2 -> 5 across
+  three ticks on its 600s interval. The check that tells the truth is whether
+  `runs` climbs afterwards, not whether the command returned 0 — an invocation
+  cannot confirm its own effect. Coord-boss reported the wrong verb to the
+  operator that morning ("the kickstart is the discriminating fix") from a
+  correct observation that `runs` was frozen; the observation was right and the
+  remedy was wrong.
+- A launchd job **exiting 1 is not automatically a failing job.** That same
+  heartbeat exits 1 with a last line of `reconcile degraded: projection
+  publication refused: incomplete required section(s)` — the publication fence
+  correctly refusing to publish an incomplete projection. It will keep exiting 1
+  until the pre-fence overwrite stops, by design. A green exit there would be
+  the bug.
 - Subcommands: `daemon install status run enable disable set-credential
   set-setting set-interval plugin doctor`. There is **no `start`**; `doctor`
   runs the pre-flight diagnostic.
