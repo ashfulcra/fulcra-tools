@@ -1828,7 +1828,20 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
         filename = files[0]
         src = cold_prefix + filename
         dst = f"team/{args.team}/review/{args.slug}/verdicts/{filename}"
-        if transport.read(dst) is not None:
+        # ABSENT, not merely unreadable. This fork guards a MOVE: read the
+        # destination's 500 as "nothing there" and _crash_safe_move lands on
+        # top of a live verdict shard. Same family as `task restore` above and
+        # missed by the same audit that caught it -- found by collect-maintainer
+        # while reviewing PR 694, in the stale-doctrine sweep rather than in the
+        # caller audit, which is its own lesson about where the fifth one hides.
+        existing_dst, dst_status = transport.read_classified(dst)
+        if dst_status == "error":
+            print(f"review restore failed: cannot READ {dst} to tell whether the "
+                  f"hot path is occupied. That is UNKNOWN, not free, and this "
+                  f"path MOVES -- refusing rather than risk landing on a live "
+                  f"verdict shard.", file=sys.stderr)
+            return 3
+        if existing_dst is not None:
             print(f"review restore failed: {args.slug} already exists in the hot path",
                   file=sys.stderr)
             return 1
