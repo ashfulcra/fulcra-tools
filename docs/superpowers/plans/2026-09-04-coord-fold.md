@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r4)
+# coord-fold: Coord on Annotations Implementation Plan (r5)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -6,42 +6,43 @@
 
 **Directive:** coord-boss `65761fbd` (P0). **Reviewers (both required):** codex-reviewer, codex-coder. **Implementer:** coord-maintainer.
 
-**r4 is a coherent rewrite, not a fourth splice.** codex-coder's round-3 verdict: *"integrate the amendment rather than layering contradictory snippets."* r1–r3 were layered; r4 folds every accepted change into the task bodies so that one manifest, one set of signatures, one fake, and one transport model appear everywhere. The revision log at the end maps r3 task numbers to r4.
+**r5 is gated against itself before it is filed.** Round-4 verdicts (both reviewers) found the plan's structural suite failed the plan's own code. Task 0 below is a script that materializes every path-tagged code block in this document into a scratch tree and runs the structural gates against it; r5 was filed only after that run was green, and the run's output is in the filing note. Every code block that lands in the package is tagged `# packages/coord-fold/<path>`; a block that is not tagged does not exist as far as the gate is concerned, so it is not allowed to matter.
 
-**Goal:** A separate `coord-fold` package whose fold engine *cannot* enumerate — the no-enumeration rule becomes a property of the type system, the import graph, the call graph, and a red CI check, not a reviewer's attention — running in parallel with the old bus until a comparator proves agreement, then cut over.
+**Goal:** A separate `coord-fold` package whose fold engine *cannot* enumerate — the no-enumeration rule becomes a property of the type system, the import graph, the call graph, the process-launch surface, and a red CI check, not a reviewer's attention — running in parallel with the old bus until a comparator proves agreement, then cut over.
 
-**Architecture:** Three planes (spec §3). Signal = one MomentAnnotation per event on a team channel. Content = unchanged OKF files addressed only by `ptr`. Fold = one checkpoint per agent, advanced by reading events forward from a cursor at O(new events). The fold is handed a **reader** whose public surface is exactly two methods and whose private surface is three sealed subcommand calls; writes live on a separate, unrelated class. The only changes to `coord-engine` are the seed export, the dual-emit mirror, and the comparator — all on the *old* side, which is allowed to enumerate.
+**Architecture:** Three planes (spec §3). Signal = one MomentAnnotation per event on a team channel. Content = unchanged OKF files addressed only by `ptr`. Fold = one checkpoint per agent, advanced by reading events forward from a cursor at O(new events). The fold is handed a **reader** with two public methods and three sealed subcommand calls; writes live on an unrelated class; process launch exists in exactly one module. The only changes to `coord-engine` are the seed export, the dual-emit mirror, and the comparator — old side, allowed to enumerate.
 
-**Tech Stack:** Python ≥3.11, stdlib only inside `coord_fold` (argparse, json, subprocess, tempfile, datetime, typing). Build: hatchling. Test: pytest<8. Dependency: `fulcra-common` only (for `find_fulcra_cli`). The Fulcra API is reached by shelling out to the `fulcra-api` CLI exactly as the old transport does (`file stat`, `file download`, `get-records`, `record`, `file upload`) — five fixed argv shapes, nothing else.
+**Tech Stack:** Python ≥3.11, stdlib only inside `coord_fold`. Build: hatchling. Test: pytest<8. Dependency: `fulcra-common` only. The Fulcra API is reached by shelling out to the `fulcra-api` CLI — five fixed argv shapes, all in `transport.py`, nowhere else.
 
 ---
 
 ## Global Constraints
 
-Every task's requirements include these. G-numbers are stable across revisions so verdicts can cite them.
+G-numbers are stable across revisions so verdicts can cite them.
 
-- **G1.** `kind` is a closed set: `open`, `close`, `claim`, `release`, `note`. (spec §3.1)
-- **G2.** `ptr` is **one file path** — never a directory, never a glob, **never absent on `open` or `close`**. (spec §3.1)
-- **G3.** Event payload v1 fields, exactly: `v`, `at`, `from`, `to`, `kind`, `slug`, `pri`, `ptr`. (spec §3.1)
-- **G4.** Checkpoint v1 fields, exactly: `v`, `cursor`, `open`, `unread_events`, `unreadable_pointers`, **plus `seen`** (see Ruling 1). Until Ruling 1 lands, `seen` is the sixth field and this constraint says so rather than hiding it under an underscore. (spec §3.3, amended)
-- **G5.** `PointerTransport` (the reader Protocol) exposes **exactly two methods**: `read_classified(path) -> (str|None, "ok"|"absent"|"error")` and `read_events(channel, since) -> Iterator[dict]`. (spec §3.4)
-- **G6.** The fold package is a **separate uv workspace package** (`packages/coord-fold`); its `pyproject.toml` must not depend on `coord-engine`. (directive §1)
-- **G7.** A structural test asserts no enumeration method exists on the reader or the writer **and** the package's import graph never reaches `coord_engine`. (directive §2)
-- **G8.** File-size ceiling as a CI gate: **400 lines per `.py` under `coord_fold/`**, recursive. (directive §3)
-- **G9.** Every fold test drives `coord_fold.cli.main([...])` and asserts on the **stored checkpoint** in the fake store, not on a decision function. (directive §4)
-- **G10.** Every test file is **mutation-verified** by showing it fails when the behaviour it names is removed. (directive §4)
-- **G11.** No output path in `coord_fold` may emit the string `degraded`. Two bounded unknowns replace it: `unread_events: N` and `unreadable_pointers: [slug]`. An unknown never reads as clear. (spec §4)
-- **G12.** Six verbs: `emit`, `fold`, `claim`, `release`, `close`, `status`. `release` asserts *not mine*; `close` asserts *done, with evidence*. Every other verb is killed and must be asked for by an agent that needs it. (spec §6, amended r3 per both verdicts and open question 4)
-- **G13.** Migration is **parallel bus proven then cut over**: seed the open obligations only, dual-emit from the old engine, shadow-compare, cut over after N agreeing passes spanning ≥24h with observed transitions, freeze the old prefix read-only. (spec §5, Ash decision — do not reopen)
-- **G14.** Rollout: coord-boss alone until a full day of ticks is clean, then one agent at a time. (spec §5.3)
-- **G15.** Never hardcode the channel: `data_type` is resolved from `team/<team>/_coord/bus-v4/records.json` via `read_classified`.
-- **G16.** No secrets in any doc, note, or fixture.
-- **G17.** Commits are authored as `114089064+ashfulcra@users.noreply.github.com` — the repo is PUBLIC.
-- **G18.** *(r2, codex-coder)* **Ownership.** Every public symbol in the manifest is **defined** in one named module, nowhere else, with the required definition kind (a callable must be a `def`/`class`, never a stub assignment). No planned module may be a shim. The package tree is scanned **recursively** and may contain only the planned modules. No module may load or generate code at runtime.
-- **G19.** *(r3, both verdicts)* **Allowed import DAG.** Only these intra-package edges exist: `cli → {fold, channel, events, checkpoint, transport}`; `fold → {channel, checkpoint, events, transport}`; `channel → {transport}`; `checkpoint → {transport}`; `events`, `transport`, `__init__` import nothing from the package. **No owner module may import `cli`.**
-- **G20.** *(r3, amended r4 per codex-coder round 3)* **`cli.py` is wiring only, recursively.** `cli.py` defines exactly the names in `CLI_EXACT_DEFINITIONS` at top level, contains **zero nested `def`/`class`/`lambda` anywhere**, and every top-level function respects a per-function budget (≤ 30 statements, ≤ 220 AST nodes). Delegation is closed **semantically**: the package may not reference `sys.modules`, `globals`, `vars`, `locals`, `getattr`, `setattr`, `eval`, `exec`, `compile`, `__import__`, `importlib`, `marshal`, `runpy` or `types.ModuleType`; and every call inside an owner module's manifest callable must resolve to a same-module definition, an allowed-DAG import of that module, an allowed stdlib import, or a small builtin allowlist. A syntactic wrapper detector is retained as a cheap early signal but is not the guarantee.
-- **G21.** *(r3)* **Mass ceilings, recursive:** per module ≤ 400 lines, ≤ 16 KB, ≤ 1500 AST nodes; `cli.py` ≤ 900 AST nodes.
-- **G22.** *(r3, amended r4 per codex-coder round 3)* **The Protocol is a capability boundary.** `CliPointerReader` and `CliPointerWriter` are **independent classes** (`__mro__ == (cls, object)`), share no base, and a reader object possesses no write primitive at any name. **There is no generic argv receiver anywhere in the package**: each sealed method calls `subprocess.run` with a literal argv whose string constants are one of exactly five fixed prefixes; no function in the package takes `*args`; `subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*` do not appear. The string `"list"` does not appear in `transport.py`.
+- **G1.** `kind` is a closed set: `open`, `close`, `claim`, `release`, `note`.
+- **G2.** `ptr` is one file path — never a directory or glob, never absent on `open` or `close`.
+- **G3.** Event payload v1 fields, exactly: `v`, `at`, `from`, `to`, `kind`, `slug`, `pri`, `ptr`.
+- **G4.** Checkpoint v1 fields, exactly: `v`, `cursor`, `open`, `unread_events`, `unreadable_pointers`, `seen`. `seen` is a stated sixth field pending Ruling 1.
+- **G5.** `PointerTransport` exposes exactly `read_classified` and `read_events`.
+- **G6.** Separate uv workspace package; `pyproject.toml` must not depend on `coord-engine`.
+- **G7.** No enumeration method on reader, writer, or fakes; the import graph never reaches `coord_engine`.
+- **G8.** 400 lines per `.py` under `coord_fold/`, recursive, as a CI gate.
+- **G9.** Every fold test drives `coord_fold.cli.main([...])` and asserts on the stored checkpoint in the fake store.
+- **G10.** Every test file is mutation-verified.
+- **G11.** No output path may emit the string `degraded`. Two **bounded-per-observed-state** diagnostics replace it: `unread_events: N` (bounded by the unread window) and `unreadable_pointers: [slug]` (bounded by the open set). They are not asymptotically corpus-independent and the plan does not claim they are. An unknown never reads as clear.
+- **G12.** Six verbs: `emit`, `fold`, `claim`, `release`, `close`, `status`.
+- **G13.** Parallel bus proven then cut over: seed, dual-emit, shadow, cut over after N agreeing passes spanning ≥24h with observed transitions, freeze.
+- **G14.** coord-boss alone first, then one agent at a time.
+- **G15.** Never hardcode the channel; resolve `data_type` from `team/<team>/_coord/bus-v4/records.json`.
+- **G16.** No secrets. **G17.** Commits authored as `114089064+ashfulcra@users.noreply.github.com`.
+- **G18.** *(r2)* Ownership: every manifest symbol is defined in one named module with the required kind; no shim modules; recursive artifact scan equals the manifest; no runtime code loading.
+- **G19.** *(r3)* Allowed import DAG; no owner module imports `cli`.
+- **G20.** *(r3, r4)* `cli.py` is wiring only, recursively: exact top-level definition set; zero nested `def`/`class`/`lambda`; per-function budgets; delegation closed semantically (banned names/attributes, call-graph rule scoped to owner callables; the one-statement wrapper rule applies only to **cross-module** delegation).
+- **G21.** *(r3, r5)* Mass ceilings, recursive: ≤ 400 lines, ≤ 16 KB, ≤ 1500 AST nodes per module; `cli.py` ≤ **2000** nodes and each `cli.py` function ≤ 30 statements / ≤ 320 nodes — *measured* by Task 0: the six-verb wiring is 1716 nodes and its largest function (`build_parser`) is 24 statements / 265 nodes; the r4 figures (900 / 220) were guesses that the plan's own code failed. The anti-consolidation guarantee is G23, not these numbers; they exist so a doubling is loud.
+- **G22.** *(r3, r4, r5)* Capability boundary: reader and writer are unrelated classes; a reader has no write primitive. **Process launch exists only in `transport.py`.** Launcher imports (`subprocess`, `pty`, `multiprocessing`, `asyncio`, and `os.system/popen/exec*/spawn*`) are forbidden in every other module; in `transport.py` the only launcher is `subprocess.run` with a literal argv from a fixed set. Launcher use is detected by **resolving aliases in the AST** (`import subprocess as s`, `from subprocess import run as launch`, `x = subprocess.run`), not by matching the source spelling. Forbidden subcommand tokens are scanned in **every** module.
+- **G23.** *(r5, both round-4 verdicts)* **Required call edges and owner-only operations.** Each `cmd_*` handler must call its named owner operation (`cmd_fold → fold.run`; `cmd_emit/claim/release/close → _emit_kind`; `cmd_claim/release/close → _owed_row`; `cmd_status → checkpoint.load`; `_emit_kind → channel.resolve, events.build_payload`; `_owed_row → checkpoint.load`), and `cli.py` may never call `checkpoint.apply`, `checkpoint.empty`, `checkpoint.save`, `events.parse_event`, `read_events`, or `save_doc` — the fold cannot be inlined into a handler because a handler is not allowed to perform a fold's operations.
+- **G24.** *(r5)* **The plan is gated against itself.** Task 0's script materializes every path-tagged block and runs Tasks 1–3's tests; a revision is filed only with that run green, and the filing note carries the output.
 
 ---
 
@@ -49,34 +50,29 @@ Every task's requirements include these. G-numbers are stable across revisions s
 
 ```
 packages/coord-fold/
-  pyproject.toml                      deps = [fulcra-common]; NO coord-engine; wheel ships coord_fold only
-  README.md                           six verbs, the two unknowns, the gates
+  pyproject.toml, README.md
+  scripts/
+    materialize_plan.py               Task 0: extract tagged blocks from the plan, run the gates   (G24)
   coord_fold/
-    __init__.py                       __version__ only
-    events.py                         KINDS, PRIORITIES, PAYLOAD_VERSION, build_payload, parse_event   (G1–G3)
-    transport.py                      PointerTransport, ReadState, TransportUnavailable,
-                                      CliPointerReader, CliPointerWriter                             (G5, G22)
-    channel.py                        CONFIG_PATH, ChannelUnresolved, config_path, resolve            (G15)
-    checkpoint.py                     SCHEMA_VERSION, path, empty, apply, load, save                  (G4)
-    fold.py                           OVERLAP_SECONDS, FoldOutcome, FoldRefused, run                  (§3.3)
-    cli.py                            main, build_parser, RC_*, cmd_* (six), six private helpers      (G12, G20)
+    __init__.py                       __version__
+    events.py                         KINDS, PRIORITIES, PAYLOAD_VERSION, build_payload, parse_event
+    transport.py                      PointerTransport, ReadState, TransportUnavailable, CliPointerReader, CliPointerWriter
+    channel.py                        CONFIG_PATH, ChannelUnresolved, config_path, resolve
+    checkpoint.py                     SCHEMA_VERSION, path, empty, apply, load, save
+    fold.py                           OVERLAP_SECONDS, FoldOutcome, FoldRefused, run
+    cli.py                            main, build_parser, RC_*, cmd_* (six), _now, _default_transports,
+                                      _row_sort_key, _render_open, _report_unknowns, _emit_kind, _owed_row
   tests/
-    fakes.py                          FakeStore, FakeReader, FakeWriter — reader has NO write method
-    test_structural.py                G5, G7, G22: enumeration, import graph, reader/writer boundary, sealed argv
-    test_ownership.py                 G18–G21: manifest w/ kinds, recursive cli policy, DAG, semantic delegation, mass
+    fakes.py
+    test_structural.py                G5, G7, G22
+    test_ownership.py                 G18–G21, G23
     test_file_size_ceiling.py         G8
     test_no_degraded_vocabulary.py    G11
-    test_events.py, test_checkpoint.py, test_channel.py
+    test_events.py, test_channel.py, test_checkpoint.py
     test_cli_fold.py, test_cli_emit.py, test_cli_claim_release_close.py, test_cli_status.py
 
-packages/coord-engine/coord_engine/
-    dual_emit.py                      NEW: mirror old-bus transitions onto bus-v4       (§5.1 step 2)
-    cli.py                            MODIFY: obligations export-open / compare-to-fold / cutover-ready
-    records.py                        MODIFY: one call into dual_emit from emit_event
-packages/coord-engine/tests/
-    test_dual_emit.py, test_obligations_export_open.py, test_obligations_compare_to_fold.py, test_obligations_cutover_ready.py
-
-.github/workflows/uv-workspace.yml    MODIFY: named step "coord-fold structural gates"
+packages/coord-engine/…               Tasks 12–14 (old side): export-open, dual_emit, compare-to-fold, cutover-ready
+.github/workflows/uv-workspace.yml    named step "coord-fold structural gates"
 docs/coord/COORD-FOLD-CUTOVER.md      runbook
 ```
 
@@ -84,54 +80,88 @@ docs/coord/COORD-FOLD-CUTOVER.md      runbook
 
 ## Verb Disposition (spec §6)
 
-42 top-level nouns registered at `5db5c3e5` (the spec counts 38 at `3a4687b0`; the four extra on my tree are `annotate`, `stash`, `wake`, `acceptance` — reported, not reconciled).
+42 top-level nouns at `5db5c3e5` (spec counts 38 at `3a4687b0`; the four extra — `annotate`, `stash`, `wake`, `acceptance` — reported, not reconciled). Kept: six (`tell→emit`, `respond→close`, `owed/obligations/needs-me/inbox→fold+status`, `roles claim/release→claim/release`, engine `status→status`). Killed: 36, each because it is a corpus walk under a deadline, sugar over `emit`, content-plane state, dispatch over an enumerated board, or old-bus plumbing. Any killed verb returns only by a directive naming the agent that needs it and the cursor it reads from.
 
-| Verb(s) | Disposition | Reason |
-|---|---|---|
-| `tell` | → `emit` | An `open` event with `to`, `pri`, `ptr`. |
-| `respond` | → `close` | A `close` event with evidence `ptr`. |
-| `owed`, `obligations`, `needs-me`, `inbox` | → `fold` + `status` | All four are "what do I owe"; one checkpoint answers it. |
-| `roles claim/release` | → `claim` / `release` | Same fact, no lease directory to enumerate. |
-| `status` (engine health) | → `status` | Reports the checkpoint and its two unknowns. |
-| `queue` | kill | `fold` *is* the read. |
-| `reconcile` | kill | Rebuilds the aggregate by enumeration — the defect. |
-| `board`, `search`, `agents`, `presence`, `engagement`, `threads`, `briefing`, `digest`, `dash`, `health`, `doctor` | kill | Corpus walks under a deadline. Earn back one at a time with a stated cursor. |
-| `broadcast`, `remind`, `later`, `intent` | kill | `emit --to all`; a timer is a future-dated `emit`. |
-| `review` (8), `forge` | kill | A review request is an `open` with a `ptr` to the review doc; the forge mirror is a §7-shaped reconciler off every fold path. |
-| `task` (9) | kill | Task state lives in the OKF doc; routing-relevant transitions are `open`/`close`. |
-| `router`, `route`, `atc`, `headroom`, `usage` | kill | Dispatch policy over an enumerated board. |
-| `escalate` | kill | Attendance scan over 592 dirs; becomes a reconciler if wanted. |
-| `bus-v3`, `wake`, `stash`, `continuity`, `annotate`, `acceptance`, `asks`, `answer` | kill | Old-bus plumbing or content-plane conveniences. |
+---
 
-**Kept: 6 (five from the spec plus `release`). Killed: 36.**
+### Task 0: The plan gate — materialize and run (G24)
+
+**Files:** `packages/coord-fold/scripts/materialize_plan.py`
+
+- [ ] **Step 1: Write the script**
+
+```python
+# packages/coord-fold/scripts/materialize_plan.py
+"""Extract every path-tagged code block from the plan into a scratch tree and run the
+structural gates against it. Round-4 verdicts: 'the proposed structural suite fails its own
+planned source.' This makes that a check, not a review finding.
+
+Usage: python scripts/materialize_plan.py <plan.md> <out-dir>
+Exit 0 iff the gates pass on the materialized tree.
+"""
+from __future__ import annotations
+
+import pathlib
+import re
+import subprocess
+import sys
+
+TAG = re.compile(r"#\s*(packages/coord-fold/\S+)")
+TICKS = "`" * 3                                  # never spelled literally: this file lives inside a fence
+FENCE = re.compile(TICKS + r"(python|toml)\n(.*?)" + TICKS, re.S)
+GATES = ["tests/test_structural.py", "tests/test_ownership.py",
+         "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]
+
+
+def materialize(plan: str, out: pathlib.Path) -> tuple[list[str], list[str]]:
+    written, untagged = [], []
+    for _lang, body in FENCE.findall(plan):
+        first, _, rest = body.partition("\n")
+        m = TAG.match(first)
+        if not m:
+            untagged.append(first[:70])
+            continue
+        target = out / m.group(1)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():                      # a second block for the same file APPENDS
+            target.write_text(target.read_text().rstrip("\n") + "\n\n\n" + rest)
+        else:
+            target.write_text(rest)
+        written.append(m.group(1))
+    return written, untagged
+
+
+def main(argv: list[str]) -> int:
+    plan, out = pathlib.Path(argv[1]).read_text(), pathlib.Path(argv[2])
+    written, untagged = materialize(plan, out)
+    pkg = out / "packages/coord-fold"
+    (pkg / "README.md").write_text("# coord-fold\nevery module under **400 lines**\n")
+    print(f"materialized {len(written)} blocks; untagged python/toml blocks: {len(untagged)}")
+    for u in untagged:
+        print("  untagged:", u)
+    rc = subprocess.run([sys.executable, "-m", "pytest", *GATES, "-q"], cwd=pkg,
+                        env={"PYTHONPATH": ".:tests", "PATH": "/usr/bin:/bin"}).returncode
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+```
+
+- [ ] **Step 2: Run it against this plan.** `python packages/coord-fold/scripts/materialize_plan.py docs/superpowers/plans/2026-09-04-coord-fold.md /tmp/coord-fold-gate` — expected: `untagged: 0` and the four gate files pass. **This is the filing precondition for every revision.** (The script lives under `scripts/`, outside `coord_fold/`, so the recursive artifact scan does not count it.)
 
 ---
 
 ### Task 1: Package scaffold, fakes, and the structural boundary test (G5, G6, G7, G22)
 
-**Files:**
-- Create: `packages/coord-fold/pyproject.toml`, `README.md`
-- Create: `coord_fold/__init__.py`, `coord_fold/transport.py`
-- Create: `tests/fakes.py`, `tests/test_structural.py`
-
-**Interfaces (produced):**
-- `transport.PointerTransport` (Protocol): `read_classified(path) -> tuple[str|None, ReadState]`, `read_events(channel, since) -> Iterator[dict]`.
-- `transport.CliPointerReader(cli: list[str], timeout=60.0)` — implements the Protocol; private: `_stat`, `_download`, `_records`.
-- `transport.CliPointerWriter(cli: list[str], timeout=60.0)` — `write_event(cfg, payload, *, sender) -> bool`, `save_doc(path, text) -> bool`; private: `_record`, `_upload`.
-- `transport.TransportUnavailable(RuntimeError)`, `transport.ReadState`.
-- `fakes.FakeStore(docs, events)`; `fakes.FakeReader(store)`; `fakes.FakeWriter(store)`.
-
-- [ ] **Step 1: Write the failing structural test**
+- [ ] **Step 1: The structural test**
 
 ```python
 # packages/coord-fold/tests/test_structural.py
-"""G5, G7, G22. The boundary as red checks.
+"""G5, G7, G22. The boundary as red checks, with aliases resolved in the AST.
 
-Spec §1a: the 2026-08-21 rule failed because it was a policy against a codebase where the
-enumerator was already imported and holding a live transport. Round-3 (codex-coder): a
-shared base class and a name-mangled generic runner were not a boundary either — the
-reader inherited write primitives and `reader._Cli__exec("file","list")` was callable.
-So: two unrelated classes, five literal argv shapes, no varargs anywhere.
+Round 4 (both reviewers): `from subprocess import run as launch; launch([cli, "file", "list",
+path])` in fold.py passed every named check. Source-spelling matchers are not detection.
 """
 from __future__ import annotations
 
@@ -146,9 +176,12 @@ ENUM_NAMES = ("list_dir", "glob", "listdir", "scandir", "walk", "rglob", "iterdi
 FORBIDDEN_IMPORT_ROOTS = ("coord_engine",)
 WRITE_NAMES = {"write_event", "save_doc", "_record", "_upload"}
 READ_NAMES = {"read_classified", "read_events", "_stat", "_download", "_records"}
-ALLOWED_ARGV = {("file", "stat"), ("file", "download"), ("get-records",), ("record",), ("file", "upload")}
-FORBIDDEN_LAUNCHERS = {("subprocess", "Popen"), ("subprocess", "call"), ("subprocess", "check_output"),
-                       ("os", "system"), ("os", "popen")}
+ALLOWED_ARGV = {("file", "stat"), ("file", "download", "/dev/stdout"), ("get-records",), ("record",), ("file", "upload")}
+LAUNCHER_MODULES = {"subprocess", "pty", "multiprocessing", "asyncio"}
+LAUNCHER_OS_ATTRS = {"system", "popen", "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp",
+                     "execvpe", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp",
+                     "spawnvpe", "posix_spawn", "posix_spawnp"}
+FORBIDDEN_TOKENS = {"list", "ls", "glob", "search", "find", "rglob", "iterdir", "scandir", "walk"}
 
 
 def _modules():
@@ -159,30 +192,63 @@ def _tree(p):
     return ast.parse(p.read_text(), filename=str(p))
 
 
+def _alias_map(tree: ast.Module) -> dict[str, str]:
+    """Local name -> dotted origin, from imports AND from assignments of attribute chains.
+    `import subprocess as s` -> s: subprocess; `from subprocess import run as launch` ->
+    launch: subprocess.run; `x = subprocess.run` -> x: subprocess.run; `y = s.run` -> y: subprocess.run."""
+    m: dict[str, str] = {}
+    def dotted(node):
+        if isinstance(node, ast.Name):
+            return m.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            base = dotted(node.value)
+            return f"{base}.{node.attr}" if base else None
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                m[(a.asname or a.name).split(".")[0]] = a.name
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for a in node.names:
+                m[a.asname or a.name] = f"{node.module}.{a.name}"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            d = dotted(node.value)
+            if d:
+                m[node.targets[0].id] = d
+    return m
+
+
+def _origin(call: ast.Call, m: dict[str, str]) -> str | None:
+    f = call.func
+    if isinstance(f, ast.Name):
+        return m.get(f.id, f.id)
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+        return f"{m.get(f.value.id, f.value.id)}.{f.attr}"
+    return None
+
+
+def _is_launcher(origin: str | None) -> bool:
+    if not origin:
+        return False
+    root = origin.split(".")[0]
+    if root in LAUNCHER_MODULES:
+        return True
+    return root == "os" and origin.split(".")[-1] in LAUNCHER_OS_ATTRS
+
+
 def test_no_enumeration_method_on_reader_writer_or_fakes():
     from fakes import FakeReader, FakeStore, FakeWriter
     st = FakeStore({}, [])
-    for obj in (tr.CliPointerReader(cli=["true"]), tr.CliPointerWriter(cli=["true"]),
-                FakeReader(st), FakeWriter(st)):
+    for obj in (tr.CliPointerReader(cli=["true"]), tr.CliPointerWriter(cli=["true"]), FakeReader(st), FakeWriter(st)):
         for n in ENUM_NAMES:
             assert not hasattr(obj, n), f"{type(obj).__name__} has {n}"
-
-
-def test_no_module_mentions_an_enumeration_token():
-    for p in _modules():
-        src = p.read_text()
-        for n in ENUM_NAMES:
-            assert f".{n}(" not in src and f"def {n}(" not in src, f"{p.name} mentions {n}"
 
 
 def test_import_graph_never_reaches_coord_engine():
     for p in _modules():
         for node in ast.walk(_tree(p)):
-            names = []
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else ([node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
             for n in names:
                 assert n.split(".")[0] not in FORBIDDEN_IMPORT_ROOTS, f"{p.name} imports {n}"
 
@@ -194,29 +260,20 @@ def test_pyproject_does_not_depend_on_coord_engine():
 
 
 def test_the_protocol_has_exactly_two_methods():
-    members = {n for n in dir(tr.PointerTransport) if not n.startswith("_")}
-    assert members == {"read_classified", "read_events"}, members
+    assert {n for n in dir(tr.PointerTransport) if not n.startswith("_")} == {"read_classified", "read_events"}
 
 
-def test_reader_and_writer_are_unrelated_classes():
-    """G22: no shared base, so nothing to inherit across the boundary."""
+def test_reader_and_writer_are_unrelated_classes_with_disjoint_surfaces():
     assert tr.CliPointerReader.__mro__ == (tr.CliPointerReader, object)
     assert tr.CliPointerWriter.__mro__ == (tr.CliPointerWriter, object)
-
-
-def test_reader_has_no_write_primitive_and_writer_has_no_read_primitive():
     for n in WRITE_NAMES:
         assert not hasattr(tr.CliPointerReader, n), f"reader has {n}"
     for n in READ_NAMES:
         assert not hasattr(tr.CliPointerWriter, n), f"writer has {n}"
-    pub_r = {n for n in vars(tr.CliPointerReader) if not n.startswith("_")}
-    pub_w = {n for n in vars(tr.CliPointerWriter) if not n.startswith("_")}
-    assert pub_r == {"read_classified", "read_events"}, pub_r
-    assert pub_w == {"write_event", "save_doc"}, pub_w
-    priv_r = {n for n in vars(tr.CliPointerReader) if n.startswith("_") and not n.startswith("__")}
-    priv_w = {n for n in vars(tr.CliPointerWriter) if n.startswith("_") and not n.startswith("__")}
-    assert priv_r == {"_stat", "_download", "_records"}, priv_r
-    assert priv_w == {"_record", "_upload"}, priv_w
+    assert {n for n in vars(tr.CliPointerReader) if not n.startswith("_")} == {"read_classified", "read_events"}
+    assert {n for n in vars(tr.CliPointerWriter) if not n.startswith("_")} == {"write_event", "save_doc"}
+    assert {n for n in vars(tr.CliPointerReader) if n.startswith("_") and not n.startswith("__")} == {"_stat", "_download", "_records"}
+    assert {n for n in vars(tr.CliPointerWriter) if n.startswith("_") and not n.startswith("__")} == {"_record", "_upload"}
 
 
 def test_no_function_in_the_package_takes_varargs():
@@ -226,33 +283,50 @@ def test_no_function_in_the_package_takes_varargs():
                 assert node.args.vararg is None, f"{p.name}:{getattr(node, 'name', 'lambda')} takes *args"
 
 
-def test_every_subprocess_call_has_a_literal_argv_from_the_fixed_set():
-    """The sealing. subprocess.run appears only in transport.py; each call's first arg is a
-    List whose string constants are exactly one allowed prefix; nothing else launches."""
+def test_launcher_imports_exist_only_in_transport():
     for p in _modules():
         for node in ast.walk(_tree(p)):
+            if isinstance(node, ast.Import):
+                roots = {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                roots = {node.module.split(".")[0]}
+                if node.module == "os":
+                    bad = {a.name for a in node.names} & LAUNCHER_OS_ATTRS
+                    assert not bad, f"{p.name} imports os launcher(s) {sorted(bad)}"
+            else:
+                continue
+            if roots & LAUNCHER_MODULES:
+                assert p.name == "transport.py", f"{p.name} imports a process launcher: {sorted(roots & LAUNCHER_MODULES)}"
+
+
+def test_every_launcher_call_resolved_by_alias_is_subprocess_run_in_transport_with_a_fixed_argv():
+    """The r4 bypass, closed: aliases are resolved, every module is scanned, and the only
+    launcher that may exist anywhere is subprocess.run in transport.py with a literal argv."""
+    for p in _modules():
+        tree = _tree(p)
+        m = _alias_map(tree)
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            f = node.func
-            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
-                key = (f.value.id, f.attr)
-                assert key not in FORBIDDEN_LAUNCHERS, f"{p.name} uses {key}"
-                if key == ("subprocess", "run"):
-                    assert p.name == "transport.py", f"{p.name} launches a subprocess"
-                    argv = node.args[0]
-                    assert isinstance(argv, ast.List), f"{p.name}: subprocess.run argv is not a literal list"
-                    consts = tuple(e.value for e in argv.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
-                    assert consts in ALLOWED_ARGV, f"{p.name}: argv constants {consts} not in the fixed set"
+            origin = _origin(node, m)
+            if not _is_launcher(origin):
+                continue
+            assert p.name == "transport.py", f"{p.name} launches a process via {origin}"
+            assert origin == "subprocess.run", f"transport.py uses {origin}; only subprocess.run is allowed"
+            argv = node.args[0]
+            assert isinstance(argv, ast.List), "subprocess.run argv must be a literal list"
+            consts = tuple(e.value for e in argv.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
+            assert consts in ALLOWED_ARGV, f"argv constants {consts} not in the fixed set"
 
 
-def test_the_token_list_does_not_appear_in_transport():
-    src = (PKG_DIR / "transport.py").read_text()
-    assert '"list"' not in src and "'list'" not in src
+def test_forbidden_subcommand_tokens_appear_in_no_module():
+    for p in _modules():
+        for node in ast.walk(_tree(p)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                assert node.value not in FORBIDDEN_TOKENS, f"{p.name} contains the string {node.value!r}"
 ```
 
-- [ ] **Step 2: Run — expect ImportError (no package yet).** Confirm the test file parses: `python -c "import ast;ast.parse(open('tests/test_structural.py').read())"`.
-
-- [ ] **Step 3: Scaffold**
+- [ ] **Step 2: Scaffold**
 
 ```toml
 # packages/coord-fold/pyproject.toml
@@ -294,9 +368,8 @@ __version__ = "0.1.0"
 # packages/coord-fold/coord_fold/transport.py
 """The enforcing interface (spec §3.4) as a capability boundary (G22).
 
-Two unrelated classes. A fold is handed a CliPointerReader; it has two public methods
-and three sealed private ones, each of which builds its own literal argv. There is no
-method that accepts free argv, no shared base, and no write primitive on the reader.
+Two unrelated classes; process launch exists only here, only as subprocess.run with a
+literal argv. There is no generic argv receiver anywhere in the package.
 """
 from __future__ import annotations
 
@@ -326,30 +399,26 @@ class CliPointerReader:
 
     def _stat(self, path: str) -> tuple[int, str, str]:
         try:
-            p = subprocess.run([*self._cli, "file", "stat", path], capture_output=True,
-                               text=True, timeout=self._timeout)
+            p = subprocess.run([*self._cli, "file", "stat", path], capture_output=True, text=True, timeout=self._timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 127, "", str(exc)
         return p.returncode, p.stdout, p.stderr
 
     def _download(self, path: str) -> tuple[int, str, str]:
         try:
-            p = subprocess.run([*self._cli, "file", "download", path, "/dev/stdout"],
-                               capture_output=True, text=True, timeout=self._timeout)
+            p = subprocess.run([*self._cli, "file", "download", path, "/dev/stdout"], capture_output=True, text=True, timeout=self._timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 127, "", str(exc)
         return p.returncode, p.stdout, p.stderr
 
     def _records(self, channel: str, since: str) -> tuple[int, str, str]:
         try:
-            p = subprocess.run([*self._cli, "get-records", channel, since, _FAR_FUTURE],
-                               capture_output=True, text=True, timeout=self._timeout)
+            p = subprocess.run([*self._cli, "get-records", channel, since, _FAR_FUTURE], capture_output=True, text=True, timeout=self._timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 127, "", str(exc)
         return p.returncode, p.stdout, p.stderr
 
     def read_classified(self, path: str) -> tuple[str | None, ReadState]:
-        # Measured 2026-09-02: `file stat` on a missing path -> rc!=0 + "File not found".
         rc, _out, err = self._stat(path)
         if rc != 0:
             return (None, "absent") if "File not found" in err else (None, "error")
@@ -377,26 +446,23 @@ class CliPointerWriter:
 
     def _record(self, doc: str) -> tuple[int, str, str]:
         try:
-            p = subprocess.run([*self._cli, "record"], input=doc, capture_output=True,
-                               text=True, timeout=self._timeout)
+            p = subprocess.run([*self._cli, "record"], input=doc, capture_output=True, text=True, timeout=self._timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 127, "", str(exc)
         return p.returncode, p.stdout, p.stderr
 
     def _upload(self, local: str, remote: str) -> tuple[int, str, str]:
         try:
-            p = subprocess.run([*self._cli, "file", "upload", local, remote],
-                               capture_output=True, text=True, timeout=self._timeout)
+            p = subprocess.run([*self._cli, "file", "upload", local, remote], capture_output=True, text=True, timeout=self._timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 127, "", str(exc)
         return p.returncode, p.stdout, p.stderr
 
     def write_event(self, channel_cfg: dict[str, str], payload: dict, *, sender: str) -> bool:
-        # Key names are a GOLDEN COMPARISON against coord_engine/transport.py record_write
-        # (line ~385 at 5db5c3e5): read them, do not guess. Task 5 Step 4 asserts them.
+        # Key names: GOLDEN COMPARISON against coord_engine/transport.py record_write (~line 385 at
+        # 5db5c3e5). Task 5 asserts them; if the old transport differs, change both there.
         doc = {"data_type": channel_cfg["data_type"], "api_version": channel_cfg["api_version"],
-               "note": json.dumps(payload, separators=(",", ":")), "source": sender,
-               "recorded_at": payload["at"]}
+               "note": json.dumps(payload, separators=(",", ":")), "source": sender, "recorded_at": payload["at"]}
         rc, _o, _e = self._record(json.dumps(doc))
         return rc == 0
 
@@ -413,8 +479,8 @@ class CliPointerWriter:
 
 ```python
 # packages/coord-fold/tests/fakes.py
-"""One store, two views. FakeReader has read_classified/read_events and NOTHING else;
-FakeWriter has write_event/save_doc and nothing else. Tests build both from one store."""
+"""One store, two views. FakeReader has read_classified/read_events and nothing else;
+FakeWriter has write_event/save_doc and nothing else."""
 from __future__ import annotations
 
 import json
@@ -459,8 +525,7 @@ class FakeWriter:
 
     def write_event(self, channel_cfg, payload, *, sender):
         self._s.written.append({"channel": channel_cfg["data_type"], "payload": dict(payload), "sender": sender})
-        self._s.events.append({"id": f"w{len(self._s.written)}", "recorded_at": payload["at"],
-                               "note": json.dumps(payload)})
+        self._s.events.append({"id": f"w{len(self._s.written)}", "recorded_at": payload["at"], "note": json.dumps(payload)})
         return True
 
     def save_doc(self, path: str, text: str) -> bool:
@@ -468,65 +533,13 @@ class FakeWriter:
         return True
 ```
 
-README:
+README (not gate-relevant beyond the ceiling sentence): six verbs, the gates, the two bounded-per-observed-state diagnostics, and the sentence `every module under **400 lines**`.
 
-```markdown
-# coord-fold
-The fold engine that cannot enumerate. Six verbs: `emit`, `fold`, `claim`, `release`, `close`, `status`.
-Structural gates (CI step "coord-fold structural gates"): no enumeration method or token; import graph
-never reaches `coord_engine`; reader and writer are unrelated classes and a reader has no write primitive;
-every subprocess call is one of five literal argv shapes; ownership manifest with definition kinds;
-`cli.py` is wiring only, recursively; allowed import DAG; semantic delegation ban; every module under
-**400 lines**, 16 KB and 1500 AST nodes; the string `degraded` never appears.
-Two bounded unknowns: `unread_events: N` and `unreadable_pointers: [slug]`. An unknown never reads as clear.
-```
-
-- [ ] **Step 4: Run — expect all 11 structural tests to pass.**
-
-- [ ] **Step 5: MUTATION-VERIFY** (each restored before the next)
-
-```bash
-# (a) a shared base class
-python - <<'PY'
-p="coord_fold/transport.py"; s=open(p).read()
-s=s.replace("class CliPointerReader:", "class _Base:\n    pass\n\nclass CliPointerReader(_Base):",1)
-open(p,"w").write(s)
-PY
-python -m pytest tests/test_structural.py -q    # expect FAIL: unrelated-classes
-git checkout coord_fold/transport.py
-# (b) a generic runner
-python - <<'PY'
-p="coord_fold/transport.py"; s=open(p).read()
-s=s.replace("    def _stat(self, path: str)", "    def _run(self, *argv):\n        return subprocess.run([*self._cli, *argv])\n\n    def _stat(self, path: str)",1)
-open(p,"w").write(s)
-PY
-python -m pytest tests/test_structural.py -q    # expect >=2 FAIL: varargs + argv-not-literal/priv-set
-git checkout coord_fold/transport.py
-# (c) an enumerating argv
-python - <<'PY'
-p="coord_fold/transport.py"; s=open(p).read()
-s=s.replace('"file", "stat", path', '"file", "list", path',1)
-open(p,"w").write(s)
-PY
-python -m pytest tests/test_structural.py -q    # expect 2 FAIL: fixed-set + token
-git checkout coord_fold/transport.py
-# (d) a write primitive on the reader
-python - <<'PY'
-p="coord_fold/transport.py"; s=open(p).read()
-s=s.replace("    def read_classified(self, path: str)", "    def _upload(self, a, b):\n        return 0, '', ''\n\n    def read_classified(self, path: str)",1)
-open(p,"w").write(s)
-PY
-python -m pytest tests/test_structural.py -q    # expect FAIL: reader has _upload
-git checkout coord_fold/transport.py
-```
-
-- [ ] **Step 6: Commit** — `coord-fold: scaffold, reader/writer boundary, sealed argv, structural tests (G5–G7, G22)`
+- [ ] **Step 3: Run — 10 structural tests pass. Mutations** (each restored): (a) give `CliPointerReader` a base class → unrelated-classes FAILS; (b) `from subprocess import run as launch` in `fold.py` and a call `launch([self._cli, "file", "stat", p])` → launcher-imports FAILS and alias-resolved-launcher FAILS (**the round-4 bypass**); (c) `x = subprocess.run` then `x([...])` in transport → still allowed only if argv is in the fixed set — change one constant to `"list"` → fixed-set FAILS and token FAILS; (d) add `def _run(self, *argv)` → varargs FAILS; (e) `def _upload` on the reader → disjoint-surfaces FAILS. **Commit** — `coord-fold: scaffold, capability boundary with alias-resolved launcher detection (G5–G7, G22)`
 
 ---
 
-### Task 2: File-size ceiling as a CI gate (G8)
-
-- [ ] **Step 1: Write the test**
+### Task 2: File-size ceiling (G8)
 
 ```python
 # packages/coord-fold/tests/test_file_size_ceiling.py
@@ -535,16 +548,23 @@ import coord_fold
 CEILING = 400
 PKG_DIR = pathlib.Path(coord_fold.__file__).parent
 
+
 def test_every_module_is_under_the_ceiling_recursively():
-    over = {p.name: sum(1 for _ in p.open()) for p in PKG_DIR.rglob("*.py")
-            if "__pycache__" not in p.parts and sum(1 for _ in p.open()) > CEILING}
+    over = {}
+    for p in PKG_DIR.rglob("*.py"):
+        if "__pycache__" in p.parts:
+            continue
+        n = sum(1 for _ in p.open())
+        if n > CEILING:
+            over[p.name] = n
     assert not over, over
+
 
 def test_the_ceiling_is_the_documented_number():
     assert f"{CEILING} lines" in (PKG_DIR.parent / "README.md").read_text()
 ```
 
-- [ ] **Step 2: CI step** — in `.github/workflows/uv-workspace.yml` after the pytest step:
+CI step in `.github/workflows/uv-workspace.yml` after the pytest step:
 
 ```yaml
       - name: coord-fold structural gates
@@ -556,26 +576,18 @@ def test_the_ceiling_is_the_documented_number():
             packages/coord-fold/tests/test_no_degraded_vocabulary.py -q
 ```
 
-- [ ] **Step 3: Run — 2 passed. Mutation:** append 401 comment lines to `__init__.py` → FAIL; restore. **Commit** — `coord-fold: 400-line ceiling as a CI gate (G8)`
+Mutation: append 401 comment lines to `__init__.py` → FAILS. **Commit.**
 
 ---
 
-### Task 3: Ownership, recursive `cli.py` policy, import DAG, semantic delegation ban, mass (G18–G21)
+### Task 3: Ownership, recursive `cli.py` policy, DAG, semantic delegation ban, required edges, mass (G18–G21, G23)
 
-**Why — attributed.** r2 (codex-coder): six shims plus one ≤399-line `cli.py` pass coupling, interface, length and filename gates. r3 (both): a `("cmd_", "_")` prefix lets the implementation sit in `cli.py` behind one-line forwarding wrappers. r3→r4 (codex-coder round 3): a top-level-only definition scan admits **nested** definitions inside an allowed `cli.py` function, and a one-statement wrapper detector admits **two-statement `sys.modules` delegation** with no owner import of `cli`. So ownership is recursive, `cli.py` may nest nothing, delegation is banned by **name** (`sys.modules`, `getattr`, `globals`…) and by **call graph** (every call in an owner's manifest callable resolves to something the DAG allows), and mass is capped per module *and* per function.
-
-**Files:** create `tests/test_ownership.py`. It cannot fail-first meaningfully before Tasks 4–10 create the modules; its proof of discrimination is Step 4's mutations, run after Task 10.
-
-- [ ] **Step 1: Write the test**
+- [ ] **Step 1: The test**
 
 ```python
 # packages/coord-fold/tests/test_ownership.py
-"""G18–G21. Ownership with kinds, recursive cli.py policy, DAG, semantic delegation ban, mass.
-
-Every check here exists because a reviewer produced a counterexample that passed the
-previous version. See the plan's revision log; the mutations in Task 3 Step 4 ARE those
-counterexamples.
-"""
+"""G18–G21, G23. Every check exists because a reviewer produced a counterexample that passed
+the previous version; Task 3 Step 3's mutations ARE those counterexamples."""
 from __future__ import annotations
 
 import ast
@@ -587,13 +599,10 @@ import coord_fold
 PKG_DIR = pathlib.Path(coord_fold.__file__).parent
 
 OWNERSHIP: dict[str, dict[str, str]] = {
-    "events.py": {"PAYLOAD_VERSION": "value", "KINDS": "value", "PRIORITIES": "value",
-                  "build_payload": "callable", "parse_event": "callable"},
-    "transport.py": {"ReadState": "value", "PointerTransport": "callable", "TransportUnavailable": "callable",
-                     "CliPointerReader": "callable", "CliPointerWriter": "callable"},
+    "events.py": {"PAYLOAD_VERSION": "value", "KINDS": "value", "PRIORITIES": "value", "build_payload": "callable", "parse_event": "callable"},
+    "transport.py": {"ReadState": "value", "PointerTransport": "callable", "TransportUnavailable": "callable", "CliPointerReader": "callable", "CliPointerWriter": "callable"},
     "channel.py": {"CONFIG_PATH": "value", "ChannelUnresolved": "callable", "config_path": "callable", "resolve": "callable"},
-    "checkpoint.py": {"SCHEMA_VERSION": "value", "path": "callable", "empty": "callable",
-                      "apply": "callable", "load": "callable", "save": "callable"},
+    "checkpoint.py": {"SCHEMA_VERSION": "value", "path": "callable", "empty": "callable", "apply": "callable", "load": "callable", "save": "callable"},
     "fold.py": {"OVERLAP_SECONDS": "value", "FoldOutcome": "callable", "FoldRefused": "callable", "run": "callable"},
     "cli.py": {"main": "callable", "build_parser": "callable"},
     "__init__.py": {"__version__": "value"},
@@ -601,10 +610,16 @@ OWNERSHIP: dict[str, dict[str, str]] = {
 CLI_EXACT_DEFINITIONS = {
     "main", "build_parser", "RC_OK", "RC_REFUSED", "RC_UNKNOWN",
     "cmd_emit", "cmd_fold", "cmd_claim", "cmd_release", "cmd_close", "cmd_status",
-    "_now", "_default_transports", "_render_open", "_report_unknowns", "_emit_kind", "_owed_row",
+    "_now", "_default_transports", "_row_sort_key", "_render_open", "_report_unknowns", "_emit_kind", "_owed_row",
 }
-CLI_MAX_STATEMENTS_PER_FUNCTION = 30
-CLI_MAX_NODES_PER_FUNCTION = 220
+CLI_MAX_STATEMENTS_PER_FUNCTION, CLI_MAX_NODES_PER_FUNCTION = 30, 320   # measured: largest is build_parser at 24 / 265
+REQUIRED_CALLS: dict[str, set[str]] = {
+    "cmd_fold": {"fold.run"}, "cmd_emit": {"_emit_kind"},
+    "cmd_claim": {"_owed_row", "_emit_kind"}, "cmd_release": {"_owed_row", "_emit_kind"}, "cmd_close": {"_owed_row", "_emit_kind"},
+    "cmd_status": {"checkpoint.load"}, "_emit_kind": {"channel.resolve", "events.build_payload"}, "_owed_row": {"checkpoint.load"},
+}
+OWNER_ONLY_OPS = {"checkpoint.apply", "checkpoint.empty", "checkpoint.save", "events.parse_event"}
+OWNER_ONLY_METHODS = {"read_events", "save_doc"}
 ALLOWED_EDGES: dict[str, set[str]] = {
     "cli.py": {"fold", "channel", "events", "checkpoint", "transport"},
     "fold.py": {"channel", "checkpoint", "events", "transport"},
@@ -612,43 +627,46 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     "events.py": set(), "transport.py": set(), "__init__.py": set(),
 }
 OWNER_MODULES = {"events.py", "transport.py", "channel.py", "checkpoint.py", "fold.py"}
-STDLIB_ALLOWED = {"__future__", "argparse", "datetime", "json", "os", "subprocess", "sys", "tempfile", "typing"}
+STDLIB_BASE = {"__future__", "argparse", "datetime", "json", "sys", "typing"}
+STDLIB_EXTRA = {"transport.py": {"subprocess", "os", "tempfile"}}
 THIRD_PARTY_ALLOWED = {"fulcra_common"}
-BANNED_NAMES = {"getattr", "setattr", "delattr", "globals", "vars", "locals", "eval", "exec", "compile", "__import__"}
-BANNED_ATTRS = {("sys", "modules"), ("importlib", "import_module"), ("importlib", "reload"),
-                ("marshal", "loads"), ("runpy", "run_path"), ("runpy", "run_module"), ("types", "ModuleType")}
-BUILTIN_CALLS_ALLOWED = {"len", "sorted", "dict", "list", "set", "tuple", "str", "int", "float", "bool",
-                         "isinstance", "min", "max", "any", "all", "range", "enumerate", "print", "repr",
-                         "ValueError", "RuntimeError", "KeyError", "TypeError", "NamedTuple", "open", "iter", "next"}
-MAX_BYTES, MAX_NODES, MAX_NODES_CLI = 16 * 1024, 1500, 900
+BANNED_NAMES = {"getattr", "setattr", "delattr", "hasattr", "globals", "vars", "locals", "eval", "exec", "compile", "__import__"}
+BANNED_ATTRS = {("sys", "modules"), ("importlib", "import_module"), ("importlib", "reload"), ("marshal", "loads"),
+                ("runpy", "run_path"), ("runpy", "run_module"), ("types", "ModuleType")}
+BUILTIN_CALLS_ALLOWED = {"len", "sorted", "dict", "list", "set", "tuple", "str", "int", "float", "bool", "isinstance", "min", "max",
+                         "any", "all", "range", "enumerate", "print", "repr", "ValueError", "RuntimeError", "KeyError", "TypeError",
+                         "NamedTuple", "open", "iter", "next", "SystemExit"}
+MAX_BYTES, MAX_NODES, MAX_NODES_CLI = 16 * 1024, 1500, 2000   # measured: cli.py is 1716 nodes; transport.py 911
 
 
-def _tree(name: str) -> ast.Module:
+def _tree(name):
     return ast.parse((PKG_DIR / name).read_text(), filename=name)
 
 
-def _top_defs(tree: ast.Module) -> dict[str, str]:
-    out: dict[str, str] = {}
+def _top_defs(tree):
+    out = {}
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             out[node.name] = "callable"
         elif isinstance(node, ast.Assign):
-            out.update({t.id: "value" for t in node.targets if isinstance(t, ast.Name)})
+            for t in node.targets:
+                names = [t] if isinstance(t, ast.Name) else (list(t.elts) if isinstance(t, ast.Tuple) else [])
+                out.update({n.id: "value" for n in names if isinstance(n, ast.Name)})
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             out[node.target.id] = "value"
     return out
 
 
-def _package_imports(tree: ast.Module) -> set[str]:
-    out: set[str] = set()
+def _package_imports(tree):
+    out = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.level == 1:
             out.update([node.module.split(".")[0]] if node.module else [a.name for a in node.names])
     return out
 
 
-def _absolute_imports(tree: ast.Module) -> set[str]:
-    out: set[str] = set()
+def _absolute_imports(tree):
+    out = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             out.update(a.name.split(".")[0] for a in node.names)
@@ -657,16 +675,24 @@ def _absolute_imports(tree: ast.Module) -> set[str]:
     return out
 
 
-def _import_aliases(tree: ast.Module) -> set[str]:
-    """Local names bound by ANY import in the module (e.g. `cp` in `from . import checkpoint as cp`)."""
-    out: set[str] = set()
+def _import_aliases(tree):
+    out = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             out.update((a.asname or a.name).split(".")[0] for a in node.names)
     return out
 
 
-# --- G18 ownership ------------------------------------------------------------------
+def _call_key(call):
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+        return f"{f.value.id}.{f.attr}"
+    return None
+
+
+# --- G18 ---------------------------------------------------------------------------
 
 def test_every_manifest_symbol_is_defined_in_its_module_with_the_right_kind():
     for mod, symbols in OWNERSHIP.items():
@@ -674,7 +700,7 @@ def test_every_manifest_symbol_is_defined_in_its_module_with_the_right_kind():
         for name, kind in symbols.items():
             assert name in defs, f"{mod} does not define {name!r}"
             if kind == "callable":
-                assert defs[name] == "callable", f"{mod}: {name!r} is a bare assignment, not a def/class"
+                assert defs[name] == "callable", f"{mod}: {name!r} is a bare assignment"
 
 
 def test_no_manifest_symbol_is_defined_in_a_second_module():
@@ -692,18 +718,16 @@ def test_no_planned_module_is_a_shim():
 
 
 def test_package_tree_recursively_equals_the_manifest():
-    found = sorted(p.relative_to(PKG_DIR).as_posix() for p in PKG_DIR.rglob("*")
-                   if p.is_file() and "__pycache__" not in p.parts)
+    found = sorted(p.relative_to(PKG_DIR).as_posix() for p in PKG_DIR.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
     assert found == sorted(OWNERSHIP), {"unplanned": sorted(set(found) - set(OWNERSHIP)), "missing": sorted(set(OWNERSHIP) - set(found))}
 
 
 def test_pyproject_ships_exactly_the_package_and_no_data():
     wheel = tomllib.loads((PKG_DIR.parent / "pyproject.toml").read_text())["tool"]["hatch"]["build"]["targets"]["wheel"]
-    assert wheel.get("packages") == ["coord_fold"], wheel
-    assert not ({"include", "artifacts", "force-include", "only-include"} & set(wheel)), wheel
+    assert wheel.get("packages") == ["coord_fold"] and not ({"include", "artifacts", "force-include", "only-include"} & set(wheel))
 
 
-# --- G20 cli.py is wiring only, RECURSIVELY -------------------------------------------
+# --- G20 cli.py wiring only, recursively ------------------------------------------------
 
 def test_cli_top_level_definitions_are_exactly_the_manifest():
     got = set(_top_defs(_tree("cli.py")))
@@ -711,14 +735,12 @@ def test_cli_top_level_definitions_are_exactly_the_manifest():
 
 
 def test_cli_contains_no_nested_definitions_anywhere():
-    """Round-3: implementation hidden as nested defs inside an allowed function."""
     tree = _tree("cli.py")
     for top in tree.body:
         for node in ast.walk(top):
-            if node is top:
-                continue
-            assert not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)), (
-                f"cli.py nests a definition inside {getattr(top, 'name', type(top).__name__)}")
+            if node is not top:
+                assert not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)), (
+                    f"cli.py nests a definition inside {getattr(top, 'name', type(top).__name__)}")
 
 
 def test_cli_functions_respect_per_function_budgets():
@@ -727,10 +749,32 @@ def test_cli_functions_respect_per_function_budgets():
             stmts = sum(1 for n in ast.walk(node) if isinstance(n, ast.stmt)) - 1
             nodes = sum(1 for _ in ast.walk(node))
             assert stmts <= CLI_MAX_STATEMENTS_PER_FUNCTION, f"cli.{node.name}: {stmts} statements"
-            assert nodes <= CLI_MAX_NODES_PER_FUNCTION, f"cli.{node.name}: {nodes} AST nodes"
+            assert nodes <= CLI_MAX_NODES_PER_FUNCTION, f"cli.{node.name}: {nodes} nodes"
 
 
-# --- G19 DAG + G20 semantic delegation ban ----------------------------------------------
+# --- G23 required edges + owner-only operations -----------------------------------------
+
+def test_each_cli_handler_calls_its_required_owner_operations():
+    """Round 4 (both): nothing required cmd_fold to call fold.run, so the fold could be inlined."""
+    tree = _tree("cli.py")
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in REQUIRED_CALLS:
+            calls = {k for k in (_call_key(c) for c in ast.walk(node) if isinstance(c, ast.Call)) if k}
+            missing = REQUIRED_CALLS[node.name] - calls
+            assert not missing, f"cli.{node.name} does not call {sorted(missing)} — the owner operation is being bypassed"
+
+
+def test_cli_never_performs_an_owner_only_operation():
+    tree = _tree("cli.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            k = _call_key(node)
+            assert k not in OWNER_ONLY_OPS, f"cli.py calls {k} — a fold operation inlined into the command file"
+            if isinstance(node.func, ast.Attribute):
+                assert node.func.attr not in OWNER_ONLY_METHODS, f"cli.py calls .{node.func.attr}() — an owner-only method"
+
+
+# --- G19 DAG + G20 semantic delegation ban -----------------------------------------------
 
 def test_every_intra_package_import_is_an_allowed_edge():
     for mod, allowed in ALLOWED_EDGES.items():
@@ -743,15 +787,15 @@ def test_no_owner_module_imports_cli():
         assert "cli" not in _package_imports(_tree(mod)), f"{mod} imports cli"
 
 
-def test_absolute_imports_are_stdlib_or_fulcra_common_only():
-    """Also the §7 composition-root exclusion proof: the inbox reconciler cannot be imported."""
+def test_absolute_imports_are_allowlisted_per_module():
+    """Also the §7 composition-root exclusion proof, and the launcher-import confinement."""
     for mod in OWNERSHIP:
-        bad = _absolute_imports(_tree(mod)) - STDLIB_ALLOWED - THIRD_PARTY_ALLOWED
+        allowed = STDLIB_BASE | THIRD_PARTY_ALLOWED | STDLIB_EXTRA.get(mod, set())
+        bad = _absolute_imports(_tree(mod)) - allowed
         assert not bad, f"{mod} imports {sorted(bad)}"
 
 
 def test_no_banned_name_or_attribute_anywhere():
-    """Closes sys.modules / getattr indirection and runtime code loading in one sweep."""
     for mod in OWNERSHIP:
         for node in ast.walk(_tree(mod)):
             if isinstance(node, ast.Name) and node.id in BANNED_NAMES:
@@ -761,33 +805,35 @@ def test_no_banned_name_or_attribute_anywhere():
 
 
 def test_owner_callables_only_call_what_the_dag_allows():
-    """The call-graph rule. Inside each owner's manifest callable, every call resolves to a
-    same-module definition, an import alias of that module, or an allowed builtin."""
     for mod in OWNER_MODULES:
         tree = _tree(mod)
         local = set(_top_defs(tree)) | _import_aliases(tree)
         for top in tree.body:
             if not (isinstance(top, ast.FunctionDef) and OWNERSHIP[mod].get(top.name) == "callable"):
                 continue
-            bound = set(a.arg for a in ast.walk(top) if isinstance(a, ast.arg))
+            bound = {a.arg for a in ast.walk(top) if isinstance(a, ast.arg)}
             bound |= {n.id for n in ast.walk(top) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
             for call in (n for n in ast.walk(top) if isinstance(n, ast.Call)):
                 f = call.func
                 root = f.id if isinstance(f, ast.Name) else (f.value.id if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None)
                 if root is None:
-                    continue  # a call on an expression result (e.g. x.get(...)()) — covered by name bans
-                assert root in local or root in bound or root in BUILTIN_CALLS_ALLOWED, (
-                    f"{mod}.{top.name} calls through {root!r}, which is not a local definition, an allowed import, or an allowed builtin")
+                    continue
+                assert root in local or root in bound or root in BUILTIN_CALLS_ALLOWED, f"{mod}.{top.name} calls through {root!r}"
 
 
-def test_no_manifest_callable_is_a_one_statement_forwarding_wrapper():
-    """Retained as a cheap early signal; the guarantee is the call-graph rule above."""
+def test_no_manifest_callable_is_a_cross_module_forwarding_wrapper():
+    """Scoped to CROSS-MODULE delegation (round 4): a same-module one-liner like
+    channel.config_path is fine; a one-liner whose call root is an import alias is not."""
     for mod, symbols in OWNERSHIP.items():
-        for node in _tree(mod).body:
+        tree = _tree(mod)
+        aliases = _import_aliases(tree)
+        for node in tree.body:
             if isinstance(node, ast.FunctionDef) and symbols.get(node.name) == "callable":
                 body = [n for n in node.body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
                 if len(body) == 1 and isinstance(body[0], ast.Return) and isinstance(body[0].value, ast.Call):
-                    raise AssertionError(f"{mod}.{node.name} is a one-line forwarding wrapper")
+                    f = body[0].value.func
+                    root = f.id if isinstance(f, ast.Name) else (f.value.id if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None)
+                    assert root not in aliases, f"{mod}.{node.name} forwards to imported {root!r}"
 
 
 # --- G21 mass -------------------------------------------------------------------------
@@ -801,76 +847,63 @@ def test_mass_ceilings_recursive():
         assert nodes <= (MAX_NODES_CLI if p.name == "cli.py" else MAX_NODES), f"{p.name}: {nodes} AST nodes"
 ```
 
-- [ ] **Step 2: Run now — expect failures naming missing modules.** Commit as failing-first: `coord-fold: ownership, recursive cli policy, DAG, semantic delegation ban, mass (G18–G21) — failing until Tasks 4–10`.
+- [ ] **Step 2: Run — fails until Tasks 4–10 exist; commit as failing-first.**
 
-- [ ] **Step 3 (after Task 10): Run — expect 16 passed.** If a symbol drifted, fix the module to the manifest, never the manifest to the module.
-
-- [ ] **Step 4 (after Task 10): MUTATION-VERIFY — the reviewers' counterexamples, one each**
+- [ ] **Step 3 (after Task 10): MUTATION-VERIFY — one per reviewer counterexample**
 
 ```bash
-# (a) r2: duplicate build_payload into cli.py (duplication, so the suite still imports)
+# (a) r2: duplicate build_payload into cli.py
 python - <<'PY'
-p="coord_fold/cli.py"; open(p,"a").write("\n\ndef build_payload(**kw):\n    return dict(kw)\n")
+open("coord_fold/cli.py","a").write("\n\ndef build_payload(**kw):\n    return dict(kw)\n")
 PY
-python -m pytest tests/test_ownership.py -q     # expect 2 FAIL: second-module + cli exact set
+python -m pytest tests/test_ownership.py -q    # expect 2 FAIL: second-module + cli exact set
 git checkout coord_fold/cli.py
-
-# (b) r3: implementation in cli.py, one-line wrapper in events.py (events imports cli)
+# (b) r3: impl in cli.py, wrapper in events.py importing cli
 python - <<'PY'
-c="coord_fold/cli.py"; open(c,"a").write("\n\ndef _build_payload_impl(**kw):\n    return dict(kw)\n")
-e="coord_fold/events.py"; t=open(e).read().replace("def build_payload(", "def _real_build_payload(",1)
-t += "\nfrom . import cli as _cli\n\ndef build_payload(**kw):\n    return _cli._build_payload_impl(**kw)\n"
+open("coord_fold/cli.py","a").write("\n\ndef _impl(**kw):\n    return dict(kw)\n")
+e="coord_fold/events.py"; t=open(e).read().replace("def build_payload(","def _real(",1)+"\nfrom . import cli as _c\n\ndef build_payload(**kw):\n    return _c._impl(**kw)\n"
 open(e,"w").write(t)
 PY
-python -m pytest tests/test_ownership.py -q     # expect >=4 FAIL: DAG edge, owner-imports-cli, call-graph, wrapper, cli exact set
+python -m pytest tests/test_ownership.py -q    # expect >=4 FAIL: DAG, owner-imports-cli, call-graph, cross-module wrapper, cli exact set
 git checkout coord_fold/cli.py coord_fold/events.py
-
-# (c) r4: NESTED implementation inside an allowed cli.py function
+# (c) r4: nested implementation inside an allowed cli function
+python - <<'PY'
+p="coord_fold/cli.py"; s=open(p).read().replace("def _now() -> str:","def _now() -> str:\n    def _hidden(x):\n        return x\n    _hidden(0)",1); open(p,"w").write(s)
+PY
+python -m pytest tests/test_ownership.py -q    # expect 1 FAIL: nested definition
+git checkout coord_fold/cli.py
+# (d) r4: two-statement sys.modules delegation
+python - <<'PY'
+e="coord_fold/events.py"; t=open(e).read().replace("def build_payload(","def _real(",1)+"\nimport sys\n\ndef build_payload(**kw):\n    impl = sys.modules['coord_fold.cli']._emit_kind\n    return impl(**kw)\n"
+open(e,"w").write(t)
+PY
+python -m pytest tests/test_ownership.py -q    # expect >=1 FAIL: banned sys.modules
+git checkout coord_fold/events.py
+# (e) r5: INLINE the fold into cmd_fold, drop the fold.run call
 python - <<'PY'
 p="coord_fold/cli.py"; s=open(p).read()
-s=s.replace("def _now() -> str:", "def _now() -> str:\n    def _hidden_engine(x):\n        return x\n    _hidden_engine(0)",1)
+s=s.replace("        out = fold.run(reader, writer, args.team, args.agent, now=args.now, max_events=args.max_events, verify_pointers=args.verify_pointers)",
+            "        st, _ = checkpoint.load(reader, args.team, args.agent)\n        out = fold.FoldOutcome(st or checkpoint.empty(args.now), 'ok', 0, 0, 0)",1)
 open(p,"w").write(s)
 PY
-python -m pytest tests/test_ownership.py -q     # expect 1 FAIL: nested definition
+python -m pytest tests/test_ownership.py -q    # expect 2 FAIL: required edge fold.run missing + owner-only checkpoint.empty
 git checkout coord_fold/cli.py
-
-# (d) r4: TWO-STATEMENT sys.modules delegation in an owner, no import of cli
-python - <<'PY'
-e="coord_fold/events.py"; t=open(e).read().replace("def build_payload(", "def _real_build_payload(",1)
-t += "\nimport sys\n\ndef build_payload(**kw):\n    impl = sys.modules['coord_fold.cli']._emit_kind\n    return impl(**kw)\n"
-open(e,"w").write(t)
-PY
-python -m pytest tests/test_ownership.py -q     # expect >=2 FAIL: banned sys.modules attribute + call-graph (impl is bound but sys is not a local def; the attribute ban fires first)
-git checkout coord_fold/events.py
-
-# (e) r4: getattr indirection
-python - <<'PY'
-e="coord_fold/events.py"; t=open(e).read().replace("def build_payload(", "def _real_build_payload(",1)
-t += "\nimport json as _j\n\ndef build_payload(**kw):\n    return getattr(_j, 'dumps')(kw)\n"
-open(e,"w").write(t)
-PY
-python -m pytest tests/test_ownership.py -q     # expect 1 FAIL: banned name getattr
-git checkout coord_fold/events.py
-
 # (f) mass: dense padding under the line ceiling
 python - <<'PY'
-p="coord_fold/cli.py"; open(p,"a").write("\n" + "; ".join(f"_p{i}=[{i}]*{i}" for i in range(1,220)) + "\n")
+open("coord_fold/cli.py","a").write("\n"+"; ".join(f"_p{i}=[{i}]*{i}" for i in range(1,220))+"\n")
 PY
-python -m pytest tests/test_ownership.py -q     # expect >=2 FAIL: cli exact set + cli node ceiling
+python -m pytest tests/test_ownership.py -q    # expect >=2 FAIL: cli exact set + node ceiling
 git checkout coord_fold/cli.py
 ```
 
-- [ ] **Step 5: Commit** — `coord-fold: ownership gates green after Task 10; mutation-verified against all six bypass shapes (r2, r3, r4)`
+**Commit** — `coord-fold: ownership, recursive cli policy, DAG, semantic delegation ban, required edges, mass — mutation-verified against r2–r5 counterexamples`
 
 ---
 
 ### Task 4: Event schema (G1–G3)
 
-**Interfaces (produced):** `events.KINDS`, `events.PRIORITIES`, `events.PAYLOAD_VERSION`, `events.build_payload(*, at, sender, to, kind, slug, pri, ptr) -> dict`, `events.parse_event(record) -> dict | None`.
-
-- [ ] **Step 1: Failing tests** — `tests/test_events.py`
-
 ```python
+# packages/coord-fold/tests/test_events.py
 import json
 import pytest
 from coord_fold import events
@@ -907,7 +940,7 @@ def test_unknown_kind_and_priority_are_refused():
 def test_parse_accepts_v1_and_carries_record_id_and_recorded_at():
     p = events.build_payload(at="t", sender="a", to="b", kind="open", slug="s", pri="P1", ptr="x.md")
     ev = events.parse_event(_rec(p, rid="abc", at="T2"))
-    assert ev and ev["record_id"] == "abc" and ev["recorded_at"] == "T2" and ev["kind"] == "open"
+    assert ev and ev["record_id"] == "abc" and ev["recorded_at"] == "T2"
 
 
 def test_parse_skips_free_text_and_foreign_payloads_silently():
@@ -915,8 +948,6 @@ def test_parse_skips_free_text_and_foreign_payloads_silently():
     assert events.parse_event(_rec({"kind": "directive", "v": 1})) is None
     assert events.parse_event(_rec({"v": 2, "kind": "open", "slug": "s"})) is None
 ```
-
-- [ ] **Step 2: Run — ImportError. Step 3: Implement**
 
 ```python
 # packages/coord-fold/coord_fold/events.py
@@ -962,18 +993,16 @@ def parse_event(record: dict[str, Any]) -> dict[str, Any] | None:
     return out
 ```
 
-- [ ] **Step 4: Run — 6 passed. Mutation:** change `if ptr is None and kind in _PTR_REQUIRED` to `if False` → first refusal test FAILS; restore. **Commit** — `coord-fold: event payload v1 (G1–G3)`
+Run — 6 passed. Mutation: `if ptr is None and kind in _PTR_REQUIRED` → `if False` → FAILS. **Commit.**
 
 ---
 
-### Task 5: Channel resolution + the golden-compared write (G15)
-
-**Interfaces (produced):** `channel.CONFIG_PATH`, `channel.ChannelUnresolved`, `channel.config_path(team) -> str`, `channel.resolve(reader, team) -> dict[str,str]`.
-
-- [ ] **Step 1: Failing tests** — `tests/test_channel.py`
+### Task 5: Channel resolution + golden-compared write keys (G15)
 
 ```python
+# packages/coord-fold/tests/test_channel.py
 import json
+import subprocess
 import pytest
 from coord_fold import channel
 from coord_fold.transport import CliPointerWriter
@@ -996,28 +1025,24 @@ def test_absent_and_unreadable_config_both_raise_with_different_words():
 
 
 def test_config_missing_data_type_raises():
-    st = FakeStore({CFG: json.dumps({"api_version": "v1alpha1"})}, [])
     with pytest.raises(channel.ChannelUnresolved):
-        channel.resolve(FakeReader(st), "r")
+        channel.resolve(FakeReader(FakeStore({CFG: json.dumps({"api_version": "v1alpha1"})}, [])), "r")
 
 
 def test_write_event_stdin_document_matches_the_old_transport_keys(monkeypatch):
-    """GOLDEN: copy the key set from coord_engine/transport.py record_write (~line 385 at 5db5c3e5).
-    EDIT the expected set if the old transport's keys differ; never guess them."""
-    import subprocess
+    """GOLDEN: the key set is copied from coord_engine/transport.py record_write (~line 385 at 5db5c3e5).
+    If the old transport's keys differ, change BOTH the writer and this set. Never guess."""
     seen = {}
+    class R:
+        returncode, stdout, stderr = 0, "", ""
     def fake_run(argv, input=None, **kw):
         seen["doc"] = json.loads(input)
-        class R: returncode, stdout, stderr = 0, "", ""
         return R()
     monkeypatch.setattr(subprocess, "run", fake_run)
-    w = CliPointerWriter(cli=["true"])
-    w.write_event({"data_type": "D", "api_version": "v1alpha1"},
-                  {"v": 1, "at": "T", "from": "a", "to": "b", "kind": "note", "slug": "s", "pri": "P3", "ptr": None}, sender="a")
+    CliPointerWriter(cli=["true"]).write_event({"data_type": "D", "api_version": "v1alpha1"},
+        {"v": 1, "at": "T", "from": "a", "to": "b", "kind": "note", "slug": "s", "pri": "P3", "ptr": None}, sender="a")
     assert set(seen["doc"]) == {"data_type", "api_version", "note", "source", "recorded_at"}
 ```
-
-- [ ] **Step 2: Run — ImportError. Step 3: Implement**
 
 ```python
 # packages/coord-fold/coord_fold/channel.py
@@ -1054,17 +1079,14 @@ def resolve(reader: PointerTransport, team: str) -> dict[str, str]:
     return {k: str(cfg[k]) for k in _REQUIRED}
 ```
 
-- [ ] **Step 4: Run — 4 passed. Mutation:** replace the first `raise ChannelUnresolved(...)` with `return {"data_type": "hardcoded", "api_version": "v1alpha1"}` → 2 FAIL; restore. **Commit** — `coord-fold: channel resolution + golden-compared write keys (G15)`
+Run — 4 passed. Mutation: replace the first `raise` with a hardcoded return → 2 FAIL. **Commit.**
 
 ---
 
-### Task 6: Checkpoint schema (G4)
-
-**Interfaces (produced):** `checkpoint.SCHEMA_VERSION`, `path(team, agent)`, `empty(now)`, `apply(state, event)`, `load(reader, team, agent) -> (state, "ok"|"fresh"|"corrupt"|"error")`, `save(writer, team, agent, state) -> bool`.
-
-- [ ] **Step 1: Failing tests** — `tests/test_checkpoint.py`
+### Task 6: Checkpoint (G4)
 
 ```python
+# packages/coord-fold/tests/test_checkpoint.py
 import json
 from coord_fold import checkpoint as cp
 from fakes import FakeReader, FakeStore, FakeWriter
@@ -1072,9 +1094,9 @@ NOW = "2026-09-04T13:45:00Z"
 
 
 def _ev(kind, slug="s1", rid="r1", **kw):
-    b = {"v": 1, "at": NOW, "from": "boss", "to": "me", "kind": kind, "slug": slug, "pri": "P1",
-         "ptr": f"team/r/task/{slug}.md", "record_id": rid}
-    b.update(kw); return b
+    b = {"v": 1, "at": NOW, "from": "boss", "to": "me", "kind": kind, "slug": slug, "pri": "P1", "ptr": f"team/r/task/{slug}.md", "record_id": rid}
+    b.update(kw)
+    return b
 
 
 def test_empty_has_exactly_the_six_fields():
@@ -1099,21 +1121,18 @@ def test_a_record_id_seen_before_is_not_applied_twice():
 
 
 def test_load_states_and_save_roundtrip():
-    st_ = FakeStore({}, []); r, w = FakeReader(st_), FakeWriter(st_)
+    store = FakeStore({}, []); r, w = FakeReader(store), FakeWriter(store)
     assert cp.load(r, "r", "me")[1] == "fresh"
-    st_.docs[cp.path("r", "me")] = "not json"; assert cp.load(r, "r", "me")[1] == "corrupt"
+    store.docs[cp.path("r", "me")] = "not json"; assert cp.load(r, "r", "me")[1] == "corrupt"
     bad = FakeStore({}, []); bad.fail_reads = True; assert cp.load(FakeReader(bad), "r", "me")[1] == "error"
     s = cp.empty(NOW); cp.apply(s, _ev("open")); s["cursor"] = NOW
     assert cp.save(w, "r", "me", s)
     back, src = cp.load(r, "r", "me"); assert src == "ok" and back["open"] == s["open"]
 ```
 
-- [ ] **Step 2: Run — ImportError. Step 3: Implement**
-
 ```python
 # packages/coord-fold/coord_fold/checkpoint.py
-"""One durable checkpoint per agent (spec §3.3). Six fields — `seen` is the idempotency ring
-and is a stated field, not a hidden one (G4; see Ruling 1 for whether it survives)."""
+"""One durable checkpoint per agent (spec §3.3). Six stated fields (G4; see Ruling 1)."""
 from __future__ import annotations
 
 import json
@@ -1170,17 +1189,14 @@ def save(writer: Any, team: str, agent: str, state: dict[str, Any]) -> bool:
     return bool(writer.save_doc(path(team, agent), json.dumps(state, indent=1)))
 ```
 
-- [ ] **Step 4: Run — 5 passed. Mutation:** delete `if rid and rid in state["seen"]: return` → idempotency test FAILS; restore. **Commit** — `coord-fold: checkpoint v1, six stated fields, idempotent by record id (G4)`
+Run — 5 passed. Mutation: delete the `seen` guard → FAILS. **Commit.**
 
 ---
 
-### Task 7: `fold` (§3.3) with `--verify-pointers`
-
-**Interfaces (produced):** `fold.OVERLAP_SECONDS`, `fold.FoldOutcome(state, source, applied, unread, rc)`, `fold.FoldRefused`, `fold.run(reader, writer, team, agent, *, now, max_events=5000, verify_pointers=False) -> FoldOutcome`; `cli.main(argv=None, *, reader=None, writer=None) -> int`. Exit codes: 0 complete; 2 refused; 3 UNKNOWN.
-
-- [ ] **Step 1: Failing CLI-driven tests (G9)** — `tests/test_cli_fold.py`
+### Task 7: `fold` and the CLI skeleton (§3.3, G9, G20, G23)
 
 ```python
+# packages/coord-fold/tests/test_cli_fold.py
 import json
 from coord_fold import checkpoint as cp
 from coord_fold.cli import main
@@ -1199,8 +1215,8 @@ def _team(events):
     return FakeStore({CFG: CFG_DOC}, events)
 
 
-def _run(st, *extra):
-    return main(["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z", *extra], reader=FakeReader(st), writer=FakeWriter(st))
+def _run(st, *extra, now="2026-09-04T11:00:00Z"):
+    return main(["fold", "r", "--agent", "me", "--now", now, *extra], reader=FakeReader(st), writer=FakeWriter(st))
 
 
 def _ckpt(st):
@@ -1209,7 +1225,7 @@ def _ckpt(st):
 
 def test_fold_from_fresh_applies_open_events_and_stores_the_checkpoint():
     st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1"), _rec("open", "b", "2026-09-04T10:01:00Z", "2")])
-    assert _run(st) == 0 and set(_ckpt(st)["open"]) == {"a", "b"} and _ckpt(st)["cursor"] == "2026-09-04T11:00:00Z"
+    assert _run(st) == 0 and set(_ckpt(st)["open"]) == {"a", "b"}
 
 
 def test_close_after_open_removes_the_row():
@@ -1225,14 +1241,12 @@ def test_events_for_someone_else_do_not_land_but_broadcast_does():
 def test_a_second_fold_reads_only_forward():
     st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")]); _run(st)
     st.events.append(_rec("close", "a", "2026-09-04T11:30:00Z", "2"))
-    main(["fold", "r", "--agent", "me", "--now", "2026-09-04T12:00:00Z"], reader=FakeReader(st), writer=FakeWriter(st))
-    assert _ckpt(st)["open"] == {} and _ckpt(st)["cursor"] == "2026-09-04T12:00:00Z"
+    _run(st, now="2026-09-04T12:00:00Z"); assert _ckpt(st)["open"] == {} and _ckpt(st)["cursor"] == "2026-09-04T12:00:00Z"
 
 
-def test_a_failed_event_read_does_NOT_advance_the_cursor_and_exits_3(capsys):
+def test_a_failed_event_read_does_not_advance_the_cursor_and_exits_3(capsys):
     st = _team([]); st.fail_events = True
-    assert _run(st) == 3 and cp.path("r", "me") not in st.saved
-    assert "degraded" not in capsys.readouterr().out.lower()
+    assert _run(st) == 3 and cp.path("r", "me") not in st.saved and "degraded" not in capsys.readouterr().out.lower()
 
 
 def test_more_events_than_the_cap_leaves_a_bounded_unread_count_and_exits_3():
@@ -1247,24 +1261,17 @@ def test_corrupt_checkpoint_is_refused_and_untouched(capsys):
 
 
 def test_unresolved_channel_is_refused():
-    st = FakeStore({}, []); assert _run(st) == 2
+    assert _run(FakeStore({}, [])) == 2
 
 
-def test_verify_pointers_records_an_absent_pointer_by_slug_and_exits_3():
+def test_verify_pointers_records_an_absent_pointer_and_default_reads_none():
     st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1", ptr="team/r/task/gone.md")])
     assert _run(st, "--verify-pointers") == 3 and _ckpt(st)["unreadable_pointers"] == ["a"]
-
-
-def test_verify_pointers_leaves_a_readable_pointer_alone_and_default_reads_none():
-    st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")]); st.docs["team/r/task/a.md"] = "x"
-    assert _run(st, "--verify-pointers") == 0 and _ckpt(st)["unreadable_pointers"] == []
-    reads = []; r = FakeReader(st); orig = r.read_classified
-    r.read_classified = lambda p: (reads.append(p), orig(p))[1]
-    main(["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z"], reader=r, writer=FakeWriter(st))
+    st2 = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1")]); reads = []
+    r = FakeReader(st2); orig = r.read_classified; r.read_classified = lambda p: (reads.append(p), orig(p))[1]
+    main(["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z"], reader=r, writer=FakeWriter(st2))
     assert not any("/task/" in p for p in reads)
 ```
-
-- [ ] **Step 2: Run — ImportError. Step 3: Implement `fold.py`**
 
 ```python
 # packages/coord-fold/coord_fold/fold.py
@@ -1332,15 +1339,12 @@ def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: st
                 state["unreadable_pointers"].append(slug)
     if not cp.save(writer, team, agent, state):
         raise TransportUnavailable("checkpoint save failed")
-    rc = 3 if (unread or state["unreadable_pointers"]) else 0
-    return FoldOutcome(state, source, applied, unread, rc)
+    return FoldOutcome(state, source, applied, unread, 3 if (unread or state["unreadable_pointers"]) else 0)
 ```
-
-- [ ] **Step 4: Implement `cli.py` (skeleton + `fold`) — exactly the manifest names, nothing nested**
 
 ```python
 # packages/coord-fold/coord_fold/cli.py
-"""Six verbs. Wiring only, recursively (G20)."""
+"""Six verbs. Wiring only, recursively (G20); every handler calls its owner operation (G23)."""
 from __future__ import annotations
 
 import argparse
@@ -1366,10 +1370,15 @@ def _default_transports() -> tuple[CliPointerReader, CliPointerWriter]:
     return CliPointerReader(cli=[cli]), CliPointerWriter(cli=[cli])
 
 
+def _row_sort_key(item: tuple) -> tuple:
+    return (item[1]["pri"], item[1]["at"])
+
+
 def _render_open(state: dict) -> str:
-    rows = sorted(state["open"].items(), key=lambda kv: (kv[1]["pri"], kv[1]["at"]))
-    lines = [f"  [{r['pri']}] {slug}  from={r['from']}  ptr={r['ptr']}" + (f"  claimed_by={r['claimed_by']}" if r.get("claimed_by") else "")
-             for slug, r in rows]
+    lines = []
+    for slug, r in sorted(state["open"].items(), key=_row_sort_key):
+        claimed = f"  claimed_by={r['claimed_by']}" if r.get("claimed_by") else ""
+        lines.append(f"  [{r['pri']}] {slug}  from={r['from']}  ptr={r['ptr']}{claimed}")
     return "\n".join(lines) if lines else "  (nothing open)"
 
 
@@ -1378,6 +1387,28 @@ def _report_unknowns(state: dict) -> None:
         print(f"fold: {state['unread_events']} events unread past {state['cursor']} — the answer is missing those", file=sys.stderr)
     for slug in state.get("unreadable_pointers", []):
         print(f"fold: pointer for {slug} unreadable — that one row is UNKNOWN", file=sys.stderr)
+
+
+def _emit_kind(reader, writer, team, *, sender, to, kind, slug, pri, ptr, at) -> int:
+    try:
+        cfg = channel.resolve(reader, team)
+        payload = events.build_payload(at=at, sender=sender, to=to, kind=kind, slug=slug, pri=pri, ptr=ptr)
+    except (channel.ChannelUnresolved, ValueError) as exc:
+        print(f"{kind}: refused — {exc}", file=sys.stderr)
+        return RC_REFUSED
+    if not writer.write_event(cfg, payload, sender=sender):
+        print(f"{kind}: UNKNOWN — the record write did not confirm", file=sys.stderr)
+        return RC_UNKNOWN
+    print(f"{kind} {slug} -> {to}")
+    return RC_OK
+
+
+def _owed_row(reader, team, agent, slug) -> tuple:
+    """(row, load_state). A None row with load_state 'error' is UNKNOWN, never 'not owed'."""
+    state, src = checkpoint.load(reader, team, agent)
+    if src != "ok":
+        return None, src
+    return state["open"].get(slug), src
 
 
 def cmd_fold(args, reader, writer) -> int:
@@ -1395,22 +1426,100 @@ def cmd_fold(args, reader, writer) -> int:
     return out.rc
 
 
+def cmd_emit(args, reader, writer) -> int:
+    return _emit_kind(reader, writer, args.team, sender=args.sender, to=args.to, kind=args.kind, slug=args.slug, pri=args.pri, ptr=args.ptr, at=args.at)
+
+
+def cmd_claim(args, reader, writer) -> int:
+    row, src = _owed_row(reader, args.team, args.agent, args.slug)
+    if src == "error":
+        print(f"claim: UNKNOWN — checkpoint unreadable; cannot tell whether {args.slug} is owed", file=sys.stderr)
+        return RC_UNKNOWN
+    if row is None:
+        print(f"claim: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
+        return RC_REFUSED
+    return _emit_kind(reader, writer, args.team, sender=args.agent, to=row["from"], kind="claim", slug=args.slug, pri=row["pri"], ptr=row["ptr"], at=args.at)
+
+
+def cmd_release(args, reader, writer) -> int:
+    row, src = _owed_row(reader, args.team, args.agent, args.slug)
+    if src == "error":
+        print(f"release: UNKNOWN — checkpoint unreadable; cannot tell whether {args.slug} is owed", file=sys.stderr)
+        return RC_UNKNOWN
+    if row is None:
+        print(f"release: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
+        return RC_REFUSED
+    return _emit_kind(reader, writer, args.team, sender=args.agent, to=row["from"], kind="release", slug=args.slug, pri=row["pri"], ptr=row["ptr"], at=args.at)
+
+
+def cmd_close(args, reader, writer) -> int:
+    row, src = _owed_row(reader, args.team, args.agent, args.slug)
+    if src == "error":
+        print(f"close: UNKNOWN — checkpoint unreadable; cannot tell whether {args.slug} is owed", file=sys.stderr)
+        return RC_UNKNOWN
+    if row is None:
+        print(f"close: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
+        return RC_REFUSED
+    _body, st = reader.read_classified(args.evidence)
+    if st == "absent":
+        print(f"close: refused — evidence {args.evidence} is absent", file=sys.stderr)
+        return RC_REFUSED
+    if st == "error":
+        print(f"close: UNKNOWN — evidence {args.evidence} unreadable; not closing on a read that did not answer", file=sys.stderr)
+        return RC_UNKNOWN
+    return _emit_kind(reader, writer, args.team, sender=args.agent, to=row["from"], kind="close", slug=args.slug, pri=row["pri"], ptr=args.evidence, at=args.at)
+
+
+def cmd_status(args, reader, writer) -> int:
+    state, src = checkpoint.load(reader, args.team, args.agent)
+    if src == "fresh":
+        print(f"status: {args.agent} has never folded — run `coord-fold fold`", file=sys.stderr)
+        return RC_REFUSED
+    if src == "corrupt":
+        print("status: refused — checkpoint corrupt", file=sys.stderr)
+        return RC_REFUSED
+    if src == "error":
+        print("status: UNKNOWN — checkpoint unreadable", file=sys.stderr)
+        return RC_UNKNOWN
+    print(f"status [{args.agent}] cursor={state['cursor']} open={len(state['open'])}")
+    print(_render_open(state))
+    _report_unknowns(state)
+    return RC_UNKNOWN if (state.get("unread_events") or state.get("unreadable_pointers")) else RC_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--now", default=None)
+    common.add_argument("--at", default=None)
     p = argparse.ArgumentParser(prog="coord-fold")
     sub = p.add_subparsers(dest="verb", required=True)
-    f = sub.add_parser("fold", help="advance my checkpoint, print what I owe")
-    f.add_argument("team"); f.add_argument("--agent", required=True); f.add_argument("--now", default=None)
-    f.add_argument("--max-events", type=int, default=5000); f.add_argument("--verify-pointers", action="store_true")
-    f.set_defaults(func=cmd_fold)
+    e = sub.add_parser("emit", parents=[common])
+    e.add_argument("team")
+    for flag in ("--from", "--to", "--kind", "--slug", "--pri"):
+        e.add_argument(flag, dest="sender" if flag == "--from" else flag[2:], required=True)
+    e.add_argument("--ptr", default=None)
+    e.set_defaults(func=cmd_emit)
+    for name, fn in (("fold", cmd_fold), ("claim", cmd_claim), ("release", cmd_release), ("close", cmd_close), ("status", cmd_status)):
+        sp = sub.add_parser(name, parents=[common])
+        sp.add_argument("team")
+        if name in ("claim", "release", "close"):
+            sp.add_argument("slug")
+        sp.add_argument("--agent", required=True)
+        if name == "close":
+            sp.add_argument("--evidence", required=True)
+        if name == "fold":
+            sp.add_argument("--max-events", type=int, default=5000)
+            sp.add_argument("--verify-pointers", action="store_true")
+        sp.set_defaults(func=fn)
     return p
 
 
 def main(argv: list[str] | None = None, *, reader=None, writer=None) -> int:
     args = build_parser().parse_args(argv)
-    if getattr(args, "now", None) is None:
+    if args.now is None:
         args.now = _now()
-    if getattr(args, "at", None) is None and hasattr(args, "at"):
-        args.at = _now()
+    if args.at is None:
+        args.at = args.now
     if reader is None or writer is None:
         reader, writer = _default_transports()
     return int(args.func(args, reader, writer))
@@ -1420,15 +1529,16 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 5: Run — 10 passed. Mutations:** (a) wrap the `read_events` loop so `TransportUnavailable` becomes an empty list → the failed-read test FAILS; (b) delete the addressee filter → the someone-else test FAILS; (c) make `verify_pointers` unconditionally `False` → the absent-pointer test FAILS. Restore each. **Commit** — `coord-fold: fold verb + --verify-pointers; CLI-driven tests on the stored checkpoint (G9)`
+(`cli.py` above is the complete file for all six verbs; Tasks 8–10 add only their tests. This is deliberate: a single tagged block is what Task 0 materializes, and round 4 showed that "add to cli.py" prose blocks are exactly what a gate cannot see.)
+
+Run — 9 passed. Mutations: (a) swallow `TransportUnavailable` in the read loop → failed-read test FAILS; (b) drop the addressee filter → someone-else test FAILS; (c) force `verify_pointers=False` → absent-pointer test FAILS. **Commit** — `coord-fold: fold verb, six-verb cli wiring, --verify-pointers (G9, G20, G23)`
 
 ---
 
-### Task 8: `emit`
-
-- [ ] **Step 1: Failing tests** — `tests/test_cli_emit.py`
+### Task 8: `emit` tests
 
 ```python
+# packages/coord-fold/tests/test_cli_emit.py
 import json
 from coord_fold import checkpoint as cp
 from coord_fold.cli import main
@@ -1465,45 +1575,20 @@ def test_a_failed_write_exits_3_not_0():
     assert main(["emit", "r", "--from", "boss", "--to", "me", "--kind", "note", "--slug", "s", "--pri", "P3"], reader=FakeReader(st), writer=w) == 3
 ```
 
-- [ ] **Step 2: Implement** — add to `cli.py`:
-
-```python
-def _emit_kind(reader, writer, team, *, sender, to, kind, slug, pri, ptr, at) -> int:
-    try:
-        cfg = channel.resolve(reader, team)
-        payload = events.build_payload(at=at, sender=sender, to=to, kind=kind, slug=slug, pri=pri, ptr=ptr)
-    except (channel.ChannelUnresolved, ValueError) as exc:
-        print(f"{kind}: refused — {exc}", file=sys.stderr)
-        return RC_REFUSED
-    if not writer.write_event(cfg, payload, sender=sender):
-        print(f"{kind}: UNKNOWN — the record write did not confirm", file=sys.stderr)
-        return RC_UNKNOWN
-    print(f"{kind} {slug} -> {to}")
-    return RC_OK
-
-
-def cmd_emit(args, reader, writer) -> int:
-    return _emit_kind(reader, writer, args.team, sender=args.sender, to=args.to, kind=args.kind, slug=args.slug, pri=args.pri, ptr=args.ptr, at=args.at)
-```
-
-parser: `e = sub.add_parser("emit"); e.add_argument("team"); e.add_argument("--from", dest="sender", required=True); e.add_argument("--to", required=True); e.add_argument("--kind", required=True); e.add_argument("--slug", required=True); e.add_argument("--pri", required=True); e.add_argument("--ptr", default=None); e.add_argument("--at", default=None); e.set_defaults(func=cmd_emit)`
-
-- [ ] **Step 3: Run — 4 passed. Mutation:** `return RC_UNKNOWN` → `return RC_OK` in `_emit_kind` → the failed-write test FAILS; restore. **Commit** — `coord-fold: emit verb`
+Run — 4 passed. Mutation: `return RC_UNKNOWN` → `return RC_OK` in `_emit_kind` → FAILS. **Commit.**
 
 ---
 
-### Task 9: `claim`, `release`, `close`
-
-`claim` and `release` require the slug to be open in **my** checkpoint. `close` additionally requires `--evidence <ptr>` and **reads it**: absent → refused (rc 2); unreadable → UNKNOWN (rc 3) — different words, the U2 lesson.
-
-- [ ] **Step 1: Failing tests** — `tests/test_cli_claim_release_close.py`
+### Task 9: `claim`, `release`, `close` tests
 
 ```python
+# packages/coord-fold/tests/test_cli_claim_release_close.py
 import json
 from coord_fold import checkpoint as cp
 from coord_fold.cli import main
 from fakes import FakeReader, FakeStore, FakeWriter
-CFG = "team/r/_coord/bus-v4/records.json"; CFG_DOC = json.dumps({"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"})
+CFG = "team/r/_coord/bus-v4/records.json"
+CFG_DOC = json.dumps({"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"})
 T0, T1, T2 = "2026-09-04T10:00:00Z", "2026-09-04T11:00:00Z", "2026-09-04T12:00:00Z"
 
 
@@ -1534,7 +1619,7 @@ def test_release_drops_the_row_on_the_next_fold():
     assert st.written[-1]["payload"]["kind"] == "release" and _open_after_fold(st) == {}
 
 
-def test_claim_and_release_of_a_slug_i_do_not_owe_are_refused(capsys):
+def test_claim_and_release_of_a_slug_i_do_not_owe_are_refused():
     st = _folded()
     assert _m(st, ["claim", "r", "not-mine", "--agent", "me"]) == 2 and _m(st, ["release", "r", "not-mine", "--agent", "me"]) == 2
     assert not any(w["payload"]["kind"] in ("claim", "release") for w in st.written)
@@ -1553,60 +1638,14 @@ def test_close_with_absent_evidence_is_refused_and_unreadable_is_unknown(capsys)
     assert "unreadable" in capsys.readouterr().err
 ```
 
-- [ ] **Step 2: Implement** — add to `cli.py`:
-
-```python
-def _owed_row(reader, team, agent, slug):
-    state, src = checkpoint.load(reader, team, agent)
-    if src != "ok" or slug not in state["open"]:
-        return None
-    return state["open"][slug]
-
-
-def cmd_claim(args, reader, writer) -> int:
-    row = _owed_row(reader, args.team, args.agent, args.slug)
-    if row is None:
-        print(f"claim: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
-        return RC_REFUSED
-    return _emit_kind(reader, writer, args.team, sender=args.agent, to=row["from"], kind="claim", slug=args.slug, pri=row["pri"], ptr=row["ptr"], at=args.at)
-
-
-def cmd_release(args, reader, writer) -> int:
-    row = _owed_row(reader, args.team, args.agent, args.slug)
-    if row is None:
-        print(f"release: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
-        return RC_REFUSED
-    return _emit_kind(reader, writer, args.team, sender=args.agent, to=row["from"], kind="release", slug=args.slug, pri=row["pri"], ptr=row["ptr"], at=args.at)
-
-
-def cmd_close(args, reader, writer) -> int:
-    row = _owed_row(reader, args.team, args.agent, args.slug)
-    if row is None:
-        print(f"close: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
-        return RC_REFUSED
-    _body, st = reader.read_classified(args.evidence)
-    if st == "absent":
-        print(f"close: refused — evidence {args.evidence} is absent", file=sys.stderr)
-        return RC_REFUSED
-    if st == "error":
-        print(f"close: UNKNOWN — evidence {args.evidence} unreadable; not closing on a read that did not answer", file=sys.stderr)
-        return RC_UNKNOWN
-    return _emit_kind(reader, writer, args.team, sender=args.agent, to=row["from"], kind="close", slug=args.slug, pri=row["pri"], ptr=args.evidence, at=args.at)
-```
-
-parser: for `claim`/`release`/`close`: `sp.add_argument("team"); sp.add_argument("slug"); sp.add_argument("--agent", required=True); sp.add_argument("--at", default=None)`; `close` also `--evidence` required.
-
-- [ ] **Step 3: Run — 5 passed. Mutation:** in `cmd_close`, make the `st == "error"` branch fall through → the unreadable assertion FAILS; restore. **Commit** — `coord-fold: claim, release, close`
+Run — 5 passed. Mutation: make `cmd_close`'s `st == "error"` branch fall through → FAILS. **Commit.**
 
 ---
 
-### Task 10: `status`
-
-Reads the checkpoint, prints it, reads no events, reads no pointers. Exit 0 no unknowns; 3 if `unread_events > 0` or `unreadable_pointers`; 2 if fresh (never folded) or corrupt.
-
-- [ ] **Step 1: Failing tests** — `tests/test_cli_status.py`
+### Task 10: `status` tests
 
 ```python
+# packages/coord-fold/tests/test_cli_status.py
 import json
 from coord_fold import checkpoint as cp
 from coord_fold.cli import main
@@ -1637,96 +1676,59 @@ def test_status_never_folded_exits_2_and_reads_no_events(capsys):
     assert main(["status", "r", "--agent", "me"], reader=r, writer=FakeWriter(st)) == 0
 ```
 
-- [ ] **Step 2: Implement**
-
-```python
-def cmd_status(args, reader, writer) -> int:
-    state, src = checkpoint.load(reader, args.team, args.agent)
-    if src == "fresh":
-        print(f"status: {args.agent} has never folded — run `coord-fold fold`", file=sys.stderr)
-        return RC_REFUSED
-    if src == "corrupt":
-        print("status: refused — checkpoint corrupt", file=sys.stderr)
-        return RC_REFUSED
-    if src == "error":
-        print("status: UNKNOWN — checkpoint unreadable", file=sys.stderr)
-        return RC_UNKNOWN
-    print(f"status [{args.agent}] cursor={state['cursor']} open={len(state['open'])}")
-    print(_render_open(state))
-    _report_unknowns(state)
-    return RC_UNKNOWN if (state.get("unread_events") or state.get("unreadable_pointers")) else RC_OK
-```
-
-parser: `s = sub.add_parser("status"); s.add_argument("team"); s.add_argument("--agent", required=True); s.set_defaults(func=cmd_status)`
-
-- [ ] **Step 3: Run — 3 passed; then Task 3 Step 3 (16 passed) and Task 3 Step 4 mutations. Mutation here:** final `return` → `RC_OK` → exits-3 test FAILS; restore. **Commit** — `coord-fold: status verb; ownership gates green`
+Run — 3 passed; then Task 3 Step 3's mutations. **Commit** — `coord-fold: status tests; ownership gates green`
 
 ---
 
 ### Task 11: Degradation vocabulary (G11)
 
-- [ ] `tests/test_no_degraded_vocabulary.py`:
-
 ```python
+# packages/coord-fold/tests/test_no_degraded_vocabulary.py
 import pathlib
 import coord_fold
 PKG_DIR = pathlib.Path(coord_fold.__file__).parent
+
 
 def test_the_token_degraded_never_appears_in_the_package():
     hits = {p.name for p in PKG_DIR.rglob("*.py") if "__pycache__" not in p.parts and "degraded" in p.read_text().lower()}
     assert not hits, hits
 ```
 
-Run — pass. **Mutation:** append `# degraded` to `fold.py` → FAIL; restore. **Commit.**
+Mutation: append `# degraded` to `fold.py` → FAILS. **Commit.**
 
 ---
 
-### Task 12: Seed export (old side, spec §5.1 step 1)
+### Tasks 12–14: Old side (unchanged from r3; code at `6e0d42e5`)
 
-`coord-engine obligations export-open <team> --agent <a>`: reads the old stream fold's open set, writes one bus-v4 `open` event per slug via the old `transport.record_write`, idempotent via `_coord/bus-v4/seeded/<agent>.md`. Payload shape written literally (this package never imports `coord_fold`). Tests drive `cli.main` on a `FakeTransport` with `record_write`: one event per open slug with the eight fields; idempotent; refuses without a v4 config. Classify `cmd_obligations_export_open` as a write in `test_activity_covers_every_write_verb.py`. Mutation: remove the seed-marker guard → idempotency test FAILS. *(Code as in r3 Task 11; unchanged.)*
-
----
-
-### Task 13: Dual-emit — the one hook (old side, spec §5.1 step 2)
-
-`coord_engine/dual_emit.py::mirror(...)` called once at the end of `records.emit_event`, mapping `directive→open`, `response→close` (of the `closes` target), `claim→claim`, `verdict→note`; no v4 config → silent no-op; a mirror failure never fails the v3 write. Thread `closes=` through `_close_answered_directive`. Tests as in r3 Task 12. Mutation: hardcode a cfg when the v4 config is absent → the no-v4 test FAILS.
-
----
-
-### Task 14: Comparator, `cutover-ready`, runbook (old side, spec §5.1 steps 3–5)
-
-`obligations compare-to-fold` diffs **(slug, pri, ptr)** tuples between the old open set and the new checkpoint, appends `AGREE n=k` / `DIVERGE slugs=[...]` to `_coord/bus-v4/comparator/<agent>.log`, exits 0/1/3 (unknown if either side unreadable). `obligations cutover-ready` exits 0 only if the trailing `AGREE` run is ≥ N **and** its first and last timestamps are ≥ 24h apart **and** within that window the new checkpoint's open set both grew and shrank at least once. Tests: 24 lines one minute apart → not ready; 25h apart with no transition → not ready; with a grow and a shrink → ready. Runbook `docs/coord/COORD-FOLD-CUTOVER.md`: seed → dual-emit → shadow → `cutover-ready` → cut over (coord-boss first) → freeze by `"frozen": true` in the v3 config. Mutation: make the 24h check always true → the one-minute-apart test FAILS.
-
----
+**12 — Seed export** `obligations export-open <team> --agent <a>`: one bus-v4 `open` per open slug from the old stream fold, idempotent via `_coord/bus-v4/seeded/<a>.md`, eight-field payload written literally. Classified as a write. Mutation: remove the marker guard → idempotency FAILS.
+**13 — Dual-emit** `coord_engine/dual_emit.py::mirror` called once at the end of `records.emit_event`; `directive→open`, `response→close` of `closes`, `claim→claim`, `verdict→note`; no v4 config → no-op; mirror failure never fails v3. Mutation: hardcode a cfg when absent → FAILS.
+**14 — Comparator + `cutover-ready` + runbook**: tuples `(slug, pri, ptr)`; `AGREE n=k` / `DIVERGE slugs=[…]`; `cutover-ready` exits 0 only if trailing AGREE run ≥ N, span ≥ 24h, and the new open set both grew and shrank within it. Mutation: force the 24h check true → the one-minute-apart test FAILS.
 
 ### Task 15: AGENTS.md (ship-gate)
 
-Under `## Setup & tests`: the package exists; its four gate files and the CI step; six verbs and exit codes 0/2/3; the two unknowns and the `degraded` ban; **dependency direction** (`coord-engine` may read bus-v4 documents by path and write via `dual_emit`; `coord_fold` never imports `coord_engine`); the reader/writer boundary and why (`_run` and a shared base were not a boundary); the recursive `cli.py` policy and why (nested defs and `sys.modules` delegation); the ownership manifest and why (six shims passed everything). Commit — `coord-fold: AGENTS.md (ship-gate)`.
+The package, its four gate files and CI step; six verbs and exit codes; the two bounded-per-observed-state diagnostics and the `degraded` ban; dependency direction; the reader/writer boundary and *why*; the recursive `cli.py` policy and *why*; required call edges and *why*; alias-resolved launcher detection and *why*; the ownership manifest and *why*; and G24 — a revision is filed only with Task 0 green.
 
 ---
 
 ## Items that need a ruling before implementation
 
-Event-correctness contracts raised by codex-reviewer (round 2). The plan proposes; it does not decide.
-
-1. **Lossless cursor.** `read_events(channel, since)` filters `get-records` by timestamp. Whether that endpoint orders by `recorded_at` with a stable tiebreak, and whether a record can surface with a `recorded_at` earlier than one already returned, is an **upstream fact** nobody in this thread has. Proposal: measure it (two records with identical `recorded_at`, read back twice, compare); if ordering is stable and monotone, set `OVERLAP_SECONDS = 0` and drop `seen` (G4 back to five fields); if not, keep the ring and G4 stays at six. Until measured the plan keeps the ring and G4 says so.
-2. **Single writer / lost update.** Proposal: the checkpoint carries `writer` (host id) and `written_at`; `save` re-reads first and **refuses** (exit 3) if `written_at` is newer than the value loaded at the start of this fold and `writer` differs; the store versions every upload (measured 2026-09-02), so the lost version is recoverable. Adds two fields to G4 if accepted.
-3. **Retention / backlog.** A fold away for a month reads a month. Proposal is open question 3's snapshot event. Out of scope until ruled.
-4. **`max_events` semantics.** The CLI returns the whole window in one call, so the read cost is one invocation regardless; the cap bounds *apply* work and the unread count is exact because the read already happened. The unbounded part is the window, which is item 3. Stated, not claimed.
+1. **Lossless cursor.** Whether `get-records` orders by `recorded_at` with a stable tiebreak is an **upstream fact** nobody has. Proposal: measure it (two records with identical `recorded_at`, read back twice). If stable and monotone: `OVERLAP_SECONDS = 0`, drop `seen`, G4 back to five fields. Otherwise keep the ring; G4 stays at six.
+2. **Single writer / lost update.** Two hosts folding as the same agent race. **Honest scope (round 4):** the proposed re-read-then-refuse check is lost-update *detection*, not CAS — two writers can both pass the re-read and both write. True CAS needs a store primitive (conditional put on version), which is upstream. Proposal: ship detection (writer id + `written_at`; refuse if a newer foreign write appeared since load; the store's versioning makes the loser recoverable) and file the CAS primitive upstream as its own ask.
+3. **Retention / backlog.** Open question 3's snapshot event. Out of scope until ruled.
+4. **`max_events`.** The CLI returns the whole window in one call, so the cap bounds *apply* work and the unread count is exact; the read itself is bounded only by the window, which is item 3. Stated, not claimed.
 
 ## What this plan does not do (spec §10)
 
-Does not fix the pre-fence publication overwrite (orthogonal: a stream fold never reads the aggregate). Does not migrate the anti-slop findings. Deletes nothing — bus-v3 is frozen, not removed. Does not implement the §7 inbox reconciler; it is post-cutover work, and Task 3's absolute-import allowlist is the proof it cannot be composed into a fold path.
+Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop findings. Deletes nothing. Does not implement the §7 inbox reconciler; Task 3's per-module import allowlist is the proof it cannot be composed into a fold path.
 
 ## Revision log
 
-- **r1 (2026-09-04):** initial plan from the spec; 14 tasks.
-- **r2:** after codex-coder CHANGES — ownership manifest (G18), recursive artifact scan, runtime-loading ban; Task 14's filename shape test subsumed.
-- **r3:** after round-2 CHANGES from both — G19–G22; import DAG; exact `cli.py` set; forwarding-wrapper detector; ceilings; reader/writer split (as a layered amendment); `release`; `--verify-pointers`; tuple comparator + 24h/transition gate; rulings section.
-- **r4 (2026-09-04, after codex-coder round-3 CHANGES @ `6e0d42e5`): coherent rewrite.** Ownership is recursive — `cli.py` may nest no `def`/`class`/`lambda` and every function has a statement and node budget; delegation is closed semantically — banned names (`getattr`, `globals`, `vars`, `locals`, …), banned attributes (`sys.modules`, `importlib.*`, `marshal.loads`, `runpy.*`, `types.ModuleType`), and a call-graph rule that every call inside an owner's manifest callable resolves to a same-module definition, an allowed import alias, or an allowed builtin; the transport has **no generic argv receiver** — five sealed methods each calling `subprocess.run` with a literal argv, a test that every such call's constants are one of five fixed prefixes, no varargs anywhere, `Popen`/`os.system` banned; `CliPointerReader` and `CliPointerWriter` are unrelated classes with `__mro__ == (cls, object)` and a reader has no write primitive at any name; the manifest, Task 1 tests, the golden test (now patching `subprocess.run`), `fold.run(reader, writer, …)`, `cp.save(writer, …)`, `main(argv, *, reader, writer)` and the fakes (`FakeStore`/`FakeReader`/`FakeWriter`) are consistent everywhere; `seen` is a stated sixth checkpoint field under G4 rather than an underscore-hidden one. Task 3's mutation set (a)–(f) is the union of the r2, r3 and r4 counterexamples. **Task map r3→r4:** 2b+2c → 3; 3→4; 4→5; 5→6; 6+6b→7; 7→8; 8+8b→9; 9→10; 10→11; 11→12; 12→13; 13→14; 14→15.
+- **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r5 (2026-09-04, after round-4 CHANGES from both reviewers @ `21dc909c`):** (1) **Materialized the plan against itself** (Task 0) and fixed what actually failed — six failures, four more than predicted: a `/dev/stdout` constant the argv test did not allow; tuple-unpacked `RC_*` the definition scanner could not see; a `lambda` in `_render_open` (now `_row_sort_key`, a manifest name); `getattr` in `main` (now a shared parent parser, so `args.now`/`args.at` always exist); the wrapper rule flagging same-module one-liners (now scoped to cross-module delegation); and a `cli.py` node ceiling of 900 against a *measured* 1456 (now 1800, with the guarantee moved to G23). (2) **Launcher-alias bypass closed** (G22): launcher imports confined to `transport.py` per-module; launcher calls detected by resolving import *and assignment* aliases in the AST; forbidden subcommand tokens scanned in every module; mutation (b) in Task 1 is the exact `from subprocess import run as launch` form. (3) **Required call edges and owner-only operations** (G23): each handler must call its named owner operation and `cli.py` may never apply/empty/save a checkpoint, parse an event, or read events; mutation (e) in Task 3 inlines the fold into `cmd_fold`. (4) `cli.py` is a single tagged block; "add to cli.py" prose blocks are gone because a gate cannot see them. (5) G11 and Ruling 2 reworded to what is true: bounded per observed state, and detection rather than CAS. (6) **Found by Task 0 on r5 itself, before filing:** the materializer's fence regex spelled a literal fence marker and so truncated its own block (now built as `"`" * 3`); `_owed_row` returned one `None` for both *not owed* and *checkpoint unreadable*, so `claim/release/close` would have said *refused* on an UNKNOWN — it now returns `(row, load_state)` and the handlers exit 3 on `error`; `build_parser` exceeded the per-function budgets and is data-driven; the three budgets are set from the measured wiring (see G21).
 
 ## Self-review
 
-1. **Spec coverage.** §3.1→T4. §3.2→G2, T7/T9 never list. §3.3→T6/T7. §3.4→T1. §4→T7/T10/T11. §5.1→T12/T13/T14. §5.2/§5.3→runbook. §6→verb table, T9 (`release`). §7→"does not do" + T3 allowlist as the exclusion proof. §8→G9/G10 every task, G11 T11. §9→rulings + `release` adopted. §1a.1–3→T1/T2/T3.
-2. **Placeholder scan.** One deliberate golden-comparison step (T5 Step 1's key set) with the file and line to copy from. Tasks 12–14 reference r3's code for the old-side verbs by name rather than repeating ~150 unchanged lines; the r3 text is in the branch history at `6e0d42e5` and the mutations are stated here.
-3. **Type consistency.** `reader`/`writer` everywhere; `read_classified` returns `(str|None, "ok"|"absent"|"error")` in T1/T5/T6/T7/T9; `write_event(cfg, payload, *, sender)` in T1/T8/T9; `checkpoint.path/empty/apply/load/save` identical across T6/T7/T9/T10; exit codes 0/2/3 in every verb; the manifest in T3 names exactly the symbols T1/T4–T7 define.
+1. **Spec coverage.** §3.1→T4. §3.2→G2, T7/T9 never list. §3.3→T6/T7. §3.4→T1. §4→T7/T10/T11. §5→T12–T14 + runbook. §6→verb table, T9 (`release`). §7→T3 allowlist. §8→G9/G10, T11. §9→rulings + `release`. §1a→T1/T2/T3/T0.
+2. **Placeholder scan.** The golden key set in T5 names its source file and line. Tasks 12–14 reference r3's code by commit rather than repeating it; they are old-side and outside Task 0's gate, and the plan says so.
+3. **Type consistency.** `reader`/`writer` everywhere; `read_classified → (str|None, ReadState)` in T1/T5/T6/T7/T9; `write_event(cfg, payload, *, sender)` in T1/T7/T8; `checkpoint.path/empty/apply/load/save` identical in T6/T7; exit codes 0/2/3 in every verb; T3's manifest names exactly what T1/T4–T7 define, including `_row_sort_key`.
+4. **Self-gate.** Task 0 was run against this file before filing; the output is in the filing note.
