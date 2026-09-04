@@ -194,3 +194,66 @@ def test_a_genuinely_wrong_shape_still_degrades():
     snap = _engine_source({"asks": "not-a-payload"}).snapshot()
     assert [d for d in snap.diagnostics if d.code == "source-schema-degraded"], (
         "a scalar payload is not an envelope and must still degrade")
+
+
+def test_one_row_in_two_folds_projects_ONE_card():
+    """The engine shows a row blocked on a human in two folds, and should.
+
+    That is right for the engine and wrong for a tracker: the source namespace
+    carries the fold, so two folds meant two identities and TWO CARDS FOR ONE
+    THING. Measured live 2026-09-04 -- the operator's "blocked on me" view held
+    30 cards for 15 real rows, 12 of them doubled. He cannot tell which copy to
+    answer, and answering one leaves its twin looking unanswered.
+    """
+
+    row = _task_row(name="needs-a-decision", status="blocked")
+    snap = _engine_source({
+        "tasks": {"active": [], "waiting": [], "blocked": [row], "proposed": []},
+        "asks": [row],
+    }).snapshot()
+
+    assert [item.source.item_id for item in snap.items] == ["needs-a-decision"]
+    # asks wins: it is the fold `coord-engine answer` is defined over, so the
+    # card left in the view is the one that can actually be settled.
+    assert [item.capability for item in snap.items] == ["asks"]
+
+
+def test_the_collapsed_fold_is_reported_never_silent():
+    """WHICH identity won decides which card the operator sees, so a collapse is
+    a fact about his board -- never an invisible one."""
+
+    row = _task_row(name="needs-a-decision", status="blocked")
+    snap = _engine_source({
+        "tasks": {"active": [], "waiting": [], "blocked": [row], "proposed": []},
+        "asks": [row],
+    }).snapshot()
+
+    collapsed = [d for d in snap.diagnostics if d.code == "fold-duplicate-collapsed"]
+    assert len(collapsed) == 1
+    assert collapsed[0].scope == "tasks"
+    assert "asks" in collapsed[0].message
+
+
+def test_distinct_rows_are_never_collapsed():
+    snap = _engine_source({
+        "tasks": {"active": [_task_row(name="a")], "waiting": [],
+                  "blocked": [_task_row(name="b", status="blocked")], "proposed": []},
+        "asks": [_task_row(name="c", status="blocked")],
+    }).snapshot()
+
+    assert sorted(item.source.item_id for item in snap.items) == ["a", "b", "c"]
+    assert not [d for d in snap.diagnostics if d.code == "fold-duplicate-collapsed"]
+
+
+def test_a_row_only_the_tasks_fold_holds_keeps_its_card():
+    """The three rows blocked on the operator but assigned to an AGENT have no
+    ask twin. Collapsing must not cost them their card -- they are exactly the
+    rows the engine will not answer, so the card is all he has."""
+
+    snap = _engine_source({
+        "tasks": {"active": [], "waiting": [],
+                  "blocked": [_task_row(name="409a", status="blocked")], "proposed": []},
+        "asks": [],
+    }).snapshot()
+
+    assert [(i.source.item_id, i.capability) for i in snap.items] == [("409a", "tasks")]

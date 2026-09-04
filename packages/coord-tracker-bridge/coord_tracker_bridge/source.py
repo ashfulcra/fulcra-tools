@@ -234,6 +234,63 @@ def _unwrap_envelope(payload: Any) -> Any:
     return payload
 
 
+#: When ONE engine row surfaces in more than one fold, which fold owns it.
+#: Earlier wins.
+#:
+#: The engine deliberately shows the same row in several folds -- a row blocked
+#: on a human is both a blocked task on the board and an ask in the asks fold --
+#: and that is right for the engine. It is wrong for a tracker: the namespace
+#: carries the fold, so two folds meant two source identities and the bridge
+#: projected TWO CARDS FOR ONE THING. Measured live 2026-09-04: the operator's
+#: "blocked on me" view held 30 cards for 15 real rows, 12 of them doubled. A
+#: person reading that view cannot tell which copy to answer, and answering one
+#: leaves its twin sitting there looking unanswered.
+#:
+#: `asks` wins over `tasks` because it is the fold `coord-engine answer` is
+#: defined over: keeping the ask card means the card left in the view is the one
+#: that can actually be settled.
+_FOLD_PRECEDENCE = ("asks", "threads", "tasks", "health")
+
+
+def _one_card_per_row(
+    items: Sequence[WorkRecord], diagnostics: list[Diagnostic]
+) -> list[WorkRecord]:
+    """Collapse a row that several folds surfaced down to one projected item.
+
+    Every collapse is recorded as a diagnostic. This package already ruled that
+    a transport does not get to decide data loss is acceptable; a fold this drops
+    is not lost -- the row survives under the winning fold -- but WHICH identity
+    won decides which card an operator sees, so it is never silent.
+    """
+
+    rank = {name: index for index, name in enumerate(_FOLD_PRECEDENCE)}
+    best: dict[str, WorkRecord] = {}
+    for item in items:
+        key = item.source.item_id
+        held = best.get(key)
+        if held is None:
+            best[key] = item
+            continue
+        # An unlisted capability sorts last but stays deterministic, so a fold
+        # added to the engine later cannot silently outrank a known one.
+        held_rank = rank.get(held.capability, len(rank))
+        item_rank = rank.get(item.capability, len(rank))
+        if (item_rank, item.capability) < (held_rank, held.capability):
+            best[key] = item
+            loser, winner = held, item
+        else:
+            loser, winner = item, held
+        diagnostics.append(Diagnostic(
+            loser.capability,
+            "fold-duplicate-collapsed",
+            f"{key}: also in {winner.capability}, which owns the card",
+        ))
+    # Preserve input order rather than dict order, so the snapshot a plan is
+    # built from does not reshuffle between runs.
+    kept = {id(record) for record in best.values()}
+    return [item for item in items if id(item) in kept]
+
+
 class EngineSourceAdapter:
     """Read coord-engine through its JSON process boundary, capability by capability."""
 
@@ -549,6 +606,9 @@ class EngineSourceAdapter:
                 states[capability.name] = CapabilityState.COMPLETE
         complete = all(state is CapabilityState.COMPLETE for name, state in states.items()
                        if name in {"tasks", "asks", "threads", "health"})
+        # AFTER the per-capability reads, so a degraded fold cannot make its
+        # rows look like duplicates of a fold that did load.
+        items = _one_card_per_row(items, diagnostics)
         return Snapshot(tuple(items), complete, tuple(diagnostics), states, self.clock())
 
 
