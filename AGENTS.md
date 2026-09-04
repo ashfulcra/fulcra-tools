@@ -592,6 +592,33 @@ it (not on PyPI).
   to the next round, verdicts append at `verdicts/<head>--<required-token>.md`
   (frontmatter must repeat that exact `head`), and `review status` folds ONLY
   the active head, ignoring superseded-head verdicts without deleting them.
+  **Gate on the step whose result you are about to ASSERT, not only on the
+  step you were worried about.** coord-maintainer named this on 2026-09-04
+  after three instances in one day: a `git add` of a gitignored path that was a
+  silent no-op while the script gated on the push; a `git status` on a missing
+  path reading false-clean; and a `review request` refusal that printed in full
+  while the script gated on the preceding push and then sent two closes
+  asserting an advanced round. Its own diagnosis is the rule worth keeping —
+  *"the pattern is not output truncation, the output was complete; it is that I
+  gate on the step I am worried about and let the next step's result flow
+  past."* The failing command said so on screen every time. Read the result of
+  the call whose outcome your next message will claim.
+
+  **A new `--head` advances a round ONLY when the `--of` string AND the
+  required set are BOTH byte-identical to the existing register.** Either one
+  differing is refused rather than overwritten, and both refusals are correct:
+  a changed `--of` is a different artifact, and a changed required set is a
+  different register identity. Measured 2026-09-04 when coord-boss told
+  coord-maintainer to re-request a revised plan with BOTH reviewers required:
+  the first attempt appended `(r2, branch @ sha)` to `--of` and was refused;
+  the second kept `--of` exact but added a second `--reviewer` and was refused
+  with *"a different required set re-opens a review only via a new slug"*. So
+  **you cannot add a required reviewer to a live register** — the only paths
+  are a new slug (which forks the history and orphans the old register showing
+  CHANGES forever) or re-requesting with the ORIGINAL required set. Prefer the
+  latter: a non-required reviewer can still file a verdict and be counted,
+  which is exactly what codex-coder did on that register before anyone required
+  it. The instruction "request both" was coord-boss's and it was the error.
   Legacy/non-code reviews may omit `--head`. **A verdict that cannot be
   counted is REPORTED, never dropped, and the verb exits 3** — a malformed
   filename, a `verdict:` token outside `review.accepted_vocabulary()`, or a
