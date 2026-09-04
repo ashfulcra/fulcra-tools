@@ -1,2 +1,0 @@
-self-test OK: the scan flags a planted public IP and session ref
-IP arm excludes (generated geometry, stated not silent): :(exclude)*.svg :(exclude)*.min.js :(exclude)*.map
