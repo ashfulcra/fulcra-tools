@@ -782,6 +782,7 @@ def _scan_review_slug(
     # newer APPROVE both reached `review.tally`, where a single blocker
     # dominates, and the stale CHANGES would have blocked the review forever.
     # Every register reader learns the fold, not just `review status`.
+    verdicts_rows = verdicts
     kept, folded_away = review.fold_newest_per_reviewer(verdicts)
     verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
                 for r in kept]
@@ -795,6 +796,9 @@ def _scan_review_slug(
                         "sort_key": r["sort_key"]}
         for r in kept
     }
+    bad_edges = review.invalid_supersession_edges(verdicts_rows)
+    if bad_edges:
+        tally["malformed_supersedes"] = bad_edges
     if folded_away:
         tally["superseded_verdicts"] = folded_away
     settled = (tally["state"] == review.APPROVED

@@ -2613,6 +2613,9 @@ def _tally_from_verdict_entries(
                         "sort_key": r["sort_key"]}
         for r in kept
     }
+    bad_edges = review.invalid_supersession_edges(rows)
+    if bad_edges:
+        tally["malformed_supersedes"] = bad_edges   # NEVER silently: a self-link is a shard trying to erase itself
     # Computed HERE, from the same entries the fold consumed, so the cache's
     # fingerprint provably describes what it summarises. EMPTY when a mutable
     # plain shard participates: a name digest cannot see that shard's in-place

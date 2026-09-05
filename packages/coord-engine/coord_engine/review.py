@@ -165,7 +165,17 @@ def fold_newest_per_reviewer(
       * any UNRESOLVED CHANGES dominates, whatever its timestamp;
       * otherwise the newest live shard wins (canonical key, then name).
 
-    Equal keys and unnamed conflicts therefore FAIL CLOSED to CHANGES. The typed
+    Equal keys and unnamed conflicts therefore FAIL CLOSED to CHANGES.
+
+    INVALID EDGES (codex-reviewer, review-winning-envelope r5, reproduced on
+    6ab678cb): a shard naming ITSELF resolved itself, so a CHANGES could erase
+    its own withdrawal and the fold read APPROVED. A self-edge is ignored and
+    reported through ``invalid_supersession_edges``. Cross-reviewer edges never
+    resolve anything (resolution is computed within one reviewer's names). A
+    cycle resolves every member, the live set falls back to all shards, and any
+    CHANGES among them dominates — fail closed. A forward edge (naming a shard
+    not yet written) cannot be forged: the name embeds the timestamp and a
+    content digest of the future verdict. The typed
     verb names every prior shard it can list, so a verb-filed APPROVE still lifts
     a prior CHANGES (coord-boss constraint 5 — a stale CHANGES must not block
     forever — is now satisfied by the link, not by the clock); a hand-written
@@ -181,7 +191,8 @@ def fold_newest_per_reviewer(
     for reviewer in sorted(by):
         shards = by[reviewer]
         names = {r.get("name") for r in shards}
-        resolved = {s for r in shards for s in (r.get("supersedes") or []) if s in names}
+        resolved = {s for r in shards for s in (r.get("supersedes") or [])
+                    if s in names and s != r.get("name")}          # a shard can never resolve ITSELF
         live = [r for r in shards if r.get("name") not in resolved] or shards
         blocking = [r for r in live if normalize_verdict(r.get("verdict")) == "changes"]
         pool = blocking or live
@@ -189,6 +200,23 @@ def fold_newest_per_reviewer(
         kept.append(winner)
         folded += len(shards) - 1
     return kept, folded
+
+
+def invalid_supersession_edges(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Edges the fold ignored, so a reader can say the graph was malformed rather
+    than silently folding around it: self-links, and names that resolve nothing
+    (dangling, or another reviewer's shard)."""
+    by_reviewer: dict[str, set[str]] = {}
+    for r in rows:
+        by_reviewer.setdefault(r["reviewer"], set()).add(r.get("name"))
+    out: list[dict[str, str]] = []
+    for r in rows:
+        for s in (r.get("supersedes") or []):
+            if s == r.get("name"):
+                out.append({"shard": r.get("name") or "", "edge": s, "why": "self-link"})
+            elif s not in by_reviewer.get(r["reviewer"], set()):
+                out.append({"shard": r.get("name") or "", "edge": s, "why": "resolves nothing"})
+    return out
 
 
 def normalize_verdict(v: Optional[str]) -> Optional[str]:

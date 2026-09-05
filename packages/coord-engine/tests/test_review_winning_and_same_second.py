@@ -257,3 +257,46 @@ def test_a_degraded_listing_makes_the_verb_supersede_nothing_and_say_so(monkeypa
     monkeypatch.setattr(t, "list_dir", real)
     tally, *_ = cli._review_tally(t, TEAM, SLUG)
     assert tally["state"] == "CHANGES"
+
+
+# --- invalid supersession edges (codex-reviewer, review-winning-envelope r5) ------------------
+
+def test_a_changes_that_names_itself_cannot_erase_itself():
+    """Reproduced by codex-reviewer on 6ab678cb: old APPROVE + newer CHANGES whose supersedes holds its
+    own filename -> the CHANGES left the live set and the fold said APPROVED."""
+    approve = _row2(A, "approve", "2026-09-05T12:00:10.000000Z")
+    self_erasing_changes = _row2(C, "changes", "2026-09-05T12:00:11.000000Z", supersedes=[C])
+    kept, _ = review.fold_newest_per_reviewer([approve, self_erasing_changes])
+    assert kept[0]["name"] == C
+    bad = review.invalid_supersession_edges([approve, self_erasing_changes])
+    assert bad == [{"shard": C, "edge": C, "why": "self-link"}]
+
+
+def test_a_cycle_fails_closed_to_changes():
+    approve = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C])
+    changes = _row2(C, "changes", "2026-09-05T12:00:11.000000Z", supersedes=[A])
+    assert review.fold_newest_per_reviewer([approve, changes])[0][0]["name"] == C
+
+
+def test_a_cross_reviewer_edge_resolves_nothing_and_is_reported():
+    other = {"reviewer": "someone-else", "name": "x--someone-else.md", "verdict": "changes", "sort_key": "2026-09-05T12:00:10.000000Z", "supersedes": []}
+    approve_naming_other = _row2(A, "approve", "2026-09-05T12:00:11.000000Z", supersedes=["x--someone-else.md"])
+    kept, _ = review.fold_newest_per_reviewer([other, approve_naming_other])
+    assert {r["reviewer"]: r["verdict"] for r in kept} == {"someone-else": "changes", REVIEWER: "approve"}
+    assert review.invalid_supersession_edges([other, approve_naming_other]) == [{"shard": A, "edge": "x--someone-else.md", "why": "resolves nothing"}]
+
+
+def test_malformed_edges_surface_in_the_direct_tally_and_the_projection(monkeypatch):
+    from coord_engine import projection, reconcile
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    _shard(t, "aaaaaaaa", "approve", "100000")
+    name_c = review.verdict_filename(REVIEWER, head=HEAD, ts=f"{SECOND}Z", digest="cccccccc")
+    t.store[PREFIX + name_c] = okf.render_frontmatter({"type": "Verdict", "reviewer": REVIEWER, "head": HEAD, "verdict": "changes",
+                                                       "ts": f"{SECOND}.900000Z", "supersedes": [name_c]}) + "\nself-link\n"
+    tally, *_ = cli._review_tally(t, TEAM, SLUG)
+    assert tally["state"] == "CHANGES" and tally["malformed_supersedes"][0]["why"] == "self-link"
+    now = "2026-09-05T02:30:00Z"
+    reconcile.reconcile(t, TEAM, now=now, today=now[:10], host="h")
+    row = next(r for r in json.loads(t.store[f"team/{TEAM}/_coord/summaries.json"])[projection.REVIEWS_KEY]["rows"] if r["name"] == SLUG)
+    assert row["state"] == "CHANGES" and row["tally"]["malformed_supersedes"][0]["why"] == "self-link"

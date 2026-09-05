@@ -995,7 +995,11 @@ it (not on PyPI).
   any UNRESOLVED CHANGES dominates regardless of timestamp; otherwise the newest live shard wins; equal
   keys and unnamed conflicts fail closed to CHANGES. `review verdict` names every prior shard of yours
   it can list; if the listing is degraded it names NOTHING and says so (your prior CHANGES keeps
-  dominating until you re-file). A hand-written APPROVE must carry `supersedes:` itself. This amends
+  dominating until you re-file). A hand-written APPROVE must carry `supersedes:` itself. **Invalid edges:** a shard can never resolve
+  ITSELF (a self-link let a CHANGES erase its own withdrawal — codex-reviewer, r5); self-links and names
+  that resolve nothing are reported in the tally as `malformed_supersedes`, never folded around silently;
+  a cycle fails closed to CHANGES; a forward edge cannot be forged (the name embeds a content digest).
+  This amends
   ruling b99fb8da (newest-wins): constraint 5 — a stale CHANGES must not block forever — is satisfied
   by the link the verb writes, not by the order of the clock.
 - **Same-second verdict shards order by chronology, not digest (2026-09-05, both codex reviewers,
