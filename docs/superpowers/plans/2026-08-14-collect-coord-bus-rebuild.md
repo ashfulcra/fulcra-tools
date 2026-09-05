@@ -1,14 +1,16 @@
 # Collect, Coord Engine, and Bus Rebuild Implementation Plan
 
-> **HISTORICAL — this plan was EXECUTED and its module layout DID NOT SHIP.**
-> Do not implement it task-by-task. Measured 2026-09-05: every module and test
-> file this plan names under `packages/coord-engine/` is **absent** —
-> `acceptance.py`, `cursor.py`, `fleet.py`, `operator.py`, `output.py`,
-> `parking.py`, `queue.py`, `responses.py`, `review_store.py`, `routing.py`
-> and their tests — while the package that did ship contains 46 different
-> modules (`obligations.py`, `stream_fold.py`, `projection.py`, `review.py`,
-> `transport.py`, …). Read this for the reasoning; the shipped layout is the
-> authority. Current coordination doctrine lives in [`AGENTS.md`](../../../AGENTS.md).
+> **HISTORICAL — the NEW module layout this plan proposes did NOT ship.**
+> Do not implement it task-by-task. Measured 2026-09-05 at `d02ab079`: of the
+> 50 `.py` paths this plan names, **30 exist and 20 do not**. The ones that
+> exist are largely files that predate or outlived the plan (`cli.py`,
+> `transport.py`, `records.py`, `projection.py`, `review.py`, `budget.py`);
+> the ones that never appeared are the plan's own proposed decomposition —
+> verified absent: `coord_engine/acceptance.py`, `cursor.py`, `fleet.py`,
+> `operator.py`, `output.py`, `parking.py`, `queue.py`, `responses.py`,
+> `review_store.py`, `routing.py`, and their `tests/test_*.py` counterparts.
+> Read this for the reasoning; the shipped tree is the authority. Current
+> coordination doctrine lives in [`AGENTS.md`](../../../AGENTS.md).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax (`- [ ]`) for tracking.
 
