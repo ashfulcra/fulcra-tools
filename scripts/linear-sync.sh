@@ -47,6 +47,21 @@ PY
 ) || return 1
 }
 
+# A SOURCE THAT MOVES IS NOT A SYNC THAT FAILED.
+#
+# The durability check compares the plan before and after. Unattended, on a bus
+# a live fleet writes to continuously, the second plan is routinely non-empty
+# just because rows changed in the intervening minutes -- and calling that a
+# failure every time is crying wolf until nobody reads the alarm.
+#
+# The bug it must still catch is specific and different: a row this run just
+# WROTE still asking to be written, forever. So compare identities, not counts.
+# A row carried over from the first plan is the failure; a row that is new since
+# it is the world moving on, and the next run takes it.
+unsettled_carryover() {  # $1 = plan before, $2 = plan after -> count on stdout
+  python3 "$REPO/scripts/_carryover.py" "$1" "$2"
+}
+
 plan_into "$WORK/plan.json" || exit 3
 summarize "$WORK/plan.json" || exit 3
 
@@ -83,8 +98,16 @@ APPLIED="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["appl
 # the same three updates forever.
 plan_into "$WORK/verify.json" || { say "applied $APPLIED but convergence is UNVERIFIED"; exit 3; }
 summarize "$WORK/verify.json" || exit 3
-if [ "$CHANGES" -ne 0 ]; then
-  say "applied $APPLIED, but the board did NOT converge: $CHANGES change(s) still proposed."
+REMAINING="$CHANGES"
+CARRIED="$(unsettled_carryover "$WORK/plan.json" "$WORK/verify.json" 2>"$WORK/carried")" || exit 3
+if [ "$CARRIED" -gt 0 ]; then
+  say "applied $APPLIED, but $CARRIED row(s) this run WROTE are still proposed. NOT settled:"
+  cat "$WORK/carried"
   exit 3
+fi
+if [ "$REMAINING" -gt 0 ]; then
+  # New work that appeared while this run was in flight. The next run takes it.
+  say "applied $APPLIED, settled. $REMAINING new change(s) arrived during the run; next run picks them up."
+  exit 0
 fi
 say "applied $APPLIED, converged: second plan returns 0 changes."
