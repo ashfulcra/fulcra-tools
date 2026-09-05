@@ -22,7 +22,8 @@ FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
 # r39 (codex-coder round 34): match the COMMAND TOKEN first, then judge every positional. A mention is an invocation
 # when it is preceded by a run-style word (python/python3/run/$/uv run) OR followed by at least one positional; a
 # bare path reference in prose ("see scripts/ship_check.py") is not one. Missing positionals are REPORTED.
-INVOCATION = re.compile(r"(?P<pre>(?:python3?|run|\$)\s+`?)?(?:[\w./-]*/)?ship_check\.py(?:[ \t]+(?P<team>[^\s`]+))?(?:[ \t]+(?P<head>[^\s`]+))?(?P<tail>[^\n`]*)")
+INVOCATION = re.compile(r"(?P<pre>(?:python3?|run|\$)\s+`?)?(?P<path>(?:[\w.-]*/)*)ship_check\.py(?:[ \t]+(?P<team>[^\s`]+))?(?:[ \t]+(?P<head>[^\s`]+))?(?P<tail>[^\n`]*)")
+EXEC_PATH = re.compile(r"^(\./|\.\./|/)")   # r40 (codex-coder round 35): `./scripts/ship_check.py` or an absolute path in command position EXPRESSES execution
 HEAD_PLACEHOLDERS = ("<HEAD>", "<40-hex-head>")                                   # `<40-hex head>` (with the space) is normalized to this before matching
 HEAD_OK = re.compile(r"^[0-9a-f]{40}$")                                          # exactly what ship_check.main fullmatches
 
@@ -82,8 +83,8 @@ def bare_invocations(text: str) -> list[str]:
     text = text.replace("<40-hex head>", "<40-hex-head>")                          # a documented head placeholder with a space: one token
     for m in INVOCATION.finditer(text):
         team, head, tail = m.group("team"), m.group("head"), m.group("tail") or ""
-        if not m.group("pre") and team is None:
-            continue                                                                # a path reference, not an invocation
+        if not m.group("pre") and team is None and not EXEC_PATH.match(m.group("path") or ""):
+            continue                                                                # a bare path reference, not an invocation (r40: ./ and / forms ARE invocations)
         problems = []
         if team is None:
             problems.append("missing team")
