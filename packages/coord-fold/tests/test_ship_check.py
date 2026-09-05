@@ -802,8 +802,9 @@ def test_no_repo_prose_invokes_ship_check_without_stated_trust_roots():
         for i, ln in enumerate(f.read_text().splitlines(), 1):
             assert not bare(ln), f"{f.name}:{i}: {bare(ln)}"
     assert bare("`scripts/ship_check.py fulcra <HEAD>` and fails closed")                          # the sentence that drifted
-    assert bare("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git") == ["missing --fulcra-api: ship_check.py fulcra <HEAD> --git /usr/bin/git"]   # codex-coder's counterexample
+    assert bare("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git") == ["missing --fulcra-api: ship_check.py fulcra <HEAD> --git /usr/bin/git"]   # codex-coder round 29
     assert bare("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x")[0].startswith("missing --git")
+    assert bare("scripts/ship_check.py fulcra <HEAD> --git --fulcra-api /x")[0].startswith("--git has no value")                      # codex-coder round 30
     assert not bare("`scripts/ship_check.py fulcra <HEAD> --git /x --fulcra-api /y`")
 
 
@@ -845,12 +846,24 @@ def test_store_read_refuses_a_body_whose_handoff_state_changed_before_the_read(t
     tempfile.tempdir = None
 
 
-def test_the_bare_invocation_guard_requires_each_root_independently():
+def test_the_bare_invocation_guard_parses_the_command_shape():
+    """codex-coder rounds 29-30: presence of an option NAME is not a usable command. Each required root must carry
+    exactly one non-option value; a shell comment ends the command."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("materialize_plan", SCRIPT.parent / "materialize_plan.py"); mp = importlib.util.module_from_spec(spec); spec.loader.exec_module(mp)
     f = mp.refuse_bare_runbook_invocations
-    assert f("run `scripts/ship_check.py fulcra <HEAD>`\n")[0].endswith("missing --git and --fulcra-api: ship_check.py fulcra <HEAD>")
-    assert "missing --fulcra-api" in f("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git\n")[0]
-    assert "missing --git" in f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x\n")[0]
-    assert f("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x\n") == []
-    assert f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x --git /usr/bin/git\n") == []               # order-independent
+    ok = "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x\n"
+    assert f(ok) == [] and f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x --git /usr/bin/git\n") == []          # order-independent
+    assert f("scripts/ship_check.py fulcra <HEAD> --git=/usr/bin/git --fulcra-api=/x\n") == []                             # the = form
+    bad = {
+        "run `scripts/ship_check.py fulcra <HEAD>`\n": "missing --git; missing --fulcra-api",
+        "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git\n": "missing --fulcra-api",
+        "scripts/ship_check.py fulcra <HEAD> --fulcra-api /x\n": "missing --git",
+        "scripts/ship_check.py fulcra <HEAD> --git --fulcra-api /x\n": "--git has no value",                                  # codex-coder (1)
+        "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api\n": "--fulcra-api has no value",                # codex-coder (2)
+        "scripts/ship_check.py fulcra <HEAD> # --git /x --fulcra-api /y\n": "missing --git; missing --fulcra-api",           # codex-coder (3): a comment ends the command
+        "scripts/ship_check.py fulcra <HEAD> --git /a --git /b --fulcra-api /x\n": "--git given 2 times",
+        "scripts/ship_check.py fulcra <HEAD> --git= --fulcra-api /x\n": "--git has no value",
+    }
+    for text, why in bad.items():
+        got = f(text); assert got and why in got[0], (text, got)
