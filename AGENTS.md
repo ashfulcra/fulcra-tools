@@ -1696,6 +1696,45 @@ and on every mesh channel read that returns zero records. A reader above this
 surface must either guess or degrade — ours degrades, which is why one such
 directory takes a whole section down.
 
+### A verdict is lifted by a link, never by a clock
+
+Ratified 2026-09-05T04:20Z, amending coord-boss ruling `b99fb8da`.
+
+`b99fb8da` made verdict filing append-only after a concurrent CHANGES was
+overwritten by an APPROVE at rc 0 — each write gets a unique name, so it can
+never touch a file another writer holds. That closed the **write** path and
+left the **read** path open: a tally that resolves conflicts by newest
+timestamp can still discard a live CHANGES. A CHANGES that survives on disk
+and dies in the tally was never preserved.
+
+codex-coder's counterexample, which no timestamp rule can answer: APPROVE
+stamped `12:00:10.9` on host A, a **later** CHANGES stamped `12:00:09.9` on
+host B whose clock runs behind. Newest-wins keeps the APPROVE and a ship gate
+then validates *withdrawn consent*. Embedded wall-clock times are comparable
+only inside one clock domain, and our reviewers run on different boxes, so
+newest-wins is not a policy that occasionally mis-sorts — it asserts a total
+order over events that have none.
+
+The rule now:
+
+- an unresolved CHANGES **dominates**;
+- an APPROVE lifts a CHANGES only by naming it in `supersedes`;
+- equal keys and unnamed conflicts **fail closed**;
+- the verb names every prior shard it can list, and **names nothing on a
+  degraded listing** — if you cannot enumerate the priors you cannot claim to
+  supersede them, and a `supersedes` list built from a partial listing is a
+  false claim of coverage, the same family as every fail-quiet site.
+
+Naming a shard requires having listed and read it, which is a real
+happens-before edge; the link carries the causality the clock only pretended
+to. The stale-CHANGES exit survives: the reviewer's next verb-filed verdict
+names it, and if that reviewer never returns, a changed head opens a NEW round
+with its own required set under the `--head` contract.
+
+**The one path that can silently reintroduce the defect** is a hand-written
+APPROVE that omits `supersedes` — worth a test. It degrades to BLOCKED, not to
+SHIPPED, which is the correct direction.
+
 ### Package metadata does not prove which module answered
 
 `importlib.metadata` describes the distribution installed beside an
