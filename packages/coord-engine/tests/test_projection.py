@@ -145,7 +145,18 @@ def test_incomplete_projection_never_replaces_complete_generation(monkeypatch):
 def test_refused_projection_persists_private_progress_and_converges(monkeypatch):
     """Refusing public partial state must not discard the review builder's
     convergence cursor.  The next pass resumes from the private partial section
-    and may atomically publish once it completes."""
+    and may atomically publish once it completes.  Detector watermark churn is
+    not a content change and therefore must not invalidate that cursor."""
+    from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
+
+    batches = iter((
+        ChangeBatch((), {name: Coverage.CLEAR for name in NAMESPACES}, True,
+                    watermark="feed-frontier-1"),
+        ChangeBatch((), {name: Coverage.CLEAR for name in NAMESPACES}, True,
+                    watermark="feed-frontier-2"),
+    ))
+    monkeypatch.setattr(
+        reconcile.ChangeDetector, "poll", lambda *args, **kwargs: next(batches))
     t = FakeTransport()
     seen_priors = []
 

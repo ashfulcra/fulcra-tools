@@ -618,18 +618,40 @@ def test_malformed_nested_forge_projection_cannot_be_sealed():
     assert generation.publish(MemoryTransport(), TEAM, built).published is False
 
 
-def test_recovery_progress_resumes_only_the_exact_immutable_build_id():
+def test_recovery_progress_resumes_only_the_exact_content_identity():
     from coord_engine import reconcile
 
     transport = MemoryTransport()
-    build = generation.build_id("prior", "feed-1", _batch())
-    progress = {"schema": "coord.projection-build-progress.v1",
-                "base_generation": build, "reviews": {"scanned": 3}}
+    build = "review-forge-content-1"
+    progress = {"schema": projection.BUILD_PROGRESS_SCHEMA,
+                "content_identity": build, "reviews": {"scanned": 3}}
     transport.write(reconcile.projection_progress_path(TEAM, build), json.dumps(progress))
 
     assert reconcile._load_projection_progress(transport, TEAM, build) == progress
     assert reconcile._load_projection_progress(
-        transport, TEAM, generation.build_id("prior", "feed-2", _batch())) == {}
+        transport, TEAM, "review-forge-content-2") == {}
+
+
+def test_projection_progress_identity_tracks_content_not_detector_frontier():
+    from coord_engine import reconcile
+
+    first = generation.build_generation(
+        prior_generation=None, source_watermark="feed-1", batch=_batch(),
+        sections=_sections())
+    later_frontier = generation.build_generation(
+        prior_generation=None, source_watermark="feed-2", batch=_batch(),
+        sections=_sections())
+    changed = _sections()
+    changed["reviews"] = generation.SectionResult(
+        "reviews", "DATA", {"rows": ["changed-review-content"]})
+    changed_content = generation.build_generation(
+        prior_generation=None, source_watermark="feed-2", batch=_batch(),
+        sections=changed)
+
+    assert (reconcile._projection_progress_identity(first)
+            == reconcile._projection_progress_identity(later_frontier))
+    assert (reconcile._projection_progress_identity(first)
+            != reconcile._projection_progress_identity(changed_content))
 
 
 def test_projection_validation_reads_only_a_digest_verified_generation():

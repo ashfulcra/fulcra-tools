@@ -195,6 +195,39 @@ def test_reconcile_seals_a_verified_generation_before_advancing_current(monkeypa
         "team/r/_coord/projections/current.json"]
 
 
+def test_reconcile_refuses_implausibly_shrunken_task_listing(monkeypatch):
+    """A successful-but-partial store listing must not erase known tasks or
+    advance the public generation from truncated canonical input."""
+
+    class IntermittentListingTransport(FakeTransport):
+        partial_task_listing = False
+
+        def list_dir(self, prefix):
+            if self.partial_task_listing and prefix == "team/r/task/":
+                return [{"name": "archive/", "mtime": None, "is_dir": True}]
+            return super().list_dir(prefix)
+
+    t = IntermittentListingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    first = _run(t)
+    assert first["degraded"] is False
+    summaries_before = t.store[reconcile.summaries_path("r")]
+    index_before = t.store[reconcile.index_path("r")]
+    current_before = t.store[generation.current_path("r")]
+
+    monkeypatch.setenv("COORD_RECONCILE_FULL_EVERY", "1")
+    t.partial_task_listing = True
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "task listing implausibly shrank" in result["reason"]
+    assert result["tasks"] == 2
+    assert t.store[reconcile.summaries_path("r")] == summaries_before
+    assert t.store[reconcile.index_path("r")] == index_before
+    assert t.store[generation.current_path("r")] == current_before
+
+
 def test_reconcile_unknown_detector_returns_degraded_without_advancing_current(monkeypatch):
     """A broken actual feed is UNKNOWN, not a successful legacy full scan."""
     from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES

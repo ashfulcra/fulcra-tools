@@ -206,6 +206,11 @@ under `skills/`, each package with its own README, build, and tests.
   successor to resume from the PREVIOUS checkpoint believing it current,
   exactly when parking matters most. **Any caller of `transport.write` must
   treat `False` as failure**; it is not a Falsy-but-fine return.
+- A task-directory listing that returns rc 0 is not automatically complete.
+  When the trusted feed fold still corroborates tasks omitted by a full-scan
+  listing, `reconcile` fails closed and preserves the current generation,
+  summaries, and index. This catches the live intermittent-empty listing shape;
+  do not turn that disagreement back into authoritative task deletions.
 - Audit every existing READER before you change what a marker MEANS. A
   marker's meaning is fixed by everything that acts on it, not by the writer's
   intent, so a new state or a new field is a change to every consumer at once.
@@ -652,7 +657,11 @@ it (not on PyPI).
     is `_coord/projections/current.json`: a builder write/read-verifies immutable
     `generations/<digest>.json` first, then writes and read-verifies the digest-bound manifest. Required
     `UNKNOWN`/incomplete sections or an unattested feed frontier stay recovery progress and never advance
-    current; reconcile exits nonzero. A transport that proves conditional-write support uses CAS to fence a
+    current; reconcile exits nonzero. Private review/forge recovery is keyed by
+    the content-bearing public projection base, not by a detector watermark or
+    batch digest; positive feed changes invalidate only affected review rows,
+    while forge is rebuilt from current canonical inputs. A transport that proves
+    conditional-write support uses CAS to fence a
     moved pointer. A transport that explicitly declares CAS unsupported may use one last-writer-wins
     manifest write only after the complete deterministic immutable generation verifies, and must verify the
     exact manifest read-back; missing/invalid capability and write/read failure remain nonzero. Because a
