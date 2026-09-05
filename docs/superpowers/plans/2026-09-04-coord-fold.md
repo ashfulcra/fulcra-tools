@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r21)
+# coord-fold: Coord on Annotations Implementation Plan (r22)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2127,7 +2127,7 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 1. **When.** Only after implementation, on the **exact implementation commit** `<HEAD>` (40-hex) whose on-disk `packages/coord-fold/` is what ships. Never at plan time. Reading the materialized plan tree earlier is welcome as *feedback* and **carries nothing**.
 2. **Register.** `coord-engine review request fulcra coord-fold-ship-<HEAD> --of packages/coord-fold --head <HEAD> --reviewer codex-reviewer --reviewer codex-coder`. The engine's `--head` keying means any head change is a new round with no verdicts.
 3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file with the **typed verb, nothing hand-uploaded**: `coord-engine review verdict fulcra coord-fold-ship-<HEAD> --head <HEAD> --verdict approve --from <reviewer> --note "tree: <git rev-parse <HEAD>:packages/coord-fold> …reading…"`. The engine writes an **append-only envelope** `verdicts/<HEAD>--<reviewer>--<UTC timestamp>-<nonce>.md` (as every verdict on this plan's register demonstrates); the `tree:` line in the note is the evidence. A verdict whose `tree` differs from the commit's is void.
-4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite — bound to an APPROVED AND PINNED engine, never to a named commit** *(r16; codex-reviewer round 13 P0 one, verified at source by coord-boss `149e7d11`: the commit r15 named still had the double clock sample, so a named prerequisite bought nothing)*: `ship_check` downloads the fleet pin from `team/<team>/_coord/bus-v3/records.json`'s sibling `adopt-latest.sh` (the plan's own rule: pins come from there, never from a slug) and requires `PIN ∈ APPROVED_ENGINE_PINS` — a list in the script that is **empty until a deliberate plan revision adds the head that register `review-winning-envelope-e9c0089b` reads APPROVED for and that the pin PR shipped**. Until then `ship_check` refuses, which is the correct state. **And the pin must be the engine that answers** *(r17, codex-reviewer round 14: on a lagging host the authority can name an approved pin while `PATH` still executes an older engine that exposes `winning` with stale-approval defects)*: `ship_check` resolves the `coord-engine` executable it will call, reads `vcs_info.commit_id` from the `direct_url.json` beside the installed `coord_engine-*.dist-info` — the build-identity mechanism `adopt-latest.sh` itself uses — and refuses unless that commit equals the pin; no executable, no `direct_url.json`, or a different commit is a refusal **before** `winning` is consumed. **And the module that answers must be that build** *(r18, codex-coder round 15, reproduced end to end by coord-boss `8268376f`: a pinned launcher answered with a capability its build lacks because `subprocess.run` inherits `PYTHONPATH`/`PYTHONHOME` and an editable tree shadowed the installed package while `importlib.metadata` still reported the approved commit)*: `ship_check` resolves the executable **once, in `main`**, and passes that absolute path to *both* the identity read and every invocation — a bound runner, so no second `which` can ever run *(r19, both reviewers round 16: r18 resolved twice, and a `PATH` swap between the identity read and `review status` would let approved launcher A authorise unapproved launcher B; the regression makes `which` answer A then B and asserts exactly one resolution and that A is what executes)* — and *(r20, codex-coder round 17: scrubbing the environment blocks `PYTHONPATH`/`PYTHONHOME` only; a `.pth` or `sitecustomize.py` inside the launcher's own environment can prepend a stale tree while the adjacent dist-info still names the pin — on the proof host that site-packages already carries a `_virtualenv.pth`)* **the process that answers attests itself**: `ship_check` never runs the launcher for the status. It spawns the launcher environment's own interpreter with **`-I -S`** (no environment variables, no user site, no `.pth` processing, no `sitecustomize`/`usercustomize`), inserts exactly the verified dist's site-packages on `sys.path`, imports `coord_engine`, and in that same process reports `coord_engine.__file__`, the `direct_url` commit via `importlib.metadata`, and `review status --json` computed in-process by `coord_engine.cli.main`. It refuses unless the answering module's file lies under that site-packages **and** the in-process commit equals the pin **and** *(r21, both reviewers round 18)* the attestation process exited 0, the in-process `review status` returned 0, and the payload is a dict of the expected shape — a status that says APPROVED while returning rc 3 (UNKNOWN) is a refusal, exactly as r19's `rc == 0` guard had it before the attestation replaced the direct call. Measured on the proof host: the isolated attestation imports from under site-packages, reports `985a4be3` (the fleet pin), and answers the status. Regressions: a shadow `coord_engine` on `PYTHONPATH` is imported under the inherited environment and not under the scrubbed one; and a tool environment whose site-packages holds both a `.pth` and a `sitecustomize.py` prepending a shadow imports the shadow under a normal site-enabled start and the approved package under the attestation. `winning` in `review status --json` is then the **supersession fold's** kept shard, under whatever contract the engine register's APPROVED head carries — at round 8 that contract is: any CHANGES not resolved by a later shard dominates regardless of timestamp; an APPROVE lifts a CHANGES only by an edge that binds the target's **content digest** (so an in-place rewrite of a mutable shard un-resolves it) **and** whose target the **store's server-assigned mtime** proves strictly earlier than the superseder (so a predeclared edge to a later-written target never resolves; same minute or unknown fails closed). Rounds 6 and 7 called a name, then a client-written nonce, "causal"; both were wrong, because both were client-controlled — only the store supplies facts the client cannot choose. Self-links, dangling names, digest mismatches, equal keys and unproven causality fail closed to CHANGES and are surfaced as `malformed_supersedes`. **Both authoritative filename forms are accepted** *(P0 two, confirmed live on this very register: `<HEAD>--<reviewer>.md` and `<HEAD>--<reviewer>--<ts>-<digest>.md` coexist on the current head)*: a winning name is valid if it is exactly `<HEAD>--<reviewer>.md` or starts with `<HEAD>--<reviewer>--`; the fold, not the gate, decides which won. Any absence — no `winning`, no fold, a pin not in the approved set, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
+4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite — bound to an APPROVED AND PINNED engine, never to a named commit** *(r16; codex-reviewer round 13 P0 one, verified at source by coord-boss `149e7d11`: the commit r15 named still had the double clock sample, so a named prerequisite bought nothing)*: `ship_check` downloads the fleet pin from `team/<team>/_coord/bus-v3/records.json`'s sibling `adopt-latest.sh` (the plan's own rule: pins come from there, never from a slug) and requires `PIN ∈ APPROVED_ENGINE_PINS` — a list in the script that is **empty until a deliberate plan revision adds the head that register `review-winning-envelope-e9c0089b` reads APPROVED for and that the pin PR shipped**. Until then `ship_check` refuses, which is the correct state. **And the pin must be the engine that answers** *(r17, codex-reviewer round 14: on a lagging host the authority can name an approved pin while `PATH` still executes an older engine that exposes `winning` with stale-approval defects)*: `ship_check` resolves the `coord-engine` executable it will call, reads `vcs_info.commit_id` from the `direct_url.json` beside the installed `coord_engine-*.dist-info` — the build-identity mechanism `adopt-latest.sh` itself uses — and refuses unless that commit equals the pin; no executable, no `direct_url.json`, or a different commit is a refusal **before** `winning` is consumed. **And the module that answers must be that build** *(r18, codex-coder round 15, reproduced end to end by coord-boss `8268376f`: a pinned launcher answered with a capability its build lacks because `subprocess.run` inherits `PYTHONPATH`/`PYTHONHOME` and an editable tree shadowed the installed package while `importlib.metadata` still reported the approved commit)*: `ship_check` resolves the executable **once, in `main`**, and passes that absolute path to *both* the identity read and every invocation — a bound runner, so no second `which` can ever run *(r19, both reviewers round 16: r18 resolved twice, and a `PATH` swap between the identity read and `review status` would let approved launcher A authorise unapproved launcher B; the regression makes `which` answer A then B and asserts exactly one resolution and that A is what executes)* — and *(r20, codex-coder round 17: scrubbing the environment blocks `PYTHONPATH`/`PYTHONHOME` only; a `.pth` or `sitecustomize.py` inside the launcher's own environment can prepend a stale tree while the adjacent dist-info still names the pin — on the proof host that site-packages already carries a `_virtualenv.pth`)* **the process that answers attests itself**: `ship_check` never runs the launcher for the status. It spawns the launcher environment's own interpreter with **`-I -S`** (no environment variables, no user site, no `.pth` processing, no `sitecustomize`/`usercustomize`), inserts exactly the verified dist's site-packages on `sys.path`, imports `coord_engine`, and in that same process reports `coord_engine.__file__`, the `direct_url` commit via `importlib.metadata`, and `review status --json` computed in-process by `coord_engine.cli.main`. **Before importing** *(r22, codex-coder round 19: "under the same site-packages" bound nothing — a stale `coord_engine/` beside an approved dist-info, or a duplicate dist-info, passed)* the attestation requires **exactly one** `coord_engine-*.dist-info`, reads **that** dist-info's `RECORD` and `direct_url.json` by path (never a name lookup), verifies the sha256 and size of **every recorded `coord_engine/**` file**, and refuses any file present under the package that RECORD does not list — the bytes that answer are the bytes the approved distribution installed. Measured on the proof host: one dist-info, 50 recorded files verified, none mismatched, none unrecorded. It refuses unless the answering module's file lies under that site-packages **and** the in-process commit equals the pin **and** *(r21, both reviewers round 18)* the attestation process exited 0, the in-process `review status` returned 0, and the payload is a dict of the expected shape — a status that says APPROVED while returning rc 3 (UNKNOWN) is a refusal, exactly as r19's `rc == 0` guard had it before the attestation replaced the direct call. Measured on the proof host: the isolated attestation imports from under site-packages, reports `985a4be3` (the fleet pin), and answers the status. Regressions: a shadow `coord_engine` on `PYTHONPATH` is imported under the inherited environment and not under the scrubbed one; and a tool environment whose site-packages holds both a `.pth` and a `sitecustomize.py` prepending a shadow imports the shadow under a normal site-enabled start and the approved package under the attestation. `winning` in `review status --json` is then the **supersession fold's** kept shard, under whatever contract the engine register's APPROVED head carries — at round 8 that contract is: any CHANGES not resolved by a later shard dominates regardless of timestamp; an APPROVE lifts a CHANGES only by an edge that binds the target's **content digest** (so an in-place rewrite of a mutable shard un-resolves it) **and** whose target the **store's server-assigned mtime** proves strictly earlier than the superseder (so a predeclared edge to a later-written target never resolves; same minute or unknown fails closed). Rounds 6 and 7 called a name, then a client-written nonce, "causal"; both were wrong, because both were client-controlled — only the store supplies facts the client cannot choose. Self-links, dangling names, digest mismatches, equal keys and unproven causality fail closed to CHANGES and are surfaced as `malformed_supersedes`. **Both authoritative filename forms are accepted** *(P0 two, confirmed live on this very register: `<HEAD>--<reviewer>.md` and `<HEAD>--<reviewer>--<ts>-<digest>.md` coexist on the current head)*: a winning name is valid if it is exactly `<HEAD>--<reviewer>.md` or starts with `<HEAD>--<reviewer>--`; the fold, not the gate, decides which won. Any absence — no `winning`, no fold, a pin not in the approved set, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
 
 | Module | The reviewer confirms, by reading the shipped tree |
 |---|---|
@@ -2186,18 +2186,48 @@ def sh(*argv):
 
 
 ATTEST = r"""
-import sys, json, io, contextlib, os
+import sys, json, io, contextlib, os, glob, csv, hashlib, base64
 site = sys.argv[1]; team = sys.argv[2]; slug = sys.argv[3]
+def refuse(why):
+    print(json.dumps({"refused": why})); sys.exit(2)
+dis = sorted(glob.glob(os.path.join(site, "coord_engine-*.dist-info")))
+if len(dis) != 1:
+    refuse(f"{len(dis)} coord_engine dist-infos under site-packages; exactly one is required")
+di = dis[0]
+rec = os.path.join(di, "RECORD")
+if not os.path.exists(rec):
+    refuse("no RECORD beside the dist-info: the installed bytes cannot be bound")
+recorded, verified = set(), 0
+with open(rec, newline="") as fh:
+    for row in csv.reader(fh):
+        if len(row) < 3 or not row[0].startswith("coord_engine/"):
+            continue
+        path, h, size = row[0], row[1], row[2]
+        recorded.add(path)
+        if not h:
+            continue
+        full = os.path.join(site, path)
+        if not os.path.exists(full):
+            refuse(f"recorded file missing: {path}")
+        algo, _, b64 = h.partition("=")
+        digest = base64.urlsafe_b64encode(hashlib.new(algo, open(full, "rb").read()).digest()).rstrip(b"=").decode()
+        if digest != b64 or int(size) != os.path.getsize(full):
+            refuse(f"recorded file does not match its RECORD hash/size: {path}")
+        verified += 1
+present = {os.path.relpath(os.path.join(dp, f), site) for dp, _, fs in os.walk(os.path.join(site, "coord_engine")) for f in fs if "__pycache__" not in dp}
+extra = sorted(present - recorded)
+if extra:
+    refuse(f"files under coord_engine/ that RECORD does not list: {extra[:3]}")
+du = json.load(open(os.path.join(di, "direct_url.json")))
 sys.path.insert(0, site)
-import importlib.metadata as md
 import coord_engine
 from coord_engine import cli
-du = json.loads(md.distribution("coord-engine").read_text("direct_url.json") or "{}")
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     rc = cli.main(["review", "status", team, slug, "--json"])
 lines = [l for l in buf.getvalue().splitlines() if l.startswith("{")]
 print(json.dumps({"file": os.path.realpath(coord_engine.__file__), "commit": du.get("vcs_info", {}).get("commit_id"),
+                  "record_verified": verified, "dist_info": os.path.basename(di),
                   "rc": rc, "status": json.loads(lines[-1]) if lines else None}))
 sys.exit(rc)                      # the outer process carries the inner verdict's rc too; both are checked
 """
@@ -2232,6 +2262,10 @@ def attested_status(exe, team, slug):
         return False, f"attestation did not answer (rc {p.returncode}): {p.stderr.strip()[-200:]}", None
     if not isinstance(a, dict):
         return False, "attestation payload is not an object", None
+    if a.get("refused"):
+        return False, f"the attestation refused before importing: {a['refused']}", None
+    if not isinstance(a.get("record_verified"), int) or a["record_verified"] < 1:
+        return False, "the attestation verified no recorded package files", None
     if not str(a.get("file", "")).startswith(site + os.sep):
         return False, f"the module that answered lives at {a.get('file')!r}, not under {site} — a startup hook or shadow tree answered", None
     # BOTH exit codes, before any status is trusted (both reviewers, round 18): a status that
@@ -2414,15 +2448,10 @@ def test_a_pth_or_sitecustomize_shadow_wins_under_site_and_loses_under_the_attes
     """codex-coder round 17: env scrubbing does not stop startup hooks INSIDE the launcher environment.
     Build one with an approved dist-info AND a .pth AND a sitecustomize that prepend a shadow tree."""
     import subprocess, sys
-    env = tmp_path / "coord-engine"; (env / "bin").mkdir(parents=True)
-    (env / "bin" / "python").symlink_to(sys.executable)
-    launcher = env / "bin" / "coord-engine"; launcher.write_text("#!/bin/sh\n"); launcher.chmod(0o755)
-    site = env / "lib" / "python3.13" / "site-packages"; (site / "coord_engine").mkdir(parents=True)
+    launcher = _tool_env(tmp_path, APPROVED_CLI)
+    site = _site_of(launcher)
     (site / "coord_engine" / "__init__.py").write_text("WHO = 'APPROVED'\n")
-    (site / "coord_engine" / "cli.py").write_text("import json\ndef main(argv):\n    print(json.dumps({'state': 'APPROVED', 'head': argv[3].rsplit('-', 1)[-1], 'approvals': ['codex-reviewer', 'codex-coder'], 'winning': {}}))\n    return 0\n")
-    di = site / "coord_engine-2.0.6.dist-info"; di.mkdir()
-    (di / "METADATA").write_text("Metadata-Version: 2.1\nName: coord-engine\nVersion: 2.0.6\n")
-    (di / "direct_url.json").write_text(json.dumps({"url": "x", "vcs_info": {"vcs": "git", "commit_id": PIN}}))
+    (site / "coord_engine-2.0.6.dist-info" / "RECORD").write_text("\n".join(_record_line(site, r) for r in ("coord_engine/__init__.py", "coord_engine/cli.py")) + "\n")
     shadow = tmp_path / "shadow"; (shadow / "coord_engine").mkdir(parents=True)
     (shadow / "coord_engine" / "__init__.py").write_text("WHO = 'SHADOW'\n")
     (site / "zzz_shadow.pth").write_text(f"import sys; sys.path.insert(0, {str(shadow)!r})\n")
@@ -2436,8 +2465,15 @@ def test_a_pth_or_sitecustomize_shadow_wins_under_site_and_loses_under_the_attes
     assert ok and commit == PIN and status["state"] == "APPROVED"
 
 
+def _record_line(site, rel):
+    import base64, hashlib
+    data = (site / rel).read_bytes()
+    return f"{rel},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}"
+
+
 def _tool_env(tmp_path, cli_body):
-    """A minimal uv-style tool environment: bin/python -> this interpreter, one fake coord_engine, an approved dist-info."""
+    """A minimal uv-style tool environment: bin/python -> this interpreter, one fake coord_engine, an approved
+    dist-info WITH a RECORD binding the package bytes (r22)."""
     import sys
     env = tmp_path / "coord-engine"; (env / "bin").mkdir(parents=True); (env / "bin" / "python").symlink_to(sys.executable)
     launcher = env / "bin" / "coord-engine"; launcher.write_text("#!/bin/sh\n"); launcher.chmod(0o755)
@@ -2447,7 +2483,50 @@ def _tool_env(tmp_path, cli_body):
     di = site / "coord_engine-2.0.6.dist-info"; di.mkdir()
     (di / "METADATA").write_text("Metadata-Version: 2.1\nName: coord-engine\nVersion: 2.0.6\n")
     (di / "direct_url.json").write_text(json.dumps({"vcs_info": {"commit_id": PIN}}))
+    (di / "RECORD").write_text("\n".join(_record_line(site, r) for r in ("coord_engine/__init__.py", "coord_engine/cli.py")) + "\n")
     return launcher
+
+
+APPROVED_CLI = "import json\ndef main(argv):\n    print(json.dumps({'state': 'APPROVED', 'head': 'x', 'approvals': ['codex-reviewer', 'codex-coder'], 'winning': {}}))\n    return 0\n"
+
+
+def _site_of(launcher):
+    return launcher.parent.parent / "lib" / "python3.13" / "site-packages"
+
+
+def test_a_stale_package_beside_approved_metadata_is_refused_by_record(tmp_path):
+    """codex-coder round 19: approved dist-info + a replaced coord_engine/cli.py returning rc0 APPROVED."""
+    launcher = _tool_env(tmp_path, "def main(argv):\n    print('{}')\n    return 3\n")          # what the distribution installed
+    (_site_of(launcher) / "coord_engine" / "cli.py").write_text(APPROVED_CLI)                       # replaced in place
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    assert not ok and "does not match its RECORD" in detail
+
+
+def test_an_unrecorded_file_under_the_package_is_refused(tmp_path):
+    launcher = _tool_env(tmp_path, APPROVED_CLI)
+    (_site_of(launcher) / "coord_engine" / "extra.py").write_text("")
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    assert not ok and "RECORD does not list" in detail
+
+
+def test_duplicate_dist_info_is_refused(tmp_path):
+    launcher = _tool_env(tmp_path, APPROVED_CLI)
+    (_site_of(launcher) / "coord_engine-2.0.5.dist-info").mkdir()
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    assert not ok and "exactly one is required" in detail
+
+
+def test_a_missing_record_is_refused(tmp_path):
+    launcher = _tool_env(tmp_path, APPROVED_CLI)
+    (_site_of(launcher) / "coord_engine-2.0.6.dist-info" / "RECORD").unlink()
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    assert not ok and "no RECORD" in detail
+
+
+def test_a_recorded_intact_package_attests_and_answers(tmp_path):
+    launcher = _tool_env(tmp_path, APPROVED_CLI)
+    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    assert ok and commit == PIN and status["state"] == "APPROVED"
 
 
 def test_an_approved_shaped_status_that_returns_rc_3_is_refused(tmp_path):
@@ -2470,13 +2549,14 @@ def test_the_attestation_refuses_a_module_answering_from_outside_the_verified_si
     site = env / "lib" / "python3.13" / "site-packages"; (site / "coord_engine-2.0.6.dist-info").mkdir(parents=True)
     (site / "coord_engine-2.0.6.dist-info" / "METADATA").write_text("Metadata-Version: 2.1\nName: coord-engine\nVersion: 2.0.6\n")
     (site / "coord_engine-2.0.6.dist-info" / "direct_url.json").write_text(json.dumps({"vcs_info": {"commit_id": PIN}}))
+    (site / "coord_engine-2.0.6.dist-info" / "RECORD").write_text("coord_engine-2.0.6.dist-info/METADATA,,\n")
     elsewhere = tmp_path / "elsewhere"; (elsewhere / "coord_engine").mkdir(parents=True)
     (elsewhere / "coord_engine" / "__init__.py").write_text("")
     (elsewhere / "coord_engine" / "cli.py").write_text("def main(argv):\n    print('{}')\n    return 0\n")
     # no coord_engine package under site — an attestation that imports from elsewhere must be refused
     monkeypatch.setattr(ship_check, "ATTEST", ship_check.ATTEST.replace("sys.path.insert(0, site)", f"sys.path.insert(0, site); sys.path.insert(0, {str(elsewhere)!r})"))
     ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
-    assert not ok and "not under" in detail
+    assert not ok and ("not under" in detail or "verified no recorded" in detail)
 
 
 def test_the_executable_is_resolved_exactly_once_and_that_path_is_what_executes(monkeypatch):
@@ -2645,6 +2725,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r22 (2026-09-05, codex-coder CHANGES on `def9bc65`, round 19):** "under the same site-packages" bound nothing. The attestation now, before importing, requires exactly one `coord_engine-*.dist-info`, reads its `RECORD` and `direct_url.json` by path, verifies every recorded `coord_engine/**` file's sha256 and size, refuses any unrecorded file under the package, and reports the count; `attested_status` refuses an attestation that refused or verified nothing. Measured on the proof host (1 dist-info, 50 files verified, 0 mismatched, 0 unrecorded). Regressions: stale `cli.py` beside approved metadata; unrecorded extra module; duplicate dist-info; missing RECORD; and the intact positive case.
 - **r21 (2026-09-05, both reviewers CHANGES on `7b06bbed`, round 18):** the attestation recorded the inner `review status` rc and never checked it (nor the subprocess rc), so an APPROVED-shaped tally returned with rc 3 could pass. Now the attestation exits with the inner rc, and `attested_status` requires process rc 0, embedded rc 0, and a dict tally with `state`/`approvals`/`head` of the expected types before returning ok. Regressions on a real fake tool environment: APPROVED-shaped status with rc 3 → refuse; wrong-shaped payload → refuse. **Engine round 8 (`f509f127`) is APPROVED by both reviewers**; the merge lane is open.
 - **r20 (2026-09-05, codex-coder CHANGES on `f8627047`, round 17):** environment scrubbing stops `PYTHONPATH`/`PYTHONHOME` only; startup hooks inside the launcher environment (`.pth`, `sitecustomize.py`) can still prepend a shadow while the adjacent dist-info names the pin. `ship_check` now takes the status only from a **self-attesting isolated process**: the launcher env's own interpreter under `-I -S`, exactly the verified dist's site-packages on `sys.path`, the fold computed in-process, and the answering module's file and `direct_url` commit reported by that process; refused unless the file is under that site-packages and the commit equals the pin. Measured on the proof host. Regressions: the `.pth` + `sitecustomize` shadow wins under a normal site-enabled start and loses under the attestation; a module answering from outside the verified site-packages is refused; an attested build that is not the pin is refused. Engine round 8 (`f509f127`) is APPROVED by codex-coder.
 - **r19 (2026-09-05, both reviewers CHANGES on `031de479`, round 16):** the resolve-once invariant was stated, not implemented — two `which` calls. Now one resolution in `main`, bound into `executing_engine_commit(exe)` and `engine(exe, …)`; `sh()` never resolves the engine. Regression: a stateful `which` answering A then B — exactly one resolution, A verified, A executed. The engine-contract paragraph no longer calls a client-written nonce causal: at round 8 the edge binds the target's content digest and requires the store's server mtime to prove the target strictly earlier.
