@@ -16,6 +16,7 @@ from .transport import PointerTransport, TransportUnavailable
 OVERLAP_SECONDS = 5
 _BROADCAST = "all"
 _EPOCH = "1970-01-01T00:00:00Z"
+_OWN_ACTIONS = ("claim", "release", "close")   # the assignee's own state changes on an obligation it holds (never `open`/`note`)
 
 
 class FoldOutcome(NamedTuple):
@@ -40,7 +41,7 @@ def _minus_overlap(iso: str) -> str:
 
 
 def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: str, writer_id: str,
-        max_events: int = 5000, verify_pointers: bool = False) -> FoldOutcome:
+        max_events: int = 5000, verify_pointers: bool = False, rebuild: bool = False) -> FoldOutcome:
     cfg = channel.resolve(reader, team)
     state, source = cp.load(reader, team, agent)
     if source == "corrupt":
@@ -49,13 +50,27 @@ def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: st
         raise TransportUnavailable("checkpoint unreadable")
     if source == "fresh":
         state = cp.empty(_EPOCH)
+    elif rebuild:
+        # Recompute the derived open set from the stream under the CURRENT relevance rule, keeping the
+        # generation/writer so lost-update detection (G27) still guards the write. Events are never deleted (G28);
+        # this replays them. Needed once when the rule changed (2026-09-05: sender events no longer open).
+        fresh = cp.empty(_EPOCH)
+        fresh["generation"], fresh["writer"] = state.get("generation", 0), state.get("writer", "")
+        state, source = fresh, "rebuild"
     generation = int(state.get("generation", 0))
     applied = unread = 0
     last_observed = state["cursor"]          # G31: advances past irrelevant records until the first UNAPPLIED relevant one
     for rec in reader.read_events(cfg["data_type"], _minus_overlap(state["cursor"])):
         at = rec.get("recorded_at") or last_observed
         ev = events.parse_event(rec)
-        if ev is None or (ev["to"] not in (agent, _BROADCAST) and ev["from"] != agent):
+        # RULING (2026-09-05, coord-boss blocker a0927018): an obligation belongs to its ASSIGNEE — the addressed `to`,
+        # or everyone for a broadcast. A sender's waiting is bookkeeping, not an obligation: an `open` the agent SENT
+        # never opens for the sender. The earlier unconditional `or ev["from"] == agent` made every seed leak into its
+        # senders' folds (coord-boss saw 54 of coord-maintainer's opens; coord-maintainer saw 137 of coord-boss's), so
+        # no coordinator could ever AGREE. What DOES apply from the sender's side is the agent's own ACTIONS on an
+        # obligation it holds — claim/release/close are addressed to the open's sender but performed by the assignee,
+        # and the assignee's fold must see them or a closed row would stay open forever.
+        if ev is None or not (ev["to"] in (agent, _BROADCAST) or (ev["from"] == agent and ev["kind"] in _OWN_ACTIONS)):
             if not unread:
                 last_observed = at
             continue

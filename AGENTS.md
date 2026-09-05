@@ -1607,6 +1607,8 @@ Canonical home for the durable facts about `packages/coord-fold` (plan `docs/sup
 
 **Cursor rules (G26, G31).** The cursor is the `recorded_at` of the last OBSERVED record before the first UNAPPLIED RELEVANT event — never `now`, never past a gap. Records that are unparseable, foreign-schema, or addressed to someone else are observed and passed, never re-read. Checkable consequence, made a test: re-running a fold from the stored cursor yields the same open set. Lost-update detection, not CAS (G27): the store has no compare-and-swap; the checkpoint carries `writer` and a monotonic `generation`, the fold re-reads before writing and refuses by name if the generation moved. No compaction, never delete events (G28).
 
+**Relevance rule (RULING 2026-09-05, coord-boss blocker a0927018).** An obligation belongs to its ASSIGNEE. An event applies to an agent's fold when it is addressed to that agent or to `all`, OR when the agent itself sent it and it is a `claim`/`release`/`close` (the assignee's own action on an obligation it holds — those are addressed to the open's sender but performed by the assignee, and the assignee's fold must see them or a closed row would stay open forever). An `open` or `note` the agent SENT never opens for the sender: a sender's waiting is bookkeeping, not an obligation. The earlier rule applied every sender event too, so every seed leaked into its senders' folds (coord-boss saw 54 of coord-maintainer's opens, coord-maintainer 137 of coord-boss's) and no coordinator could ever AGREE. Both sides — the old plane's `obligations`/`compare-to-fold` and coord-fold — ask the question this way. A checkpoint computed under the old rule is repaired with `coord-fold fold <team> --agent <a> --rebuild`: it replays the whole stream under the current rule (events are never deleted, G28) and keeps the generation/writer so a concurrent writer is still refused (G27).
+
 **The four gate files** (CI, `uv-workspace.yml` gates step and `scripts/materialize_plan.py` GATES): `tests/test_structural.py` (ownership manifest, no enumeration, import graph, two-method Protocol, disjoint reader/writer), `tests/test_tripwire.py`, `tests/test_ship_check.py`, `tests/test_ci_wiring.py`; plus `tests/test_file_size_ceiling.py` (G8: 400 lines per `.py` under `coord_fold/`, recursive; the ceiling is documented in `packages/coord-fold/README.md`) and `tests/test_no_degraded_vocabulary.py`.
 
 **The tripwire is demoted (G30).** `tests/test_tripwire.py` is a syntactic scan for enumeration identifiers and modules (`os.listdir`, `iterdir`, `glob`, …). It catches the plain spelling and nothing else — an alias, a `getattr`-built name, or a subprocess escapes it by construction. It is kept because it is cheap and true about what it names; it is NOT the guarantee and a green tripwire proves nothing about behaviour.
@@ -1630,8 +1632,13 @@ acts on today.
   opting in: `directive→open`, `response→close`, `claim→claim`, `verdict→note`, eight-field payload
   `{v, at, from, to, kind, slug, pri, ptr}`. A mirror failure never fails the v3 write.
 - **Seed (Task 12).** `obligations <team> --agent <a> --export-open` writes one bus-v4 `open` per slug the old
-  fold says the agent owes, idempotent via `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). Refuses on an
-  UNKNOWN old fold — a seed from a partial answer would enshrine the gap as absence. Classified as a WRITE.
+  fold says the agent owes AS ASSIGNEE (row assignee is the agent, `@agent`, `*`, or a role the agent holds —
+  rows the agent merely sent are not its obligations; ruling a0927018), idempotent via
+  `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). A re-seed RECONCILES: every slug open in the agent's
+  coord-fold checkpoint that the correct set no longer contains gets a bus-v4 `close` (ptr = the seed marker),
+  so a leaked open is retired on the stream rather than deleted (G28); an unreadable checkpoint makes the whole
+  seed UNKNOWN (rc 3), never a silent partial reconcile. Refuses on an UNKNOWN old fold — a seed from a partial
+  answer would enshrine the gap as absence. Classified as a WRITE.
 - **Comparator (Task 14).** `compare-to-fold <team> --agent <a>`: the old open set vs the coord-fold checkpoint
   (`team/<team>/member/<agent>/fold/checkpoint.json`) as `(slug, pri, ptr)` tuples; prints `AGREE n=k` or
   `DIVERGE slugs=[…]`; appends one JSON line to `_coord/bus-v4/compare/<agent>.jsonl`. rc 0/2/3 = agree/diverge/

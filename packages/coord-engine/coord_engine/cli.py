@@ -6653,6 +6653,11 @@ def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str,
     held_roles, _unresolved = _held_roles_for_rows(transport, team, agent, rows, now=now,
                                                    deadline_seconds=_role_fold_budget())
     got = _needs_me_rows(transport, team, agent, rows, now=now, held_roles=held_roles)
+    # RULING (2026-09-05, coord-boss blocker a0927018): an obligation belongs to its ASSIGNEE. needs-me also lists
+    # rows an agent merely OWNS and awaits ("waiting"), and a coordinator owns most of what it sends; seeding those
+    # made every coordinator diverge forever. Keep only rows assigned to this agent, to everyone, or to a role it holds.
+    mine = {agent, "@" + agent, "*"} | {r for r in (held_roles or set())} | {"@" + r for r in (held_roles or set())}
+    got = [r for r in got if str(r.get("assignee") or "") in mine]
     return got, bool(rows_ok), str(rows_reason or "")
 
 
@@ -6697,25 +6702,50 @@ def cmd_obligations_export_open(args: argparse.Namespace, transport: Any) -> int
         return 3
     at = _iso(_now())
     written, skipped = 0, []
+    wanted: set[str] = set()
     for row in rows:
         tup = _row_tuple(row)
         if not tup or tup[1] not in dual_emit.PRIORITIES or not tup[2]:
             skipped.append(str(row.get("id") or row.get("name") or "?"))
             continue
+        wanted.add(tup[0])
         note = json.dumps(dual_emit.payload(at=at, sender=str(row.get("owner") or "seed"), to=agent, kind="open",
                                             slug=tup[0], pri=tup[1], ptr=tup[2]), sort_keys=True)
         if transport.record_write(cfg["data_type"], cfg["api_version"], note, agent):
             written += 1
         else:
             skipped.append(tup[0])
-    doc = (f"# bus-v4 seed for {agent}\n\nat: {at}\nwritten: {written}\nskipped: {len(skipped)}\n"
-           f"source: old fold (needs-me rows)\nslugs skipped (no ptr / bad pri / write unconfirmed): {skipped}\n")
+    # RECONCILE (2026-09-05, blocker a0927018): a re-seed must make the new plane EQUAL the old one, not merely add
+    # to it. Every open the agent's coord-fold checkpoint holds that the correct set does not contain gets a
+    # `close` (ptr = this marker), so the next fold removes it. Events are never deleted (G28); they are answered.
+    closed, ckpt_state = 0, "absent"
+    ck_body, ck_state = transport.read_classified(f"team/{team}/member/{agent}/fold/checkpoint.json")
+    if ck_state == "error":
+        print(f"obligations --export-open: UNKNOWN — the coord-fold checkpoint for {agent} is unreadable; opens written "
+              "but stale opens could not be reconciled; re-run", file=sys.stderr)
+        return 3
+    if ck_state == "ok" and ck_body:
+        try:
+            stale = [s for s in (json.loads(ck_body).get("open") or {}) if s not in wanted]
+            ckpt_state = f"ok ({len(stale)} stale)"
+        except ValueError:
+            stale, ckpt_state = [], "unparsable"
+        for slug in stale:
+            note = json.dumps(dual_emit.payload(at=at, sender=agent, to=agent, kind="close", slug=slug, pri="P3",
+                                                ptr=marker), sort_keys=True)
+            if transport.record_write(cfg["data_type"], cfg["api_version"], note, agent):
+                closed += 1
+            else:
+                skipped.append("close:" + slug)
+    doc = (f"# bus-v4 seed for {agent}\n\nat: {at}\nwritten: {written}\nclosed_stale: {closed}\nskipped: {len(skipped)}\n"
+           f"source: old fold (needs-me rows, ASSIGNEE-filtered)\ncheckpoint: {ckpt_state}\n"
+           f"slugs skipped (no ptr / bad pri / write unconfirmed): {skipped}\n")
     if not transport.write(marker, doc):
         print(f"obligations --export-open: wrote {written} opens but the marker write did NOT confirm — a re-run "
               "will re-seed; fix the marker first", file=sys.stderr)
         return 3
     print(f"obligations --export-open: seeded {written} open(s) for {agent} onto {cfg['data_type']}; "
-          f"skipped {len(skipped)}; marker {marker}")
+          f"closed {closed} stale; skipped {len(skipped)}; marker {marker}")
     return 0 if not skipped else 2
 
 

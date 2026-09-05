@@ -68,7 +68,7 @@ def _owed_row(reader, team, agent, slug) -> tuple:
 
 def cmd_fold(args, reader, writer) -> int:
     try:
-        out = fold.run(reader, writer, args.team, args.agent, now=args.now, writer_id=f"{args.agent}:{uuid.uuid4().hex[:8]}", max_events=args.max_events, verify_pointers=args.verify_pointers)
+        out = fold.run(reader, writer, args.team, args.agent, now=args.now, writer_id=f"{args.agent}:{uuid.uuid4().hex[:8]}", max_events=args.max_events, verify_pointers=args.verify_pointers, rebuild=getattr(args, "rebuild", False))
     except (channel.ChannelUnresolved, fold.FoldRefused) as exc:
         print(f"fold: refused — {exc}", file=sys.stderr)
         return RC_REFUSED
@@ -168,6 +168,9 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "fold":
             sp.add_argument("--max-events", type=int, default=5000)
             sp.add_argument("--verify-pointers", action="store_true")
+            sp.add_argument("--rebuild", action="store_true",
+                            help="recompute the open set from the stream (epoch cursor) under the current relevance rule; "
+                                 "generation/writer kept so a concurrent writer is still refused")
         sp.set_defaults(func=fn)
     return p
 
