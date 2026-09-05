@@ -352,20 +352,26 @@ def test_a_directive_whose_task_is_already_terminal_at_emit_time_is_not_mirrored
     assert dual_emit.mirror(FakeTransport(docs), "fulcra", sender="a", to="coord-boss", kind="directive", priority="P1", slug="live", ptr="task/live.md") is True
 
 
-def test_the_old_open_set_includes_open_star_rows_for_every_agent_except_their_owner(monkeypatch):
+def test_the_old_open_set_includes_star_rows_for_every_non_owner_until_that_agent_acks(monkeypatch):
     """RULING 1 (f9f5823b): a broadcast is an obligation of every recipient except its sender. needs-me yields no
     star rows, so the old set adds them from the full row load: open, assignee "*", owner != agent, deduplicated."""
     rows = [
         {"id": "bcast-by-boss", "assignee": "*", "owner": "coord-boss", "status": "proposed", "priority": "P0", "path": "task/bcast-by-boss.md"},
         {"id": "bcast-by-me", "assignee": "*", "owner": "coord-maintainer", "status": "proposed", "priority": "P1", "path": "task/bcast-by-me.md"},
         {"id": "bcast-done", "assignee": "*", "owner": "coord-boss", "status": "done", "priority": "P1", "path": "task/bcast-done.md"},
+        {"id": "bcast-acked-by-me", "assignee": "*", "owner": "coord-boss", "status": "proposed", "priority": "P1", "path": "task/bcast-acked-by-me.md", "acked_by": ["coord-maintainer"]},
+        {"id": "bcast-ack-doc", "assignee": "*", "owner": "coord-boss", "status": "proposed", "priority": "P1", "path": "task/bcast-ack-doc.md"},
         {"id": "mine", "assignee": "coord-maintainer", "owner": "coord-boss", "status": "proposed", "priority": "P1", "path": "task/mine.md"},
         {"id": "bcast-all-spelling", "assignee": "all", "owner": "coord-boss", "status": "active", "priority": "P2", "path": "task/bcast-all-spelling.md"},
     ]
     monkeypatch.setattr(cli, "_load_rows_status", lambda transport, team: (rows, True, ""))
     monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **k: (set(), set()))
-    monkeypatch.setattr(cli, "_needs_me_rows", lambda transport, team, agent, rows, now, held_roles: [rows[3]])
-    got, ok, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-maintainer")
-    assert ok and sorted(r["id"] for r in got) == ["bcast-all-spelling", "bcast-by-boss", "mine"]      # not my own broadcast, not the done one; both spellings
+    monkeypatch.setattr(cli, "_needs_me_rows", lambda transport, team, agent, rows, now, held_roles: [r for r in rows if r["id"] == "mine"])   # by id, never by index
+    tr = FakeTransport({cli._ack_path("fulcra", "bcast-ack-doc", "coord-maintainer"): "acked"})   # the engine's own ack path (agent_key is hash-suffixed)
+    got, ok, _ = cli._old_open_set(tr, "fulcra", "coord-maintainer")
+    # RULING 13a58789: `bcast-done` stays OPEN for me (the owner's done is not my close); the two I acked are closed for me only
+    assert ok and sorted(r["id"] for r in got) == ["bcast-all-spelling", "bcast-by-boss", "bcast-done", "mine"]
     got_boss, _, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-boss")
-    assert sorted(r["id"] for r in got_boss) == ["bcast-by-me"]                    # coord-boss owes MY broadcast, not his own
+    assert sorted(r["id"] for r in got_boss) == ["bcast-by-me"]                    # coord-boss owes MY broadcast, never his own
+    got_other, _, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-opus-worker")
+    assert "bcast-acked-by-me" in {r["id"] for r in got_other} and "bcast-ack-doc" in {r["id"] for r in got_other}   # my acks close nothing for anyone else

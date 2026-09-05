@@ -6663,7 +6663,12 @@ def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str,
     # for an agent, so without this every broadcast diverged once for every non-sender (measured on three identities
     # 20:24Z-22:23Z) and a --force re-seed closed it. The fold already keeps to==all for every agent except from
     # (PR 716); the old set now asks the same question: open star rows whose owner is not this agent.
-    from .model import TERMINAL_STATUSES
+    # RULING (coord-boss 13a58789, 2026-09-05): broadcast closes are PER-RECIPIENT. One agent replying with
+    # --closes flips the row's single status to done for everyone; that status is the OWNER's disposition and is
+    # NOT read as a per-recipient close. A broadcast stays open for every non-owner agent unless an ack record
+    # exists for THAT agent (the row's `acked_by`, or the ack doc at _ack_path), in which case it is closed for that
+    # agent only. bus-v4 already carries this per recipient (each ack/close is its own event); the old plane now
+    # approximates it the same way. An unreadable ack reads as no ack (over-capture, never a manufactured close).
     seen = {str(r.get("id") or r.get("name") or "") for r in got}
     for r in rows or []:
         if not isinstance(r, dict) or str(r.get("assignee") or "") not in ("*", "all"):   # both spellings exist on the store (measured: 30 rows, "*" and "all")
@@ -6671,8 +6676,13 @@ def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str,
         slug = str(r.get("id") or r.get("name") or "")
         if not slug or slug in seen or str(r.get("owner") or "") == agent:
             continue
-        if str(r.get("status") or "") in TERMINAL_STATUSES:
+        if agent in (r.get("acked_by") or []):
             continue
+        try:
+            if transport.read(_ack_path(team, slug, agent)) is not None:
+                continue
+        except Exception:
+            pass                                                   # unreadable ack: not an ack
         got.append(r); seen.add(slug)
     return got, bool(rows_ok), str(rows_reason or "")
 
