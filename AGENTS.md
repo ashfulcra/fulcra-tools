@@ -1784,6 +1784,40 @@ The principle in this section survives untouched — a verdict is lifted by a
 link, not by a clock. What changed is the anchor, and the correction is mine to
 carry: naming is a link the superseding party can forge.
 
+### Never let a pass rewrite the instruction that drives the next pass
+
+Ash, 2026-09-05: *"There is something wrong in your instructions, possibly your
+tick, that is dragging every task into recursive churn."* He was right, and the
+engine was mine.
+
+Each scheduled pass re-armed its own trigger by **rewriting the prompt**, adding
+whatever that pass had learned. The PR check-in grew from roughly 1.5 KB to 8 KB
+in twelve hours, and its "standing probe corrections" list grew from (a) to (s)
+— nineteen entries, one per defect found. The next pass then re-read the longer
+prompt, re-measured everything named in it, and found another defect to add. The
+instruction grew monotonically; the product did not grow at all.
+
+It is the same shape as the two arms races above, one level out: **a flaw is
+found, the response is to strengthen the checking apparatus, and the apparatus
+becomes the work.** The plan register spent 28 rounds hardening a proof while
+`packages/coord-fold/` did not exist. Each of those was locally correct and
+collectively fatal.
+
+**The fix cannot be another rule in the prompt** — that is one more turn of the
+same crank. It is structural:
+
+- **Scheduled prompts are FROZEN and short.** They say what to measure and what
+  is forbidden. They do not accumulate history.
+- **Durable facts go to their canonical home here**, which the documentation
+  rules already required — *one canonical home per fact; everything else links
+  to it.* Nineteen lessons duplicated into a trigger prompt violated a rule this
+  file already stated.
+- **Re-arm without rewriting** unless something in the prompt has become FALSE.
+  A stale-but-true prompt costs nothing; a growing one costs every future pass.
+
+The tell that this is happening: the artifact you re-read each cycle is longer
+than it was last cycle, and the thing it is supposed to produce is not.
+
 ### An arms race ends only at an authority the constrained party cannot choose
 
 Twice now on this project, independently:
