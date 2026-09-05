@@ -188,6 +188,21 @@ under `skills/`, each package with its own README, build, and tests.
   and must NOT hit the network — a network-bound run is the bug, not slowness).
 - Editable install: the `.venv` imports the live workspace source, so a code
   change is picked up by **restarting the daemon**, not re-syncing.
+- **A pass/fail count is a property of (sha, interpreter, cwd) — never of the
+  sha alone.** Measuring the engine at one merge commit gave **66 failed**,
+  then **1 failed**, then **0 failed**, from three cwds over the same source.
+  From the repo root, the `.venv`'s editable install resolved `coord_engine` to
+  a DIFFERENT checkout — the 66 failures belonged to a stale working tree, not
+  to the sha under test. From the package directory, `coord_engine/` sat on
+  `sys.path`, and the subprocess in `test_obligations_engine_absent.py` — whose
+  whole job is to assert the engine is NOT importable in its sandbox —
+  inherited that cwd and found it. Only an isolated venv holding a
+  **non-editable** install, run from a repo root, measured the build actually
+  under test. So print `module.__file__` for the package before you report a
+  number, and say which cwd produced it: a count without that pair is not
+  evidence, and two of those three numbers would have been a false report to
+  the operator. The rule generalizes past Python — whenever a tool resolves an
+  implementation by search path, the search path is part of the measurement.
 - Pull latest into a checkout with `bash scripts/update.sh` (git pull +
   `uv sync --all-packages --all-extras` + restart daemon/menubar).
 - PyObjC-free logic is split into its own modules so tests run on Linux CI;
