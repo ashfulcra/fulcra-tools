@@ -19,7 +19,18 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-BARE_RUNBOOK = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
+INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})([^\n`]*)")
+REQUIRED_ROOTS = ("--git", "--fulcra-api")
+
+
+def missing_roots(rest: str) -> list[str]:
+    """codex-coder round 29: the r33 guard checked only --git, so an invocation missing --fulcra-api passed the guard and
+    died at argparse. Each invocation is PARSED and every required root must be present as its own token."""
+    return [r for r in REQUIRED_ROOTS if not re.search(r"(^|\s)" + re.escape(r) + r"(\s|=|$)", rest)]
+
+
+def bare_invocations(text: str) -> list[str]:
+    return [f"missing {' and '.join(missing_roots(m.group(3)))}: {m.group(0).strip()[:100]}" for m in INVOCATION.finditer(text) if missing_roots(m.group(3))]
 
 
 def refuse_bare_runbook_invocations(plan_text: str) -> list[str]:
@@ -34,8 +45,8 @@ def refuse_bare_runbook_invocations(plan_text: str) -> list[str]:
             in_log = ln.startswith("## Revision log")
         if in_fence or in_log:
             continue
-        if BARE_RUNBOOK.search(ln):
-            out.append(f"line {i}: {ln.strip()[:120]}")
+        for why in bare_invocations(ln):
+            out.append(f"line {i}: {why}")
     return out
 
 

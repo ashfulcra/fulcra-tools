@@ -426,12 +426,13 @@ def test_the_attestation_child_can_reach_only_the_stated_fulcra_api(tmp_path, mo
     assert shutil.which("fulcra-api") == str(shadow / "fulcra-api")                              # positive control: inherited PATH hands out the forgery
     env = ship_check.engine_env(str(trusted))
     entries = env["PATH"].split(os.pathsep)
-    assert len(entries) == 1 and os.listdir(entries[0]) == ["fulcra-api"]
-    assert os.path.realpath(shutil.which("fulcra-api", path=env["PATH"])) == os.path.realpath(trusted)
-    assert shutil.which("git", path=env["PATH"]) is None and shutil.which("sh", path=env["PATH"]) is None
-    for k in ("FULCRA_CLI_COMMAND", "FULCRA_API_BASE", "COORD_TRANSPORT_HTTP"):
+    assert len(entries) == 1 and os.listdir(entries[0]) == []                                   # r34: NO link at all; PATH resolves nothing
+    assert shutil.which("fulcra-api", path=env["PATH"]) is None and shutil.which("sh", path=env["PATH"]) is None
+    import shlex
+    assert shlex.split(env["FULCRA_CLI_COMMAND"]) == [os.path.realpath(trusted)]                # the engine is HANDED the absolute path (its transport shlex-splits)
+    for k in ("FULCRA_API_BASE", "COORD_TRANSPORT_HTTP"):
         assert k not in env
-    assert os.listdir(ship_check.engine_env()["PATH"]) == []                                     # nothing stated -> nothing reachable
+    assert "FULCRA_CLI_COMMAND" not in ship_check.engine_env() and os.listdir(ship_check.engine_env()["PATH"]) == []   # nothing stated -> nothing reachable; inherited 'evil' scrubbed
 
 
 def test_main_refuses_without_stated_trust_roots_before_touching_the_store(monkeypatch, capsys):
@@ -791,13 +792,65 @@ def test_no_repo_prose_invokes_ship_check_without_stated_trust_roots():
     """codex-coder rounds 27/28: the prose contract drifted from argparse twice (Task 14, then Task 16). Every
     invocation written in repo prose — AGENTS.md, the package README, the script's own Usage — must carry the
     stated trust roots on the same line. (The plan document itself is checked by Task 0's materialize_plan.)"""
-    import re
-    bare = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
+    import importlib.util
+    mp_spec = importlib.util.spec_from_file_location("materialize_plan", SCRIPT.parent / "materialize_plan.py"); mp = importlib.util.module_from_spec(mp_spec); mp_spec.loader.exec_module(mp)
+    bare = mp.bare_invocations                                                                    # ONE parser, shared with the plan gate (r34: the r33 regex checked only --git)
     here = pathlib.Path(__file__).resolve()
     files = [f for f in (here.parents[3] / "AGENTS.md", here.parents[1] / "README.md", SCRIPT) if f.exists()]   # a materialized plan tree has no repo AGENTS.md
     assert len(files) >= 2, files
     for f in files:
         for i, ln in enumerate(f.read_text().splitlines(), 1):
-            assert not bare.search(ln), f"{f.name}:{i}: ship_check invoked without --git/--fulcra-api: {ln.strip()[:120]}"
-    assert bare.search("`scripts/ship_check.py fulcra <HEAD>` and fails closed")           # the pattern catches the sentence that drifted
-    assert not bare.search("`scripts/ship_check.py fulcra <HEAD> --git /x --fulcra-api /y`")
+            assert not bare(ln), f"{f.name}:{i}: {bare(ln)}"
+    assert bare("`scripts/ship_check.py fulcra <HEAD>` and fails closed")                          # the sentence that drifted
+    assert bare("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git") == ["missing --fulcra-api: ship_check.py fulcra <HEAD> --git /usr/bin/git"]   # codex-coder's counterexample
+    assert bare("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x")[0].startswith("missing --git")
+    assert not bare("`scripts/ship_check.py fulcra <HEAD> --git /x --fulcra-api /y`")
+
+
+def test_the_gate_temp_root_is_its_own_0700_directory_and_TMPDIR_is_ignored(tmp_path, monkeypatch):
+    """codex-coder round 29: mkdtemp under an uncontrolled TMPDIR is a pathname handoff the gate did not own."""
+    import os, stat, tempfile
+    home = tmp_path / "home"; home.mkdir(); monkeypatch.setenv("HOME", str(home))
+    world = tmp_path / "world"; world.mkdir(); world.chmod(0o777); monkeypatch.setenv("TMPDIR", str(world)); tempfile.tempdir = None
+    root = ship_check.gate_tmp_root()
+    assert root == str(home / ".local" / "state" / "coord-fold" / "tmp") and stat.S_IMODE(os.stat(root).st_mode) == 0o700
+    d = ship_check.private_dir("x-"); assert d.startswith(root + os.sep) and not d.startswith(str(world))
+    os.chmod(root, 0o755)
+    import pytest
+    with pytest.raises(RuntimeError, match="not a private directory"):
+        ship_check.gate_tmp_root()                                                                  # a root that lost its privacy is refused, never reused
+    os.chmod(root, 0o700); tempfile.tempdir = None
+
+
+def test_store_read_refuses_a_body_whose_handoff_state_changed_before_the_read(tmp_path, monkeypatch):
+    """Synchronized, not raced (codex-reviewer round 28): the fake CLI writes the body and then — before the gate reads —
+    (a) makes the private dir world-readable, (b) replaces the body with a symlink, (c) keeps it intact. Only (c) is read."""
+    import os, tempfile
+    home = tmp_path / "home"; home.mkdir(); monkeypatch.setenv("HOME", str(home)); tempfile.tempdir = None
+    g = tmp_path / "git"; g.write_text("#!/bin/sh\n"); g.chmod(0o755)
+    secret = tmp_path / "secret.txt"; secret.write_text("PIN=\"deadbeef\"\n")
+    def fake(mode):
+        fa = tmp_path / f"fulcra-api-{mode}"
+        # absolute tool paths: the gate hands the CLI an EMPTY PATH, so a bare `chmod` would silently not run (measured)
+        body = {"chmod": 'printf "ok" > "$4"; /bin/chmod 755 "$(/usr/bin/dirname "$4")"', "link": f'printf "ok" > "$4"; /bin/rm "$4"; /bin/ln -s {secret} "$4"', "intact": 'printf "PIN=x" > "$4"'}[mode]
+        fa.write_text("#!/bin/sh\n" + body + "\nexit 0\n"); fa.chmod(0o755); return fa
+    for mode, expect in (("chmod", "no longer private"), ("link", "not a regular file"), ("intact", None)):
+        table, why = ship_check.resolve_trust_roots({"git": str(g), "fulcra-api": str(fake(mode))}, "/tool"); assert why is None
+        monkeypatch.setattr(ship_check, "TRUSTED", dict(table))
+        rc, body, err = ship_check.store_read("team/fulcra/x")
+        if expect:
+            assert rc == 3 and body == "" and expect in err, (mode, rc, err)
+        else:
+            assert rc == 0 and body == "PIN=x", (rc, body, err)
+    tempfile.tempdir = None
+
+
+def test_the_bare_invocation_guard_requires_each_root_independently():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("materialize_plan", SCRIPT.parent / "materialize_plan.py"); mp = importlib.util.module_from_spec(spec); spec.loader.exec_module(mp)
+    f = mp.refuse_bare_runbook_invocations
+    assert f("run `scripts/ship_check.py fulcra <HEAD>`\n")[0].endswith("missing --git and --fulcra-api: ship_check.py fulcra <HEAD>")
+    assert "missing --fulcra-api" in f("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git\n")[0]
+    assert "missing --git" in f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x\n")[0]
+    assert f("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x\n") == []
+    assert f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x --git /usr/bin/git\n") == []               # order-independent

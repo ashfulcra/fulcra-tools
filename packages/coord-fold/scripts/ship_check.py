@@ -2,6 +2,15 @@
 commit — the engine's folded result AND, per reviewer, the exact WINNING shard the fold kept (never a
 refold of filenames here), each quoting that commit's tree hash for packages/coord-fold.
 Fails closed on any absence, including an engine that does not expose `winning`.
+TRUST MODEL (r34, stated after codex-reviewer rounds 25-28): the gate defends against the MUTABLE TOOL ENVIRONMENT
+(everything an engine install controls: its files, its interpreter, its bytecode, its metadata), against PATH and
+environment-variable resolution, and against world-writable or cross-user temporary locations. It does NOT defend
+against a concurrent process running as the SAME USER on the gate host: such a process can replace the gate's own
+bytes, its interpreter, or its git, so no pathname handoff between the gate and its trusted executables can be
+bound against it and none is claimed to be. Within that model every remaining handoff is owned: the temp root is a
+gate-created 0700 directory under the user's state dir (an inherited TMPDIR is ignored), the engine child receives
+its CLI as an absolute path in FULCRA_CLI_COMMAND (no link, no PATH lookup), and every downloaded body is checked
+for owner, mode and non-link status immediately before it is read.
 Usage: python scripts/ship_check.py <team> <40-hex head> --git <abs path> --fulcra-api <abs path>
 (both trust roots are REQUIRED and stated as absolute paths — never discovered through PATH; r29/r31)"""
 import json
@@ -23,14 +32,18 @@ IMPORT_AFFECTING = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE
 
 
 def engine_env(fulcra_api=None):
-    """The environment a child is invoked with: NOTHING that can change which coord_engine imports, and (r29)
-    a PATH that is one private directory holding a single link to the STATED fulcra-api — so the engine's own
-    transport, which shells out by name, can reach nothing else — with the engine's command/store overrides
-    (FULCRA_CLI_COMMAND, FULCRA_API_BASE, COORD_TRANSPORT_HTTP) scrubbed. (coord-boss 8268376f: a pinned launcher
-    answered with the working tree's capabilities because subprocess.run inherited PYTHONPATH.)"""
+    """The environment a child is invoked with: NOTHING that can change which coord_engine imports; PATH is one
+    EMPTY private directory (no lookup can succeed); and the engine receives its CLI as an ABSOLUTE PATH in
+    FULCRA_CLI_COMMAND, which its transport shlex-splits — no link, no PATH, no pathname the child resolves for
+    itself (r34, replacing r29's private-bin symlink: codex-reviewer round 28). The inherited overrides
+    (FULCRA_CLI_COMMAND, FULCRA_API_BASE, COORD_TRANSPORT_HTTP) are scrubbed first. (coord-boss 8268376f: a pinned
+    launcher answered with the working tree's capabilities because subprocess.run inherited PYTHONPATH.)"""
+    import shlex
     env = {k: v for k, v in os.environ.items() if k not in IMPORT_AFFECTING and k not in SCRUBBED_OVERRIDES and not k.startswith("PYTHON")}
     env["PYTHONNOUSERSITE"] = "1"
-    env["PATH"] = private_bin({"fulcra-api": fulcra_api} if fulcra_api else {})
+    env["PATH"] = private_dir("coord-fold-empty-path-")
+    if fulcra_api:
+        env["FULCRA_CLI_COMMAND"] = shlex.quote(os.path.realpath(fulcra_api))
     return env
 
 
@@ -73,32 +86,63 @@ def resolve_trust_roots(stated, env_root):
     return out, None
 
 
-def private_bin(links):
-    """A fresh 0700 directory holding ONLY the given links; the child's PATH is exactly this directory."""
+def gate_tmp_root():
+    """The ONLY place the gate creates temporary state: ~/.local/state/coord-fold/tmp, created 0700 and verified
+    (owned by this uid, no group/other bits) on every call. An inherited TMPDIR is never consulted (codex-coder round 29:
+    tempfile.mkdtemp under an uncontrolled TMPDIR is a pathname handoff the gate did not own)."""
     import tempfile
-    d = tempfile.mkdtemp(prefix="coord-fold-bin-")
+    root = os.path.join(os.path.expanduser("~"), ".local", "state", "coord-fold", "tmp")
+    if not os.path.isdir(root):
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        os.chmod(root, 0o700)                       # umask-proof on creation only; an EXISTING root that lost its privacy is refused, never repaired
+    st = os.stat(root)
+    if st.st_uid != os.getuid() or (st.st_mode & 0o077):
+        raise RuntimeError(f"gate temp root {root} is not a private directory of this user (uid {st.st_uid}, mode {oct(st.st_mode & 0o777)})")
+    tempfile.tempdir = root
+    return root
+
+
+def private_dir(prefix):
+    """A fresh 0700 directory under the gate's own temp root."""
+    import tempfile
+    d = tempfile.mkdtemp(prefix=prefix, dir=gate_tmp_root())
     os.chmod(d, 0o700)
-    for name, target in links.items():
-        os.symlink(target, os.path.join(d, name))
     return d
+
+
+def read_owned_file(path):
+    """Read a file the gate expects to own, refusing if the handoff state changed before the read: a symlink, a
+    non-regular file, another owner, or a containing directory that is no longer private (r34)."""
+    import stat as _stat
+    d = os.path.dirname(path)
+    ds = os.stat(d)
+    if ds.st_uid != os.getuid() or (ds.st_mode & 0o077):
+        raise PermissionError(f"the private directory {d} is no longer private (uid {ds.st_uid}, mode {oct(ds.st_mode & 0o777)})")
+    ls = os.lstat(path)
+    if _stat.S_ISLNK(ls.st_mode) or not _stat.S_ISREG(ls.st_mode):
+        raise PermissionError(f"{path} is not a regular file the gate wrote")
+    if ls.st_uid != os.getuid():
+        raise PermissionError(f"{path} is owned by uid {ls.st_uid}, not this user")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, encoding="utf-8") as fh:
+        return fh.read()
 
 
 def store_read(remote):
     """Read one store file through the trusted fulcra-api into a PRIVATE temp file and return its text.
     r30 (found by the first real measurement of fleet_pin, 2026-09-05): the real CLI validates LOCAL_FILE as a
-    readable path and REFUSES /dev/stdout whenever stdout is a pipe — so every earlier revision's `download ...
-    /dev/stdout` form never worked outside the tests, whose fake shell returned bodies on stdout and hid it.
-    -> (rc, text, err)."""
-    import tempfile
-    d = tempfile.mkdtemp(prefix="coord-fold-store-")
-    os.chmod(d, 0o700)
+    readable path and REFUSES /dev/stdout whenever stdout is a pipe. r34: the file lives under the gate's own temp
+    root and is checked for owner, mode and non-link status immediately before the read. -> (rc, text, err)."""
+    d = private_dir("coord-fold-store-")
     f = os.path.join(d, "body")
     try:
         rc, _, err = sh("fulcra-api", "file", "download", remote, f)
         if rc:
             return rc, "", err
-        with open(f, encoding="utf-8") as fh:
-            return 0, fh.read(), ""
+        try:
+            return 0, read_owned_file(f), ""
+        except (OSError, PermissionError) as exc:
+            return 3, "", f"downloaded body refused: {exc}"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -371,6 +415,7 @@ def winning_name_ok(name: str, head: str, reviewer: str) -> bool:
 def main(team: str, head: str, git: str = None, fulcra_api: str = None) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         print("ship_check: head must be a 40-hex commit"); return 1
+    gate_tmp_root()                                                     # r34: our own 0700 temp root; TMPDIR is never consulted
     exe = engine_executable()                                           # THE one resolution of the launcher
     if not exe:
         print("ship_check: coord-engine not found on PATH — refusing"); return 1
