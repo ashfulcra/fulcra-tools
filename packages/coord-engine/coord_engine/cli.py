@@ -2593,7 +2593,7 @@ def _tally_from_verdict_entries(
             "verdict": token,
             "supersedes": [str(x) for x in (fm.get("supersedes") or [])
                            if isinstance(fm.get("supersedes"), list)],
-            "nonce": str(fm.get("nonce") or ""),
+            "digest": review.content_digest(raw_v),
             "mtime_iso": _store_mtime_iso(e.get("mtime")) or "",
             # ONE canonical form (second from the ACL-controlled name, fraction
             # from frontmatter `ts` only within that second) so two same-second
@@ -4608,8 +4608,12 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
     # must come from the same reading.
     stamp = _now().astimezone(timezone.utc)
     now_iso = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    nonce = secrets.token_hex(8)
+    # The random nonce is part of the NAME (codex-reviewer, r7 secondary): without
+    # it, two identical same-second filings collided and overwrote — an append-only
+    # claim with a non-unique name.
     digest = hashlib.sha1(
-        f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}"
+        f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}|{nonce}"
         .encode()).hexdigest()[:8]
     filename = review.verdict_filename(reviewer, head=head, ts=now_iso,
                                        digest=digest)
@@ -4628,19 +4632,21 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
             parsed = review.parse_verdict_filename(n, head=head)
             if not (parsed and parsed[0] == reviewer and n != filename):
                 continue
-            # QUOTE THE TARGET'S NONCE (r7): a name is predictable, a nonce is
-            # not, so only a shard that exists can be named. Read it; if the
-            # read fails or the shard has no nonce, name it bare — the fold will
-            # honour a bare name only with server-mtime proof (legacy shards).
+            # QUOTE THE TARGET'S CURRENT BYTES (r8): the edge binds the content
+            # digest, and the fold honours it only if the STORE's mtime proves
+            # the target earlier than this shard. A prior that cannot be READ
+            # cannot be named — it stays live, which is the fail-closed answer.
             prior = transport.read(_verdicts_prefix(args.team, args.name) + n)
-            pfm = okf.parse_frontmatter(prior) if prior else None
-            pn = str((pfm or {}).get("nonce") or "")
-            supersedes.append(f"{n}@{pn}" if pn else n)
-            if not pn:
+            if prior is None:
                 unquotable.append(n)
+                continue
+            supersedes.append(f"{n}@sha256:{review.content_digest(prior)}")
     except TransportError:
+        # IF YOU CANNOT ENUMERATE THE PRIORS YOU CANNOT CLAIM TO SUPERSEDE THEM
+        # (coord-boss, ratification 1bce3da9): a supersedes list computed from a
+        # partial listing is a false claim of coverage. Name NOTHING.
         listing_ok = False
-    nonce = secrets.token_hex(8)
+        supersedes = []
 
     body = okf.render_frontmatter({
         "type": "Verdict",
@@ -4655,9 +4661,9 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
         "supersedes": sorted(supersedes),
     }) + f"\n{getattr(args, 'note', None) or normalized}\n"
     if unquotable:
-        print(f"review verdict: {len(unquotable)} prior shard(s) of yours carry no nonce "
-              f"(legacy or hand-written); they are named bare and the fold will honour "
-              f"that only if the store's mtime proves them earlier than this one",
+        print(f"review verdict: {len(unquotable)} prior shard(s) of yours could not be read, "
+              f"so this verdict does NOT supersede them; a CHANGES among them still dominates "
+              f"until you re-file when they are readable",
               file=sys.stderr)
     if not listing_ok:
         print(f"review verdict: could not list your prior shards for {args.name} — "

@@ -148,27 +148,39 @@ def canonical_sort_key(name_ts: Optional[str], fm_ts: Optional[str],
     return f"{second}.{fraction}Z"
 
 
+def content_digest(raw: Optional[str]) -> str:
+    """Identity of a shard's CURRENT bytes: sha256, 16 hex. A rewrite in place changes it."""
+    import hashlib
+    return hashlib.sha256((raw or "").encode()).hexdigest()[:16]
+
+
 def _resolves(source: dict[str, Any], entry: str, targets: dict[str, dict[str, Any]]) -> tuple[Optional[str], str]:
     """Does ``entry`` (from ``source['supersedes']``) resolve a target? -> (target name or None, why).
 
-    A CAUSAL TOKEN, NOT A CLOCK (codex-coder, review-winning-envelope r6): a
-    superseding shard must quote the target's NONCE (``name@nonce``) — a random
-    value the target's writer generated, unknowable before the target existed,
-    so a forward edge cannot be predeclared. A nonce-less (legacy) target may be
-    resolved by name ALONE only when the STORE's mtime — server-assigned, never
-    client-selectable — proves it strictly earlier than the source; the same
-    minute, or an unknown mtime, is not proof and fails closed.
+    ONLY THE STORE CAN SUPPLY CAUSALITY (both reviewers, review-winning-envelope
+    r7). A name is predictable; a client-written nonce is editable frontmatter at
+    a mutable path — codex-reviewer rewrote a plain CHANGES in place keeping its
+    nonce and the old edge still resolved it; codex-coder predeclared a nonce
+    and wrote the later CHANGES to match. So an edge is honoured only when:
+
+      * ``name@sha256:<digest>`` matches the target's CURRENT bytes (a rewrite in
+        place un-resolves it), and
+      * the STORE's mtime — server-assigned, never client-selectable — proves
+        the target strictly EARLIER than the source (a later-written target, or
+        an in-place rewrite, is never resolved; the same minute, or an unknown
+        mtime, is not proof and fails closed).
+
+    A bare legacy name needs the same mtime proof and binds no digest.
     """
-    name, _, nonce = entry.partition("@")
+    name, _, token = entry.partition("@")
     if name == source.get("name"):
         return None, "self-link"
     target = targets.get(name)
     if target is None:
         return None, "resolves nothing"
-    if nonce:
-        return (name, "ok") if target.get("nonce") == nonce else (None, "nonce mismatch")
-    if target.get("nonce"):
-        return None, "nonce required"
+    if token:
+        if not token.startswith("sha256:") or token[7:] != (target.get("digest") or ""):
+            return None, "digest mismatch"
     t_at, s_at = target.get("mtime_iso") or "", source.get("mtime_iso") or ""
     if t_at and s_at and t_at < s_at:
         return name, "ok"
@@ -187,15 +199,16 @@ def fold_newest_per_reviewer(
     explicit AND causal:
 
       * a shard is RESOLVED when another shard of the same reviewer quotes it
-        as ``name@nonce`` with the target's actual nonce (see ``_resolves``;
-        legacy nonce-less targets only with server-mtime proof);
+        as ``name@sha256:<digest>`` matching its CURRENT bytes AND the store's
+        mtime proves it strictly earlier than the quoting shard (see
+        ``_resolves``; a bare legacy name needs the same mtime proof);
       * any UNRESOLVED CHANGES dominates, whatever its timestamp;
       * otherwise the newest live shard wins (canonical key, then name).
 
-    Equal keys, unnamed conflicts, dangling names, nonce mismatches, self-links
+    Equal keys, unnamed conflicts, dangling names, digest mismatches, self-links
     and unproven causality all FAIL CLOSED to CHANGES. The typed verb quotes the
-    nonce of every prior shard it can list AND read; a hand-written APPROVE must
-    quote nonces itself. Amends ruling b99fb8da (newest-wins); constraint 5 — a
+    content digest of every prior shard it can list AND read; a hand-written
+    APPROVE must quote digests itself. Amends ruling b99fb8da (newest-wins); constraint 5 — a
     stale CHANGES must not block forever — holds through the link the verb
     writes. Supersession stays auditable: every shard stays on disk and the
     folded count is returned.
@@ -225,8 +238,8 @@ def fold_newest_per_reviewer(
 
 def invalid_supersession_edges(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Every edge the fold did NOT honour, with why — so a reader can say the graph was malformed
-    rather than silently folding around it: self-links, dangling names, nonce mismatches, a
-    nonce-less entry against a nonce-bearing target, and legacy entries without server-mtime proof."""
+    rather than silently folding around it: self-links, dangling names, digest mismatches, and any
+    entry without the store's mtime proving its target earlier."""
     by: dict[str, dict[str, dict[str, Any]]] = {}
     for r in rows:
         by.setdefault(r["reviewer"], {})[r.get("name")] = r

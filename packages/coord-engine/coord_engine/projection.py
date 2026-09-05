@@ -760,7 +760,7 @@ def _scan_review_slug(
             "name": n,
             "supersedes": [str(x) for x in (vfm.get("supersedes") or [])
                            if isinstance(vfm.get("supersedes"), list)],
-            "nonce": str(vfm.get("nonce") or ""),
+            "digest": review.content_digest(raw_v),
             "mtime_iso": _store_mtime_iso(v.get("mtime")) or "",
             # SAME fallback chain as `_tally_from_verdict_entries` — filename
             # ts, then frontmatter ts, then the LISTING MTIME. Projection used

@@ -154,20 +154,22 @@ def test_a_CONCURRENT_verdict_is_never_overwritten(monkeypatch):
 
 def test_the_NEWEST_shard_wins_across_both_forms(monkeypatch, capsys):
     """A plain shard and an append shard for the same reviewer: the newer
-    APPROVE lifts the plain CHANGES — by LINK (review-winning-envelope r7): the
-    hand-written plain shard carries the `nonce:` the contract asks hand-writers
-    to include, the verb quotes it, and the fold resolves the CHANGES. Without a
-    nonce and without the store's mtime proof (this fake reports none), the
-    CHANGES stays dominant — the second half pins that, fail closed."""
+    APPROVE lifts the plain CHANGES — by a CAUSAL link (review-winning-envelope
+    r8): the verb quotes the plain shard's content digest and the STORE's mtime
+    proves the plain shard earlier. When the store cannot prove that (second
+    half: same mtime), the CHANGES stays dominant — fail closed."""
     t = FakeTransport()
     _open_review(t, monkeypatch)
     t.put(_plain_path(), okf.render_frontmatter({
         "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
-        "verdict": "changes", "ts": "2020-01-01T00:00:00Z",
-        "nonce": "0ldp1a1n0000cafe"}) + "\nold.\n")
+        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n",
+        mtime="2020-01-01 12:00AM UTC")                       # the STORE says the plain shard is old
     monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
     cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
               "--verdict", "approve"], transport=t)
+    for k in t.store:                                             # the STORE dates the verb's shard later
+        if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--"):
+            t.mtimes[k] = "2026-09-05 12:01PM UTC"
     capsys.readouterr()
     assert cli.main(["review", "status", TEAM, SLUG], transport=t) == 0
     out = capsys.readouterr().out
@@ -180,10 +182,14 @@ def test_the_NEWEST_shard_wins_across_both_forms(monkeypatch, capsys):
     _open_review(t2, monkeypatch)
     t2.put(_plain_path(), okf.render_frontmatter({
         "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
-        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n")
+        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n",
+        mtime="2026-09-05 12:01PM UTC")
     monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
     cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
               "--verdict", "approve"], transport=t2)
+    for k in t2.store:                                            # same store minute as the plain CHANGES: not proof
+        if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--"):
+            t2.mtimes[k] = "2026-09-05 12:01PM UTC"
     capsys.readouterr()
     cli.main(["review", "status", TEAM, SLUG, "--json"], transport=t2)
     import json as _json
