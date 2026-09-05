@@ -40,7 +40,8 @@ EXPECTED_READS = {
     "cmd_status", "cmd_board", "cmd_search", "cmd_needs_me", "cmd_owed",
     "cmd_briefing",
     "cmd_presence_show", "cmd_health", "cmd_doctor",
-    "cmd_obligations", "cmd_roles_status", "cmd_continuity_resume",
+    "cmd_obligations", "cmd_obligations_dispatch", "cmd_obligations_stream",
+    "cmd_roles_status", "cmd_continuity_resume",
     "cmd_agents", "cmd_asks", "cmd_engagement_gate", "cmd_stash_list",
     "cmd_router_shadow_status",
     # extracted modules — the class codex-reviewer caught on 590 r1

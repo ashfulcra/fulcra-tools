@@ -31,7 +31,7 @@ def test_payload_round_trips():
     assert parsed == {"to": "codex-coder", "kind": "directive",
                       "slug": "fix-the-thing", "pri": "P0",
                       "ptr": "task/fix-the-thing.md", "fyi": False,
-                      "for": None,
+                      "for": None, "on": None, "state": None,
                       "writer": {
                           # the RELEASE, not a frozen literal: a version bump is
                           # release discipline, not a reason to edit this test
@@ -171,3 +171,60 @@ def test_divergence_names_both_directions():
     out = records.compare_to_file_fold(ev, {"b"})
     assert out["status"] == "divergent"
     assert out["only_in_records"] == ["a"] and out["only_in_files"] == ["b"]
+
+
+# --- blocked as a bus signal -------------------------------------------------
+# `blocked_on` was read by seven modules and announced by none, so anything that
+# wanted "what is blocked, and on whom" had to enumerate the task corpus. As an
+# event it is available to anything reading the bus forward from a cursor.
+
+def test_blocked_is_a_control_plane_kind():
+    assert "blocked" in records.KINDS
+
+
+def test_a_blocked_event_carries_what_it_waits_on_and_which_way_it_went():
+    parsed = records.parse_payload(_payload(
+        to="ash", kind="blocked", priority="P1", slug="409a",
+        ptr="task/409a.md", on="user:ash", state="blocked"))
+    assert parsed["kind"] == "blocked"
+    assert parsed["on"] == "user:ash"
+    assert parsed["state"] == "blocked"
+
+
+def test_the_clear_is_carried_too():
+    """A block announced but never retracted leaves every downstream queue
+    growing forever, and a queue that only grows stops being read."""
+    parsed = records.parse_payload(_payload(
+        to="ash", kind="blocked", priority="P1", slug="409a",
+        on="user:ash", state="cleared"))
+    assert parsed["state"] == "cleared"
+
+
+def test_an_unknown_state_fails_at_the_write():
+    with pytest.raises(ValueError):
+        _payload(to="ash", kind="blocked", priority="P1", slug="x", state="maybe")
+
+
+def test_the_raw_blocked_on_value_is_preserved_not_classified():
+    """Carried verbatim so a consumer applies its own classifier rather than
+    inheriting ours — an agent name and a role must survive as written."""
+    for raw in ("codex-coder", "role:build-lane", "user:ash"):
+        parsed = records.parse_payload(_payload(
+            to="x", kind="blocked", priority="P2", slug="s", on=raw, state="blocked"))
+        assert parsed["on"] == raw
+
+
+def test_an_older_reader_skips_a_blocked_event_rather_than_poisoning_on_it():
+    """THE COMPATIBILITY PROPERTY that made adding a kind safe: parse_payload
+    returns None for a kind it does not know, and None means 'not a
+    control-plane event — skip silently'. Simulated by parsing against a KINDS
+    tuple that predates this change."""
+    note = _payload(to="ash", kind="blocked", priority="P1", slug="409a",
+                    on="user:ash", state="blocked")
+    original = records.KINDS
+    try:
+        records.KINDS = ("directive", "response", "verdict", "claim")
+        assert records.parse_payload(note) is None
+    finally:
+        records.KINDS = original
+    assert records.parse_payload(note) is not None

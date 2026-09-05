@@ -1507,9 +1507,11 @@ def cmd_task_start(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_task_update(args: argparse.Namespace, transport: Any) -> int:
     path = _task_path(args.team, args.name)
+    prior = transport.read(path)
+    before = _blocked_on_of(prior)
     try:
         out = tasks.apply_update(
-            transport.read(path), now=_iso(_now()), status=args.status, summary=args.summary,
+            prior, now=_iso(_now()), status=args.status, summary=args.summary,
             next_action=args.next, assignee=args.assignee, blocked_on=args.blocked_on,
             priority=args.priority, evidence=args.evidence,
         )
@@ -1517,6 +1519,9 @@ def cmd_task_update(args: argparse.Namespace, transport: Any) -> int:
         print(f"task update failed: {e}", file=sys.stderr)
         return 1
     written = transport.write(path, out)
+    if written:
+        _emit_blocked_signal(args, transport, before=before,
+                             after=_blocked_on_of(out), doc=out)
     if written and args.status in tasks.TERMINAL_STATUSES:
         # `update --status done/abandoned` is a close like any other (round 3):
         # it must emit, or the stream replays the obligation open forever.
@@ -1536,17 +1541,80 @@ def _task_apply(args, transport, *, close_event: bool = False, **kw) -> int:
     anyway because the closer is usually not the assignee.
     """
     path = _task_path(args.team, args.name)
+    prior = transport.read(path)
+    before = _blocked_on_of(prior)
     try:
-        out = tasks.apply_update(transport.read(path), now=_iso(_now()), **kw)
+        out = tasks.apply_update(prior, now=_iso(_now()), **kw)
     except tasks.TaskError as e:
         verb = getattr(args, "verb", getattr(args, "task_command", "update"))
         print(f"task {verb} failed: {e}", file=sys.stderr)
         return 1
     written = transport.write(path, out)
+    if written:
+        # Covers `task block`, `task unblock` and every other lifecycle verb
+        # routed here — the signal must not depend on which verb was used.
+        _emit_blocked_signal(args, transport, before=before,
+                             after=_blocked_on_of(out), doc=out)
     if close_event and written:
         _emit_task_close(args, transport, doc=out)
     print(f"{getattr(args, 'verb', 'updated')} {args.name}")
     return 0
+
+
+
+def _blocked_on_of(doc: Optional[str]) -> str:
+    """The ``blocked_on`` value of a task doc, normalized for comparison."""
+    if not doc:
+        return ""
+    fm = okf.parse_frontmatter(doc) or {}
+    return str(fm.get("blocked_on") or "").strip()
+
+
+def _emit_blocked_signal(args, transport, *, before: str, after: str,
+                         doc: str) -> None:
+    """Announce a change in what a task waits on. Best-effort, never fatal.
+
+    THE POINT OF THIS FUNCTION. ``blocked_on`` was read by seven modules and
+    announced by none, so every consumer that wanted "what is blocked, and on
+    whom" had to enumerate the whole task corpus — the fold-by-enumeration the
+    stream architecture rejects. In practice that meant only one bespoke
+    tracker bridge ever surfaced it, and only into one tracker. As an event it
+    is available to anything reading the bus forward from a cursor: a tracker
+    projection, a dashboard, a phone notification, a peer agent across the
+    mesh, or the blocker themselves.
+
+    Addressed to the BLOCKER (``to``), not to the assignee: the whole value is
+    telling whoever is holding something up that they are. Both directions are
+    emitted — a new block and a clear — because a block announced but never
+    retracted leaves every downstream queue growing forever.
+    """
+    if before == after:
+        return
+    fm = okf.parse_frontmatter(doc) or {}
+    target = after or before
+    if not target:
+        return
+    state = "blocked" if after else "cleared"
+    # `user:<name>` is the typed human form; anything else is an agent or role
+    # name. Strip the prefix for addressing, keep it raw in `on` so a consumer
+    # applies its own classifier rather than inheriting ours.
+    to = target.split()[0] if target.split() else target
+    if to.lower().startswith("user:"):
+        to = to[len("user:"):] or to
+    cfg, _status = records.load_config_classified(transport, args.team)
+    if not cfg:
+        return
+    try:
+        records.emit_event(
+            transport, cfg, sender=_identity(getattr(args, "agent", None)),
+            to=to, kind="blocked", priority=str(fm.get("priority") or "P2"),
+            slug=args.name, ptr=f"task/{args.name}.md",
+            on=(after or before), state=state, team=args.team)
+    except Exception as e:
+        # The doc is the truth and the event is delivery: a bus that is down
+        # degrades latency, never the record of what is blocked.
+        print(f"record: blocked signal not emitted ({e}) — the block rides the "
+              f"file plane only", file=sys.stderr)
 
 
 def _emit_task_close(args, transport, *, doc: str) -> None:
@@ -1644,7 +1712,20 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
         if transport.read(src) is None:
             continue
         dst = _task_path(args.team, args.name)
-        if transport.read(dst) is not None:
+        # ABSENT, not merely unreadable. This guard is the only thing standing
+        # between a restore and overwriting a live hot-path doc, and
+        # `transport.read` returns None for a 500 exactly as it does for a
+        # missing file — so a transient read failure used to read as "the
+        # destination is free". Measured 2026-09-04: an hour of HTTP 500s on
+        # every path three levels deep, which is where task docs live.
+        existing_dst, dst_status = transport.read_classified(dst)
+        if dst_status == "error":
+            print(f"restore refused: cannot READ {dst} to check whether it is "
+                  f"occupied — that is UNKNOWN, not free, and a restore over a "
+                  f"live doc is unrecoverable. Retry when the store answers.",
+                  file=sys.stderr)
+            return 3
+        if existing_dst is not None:
             print(f"restore failed: {args.name} already exists in the hot path", file=sys.stderr)
             return 1
         if rec._crash_safe_move(transport, src, dst):
@@ -1747,7 +1828,20 @@ def cmd_review_restore(args: argparse.Namespace, transport: Any) -> int:
         filename = files[0]
         src = cold_prefix + filename
         dst = f"team/{args.team}/review/{args.slug}/verdicts/{filename}"
-        if transport.read(dst) is not None:
+        # ABSENT, not merely unreadable. This fork guards a MOVE: read the
+        # destination's 500 as "nothing there" and _crash_safe_move lands on
+        # top of a live verdict shard. Same family as `task restore` above and
+        # missed by the same audit that caught it -- found by collect-maintainer
+        # while reviewing PR 694, in the stale-doctrine sweep rather than in the
+        # caller audit, which is its own lesson about where the fifth one hides.
+        existing_dst, dst_status = transport.read_classified(dst)
+        if dst_status == "error":
+            print(f"review restore failed: cannot READ {dst} to tell whether the "
+                  f"hot path is occupied. That is UNKNOWN, not free, and this "
+                  f"path MOVES -- refusing rather than risk landing on a live "
+                  f"verdict shard.", file=sys.stderr)
+            return 3
+        if existing_dst is not None:
             print(f"review restore failed: {args.slug} already exists in the hot path",
                   file=sys.stderr)
             return 1
@@ -5786,8 +5880,21 @@ def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
     fm["tags"] = tags + [f"intent:{principal}"]
     fm["intent_by"] = intent_by  # None omitted by render_frontmatter (undeclared)
     content = okf.render_frontmatter(fm) + "\n" + split[1]
-    return _write_directive(transport, args, slug=slug, content=content,
-                            payload=payload, assignee=principal, not_before=None)
+    rc = _write_directive(transport, args, slug=slug, content=content,
+                          payload=payload, assignee=principal, not_before=None)
+    # Third instance of pr-630 root cause #2 (fixed for `tell` 2026-08-06 and for
+    # `review request` 2026-08-14 after it was bitten live). Without this, intent
+    # wrote the durable doc and returned, so the obligation existed ONLY as a
+    # file: absent from the annotation stream, and therefore invisible to every
+    # stream consumer — a source that does not emit is not slow on the channel,
+    # it is missing from it, and no cursor advance can surface it. Same contract
+    # as the other two: fresh-write-only (never on the dedupe or the in-place
+    # --by window update, where a second event is indistinguishable from new
+    # work), and best-effort so an unconfigured bus degrades to file-plane-only
+    # rather than failing the intent.
+    if rc == 0 and getattr(args, "_directive_outcome", None) == "written":
+        _emit_dispatch_companion(transport, args, slug=slug, assignee=principal)
+    return rc
 
 
 def _directed_inbox(transport: Any, team: str, agent: str,
@@ -6208,6 +6315,403 @@ def cmd_obligations(args: argparse.Namespace, transport: Any) -> int:
     if result.state is obligations_mod.ObligationState.INVALID:
         return 4
     return 0
+
+
+
+
+
+# --- obligations checkpoint: the open set as of a stated instant --------------
+# The piece that lets the stream fold answer COMPLETELY instead of only for its
+# window. Shape: {"v": 1, "as_of": ISO, "open": [{"slug","ptr","priority"}...],
+# "seeded_by": "corpus-fold" | "stream-fold"}. Seeded ONCE by the corpus walk
+# (the 111s fold, run deliberately and off the wake path), then ADVANCED by
+# every clean stream run — so the expensive enumeration happens once per agent
+# plus repair, not once per wake.
+
+
+def _obligations_checkpoint_path(team: str, agent: str) -> str:
+    return f"team/{team}/_coord/agents/{agent}/obligations-checkpoint.json"
+
+
+def _load_obligations_checkpoint(transport: Any, team: str,
+                                 agent: str) -> "Optional[dict[str, Any]]":
+    """The checkpoint, or None when absent/unreadable/malformed.
+
+    None means "no trustworthy claim about the past exists" — the stream fold
+    then reports everything before its window as UNKNOWN, exactly as it did
+    before checkpoints existed. A malformed checkpoint must never pass as a
+    recent empty one: that would convert a parse error into "nothing was owed".
+    """
+    raw = transport.read(_obligations_checkpoint_path(team, agent))
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or doc.get("v") != 1:
+        return None
+    as_of, open_rows = doc.get("as_of"), doc.get("open")
+    if not isinstance(as_of, str) or not as_of or not isinstance(open_rows, list):
+        return None
+    rows = []
+    for row in open_rows:
+        if not isinstance(row, dict) or not row.get("slug"):
+            return None  # a checkpoint with unreadable rows proves nothing
+        rows.append({"slug": str(row["slug"]),
+                     "ptr": str(row.get("ptr") or f"task/{row['slug']}.md"),
+                     "priority": str(row.get("priority") or "P2")})
+    unk = doc.get("unknown_components")
+    return {"as_of": as_of, "open": rows,
+            "unknown_components": [str(u) for u in unk] if isinstance(unk, list) else [],
+            "seeded_by": str(doc.get("seeded_by") or "unknown")}
+
+
+def _save_obligations_checkpoint(transport: Any, team: str, agent: str, *,
+                                 as_of: str, open_rows: list, seeded_by: str,
+                                 unknown_components: "Optional[list[str]]" = None) -> bool:
+    doc = {"v": 1, "as_of": as_of, "seeded_by": seeded_by,
+           "unknown_components": sorted(unknown_components or []),
+           "open": [{"slug": r["slug"], "ptr": r.get("ptr"),
+                     "priority": r.get("priority", "P2")} for r in open_rows]}
+    try:
+        return bool(transport.write(
+            _obligations_checkpoint_path(team, agent), json.dumps(doc, sort_keys=True)))
+    except Exception:
+        return False
+
+
+def cmd_obligations_seed(args: argparse.Namespace, transport: Any) -> int:
+    """`obligations --seed-checkpoint`: run the corpus fold ONCE, deliberately,
+    and write its answer down as the checkpoint the stream fold starts from.
+
+    This is the one sanctioned use of the enumerating fold going forward: a
+    seed or a repair, invoked on purpose and off the wake path — never the
+    per-wake answer to "what do I owe". It refuses to write on UNKNOWN or
+    INVALID: a checkpoint seeded from a degraded fold would launder the
+    degradation into a clean-looking past.
+    """
+    now = _iso(_now())
+    result = obligations_mod.fold(
+        _obligation_probes(transport, args.team, args.agent, now=now),
+        expected=obligations_mod.OBLIGATION_COMPONENTS)
+    degraded = sorted(set(result.degraded) | set(result.malformed))
+    # The components whose open rows the stream fold takes over from this
+    # checkpoint. A gap in one of THESE is a gap in the checkpoint's own
+    # subject matter; a gap elsewhere (forge, roles) is recorded by name and
+    # surfaced on every stream answer, but must not chain this seed on an
+    # unrelated standing defect.
+    stream_served = {"tasks", "directives", "blocks", "reminders"}
+    unseedable = sorted(set(degraded) & stream_served)
+    if unseedable and not getattr(args, "seed_partial", False):
+        print(f"obligations seed: REFUSED — corpus fold is {result.state.value} "
+              f"and the degraded set {degraded} includes stream-served "
+              f"component(s) {unseedable}, whose open rows this checkpoint "
+              "exists to carry. Seeding would launder that gap into a "
+              "clean-looking past. Fix the fold, or pass --seed-partial to "
+              "write a checkpoint that NAMES the unknown components — the "
+              "stream fold will then report them as UNKNOWN every run rather "
+              "than clear.", file=sys.stderr)
+        return 3
+    if degraded:
+        print(f"obligations seed: proceeding with named gaps {degraded} — "
+              "these components stay UNKNOWN in every stream answer until the "
+              "underlying fold is fixed and the checkpoint is re-seeded")
+    rows = [{"slug": str(r.get("slug") or r.get("id") or ""),
+             "ptr": str(r.get("ptr") or "") or None,
+             "priority": str(r.get("priority") or r.get("pri") or "P2")}
+            for r in result.owed if (r.get("slug") or r.get("id"))]
+    if not _save_obligations_checkpoint(transport, args.team, args.agent,
+                                        as_of=now, open_rows=rows,
+                                        seeded_by="corpus-fold",
+                                        unknown_components=degraded):
+        print("obligations seed: checkpoint write FAILED — nothing recorded",
+              file=sys.stderr)
+        return 3
+    back = _load_obligations_checkpoint(transport, args.team, args.agent)
+    if back is None or back["as_of"] != now:
+        print("obligations seed: read-back mismatch — the checkpoint did not "
+              "land; treat as not seeded", file=sys.stderr)
+        return 3
+    print(f"obligations seed: checkpoint written as of {now} — "
+          f"{len(rows)} open obligation(s); the stream fold now answers "
+          "completely from here forward")
+    return 0
+
+
+def cmd_obligations_repair(args: argparse.Namespace, transport: Any) -> int:
+    """`obligations --repair-unknown`: re-probe ONLY the components the
+    checkpoint carries as UNKNOWN, and clear the ones that now read.
+
+    THE DEADLOCK THIS BREAKS. A carried UNKNOWN is sticky by construction: the
+    stream fold copies ``unknown_components`` forward on every advance and
+    nothing else writes it, so the ONLY way to clear one was a full
+    ``--seed-checkpoint`` — a corpus walk over every component. When the stuck
+    component is the one whose corpus probe cannot finish inside a budget
+    (measured: the reviews leg covers 104 of 364 slugs at fold 300/briefing
+    600), the only thing that could clear the UNKNOWN is the thing that cannot
+    run. The UNKNOWN then reads as permanent when it is really unattempted, and
+    those are different claims.
+
+    Two properties make this safe to run without weakening the answer:
+
+    * **It probes a SUBSET, so the stuck component gets the whole budget**
+      instead of whatever survives six siblings. That is the measured shape of
+      the failure — the review leg starved on a budget it inherited already
+      drained — so a subset probe is not a smaller version of the same attempt.
+    * **Clearing a component MERGES its owed rows into the open set.** Marking
+      a surface covered while dropping the work it found would be a false clear
+      manufactured by the repair itself, which is the exact failure class the
+      checkpoint exists to prevent.
+
+    It is off the wake path, like ``--seed-checkpoint``: a deliberate repair,
+    never the per-wake answer. ``as_of`` is NOT advanced — this run folds no
+    events and has no claim to make about time.
+    """
+    agent = _declared_identity(getattr(args, "agent", None))
+    if not agent:
+        print("obligations --repair-unknown: --agent or FULCRA_COORD_AGENT required",
+              file=sys.stderr)
+        return 2
+    checkpoint = _load_obligations_checkpoint(transport, args.team, agent)
+    if checkpoint is None:
+        print("obligations --repair-unknown: no readable checkpoint — there is "
+              "nothing to repair yet. Seed one with obligations "
+              "--seed-checkpoint first.", file=sys.stderr)
+        return 3
+    unknown = sorted(set(checkpoint.get("unknown_components") or []))
+    if not unknown:
+        print("obligations --repair-unknown: nothing to repair — the checkpoint "
+              "carries no UNKNOWN components")
+        return 0
+
+    now = _iso(_now())
+    offered = _obligation_probes(transport, args.team, agent, now=now)
+    by_name = {c.name: c for c in offered}
+    probes = [by_name[n] for n in unknown if n in by_name]
+    # A name the registry no longer offers cannot be probed here. Clearing it
+    # would claim coverage we never established; it stays UNKNOWN and is
+    # reported by a DIFFERENT sentence, because "not offered" and "read and
+    # failed" have different remedies.
+    unoffered = [n for n in unknown if n not in by_name]
+
+    result = obligations_mod.fold(probes, expected=tuple(n for n in unknown
+                                                         if n in by_name))
+    cleared = sorted(set(result.consulted))
+    still = sorted(set(unknown) - set(cleared))
+
+    merged = {r["slug"]: r for r in checkpoint["open"]}
+    added = 0
+    for row in result.owed:
+        slug = str(row.get("slug") or row.get("id") or "")
+        if not slug or slug in merged:
+            continue
+        merged[slug] = {"slug": slug,
+                        "ptr": str(row.get("ptr") or "") or None,
+                        "priority": str(row.get("priority") or row.get("pri") or "P2")}
+        added += 1
+
+    print(f"obligations --repair-unknown: {len(unknown)} carried UNKNOWN "
+          f"({', '.join(unknown)}) — cleared {len(cleared)}, still UNKNOWN "
+          f"{len(still)}; {added} newly-open row(s) merged into the checkpoint")
+    for name in cleared:
+        print(f"  cleared: {name}")
+    for name in still:
+        detail = result.details.get(name) or "no detail"
+        if name in unoffered:
+            detail = ("component is not offered by this engine's probe "
+                      "registry — cannot be repaired here")
+        print(f"  ! still UNKNOWN: {name} — {detail}", file=sys.stderr)
+
+    if not cleared and not added:
+        print("obligations --repair-unknown: checkpoint UNCHANGED — nothing "
+              "cleared and nothing merged, so it is not rewritten",
+              file=sys.stderr)
+        return 3
+    if not _save_obligations_checkpoint(
+            transport, args.team, agent, as_of=checkpoint["as_of"],
+            open_rows=list(merged.values()), seeded_by="repair-unknown",
+            unknown_components=still):
+        print("obligations --repair-unknown: checkpoint write FAILED — nothing "
+              "recorded, the carried UNKNOWN stands", file=sys.stderr)
+        return 3
+    back = _load_obligations_checkpoint(transport, args.team, agent)
+    if back is None or sorted(back.get("unknown_components") or []) != still:
+        print("obligations --repair-unknown: read-back mismatch — treat the "
+              "repair as NOT applied", file=sys.stderr)
+        return 3
+    return 3 if still else 0
+
+
+def cmd_obligations_dispatch(args: argparse.Namespace, transport: Any) -> int:
+    """Route `obligations` to the corpus fold or the --stream path. A named
+    function, not a lambda: the activity-classification pin requires every
+    registered command to be classifiable by name."""
+    if getattr(args, "repair_unknown", False):
+        return cmd_obligations_repair(args, transport)
+    if getattr(args, "seed_checkpoint", False):
+        return cmd_obligations_seed(args, transport)
+    if getattr(args, "stream", False):
+        return cmd_obligations_stream(args, transport)
+    return cmd_obligations(args, transport)
+
+
+def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
+    """`obligations --stream`: follow the signal to the doc, never scan the corpus.
+
+    THE POINT, and it is Ash's, repeated for six weeks before it was built: the
+    bus payload has ALWAYS carried ``ptr``. The signal already names the exact
+    document an obligation lives in. The default obligations path ignores it —
+    it loads a reconcile-built summaries index and folds the whole fleet, so its
+    cost is proportional to accumulated history rather than to what changed.
+    Measured on this box 2026-08-29: the stream read is 8.3s and CLEAR while the
+    corpus fold is 111.0s with 5 of 7 probes UNREADABLE, against 3,159 task docs
+    and 950 review entries.
+
+    This path instead: read my own channel forward from my own durable cursor,
+    keep the events addressed to me, and open ONLY the documents their ``ptr``
+    names. Cost is proportional to new events plus the handful of docs they
+    point at.
+
+    WHAT IT HONESTLY IS NOT: complete on its own. A windowed read answers for
+    the window, so an obligation opened before it is invisible here. That is the
+    checkpoint half of the design and it is NOT built yet — so anything earlier
+    than the window is reported UNKNOWN, never clear. A fold that cannot see far
+    enough must say so; that failure is the whole reason this work exists.
+    """
+    agent = _declared_identity(getattr(args, "agent", None))
+    if not agent:
+        print("obligations --stream: --agent or FULCRA_COORD_AGENT required",
+              file=sys.stderr)
+        return 2
+    cfg, cfg_status = records.load_config_classified(transport, args.team)
+    if cfg is None:
+        print(f"obligations --stream: UNKNOWN — records config unreadable "
+              f"({cfg_status})", file=sys.stderr)
+        return 3
+
+    checkpoint = _load_obligations_checkpoint(transport, args.team, agent)
+    cursor = records.load_cursor(transport, args.team, agent)
+    now = _now()
+    lookback_h = int(getattr(args, "lookback_hours", 0) or 168)
+    since = None
+    if checkpoint:
+        # The checkpoint is the authority for everything before its as_of, so
+        # the window starts THERE — not at the queue cursor, which tracks a
+        # different consumer (the delivery read) and may be ahead of the last
+        # obligation fold. Reading from the older instant re-covers events the
+        # queue consumed but this fold never saw.
+        since = checkpoint["as_of"]
+    elif cursor and cursor.get("last_read"):
+        since = str(cursor["last_read"])
+    floor = _iso(now - timedelta(hours=lookback_h))
+    # THE CURSOR IS THE START, and the floor applies only when there is no
+    # cursor. I first wrote this as `min(cursor, floor)` — copied from the mesh
+    # sweep, where widening is the safe direction because that sweep is the only
+    # reader and must never miss. Here it is the WRONG direction and it defeated
+    # the whole point: it re-read a week of fleet events on every run and blew
+    # past a 2-minute timeout. A cursor that cannot shrink the window is not a
+    # cursor. What is older than the cursor is the checkpoint's job, and until
+    # that exists this path says UNKNOWN about it rather than pretending.
+    start = since or floor
+    until = _iso(now)
+
+    raw = transport.records(cfg["data_type"], start, until)
+    if raw is None:
+        print("obligations --stream: UNKNOWN — window unreadable, cursor untouched",
+              file=sys.stderr)
+        return 3
+    events = records.events_for(raw, agent)
+    if events is None:
+        print("obligations --stream: UNKNOWN — events unparseable", file=sys.stderr)
+        return 3
+
+    # Fold the window: a directive opens, a response/verdict naming me closes.
+    # An FYI opens NOTHING — measured 2026-08-21, most of 92 stream-only "opens"
+    # were FYIs replayed as permanent obligations.
+    opened: dict[str, dict[str, Any]] = {}
+    carried: dict[str, dict[str, Any]] = {}
+    if checkpoint:
+        # Seed the fold with the past: the checkpoint open set as of its
+        # instant. Window events then open and close on top of it.
+        for row in checkpoint["open"]:
+            opened[row["slug"]] = {"slug": row["slug"], "ptr": row["ptr"],
+                                   "kind": "directive", "fyi": False}
+            carried[row["slug"]] = row
+    touched: set = set()
+    for ev in events:
+        slug, kind = ev.get("slug"), ev.get("kind")
+        if not slug:
+            continue
+        if kind == "directive" and not ev.get("fyi"):
+            opened.setdefault(slug, ev)
+            touched.add(slug)
+        elif kind in ("response", "verdict"):
+            opened.pop(slug, None)
+            touched.add(slug)
+
+    # Follow the ptr — but ONLY for slugs the window touched. THIS is what
+    # makes the run proportional to new events: a checkpoint row with no
+    # window activity carries forward with its stored fields, unread. The
+    # first live seeded run proved why (2026-08-29): re-verifying every
+    # carried row read 225 docs in 136.6s — proportional to the open set,
+    # not to what changed, which is the corpus fold's disease in miniature.
+    # The trade is explicit: an obligation closed WITHOUT an emitted event
+    # stays owed here until the periodic re-seed reconciles it. That is the
+    # correct pressure — the missing close event is the defect, and hiding
+    # it by re-reading everything every run would subsidize silent closers.
+    owed, unresolved = [], []
+    for slug, ev in opened.items():
+        if slug in carried and slug not in touched:
+            row = carried[slug]
+            owed.append({"slug": slug, "ptr": row.get("ptr"),
+                         "priority": row.get("priority", "P2"),
+                         "blocked_on": row.get("blocked_on") or None,
+                         "verified": "checkpoint"})
+            continue
+        ptr = ev.get("ptr") or f"task/{slug}.md"
+        doc = transport.read(f"team/{args.team}/{ptr}")
+        if doc is None:
+            # Absent-or-unreadable is ambiguous and must not read as discharged.
+            unresolved.append(slug)
+            continue
+        fm = okf.parse_frontmatter(doc) or {}
+        if str(fm.get("status") or "") not in tasks.TERMINAL_STATUSES:
+            owed.append({"slug": slug, "ptr": ptr,
+                         "priority": str(fm.get("priority") or "P2"),
+                         "blocked_on": str(fm.get("blocked_on") or "") or None,
+                         "verified": "doc"})
+
+    reads = sum(1 for r in owed if r.get("verified") == "doc") + len(unresolved)
+    origin = ("checkpoint " + checkpoint["as_of"] + " + window") if checkpoint else "window only"
+    print(f"obligations --stream: {len(owed)} owed from {len(events)} event(s) "
+          f"in [{start}, {until}] ({origin}) — {len(opened)} open slug(s), "
+          f"{reads} doc read(s)")
+    for row in sorted(owed, key=lambda r: r["priority"]):
+        blocked = f"  blocked_on={row['blocked_on']}" if row["blocked_on"] else ""
+        print(f"  - [{row['priority']}] {row['slug']}{blocked}")
+    for slug in unresolved:
+        print(f"  ! {slug}: ptr unreadable — cannot claim discharged",
+              file=sys.stderr)
+    if checkpoint and checkpoint.get("unknown_components"):
+        print("  ! UNKNOWN components carried from the seed: "
+              + ", ".join(checkpoint["unknown_components"])
+              + " — the corpus fold could not read these when the checkpoint "
+              "was written; they are not covered by this answer", file=sys.stderr)
+    if not checkpoint:
+        print(f"  ! NO CHECKPOINT: anything opened before {start} is UNKNOWN "
+              "here. Seed one deliberately with obligations --seed-checkpoint "
+              "(runs the corpus fold once, off the wake path)", file=sys.stderr)
+    elif not unresolved:
+        # A clean fold ADVANCES the checkpoint, so the corpus walk never runs
+        # again for this agent outside seed and repair. Advance only on clean:
+        # an unresolved ptr means the open set is not fully known, and a
+        # checkpoint that guesses converts one bad read into a durable lie.
+        _save_obligations_checkpoint(
+            transport, args.team, agent, as_of=until, open_rows=owed,
+            seeded_by="stream-fold",
+            unknown_components=checkpoint.get("unknown_components") or [])
+    return 3 if unresolved else 0
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
@@ -8631,9 +9135,37 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
 
 
 def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
+    """Claim a role lease.
+
+    THE 2026-09-04 OUTAGE IS WHY THIS READS `read_classified` AND CHECKS THE
+    WRITE. For about an hour the store returned HTTP 500 on every path three
+    levels deep or more. `transport.read` collapses "absent" and "unreadable"
+    into None, and `transport.write` returns False that nobody looked at, so
+    this verb — measured, not reasoned about — did three wrong things at once:
+
+    * printed "role 'coord-boss' has no registered role doc" while the doc sat
+      in the store at 1390 bytes, untouched since 2026-08-03. The message is
+      load-bearing: it tells the reader that dormancy suppression and review
+      role-routing are OFF for the role;
+    * printed "claimed coord-boss" and exited 0 for a write that never landed —
+      the shard's version history runs 01:14:22Z straight to 02:14:45Z;
+    * updated the LOCAL nonce state to that phantom write's nonce, so the next
+      real claim raised "another session last claimed as coord-boss" — an alarm
+      whose own text invites the reader to hunt an intruder that never existed.
+
+    An unreadable read is UNKNOWN, never absent; an unverified write is not a
+    claim. Both are the same rule, applied on the two planes.
+    """
     agent = _identity(args.agent)
     slug = tasks.agent_key(agent)
-    if okf.parse_frontmatter(transport.read(_role_doc_path(args.team, args.role))) is None:
+    doc_raw, doc_status = transport.read_classified(_role_doc_path(args.team, args.role))
+    if doc_status == "error":
+        print(f"WARNING: could not READ the role doc for {args.role!r} — this is "
+              f"UNKNOWN, not absence. Status folds and review role-routing may be "
+              f"running on defaults, and a dormant_until on this role cannot be "
+              f"seen right now. Re-check before acting on anything that depends "
+              f"on the role doc.", file=sys.stderr)
+    elif okf.parse_frontmatter(doc_raw) is None:
         print(f"note: role {args.role!r} has no registered role doc — status folds fall back "
               f"to defaults and review role-routing will NOT match this role's holders; "
               f"create team/{args.team}/roles/{args.role}.md", file=sys.stderr)
@@ -8641,7 +9173,15 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     state = _nonce_state_path(args.team, args.role, slug)
     # Same-id double-acting check: leases can't distinguish two sessions sharing one
     # id (same shard file), so compare the shard's nonce to the one THIS session wrote.
-    existing = okf.parse_frontmatter(transport.read(shard_path)) or {}
+    shard_raw, shard_status = transport.read_classified(shard_path)
+    if shard_status == "error":
+        # An unreadable shard has no nonce to compare, and silently skipping the
+        # comparison would present "check disabled" as "check passed".
+        print(f"note: the lease shard for {agent} could not be read — the "
+              f"same-id double-acting check did NOT run this pass; a second "
+              f"session claiming this role would not have been detected.",
+              file=sys.stderr)
+    existing = okf.parse_frontmatter(shard_raw) or {}
     try:
         stored = state.read_text().strip() if state.exists() else None
     except OSError:
@@ -8666,7 +9206,17 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     fm = {"type": "Lease", "title": f"{args.role} lease — {agent}", "agent": agent,
           "timestamp": _iso(_now()), "nonce": nonce,
           "summary": args.summary or ""}
-    transport.write(shard_path, okf.render_frontmatter(fm) + f"\nHolding {args.role}.\n")
+    if not transport.write(shard_path,
+                           okf.render_frontmatter(fm) + f"\nHolding {args.role}.\n"):
+        # The write did not land. Saying "claimed" here is the failure that lets
+        # a lease lapse while every log line says it was renewed — and writing
+        # the nonce locally would poison the NEXT claim's double-acting check
+        # with a nonce the store never saw.
+        print(f"roles claim: WRITE FAILED for {slug}.md — {args.role} is NOT "
+              f"claimed and the local nonce state is left untouched. The lease "
+              f"stands at whatever the store last accepted; re-run when the "
+              f"transport recovers.", file=sys.stderr)
+        return 3
     try:
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(nonce + "\n")
@@ -11634,7 +12184,19 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
         if self_addressed:
             undelivered += 1
         dst = _task_path(args.team, slug)
-        if transport.read(dst) is None:
+        # ABSENT, not merely unreadable: this is the per-day idempotency guard
+        # for the vacancy mint, and it both WRITES and EMITS. Read a 500 as
+        # "not minted yet" and an outage turns the daily pass into duplicate
+        # P1 vacancy rows plus duplicate bus events, fleet-wide — the alarm
+        # bloat mechanism running at machine speed.
+        existing_row, row_status = transport.read_classified(dst)
+        if row_status == "error":
+            print(f"escalate: {slug} — cannot READ the day's row to tell whether "
+                  f"it was already minted; skipping rather than risk a duplicate "
+                  f"row and a duplicate event. This role is UNKNOWN this pass, "
+                  f"not clear.", file=sys.stderr)
+            continue
+        if existing_row is None:
             transport.write(dst, content)
             escalated += 1
             # PUBLISH IT TO THE EVENT PLANE. Until 2.0.5 this branch wrote the
@@ -12174,8 +12736,30 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("obligations",
                         help="terminal answer: does this agent owe work?")
     ob.add_argument("team"); ob.add_argument("--agent", required=True)
+    ob.add_argument("--seed-partial", action="store_true",
+                    help="allow --seed-checkpoint to proceed when stream-served "
+                         "components are degraded, writing their names into the "
+                         "checkpoint as permanently-surfaced UNKNOWNs")
+    ob.add_argument("--seed-checkpoint", action="store_true",
+                    help="run the corpus fold ONCE and write its open set as "
+                         "the checkpoint the --stream fold starts from; the "
+                         "sanctioned use of the enumerating fold")
+    ob.add_argument("--repair-unknown", action="store_true",
+                    help="re-probe ONLY the components the checkpoint carries "
+                         "as UNKNOWN and clear the ones that now read, merging "
+                         "their owed rows in; breaks the deadlock where the "
+                         "only way to clear an UNKNOWN was the corpus walk "
+                         "that cannot finish. Off the wake path.")
+    ob.add_argument("--stream", action="store_true",
+                    help="follow the signal to the doc: read this agent's "
+                         "channel forward from its cursor and open only the "
+                         "documents the events' ptr names, instead of folding "
+                         "the whole task corpus")
+    ob.add_argument("--lookback-hours", type=int, default=168,
+                    help="window floor for --stream (default 168h); the window "
+                         "is the OLDER of the cursor and this floor")
     add_json(ob)
-    ob.set_defaults(func=cmd_obligations)
+    ob.set_defaults(func=cmd_obligations_dispatch)
 
     sc = sub.add_parser("search", help="substring search over tasks")
     sc.add_argument("team"); sc.add_argument("query"); add_json(sc)
@@ -12802,6 +13386,10 @@ def build_parser() -> argparse.ArgumentParser:
 #: the extracted command modules are imported — see the note down there; that
 #: ordering is load-bearing, not cosmetic.
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
+    cmd_obligations_dispatch, cmd_obligations_stream,
+    # NOT cmd_obligations_repair: it exists to MUTATE the checkpoint, so
+    # running it is activity. The stream fold's checkpoint advance is
+    # incidental to a read; this verb's write is the whole point.
     cmd_status, cmd_board, cmd_search, cmd_needs_me, cmd_owed, cmd_briefing,
     cmd_presence_show, cmd_review_status, cmd_health, cmd_doctor,
     cmd_obligations, cmd_roles_status, cmd_continuity_resume,
