@@ -162,3 +162,28 @@ def test_generation_backed_status_fails_closed_without_winning(monkeypatch, caps
     tally that a ship gate would read as the whole truth."""
     rc, out = _served(monkeypatch, capsys, _base_tally())
     assert rc == 3 and "does not record the winning shard" in out.err
+
+
+# --- the writer samples the clock once (both reviewers, review-winning-envelope r3) -----------
+
+def test_the_verb_samples_the_clock_once_so_name_and_frontmatter_seconds_agree(monkeypatch):
+    """A clock that returns adjacent seconds on successive calls: with two samples the name says
+    :10Z and the frontmatter :11.000001Z, the fraction is discarded, and the later correction loses."""
+    from datetime import datetime, timezone
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    _shard(t, "feb86aee", "approve", "900000")                 # earlier APPROVE at :10.900000
+    ticks = iter([datetime(2026, 9, 5, 1, 32, 10, 999999, tzinfo=timezone.utc),
+                  datetime(2026, 9, 5, 1, 32, 11, 1, tzinfo=timezone.utc)])
+    monkeypatch.setattr(cli, "_now", lambda: next(ticks))
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD, "--verdict", "changes", "--note", "later correction"], transport=t) == 0
+    new = [k for k in t.store if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--") and "feb86aee" not in k]
+    assert len(new) == 1
+    fm = okf.parse_frontmatter(t.store[new[0]])
+    name_second = new[0].rsplit("--", 1)[1][:19]
+    assert str(fm["ts"])[:19] == name_second == "2026-09-05T01:32:10"
+    assert str(fm["ts"]).startswith("2026-09-05T01:32:10.999999")
+    tally, *_ = cli._review_tally(t, TEAM, SLUG)
+    assert tally["state"] == "CHANGES"
+    assert tally["winning"][REVIEWER]["name"] == new[0].rsplit("/", 1)[-1]

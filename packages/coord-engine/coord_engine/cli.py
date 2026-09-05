@@ -4593,7 +4593,14 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
     # and the tally credited a phantom while the real reviewer read as pending.
     # Mixed precision would also misorder a plain shard against an append one
     # when compared as strings.
-    now_iso = _now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ONE instant, sampled ONCE (both reviewers, review-winning-envelope r3):
+    # sampling _now() twice let a verdict straddle a UTC second — named :10Z,
+    # stamped :11.xZ — and canonical_sort_key then rightly discarded the
+    # cross-second fraction, so the later correction sorted as :10.000000 and
+    # LOST to an earlier :10.900000 shard. Name second and frontmatter fraction
+    # must come from the same reading.
+    stamp = _now().astimezone(timezone.utc)
+    now_iso = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
     digest = hashlib.sha1(
         f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}"
         .encode()).hexdigest()[:8]
@@ -4609,7 +4616,7 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
         # Microseconds live HERE, not in the name (the name stays second-
         # precision for the reasons above); the fold uses this fraction only to
         # order shards that share the name's second. See review.canonical_sort_key.
-        "ts": _iso(_now().astimezone(timezone.utc)),
+        "ts": _iso(stamp),
     }) + f"\n{getattr(args, 'note', None) or normalized}\n"
     if not transport.write(path, body):
         print(f"review verdict: write FAILED for {path} — the verdict did NOT "

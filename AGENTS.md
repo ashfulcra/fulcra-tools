@@ -999,8 +999,12 @@ it (not on PyPI).
   consumer (a ship gate) reads `winning`; it never refolds filenames itself.** The projection
   (`projection.py`) uses the SAME key and records `winning` in each generation row, and the
   generation-backed `review status` **fails closed (rc 3)** on a row without it — two canonical
-  readers must not answer differently about one directory. Caveat, pinned by test: two legacy
-  shards with no `ts:` in the same second still tie on the name.
+  readers must not answer differently about one directory. Caveats, pinned by test: two legacy
+  shards with no `ts:` in the same second still tie on the name; the verb samples the clock ONCE for
+  both the name's second and the frontmatter fraction (two samples let a verdict straddle a second
+  and lose to an earlier same-second shard); and the resulting order is **client-timestamp order**,
+  not a provable arrival chronology — cross-host clock skew is out of the fold's reach, and two
+  shards with equal microseconds tie deterministically on the name.
 - **Engagement-aware liveness is a combiner over two ORTHOGONAL axes.** `classify(ts, now)` stays
   PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone. The truth table
   is layered on top by `presence.liveness(shard, now=…)`, which returns `{state, freshness,
