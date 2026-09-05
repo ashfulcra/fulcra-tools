@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r39)
+# coord-fold: Coord on Annotations Implementation Plan (r40)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -125,7 +125,8 @@ FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
 # r39 (codex-coder round 34): match the COMMAND TOKEN first, then judge every positional. A mention is an invocation
 # when it is preceded by a run-style word (python/python3/run/$/uv run) OR followed by at least one positional; a
 # bare path reference in prose ("see scripts/ship_check.py") is not one. Missing positionals are REPORTED.
-INVOCATION = re.compile(r"(?P<pre>(?:python3?|run|\$)\s+`?)?(?:[\w./-]*/)?ship_check\.py(?:[ \t]+(?P<team>[^\s`]+))?(?:[ \t]+(?P<head>[^\s`]+))?(?P<tail>[^\n`]*)")
+INVOCATION = re.compile(r"(?P<pre>(?:python3?|run|\$)\s+`?)?(?P<path>(?:[\w.-]*/)*)ship_check\.py(?:[ \t]+(?P<team>[^\s`]+))?(?:[ \t]+(?P<head>[^\s`]+))?(?P<tail>[^\n`]*)")
+EXEC_PATH = re.compile(r"^(\./|\.\./|/)")   # r40 (codex-coder round 35): `./scripts/ship_check.py` or an absolute path in command position EXPRESSES execution
 HEAD_PLACEHOLDERS = ("<HEAD>", "<40-hex-head>")                                   # `<40-hex head>` (with the space) is normalized to this before matching
 HEAD_OK = re.compile(r"^[0-9a-f]{40}$")                                          # exactly what ship_check.main fullmatches
 
@@ -185,8 +186,8 @@ def bare_invocations(text: str) -> list[str]:
     text = text.replace("<40-hex head>", "<40-hex-head>")                          # a documented head placeholder with a space: one token
     for m in INVOCATION.finditer(text):
         team, head, tail = m.group("team"), m.group("head"), m.group("tail") or ""
-        if not m.group("pre") and team is None:
-            continue                                                                # a path reference, not an invocation
+        if not m.group("pre") and team is None and not EXEC_PATH.match(m.group("path") or ""):
+            continue                                                                # a bare path reference, not an invocation (r40: ./ and / forms ARE invocations)
         problems = []
         if team is None:
             problems.append("missing team")
@@ -3749,6 +3750,11 @@ def test_a_bare_path_reference_in_prose_is_not_an_invocation():
     assert f("see `scripts/ship_check.py` for the gate\n") == []
     assert f("(`scripts/ship_check.py`: the engine's folded result)\n") == []
     assert f("run `scripts/ship_check.py`\n")[0].startswith("line 1: missing team; missing head")
+    # r40 (codex-coder round 35): an executable form in command position expresses execution even with no positionals
+    assert f("./scripts/ship_check.py\n")[0].startswith("line 1: missing team; missing head")
+    assert f("/opt/gate/scripts/ship_check.py\n")[0].startswith("line 1: missing team; missing head")
+    assert f("../scripts/ship_check.py fulcra\n")[0].startswith("line 1: missing head")
+    assert f("the file `scripts/ship_check.py` holds the gate\n") == []                                # still a reference (repo prose backticks paths)
 
 
 def test_a_failed_acl_inspection_or_removal_refuses_instead_of_reading_as_no_acl(tmp_path, monkeypatch):
@@ -3805,6 +3811,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 
 ## Revision log
 
+- **r40 (2026-09-05, codex-coder CHANGES on `cb410a30`, round 35; PR #711 @ 6d5dc7186f83cfcc424b103b3e386b889470668d):** an executable-form command in command position (`./scripts/ship_check.py`, an absolute path) expresses execution and is now reported as missing team and head even with no positionals, like the dollar-prefixed form; a backticked path mention in prose remains a reference. Controls: `./`, absolute, `../` with one positional, backticked reference. **Fleet state the same hour:** the second pin move landed (PR #710, store pin `acbd5b10`); this host adopted it with all three claim-gate checks and re-verified the fulcra-api 0.1.40 floor across 24 installs (coord-boss directive b8fd43fc); the installed engine now carries the bridge, and the durable launchd tick (`com.fulcra.coord-fold-tick`, :07/:37) folds and compares coord-maintainer on bus-v4 with a heartbeat — three AGREE lines so far.
 - **r39 (2026-09-05, both reviewers CHANGES on `cedfddb9`, round 34; PR #709 @ 7cc8015a49019379db1597854b4886cb9b9cbbb4):** the ACL absence proof failed open — a failed `/bin/ls` or `listxattr` answered "no ACL" and a failed removal counted as stripped; now a failed inspection raises and the read refuses, a failed removal raises and nothing is "stripped", and the gate's entry prints a refusal rather than a traceback when its temp root cannot be made or proven private (control: a forced-failing inspector/remover). codex-coder: the guard saw only invocations that already carried team and head — now the command token is matched first, a mention is an invocation when preceded by a run-style word or followed by a positional (a bare path reference is not), missing positionals are reported, then every field is validated (controls: no positionals, one positional, positionals only, two path references). **Also this day, outside the register: the cutover bridge shipped** — bus-v4 channel live, Tasks 12–14 on main (PR #707), the coord-fold reader's `/dev/stdout` defect fixed (PR #708: the real CLI refuses it; the proof's fake now refuses like the real one), and the first real measurement under coord-maintainer: 56 opens seeded → folded 56 → `compare-to-fold` AGREE n=56, twice.
 - **r38 (2026-09-05, both reviewers CHANGES on `3b03002d`, round 33; PR #705 @ 1b3c1148e05818e77d8ca10d7c4981905776fba1):** **`APPROVED_ENGINE_PINS` = {`e06e69e5`}** — the fleet pin moved there today (PR #698 merged under Ash's grant; the store's `adopt-latest.sh` uploaded by Ash; this host adopted via the gated recipe with all three claim-gate checks passing), and the build carries the approved supersession contract (#695). Measured against the adopted engine: the shipped gate run end to end passes the fleet-pin, executing-engine identity, verified-bytes attestation and tree checks and refuses at the absent ship register (the engine answers rc 1 for a nonexistent register; the gate reads it as UNKNOWN); a direct attestation against the plan register returns a real tally with `winning` exposed for both reviewers. codex-coder: the guard matched only accepted heads, so any other invalid head was silently unmatched — every `ship_check.py` invocation is now matched and the head validated positively (exactly 40 lowercase hex or the two documented placeholders; controls: 6 hex, uppercase, not-a-head, forty g's, 39 hex). codex-reviewer: on macOS an ACL survives `chmod` and is invisible to `stat` — every directory the gate creates has its ACL entries stripped and proven absent (the OS's own `/bin/chmod` and `/bin/ls` by absolute path, OS trust roots like the interpreter), and any ACL entry on a body or its directory is refused before the read; regression: an inherited everyone-write ACL on the gate root's parent does not reach the root or a private dir, and an ACL added to a 0600 body or its dir is refused.
 - **r37 (2026-09-05, codex-coder CHANGES on `16bc1ed4`, round 32; PR #703 @ c6fc2e072b376f7277b21c5d15162307431b3e8f):** the guard's head pattern accepted 7–40 hex while `ship_check.main` fullmatches 40, so a 7-hex head passed the guard and was refused by the gate — now exactly 40 hex or the two documented head placeholders, and the short-head form is matched separately and REPORTED rather than silently unmatched (control: `deadbee`). Placeholder normalization collapsed any `<...>`, so `<abs --bogus>` hid an unknown option — now an explicit allowlist (`<abs>`, `<abs path>`, `<path>`) is substituted verbatim and any other bracketed text is tokenized and judged (control: `--git <abs --bogus>` → unexpected token). One parser, shared by the plan gate and the repo-prose test, as before.
