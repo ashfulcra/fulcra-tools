@@ -17,7 +17,7 @@ def test_empty_has_exactly_the_eight_fields():
 
 def test_open_adds_close_and_release_remove_claim_annotates():
     st = cp.empty(NOW); cp.apply(st, _ev("open"))
-    assert st["open"]["s1"] == {"pri": "P1", "from": "boss", "ptr": "team/r/task/s1.md", "at": NOW}
+    assert st["open"]["s1"] == {"pri": "P1", "from": "boss", "to": "me", "ptr": "team/r/task/s1.md", "at": NOW}
     cp.apply(st, _ev("claim", rid="r2", **{"from": "me"})); assert st["open"]["s1"]["claimed_by"] == "me"
     cp.apply(st, _ev("release", rid="r3")); assert "s1" not in st["open"]
     cp.apply(st, _ev("open", rid="r4")); cp.apply(st, _ev("close", rid="r5")); assert st["open"] == {}
@@ -40,3 +40,13 @@ def test_load_states_and_save_roundtrip():
     s = cp.empty(NOW); cp.apply(s, _ev("open")); s["cursor"] = NOW
     assert cp.save(w, "r", "me", s)
     back, src = cp.load(r, "r", "me"); assert src == "ok" and back["open"] == s["open"]
+
+
+def test_a_row_written_before_the_to_field_still_loads_and_renders():
+    """Additive field: no SCHEMA_VERSION bump (a bump would make every existing checkpoint 'corrupt' and refuse the
+    fleet's next fold). Old rows lack `to`; they stay valid and render without it."""
+    from coord_fold.cli import _render_open
+    s = cp.empty(NOW); s["open"]["old"] = {"pri": "P1", "from": "boss", "ptr": "x.md", "at": NOW}
+    s["open"]["new"] = {"pri": "P2", "from": "boss", "to": "all", "ptr": "y.md", "at": NOW}
+    out = _render_open(s)
+    assert "old  from=boss  ptr=x.md" in out and "new  from=boss  to=all  ptr=y.md" in out
