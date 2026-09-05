@@ -191,8 +191,8 @@ def test_the_verb_samples_the_clock_once_so_name_and_frontmatter_seconds_agree(m
 
 # --- explicit supersession (codex-coder, review-winning-envelope r4) ----------------------------
 
-def _row2(name, verdict, key, supersedes=()):
-    return {"reviewer": REVIEWER, "name": name, "verdict": verdict, "sort_key": key, "supersedes": list(supersedes)}
+def _row2(name, verdict, key, supersedes=(), nonce="", mtime=""):
+    return {"reviewer": REVIEWER, "name": name, "verdict": verdict, "sort_key": key, "supersedes": list(supersedes), "nonce": nonce, "mtime_iso": mtime}
 
 
 A = review.verdict_filename(REVIEWER, head=HEAD, ts="2026-09-05T12:00:10Z", digest="aaaaaaaa")
@@ -213,8 +213,8 @@ def test_equal_timestamps_fail_closed_to_changes():
 
 
 def test_an_approve_lifts_a_changes_only_by_naming_it():
-    changes = _row2(C, "changes", "2026-09-05T12:00:09.900000Z")
-    approve_naming = _row2(A, "approve", "2026-09-05T12:00:08.000000Z", supersedes=[C])   # even with an EARLIER stamp
+    changes = _row2(C, "changes", "2026-09-05T12:00:09.900000Z", nonce="c0ffee")
+    approve_naming = _row2(A, "approve", "2026-09-05T12:00:08.000000Z", supersedes=[C + "@c0ffee"])   # even with an EARLIER stamp
     assert review.fold_newest_per_reviewer([changes, approve_naming])[0][0]["name"] == A
     approve_dangling = _row2(A, "approve", "2026-09-05T12:00:11.000000Z", supersedes=["no-such-shard.md"])
     assert review.fold_newest_per_reviewer([changes, approve_dangling])[0][0]["name"] == C
@@ -232,7 +232,8 @@ def test_the_verb_names_every_prior_shard_so_a_verb_filed_approve_lifts_a_prior_
     # pick the APPROVE by its frontmatter — NOT by sorting names, which is the digest-order defect itself
     approve_path = next(k for k, fm in shards.items() if fm["verdict"] == "approve")
     changes_path = next(k for k, fm in shards.items() if fm["verdict"] == "changes")
-    assert shards[approve_path]["supersedes"] == [changes_path.rsplit("/", 1)[-1]]
+    c_name = changes_path.rsplit("/", 1)[-1]
+    assert shards[approve_path]["supersedes"] == [f"{c_name}@{shards[changes_path]['nonce']}"]   # quoted by nonce (r7)
     tally, *_ = cli._review_tally(t, TEAM, SLUG)
     assert tally["state"] == "APPROVED" and tally["winning"][REVIEWER]["name"] == approve_path.rsplit("/", 1)[-1]
 
@@ -265,16 +266,16 @@ def test_a_changes_that_names_itself_cannot_erase_itself():
     """Reproduced by codex-reviewer on 6ab678cb: old APPROVE + newer CHANGES whose supersedes holds its
     own filename -> the CHANGES left the live set and the fold said APPROVED."""
     approve = _row2(A, "approve", "2026-09-05T12:00:10.000000Z")
-    self_erasing_changes = _row2(C, "changes", "2026-09-05T12:00:11.000000Z", supersedes=[C])
+    self_erasing_changes = _row2(C, "changes", "2026-09-05T12:00:11.000000Z", supersedes=[C + "@beef"], nonce="beef")
     kept, _ = review.fold_newest_per_reviewer([approve, self_erasing_changes])
     assert kept[0]["name"] == C
     bad = review.invalid_supersession_edges([approve, self_erasing_changes])
-    assert bad == [{"shard": C, "edge": C, "why": "self-link"}]
+    assert bad == [{"shard": C, "edge": C + "@beef", "why": "self-link"}]
 
 
 def test_a_cycle_fails_closed_to_changes():
-    approve = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C])
-    changes = _row2(C, "changes", "2026-09-05T12:00:11.000000Z", supersedes=[A])
+    approve = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C + "@cc"], nonce="aa")
+    changes = _row2(C, "changes", "2026-09-05T12:00:11.000000Z", supersedes=[A + "@aa"], nonce="cc")
     assert review.fold_newest_per_reviewer([approve, changes])[0][0]["name"] == C
 
 
@@ -300,3 +301,49 @@ def test_malformed_edges_surface_in_the_direct_tally_and_the_projection(monkeypa
     reconcile.reconcile(t, TEAM, now=now, today=now[:10], host="h")
     row = next(r for r in json.loads(t.store[f"team/{TEAM}/_coord/summaries.json"])[projection.REVIEWS_KEY]["rows"] if r["name"] == SLUG)
     assert row["state"] == "CHANGES" and row["tally"]["malformed_supersedes"][0]["why"] == "self-link"
+
+
+# --- causal supersession: a nonce, not a name (codex-coder, review-winning-envelope r6) --------
+
+def test_a_predeclared_forward_name_cannot_erase_a_later_changes():
+    """codex-coder's exact reproduction: an older APPROVE names the future CHANGES's (predictable) name;
+    when the CHANGES appears, it must stay live."""
+    future_changes = _row2(C, "changes", "2026-09-05T12:00:11.000000Z", nonce="7e5e7e5e")
+    older_approve = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C])        # bare name, predeclared
+    kept, _ = review.fold_newest_per_reviewer([older_approve, future_changes])
+    assert kept[0]["name"] == C
+    assert review.invalid_supersession_edges([older_approve, future_changes]) == [{"shard": A, "edge": C, "why": "nonce required"}]
+
+
+def test_a_wrong_nonce_resolves_nothing():
+    changes = _row2(C, "changes", "2026-09-05T12:00:09.000000Z", nonce="real")
+    approve = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C + "@guess"])
+    assert review.fold_newest_per_reviewer([changes, approve])[0][0]["name"] == C
+    assert review.invalid_supersession_edges([changes, approve])[0]["why"] == "nonce mismatch"
+
+
+def test_a_legacy_nonce_less_target_is_resolved_only_with_server_mtime_proof():
+    legacy_changes = _row2(C, "changes", "2026-09-05T12:00:09.000000Z", mtime="2026-09-05T12:00:00Z")
+    approve_later_minute = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C], mtime="2026-09-05T12:01:00Z")
+    assert review.fold_newest_per_reviewer([legacy_changes, approve_later_minute])[0][0]["name"] == A
+    approve_same_minute = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C], mtime="2026-09-05T12:00:00Z")
+    assert review.fold_newest_per_reviewer([legacy_changes, approve_same_minute])[0][0]["name"] == C
+    approve_unknown_mtime = _row2(A, "approve", "2026-09-05T12:00:10.000000Z", supersedes=[C])
+    assert review.fold_newest_per_reviewer([legacy_changes, approve_unknown_mtime])[0][0]["name"] == C
+    assert review.invalid_supersession_edges([legacy_changes, approve_unknown_mtime])[0]["why"] == "no causal proof"
+
+
+def test_the_verb_writes_a_nonce_and_quotes_the_priors_nonce(monkeypatch):
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD, "--verdict", "changes", "--note", "first"], transport=t) == 0
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD, "--verdict", "approve", "--note", "fixed"], transport=t) == 0
+    shards = {k: okf.parse_frontmatter(t.store[k]) for k in t.store if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--")}
+    changes_path = next(k for k, fm in shards.items() if fm["verdict"] == "changes")
+    approve_fm = next(fm for fm in shards.values() if fm["verdict"] == "approve")
+    c_name, c_nonce = changes_path.rsplit("/", 1)[-1], shards[changes_path]["nonce"]
+    assert len(c_nonce) == 16 and len(approve_fm["nonce"]) == 16 and approve_fm["nonce"] != c_nonce
+    assert approve_fm["supersedes"] == [f"{c_name}@{c_nonce}"]
+    tally, *_ = cli._review_tally(t, TEAM, SLUG)
+    assert tally["state"] == "APPROVED" and "malformed_supersedes" not in tally

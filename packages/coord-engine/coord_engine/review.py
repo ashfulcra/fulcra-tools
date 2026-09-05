@@ -148,40 +148,57 @@ def canonical_sort_key(name_ts: Optional[str], fm_ts: Optional[str],
     return f"{second}.{fraction}Z"
 
 
+def _resolves(source: dict[str, Any], entry: str, targets: dict[str, dict[str, Any]]) -> tuple[Optional[str], str]:
+    """Does ``entry`` (from ``source['supersedes']``) resolve a target? -> (target name or None, why).
+
+    A CAUSAL TOKEN, NOT A CLOCK (codex-coder, review-winning-envelope r6): a
+    superseding shard must quote the target's NONCE (``name@nonce``) — a random
+    value the target's writer generated, unknowable before the target existed,
+    so a forward edge cannot be predeclared. A nonce-less (legacy) target may be
+    resolved by name ALONE only when the STORE's mtime — server-assigned, never
+    client-selectable — proves it strictly earlier than the source; the same
+    minute, or an unknown mtime, is not proof and fails closed.
+    """
+    name, _, nonce = entry.partition("@")
+    if name == source.get("name"):
+        return None, "self-link"
+    target = targets.get(name)
+    if target is None:
+        return None, "resolves nothing"
+    if nonce:
+        return (name, "ok") if target.get("nonce") == nonce else (None, "nonce mismatch")
+    if target.get("nonce"):
+        return None, "nonce required"
+    t_at, s_at = target.get("mtime_iso") or "", source.get("mtime_iso") or ""
+    if t_at and s_at and t_at < s_at:
+        return name, "ok"
+    return None, "no causal proof"
+
+
 def fold_newest_per_reviewer(
     rows: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], int]:
     """Keep ONE shard per reviewer; return ``(kept, folded_away)``.
 
-    THE RULE (codex-coder, review-winning-envelope r4, 2026-09-05): ordering by
-    client timestamp can never carry the correction contract — a CHANGES filed
-    later from a host whose clock is behind sorts EARLIER, the old APPROVE wins,
-    and a ship gate faithfully validates withdrawn consent. So supersession is
-    EXPLICIT, not temporal:
+    THE RULE (codex-coder, review-winning-envelope r4/r6): ordering by client
+    timestamp can never carry the correction contract, and neither can a name —
+    a name is predictable (selectable timestamp, deterministic digest), so an
+    older APPROVE could predeclare and erase a later CHANGES. Supersession is
+    explicit AND causal:
 
-      * a shard is RESOLVED when another shard of the same reviewer names it in
-        ``supersedes`` — validated against shards that actually exist, so a
-        dangling name resolves nothing;
+      * a shard is RESOLVED when another shard of the same reviewer quotes it
+        as ``name@nonce`` with the target's actual nonce (see ``_resolves``;
+        legacy nonce-less targets only with server-mtime proof);
       * any UNRESOLVED CHANGES dominates, whatever its timestamp;
       * otherwise the newest live shard wins (canonical key, then name).
 
-    Equal keys and unnamed conflicts therefore FAIL CLOSED to CHANGES.
-
-    INVALID EDGES (codex-reviewer, review-winning-envelope r5, reproduced on
-    6ab678cb): a shard naming ITSELF resolved itself, so a CHANGES could erase
-    its own withdrawal and the fold read APPROVED. A self-edge is ignored and
-    reported through ``invalid_supersession_edges``. Cross-reviewer edges never
-    resolve anything (resolution is computed within one reviewer's names). A
-    cycle resolves every member, the live set falls back to all shards, and any
-    CHANGES among them dominates — fail closed. A forward edge (naming a shard
-    not yet written) cannot be forged: the name embeds the timestamp and a
-    content digest of the future verdict. The typed
-    verb names every prior shard it can list, so a verb-filed APPROVE still lifts
-    a prior CHANGES (coord-boss constraint 5 — a stale CHANGES must not block
-    forever — is now satisfied by the link, not by the clock); a hand-written
-    APPROVE must carry ``supersedes:`` itself. This amends ruling b99fb8da's
-    newest-wins order; supersession stays auditable because every shard stays
-    on disk and the count of folded shards is returned.
+    Equal keys, unnamed conflicts, dangling names, nonce mismatches, self-links
+    and unproven causality all FAIL CLOSED to CHANGES. The typed verb quotes the
+    nonce of every prior shard it can list AND read; a hand-written APPROVE must
+    quote nonces itself. Amends ruling b99fb8da (newest-wins); constraint 5 — a
+    stale CHANGES must not block forever — holds through the link the verb
+    writes. Supersession stays auditable: every shard stays on disk and the
+    folded count is returned.
     """
     by: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -190,9 +207,13 @@ def fold_newest_per_reviewer(
     folded = 0
     for reviewer in sorted(by):
         shards = by[reviewer]
-        names = {r.get("name") for r in shards}
-        resolved = {s for r in shards for s in (r.get("supersedes") or [])
-                    if s in names and s != r.get("name")}          # a shard can never resolve ITSELF
+        targets = {r.get("name"): r for r in shards}
+        resolved = set()
+        for r in shards:
+            for entry in (r.get("supersedes") or []):
+                hit, _why = _resolves(r, str(entry), targets)
+                if hit:
+                    resolved.add(hit)
         live = [r for r in shards if r.get("name") not in resolved] or shards
         blocking = [r for r in live if normalize_verdict(r.get("verdict")) == "changes"]
         pool = blocking or live
@@ -203,19 +224,18 @@ def fold_newest_per_reviewer(
 
 
 def invalid_supersession_edges(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Edges the fold ignored, so a reader can say the graph was malformed rather
-    than silently folding around it: self-links, and names that resolve nothing
-    (dangling, or another reviewer's shard)."""
-    by_reviewer: dict[str, set[str]] = {}
+    """Every edge the fold did NOT honour, with why — so a reader can say the graph was malformed
+    rather than silently folding around it: self-links, dangling names, nonce mismatches, a
+    nonce-less entry against a nonce-bearing target, and legacy entries without server-mtime proof."""
+    by: dict[str, dict[str, dict[str, Any]]] = {}
     for r in rows:
-        by_reviewer.setdefault(r["reviewer"], set()).add(r.get("name"))
+        by.setdefault(r["reviewer"], {})[r.get("name")] = r
     out: list[dict[str, str]] = []
     for r in rows:
-        for s in (r.get("supersedes") or []):
-            if s == r.get("name"):
-                out.append({"shard": r.get("name") or "", "edge": s, "why": "self-link"})
-            elif s not in by_reviewer.get(r["reviewer"], set()):
-                out.append({"shard": r.get("name") or "", "edge": s, "why": "resolves nothing"})
+        for entry in (r.get("supersedes") or []):
+            hit, why = _resolves(r, str(entry), by[r["reviewer"]])
+            if hit is None:
+                out.append({"shard": r.get("name") or "", "edge": str(entry), "why": why})
     return out
 
 

@@ -2593,6 +2593,8 @@ def _tally_from_verdict_entries(
             "verdict": token,
             "supersedes": [str(x) for x in (fm.get("supersedes") or [])
                            if isinstance(fm.get("supersedes"), list)],
+            "nonce": str(fm.get("nonce") or ""),
+            "mtime_iso": _store_mtime_iso(e.get("mtime")) or "",
             # ONE canonical form (second from the ACL-controlled name, fraction
             # from frontmatter `ts` only within that second) so two same-second
             # shards of one reviewer order by chronology, not by digest.
@@ -4619,14 +4621,26 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
     # unseen CHANGES keeps dominating, which is the fail-closed answer.
     supersedes: list[str] = []
     listing_ok = True
+    unquotable: list[str] = []
     try:
         for e in transport.list_dir(_verdicts_prefix(args.team, args.name)):
             n = str(e.get("name") or "")
             parsed = review.parse_verdict_filename(n, head=head)
-            if parsed and parsed[0] == reviewer and n != filename:
-                supersedes.append(n)
+            if not (parsed and parsed[0] == reviewer and n != filename):
+                continue
+            # QUOTE THE TARGET'S NONCE (r7): a name is predictable, a nonce is
+            # not, so only a shard that exists can be named. Read it; if the
+            # read fails or the shard has no nonce, name it bare — the fold will
+            # honour a bare name only with server-mtime proof (legacy shards).
+            prior = transport.read(_verdicts_prefix(args.team, args.name) + n)
+            pfm = okf.parse_frontmatter(prior) if prior else None
+            pn = str((pfm or {}).get("nonce") or "")
+            supersedes.append(f"{n}@{pn}" if pn else n)
+            if not pn:
+                unquotable.append(n)
     except TransportError:
         listing_ok = False
+    nonce = secrets.token_hex(8)
 
     body = okf.render_frontmatter({
         "type": "Verdict",
@@ -4637,8 +4651,14 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
         # precision for the reasons above); the fold uses this fraction only to
         # order shards that share the name's second. See review.canonical_sort_key.
         "ts": _iso(stamp),
+        "nonce": nonce,
         "supersedes": sorted(supersedes),
     }) + f"\n{getattr(args, 'note', None) or normalized}\n"
+    if unquotable:
+        print(f"review verdict: {len(unquotable)} prior shard(s) of yours carry no nonce "
+              f"(legacy or hand-written); they are named bare and the fold will honour "
+              f"that only if the store's mtime proves them earlier than this one",
+              file=sys.stderr)
     if not listing_ok:
         print(f"review verdict: could not list your prior shards for {args.name} — "
               f"this verdict supersedes NOTHING; an existing CHANGES of yours "
