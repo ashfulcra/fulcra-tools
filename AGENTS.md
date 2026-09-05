@@ -1696,6 +1696,38 @@ and on every mesh channel read that returns zero records. A reader above this
 surface must either guess or degrade — ours degrades, which is why one such
 directory takes a whole section down.
 
+### One mesh outbox per peer — the share is the access control
+
+Mesh replies go out on a channel dedicated to the peer being answered:
+
+| peer    | their outbox (we read)                                  | our outbox to them (we write)                           |
+|---------|---------------------------------------------------------|---------------------------------------------------------|
+| webster | `MomentAnnotation/0939d4fb-861c-4321-9bcc-0ce84392478f` | `MomentAnnotation/b7027af9-a820-4662-a929-c70b9574500a` |
+| treecle | `MomentAnnotation/ca40e083-0810-4d66-914c-cf9935f54502` | `MomentAnnotation/e882b9ef-610c-4561-86f8-4889ca64e94e` |
+
+`b7027af9` is **webster's** channel, not a general-purpose one. The
+2026-08-26 ruling is what makes this load-bearing: **address fields are not
+access control, the share is.** A `to: "treecle"` envelope written to
+`b7027af9` does not reach treecle — it reaches whoever holds a share of
+`b7027af9`. So the failure is not a dropped reply, it is a cross-peer
+disclosure in one direction and silence in the other.
+
+Found 2026-09-05T02:47Z: the hourly mesh-sweep trigger prompt said "reply on
+the Tycho outbox `MomentAnnotation/b7027af9-...`" — one channel, all peers —
+while the `mesh-sweep` skill doc has carried the per-peer table since
+2026-08-26. Nothing leaked, because the sweep found zero treecle directives in
+the window; the hazard was live and unfired. The trigger prompt now carries the
+table and an explicit line saying **the skill doc is the authority and wins
+wherever the two differ**, because a summary that drifts from its source is
+worse than no summary.
+
+Still open, and it is ours to close: treecle has never acked the migration.
+The notice (slug `channel-migration-dedicated-outbox-2026-08-26`) postdates
+treecle's last inbound of 2026-08-24, so there is no evidence which channel it
+reads. If it reads only the old one, the silence on that peer is **ours**, not
+theirs. The doc's follow-up — revoke treecle's share of the old channel once it
+acks — is correctly still pending, and must not be done before the ack.
+
 ### The mesh cursor is durable only if it is uploaded
 
 The hourly mesh sweep reads two peer outboxes forward from a cursor at
