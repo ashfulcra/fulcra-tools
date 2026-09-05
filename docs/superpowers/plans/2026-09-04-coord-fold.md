@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r37)
+# coord-fold: Coord on Annotations Implementation Plan (r38)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -122,8 +122,13 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{40})(?![0-9a-f])([^\n`]*)")   # r37: EXACTLY 40 hex (main() fullmatches 40) or the two documented head placeholders — a 7-hex head passed the guard and was refused by the gate (codex-coder round 32)
-SHORT_HEAD = re.compile(r"ship_check\.py\s+\S+\s+[0-9a-f]{7,39}(?![0-9a-f<])")                                            # the fail-open form, named so it is REPORTED rather than silently unmatched
+INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(\S+)([^\n`]*)")   # r38 (codex-coder round 33): match EVERY invocation, then judge the head POSITIVELY
+HEAD_PLACEHOLDERS = ("<HEAD>", "<40-hex-head>")                                   # `<40-hex head>` (with the space) is normalized to this before matching
+HEAD_OK = re.compile(r"^[0-9a-f]{40}$")                                          # exactly what ship_check.main fullmatches
+
+
+def head_problem(head: str):
+    return None if HEAD_OK.match(head) or head in HEAD_PLACEHOLDERS else f"head {head!r} is not 40 lowercase hex (or a documented placeholder)"
 REQUIRED_ROOTS = ("--git", "--fulcra-api")
 
 
@@ -173,9 +178,10 @@ def parse_invocation(rest: str) -> list[str]:
 
 
 def bare_invocations(text: str) -> list[str]:
-    out = [f"head is not 40 hex: {m.group(0).strip()[:100]}" for m in SHORT_HEAD.finditer(text)]
+    out = []
+    text = text.replace("<40-hex head>", "<40-hex-head>")                          # a documented head placeholder with a space: one token
     for m in INVOCATION.finditer(text):
-        problems = parse_invocation(m.group(3))
+        problems = ([head_problem(m.group(2))] if head_problem(m.group(2)) else []) + parse_invocation(m.group(3))
         if problems:
             out.append(f"{'; '.join(problems)}: {m.group(0).strip()[:100]}")
     return out
@@ -2265,7 +2271,10 @@ import sys
 REQUIRED = ("codex-reviewer", "codex-coder")
 # Engine heads whose register `review-winning-envelope-e9c0089b` read APPROVED AND whose pin PR shipped.
 # EMPTY until a deliberate plan revision adds one; an empty set means ship_check refuses, correctly.
-APPROVED_ENGINE_PINS: frozenset = frozenset()
+APPROVED_ENGINE_PINS: frozenset = frozenset({
+    "e06e69e5d44d92b2b52a09020f53f2bd1ccdc1d5",   # r38, 2026-09-05: the fleet pin moved here (PR #698 merged; store adopt-latest.sh uploaded by Ash);
+                                                  # this build carries the review supersession contract (PR #695, APPROVED by both required reviewers)
+})
 
 
 IMPORT_AFFECTING = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONSAFEPATH", "VIRTUAL_ENV", "CONDA_PREFIX")
@@ -2338,15 +2347,45 @@ def gate_tmp_root():
     st = os.stat(root)
     if st.st_uid != os.getuid() or (st.st_mode & 0o077):
         raise RuntimeError(f"gate temp root {root} is not a private directory of this user (uid {st.st_uid}, mode {oct(st.st_mode & 0o777)})")
+    strip_acls(root)                                # r38: an inherited ACL on the root would survive the chmod above
     tempfile.tempdir = root
     return root
 
 
+def acl_entries(path):
+    """ACL entries on a path. r38 (codex-reviewer round 33): on macOS an ACL survives chmod and is INVISIBLE to stat, so a
+    directory that reports 0700 can still grant everyone write/delete via an inherited entry. Listed through the OS's own
+    /bin/ls (an OS trust root, like /bin/chmod below); on Linux, the POSIX-ACL xattr."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["/bin/ls", "-led", path], capture_output=True, text=True).stdout.splitlines()
+        return [ln.strip() for ln in out[1:] if re.match(r"\s*\d+:\s", ln)]
+    try:
+        return [x for x in os.listxattr(path) if x.startswith("system.posix_acl")]
+    except OSError:
+        return []
+
+
+def strip_acls(path):
+    """Remove every ACL entry (inherited ones included) from a path the gate just created, then PROVE none remain."""
+    if sys.platform == "darwin":
+        subprocess.run(["/bin/chmod", "-N", path], capture_output=True)
+    else:
+        for x in acl_entries(path):
+            try:
+                os.removexattr(path, x)
+            except OSError:
+                pass
+    left = acl_entries(path)
+    if left:
+        raise RuntimeError(f"{path} still carries ACL entries after stripping: {left[:2]}")
+
+
 def private_dir(prefix):
-    """A fresh 0700 directory under the gate's own temp root."""
+    """A fresh 0700 directory under the gate's own temp root, with no ACL entries (r38)."""
     import tempfile
     d = tempfile.mkdtemp(prefix=prefix, dir=gate_tmp_root())
     os.chmod(d, 0o700)
+    strip_acls(d)
     return d
 
 
@@ -2358,11 +2397,15 @@ def read_owned_file(path):
     ds = os.stat(d)
     if ds.st_uid != os.getuid() or (ds.st_mode & 0o077):
         raise PermissionError(f"the private directory {d} is no longer private (uid {ds.st_uid}, mode {oct(ds.st_mode & 0o777)})")
+    if acl_entries(d):
+        raise PermissionError(f"the private directory {d} carries ACL entries: {acl_entries(d)[:2]}")      # r38: invisible to stat
     ls = os.lstat(path)
     if _stat.S_ISLNK(ls.st_mode) or not _stat.S_ISREG(ls.st_mode):
         raise PermissionError(f"{path} is not a regular file the gate wrote")
     if ls.st_uid != os.getuid():
         raise PermissionError(f"{path} is owned by uid {ls.st_uid}, not this user")
+    if acl_entries(path):
+        raise PermissionError(f"{path} carries ACL entries: {acl_entries(path)[:2]}")                          # r38: an ACL can grant write past the mode
     if ls.st_mode & 0o022:                                  # r36 (codex-reviewer round 31): the BODY's own mode, not only the directory's.
         # The guarantee is INTEGRITY (nobody else could have modified the body between the CLI's write and this read),
         # so the group/other WRITE bits are what matter; a 0644 body — what any CLI writes under a normal umask — is fine.
@@ -3112,7 +3155,9 @@ def test_trust_roots_are_stated_not_discovered_and_a_path_shadow_never_executes(
     monkeypatch.setattr(ship_check.subprocess, "run", lambda cmd, **kw: (calls.append(list(cmd)), real(cmd, **kw))[1])
     assert ship_check.sh("git", "rev-parse", "HEAD")[1] == "TRUSTED-git"
     assert ship_check.sh("fulcra-api", "file", "download", "x", "/dev/stdout")[1] == "TRUSTED-fulcra-api"
-    assert [c[0] for c in calls] == [table["git"], table["fulcra-api"]]                       # absolute trusted paths, every call
+    OS_ROOTS = ("/bin/chmod", "/bin/ls")                                                       # r38: the ACL helpers call the OS's own chmod/ls by absolute path (OS trust roots, like the interpreter)
+    assert [c[0] for c in calls if c[0] not in OS_ROOTS] == [table["git"], table["fulcra-api"]]  # every OTHER call is an absolute trusted path
+    assert all(c[0].startswith("/") for c in calls)                                              # and nothing is ever resolved through PATH
     monkeypatch.setattr(ship_check, "TRUSTED", {})
     import pytest
     with pytest.raises(RuntimeError, match="bare name never executes"):
@@ -3445,14 +3490,14 @@ def test_executing_engine_commit_reads_direct_url_beside_the_dist_info(tmp_path,
     assert ship_check.executing_engine_commit(str(exe)) is None
 
 
-def test_the_shipped_default_approved_set_is_empty_so_ship_check_refuses_until_a_revision_adds_a_pin(monkeypatch, capsys):
-    monkeypatch.setattr(ship_check, "sh", world())
+def test_the_shipped_approved_set_is_exactly_the_adopted_fleet_pin_and_any_other_pin_refuses(monkeypatch, capsys):
+    """r38: the fleet pin moved to e06e69e5 (PR #698 + store upload, 2026-09-05), the build that carries the approved
+    supersession contract (#695). The approved set names exactly it; a fleet pin outside it still refuses."""
+    assert ship_check.APPROVED_ENGINE_PINS == frozenset({"e06e69e5d44d92b2b52a09020f53f2bd1ccdc1d5"})
+    monkeypatch.setattr(ship_check, "sh", world(pin="0" * 40))
     monkeypatch.setattr(ship_check, "engine_executable", lambda: "/tool/bin/coord-engine")
-    assert ship_check.APPROVED_ENGINE_PINS == frozenset()
     import sys
     assert ship_check.main("fulcra", HEAD, git=sys.executable, fulcra_api=sys.executable) == 1 and "not an APPROVED+PINNED" in capsys.readouterr().out
-
-
 def test_a_pin_outside_the_approved_set_refuses(monkeypatch):
     assert run(monkeypatch, pin="e" * 40) == 1
 
@@ -3601,11 +3646,40 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
         "scripts/ship_check.py fulcra <HEAD> --git git --fulcra-api fulcra-api\n": "--git value 'git' is not an absolute path",      # codex-coder round 31: relative roots
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x --bogus\n": "unexpected token '--bogus'",            # unknown option
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x extra\n": "unexpected token 'extra'",                # trailing positional
-        "scripts/ship_check.py fulcra deadbee --git /usr/bin/git --fulcra-api /x\n": "head is not 40 hex",                          # codex-coder round 32: 7-hex head
+        "scripts/ship_check.py fulcra deadbee --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",                   # codex-coder round 32: 7-hex head
+        "scripts/ship_check.py fulcra deadbe --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",                    # codex-coder round 33: 6 hex
+        "scripts/ship_check.py fulcra DEADBEEF --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",                  # uppercase
+        "scripts/ship_check.py fulcra not-a-head --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",                # not hex
+        "scripts/ship_check.py fulcra " + "g" * 40 + " --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",           # 40 non-hex
+        "scripts/ship_check.py fulcra " + "e" * 39 + " --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",           # 39 hex
         "scripts/ship_check.py fulcra <HEAD> --git <abs --bogus> --fulcra-api /x\n": "unexpected token",                             # codex-coder round 32: option hidden in <...>
     }
     for text, why in bad.items():
         got = f(text); assert got and why in got[0], (text, got)
+
+
+def test_acl_entries_are_stripped_from_gate_directories_and_refused_on_bodies(tmp_path, monkeypatch):
+    """codex-reviewer round 33: on macOS an ACL survives chmod and is invisible to stat. An INHERITED everyone-write ACL
+    on the parent of the gate's temp root must not reach the root or any private dir (stripped, proven); an ACL added
+    to a body or its dir before the read is refused."""
+    import os, subprocess, sys, tempfile
+    if sys.platform != "darwin":
+        import pytest; pytest.skip("macOS ACL semantics")
+    home = tmp_path / "home"; home.mkdir(); monkeypatch.setenv("HOME", str(home)); tempfile.tempdir = None
+    subprocess.run(["/bin/chmod", "+a", "everyone allow write,delete,add_file,add_subdirectory,file_inherit,directory_inherit", str(home)], check=True)
+    root = ship_check.gate_tmp_root(); assert ship_check.acl_entries(root) == [], ship_check.acl_entries(root)          # inherited entry stripped from the root
+    d = ship_check.private_dir("acl-"); assert ship_check.acl_entries(d) == []                                        # and from every private dir
+    body = os.path.join(d, "body"); open(body, "w").write("x"); os.chmod(body, 0o600)
+    assert ship_check.read_owned_file(body) == "x"
+    subprocess.run(["/bin/chmod", "+a", "everyone allow write", body], check=True)                                     # the body's mode still reads 0600
+    assert oct(os.stat(body).st_mode & 0o777) == "0o600"
+    import pytest
+    with pytest.raises(PermissionError, match="carries ACL entries"):
+        ship_check.read_owned_file(body)
+    subprocess.run(["/bin/chmod", "-N", body], check=True); subprocess.run(["/bin/chmod", "+a", "everyone allow delete", d], check=True)
+    with pytest.raises(PermissionError, match="carries ACL entries"):
+        ship_check.read_owned_file(body)
+    tempfile.tempdir = None
 ```
 
 
@@ -3635,6 +3709,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 
 ## Revision log
 
+- **r38 (2026-09-05, both reviewers CHANGES on `3b03002d`, round 33; PR #705 @ 1b3c1148e05818e77d8ca10d7c4981905776fba1):** **`APPROVED_ENGINE_PINS` = {`e06e69e5`}** — the fleet pin moved there today (PR #698 merged under Ash's grant; the store's `adopt-latest.sh` uploaded by Ash; this host adopted via the gated recipe with all three claim-gate checks passing), and the build carries the approved supersession contract (#695). Measured against the adopted engine: the shipped gate run end to end passes the fleet-pin, executing-engine identity, verified-bytes attestation and tree checks and refuses at the absent ship register (the engine answers rc 1 for a nonexistent register; the gate reads it as UNKNOWN); a direct attestation against the plan register returns a real tally with `winning` exposed for both reviewers. codex-coder: the guard matched only accepted heads, so any other invalid head was silently unmatched — every `ship_check.py` invocation is now matched and the head validated positively (exactly 40 lowercase hex or the two documented placeholders; controls: 6 hex, uppercase, not-a-head, forty g's, 39 hex). codex-reviewer: on macOS an ACL survives `chmod` and is invisible to `stat` — every directory the gate creates has its ACL entries stripped and proven absent (the OS's own `/bin/chmod` and `/bin/ls` by absolute path, OS trust roots like the interpreter), and any ACL entry on a body or its directory is refused before the read; regression: an inherited everyone-write ACL on the gate root's parent does not reach the root or a private dir, and an ACL added to a 0600 body or its dir is refused.
 - **r37 (2026-09-05, codex-coder CHANGES on `16bc1ed4`, round 32; PR #703 @ c6fc2e072b376f7277b21c5d15162307431b3e8f):** the guard's head pattern accepted 7–40 hex while `ship_check.main` fullmatches 40, so a 7-hex head passed the guard and was refused by the gate — now exactly 40 hex or the two documented head placeholders, and the short-head form is matched separately and REPORTED rather than silently unmatched (control: `deadbee`). Placeholder normalization collapsed any `<...>`, so `<abs --bogus>` hid an unknown option — now an explicit allowlist (`<abs>`, `<abs path>`, `<path>`) is substituted verbatim and any other bracketed text is tokenized and judged (control: `--git <abs --bogus>` → unexpected token). One parser, shared by the plan gate and the repo-prose test, as before.
 - **r36 (2026-09-05, both reviewers CHANGES on `f81dbeba`, round 31; PR #702 @ 1c20fab21d62e4995db665580bb00fc646acfa4e):** codex-coder: the r35 parser accepted relative roots (`--git git`), unknown options and trailing positionals that argparse or `resolve_trust_roots` refuse at runtime — the tail is now validated against the documented shape (only the two flags, each exactly once, each value an absolute path or a documentation placeholder such as `<abs path>`, collapsed to one token first; anything else is a problem), with controls for relative roots, an unknown option, a trailing token and placeholders. codex-reviewer: the owned-file read never checked the body's own mode — its group/other write bits are now refused, justified as an integrity guarantee (a 0644 body is fine, 0666 is not), with a synchronized 0666 regression and a measured real download. His repeated note that the OS proof cannot run in his sandbox is expected and not counted green by either of us.
 - **r35 (2026-09-05, codex-coder CHANGES on `cf8f2d31`, round 30; PR #701 @ abca45b086a5b2e0a258740d6ae860613e036a30):** the r34 guard only regex-checked that each option NAME appeared — `--git --fulcra-api /x`, a trailing `--fulcra-api`, and a shell comment hiding both flags all passed while the documented command was unusable. Now a shell comment ends the command, the rest is shlex-tokenized, and each trust-root flag must appear exactly once with exactly one non-option value (`--git /x` or `--git=/x`); his three forms plus the `=` form, a duplicate flag and an empty `=` value are named controls; one parser shared by the plan gate and the repo-prose test. Task 16 prose reconciled: the r29 sentence that still described a symlink in the child's PATH is replaced (the code has had no link since r34). His note that the OS proof could not run in his sandbox (`sandbox-exec`: operation not permitted) is expected: the proof exits UNKNOWN where no sandbox exists and is green on this host and on GitHub's macOS runner.
