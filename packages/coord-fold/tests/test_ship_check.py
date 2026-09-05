@@ -833,9 +833,11 @@ def test_store_read_refuses_a_body_whose_handoff_state_changed_before_the_read(t
     def fake(mode):
         fa = tmp_path / f"fulcra-api-{mode}"
         # absolute tool paths: the gate hands the CLI an EMPTY PATH, so a bare `chmod` would silently not run (measured)
-        body = {"chmod": 'printf "ok" > "$4"; /bin/chmod 755 "$(/usr/bin/dirname "$4")"', "link": f'printf "ok" > "$4"; /bin/rm "$4"; /bin/ln -s {secret} "$4"', "intact": 'printf "PIN=x" > "$4"'}[mode]
+        body = {"chmod": 'printf "ok" > "$4"; /bin/chmod 755 "$(/usr/bin/dirname "$4")"', "link": f'printf "ok" > "$4"; /bin/rm "$4"; /bin/ln -s {secret} "$4"',
+                "bodymode": 'printf "ok" > "$4"; /bin/chmod 666 "$4"',                                        # codex-reviewer round 31: the BODY left world-writable
+                "intact": 'printf "PIN=x" > "$4"'}[mode]
         fa.write_text("#!/bin/sh\n" + body + "\nexit 0\n"); fa.chmod(0o755); return fa
-    for mode, expect in (("chmod", "no longer private"), ("link", "not a regular file"), ("intact", None)):
+    for mode, expect in (("chmod", "no longer private"), ("link", "not a regular file"), ("bodymode", "is writable by others (mode 0o666)"), ("intact", None)):
         table, why = ship_check.resolve_trust_roots({"git": str(g), "fulcra-api": str(fake(mode))}, "/tool"); assert why is None
         monkeypatch.setattr(ship_check, "TRUSTED", dict(table))
         rc, body, err = ship_check.store_read("team/fulcra/x")
@@ -855,6 +857,7 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
     ok = "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x\n"
     assert f(ok) == [] and f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x --git /usr/bin/git\n") == []          # order-independent
     assert f("scripts/ship_check.py fulcra <HEAD> --git=/usr/bin/git --fulcra-api=/x\n") == []                             # the = form
+    assert f("scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs path>\n") == []                            # documentation placeholders
     bad = {
         "run `scripts/ship_check.py fulcra <HEAD>`\n": "missing --git; missing --fulcra-api",
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git\n": "missing --fulcra-api",
@@ -864,6 +867,9 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
         "scripts/ship_check.py fulcra <HEAD> # --git /x --fulcra-api /y\n": "missing --git; missing --fulcra-api",           # codex-coder (3): a comment ends the command
         "scripts/ship_check.py fulcra <HEAD> --git /a --git /b --fulcra-api /x\n": "--git given 2 times",
         "scripts/ship_check.py fulcra <HEAD> --git= --fulcra-api /x\n": "--git has no value",
+        "scripts/ship_check.py fulcra <HEAD> --git git --fulcra-api fulcra-api\n": "--git value 'git' is not an absolute path",      # codex-coder round 31: relative roots
+        "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x --bogus\n": "unexpected token '--bogus'",            # unknown option
+        "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x extra\n": "unexpected token 'extra'",                # trailing positional
     }
     for text, why in bad.items():
         got = f(text); assert got and why in got[0], (text, got)

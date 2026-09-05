@@ -23,35 +23,46 @@ INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f
 REQUIRED_ROOTS = ("--git", "--fulcra-api")
 
 
+PLACEHOLDER = re.compile(r"^<[^<>]+>$")          # documentation placeholders: <abs>, <abs path>, <path>
+
+
 def parse_invocation(rest: str) -> list[str]:
-    """Problems with the SAME-LINE COMMAND SHAPE after `ship_check.py <team> <head>` (codex-coder round 30: r34 only
-    regex-checked that each option NAME appeared; `--git --fulcra-api /x`, a trailing `--fulcra-api`, and a shell
-    comment hiding both flags all passed). A shell comment ends the command; the rest is shlex-tokenized; each
-    required root must appear exactly once with exactly one non-option value (`--git /x` or `--git=/x`)."""
+    """Problems with the SAME-LINE COMMAND SHAPE after `ship_check.py <team> <head>`, validated against the documented
+    argparse shape (codex-coder rounds 30-31): a shell comment ends the command; the rest is shlex-tokenized; the tail
+    may contain ONLY `--git V` / `--git=V` and `--fulcra-api V` / `--fulcra-api=V`, each exactly once, each V an
+    ABSOLUTE path (resolve_trust_roots refuses anything else) or a documentation placeholder like `<abs>`; any other
+    token — an unknown option, a relative value, a trailing positional — is a problem, because argparse or the gate
+    refuses the documented command at runtime while a presence check would have passed it."""
     import shlex
-    command = rest.split("#", 1)[0]
+    command = re.sub(r"<[^<>]*>", "<placeholder>", rest.split("#", 1)[0])   # a documentation placeholder may contain spaces (`<abs path>`): one token
     try:
         toks = shlex.split(command)
     except ValueError as exc:
         return [f"unparseable shell syntax ({exc})"]
-    problems = []
+    problems, seen, i = [], {r: 0 for r in REQUIRED_ROOTS}, 0
+    def check_value(root, v):
+        if not v:
+            problems.append(f"{root} has no value")
+        elif not (v.startswith("/") or PLACEHOLDER.match(v)):
+            problems.append(f"{root} value {v!r} is not an absolute path")
+        seen[root] += 1
+    while i < len(toks):
+        t = toks[i]
+        root = next((r for r in REQUIRED_ROOTS if t == r or t.startswith(r + "=")), None)
+        if root is None:
+            problems.append(f"unexpected token {t!r}"); i += 1; continue
+        if t == root:
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            if nxt is None or nxt.startswith("--"):
+                problems.append(f"{root} has no value"); seen[root] += 1; i += 1; continue
+            check_value(root, nxt); i += 2
+        else:
+            check_value(root, t[len(root) + 1:]); i += 1
     for root in REQUIRED_ROOTS:
-        values, i = [], 0
-        while i < len(toks):
-            t = toks[i]
-            if t == root:
-                nxt = toks[i + 1] if i + 1 < len(toks) else None
-                if nxt is None or nxt.startswith("--"):
-                    problems.append(f"{root} has no value"); i += 1; continue
-                values.append(nxt); i += 2; continue
-            if t.startswith(root + "="):
-                v = t[len(root) + 1:]
-                (values.append(v) if v else problems.append(f"{root} has no value")); i += 1; continue
-            i += 1
-        if not values and not any(p.startswith(root) for p in problems):
+        if seen[root] == 0:
             problems.append(f"missing {root}")
-        if len(values) > 1:
-            problems.append(f"{root} given {len(values)} times")
+        elif seen[root] > 1:
+            problems.append(f"{root} given {seen[root]} times")
     return problems
 
 

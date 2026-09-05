@@ -123,6 +123,10 @@ def read_owned_file(path):
         raise PermissionError(f"{path} is not a regular file the gate wrote")
     if ls.st_uid != os.getuid():
         raise PermissionError(f"{path} is owned by uid {ls.st_uid}, not this user")
+    if ls.st_mode & 0o022:                                  # r36 (codex-reviewer round 31): the BODY's own mode, not only the directory's.
+        # The guarantee is INTEGRITY (nobody else could have modified the body between the CLI's write and this read),
+        # so the group/other WRITE bits are what matter; a 0644 body — what any CLI writes under a normal umask — is fine.
+        raise PermissionError(f"{path} is writable by others (mode {oct(ls.st_mode & 0o777)})")
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, encoding="utf-8") as fh:
         return fh.read()
