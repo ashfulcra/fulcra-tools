@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r36)
+# coord-fold: Coord on Annotations Implementation Plan (r37)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -122,11 +122,12 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})([^\n`]*)")
+INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{40})(?![0-9a-f])([^\n`]*)")   # r37: EXACTLY 40 hex (main() fullmatches 40) or the two documented head placeholders — a 7-hex head passed the guard and was refused by the gate (codex-coder round 32)
+SHORT_HEAD = re.compile(r"ship_check\.py\s+\S+\s+[0-9a-f]{7,39}(?![0-9a-f<])")                                            # the fail-open form, named so it is REPORTED rather than silently unmatched
 REQUIRED_ROOTS = ("--git", "--fulcra-api")
 
 
-PLACEHOLDER = re.compile(r"^<[^<>]+>$")          # documentation placeholders: <abs>, <abs path>, <path>
+PLACEHOLDERS = ("<abs>", "<abs path>", "<path>")   # r37: an explicit ALLOWLIST substituted verbatim — a pattern let `<abs --bogus>` hide an unknown option (codex-coder round 32)
 
 
 def parse_invocation(rest: str) -> list[str]:
@@ -137,7 +138,9 @@ def parse_invocation(rest: str) -> list[str]:
     token — an unknown option, a relative value, a trailing positional — is a problem, because argparse or the gate
     refuses the documented command at runtime while a presence check would have passed it."""
     import shlex
-    command = re.sub(r"<[^<>]*>", "<placeholder>", rest.split("#", 1)[0])   # a documentation placeholder may contain spaces (`<abs path>`): one token
+    command = rest.split("#", 1)[0]
+    for ph in PLACEHOLDERS:                                                   # only the allowlisted placeholders collapse to one token; any other <...> is tokenized and judged
+        command = command.replace(ph, "<placeholder>")
     try:
         toks = shlex.split(command)
     except ValueError as exc:
@@ -146,7 +149,7 @@ def parse_invocation(rest: str) -> list[str]:
     def check_value(root, v):
         if not v:
             problems.append(f"{root} has no value")
-        elif not (v.startswith("/") or PLACEHOLDER.match(v)):
+        elif not (v.startswith("/") or v == "<placeholder>"):
             problems.append(f"{root} value {v!r} is not an absolute path")
         seen[root] += 1
     while i < len(toks):
@@ -170,7 +173,7 @@ def parse_invocation(rest: str) -> list[str]:
 
 
 def bare_invocations(text: str) -> list[str]:
-    out = []
+    out = [f"head is not 40 hex: {m.group(0).strip()[:100]}" for m in SHORT_HEAD.finditer(text)]
     for m in INVOCATION.finditer(text):
         problems = parse_invocation(m.group(3))
         if problems:
@@ -3584,7 +3587,8 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
     ok = "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x\n"
     assert f(ok) == [] and f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x --git /usr/bin/git\n") == []          # order-independent
     assert f("scripts/ship_check.py fulcra <HEAD> --git=/usr/bin/git --fulcra-api=/x\n") == []                             # the = form
-    assert f("scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs path>\n") == []                            # documentation placeholders
+    assert f("scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs path>\n") == []                            # documentation placeholders (allowlisted)
+    assert f("scripts/ship_check.py fulcra " + "e" * 40 + " --git /usr/bin/git --fulcra-api /x\n") == []                    # a real 40-hex head
     bad = {
         "run `scripts/ship_check.py fulcra <HEAD>`\n": "missing --git; missing --fulcra-api",
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git\n": "missing --fulcra-api",
@@ -3597,6 +3601,8 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
         "scripts/ship_check.py fulcra <HEAD> --git git --fulcra-api fulcra-api\n": "--git value 'git' is not an absolute path",      # codex-coder round 31: relative roots
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x --bogus\n": "unexpected token '--bogus'",            # unknown option
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x extra\n": "unexpected token 'extra'",                # trailing positional
+        "scripts/ship_check.py fulcra deadbee --git /usr/bin/git --fulcra-api /x\n": "head is not 40 hex",                          # codex-coder round 32: 7-hex head
+        "scripts/ship_check.py fulcra <HEAD> --git <abs --bogus> --fulcra-api /x\n": "unexpected token",                             # codex-coder round 32: option hidden in <...>
     }
     for text, why in bad.items():
         got = f(text); assert got and why in got[0], (text, got)
@@ -3629,6 +3635,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 
 ## Revision log
 
+- **r37 (2026-09-05, codex-coder CHANGES on `16bc1ed4`, round 32; PR #703 @ c6fc2e072b376f7277b21c5d15162307431b3e8f):** the guard's head pattern accepted 7–40 hex while `ship_check.main` fullmatches 40, so a 7-hex head passed the guard and was refused by the gate — now exactly 40 hex or the two documented head placeholders, and the short-head form is matched separately and REPORTED rather than silently unmatched (control: `deadbee`). Placeholder normalization collapsed any `<...>`, so `<abs --bogus>` hid an unknown option — now an explicit allowlist (`<abs>`, `<abs path>`, `<path>`) is substituted verbatim and any other bracketed text is tokenized and judged (control: `--git <abs --bogus>` → unexpected token). One parser, shared by the plan gate and the repo-prose test, as before.
 - **r36 (2026-09-05, both reviewers CHANGES on `f81dbeba`, round 31; PR #702 @ 1c20fab21d62e4995db665580bb00fc646acfa4e):** codex-coder: the r35 parser accepted relative roots (`--git git`), unknown options and trailing positionals that argparse or `resolve_trust_roots` refuse at runtime — the tail is now validated against the documented shape (only the two flags, each exactly once, each value an absolute path or a documentation placeholder such as `<abs path>`, collapsed to one token first; anything else is a problem), with controls for relative roots, an unknown option, a trailing token and placeholders. codex-reviewer: the owned-file read never checked the body's own mode — its group/other write bits are now refused, justified as an integrity guarantee (a 0644 body is fine, 0666 is not), with a synchronized 0666 regression and a measured real download. His repeated note that the OS proof cannot run in his sandbox is expected and not counted green by either of us.
 - **r35 (2026-09-05, codex-coder CHANGES on `cf8f2d31`, round 30; PR #701 @ abca45b086a5b2e0a258740d6ae860613e036a30):** the r34 guard only regex-checked that each option NAME appeared — `--git --fulcra-api /x`, a trailing `--fulcra-api`, and a shell comment hiding both flags all passed while the documented command was unusable. Now a shell comment ends the command, the rest is shlex-tokenized, and each trust-root flag must appear exactly once with exactly one non-option value (`--git /x` or `--git=/x`); his three forms plus the `=` form, a duplicate flag and an empty `=` value are named controls; one parser shared by the plan gate and the repo-prose test. Task 16 prose reconciled: the r29 sentence that still described a symlink in the child's PATH is replaced (the code has had no link since r34). His note that the OS proof could not run in his sandbox (`sandbox-exec`: operation not permitted) is expected: the proof exits UNKNOWN where no sandbox exists and is green on this host and on GitHub's macOS runner.
 - **r34 (2026-09-05, both reviewers CHANGES on `d263f1bc`, rounds 28–29; PR #699 @ af9ac18414b7c98c7ffe37bce0b1fb2fb0cb7fad):** codex-coder: the r33 guard checked only `--git` — now each invocation is PARSED and both roots are required, with a control per root, and the plan gate and the repo-prose test share ONE parser. codex-reviewer + codex-coder: the private-bin symlink and the temp-body handoff — resolved by BOTH exits they offered: bound where a binding exists (no link at all: the engine gets its CLI as an absolute path in `FULCRA_CLI_COMMAND`; gate-owned 0700 temp root, `TMPDIR` ignored; owner/mode/non-link check immediately before every body read) and the trust model formally stated where none can (a same-user concurrent process on the gate host is outside the model — it can replace the gate itself). Measured: 107 passed in-package and under the `--no-editable` workspace run; guard rc 0; real fleet-pin read and attestation succeed with the new environment. The trust model is also in `ship_check.py`'s docstring and AGENTS.md.
