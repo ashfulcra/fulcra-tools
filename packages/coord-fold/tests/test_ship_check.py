@@ -785,3 +785,17 @@ def test_tree_mismatch_refuses(monkeypatch):
 def test_winning_says_approve_but_the_shard_body_does_not_refuses(monkeypatch):
     bodies = {ENV["codex-reviewer"]: APPROVE, ENV["codex-coder"]: f"verdict: changes\ntree: {TREE}"}
     assert run(monkeypatch, bodies=bodies) == 1
+
+
+def test_no_repo_prose_invokes_ship_check_without_stated_trust_roots():
+    """codex-coder rounds 27/28: the prose contract drifted from argparse twice (Task 14, then Task 16). Every
+    invocation written in repo prose — AGENTS.md, the package README, the script's own Usage — must carry the
+    stated trust roots on the same line. (The plan document itself is checked by Task 0's materialize_plan.)"""
+    import re
+    bare = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
+    here = pathlib.Path(__file__).resolve()
+    for f in (here.parents[3] / "AGENTS.md", here.parents[1] / "README.md", SCRIPT):
+        for i, ln in enumerate(f.read_text().splitlines(), 1):
+            assert not bare.search(ln), f"{f.name}:{i}: ship_check invoked without --git/--fulcra-api: {ln.strip()[:120]}"
+    assert bare.search("`scripts/ship_check.py fulcra <HEAD>` and fails closed")           # the pattern catches the sentence that drifted
+    assert not bare.search("`scripts/ship_check.py fulcra <HEAD> --git /x --fulcra-api /y`")

@@ -15,6 +15,15 @@ import sys
 TICKS = "`" * 3                                  # never spelled literally: this file lives inside a fence
 FENCE = re.compile(TICKS + r"(python|toml|yaml)\n(.*?)" + TICKS, re.S)
 TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # workflow YAML materializes too, so the wiring test runs here
+# codex-coder rounds 27-28: the prose contract drifted from argparse twice. An invocation of the ship gate written
+# without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
+BARE_RUNBOOK = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
+
+
+def refuse_bare_runbook_invocations(plan_text: str) -> list[str]:
+    return [f"line {i}: {ln.strip()[:120]}" for i, ln in enumerate(plan_text.splitlines(), 1) if BARE_RUNBOOK.search(ln)]
+
+
 GATES = ["tests/test_structural.py", "tests/test_tripwire.py", "tests/test_ship_check.py", "tests/test_ci_wiring.py",
          "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]
 PROOF = "tests/proof/run_proof.py"   # G29; exits 3 = UNKNOWN where no OS sandbox exists — never read as green
@@ -41,6 +50,12 @@ def materialize(plan: str, out: pathlib.Path) -> tuple[list[str], list[str]]:
 
 def main(argv: list[str]) -> int:
     plan, out = pathlib.Path(argv[1]).read_text(), pathlib.Path(argv[2])
+    bare = refuse_bare_runbook_invocations(plan)
+    if bare:
+        print("Task 0: the plan invokes ship_check WITHOUT its stated trust roots (--git/--fulcra-api) — a builder following it cannot cut over:")
+        for b in bare:
+            print("  " + b)
+        return 1
     written, untagged = materialize(plan, out)
     pkg = out / "packages/coord-fold"
     (pkg / "README.md").write_text("# coord-fold\nevery module under **400 lines**\n")
