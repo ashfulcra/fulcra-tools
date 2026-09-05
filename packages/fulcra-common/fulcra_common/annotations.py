@@ -923,9 +923,73 @@ AUTHORITY_MEMO_TTL_SECONDS = 300.0
 _AUTHORITY_MEMO: dict[str, tuple[str, float]] = {}
 
 
+#: Account-level bootstrap pointer naming this account's coord team.
+#:
+#: It sits at the STORE ROOT, not under ``team/<team>/``, and that is the whole
+#: point: a process that does not yet know its team cannot look under a path
+#: keyed by the answer. A pointer only findable by something that already knew
+#: would be decoration.
+_BOOTSTRAP_PATH = "/coord-bootstrap.json"
+
+#: Seconds a resolved team may be reused inside one process. Bounded for the
+#: same reason ``AUTHORITY_MEMO_TTL_SECONDS`` is: the population that matters is
+#: long-lived, and an unbounded memo pins a team across a re-point for the
+#: process lifetime.
+TEAM_MEMO_TTL_SECONDS = 300.0
+
+#: ``(team, monotonic_stamp)``, written ONLY on a successful read so a transient
+#: store failure retries on the next call instead of pinning "unknown".
+_TEAM_MEMO: Optional[tuple[str, float]] = None
+
+
+def _bootstrap_team() -> str:
+    """Team named by the account-level pointer, or "" if it cannot be read."""
+    tmp = Path(tempfile.gettempdir()) / f"fulcra-bootstrap-{os.getpid()}.json"
+    try:
+        result = subprocess.run(
+            _cli_base_cmd() + ["file", "download", _BOOTSTRAP_PATH, str(tmp)],
+            capture_output=True, text=True, timeout=_write_timeout())
+        if result.returncode != 0:
+            return ""
+        data = json.loads(tmp.read_text())
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError,
+            json.JSONDecodeError, ValueError):
+        return ""
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    if not isinstance(data, dict):
+        return ""
+    return (data.get("team") or "").strip()
+
+
 def _coord_team() -> str:
-    """Team whose authority document names our channel."""
-    return os.environ.get("FULCRA_COORD_TEAM", "").strip() or "fulcra"
+    """Team whose authority document names our channel.
+
+    Resolution order: the environment, then the account-level pointer on the
+    store. **"" means UNKNOWN and callers must fail closed on it.**
+
+    This function used to end in ``or "fulcra"``. That default shipped from a
+    PUBLIC repo, so every agent of every other team silently resolved ITS
+    channel authority against the authoring team's store — reading a document
+    it had no business reading, and writing annotations addressed by it. A
+    wrong answer delivered confidently is worse here than no answer, because
+    "no answer" is already modelled: the authority resolver returns None for
+    UNKNOWN and its callers are documented as forbidden to guess past it.
+    """
+    global _TEAM_MEMO
+    env = os.environ.get("FULCRA_COORD_TEAM", "").strip()
+    if env:
+        return env
+    memo = _TEAM_MEMO
+    if memo and (time.monotonic() - memo[1]) < TEAM_MEMO_TTL_SECONDS:
+        return memo[0]
+    team = _bootstrap_team()
+    if team:
+        _TEAM_MEMO = (team, time.monotonic())
+    return team
 
 
 def _authority_definition_id(team: Optional[str] = None) -> Optional[str]:
@@ -935,6 +999,12 @@ def _authority_definition_id(team: Optional[str] = None) -> Optional[str]:
     "no channel". Callers must not treat it as permission to fall back to a
     name lookup; see :func:`_resolve_definition_id`."""
     team = team or _coord_team()
+    if not team:
+        logger.warning(
+            "annotations: no coord team (FULCRA_COORD_TEAM unset and %s "
+            "unreadable); the channel authority is UNKNOWN, not absent",
+            _BOOTSTRAP_PATH)
+        return None
     memo = _AUTHORITY_MEMO.get(team)
     if memo and (time.monotonic() - memo[1]) < AUTHORITY_MEMO_TTL_SECONDS:
         return memo[0]

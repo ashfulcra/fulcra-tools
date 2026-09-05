@@ -38,7 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="preview adopt-markers mappings without provider or ledger writes",
     )
-    parser.add_argument("--coord-team", default=os.environ.get("COORD_TEAM", "fulcra"))
+    # No hardcoded team: this ships from a public repo, and a default here
+    # points another team's bridge at ours. COORD_TEAM stays first for
+    # back-compat; FULCRA_COORD_TEAM is the fleet-wide name.
+    parser.add_argument(
+        "--coord-team",
+        default=(os.environ.get("COORD_TEAM")
+                 or os.environ.get("FULCRA_COORD_TEAM") or ""))
     parser.add_argument("--source", choices=("engine", "teams"), default="engine")
     parser.add_argument("--principal", default="ash")
     parser.add_argument("--linear-team-id", default=os.environ.get("LINEAR_TEAM_ID"))

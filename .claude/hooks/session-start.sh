@@ -138,7 +138,31 @@ fi
 # a hook that silently fixes things teaches you to stop reading it.
 # An absent config is normal and silent: most boxes have nothing to say here.
 # ---------------------------------------------------------------------------
+# The team may not be in the environment at all — environment changes reach a
+# container only at start, so a box can be authenticated and still not know
+# which team it belongs to. When that happens, read the account-level pointer
+# at the store ROOT. It is deliberately not under /team/<team>/: a process that
+# does not know its team cannot look under a path keyed by the answer.
+#
+# What is resolved here is exported through $CLAUDE_ENV_FILE, the supported
+# mechanism for a SessionStart hook to set variables for the session, so the
+# rest of the session sees it without anything being written to a shell profile.
 team="${FULCRA_COORD_TEAM:-}"
+coordinator="${FULCRA_COORD_COORDINATOR:-}"
+if [ -z "$team" ] && [ "$have_creds" = "1" ] && command -v fulcra-api >/dev/null 2>&1; then
+  bp="/tmp/coord-bootstrap.$$.json"
+  if fulcra-api file download /coord-bootstrap.json "$bp" >/dev/null 2>&1; then
+    team=$(python3 -c 'import json,sys;print((json.load(open(sys.argv[1])).get("team") or "").strip())' "$bp" 2>/dev/null)
+    coordinator=$(python3 -c 'import json,sys;print((json.load(open(sys.argv[1])).get("coordinator") or "").strip())' "$bp" 2>/dev/null)
+    [ -n "$team" ] && say "team resolved from the store pointer: ${team}"
+  fi
+  rm -f "$bp"
+fi
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  [ -n "$team" ] && echo "export FULCRA_COORD_TEAM=${team}" >> "$CLAUDE_ENV_FILE"
+  [ -n "$coordinator" ] && echo "export FULCRA_COORD_COORDINATOR=${coordinator}" >> "$CLAUDE_ENV_FILE"
+fi
+
 if [ -n "$team" ] && [ "$have_creds" = "1" ] && command -v fulcra-api >/dev/null 2>&1; then
   cfg="/tmp/session-config.$$.json"
   if fulcra-api file download "/team/${team}/_coord/bus-v3/session-config.json" "$cfg" >/dev/null 2>&1; then
