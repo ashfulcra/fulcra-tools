@@ -1696,6 +1696,38 @@ and on every mesh channel read that returns zero records. A reader above this
 surface must either guess or degrade — ours degrades, which is why one such
 directory takes a whole section down.
 
+### Never put the head sha in `--of`
+
+`review request` advances a round only when `--of` is **byte-identical** to the
+round that opened the register. So an `--of` that embeds the head — *"branch
+docs-qa/2026-09-05 at d02ab079 — …"* — is a string you must keep passing
+verbatim at round 2, 3, 4, while `--head` moves past it. The register then
+carries an `of` field naming a commit that is no longer the head: correct by the
+contract, and a lie to any reader who trusts it.
+
+Describe the artifact in `--of` (branch, path, PR number) and let `--head` carry
+the revision. Learned 2026-09-05T08:20Z advancing
+`docs-qa-2026-09-05-historical-banners` to round 2.
+
+### Verify a sample, then state the sample — a quantifier is its own claim
+
+Measured ten absent modules and wrote **"every module and test file this plan
+names is absent."** codex-reviewer filed CHANGES and was right: the plan names
+**50** `.py` paths, of which **30 exist** — `cli.py`, `transport.py`,
+`records.py`, `projection.py`, `review.py`, `budget.py` among them. The evidence
+supported "these ten are absent"; the sentence claimed something forty paths
+wider that nothing had checked.
+
+The same banner also said the package holds 46 modules. It holds **49**, at both
+heads — so not even a head mismatch, just a number read off an `ls` of basenames
+and eyeballed instead of computed.
+
+Both errors landed in a document written to stop other agents believing false
+claims, one day after the identical over-generalisation was corrected in the
+coord spec. **"Every", "all", "none" and "always" are separate claims from the
+instances that suggested them, and they need separate evidence.** Counts get
+computed, never estimated from a printed list.
+
 ### A verdict is lifted by a link, never by a clock
 
 Ratified 2026-09-05T04:20Z, amending coord-boss ruling `b99fb8da`.
