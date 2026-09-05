@@ -253,6 +253,32 @@ under `skills/`, each package with its own README, build, and tests.
   SUPPRESSOR and is never written for a notice that reached nobody, a
   closed-loop role re-surfaces every sweep, `escalate` reports
   `undelivered=N`, and the verb exits 3.
+- **`escalate` does not restate a vacancy that is already on the board.** The
+  vacancy title embeds the date, so the slug differs every day and the
+  per-slug existence check on `dst` (a classified `read_classified(dst)` since
+  PR 694; a bare `read(dst) is None` before it) can never match across days; the daily
+  marker suppresses only WITHIN a day. Measured result: 117 open ROLE VACANT
+  rows carrying 12 distinct facts, growing 2-6/day fleetwide. A state-change
+  guard (`roles.vacancy_already_open`) now skips minting while a row for that
+  role is open, and prints `ALREADY OPEN` when it fires — a suppressor that
+  says nothing is indistinguishable from a sweep that never ran. Three
+  properties are load-bearing and must survive any edit:
+  - **Role matching is EXACT, never a prefix.** A prefix test would let
+    `codex-reviewer` suppress `codex-reviewer-2`; an identity transform used to
+    suppress an alarm has to be injective or it hides what it was not asked to.
+  - **An unreadable listing does NOT suppress.** UNKNOWN silencing an alarm is
+    worse than a duplicate row, so the guard falls through to minting and says
+    it skipped.
+  - **Closed-loop vacancies are EXEMPT** — that is what the `re-surfaces every
+    sweep` clause above is FOR. The notice reached nobody, so there the repeat
+    IS the delivery, and suppressing it would silence the only retry.
+  This is not a change to re-notify: `directives.renotify` is "a strict filter
+  OVER inbox", a read-side fold that writes nothing and keeps surfacing ONE
+  unacked directive. `escalate` was re-MINTING, which is a different mechanism
+  that shared the name. Suppressing the re-mint costs no visibility, because
+  the standing row is unacked and the fold surfaces it anyway. The skill prose
+  (`skills/fulcra-agent-roles/`) carries the same condition, since a hand-written
+  inbox drop would re-create the debt the engine guard removes.
 - The `no-team-internals` CI guard PROVES it can fail before it reports clean.
   `scripts/no-team-internals.sh` runs `--self-test` first: it stages a fixture
   carrying a public IP and a session ref, asserts the scan flags both, and only

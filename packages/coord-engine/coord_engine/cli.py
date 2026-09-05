@@ -12036,7 +12036,11 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     today, write the marker + a P1 directive to the role's maintainer.
     Heartbeat-safe (idempotent per day)."""
     now = _iso(_now()); today = _now().strftime("%Y-%m-%d")
-    escalated = checked = undelivered = 0
+    escalated = checked = undelivered = suppressed = 0
+    # Listed lazily ONCE per sweep, not per role. None = not looked yet;
+    # the failed flag keeps 'could not look' distinct from 'nothing open'.
+    _vacancy_open_slugs: Optional[list[str]] = None
+    _vacancy_listing_failed = False
     try:
         entries = transport.list_dir(f"team/{args.team}/roles/")
     except TransportError:
@@ -12232,6 +12236,52 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                   f"lapsed, the job did not. Escalation suppressed — ask for a "
                   f"lease renewal.", file=sys.stderr)
             continue
+        # STATE-CHANGE GUARD (coord-boss ruling 11a4720d, 2026-09-02). The title
+        # below embeds `today`, so every sweep mints a NEW slug and the
+        # `transport.read(dst) is None` guard further down can never match across
+        # days; `marker_exists_today` only suppresses WITHIN a day. Measured:
+        # 117 open rows carrying 12 distinct facts, +2-6/day fleetwide. While a
+        # vacancy row for this role is already open, a restatement adds no fact.
+        #
+        # FAIL DIRECTION IS DELIBERATE. If the board cannot be listed we do NOT
+        # suppress — an unreadable listing is UNKNOWN, and letting UNKNOWN
+        # silence an alarm is strictly worse than minting a duplicate. The
+        # listing raises rather than returning empty precisely so this branch
+        # can tell "nothing open" from "could not look".
+        # A CLOSED-LOOP vacancy is EXEMPT. When the notice is addressed to the
+        # role's own lapsed holder it reached nobody, and the deliberate design
+        # (see the marker comment below) is to re-surface it every sweep until
+        # the `maintainer:` field is fixed. Suppressing a restatement there
+        # would silence the only mechanism that retries an undelivered alarm —
+        # the guard would be removing a row that carries no NEW fact but IS the
+        # delivery. Guarding the case I was thinking about and breaking its
+        # neighbour is a failure mode I have shipped before; the existing test
+        # `test_the_self_addressed_retry_still_redelivers_a_live_vacancy` is
+        # what caught it here.
+        _guard_maintainer = str(reg.get("maintainer") or _human())
+        _guard_closed_loop = _is_self_addressed_vacancy(_guard_maintainer, leases)
+        if _vacancy_open_slugs is None and not _guard_closed_loop:
+            try:
+                _vacancy_open_slugs = [
+                    str(e.get("name") or "").removesuffix(".md")
+                    for e in transport.list_dir(f"team/{args.team}/task/")]
+            except Exception as exc:  # noqa: BLE001 — see FAIL DIRECTION above
+                _vacancy_open_slugs = []
+                _vacancy_listing_failed = True
+                print(f"escalate: {role} state-change guard SKIPPED — task "
+                      f"listing unreadable ({type(exc).__name__}); minting "
+                      f"rather than letting UNKNOWN silence an alarm",
+                      file=sys.stderr)
+        if (not _guard_closed_loop and not _vacancy_listing_failed
+                and _vacancy_open_slugs is not None
+                and roles.vacancy_already_open(_vacancy_open_slugs, role)):
+            # Positive heartbeat: a suppressor that prints nothing is
+            # indistinguishable from a sweep that never ran.
+            print(f"escalate: {role} vacancy ALREADY OPEN — suppressed a "
+                  f"restatement (state-change guard); the standing row is the "
+                  f"live one", file=sys.stderr)
+            suppressed += 1
+            continue
         # The `ROLE VACANT ...` slug family is a CONTRACT (dedupe key, existing
         # queries, day-over-day re-notify). Keep it; change only the claim made
         # after it, which is the part that was false.
@@ -12405,6 +12455,10 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
                   undelivered=undelivered,
                   attendance=f"{_att_scanned}/{_att_total}",
                   degraded=1 if (att_cut or undelivered) else 0)
+    if suppressed:
+        print(f"escalate: {suppressed} restatement(s) suppressed by the "
+              f"state-change guard (a row for that role was already open)",
+              file=sys.stderr)
     print(f"escalate: {checked} role(s) checked, {escalated} escalated"
           + (f", {undelivered} UNDELIVERED (closed loop)" if undelivered else ""))
     if att_cut:

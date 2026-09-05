@@ -51,7 +51,11 @@ it. The raw per-role equivalent:
 # 1. first-writer-wins daily marker (dedupe)
 fulcra-api file upload /tmp/escalation.md \
   "team/<team>/roles/reviewer/escalations/$(date -u +%Y-%m-%d).md"
-# 2. notify the maintainer via the teams inbox lifecycle
+# 2. notify the maintainer via the teams inbox lifecycle — ONLY IF no vacancy
+#    notice for this role is already open. An open unacked notice keeps
+#    surfacing on its own; re-notify SURFACES an unacked directive (a read-side
+#    fold, see directives.py) rather than minting a second one. Restating a
+#    standing vacancy daily is what turned 12 facts into 117 rows.
 fulcra-api file upload /tmp/notice.md \
   "team/<team>/member/<maintainer>/inbox/$(date -u +%Y%m%d-%H%M%S)_<you>_role-vacant-reviewer.md"
 ```
