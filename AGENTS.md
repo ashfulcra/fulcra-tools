@@ -1616,3 +1616,30 @@ Canonical home for the durable facts about `packages/coord-fold` (plan `docs/sup
 **Trust model of the ship gate (r34).** It defends against the mutable tool environment, PATH/env resolution, and world-writable or cross-user temp locations. It does not defend against a concurrent same-user process on the gate host (which could replace the gate itself), and claims no pathname binding against one. Its temp root is a gate-created 0700 directory under `~/.local/state/coord-fold/tmp` (an inherited `TMPDIR` is ignored); the engine child gets its CLI as an absolute path in `FULCRA_CLI_COMMAND` with an empty PATH; downloaded bodies are checked for owner, mode and non-link status immediately before being read.
 
 **Ship gates (ruling `6bb7fa0f`, 2026-09-05).** Task 1b (the proof) and Task 16 (`scripts/ship_check.py`: the engine's folded APPROVED result on the EXACT commit, both required reviewers' winning shards quoting `git rev-parse HEAD:packages/coord-fold`, an approved+pinned engine attested by the gate's own interpreter through a verified-bytes importer, trust roots stated as absolute paths `--git`/`--fulcra-api`) gate SHIPMENT, never the start of work. G24: a plan revision is filed only with Task 0 (`scripts/materialize_plan.py`) green.
+
+## coord bus-v4 bridge — Tasks 12–14 of the coord-fold plan (2026-09-05)
+
+The old bus (bus-v3) and the new annotation-native plane (bus-v4, folded by `packages/coord-fold`) run in
+parallel until cutover. Three engine verbs make the parallel run measurable; none of them changes what the fleet
+acts on today.
+
+- **Channel.** bus-v4 is the data type named in `team/<team>/_coord/bus-v4/records.json` (`data_type`,
+  `api_version`). No config → nothing mirrors, nothing seeds. Never hardcode it.
+- **Dual-emit (Task 13).** `coord_engine/dual_emit.py::mirror` is called once at the end of
+  `records.emit_event`, the engine's single write chokepoint, so every bus write is mirrored without any verb
+  opting in: `directive→open`, `response→close`, `claim→claim`, `verdict→note`, eight-field payload
+  `{v, at, from, to, kind, slug, pri, ptr}`. A mirror failure never fails the v3 write.
+- **Seed (Task 12).** `obligations <team> --agent <a> --export-open` writes one bus-v4 `open` per slug the old
+  fold says the agent owes, idempotent via `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). Refuses on an
+  UNKNOWN old fold — a seed from a partial answer would enshrine the gap as absence. Classified as a WRITE.
+- **Comparator (Task 14).** `compare-to-fold <team> --agent <a>`: the old open set vs the coord-fold checkpoint
+  (`team/<team>/member/<agent>/fold/checkpoint.json`) as `(slug, pri, ptr)` tuples; prints `AGREE n=k` or
+  `DIVERGE slugs=[…]`; appends one JSON line to `_coord/bus-v4/compare/<agent>.jsonl`. rc 0/2/3 = agree/diverge/
+  UNKNOWN. A WRITE (it logs).
+- **Cutover check (Task 14).** `cutover-ready <team> --agent <a>` exits 0 only when the trailing AGREE run is
+  ≥ `--min-run` (24) over ≥ `--min-hours` (24), the open set both grew and shrank within it, the divergence/
+  recovery drill is recorded at `_coord/bus-v4/drill/<agent>.md` (G13), and `--ship-check-rc 0` carries the rc of
+  the runbook's `scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs>`. The window flags exist so
+  the operator can compress the window deliberately, never silently. A read.
+- **Activity classification.** `obligations` is MIXED: `--export-open`, `--repair-unknown` and `--seed-checkpoint`
+  each write (two of those already did while the verb classified as a read).

@@ -6644,10 +6644,193 @@ def cmd_obligations_repair(args: argparse.Namespace, transport: Any) -> int:
     return 3 if still else 0
 
 
+def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str, Any]], bool, str]:
+    """The old bus's answer to 'what does this agent owe': the same rows needs-me prints, from the same loader
+    and the same tally, so the seed export and the comparator compare the thing the fleet acts on today.
+    -> (rows, ok, reason)."""
+    now = _iso(_now())
+    rows, rows_ok, rows_reason = _load_rows_status(transport, team)
+    held_roles, _unresolved = _held_roles_for_rows(transport, team, agent, rows, now=now,
+                                                   deadline_seconds=_role_fold_budget())
+    got = _needs_me_rows(transport, team, agent, rows, now=now, held_roles=held_roles)
+    return got, bool(rows_ok), str(rows_reason or "")
+
+
+def _row_tuple(row: dict[str, Any]) -> Optional[tuple[str, str, str]]:
+    slug = row.get("id") or row.get("name")
+    if not slug:
+        return None
+    return (str(slug), str(row.get("priority") or ""), str(row.get("path") or ""))
+
+
+def cmd_obligations_export_open(args: argparse.Namespace, transport: Any) -> int:
+    """`obligations <team> --agent <a> --export-open` — Task 12: seed bus-v4 with this agent's open set.
+
+    One bus-v4 `open` per slug the old fold says this agent owes, the eight-field payload written literally,
+    idempotent via the marker `_coord/bus-v4/seeded/<agent>.md` (re-seeding without --force is refused: a second
+    seed would double every open on the new plane). Classified as a write. Refuses when the old fold is UNKNOWN:
+    seeding from a partial answer would enshrine the gap as absence.
+    """
+    from . import dual_emit
+    team, agent = args.team, _declared_identity(getattr(args, "agent", None))
+    if not agent:
+        print("obligations --export-open: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
+        return 2
+    cfg = dual_emit.v4_config(transport, team)
+    if cfg is None:
+        print(f"obligations --export-open: REFUSED — no bus-v4 config at {dual_emit.V4_CONFIG.format(team=team)}",
+              file=sys.stderr)
+        return 3
+    marker = f"team/{team}/_coord/bus-v4/seeded/{agent}.md"
+    _body, state = transport.read_classified(marker)
+    if state == "error":
+        print(f"obligations --export-open: UNKNOWN — the seed marker {marker} is unreadable; not seeding on a "
+              "read that did not answer", file=sys.stderr)
+        return 3
+    if state == "ok" and not getattr(args, "force", False):
+        print(f"obligations --export-open: already seeded ({marker}); pass --force to re-seed", file=sys.stderr)
+        return 2
+    rows, ok, reason = _old_open_set(transport, team, agent)
+    if not ok:
+        print(f"obligations --export-open: REFUSED — the old fold is UNKNOWN ({reason}); a seed from a partial "
+              "answer would enshrine the gap as absence", file=sys.stderr)
+        return 3
+    at = _iso(_now())
+    written, skipped = 0, []
+    for row in rows:
+        tup = _row_tuple(row)
+        if not tup or tup[1] not in dual_emit.PRIORITIES or not tup[2]:
+            skipped.append(str(row.get("id") or row.get("name") or "?"))
+            continue
+        note = json.dumps(dual_emit.payload(at=at, sender=str(row.get("owner") or "seed"), to=agent, kind="open",
+                                            slug=tup[0], pri=tup[1], ptr=tup[2]), sort_keys=True)
+        if transport.record_write(cfg["data_type"], cfg["api_version"], note, agent):
+            written += 1
+        else:
+            skipped.append(tup[0])
+    doc = (f"# bus-v4 seed for {agent}\n\nat: {at}\nwritten: {written}\nskipped: {len(skipped)}\n"
+           f"source: old fold (needs-me rows)\nslugs skipped (no ptr / bad pri / write unconfirmed): {skipped}\n")
+    if not transport.write(marker, doc):
+        print(f"obligations --export-open: wrote {written} opens but the marker write did NOT confirm — a re-run "
+              "will re-seed; fix the marker first", file=sys.stderr)
+        return 3
+    print(f"obligations --export-open: seeded {written} open(s) for {agent} onto {cfg['data_type']}; "
+          f"skipped {len(skipped)}; marker {marker}")
+    return 0 if not skipped else 2
+
+
+def cmd_compare_to_fold(args: argparse.Namespace, transport: Any) -> int:
+    """`compare-to-fold <team> --agent <a>` — Task 14: the old open set vs coord-fold's checkpoint, as
+    (slug, pri, ptr) tuples. Prints `AGREE n=k` or `DIVERGE slugs=[...]`, appends one JSON line to
+    `_coord/bus-v4/compare/<agent>.jsonl` so cutover-ready can measure the trailing run.
+    rc 0 AGREE, 2 DIVERGE, 3 UNKNOWN (either side unreadable)."""
+    team, agent = args.team, _declared_identity(getattr(args, "agent", None))
+    if not agent:
+        print("compare-to-fold: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
+        return 2
+    rows, ok, reason = _old_open_set(transport, team, agent)
+    if not ok:
+        print(f"compare-to-fold: UNKNOWN — old fold {reason}", file=sys.stderr)
+        return 3
+    body, state = transport.read_classified(f"team/{team}/member/{agent}/fold/checkpoint.json")
+    if state != "ok" or not body:
+        print(f"compare-to-fold: UNKNOWN — coord-fold checkpoint for {agent} is {state}", file=sys.stderr)
+        return 3
+    try:
+        new_open = json.loads(body).get("open") or {}
+    except ValueError:
+        print("compare-to-fold: UNKNOWN — coord-fold checkpoint unparsable", file=sys.stderr)
+        return 3
+    old = {t for t in (_row_tuple(r) for r in rows) if t}
+    new = {(str(slug), str(row.get("pri") or ""), str(row.get("ptr") or ""))
+           for slug, row in new_open.items() if isinstance(row, dict)}
+    only_old, only_new = sorted(old - new), sorted(new - old)
+    agree = not only_old and not only_new
+    line = {"at": _iso(_now()), "agent": agent, "agree": agree, "n": len(old & new),
+            "only_old": [t[0] for t in only_old], "only_new": [t[0] for t in only_new]}
+    log = f"team/{team}/_coord/bus-v4/compare/{agent}.jsonl"
+    prev, pstate = transport.read_classified(log)
+    if pstate == "error":
+        print(f"compare-to-fold: UNKNOWN — compare log {log} unreadable", file=sys.stderr)
+        return 3
+    if not transport.write(log, (prev or "") + json.dumps(line, sort_keys=True) + "\n"):
+        print("compare-to-fold: comparison computed but the log write did not confirm", file=sys.stderr)
+        return 3
+    if agree:
+        print(f"AGREE n={len(old)}")
+        return 0
+    slugs = sorted({t[0] for t in only_old} | {t[0] for t in only_new})
+    print(f"DIVERGE slugs={slugs} only_old={len(only_old)} only_new={len(only_new)}")
+    return 2
+
+
+def cmd_cutover_ready(args: argparse.Namespace, transport: Any) -> int:
+    """`cutover-ready <team> --agent <a>` — Task 14: exit 0 only if the trailing AGREE run is >= --min-run (24),
+    spans >= --min-hours (24), the new open set both grew and shrank within it, the divergence/recovery drill is
+    recorded (`_coord/bus-v4/drill/<agent>.md`), and the ship gate passed (--ship-check-rc 0, the rc of the
+    runbook's `scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs>`). Every failing condition is
+    printed; the window flags exist so the operator can compress the window deliberately, never silently."""
+    from datetime import datetime as _dt
+    team, agent = args.team, _declared_identity(getattr(args, "agent", None))
+    if not agent:
+        print("cutover-ready: --agent or FULCRA_COORD_AGENT required", file=sys.stderr)
+        return 2
+    body, state = transport.read_classified(f"team/{team}/_coord/bus-v4/compare/{agent}.jsonl")
+    if state != "ok" or not body:
+        print(f"cutover-ready: NOT READY — no compare log for {agent} ({state})")
+        return 1
+    lines = []
+    for raw in body.splitlines():
+        try:
+            lines.append(json.loads(raw))
+        except ValueError:
+            continue
+    run: list[dict[str, Any]] = []
+    for entry in reversed(lines):
+        if entry.get("agree") is True:
+            run.append(entry)
+        else:
+            break
+    run.reverse()
+    failures = []
+    min_run, min_hours = int(getattr(args, "min_run", 24)), float(getattr(args, "min_hours", 24.0))
+    span_h = 0.0
+    if len(run) < min_run:
+        failures.append(f"trailing AGREE run is {len(run)} < {min_run}")
+    if run:
+        t0 = _dt.fromisoformat(run[0]["at"].replace("Z", "+00:00"))
+        t1 = _dt.fromisoformat(run[-1]["at"].replace("Z", "+00:00"))
+        span_h = (t1 - t0).total_seconds() / 3600.0
+        if span_h < min_hours:
+            failures.append(f"AGREE span is {span_h:.2f}h < {min_hours}h")
+        ns = [int(e.get("n", 0)) for e in run]
+        grew = any(b > a for a, b in zip(ns, ns[1:]))
+        shrank = any(b < a for a, b in zip(ns, ns[1:]))
+        if not (grew and shrank):
+            failures.append(f"the open set did not both grow and shrink within the run (grew={grew}, shrank={shrank})")
+    _b, dstate = transport.read_classified(f"team/{team}/_coord/bus-v4/drill/{agent}.md")
+    if dstate != "ok":
+        failures.append(f"divergence/recovery drill not recorded (G13): _coord/bus-v4/drill/{agent}.md is {dstate}")
+    rc = getattr(args, "ship_check_rc", None)
+    if rc is None or int(rc) != 0:
+        failures.append(f"ship gate not proven: --ship-check-rc {rc!r} (run scripts/ship_check.py fulcra <HEAD> "
+                        "--git <abs> --fulcra-api <abs> and pass its rc)")
+    if failures:
+        print("cutover-ready: NOT READY")
+        for f in failures:
+            print("  - " + f)
+        return 1
+    print(f"cutover-ready: READY — {len(run)} consecutive AGREE over {span_h:.1f}h, grew and shrank, drill "
+          "recorded, ship gate rc 0")
+    return 0
+
+
 def cmd_obligations_dispatch(args: argparse.Namespace, transport: Any) -> int:
     """Route `obligations` to the corpus fold or the --stream path. A named
     function, not a lambda: the activity-classification pin requires every
     registered command to be classifiable by name."""
+    if getattr(args, "export_open", False):
+        return cmd_obligations_export_open(args, transport)
     if getattr(args, "repair_unknown", False):
         return cmd_obligations_repair(args, transport)
     if getattr(args, "seed_checkpoint", False):
@@ -12910,11 +13093,28 @@ def build_parser() -> argparse.ArgumentParser:
                          "channel forward from its cursor and open only the "
                          "documents the events' ptr names, instead of folding "
                          "the whole task corpus")
+    ob.add_argument("--export-open", action="store_true",
+                    help="Task 12 (plan 2026-09-04-coord-fold): write ONE bus-v4 `open` per slug this agent "
+                         "owes on the old bus, idempotent via _coord/bus-v4/seeded/<agent>.md; --force re-seeds")
+    ob.add_argument("--force", action="store_true", help="with --export-open: re-seed even if the marker exists")
     ob.add_argument("--lookback-hours", type=int, default=168,
                     help="window floor for --stream (default 168h); the window "
                          "is the OLDER of the cursor and this floor")
     add_json(ob)
     ob.set_defaults(func=cmd_obligations_dispatch)
+
+    cf = sub.add_parser("compare-to-fold",
+                        help="Task 14: old open set vs coord-fold checkpoint, as (slug, pri, ptr) tuples")
+    cf.add_argument("team"); cf.add_argument("--agent", required=True)
+    cf.set_defaults(func=cmd_compare_to_fold)
+    cr = sub.add_parser("cutover-ready",
+                        help="Task 14: exit 0 only when the trailing AGREE run, span, growth, drill and ship gate all hold")
+    cr.add_argument("team"); cr.add_argument("--agent", required=True)
+    cr.add_argument("--min-run", type=int, default=24)
+    cr.add_argument("--min-hours", type=float, default=24.0)
+    cr.add_argument("--ship-check-rc", type=int, default=None,
+                    help="the rc of the runbook's ship_check run; 0 is the only passing value")
+    cr.set_defaults(func=cmd_cutover_ready)
 
     sc = sub.add_parser("search", help="substring search over tasks")
     sc.add_argument("team"); sc.add_argument("query"); add_json(sc)
@@ -13541,7 +13741,9 @@ def build_parser() -> argparse.ArgumentParser:
 #: the extracted command modules are imported — see the note down there; that
 #: ordering is load-bearing, not cosmetic.
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
-    cmd_obligations_dispatch, cmd_obligations_stream,
+    # cmd_obligations_dispatch is MIXED (below): `--export-open`, `--repair-unknown` and `--seed-checkpoint`
+    # all write, so the flag decides (Task 12 bridge, 2026-09-05).
+    cmd_obligations_stream, cmd_cutover_ready,
     # NOT cmd_obligations_repair: it exists to MUTATE the checkpoint, so
     # running it is activity. The stream fold's checkpoint advance is
     # incidental to a read; this verb's write is the whole point.
@@ -13580,6 +13782,11 @@ _MIXED_MODE_ACTIVITY: dict[Any, Any] = {
                           or bool(getattr(a, "consume", False))),
     # `inbox TEAM` views; `inbox TEAM --ack SLUG` acknowledges.
     cmd_inbox: lambda a: bool(getattr(a, "ack", None)),
+    # `obligations TEAM` folds (a read); `--export-open` seeds bus-v4, `--repair-unknown` and
+    # `--seed-checkpoint` write the checkpoint — each is activity (Task 12 bridge, 2026-09-05).
+    cmd_obligations_dispatch: lambda a: bool(getattr(a, "export_open", False)
+                                             or getattr(a, "repair_unknown", False)
+                                             or getattr(a, "seed_checkpoint", False)),
     # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
     # defers to the same `_digest_persists` the command branches on.
     cmd_digest: lambda a: _digest_persists(a),
