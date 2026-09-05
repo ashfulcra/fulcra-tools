@@ -1109,7 +1109,24 @@ def build_forge_projection(
             resp.setdefault(str(slug), set()).add(str(who))
 
     feedback: dict[str, list[dict[str, Any]]] = {}
+    # coord-boss ruling 30be1f8e (2026-09-05): stop re-paying one listing per responsible PR on every pass. Measured
+    # on the live store: 125 responsible PRs cost ~77 s of per-PR listings that almost all come back EMPTY, while ONE
+    # listing of the parent `_coord/forge/feedback/` returns the two PR directories that exist in under a second. So
+    # the parent listing prunes the loop to the PRs that have a feedback directory. An EMPTY or FAILED parent listing
+    # proves nothing (a listing cannot prove absence: it answers identically for a real empty dir and a bad path), so
+    # both fall back to the per-PR loop unchanged — the pruning only ever REMOVES work it has positive evidence for.
+    with_feedback: Optional[set] = None
+    try:
+        parent = transport.list_dir(f"team/{team}/_coord/forge/feedback/")
+        names = {str(e.get("name") or "").rstrip("/") for e in parent if e.get("is_dir") or str(e.get("name") or "").endswith("/")}
+        names.discard("")
+        if names:
+            with_feedback = names
+    except TransportError:
+        with_feedback = None
     for slug in sorted(resp):
+        if with_feedback is not None and slug not in with_feedback:
+            continue                                  # positive evidence: no feedback directory for this PR
         if deadline.expired():
             complete = False
             break
