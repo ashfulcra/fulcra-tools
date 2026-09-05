@@ -7,7 +7,17 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .superpowers/
-.claude/
+# .claude/ is a local working directory (transcripts, caches, per-machine
+# settings) and stays ignored — EXCEPT the two files that must travel with the
+# repo so a fresh container can bootstrap itself without a human: the
+# SessionStart hook and the settings that register it. A negation cannot reach
+# inside an ignored DIRECTORY, so this is `.claude/*` rather than `.claude/`.
+# settings.local.json stays ignored deliberately: it is the per-machine
+# permission-grant file and must never be shared between boxes.
+.claude/*
+!.claude/hooks/
+!.claude/settings.json
+.claude/settings.local.json
 
 # AI / planning working artifacts — kept locally, never committed.
 # These are the brainstorm specs, subagent execution plans, and
