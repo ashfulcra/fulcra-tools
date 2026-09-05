@@ -857,7 +857,8 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
     ok = "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x\n"
     assert f(ok) == [] and f("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x --git /usr/bin/git\n") == []          # order-independent
     assert f("scripts/ship_check.py fulcra <HEAD> --git=/usr/bin/git --fulcra-api=/x\n") == []                             # the = form
-    assert f("scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs path>\n") == []                            # documentation placeholders
+    assert f("scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs path>\n") == []                            # documentation placeholders (allowlisted)
+    assert f("scripts/ship_check.py fulcra " + "e" * 40 + " --git /usr/bin/git --fulcra-api /x\n") == []                    # a real 40-hex head
     bad = {
         "run `scripts/ship_check.py fulcra <HEAD>`\n": "missing --git; missing --fulcra-api",
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git\n": "missing --fulcra-api",
@@ -870,6 +871,8 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
         "scripts/ship_check.py fulcra <HEAD> --git git --fulcra-api fulcra-api\n": "--git value 'git' is not an absolute path",      # codex-coder round 31: relative roots
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x --bogus\n": "unexpected token '--bogus'",            # unknown option
         "scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git --fulcra-api /x extra\n": "unexpected token 'extra'",                # trailing positional
+        "scripts/ship_check.py fulcra deadbee --git /usr/bin/git --fulcra-api /x\n": "head is not 40 hex",                          # codex-coder round 32: 7-hex head
+        "scripts/ship_check.py fulcra <HEAD> --git <abs --bogus> --fulcra-api /x\n": "unexpected token",                             # codex-coder round 32: option hidden in <...>
     }
     for text, why in bad.items():
         got = f(text); assert got and why in got[0], (text, got)
