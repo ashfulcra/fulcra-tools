@@ -23,14 +23,45 @@ INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f
 REQUIRED_ROOTS = ("--git", "--fulcra-api")
 
 
-def missing_roots(rest: str) -> list[str]:
-    """codex-coder round 29: the r33 guard checked only --git, so an invocation missing --fulcra-api passed the guard and
-    died at argparse. Each invocation is PARSED and every required root must be present as its own token."""
-    return [r for r in REQUIRED_ROOTS if not re.search(r"(^|\s)" + re.escape(r) + r"(\s|=|$)", rest)]
+def parse_invocation(rest: str) -> list[str]:
+    """Problems with the SAME-LINE COMMAND SHAPE after `ship_check.py <team> <head>` (codex-coder round 30: r34 only
+    regex-checked that each option NAME appeared; `--git --fulcra-api /x`, a trailing `--fulcra-api`, and a shell
+    comment hiding both flags all passed). A shell comment ends the command; the rest is shlex-tokenized; each
+    required root must appear exactly once with exactly one non-option value (`--git /x` or `--git=/x`)."""
+    import shlex
+    command = rest.split("#", 1)[0]
+    try:
+        toks = shlex.split(command)
+    except ValueError as exc:
+        return [f"unparseable shell syntax ({exc})"]
+    problems = []
+    for root in REQUIRED_ROOTS:
+        values, i = [], 0
+        while i < len(toks):
+            t = toks[i]
+            if t == root:
+                nxt = toks[i + 1] if i + 1 < len(toks) else None
+                if nxt is None or nxt.startswith("--"):
+                    problems.append(f"{root} has no value"); i += 1; continue
+                values.append(nxt); i += 2; continue
+            if t.startswith(root + "="):
+                v = t[len(root) + 1:]
+                (values.append(v) if v else problems.append(f"{root} has no value")); i += 1; continue
+            i += 1
+        if not values and not any(p.startswith(root) for p in problems):
+            problems.append(f"missing {root}")
+        if len(values) > 1:
+            problems.append(f"{root} given {len(values)} times")
+    return problems
 
 
 def bare_invocations(text: str) -> list[str]:
-    return [f"missing {' and '.join(missing_roots(m.group(3)))}: {m.group(0).strip()[:100]}" for m in INVOCATION.finditer(text) if missing_roots(m.group(3))]
+    out = []
+    for m in INVOCATION.finditer(text):
+        problems = parse_invocation(m.group(3))
+        if problems:
+            out.append(f"{'; '.join(problems)}: {m.group(0).strip()[:100]}")
+    return out
 
 
 def refuse_bare_runbook_invocations(plan_text: str) -> list[str]:
