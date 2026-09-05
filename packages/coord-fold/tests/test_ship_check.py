@@ -920,6 +920,11 @@ def test_a_bare_path_reference_in_prose_is_not_an_invocation():
     assert f("see `scripts/ship_check.py` for the gate\n") == []
     assert f("(`scripts/ship_check.py`: the engine's folded result)\n") == []
     assert f("run `scripts/ship_check.py`\n")[0].startswith("line 1: missing team; missing head")
+    # r40 (codex-coder round 35): an executable form in command position expresses execution even with no positionals
+    assert f("./scripts/ship_check.py\n")[0].startswith("line 1: missing team; missing head")
+    assert f("/opt/gate/scripts/ship_check.py\n")[0].startswith("line 1: missing team; missing head")
+    assert f("../scripts/ship_check.py fulcra\n")[0].startswith("line 1: missing head")
+    assert f("the file `scripts/ship_check.py` holds the gate\n") == []                                # still a reference (repo prose backticks paths)
 
 
 def test_a_failed_acl_inspection_or_removal_refuses_instead_of_reading_as_no_acl(tmp_path, monkeypatch):
