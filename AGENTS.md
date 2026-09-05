@@ -179,11 +179,24 @@ under `skills/`, each package with its own README, build, and tests.
 - One command: **`bash scripts/setup.sh`** — installs the right Python + `uv`
   extras + the `fulcra` CLI, then runs the suite to verify (macOS-first; the
   menubar's PyObjC deps are macOS-only).
-- The manual equivalent is **`uv sync --all-packages --all-extras`**. Bare
-  `uv sync` is NOT enough — pytest lives in each package's `dev` extra and
-  PyObjC/rumps in the `macos` extra, so a bare sync fails tests with
-  `Failed to spawn: pytest` and the menu-bar can't import. Any sync must keep
-  `--all-extras` or it prunes pytest + PyObjC back out.
+- The manual equivalent is **OS-dependent, and the difference is silent** —
+  which is the whole reason this bullet is two paragraphs.
+  - **macOS**: `uv sync --all-packages --all-extras`. Bare `uv sync` is NOT
+    enough — pytest lives in each package's `dev` extra and PyObjC/rumps in the
+    `macos` extra, so a bare sync fails tests with `Failed to spawn: pytest` and
+    the menu-bar can't import. Any sync must keep `--all-extras` or it prunes
+    pytest + PyObjC back out.
+  - **Linux**: `uv sync --all-packages`, then select the dev extra at RUN time:
+    `uv run --all-packages --extra dev python -m pytest packages/ -q`. This is
+    what the Linux workflows do (`uv-workspace.yml`, `coord-fold-proof.yml`).
+    Do NOT use `--all-extras` here: it pulls the `macos` extra, whose PyObjC
+    wheels build by shelling out to `/usr/bin/sw_vers`, which does not exist on
+    Linux. The build dies with `FileNotFoundError` and **nothing is installed**.
+    That failure does not look like a failure afterwards: it leaves a `.venv`
+    containing `python` and nothing else, so `ls .venv` succeeds, the venv
+    "exists", and the next thing to run is a test that cannot import anything.
+    Measured here on 2026-09-05 — the macOS line above was followed on a Linux
+    container and produced exactly that.
 - Run tests: `uv run pytest packages/ -q` (a couple of minutes,
   and must NOT hit the network — a network-bound run is the bug, not slowness).
 - Editable install: the `.venv` imports the live workspace source, so a code
