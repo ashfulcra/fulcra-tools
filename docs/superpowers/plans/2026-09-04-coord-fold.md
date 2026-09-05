@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r14)
+# coord-fold: Coord on Annotations Implementation Plan (r15)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -115,21 +115,22 @@ import re
 import subprocess
 import sys
 
-TAG = re.compile(r"#\s*(packages/coord-fold/\S+)")
 TICKS = "`" * 3                                  # never spelled literally: this file lives inside a fence
-FENCE = re.compile(TICKS + r"(python|toml)\n(.*?)" + TICKS, re.S)
-GATES = ["tests/test_structural.py", "tests/test_tripwire.py", "tests/test_ship_check.py",
-         "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]   # test_ci_wiring.py runs in the repo, where .github exists
+FENCE = re.compile(TICKS + r"(python|toml|yaml)\n(.*?)" + TICKS, re.S)
+TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # workflow YAML materializes too, so the wiring test runs here
+GATES = ["tests/test_structural.py", "tests/test_tripwire.py", "tests/test_ship_check.py", "tests/test_ci_wiring.py",
+         "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]
 PROOF = "tests/proof/run_proof.py"   # G29; exits 3 = UNKNOWN where no OS sandbox exists — never read as green
 
 
 def materialize(plan: str, out: pathlib.Path) -> tuple[list[str], list[str]]:
     written, untagged = [], []
-    for _lang, body in FENCE.findall(plan):
+    for lang, body in FENCE.findall(plan):
         first, _, rest = body.partition("\n")
         m = TAG.match(first)
         if not m:
-            untagged.append(first[:70])
+            if lang != "yaml":                       # a YAML snippet (a CI step to add) is prose; whole workflows are tagged
+                untagged.append(first[:70])
             continue
         target = out / m.group(1)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1107,7 +1108,9 @@ CI step in `.github/workflows/uv-workspace.yml` after the pytest step:
             packages/coord-fold/tests/test_structural.py \
             packages/coord-fold/tests/test_tripwire.py \
             packages/coord-fold/tests/test_file_size_ceiling.py \
-            packages/coord-fold/tests/test_no_degraded_vocabulary.py -q
+            packages/coord-fold/tests/test_no_degraded_vocabulary.py \
+            packages/coord-fold/tests/test_ship_check.py \
+            packages/coord-fold/tests/test_ci_wiring.py -q
 ```
 
 **The proof runs on a real macOS job** *(r13, codex-reviewer: an `if: runner.os == 'macOS'` step inside a workflow whose only job is `ubuntu-latest` always skips)* — its own always-on workflow, no `paths-ignore`, modelled on `uv-workspace.yml`:
@@ -1143,9 +1146,11 @@ jobs:
 
 ```python
 # packages/coord-fold/tests/test_ci_wiring.py
-"""The proof must be run by a job on a macOS runner with no `if:` that can skip it. Honest status:
-a green run of this workflow in CI has NOT yet been observed; the G29 gate is the PASSED record from
-a host, and this test only keeps the CI wiring from rotting."""
+"""The proof must be run by a job whose ACTUAL `runs-on` is a macOS runner, with no `if:` that can
+skip the step. *(r15, codex-reviewer round 14: `"macos" in job` matched a comment; and this test was
+run by nothing.)* It runs from the always-on uv-workspace job and from Task 0 (which materializes the
+workflow), so deleting the proof workflow turns a required gate red. Honest status: a green run of
+the proof workflow in CI has NOT yet been observed; the G29 gate is the PASSED record from a host."""
 import pathlib
 import re
 
@@ -1153,14 +1158,27 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 
+def _jobs(text):
+    """Split a workflow into its jobs (2-space-indented keys under `jobs:`), comments stripped."""
+    body = re.sub(r"(?m)^\s*#.*$", "", text)
+    m = re.search(r"(?m)^jobs:\s*$", body)
+    if not m:
+        return []
+    jobs_text = body[m.end():]
+    return [j for j in re.split(r"(?m)^  (?=[A-Za-z_][A-Za-z0-9_-]*:\s*$)", jobs_text) if j.strip()]
+
+
 def test_a_macos_job_runs_the_proof_unconditionally():
-    hits = []
+    found = []
     for wf in sorted(WORKFLOWS.glob("*.yml")):
-        text = wf.read_text()
-        for job in re.split(r"\n  (?=[A-Za-z_-]+:\n)", text):
-            if "tests/proof/run_proof.py" in job:
-                hits.append((wf.name, "macos" in job, bool(re.search(r"^\s+if:", job, re.M))))
-    assert any(h[1] and not h[2] for h in hits), f"no unconditional macOS job runs the proof: {hits}"
+        for job in _jobs(wf.read_text()):
+            if "tests/proof/run_proof.py" not in job:
+                continue
+            runs_on = re.search(r"(?m)^\s+runs-on:\s*(\S+)", job)
+            step_if = re.search(r"(?m)^\s+if:", job)
+            found.append((wf.name, runs_on.group(1) if runs_on else None, bool(step_if)))
+    ok = [f for f in found if f[1] and f[1].startswith("macos") and not f[2]]
+    assert ok, f"no job with runs-on: macos-* runs the proof unconditionally; found {found}"
 ```
 
 Mutation: append 401 comment lines to `__init__.py` → FAILS. **Commit.**
@@ -2109,7 +2127,7 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 1. **When.** Only after implementation, on the **exact implementation commit** `<HEAD>` (40-hex) whose on-disk `packages/coord-fold/` is what ships. Never at plan time. Reading the materialized plan tree earlier is welcome as *feedback* and **carries nothing**.
 2. **Register.** `coord-engine review request fulcra coord-fold-ship-<HEAD> --of packages/coord-fold --head <HEAD> --reviewer codex-reviewer --reviewer codex-coder`. The engine's `--head` keying means any head change is a new round with no verdicts.
 3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file with the **typed verb, nothing hand-uploaded**: `coord-engine review verdict fulcra coord-fold-ship-<HEAD> --head <HEAD> --verdict approve --from <reviewer> --note "tree: <git rev-parse <HEAD>:packages/coord-fold> …reading…"`. The engine writes an **append-only envelope** `verdicts/<HEAD>--<reviewer>--<UTC timestamp>-<nonce>.md` (as every verdict on this plan's register demonstrates); the `tree:` line in the note is the evidence. A verdict whose `tree` differs from the commit's is void.
-4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` *(r14, codex-coder round 13: the r13 script read a plain `<HEAD>--<reviewer>.md` the typed verb never writes and would have refused forever)* exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the latest envelope for that head** (ISO timestamps in the filename sort lexically) says `approve` and quotes the commit's tree hash. Any absence — no envelope, no fold, a list that fails — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
+4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite:** `review status --json` exposes `winning` and orders same-second shards by the microsecond `ts` the verb now writes — `ashfulcra/fulcra-tools` branch `review-winning-envelope` @ `e9c0089b` (register `review-winning-envelope-e9c0089b`, pending both reviewers; pin moves in its own PR). An engine without `winning` is **UNKNOWN → refuse**. Any absence — no `winning`, no fold, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
 
 | Module | The reviewer confirms, by reading the shipped tree |
 |---|---|
@@ -2124,8 +2142,9 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 ```python
 # packages/coord-fold/scripts/ship_check.py
 """Task 16 ship check. Exit 0 only with BOTH required responsibility-distribution approvals on the EXACT
-commit — taken from the engine's folded result AND from the latest append-only verdict envelope per
-reviewer, each quoting that commit's tree hash for packages/coord-fold. Fails closed on any absence.
+commit — the engine's folded result AND, per reviewer, the exact WINNING shard the fold kept (never a
+refold of filenames here), each quoting that commit's tree hash for packages/coord-fold.
+Fails closed on any absence, including an engine that does not expose `winning`.
 Usage: python scripts/ship_check.py <team> <40-hex head>"""
 import json
 import re
@@ -2133,23 +2152,11 @@ import subprocess
 import sys
 
 REQUIRED = ("codex-reviewer", "codex-coder")
-ENVELOPE = re.compile(r"^(?P<head>[0-9a-f]{40})--(?P<reviewer>[A-Za-z0-9_-]+)--(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)-(?P<nonce>[0-9a-f]+)\.md$")
 
 
 def sh(*argv):
     p = subprocess.run(list(argv), capture_output=True, text=True)
     return p.returncode, p.stdout.strip(), p.stderr.strip()
-
-
-def latest_envelope(names, head, reviewer):
-    """The newest append-only envelope for (head, reviewer), or None. Names come from a listing whose
-    emptiness cannot prove absence — but here absence is a refusal either way."""
-    hits = []
-    for n in names:
-        m = ENVELOPE.match(n.strip().split()[-1] if n.strip() else "")
-        if m and m.group("head") == head and m.group("reviewer") == reviewer:
-            hits.append((m.group("ts"), m.group(0)))
-    return max(hits)[1] if hits else None
 
 
 def main(team: str, head: str) -> int:
@@ -2172,25 +2179,29 @@ def main(team: str, head: str) -> int:
         fold = {}
     if not fold:
         print(f"ship_check: no folded review result for {slug} ({err[:80]})"); return 1
+    winning = fold.get("winning")
+    if not isinstance(winning, dict):
+        print("ship_check: UNKNOWN — this engine does not expose `winning` (needs review-winning-envelope); refusing rather than refolding filenames"); return 1
     ok = True
     if fold.get("state") != "APPROVED" or fold.get("head") != head or set(REQUIRED) - set(fold.get("approvals", [])):
         print(f"ship_check: folded result is {fold.get('state')} on head {fold.get('head')} with approvals {fold.get('approvals')}"); ok = False
-    rc, listing, err = sh("fulcra-api", "file", "list", f"team/{team}/review/{slug}/verdicts/")
-    names = listing.splitlines() if rc == 0 else []
     for reviewer in REQUIRED:
-        env = latest_envelope(names, head, reviewer)
-        if env is None:
-            print(f"ship_check: no verdict envelope from {reviewer} for {head}"); ok = False; continue
-        rc, body, err = sh("fulcra-api", "file", "download", f"team/{team}/review/{slug}/verdicts/{env}", "/dev/stdout")
+        win = winning.get(reviewer) or {}
+        name = win.get("name")
+        if not name or not name.startswith(f"{head}--{reviewer}--"):
+            print(f"ship_check: no winning shard from {reviewer} for {head} (fold says {win})"); ok = False; continue
+        if win.get("verdict") != "approve":
+            print(f"ship_check: {reviewer}'s winning shard {name} is {win.get('verdict')}, not approve"); ok = False
+        rc, body, err = sh("fulcra-api", "file", "download", f"team/{team}/review/{slug}/verdicts/{name}", "/dev/stdout")
         if rc:
-            print(f"ship_check: cannot read {env} ({err[:80]})"); ok = False; continue
+            print(f"ship_check: cannot read {name} ({err[:80]})"); ok = False; continue
         verdict = re.search(r"^verdict:\s*(\S+)", body, re.M)
         quoted = re.search(r"^\s*tree:\s*([0-9a-f]{40})", body, re.M)
         if not verdict or verdict.group(1) != "approve":
-            print(f"ship_check: {reviewer}'s latest envelope {env} is {verdict.group(1) if verdict else 'missing'}, not approve"); ok = False
+            print(f"ship_check: {name} says {verdict.group(1) if verdict else 'nothing'}, not approve"); ok = False
         if not quoted or quoted.group(1) != tree:
             print(f"ship_check: {reviewer} quotes tree {quoted.group(1) if quoted else 'none'}, the commit's is {tree}"); ok = False
-    print("ship_check: OK — folded APPROVED and both latest envelopes approve this exact head and tree" if ok else "ship_check: REFUSED")
+    print("ship_check: OK — folded APPROVED and both winning shards approve this exact head and tree" if ok else "ship_check: REFUSED")
     return 0 if ok else 1
 
 
@@ -2200,8 +2211,9 @@ if __name__ == "__main__":
 
 ```python
 # packages/coord-fold/tests/test_ship_check.py
-"""End-to-end over REAL append-only envelope names (codex-coder round 13): both exact-head/tree
-approvals -> 0; head change, changes verdict, missing reviewer, dirty package, tree mismatch -> 1."""
+"""End-to-end over REAL append-only envelope names. The script consumes `winning` from the typed
+surface and never refolds: a same-second earlier APPROVE with a lexically larger digest cannot beat
+the later CHANGES the fold kept (both reviewers, round 14)."""
 import importlib.util
 import json
 import pathlib
@@ -2215,12 +2227,15 @@ HEAD = "e67ac6474ebb38a93bc747afd422dfd6935998bc"
 OTHER = "b6d867d96abf91ef2d82f066bf2e4977429cbe54"
 TREE = "1111111111111111111111111111111111111111"
 ENV = {r: f"{HEAD}--{r}--2026-09-05T01:00:24Z-626c9635.md" for r in ("codex-reviewer", "codex-coder")}
+APPROVE = f"verdict: approve\ntree: {TREE}"
 
 
 def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "codex-coder"), fold_head=HEAD,
-          names=None, bodies=None):
-    names = list(ENV.values()) if names is None else names
-    bodies = bodies or {n: f"---\nverdict: approve\n---\ntree: {TREE}\nread the tree" for n in names}
+          winning=None, bodies=None):
+    if winning is None:
+        winning = {r: {"name": n, "verdict": "approve", "sort_key": "2026-09-05T01:00:24.000000Z"} for r, n in ENV.items()}
+    if bodies is None:
+        bodies = {w["name"]: APPROVE for w in winning.values() if w.get("name")} if isinstance(winning, dict) else {}
     def fake_sh(*argv):
         a = list(argv)
         if a[:2] == ["git", "rev-parse"] and a[2] == "HEAD":
@@ -2230,9 +2245,10 @@ def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "
         if a[:2] == ["git", "rev-parse"]:
             return 0, TREE, ""
         if a[:3] == ["coord-engine", "review", "status"]:
-            return 0, json.dumps({"state": state, "head": fold_head, "approvals": list(approvals)}), ""
-        if a[:3] == ["fulcra-api", "file", "list"]:
-            return 0, "\n".join(f"1KiB    2026-09-05 01:00AM UTC  {n}" for n in names), ""
+            fold = {"state": state, "head": fold_head, "approvals": list(approvals)}
+            if winning != "absent":
+                fold["winning"] = winning
+            return 0, json.dumps(fold), ""
         if a[:3] == ["fulcra-api", "file", "download"]:
             n = a[3].rsplit("/", 1)[-1]
             return (0, bodies[n], "") if n in bodies else (1, "", "Error: File not found")
@@ -2249,26 +2265,37 @@ def test_both_exact_head_and_tree_approvals_pass(monkeypatch, capsys):
     assert run(monkeypatch) == 0 and "OK" in capsys.readouterr().out
 
 
-def test_latest_envelope_wins_over_an_older_changes(monkeypatch):
-    old = f"{HEAD}--codex-coder--2026-09-05T00:29:53Z-64b9c78b.md"
-    names = list(ENV.values()) + [old]
-    bodies = {n: f"verdict: approve\ntree: {TREE}" for n in ENV.values()}
-    bodies[old] = f"verdict: changes\ntree: {TREE}"
-    assert run(monkeypatch, names=names, bodies=bodies) == 0
+def test_same_second_earlier_approve_with_larger_digest_does_not_beat_the_winning_changes(monkeypatch, capsys):
+    """The round-14 hole. The fold (engine) kept the later CHANGES (digest 058ddb93) and says so in
+    `winning`; the earlier APPROVE (feb86aee) exists too. The script must read winning, never max(name)."""
+    later_changes = f"{HEAD}--codex-coder--2026-09-05T01:32:10Z-058ddb93.md"
+    earlier_approve = f"{HEAD}--codex-coder--2026-09-05T01:32:10Z-feb86aee.md"
+    winning = {"codex-reviewer": {"name": ENV["codex-reviewer"], "verdict": "approve", "sort_key": "2026-09-05T01:00:24.000000Z"},
+               "codex-coder": {"name": later_changes, "verdict": "changes", "sort_key": "2026-09-05T01:32:10.900000Z"}}
+    bodies = {ENV["codex-reviewer"]: APPROVE, later_changes: f"verdict: changes\ntree: {TREE}", earlier_approve: APPROVE}
+    assert run(monkeypatch, winning=winning, bodies=bodies, state="CHANGES", approvals=("codex-reviewer",)) == 1
+    assert "058ddb93" in capsys.readouterr().out
 
 
-def test_head_change_refuses(monkeypatch):
-    names = [n.replace(HEAD, OTHER) for n in ENV.values()]
-    assert run(monkeypatch, names=names, bodies={n: f"verdict: approve\ntree: {TREE}" for n in names}, fold_head=OTHER) == 1
+def test_engine_without_winning_is_unknown_and_refuses(monkeypatch, capsys):
+    assert run(monkeypatch, winning="absent") == 1 and "does not expose `winning`" in capsys.readouterr().out
+
+
+def test_winning_shard_on_another_head_refuses(monkeypatch):
+    winning = {r: {"name": n.replace(HEAD, OTHER), "verdict": "approve", "sort_key": "x"} for r, n in ENV.items()}
+    assert run(monkeypatch, winning=winning, bodies={w["name"]: APPROVE for w in winning.values()}, fold_head=OTHER) == 1
 
 
 def test_changes_verdict_refuses(monkeypatch):
-    bodies = {ENV["codex-reviewer"]: f"verdict: approve\ntree: {TREE}", ENV["codex-coder"]: f"verdict: changes\ntree: {TREE}"}
-    assert run(monkeypatch, bodies=bodies, state="CHANGES", approvals=("codex-reviewer",)) == 1
+    winning = {"codex-reviewer": {"name": ENV["codex-reviewer"], "verdict": "approve", "sort_key": "x"},
+               "codex-coder": {"name": ENV["codex-coder"], "verdict": "changes", "sort_key": "x"}}
+    bodies = {ENV["codex-reviewer"]: APPROVE, ENV["codex-coder"]: f"verdict: changes\ntree: {TREE}"}
+    assert run(monkeypatch, winning=winning, bodies=bodies, state="CHANGES", approvals=("codex-reviewer",)) == 1
 
 
 def test_missing_reviewer_refuses(monkeypatch):
-    assert run(monkeypatch, names=[ENV["codex-reviewer"]], approvals=("codex-reviewer",), state="PENDING") == 1
+    winning = {"codex-reviewer": {"name": ENV["codex-reviewer"], "verdict": "approve", "sort_key": "x"}}
+    assert run(monkeypatch, winning=winning, approvals=("codex-reviewer",), state="PENDING") == 1
 
 
 def test_dirty_package_refuses(monkeypatch):
@@ -2280,8 +2307,9 @@ def test_tree_mismatch_refuses(monkeypatch):
     assert run(monkeypatch, bodies=bodies) == 1
 
 
-def test_folded_approved_but_no_envelopes_refuses(monkeypatch):
-    assert run(monkeypatch, names=[]) == 1
+def test_winning_says_approve_but_the_shard_body_does_not_refuses(monkeypatch):
+    bodies = {ENV["codex-reviewer"]: APPROVE, ENV["codex-coder"]: f"verdict: changes\ntree: {TREE}"}
+    assert run(monkeypatch, bodies=bodies) == 1
 ```
 
 
@@ -2310,6 +2338,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r15 (2026-09-05, both reviewers CHANGES on `2446dde8`, round 14):** (1) Same-second shard ordering was by digest in both the engine and `ship_check`; fixed **in the engine** (branch `review-winning-envelope` @ `e9c0089b`: microsecond `ts` in the shard frontmatter, `canonical_sort_key`, `winning` in `review status --json`, six regressions incl. the reverse-digest case, mutation to name-only ties turns four red); `ship_check` now consumes `winning` and never refolds, refusing an engine that lacks it; `test_ship_check.py` adds the same-second regression and the no-`winning` case. (2) The CI wiring test was run by nothing and matched a comment; now it parses the real `runs-on`, runs from the always-on job and from Task 0 (the materializer extracts the workflow YAML), and both mutations — workflow deleted, ubuntu runner with a `macos` comment — are red.
 - **r14 (2026-09-05, codex-coder CHANGES on `e67ac647`, round 13 — operability):** the r13 ship check read `verdicts/<HEAD>--<reviewer>.md`, a file the typed `review verdict --head` never writes (it writes append-only `<HEAD>--<reviewer>--<ts>-<nonce>.md` envelopes, as this register shows), so it would have refused forever. Now it consumes the engine's folded result (`review status --json`: APPROVED on the exact head with both required in `approvals`) AND the latest envelope per reviewer (lexical ISO timestamp), each quoting the commit's tree hash in its `--note`; absence of anything is a refusal. `tests/test_ship_check.py` runs it end to end over real envelope names for eight outcomes. Task 14 calls `scripts/ship_check.py fulcra <HEAD>`.
 - **r13 (2026-09-05, both reviewers CHANGES on `b6d867d9`, round 12; coord-boss `5ccfce26` no waiver):** Task 16 bound to what ships — implementation commit only, ship register keyed by head, verdicts quote head + git tree hash, any head change invalidates, plan-time carry removed, `scripts/ship_check.py` fails closed and `cutover-ready` calls it. The G29 CI step was unreachable (macOS condition inside an ubuntu-only workflow); now its own always-on macOS workflow plus `test_ci_wiring.py`; a green CI run has not yet been observed and the plan says so. Overclaims softened (Goal, pyproject, `__init__`). G13: 24 passes / 24h / injected divergence drill. G34: reconciler separation as an invariant with its evidence. codex-reviewer's §9 items recorded as open items for coord-boss, not decided here.
 - **r12 (2026-09-05, codex-coder CHANGES on `92e838a9`, round 11):** point-probe closure accepted. The remaining P0: the requester's acceptance condition (one big file must not pass) is not waived by a scope ruling. Closed review-shaped, per `f6ceb0c4`'s own constraint: **Task 16**, a required reviewer reads the materialized/shipped tree against a written rubric and files a `responsibility-distribution` verdict; not shippable without it; runnable at plan time on Task 0's tree. G32 rewritten accordingly (the gates do not check this; the review does). Accuracy fix: G29 says five phases.
