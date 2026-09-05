@@ -147,9 +147,17 @@ field, so pointing it at the role itself mails the alert to the very inbox that 
 The engine already computed `escalation_due` above. When it is **true**, perform the single-file actions
 (these are reliable as prose):
 1. Write today's dedupe marker `roles/<name>/escalations/<date>.md` (first-writer-wins).
-2. Drop a message into the maintainer's inbox
-   (`team/<team>/member/<maintainer>/inbox/<YYYYMMDD-HHMMSS>_<you>_role-vacant-<name>.md`) per the
-   `fulcra-agent-teams` inbox lifecycle, stating which role is vacant and for how long.
+2. **Only if no vacancy notice for this role is already open**, drop a message into the maintainer's
+   inbox (`team/<team>/member/<maintainer>/inbox/<YYYYMMDD-HHMMSS>_<you>_role-vacant-<name>.md`) per
+   the `fulcra-agent-teams` inbox lifecycle, stating which role is vacant and for how long.
+
+   **Check first.** A vacancy that is already on the board does not need saying again: an open,
+   unacked notice keeps surfacing on its own (that is what the read-side fold in `directives.py` is
+   for — re-notify *surfaces* an unacked directive, it does not mint a second one). Restating it
+   daily is how 117 open rows came to carry 12 distinct facts. The engine's `escalate` enforces this
+   as a state-change guard; doing it by hand here would re-create the debt the guard removes.
+
+   The **first** notice for a role is the one that carries information — send that one.
 
 ### Park a role (dormancy)
 To deliberately leave a role unattended without alarming — a reviewer on leave, a

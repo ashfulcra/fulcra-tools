@@ -274,3 +274,92 @@ def render_plan(verdicts: list[Verdict], *, applying: bool) -> str:
     if not applying and retirable:
         lines.append("  (dry run — re-run with --apply to write markers)")
     return "\n".join(lines)
+
+
+#: :func:`residue_disposition` answers. The residue pass CLOSES task rows, so the
+#: expensive failure is not "residue survives another pass", it is "a row was
+#: closed while its review still owed a verdict".
+RESIDUE_CLOSE = "close"
+RESIDUE_OPEN = "open"
+RESIDUE_UNRESOLVED = "unresolved-marker"
+RESIDUE_UNKNOWN_PROVENANCE = "unknown-provenance"
+RESIDUE_UNKNOWN = "unknown"
+
+
+class Disposition(NamedTuple):
+    """What the sweep may do with one row, WHY, and the machine-readable answer.
+
+    ``answer`` exists so a scheduled run can report closures split by cause
+    without parsing its own prose. A detector that reports only a total cannot
+    be told apart from a detector that stopped detecting.
+    """
+    kind: str
+    answer: str
+    why: str
+
+
+def residue_disposition(names: Any, *, settled_marker: str,
+                      marker_fm: Any = None,
+                      listing_ok: bool = True) -> "Disposition":
+    """What a residue sweep may do with ONE review-request row, and why.
+
+    ONE decision function, for the same reason :data:`TERMINAL_MARKERS` is a set.
+    The residue pass is the THIRD reader to short-circuit on ``.settled``, and the first
+    two each had to be fixed separately when presence-alone proved unsound (595
+    r4 in the register projection, then again in the fan-out obligation scan). A
+    rule that lives in the residue pass is a rule the next reader silently lacks, so the
+    rule lives here and the residue pass asks it.
+
+    Returns ``(disposition, justification)``. The justification is recorded on
+    every closure, because a closure that says only "terminal" is
+    self-certifying: nobody can later audit it against the marker it claims to
+    have read. That self-certification is what made the original 95-row count
+    look safe.
+
+    ``.settled`` is never honoured on presence. It carries an APPROVED CLAIM and
+    this reader acts on the claim, so it goes through
+    :func:`review.settle_shortcircuit` exactly as the other two readers do.
+    """
+    from . import review
+
+    if not listing_ok:
+        return Disposition(RESIDUE_UNKNOWN, "unreadable",
+                           "verdicts listing unreadable — closes nothing")
+    try:
+        settled_present = settled_marker in (names or [])
+    except TypeError:
+        return Disposition(RESIDUE_UNKNOWN, "not-enumerable",
+                           "verdicts listing not enumerable — closes nothing")
+
+    if is_terminal(names):
+        found = ", ".join(sorted(m for m in TERMINAL_MARKERS if m in names))
+        return Disposition(RESIDUE_CLOSE, found,
+                           f"terminal marker present: {found}")
+
+    if not settled_present:
+        return Disposition(RESIDUE_OPEN, "none",
+                           "no terminal marker and no settle marker")
+
+    fm = marker_fm if isinstance(marker_fm, dict) else {}
+    answer = review.settle_shortcircuit(fm, names)
+    if answer == review.SETTLE_MERGED:
+        return Disposition(RESIDUE_CLOSE, answer,
+                           "settled: merged — merge evidence, unconditional")
+    if answer == review.SETTLE_CACHE:
+        return Disposition(RESIDUE_CLOSE, answer,
+                           "settled: cache — evidence digest recomputed over "
+                           "the current listing and matched")
+
+    # SETTLE_NO from here. One of its causes is not a stale marker at all: a
+    # marker with an APPROVED state and NO ``evidence`` KEY cannot have been
+    # written by the engine, because `settled_marker_fields` always emits that
+    # key when there is no merge sha (the renderer omits None, not ""). Unknown
+    # provenance is quarantined rather than merely unresolved: no automation
+    # closes a row behind a marker nothing in this codebase could have written.
+    if str(fm.get("state") or "") == review.APPROVED and "evidence" not in fm:
+        return Disposition(RESIDUE_UNKNOWN_PROVENANCE, "no-evidence-key",
+                           "APPROVED marker carrying no evidence KEY — not "
+                           "producible by any engine write path; provenance "
+                           "unknown, quarantined")
+    return Disposition(RESIDUE_UNRESOLVED, answer,
+                       "settle marker present but does not license a skip")

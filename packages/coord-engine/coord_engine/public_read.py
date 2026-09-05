@@ -110,11 +110,38 @@ class SealedGenerationTransport:
             f"team/{team}/_coord/responses/": "responses",
         }
         self._records: dict[str, str] = {}
+        # A prefix is sealed ONLY if its section actually materialized.
+        #
+        # Sealing used to be decided by the path string alone, against the
+        # hardcoded dict above, while `__init__` skipped a section silently
+        # whenever its records were missing or malformed. A section that failed
+        # to load therefore left its prefix sealed over ZERO records, and every
+        # read under it answered a confident "absent" for files that exist in
+        # the store — the exact conflation this class's callers were fixed to
+        # stop, reached through the sealed path instead of the transport.
+        #
+        # Found by collect-maintainer re-reviewing PR 694 (2026-09-04) after I
+        # argued the opposite: that absence here is genuinely known because the
+        # record set is complete in memory. Completeness was assumed, never
+        # checked. Its repro, on an authority whose roles section is absent:
+        #
+        #     COMPLETE    read_classified(".../roles/live.md") -> ('REAL', 'ok')
+        #     INCOMPLETE  read_classified(".../roles/live.md") -> (None, 'absent')
+        #
+        # and `peer_parks` then sees `status != "error"` with `existing is None`
+        # and writes its stub over a live role doc. Incomplete sections are a
+        # live condition on this fleet: reconcile on Ashs-MBP-Work reports
+        # "publication refused: incomplete required section(s)" every pass.
+        #
+        # An unsealed prefix reading the real store is correct-but-slower. A
+        # sealed empty one is confidently wrong.
+        self._sealed: set[str] = set()
         for prefix, section_name in self._prefix_sections.items():
             section = authority.section(section_name)
             records = section.get("records") if isinstance(section, Mapping) else None
             if not isinstance(records, list):
                 continue
+            self._sealed.add(prefix)
             for record in records:
                 if not isinstance(record, Mapping):
                     continue
@@ -127,7 +154,14 @@ class SealedGenerationTransport:
         return getattr(self._transport, name)
 
     def _sealed_prefix(self, path: str) -> Optional[str]:
-        return next((prefix for prefix in self._prefix_sections
+        """The sealed prefix covering ``path``, or None to fall through.
+
+        Membership is ``self._sealed`` — the sections that LOADED — not
+        ``self._prefix_sections``, which is only the set of prefixes this class
+        knows how to seal. A section that did not materialize falls through to
+        the real transport rather than answering from an empty cache.
+        """
+        return next((prefix for prefix in self._sealed
                      if path.startswith(prefix)), None)
 
     def read(self, path: str) -> Optional[str]:
@@ -144,8 +178,36 @@ class SealedGenerationTransport:
         classified = getattr(self._transport, "read_classified", None)
         if callable(classified):
             return classified(path, deadline=deadline)
+        # FAIL CLOSED. `read` returns None for a missing file and for a failed
+        # one alike — that collapse is the whole reason `read_classified`
+        # exists, so a wrapper that cannot classify must not manufacture the
+        # confident answer. Claiming "absent" here would hand a write-caller
+        # (`peer_parks`, `task restore`, `escalate`) the one status that means
+        # "safe to create", derived from a read that may have been a 500.
+        #
+        # Found by collect-maintainer reviewing PR 694 (2026-09-04) as a trap
+        # rather than a live bug: every production transport
+        # (`FulcraFileTransport`, `SealedGenerationTransport`) implements
+        # `read_classified`, so this branch is unreachable in the fleet today.
+        # It stays reachable for the ~30 hand-written test doubles, and the
+        # next one that forgets the method would silently get the unsafe
+        # mapping. "error" is used rather than a new "unknown" token because
+        # every caller already fails closed on it; widening the vocabulary is
+        # a separate change with its own review.
+        #
+        # The sealed-prefix branch above is NOT changed and is correct: there
+        # the record set is complete in memory, so absence is genuinely known.
         value = self._transport.read(path)
-        return (value, "ok") if value is not None else (None, "absent")
+        # The token stays exactly "error". collect-maintainer asked, on this
+        # same review, for the message to say classification-unavailable rather
+        # than a bare store error so an operator is not sent hunting a healthy
+        # store — and I first did that by returning
+        # "error:classification-unavailable", which is precisely the mistake it
+        # warned about one paragraph earlier: 15 call sites compare
+        # `status == "error"` exactly, so a richer token silently turns every
+        # fail-closed guard back off. The nuance belongs in the CALLERS' printed
+        # messages, where it costs nothing and cannot disarm a guard.
+        return (value, "ok") if value is not None else (None, "error")
 
     def list_dir(self, path: str) -> list[dict[str, Any]]:
         if self._sealed_prefix(path) is None:

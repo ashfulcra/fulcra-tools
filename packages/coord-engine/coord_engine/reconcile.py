@@ -93,9 +93,9 @@ def summaries_path(team: str) -> str:
     return f"team/{team}/_coord/summaries.json"
 
 
-def projection_progress_path(team: str, build_id: str = "root") -> str:
-    """Private, immutable-build convergence state; never reader-serving."""
-    return f"team/{team}/_coord/projections/builds/{build_id}.json"
+def projection_progress_path(team: str, content_identity: str = "root") -> str:
+    """Private, content-bound convergence state; never reader-serving."""
+    return f"team/{team}/_coord/projections/builds/{content_identity}.json"
 
 
 def _acks_prefix(team: str) -> str:
@@ -919,15 +919,56 @@ def _publication_generation(aggregate_doc: Any) -> Optional[str]:
     return None
 
 
-def _load_projection_progress(
-        transport: Any, team: str, build_id: str) -> dict[str, Any]:
-    """Load private partial-build state only for the current public base.
+def _projection_progress_identity(
+        current: Optional[generation.Generation]) -> str:
+    """Identity of the public review/forge content a private scan extends.
 
-    Binding the shard to the public generation prevents a completed publish
-    from being followed by an older partial cursor, including when both hosts
-    used the same wall-clock second.
+    Detector watermarks and normalized update batches describe how a pass
+    observed the store; they are not review/forge content. Binding recovery
+    progress to those observations discards the partial frontier on every
+    refused pass. The builders already invalidate changed review rows from
+    positive feed evidence and rebuild forge from current canonical inputs, so
+    the durable key needs only the content-bearing public base.
+
+    ``generated_at`` is likewise an observation. Excluding it lets an
+    unrelated public republish with byte-identical review/forge content reuse
+    the same safe convergence frontier.
     """
-    raw = transport.read(projection_progress_path(team, build_id))
+    sections: dict[str, Any] = {}
+    if current is not None:
+        try:
+            document = json.loads(current.bytes)
+            public_sections = document.get("sections") or {}
+            for name in ("reviews", "forge"):
+                section = public_sections.get(name)
+                value = section.get("value") if isinstance(section, dict) else None
+                if isinstance(value, dict):
+                    value = {key: item for key, item in value.items()
+                             if key != "generated_at"}
+                sections[name] = {
+                    "schema": section.get("schema") if isinstance(section, dict) else None,
+                    "value": value,
+                }
+        except (TypeError, ValueError):
+            sections = {}
+    payload = {
+        "schema": projection_mod.BUILD_PROGRESS_SCHEMA,
+        "public_projection_content": sections or "absent",
+    }
+    return sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+
+def _load_projection_progress(
+        transport: Any, team: str, content_identity: str) -> dict[str, Any]:
+    """Load private partial-build state only for the current content base.
+
+    Binding the shard to the public projection content prevents a completed
+    publish with changed review/forge inputs from being followed by an older
+    partial cursor, without treating detector observations as content.
+    """
+    raw = transport.read(projection_progress_path(team, content_identity))
     if not raw:
         return {}
     try:
@@ -936,7 +977,7 @@ def _load_projection_progress(
         return {}
     if (not isinstance(progress, dict)
             or progress.get("schema") != projection_mod.BUILD_PROGRESS_SCHEMA
-            or progress.get("base_generation") != build_id):
+            or progress.get("content_identity") != content_identity):
         return {}
     return progress
 
@@ -1331,6 +1372,14 @@ def _tree_section(transport: Any, prefix: str, *, section: str,
         # them before sealing so malformed source content cannot be published
         # as a complete view.
         document = okf.parse_frontmatter(raw)
+        # A file that is not inventory at all (a documented-optional courtesy
+        # index) is SKIPPED, not sealed and not fatal. Real corruption still
+        # fails the whole section below — the all-or-nothing rule is what stops
+        # a partial view publishing as complete, and it stays.
+        if (isinstance(document, dict)
+                and generation.ignorable_inventory_file(
+                    section, child, document)):
+            continue
         if (not isinstance(document, dict)
                 or not generation.canonical_inventory_document(
                     section, child, document)
@@ -1664,6 +1713,38 @@ def reconcile(
             return {"degraded": True, "reason": str(e), "tasks": 0}
         rows, warnings, reused, parsed = _full_scan_task_rows(
             transport, team, listing, prior_by_name, last_reconcile_iso, log)
+        # A directory listing can return rc 0 with only a tiny prefix of the
+        # real directory.  The feed-folded rows are the independently
+        # corroborated task set for this pass.  Never let a full scan turn an
+        # uncorroborated listing omission into task deletions: a later clean pass
+        # can retry, while the current generation stays intact.  Without a
+        # conclusive incremental fold there is no independent evidence to
+        # distinguish a partial listing from stale legacy/orphan rows, so the
+        # existing authoritative full-scan behavior remains unchanged.
+        reference_names = (
+            set(aggregate.rows_by_name(inc[0])) if inc is not None else set()
+        )
+        listed_names = set(aggregate.rows_by_name(rows))
+        uncorroborated_missing = sorted(reference_names - listed_names)
+        if uncorroborated_missing:
+            reason = (
+                "task listing implausibly shrank; current generation preserved: "
+                f"{len(uncorroborated_missing)} corroborated task(s) absent"
+            )
+            result = {
+                "degraded": True,
+                "reason": reason,
+                "tasks": len(prior_rows),
+                "warnings": [reason],
+                "rows": prior_rows,
+            }
+            _write_health_shard(
+                transport, team, host=host, now=now, result=result, log=log)
+            log.error(
+                "reconcile aborted: implausibly shrunken task listing",
+                team=team, missing=len(uncorroborated_missing),
+            )
+            return result
         if batch.trusted and (prior_cursor is None or not stale):
             new_cursor = {"watermark": now, "processed": {}, "streak": 0}
         elif prior_cursor is not None:
@@ -1756,12 +1837,11 @@ def reconcile(
     }
     # The public aggregate is atomic, but an incomplete review section is also
     # the builder's durable scan frontier. Resume that frontier from a private
-    # shard bound to the exact public generation it was derived from.
+    # shard bound to the content-bearing public review/forge base it extends.
     current_generation = generation.load_current(transport, team)
-    progress_build_id = generation.build_id(
-        current_generation.id if current_generation else None,
-        _generation_watermark(batch, current_generation), batch)
-    build_progress = _load_projection_progress(transport, team, progress_build_id)
+    progress_content_identity = _projection_progress_identity(current_generation)
+    build_progress = _load_projection_progress(
+        transport, team, progress_content_identity)
     built_current = {
         projection_mod.REVIEWS_KEY: False,
         projection_mod.FORGE_KEY: False,
@@ -1825,7 +1905,7 @@ def reconcile(
     if all(built_current.values()):
         progress = {
             "schema": projection_mod.BUILD_PROGRESS_SCHEMA,
-            "base_generation": progress_build_id,
+            "content_identity": progress_content_identity,
             "generated_at": now,
             projection_mod.REVIEWS_KEY:
                 proj_state[projection_mod.REVIEWS_KEY],
@@ -1833,7 +1913,8 @@ def reconcile(
                 proj_state[projection_mod.FORGE_KEY],
         }
         if not transport.write(
-                projection_progress_path(team, progress_build_id), jsonutil.dumps(progress)):
+                projection_progress_path(team, progress_content_identity),
+                jsonutil.dumps(progress)):
             warnings.append("projection build progress write failed")
 
     # Review + forge publication is all-or-nothing. A section that exhausted its

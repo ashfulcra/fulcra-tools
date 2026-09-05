@@ -188,6 +188,21 @@ under `skills/`, each package with its own README, build, and tests.
   and must NOT hit the network — a network-bound run is the bug, not slowness).
 - Editable install: the `.venv` imports the live workspace source, so a code
   change is picked up by **restarting the daemon**, not re-syncing.
+- **A pass/fail count is a property of (sha, interpreter, cwd) — never of the
+  sha alone.** Measuring the engine at one merge commit gave **66 failed**,
+  then **1 failed**, then **0 failed**, from three cwds over the same source.
+  From the repo root, the `.venv`'s editable install resolved `coord_engine` to
+  a DIFFERENT checkout — the 66 failures belonged to a stale working tree, not
+  to the sha under test. From the package directory, `coord_engine/` sat on
+  `sys.path`, and the subprocess in `test_obligations_engine_absent.py` — whose
+  whole job is to assert the engine is NOT importable in its sandbox —
+  inherited that cwd and found it. Only an isolated venv holding a
+  **non-editable** install, run from a repo root, measured the build actually
+  under test. So print `module.__file__` for the package before you report a
+  number, and say which cwd produced it: a count without that pair is not
+  evidence, and two of those three numbers would have been a false report to
+  the operator. The rule generalizes past Python — whenever a tool resolves an
+  implementation by search path, the search path is part of the measurement.
 - Pull latest into a checkout with `bash scripts/update.sh` (git pull +
   `uv sync --all-packages --all-extras` + restart daemon/menubar).
 - PyObjC-free logic is split into its own modules so tests run on Linux CI;
@@ -206,6 +221,11 @@ under `skills/`, each package with its own README, build, and tests.
   successor to resume from the PREVIOUS checkpoint believing it current,
   exactly when parking matters most. **Any caller of `transport.write` must
   treat `False` as failure**; it is not a Falsy-but-fine return.
+- A task-directory listing that returns rc 0 is not automatically complete.
+  When the trusted feed fold still corroborates tasks omitted by a full-scan
+  listing, `reconcile` fails closed and preserves the current generation,
+  summaries, and index. This catches the live intermittent-empty listing shape;
+  do not turn that disagreement back into authoritative task deletions.
 - Audit every existing READER before you change what a marker MEANS. A
   marker's meaning is fixed by everything that acts on it, not by the writer's
   intent, so a new state or a new field is a change to every consumer at once.
@@ -248,6 +268,32 @@ under `skills/`, each package with its own README, build, and tests.
   SUPPRESSOR and is never written for a notice that reached nobody, a
   closed-loop role re-surfaces every sweep, `escalate` reports
   `undelivered=N`, and the verb exits 3.
+- **`escalate` does not restate a vacancy that is already on the board.** The
+  vacancy title embeds the date, so the slug differs every day and the
+  per-slug existence check on `dst` (a classified `read_classified(dst)` since
+  PR 694; a bare `read(dst) is None` before it) can never match across days; the daily
+  marker suppresses only WITHIN a day. Measured result: 117 open ROLE VACANT
+  rows carrying 12 distinct facts, growing 2-6/day fleetwide. A state-change
+  guard (`roles.vacancy_already_open`) now skips minting while a row for that
+  role is open, and prints `ALREADY OPEN` when it fires — a suppressor that
+  says nothing is indistinguishable from a sweep that never ran. Three
+  properties are load-bearing and must survive any edit:
+  - **Role matching is EXACT, never a prefix.** A prefix test would let
+    `codex-reviewer` suppress `codex-reviewer-2`; an identity transform used to
+    suppress an alarm has to be injective or it hides what it was not asked to.
+  - **An unreadable listing does NOT suppress.** UNKNOWN silencing an alarm is
+    worse than a duplicate row, so the guard falls through to minting and says
+    it skipped.
+  - **Closed-loop vacancies are EXEMPT** — that is what the `re-surfaces every
+    sweep` clause above is FOR. The notice reached nobody, so there the repeat
+    IS the delivery, and suppressing it would silence the only retry.
+  This is not a change to re-notify: `directives.renotify` is "a strict filter
+  OVER inbox", a read-side fold that writes nothing and keeps surfacing ONE
+  unacked directive. `escalate` was re-MINTING, which is a different mechanism
+  that shared the name. Suppressing the re-mint costs no visibility, because
+  the standing row is unacked and the fold surfaces it anyway. The skill prose
+  (`skills/fulcra-agent-roles/`) carries the same condition, since a hand-written
+  inbox drop would re-create the debt the engine guard removes.
 - The `no-team-internals` CI guard PROVES it can fail before it reports clean.
   `scripts/no-team-internals.sh` runs `--self-test` first: it stages a fixture
   carrying a public IP and a session ref, asserts the scan flags both, and only
@@ -652,7 +698,11 @@ it (not on PyPI).
     is `_coord/projections/current.json`: a builder write/read-verifies immutable
     `generations/<digest>.json` first, then writes and read-verifies the digest-bound manifest. Required
     `UNKNOWN`/incomplete sections or an unattested feed frontier stay recovery progress and never advance
-    current; reconcile exits nonzero. A transport that proves conditional-write support uses CAS to fence a
+    current; reconcile exits nonzero. Private review/forge recovery is keyed by
+    the content-bearing public projection base, not by a detector watermark or
+    batch digest; positive feed changes invalidate only affected review rows,
+    while forge is rebuilt from current canonical inputs. A transport that proves
+    conditional-write support uses CAS to fence a
     moved pointer. A transport that explicitly declares CAS unsupported may use one last-writer-wins
     manifest write only after the complete deterministic immutable generation verifies, and must verify the
     exact manifest read-back; missing/invalid capability and write/read failure remain nonzero. Because a
@@ -723,6 +773,16 @@ it (not on PyPI).
   fan-out uses `budget.Deadline` for its deadline check (never a hand-rolled
   `time.monotonic() >= deadline`) and `budget.degraded_row` for its marker**, so the whole family
   keeps one `>=` boundary and one degraded shape.
+- **Ship-gate: a verb that mutates durable state does not ship on decision-function tests alone.**
+  It ships with at least one test that invokes the ACTUATOR end to end, or with a recorded live dry
+  run against a real team. `review residue` shipped its decision function under thirteen passing
+  tests while the command itself was dead on a `NameError` — `model` is imported locally in `cli.py`
+  and the verb used it unqualified. Nothing in the suite touched the command, so a green suite sat
+  over a completely broken verb; only running it against the real team found it. A green suite over
+  a broken command is the same false-clear as an empty queue over 257 owed obligations: the
+  instrument answered a question nobody asked. When you add such a test, VERIFY IT DISCRIMINATES —
+  neuter the wiring and watch it fail — because a test that passes either way is the thing it was
+  written to prevent.
 - **The public-read failure contract — UNKNOWN is loud, never a clean-empty.** Every aggregate-backed
   public read (`status`, `board`, `needs-me`, `search`, `inbox`, the `agents`/`digest`/`asks`/
   `briefing` bundles) folds the summaries index via `_load_rows_status`, whose `ok` bit is **False
@@ -746,6 +806,24 @@ it (not on PyPI).
   budgets) or `_JSON_EXEMPT` with a stated reason — `_JSON_EXEMPT` is empty today, pinned paths must
   print SOMETHING, and the widened sweep immediately found a live leak (`headroom --json` printed
   prose on its no-accounts early return).
+- **A finished review does not close its request row unless something closes it.** 198 open
+  `REVIEW REQUEST:` rows were live in `team/fulcra` with 156 already behind a terminal marker: the
+  review store and the task board had diverged and only the store was kept honest. Two halves fix
+  it. The DECISION verbs (`review close`, `review conclude`) close their own rows at settle time —
+  best-effort and loud, because the marker is durable truth and bookkeeping must not fail a verified
+  closure, but a silent skip rebuilds the backlog. The `review residue` verb (DRY RUN by default)
+  closes the rest on a schedule. It is **permanent infrastructure, not a backfill**: a review that
+  settles through the fold's APPROVED cache is settled by a pure build path that must not mutate
+  task state (`projection.py` calls `transport.write` exactly once in the whole module and never
+  touches `task/`), so those rows have no decision verb to hook. Retiring it needs the successor
+  where the cache writers EMIT and reconcile folds the close — and when that lands, `review residue`
+  is deleted, not kept as a second reader.
+- **Ask `review_gc.TERMINAL_MARKERS`, never a marker filename.** There are three — `.gc-closed`,
+  `.concluded`, and `.settled` — and `.settled` is deliberately outside that set because it carries
+  an APPROVED CLAIM that some readers act on rather than merely skipping. Hard-coding names is what
+  hid `.gc-closed` for a whole round; it then hid `.concluded` from a residue census written by
+  someone reading the very comment that forbids it. A reader that acts on `.settled`'s claim goes
+  through `review.settle_shortcircuit`; presence alone closes nothing.
 - **`.settled` carries TWO things and only one of them is disposable.** `state: APPROVED` is a tally
   CACHE — cheap to recompute, safe to drop. `state: MERGED` + `merge_sha` is merge EVIDENCE written
   by `review close`, and **nothing recomputes it**. `review status` deletes a stale cache but
@@ -959,6 +1037,48 @@ it (not on PyPI).
   never means destructive fallback. **Ship-gate: the throttle memo is process-global state — reset
   it between tests; a new write verb joins `_ACTIVITY_WRITE_FUNCS` (or the omission is justified);
   the preserve-everything-but-timestamp rule stays red-first pinned.**
+- **A CHANGES is lifted only by a shard that NAMES it (`supersedes:`), never by the clock
+  (2026-09-05, codex-coder, review-winning-envelope r4).** Client timestamps cannot carry the
+  correction contract: a CHANGES filed later from a host whose clock is behind sorts EARLIER, the old
+  APPROVE wins, and a ship gate validates withdrawn consent. The fold is now: a shard is RESOLVED when
+  another shard of the same reviewer names it in `supersedes:` (validated against shards that exist);
+  any UNRESOLVED CHANGES dominates regardless of timestamp; otherwise the newest live shard wins; equal
+  keys and unnamed conflicts fail closed to CHANGES. `review verdict` names every prior shard of yours
+  it can list; if the listing is degraded it names NOTHING and says so (your prior CHANGES keeps
+  dominating until you re-file). A hand-written APPROVE must carry `supersedes:` itself. **Only the STORE can supply causality (r8, both codex reviewers):** a name is predictable, and a
+  client-written nonce is editable frontmatter at a mutable path (a plain CHANGES rewritten in place
+  kept its nonce and an old edge still resolved it; a predeclared nonce was matched by a later
+  CHANGES). An edge `name@sha256:<digest>` is honoured only when the digest matches the target's
+  CURRENT bytes AND the store's server-assigned mtime proves the target strictly earlier than the
+  superseder — same minute or unknown fails closed; a bare legacy name needs the same mtime proof.
+  The verb quotes the content digest of each prior it can list AND read; a prior it cannot read is
+  not named; on a degraded listing it names NOTHING (if you cannot enumerate the priors you cannot
+  claim to supersede them — coord-boss 1bce3da9). The random `nonce:` now also sits in the shard NAME
+  so identical same-second filings cannot collide. **Invalid edges:** a shard can never resolve
+  ITSELF (a self-link let a CHANGES erase its own withdrawal — codex-reviewer, r5); self-links and names
+  that resolve nothing are reported in the tally as `malformed_supersedes`, never folded around silently;
+  a cycle fails closed to CHANGES; a forward edge cannot be forged (the name embeds a content digest).
+  This amends
+  ruling b99fb8da (newest-wins): constraint 5 — a stale CHANGES must not block forever — is satisfied
+  by the link the verb writes, not by the order of the clock.
+- **Same-second verdict shards order by chronology, not digest (2026-09-05, both codex reviewers,
+  coord-fold round 12).** The append-only name has SECOND precision plus a content digest, and the
+  fold broke same-second ties on the name — so an earlier APPROVE could outrank a later CHANGES from
+  the same reviewer (reproduced: digest `feb86aee` over `058ddb93`). Now `review verdict` writes a
+  microsecond `ts:` in the shard frontmatter and the fold orders every shard by
+  `review.canonical_sort_key` — the second from the ACL-controlled NAME (frontmatter can never move
+  a shard across seconds), the fraction from frontmatter only within that second, `.000000` for
+  shards without one so legacy and new compare in ONE format. `review status --json` now carries
+  `winning: {reviewer: {name, verdict, sort_key}}` — the exact shard the fold kept. **A downstream
+  consumer (a ship gate) reads `winning`; it never refolds filenames itself.** The projection
+  (`projection.py`) uses the SAME key and records `winning` in each generation row, and the
+  generation-backed `review status` **fails closed (rc 3)** on a row without it — two canonical
+  readers must not answer differently about one directory. Caveats, pinned by test: two legacy
+  shards with no `ts:` in the same second still tie on the name; the verb samples the clock ONCE for
+  both the name's second and the frontmatter fraction (two samples let a verdict straddle a second
+  and lose to an earlier same-second shard); and the resulting order is **client-timestamp order**,
+  not a provable arrival chronology — cross-host clock skew is out of the fold's reach, and two
+  shards with equal microseconds tie deterministically on the name.
 - **Engagement-aware liveness is a combiner over two ORTHOGONAL axes.** `classify(ts, now)` stays
   PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone. The truth table
   is layered on top by `presence.liveness(shard, now=…)`, which returns `{state, freshness,
@@ -1234,6 +1354,15 @@ sessions sharing one working tree clobber each other's index/`HEAD`
 <vendor>/<purpose> origin/main`. Conflict markers or staged files you didn't
 create mean you're sharing a checkout — move out before committing.
 
+**A worktree does NOT isolate the stash stack.** Stashes live in the shared
+`.git`, so `git stash` in your own worktree reaches into the same stack every
+other session uses. A `git stash push` with a pathspec that matches nothing
+succeeds silently and stashes NOTHING — and the `git stash pop` you pair it with
+then pops somebody else's entry into your tree, as a conflict you did not cause.
+If that happens: `git checkout HEAD -- <their paths>` to restore, and CHECK
+`git stash list` afterwards to confirm their entry survived. Prefer a scratch
+commit on your own branch over `git stash` entirely.
+
 ## Commits
 
 End the commit message with the trailer
@@ -1465,3 +1594,52 @@ reintroduce the outage.
 
 Full first-run walkthrough + troubleshooting: [`docs/TESTING.md`](docs/TESTING.md).
 Diagnose a live install with `uv run fulcra-collect doctor`.
+
+## coord-fold — the coord-on-annotations fold engine (packages/coord-fold)
+
+Canonical home for the durable facts about `packages/coord-fold` (plan `docs/superpowers/plans/2026-09-04-coord-fold.md`, spec `docs/superpowers/specs/2026-09-04-coord-annotation-bus-design.md`). Ship-gate rule: every PR touching the package updates this section or states "no change needed".
+
+**What it is.** A SEPARATE package (not a module inside coord-engine): `coord_fold/{events,transport,channel,checkpoint,fold,cli}.py`, each owning exactly the symbols the ownership manifest in `tests/test_structural.py` names. Its import graph never reaches `coord_engine`; `pyproject.toml` declares no dependency on it. Dependency direction is one way: coord-engine's old side (Tasks 12–14: seed export, dual-emit, comparator) may import nothing from here and here imports nothing from there.
+
+**The reader/writer boundary (spec §3.4, corrected).** The transport is a two-method Protocol; `CliPointerReader` and `CliPointerWriter` are unrelated classes with disjoint surfaces and NO enumeration method. §3.4's original wording implied that the type "stops `os.listdir`"; corrected: **a type stops a method call, not `os.listdir`** — nothing in a Python type prevents a caller from enumerating. The guarantee that enumeration does not happen is G29, below, not the type.
+
+**Six verbs, three exit codes** (`coord_fold/cli.py`): `emit`, `fold`, `claim`, `release`, `close`, `status`. `RC_OK=0`, `RC_REFUSED=2`, `RC_UNKNOWN=3`. Refused means the verb declined on evidence it read; UNKNOWN means a read did not answer and nothing was concluded. A capped fold pass is NOT an error (G25): it applies what it read, advances the cursor to the last applied event, reports `unread_events: N` and exits 0 — a remainder bounded by new events, not a failure. The only fold error is zero progress while events exist. **The string `degraded` never appears on any output path** (G11; `tests/test_no_degraded_vocabulary.py` enforces it): `unreadable_pointers: [slug]` is UNKNOWN (exit 3); `unread_events: N` is a remainder (exit 0). An unknown never reads as clear.
+
+**Cursor rules (G26, G31).** The cursor is the `recorded_at` of the last OBSERVED record before the first UNAPPLIED RELEVANT event — never `now`, never past a gap. Records that are unparseable, foreign-schema, or addressed to someone else are observed and passed, never re-read. Checkable consequence, made a test: re-running a fold from the stored cursor yields the same open set. Lost-update detection, not CAS (G27): the store has no compare-and-swap; the checkpoint carries `writer` and a monotonic `generation`, the fold re-reads before writing and refuses by name if the generation moved. No compaction, never delete events (G28).
+
+**The four gate files** (CI, `uv-workspace.yml` gates step and `scripts/materialize_plan.py` GATES): `tests/test_structural.py` (ownership manifest, no enumeration, import graph, two-method Protocol, disjoint reader/writer), `tests/test_tripwire.py`, `tests/test_ship_check.py`, `tests/test_ci_wiring.py`; plus `tests/test_file_size_ceiling.py` (G8: 400 lines per `.py` under `coord_fold/`, recursive; the ceiling is documented in `packages/coord-fold/README.md`) and `tests/test_no_degraded_vocabulary.py`.
+
+**The tripwire is demoted (G30).** `tests/test_tripwire.py` is a syntactic scan for enumeration identifiers and modules (`os.listdir`, `iterdir`, `glob`, …). It catches the plain spelling and nothing else — an alias, a `getattr`-built name, or a subprocess escapes it by construction. It is kept because it is cheap and true about what it names; it is NOT the guarantee and a green tripwire proves nothing about behaviour.
+
+**THE GUARANTEE, in G29's words.** *The guarantee is behavioural, OS-enforced, and observed at a process boundary.* `tests/proof/run_proof.py` starts a store server OUTSIDE the sandbox (`tests/proof/store_server.py`: the corpus lives in that process, loaded from a file the sandbox cannot read; it answers only the five fixed request shapes — `file stat`, `file download`, `get-records`, `record`, `file upload` — refuses and logs everything else, and logs each `get-records` with its channel, its `since`, and the count returned), then runs the PRODUCTION `CliPointerReader`/`CliPointerWriter` through all six verbs INSIDE a macOS seatbelt sandbox that denies at the kernel every network endpoint except the store's socket, every exec except the interpreter, every file read outside the interpreter, the package tree and its own temp dir, and every file write outside that temp dir. Five phases: the clean run asserts the exact request sequence with paths, a path allowlist, per-shape bounds, and that no `get-records` asks from before the cursor the store held at that moment minus the overlap; the attack battery; a `file list` mutation; the epoch-rewrite mutation; the point-probe mutation — the last three must be FLAGGED. **What it proves and no more:** *in that run the fold reached no store except through observed requests* — these specific capabilities were denied by the kernel and the fold still completed. NOT "the fold ran with no capabilities". **What it does not claim:** that enumeration is impossible to write, that the fold cannot detect it is under test, or that a Python process can hide anything from code running inside it. The measured profile is allow-default with kernel denies on the capabilities that matter, because deny-default aborts the interpreter at startup on the proof host (measured, rc 134). The driver exits 3 (UNKNOWN) where no OS sandbox exists — never green by absence, never softened to a skip; the final line prints host, platform and UTC time. **The proof needs a macOS runner:** `.github/workflows/coord-fold-proof.yml` has two steps — one asserts the host has a sandbox (else it is the wrong host, not a pass), one runs the proof and treats exit 3 as a failed job. Linux CI is UNKNOWN by design. No bwrap profile is written until it can be measured.
+
+**Trust model of the ship gate (r34).** It defends against the mutable tool environment, PATH/env resolution, and world-writable or cross-user temp locations. It does not defend against a concurrent same-user process on the gate host (which could replace the gate itself), and claims no pathname binding against one. Its temp root is a gate-created 0700 directory under `~/.local/state/coord-fold/tmp` (an inherited `TMPDIR` is ignored); the engine child gets its CLI as an absolute path in `FULCRA_CLI_COMMAND` with an empty PATH; downloaded bodies are checked for owner, mode and non-link status immediately before being read.
+
+**Ship gates (ruling `6bb7fa0f`, 2026-09-05).** Task 1b (the proof) and Task 16 (`scripts/ship_check.py`: the engine's folded APPROVED result on the EXACT commit, both required reviewers' winning shards quoting `git rev-parse HEAD:packages/coord-fold`, an approved+pinned engine attested by the gate's own interpreter through a verified-bytes importer, trust roots stated as absolute paths `--git`/`--fulcra-api`) gate SHIPMENT, never the start of work. G24: a plan revision is filed only with Task 0 (`scripts/materialize_plan.py`) green.
+
+## coord bus-v4 bridge — Tasks 12–14 of the coord-fold plan (2026-09-05)
+
+The old bus (bus-v3) and the new annotation-native plane (bus-v4, folded by `packages/coord-fold`) run in
+parallel until cutover. Three engine verbs make the parallel run measurable; none of them changes what the fleet
+acts on today.
+
+- **Channel.** bus-v4 is the data type named in `team/<team>/_coord/bus-v4/records.json` (`data_type`,
+  `api_version`). No config → nothing mirrors, nothing seeds. Never hardcode it.
+- **Dual-emit (Task 13).** `coord_engine/dual_emit.py::mirror` is called once at the end of
+  `records.emit_event`, the engine's single write chokepoint, so every bus write is mirrored without any verb
+  opting in: `directive→open`, `response→close`, `claim→claim`, `verdict→note`, eight-field payload
+  `{v, at, from, to, kind, slug, pri, ptr}`. A mirror failure never fails the v3 write.
+- **Seed (Task 12).** `obligations <team> --agent <a> --export-open` writes one bus-v4 `open` per slug the old
+  fold says the agent owes, idempotent via `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). Refuses on an
+  UNKNOWN old fold — a seed from a partial answer would enshrine the gap as absence. Classified as a WRITE.
+- **Comparator (Task 14).** `compare-to-fold <team> --agent <a>`: the old open set vs the coord-fold checkpoint
+  (`team/<team>/member/<agent>/fold/checkpoint.json`) as `(slug, pri, ptr)` tuples; prints `AGREE n=k` or
+  `DIVERGE slugs=[…]`; appends one JSON line to `_coord/bus-v4/compare/<agent>.jsonl`. rc 0/2/3 = agree/diverge/
+  UNKNOWN. A WRITE (it logs).
+- **Cutover check (Task 14).** `cutover-ready <team> --agent <a>` exits 0 only when the trailing AGREE run is
+  ≥ `--min-run` (24) over ≥ `--min-hours` (24), the open set both grew and shrank within it, the divergence/
+  recovery drill is recorded at `_coord/bus-v4/drill/<agent>.md` (G13), and `--ship-check-rc 0` carries the rc of
+  the runbook's `scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs>`. The window flags exist so
+  the operator can compress the window deliberately, never silently. A read.
+- **Activity classification.** `obligations` is MIXED: `--export-open`, `--repair-unknown` and `--seed-checkpoint`
+  each write (two of those already did while the verb classified as a read).

@@ -1,0 +1,23 @@
+name: coord-fold proof (G29)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  proof:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.x"
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --all-packages
+      - name: the proof host has a sandbox (else this job is the wrong host, not a pass)
+        run: test -x /usr/bin/sandbox-exec
+      - name: coord-fold proof — exit 3 is UNKNOWN and fails this job
+        run: uv run --package coord-fold --extra dev python packages/coord-fold/tests/proof/run_proof.py

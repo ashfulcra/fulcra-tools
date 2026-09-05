@@ -52,7 +52,21 @@ CURSOR_SCHEMA_ENGINE_FLOORS = {2: "1.9.0"}
 #: Event classes carried on the control plane. One data type carries all of
 #: them, discriminated by ``kind``: ``get-records`` filters by type, so one type
 #: plus a kind field costs one query where five types would cost five.
-KINDS = ("directive", "response", "verdict", "claim")
+KINDS = ("directive", "response", "verdict", "claim", "blocked")
+
+#: ``blocked`` is the newest class and the reason it could be added safely: the
+#: read side returns None for an unrecognised ``kind`` (see ``parse_payload``),
+#: so an engine older than this one SKIPS a blocked event as a non-control-plane
+#: note rather than poisoning on it. Adding a kind is backward-compatible;
+#: changing the meaning of an existing one would not be.
+#:
+#: Why it exists at all: ``blocked_on`` was a field seven modules READ and no
+#: module ever announced. Every consumer therefore had to enumerate the task
+#: corpus to discover what was blocked — the exact fold-by-enumeration the
+#: stream architecture rejects — which is why only a bespoke tracker bridge
+#: could ever see it, and only for one tracker. As an event it is available to
+#: anything that reads the bus forward from a cursor.
+BLOCKED_STATES = ("blocked", "cleared")
 
 #: Prefix identifying records the engine's own projection wrote. Records from
 #: any other source are data, not control-plane events.
@@ -72,6 +86,7 @@ def engine_stamp() -> dict[str, Any]:
 def build_payload(*, to: str, kind: str, priority: str, slug: str,
                   ptr: Optional[str] = None, fyi: bool = False,
                   for_agent: Optional[str] = None,
+                  on: Optional[str] = None, state: Optional[str] = None,
                   stamp: Optional[dict[str, Any]] = None) -> str:
     """Serialize a control-plane payload for the ``note`` field.
 
@@ -92,6 +107,18 @@ def build_payload(*, to: str, kind: str, priority: str, slug: str,
         # this flag replays every FYI as a permanent open obligation (measured
         # 2026-08-21: most of 92 stream-only "opens" were exactly this).
         payload["fyi"] = True
+    if on:
+        # WHAT it waits on, verbatim from the doc (`user:ash`, an agent name, a
+        # role). Carried raw so a consumer can apply its own classifier rather
+        # than inheriting ours.
+        payload["on"] = on
+    if state:
+        if state not in BLOCKED_STATES:
+            raise ValueError(f"unknown state {state!r}; expected one of {BLOCKED_STATES}")
+        # A block that is never announced as CLEARED leaves every downstream
+        # queue growing forever, and a queue that only grows stops being read.
+        # The clear is half the signal.
+        payload["state"] = state
     if for_agent:
         # A close names WHOM it discharges (2026-08-21 pilot round-trip): the
         # per-responder rule reads the sender, so a third-party close — an
@@ -125,7 +152,11 @@ def parse_payload(note: Any) -> Optional[dict[str, Any]]:
     if not isinstance(to, str) or not isinstance(slug, str) or not slug:
         return None
     fa = obj.get("for")
+    on = obj.get("on")
+    state = obj.get("state")
     return {
+        "on": on if isinstance(on, str) and on else None,
+        "state": state if state in BLOCKED_STATES else None,
         "to": to, "kind": kind, "slug": slug,
         "pri": obj.get("pri"), "ptr": obj.get("ptr"),
         "fyi": obj.get("fyi") is True,
@@ -391,6 +422,18 @@ def events_for(records: Optional[list], agent: str) -> Optional[list[dict[str, A
             "priority": payload["pri"],
             "ptr": payload["ptr"],
             "to": payload["to"],
+            # `parse_payload` preserves these and this projection used to drop
+            # them, so every consumer reading the stream through here was blind
+            # to the difference between a NOTIFICATION and an OBLIGATION. That
+            # is the 2026-08-21 measurement — most of 92 stream-only "opens"
+            # were FYIs replayed as permanent obligations — and the cause was
+            # here, one layer below where it was diagnosed. `for` names whom a
+            # close discharges; `on`/`state` carry the blocked signal. A fold
+            # that cannot see them cannot be correct no matter how it is written.
+            "fyi": payload.get("fyi") is True,
+            "for": payload.get("for"),
+            "on": payload.get("on"),
+            "state": payload.get("state"),
             "from": sender_of(rec),
             "recorded_at": rec.get("recorded_at"),
             "record_id": rec.get("id"),
@@ -798,6 +841,7 @@ def authority_currency_state(config: Optional[dict], *,
 def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
                kind: str, priority: str, slug: str, ptr: Optional[str] = None,
                fyi: bool = False, for_agent: Optional[str] = None,
+               on: Optional[str] = None, state: Optional[str] = None,
                recorded_at: Optional[str] = None,
                team: Optional[str] = None) -> bool:
     """Emit one control-plane event; ``recorded_at`` in the future is a timer.
@@ -816,14 +860,20 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     contract.
     """
     note = build_payload(to=to, kind=kind, priority=priority, slug=slug,
-                         ptr=ptr, fyi=fyi, for_agent=for_agent)
+                         ptr=ptr, fyi=fyi, for_agent=for_agent, on=on, state=state)
     from . import bus_tags
     tags = bus_tags.tags_for_write(transport, team, sender)
     kwargs: dict[str, Any] = {"recorded_at": recorded_at}
     if tags:
         kwargs["tags"] = tags
-    return bool(transport.record_write(
+    ok = bool(transport.record_write(
         config["data_type"], config["api_version"], note, sender, **kwargs))
+    # Task 13 (plan 2026-09-04-coord-fold): mirror onto bus-v4 AFTER the v3 write, from this one chokepoint.
+    # The mirror can never fail the v3 write (it does not raise) and is a no-op without a bus-v4 config.
+    from . import dual_emit
+    dual_emit.mirror(transport, team, sender=sender, to=to, kind=kind, priority=priority, slug=slug,
+                     ptr=ptr, recorded_at=recorded_at)
+    return ok
 
 
 # --- read side: the durable cursor (the window rule, 2026-07-27) --------------

@@ -150,6 +150,108 @@ def test_task_index_failure_degrades_every_row_derived_component():
         )
 
 
+def test_row_components_share_one_needs_me_fold_and_keep_their_owed_sets(
+        monkeypatch):
+    """The four row views are filters over one expensive needs-me answer.
+
+    Recomputing the identical fold once per component multiplied every live-head
+    ack read by four.  The optimization must not broaden any component's owed
+    set, and the source marker must remain informational rather than owed work.
+    """
+    calls = 0
+    mine = [
+        {"name": "blocked", "kind": "block"},
+        {"name": "directed", "kind": "directive"},
+        {"name": "later", "kind": "reminder"},
+        {"name": "ordinary", "kind": "task"},
+        {"type": "needs-me-source", "source": "projection"},
+    ]
+
+    def counted_needs_me(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return mine
+
+    monkeypatch.setattr(cli, "_needs_me_rows", counted_needs_me)
+    components = {c.name: c for c in cli._obligation_probes(
+        FakeTransport(), TEAM, AGENT, now=PINNED_NOW)}
+
+    expected = {
+        "blocks": ["blocked"],
+        "directives": ["directed"],
+        "reminders": ["later"],
+        "tasks": ["blocked", "directed", "later", "ordinary"],
+    }
+    for name, owed_names in expected.items():
+        result = components[name].probe()
+        assert result.state is obligations_mod.ProbeState.OK
+        assert [row["name"] for row in result.owed] == owed_names
+
+    assert calls == 1, "the identical needs-me fold ran once per row component"
+
+
+def test_starved_row_component_stays_unreadable_after_shared_fold_is_cached(
+        monkeypatch):
+    """A warm cache never turns a budget-starved component into known-empty."""
+
+    class SetupDeadline:
+        instant = None
+
+        @staticmethod
+        def remaining():
+            return 90.0
+
+        @staticmethod
+        def expired():
+            return False
+
+    class ProbeDeadline:
+        instant = None
+
+        def __init__(self):
+            self.checks = 0
+
+        def expired(self):
+            self.checks += 1
+            return self.checks > 1
+
+    deadlines = iter((SetupDeadline(), ProbeDeadline()))
+    monkeypatch.setattr(cli.Deadline, "open", lambda _seconds: next(deadlines))
+    monkeypatch.setattr(
+        cli, "_held_roles_for_rows",
+        lambda *a, **kw: (set(), set()))
+    monkeypatch.setattr(
+        cli, "_needs_me_rows", lambda *a, **kw: [{"name": "x", "kind": "task"}])
+    components = {c.name: c for c in cli._obligation_probes(
+        FakeTransport(), TEAM, AGENT, now=PINNED_NOW)}
+
+    assert components["blocks"].probe().state is obligations_mod.ProbeState.OK
+    starved = components["directives"].probe()
+    assert starved.state is obligations_mod.ProbeState.UNREADABLE
+    assert "budget exhausted" in starved.detail
+
+
+def test_interrupted_shared_fold_makes_every_row_component_unreadable(
+        monkeypatch):
+    """A failed shared computation is cached as doubt, never as an empty list."""
+    calls = 0
+
+    def interrupted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise TransportError("ack shard timed out")
+
+    monkeypatch.setattr(cli, "_needs_me_rows", interrupted)
+    components = {c.name: c for c in cli._obligation_probes(
+        FakeTransport(), TEAM, AGENT, now=PINNED_NOW)}
+
+    for name in ("blocks", "directives", "reminders", "tasks"):
+        result = components[name].probe()
+        assert result.state is obligations_mod.ProbeState.UNREADABLE
+        assert "ack shard timed out" in result.detail
+    assert calls == 1, "dependents retried a shared fold already known unreadable"
+
+
 # --- queue integration (slice 3, item: "fold runs in queue/briefing paths") ---
 
 def test_empty_queue_notice_is_emitted_when_obligations_are_not_checked(capsys):

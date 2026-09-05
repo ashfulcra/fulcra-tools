@@ -153,21 +153,49 @@ def test_a_CONCURRENT_verdict_is_never_overwritten(monkeypatch):
 
 
 def test_the_NEWEST_shard_wins_across_both_forms(monkeypatch, capsys):
-    """A plain shard and an append shard for the same reviewer: newest counts.
-    The plain form is dated by its frontmatter ts, the append form by its
-    name."""
+    """A plain shard and an append shard for the same reviewer: the newer
+    APPROVE lifts the plain CHANGES — by a CAUSAL link (review-winning-envelope
+    r8): the verb quotes the plain shard's content digest and the STORE's mtime
+    proves the plain shard earlier. When the store cannot prove that (second
+    half: same mtime), the CHANGES stays dominant — fail closed."""
     t = FakeTransport()
     _open_review(t, monkeypatch)
     t.put(_plain_path(), okf.render_frontmatter({
         "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
-        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n")
+        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n",
+        mtime="2020-01-01 12:00AM UTC")                       # the STORE says the plain shard is old
     monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
     cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
               "--verdict", "approve"], transport=t)
+    for k in t.store:                                             # the STORE dates the verb's shard later
+        if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--"):
+            t.mtimes[k] = "2026-09-05 12:01PM UTC"
     capsys.readouterr()
     assert cli.main(["review", "status", TEAM, SLUG], transport=t) == 0
     out = capsys.readouterr().out
     assert "APPROVED" in out, f"the newer approve did not win:\n{out}"
+
+    # the same shape with a NONCE-LESS plain CHANGES and no mtime proof: the
+    # link cannot be made, so the CHANGES dominates — a withdrawal is never
+    # folded away on a guess.
+    t2 = FakeTransport()
+    _open_review(t2, monkeypatch)
+    t2.put(_plain_path(), okf.render_frontmatter({
+        "type": "Verdict", "reviewer": REVIEWER, "head": HEAD,
+        "verdict": "changes", "ts": "2020-01-01T00:00:00Z"}) + "\nold.\n",
+        mtime="2026-09-05 12:01PM UTC")
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD,
+              "--verdict", "approve"], transport=t2)
+    for k in t2.store:                                            # same store minute as the plain CHANGES: not proof
+        if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--"):
+            t2.mtimes[k] = "2026-09-05 12:01PM UTC"
+    capsys.readouterr()
+    cli.main(["review", "status", TEAM, SLUG, "--json"], transport=t2)
+    import json as _json
+    out2 = _json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+    assert out2["state"] == "CHANGES", out2
+    assert out2["malformed_supersedes"][0]["why"] == "no causal proof", out2
 
 
 def test_supersession_is_REPORTED_never_silent(monkeypatch, capsys):
@@ -289,15 +317,23 @@ def test_the_PROJECTION_folds_too_or_a_stale_CHANGES_blocks_forever():
     stale CHANGES would have blocked that review permanently, in a fold nobody
     would think to look at.
     """
-    rows = [
+    # review-winning-envelope r5: the fold no longer lifts a CHANGES by CLOCK — a
+    # later APPROVE from a host whose clock is behind would otherwise lose, and a
+    # ship gate would validate withdrawn consent. The verb NAMES what it
+    # supersedes, and that link is what folds the stale CHANGES away. A stale
+    # CHANGES still cannot block forever: the reviewer's next verb-filed verdict
+    # names it. An APPROVE that names nothing leaves the CHANGES dominant.
+    rows = [   # legacy shards (no nonce): a bare name resolves only with the STORE's mtime proof
         {"reviewer": REVIEWER, "verdict": "changes", "name": "old.md",
-         "sort_key": "2020-01-01T00:00:00Z"},
+         "sort_key": "2020-01-01T00:00:00Z", "mtime_iso": "2020-01-01T00:00:00Z"},
         {"reviewer": REVIEWER, "verdict": "approve", "name": "new.md",
-         "sort_key": "2026-08-10T05:00:00Z"},
+         "sort_key": "2026-08-10T05:00:00Z", "supersedes": ["old.md"], "mtime_iso": "2026-08-10T05:00:00Z"},
     ]
     kept, folded = review.fold_newest_per_reviewer(rows)
     assert [r["verdict"] for r in kept] == ["approve"]
     assert folded == 1
+    unlinked = [dict(rows[0]), {**rows[1], "supersedes": []}]
+    assert [r["verdict"] for r in review.fold_newest_per_reviewer(unlinked)[0]] == ["changes"]
     assert review.tally(
         [{"reviewer": r["reviewer"], "verdict": r["verdict"]} for r in kept],
         required=[REVIEWER])["state"] == review.APPROVED

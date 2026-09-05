@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "coord-engine",
+    "coord-fold",
     "coord-mesh",
     "coord-tracker-bridge",
     "fde-engine",
@@ -153,6 +154,26 @@ dev = [
 
 [package.metadata]
 requires-dist = [{ name = "pytest", marker = "extra == 'dev'" }]
+provides-extras = ["dev"]
+
+[[package]]
+name = "coord-fold"
+version = "0.1.0"
+source = { editable = "packages/coord-fold" }
+dependencies = [
+    { name = "fulcra-common" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fulcra-common", editable = "packages/fulcra-common" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7,<8" },
+]
 provides-extras = ["dev"]
 
 [[package]]
