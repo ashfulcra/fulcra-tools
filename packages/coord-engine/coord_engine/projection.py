@@ -765,9 +765,14 @@ def _scan_review_slug(
             # tally said CHANGES while the projection said APPROVED for the same
             # directory (codex-reviewer, 595 r3). Two readers disagreeing about
             # the same evidence is worse than either answer alone.
-            "sort_key": (parsed_ts
-                         or str(vfm.get("ts") or "")
-                         or _store_mtime_iso(v.get("mtime")) or ""),
+            # ONE canonical form shared with the direct tally (codex-coder on
+            # review-winning-envelope r1): the projection had its own chain, so
+            # same-second shards still tied on the digest-bearing name here
+            # while the direct read ordered them by microsecond — two canonical
+            # readers disagreeing about the same directory, again.
+            "sort_key": review.canonical_sort_key(
+                parsed_ts, str(vfm.get("ts") or ""),
+                _store_mtime_iso(v.get("mtime"))),
         })
     # FOLD NEWEST PER REVIEWER (coord-boss constraint 5, ruling b99fb8da).
     # Append-only verdicts mean one reviewer can have several shards, and this
@@ -779,6 +784,15 @@ def _scan_review_slug(
     verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
                 for r in kept]
     tally = review.tally(verdicts, required=base["required"])
+    # The exact winning shard per reviewer, same shape as the direct tally, so a
+    # generation-backed `review status --json` can hand a ship gate the identity
+    # the fold decided instead of leaving it to refold filenames.
+    tally["winning"] = {
+        r["reviewer"]: {"name": r["name"],
+                        "verdict": review.normalize_verdict(r["verdict"]),
+                        "sort_key": r["sort_key"]}
+        for r in kept
+    }
     if folded_away:
         tally["superseded_verdicts"] = folded_away
     settled = (tally["state"] == review.APPROVED

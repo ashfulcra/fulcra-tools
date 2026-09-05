@@ -996,8 +996,11 @@ it (not on PyPI).
   a shard across seconds), the fraction from frontmatter only within that second, `.000000` for
   shards without one so legacy and new compare in ONE format. `review status --json` now carries
   `winning: {reviewer: {name, verdict, sort_key}}` — the exact shard the fold kept. **A downstream
-  consumer (a ship gate) reads `winning`; it never refolds filenames itself.** Caveat, pinned by
-  test: two legacy shards with no `ts:` in the same second still tie on the name.
+  consumer (a ship gate) reads `winning`; it never refolds filenames itself.** The projection
+  (`projection.py`) uses the SAME key and records `winning` in each generation row, and the
+  generation-backed `review status` **fails closed (rc 3)** on a row without it — two canonical
+  readers must not answer differently about one directory. Caveat, pinned by test: two legacy
+  shards with no `ts:` in the same second still tie on the name.
 - **Engagement-aware liveness is a combiner over two ORTHOGONAL axes.** `classify(ts, now)` stays
   PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone. The truth table
   is layered on top by `presence.liveness(shard, now=…)`, which returns `{state, freshness,

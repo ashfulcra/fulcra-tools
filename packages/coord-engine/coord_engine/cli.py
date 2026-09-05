@@ -4690,6 +4690,15 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
                   "does not prove the full direct tally — reconcile with a "
                   "compatible writer", file=sys.stderr)
             return 3
+        if not isinstance(tally.get("winning"), dict):
+            # A generation written by a projection that did not record which
+            # shard won cannot serve the winning identity a ship gate consumes,
+            # and silently returning the tally without it would let the direct
+            # and generation-backed readers answer differently. Fail closed.
+            print(f"review status failed: validated generation row for {slug} "
+                  "does not record the winning shard per reviewer — reconcile "
+                  "with a compatible writer", file=sys.stderr)
+            return 3
         result = deepcopy(tally)
         result.update({"team": team, "slug": slug, "contract": 2})
         if args.json:

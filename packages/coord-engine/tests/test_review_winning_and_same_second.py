@@ -98,3 +98,67 @@ def test_the_verb_writes_a_microsecond_ts_in_frontmatter(monkeypatch):
     fm = okf.parse_frontmatter(t.store[shards[-1]])
     name_second = shards[-1].rsplit("--", 1)[1][:19]
     assert str(fm["ts"])[:19] == name_second and str(fm["ts"]).endswith("Z")
+
+
+# --- the projection and the generation-backed surface (codex-coder, review-winning-envelope r1) ---
+
+def test_the_projection_orders_same_second_shards_by_chronology_and_records_winning():
+    """Two canonical readers must not disagree: reconcile over the same directory must keep the
+    later CHANGES and say which shard it kept."""
+    from coord_engine import projection, reconcile
+    t = FakeTransport()
+    _open_review(t, __import__("pytest").MonkeyPatch())
+    _shard(t, "feb86aee", "approve", "100000")
+    later = _shard(t, "058ddb93", "changes", "900000")
+    now = "2026-09-05T02:30:00Z"
+    reconcile.reconcile(t, TEAM, now=now, today=now[:10], host="h")
+    sec = json.loads(t.store[f"team/{TEAM}/_coord/summaries.json"])[projection.REVIEWS_KEY]
+    row = next(r for r in sec["rows"] if r["name"] == SLUG)
+    assert row["state"] == "CHANGES"
+    assert row["tally"]["winning"][REVIEWER]["name"] == later
+    assert row["tally"]["winning"][REVIEWER]["verdict"] == "changes"
+    assert row["tally"]["winning"][REVIEWER]["sort_key"] == f"{SECOND}.900000Z"
+
+
+class _Authority:
+    """The minimum a validated generation needs to be served through the public-read branch."""
+    def __init__(self, row):
+        self._row = row
+
+    def section(self, name):
+        return {"rows": [self._row]} if name == "reviews" else None
+
+
+def _generation_row(tally):
+    return {"name": SLUG, "tally": tally}
+
+
+def _served(monkeypatch, capsys, tally):
+    token = cli._PUBLIC_READ_CONTEXT.set(_Authority(_generation_row(tally)))
+    try:
+        rc = cli.main(["review", "status", TEAM, SLUG, "--json"], transport=FakeTransport())
+    finally:
+        cli._PUBLIC_READ_CONTEXT.reset(token)
+    out = capsys.readouterr()
+    return rc, out
+
+
+def _base_tally(**extra):
+    t = {"state": "APPROVED", "approvals": [REVIEWER], "changes": [], "required": [REVIEWER],
+         "pending_required": [], "evidence": "", "of": "PR #1", "head": HEAD}
+    t.update(extra)
+    return t
+
+
+def test_generation_backed_status_serves_winning(monkeypatch, capsys):
+    name = review.verdict_filename(REVIEWER, head=HEAD, ts=f"{SECOND}Z", digest="058ddb93")
+    rc, out = _served(monkeypatch, capsys, _base_tally(winning={REVIEWER: {"name": name, "verdict": "approve", "sort_key": f"{SECOND}.900000Z"}}))
+    assert rc == 0
+    assert json.loads([l for l in out.out.splitlines() if l.startswith("{")][-1])["winning"][REVIEWER]["name"] == name
+
+
+def test_generation_backed_status_fails_closed_without_winning(monkeypatch, capsys):
+    """An old generation (projected before this change) cannot prove which shard won: rc 3, not a
+    tally that a ship gate would read as the whole truth."""
+    rc, out = _served(monkeypatch, capsys, _base_tally())
+    assert rc == 3 and "does not record the winning shard" in out.err
