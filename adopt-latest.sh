@@ -290,7 +290,14 @@ fulcra_api_version() {
   # UNKNOWN is a real answer here and is NOT treated as "below": refusing to
   # enforce a floor you cannot measure is the same discipline as refusing to
   # delete something you cannot classify.
-  _V="$(uv tool list 2>/dev/null | awk '/^fulcra-api v/ {sub(/^v/,"",$2); print $2; exit}')"
+  # Use the ALREADY-RESOLVED installer path, not a bare `uv`. This script
+  # resolves UV_BIN beyond PATH precisely because launchd/cron/systemd run lean
+  # PATHs where "uv not found" is falsely true, and a floor probe that misses uv
+  # there falls through to unrelated python3 metadata, reports UNKNOWN, and so
+  # SKIPS the upgrade on exactly the hosts least likely to be fixed by hand.
+  # An inventory probe that cannot see the installer is worse than no probe: it
+  # makes a skipped gate look like a considered decision.
+  _V="$("${UV_BIN:-uv}" tool list 2>/dev/null | awk '/^fulcra-api v/ {sub(/^v/,"",$2); print $2; exit}')"
   [ -n "$_V" ] && { echo "$_V"; return 0; }
   python3 -c 'import importlib.metadata as m; print(m.version("fulcra-api"))' 2>/dev/null
 }

@@ -147,6 +147,40 @@ fi
 # What is resolved here is exported through $CLAUDE_ENV_FILE, the supported
 # mechanism for a SessionStart hook to set variables for the session, so the
 # rest of the session sees it without anything being written to a shell profile.
+# An identity read from the store is UNTRUSTED INPUT, and treating it
+# otherwise is how a config pointer becomes code execution. The document is
+# mutable and any agent with write access can change it; the fact that this
+# team wrote the current one is not a property of the next one. Two consequences
+# the code below enforces rather than assumes:
+#
+#   1. The value is INTERPOLATED INTO A STORE PATH. A "team" of `../..` or one
+#      carrying a slash reaches a document nobody intended.
+#   2. The value is WRITTEN INTO A FILE THE SHELL SOURCES. An unquoted
+#      `export NAME=${value}` with whitespace, a newline, a `;` or a `$(...)`
+#      does not set a variable — it adds a statement to the session's shell
+#      program.
+#
+# So: validate against a closed grammar first, refuse anything else loudly, and
+# still emit single-quoted assignments. The grammar makes the quoting redundant
+# and the quoting makes a future grammar mistake harmless; neither alone is
+# worth relying on for something that becomes shell source.
+valid_identity() {
+  # DELIBERATELY `case`, NOT `grep -E`. grep matches LINE BY LINE, so a value
+  # whose FIRST line is a valid identity passes the anchors even when later
+  # lines carry an injected statement: `a\nexport EVIL=1` slipped through the
+  # first version of this guard, and the test written for the original finding
+  # is what caught it. `case` tests the WHOLE string, newline included, because
+  # a newline is simply not in the permitted set.
+  _vi="${1:-}"
+  [ -n "$_vi" ] || return 1
+  [ "${#_vi}" -le 64 ] || return 1
+  case "$_vi" in
+    [!A-Za-z0-9]*)      return 1 ;;   # must begin with an alphanumeric
+    *[!A-Za-z0-9._-]*)  return 1 ;;   # any other character, anywhere
+  esac
+  return 0
+}
+
 team="${FULCRA_COORD_TEAM:-}"
 coordinator="${FULCRA_COORD_COORDINATOR:-}"
 if [ -z "$team" ] && [ "$have_creds" = "1" ] && command -v fulcra-api >/dev/null 2>&1; then
@@ -154,13 +188,25 @@ if [ -z "$team" ] && [ "$have_creds" = "1" ] && command -v fulcra-api >/dev/null
   if fulcra-api file download /coord-bootstrap.json "$bp" >/dev/null 2>&1; then
     team=$(python3 -c 'import json,sys;print((json.load(open(sys.argv[1])).get("team") or "").strip())' "$bp" 2>/dev/null)
     coordinator=$(python3 -c 'import json,sys;print((json.load(open(sys.argv[1])).get("coordinator") or "").strip())' "$bp" 2>/dev/null)
+    if [ -n "$team" ] && ! valid_identity "$team"; then
+      loud "REFUSED a team identity from ${_BOOTSTRAP_DOC:-/coord-bootstrap.json}: it is not a bare identity." \
+           "It would be interpolated into a store path and into shell source." \
+           "Nothing was exported and no store path was built from it."
+      team=""
+    fi
+    if [ -n "$coordinator" ] && ! valid_identity "$coordinator"; then
+      loud "REFUSED a coordinator identity from the bootstrap document: not a bare identity." \
+           "Nothing was exported."
+      coordinator=""
+    fi
     [ -n "$team" ] && say "team resolved from the store pointer: ${team}"
   fi
   rm -f "$bp"
 fi
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-  [ -n "$team" ] && echo "export FULCRA_COORD_TEAM=${team}" >> "$CLAUDE_ENV_FILE"
-  [ -n "$coordinator" ] && echo "export FULCRA_COORD_COORDINATOR=${coordinator}" >> "$CLAUDE_ENV_FILE"
+  # Single-quoted, and only ever a value the grammar above already accepted.
+  valid_identity "$team" && printf "export FULCRA_COORD_TEAM='%s'\n" "$team" >> "$CLAUDE_ENV_FILE"
+  valid_identity "$coordinator" && printf "export FULCRA_COORD_COORDINATOR='%s'\n" "$coordinator" >> "$CLAUDE_ENV_FILE"
 fi
 
 if [ -n "$team" ] && [ "$have_creds" = "1" ] && command -v fulcra-api >/dev/null 2>&1; then

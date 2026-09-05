@@ -37,8 +37,13 @@ def _floor_block() -> str:
     return text[start:end]
 
 
-def _classify(tmp_path, version: str | None):
-    """Run the real block with a stub `uv` reporting `version`."""
+def _classify(tmp_path, version: str | None, *, uv_on_path: bool = True):
+    """Run the real block with a stub `uv` reporting `version`.
+
+    `uv_on_path=False` models a lean launchd/cron PATH: uv exists only at the
+    absolute location this script resolves into UV_BIN, and is NOT findable by
+    name. That is the case the floor probe has to survive.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     if version is None:
@@ -55,10 +60,20 @@ def _classify(tmp_path, version: str | None):
     for f in bin_dir.iterdir():
         f.chmod(0o755)
 
-    script = f'set -u\nCLIENT_STATE=working\n{_floor_block()}\necho "STATE=$CLIENT_STATE"\n'
+    if uv_on_path:
+        uv_bin, path = "", f"{bin_dir}:/usr/bin:/bin"
+    else:
+        # uv is moved somewhere PATH cannot reach, and only UV_BIN knows it.
+        hidden = tmp_path / "opt"
+        hidden.mkdir()
+        (bin_dir / "uv").rename(hidden / "uv")
+        uv_bin, path = f'UV_BIN="{hidden / "uv"}"\n', f"{bin_dir}:/usr/bin:/bin"
+
+    script = (f'set -u\nCLIENT_STATE=working\n{uv_bin}{_floor_block()}'
+              f'\necho "STATE=$CLIENT_STATE"\n')
     proc = subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True,
-        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)})
+        env={"PATH": path, "HOME": str(tmp_path)})
     assert "STATE=" in proc.stdout, f"fragment did not finish:\n{proc.stderr}"
     return proc.stdout.strip().split("STATE=")[1].strip(), proc.stderr
 
@@ -104,3 +119,25 @@ def test_the_floor_is_stated_once_and_the_tests_read_it_from_the_script(tmp_path
     assert 'FULCRA_API_FLOOR="0.1.40"' in block
     state, _ = _classify(tmp_path, "0.1.40")
     assert state == "working"
+
+
+def test_a_lean_PATH_still_sees_an_old_tool_through_UV_BIN(tmp_path):
+    """codex-reviewer P1 on PR 706.
+
+    This script resolves UV_BIN beyond PATH precisely because launchd, cron and
+    systemd run lean PATHs where "uv not found" is falsely true. A floor probe
+    calling bare `uv` misses the installer there, falls through to unrelated
+    python3 metadata, reports UNKNOWN — and UNKNOWN deliberately does not
+    upgrade. So the gate would silently skip exactly the hosts least likely to
+    be fixed by hand, while looking like a considered decision.
+    """
+    state, err = _classify(tmp_path, "0.1.35", uv_on_path=False)
+    assert state == "stale", (
+        "a lean PATH hid the old client from the floor probe:\n" + err)
+    assert "BELOW the" in err
+
+
+def test_a_lean_PATH_does_not_invent_a_version_for_a_current_tool(tmp_path):
+    """The same path must not flip the other way and upgrade something current."""
+    state, err = _classify(tmp_path, "0.1.40", uv_on_path=False)
+    assert state == "working", err
