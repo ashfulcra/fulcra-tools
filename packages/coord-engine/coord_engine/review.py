@@ -112,6 +112,42 @@ def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional
     return parsed[0] if parsed else None
 
 
+_FRACTION = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(\d{1,6})Z$")
+
+
+def canonical_sort_key(name_ts: Optional[str], fm_ts: Optional[str],
+                       mtime_ts: Optional[str]) -> str:
+    """One form for every shard's ordering key: ``YYYY-MM-DDTHH:MM:SS.ffffffZ``.
+
+    WHY (codex-reviewer + codex-coder, coord-fold round 12, 2026-09-05): the
+    append-only name carries SECOND precision plus a content digest, and the
+    fold broke same-second ties on the name — so two verdicts from one reviewer
+    in one second were ordered by DIGEST, not chronology. codex-reviewer
+    reproduced an earlier APPROVE (digest feb86aee) outranking a later CHANGES
+    (058ddb93): folded APPROVED on stale evidence.
+
+    The SECOND comes from the ACL-controlled filename whenever it has one — a
+    frontmatter value can never move a shard across seconds, so a reviewer can
+    only reorder their OWN same-second shards, which they could do anyway by
+    filing again. The FRACTION comes from the frontmatter ``ts`` only when its
+    second equals the name's; the verb writes microseconds there. Shards with no
+    fraction get ``.000000`` so legacy and new shards compare in ONE format —
+    mixed precision compared as strings is exactly the misordering the verb's
+    own comment warns about. Same-microsecond shards from one reviewer are not
+    a case the fold can order; the name still breaks that tie, deterministically.
+    """
+    base = name_ts or fm_ts or mtime_ts or ""
+    if len(base) < 19:
+        return ""
+    second = base[:19]
+    fraction = "000000"
+    if fm_ts and fm_ts[:19] == second:
+        m = _FRACTION.match(fm_ts)
+        if m:
+            fraction = m.group(1).ljust(6, "0")
+    return f"{second}.{fraction}Z"
+
+
 def fold_newest_per_reviewer(
     rows: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], int]:

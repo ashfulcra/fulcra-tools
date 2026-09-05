@@ -2591,14 +2591,26 @@ def _tally_from_verdict_entries(
             "reviewer": reviewer,
             "name": n,
             "verdict": token,
-            "sort_key": (parsed_ts
-                         or str(fm.get("ts") or "")
-                         or _store_mtime_iso(e.get("mtime")) or ""),
+            # ONE canonical form (second from the ACL-controlled name, fraction
+            # from frontmatter `ts` only within that second) so two same-second
+            # shards of one reviewer order by chronology, not by digest.
+            "sort_key": review.canonical_sort_key(
+                parsed_ts, str(fm.get("ts") or ""),
+                _store_mtime_iso(e.get("mtime"))),
         })
     kept, folded_away = review.fold_newest_per_reviewer(rows)
     verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
                 for r in kept]
     tally = review.tally(verdicts, required=required)
+    # THE EXACT WINNING SHARD PER REVIEWER, exposed so a consumer (a ship gate)
+    # reads what the fold decided instead of refolding filenames itself — the
+    # reviewers' explicit ask: "do not independently refold ambiguous filenames".
+    tally["winning"] = {
+        r["reviewer"]: {"name": r["name"],
+                        "verdict": review.normalize_verdict(r["verdict"]),
+                        "sort_key": r["sort_key"]}
+        for r in kept
+    }
     # Computed HERE, from the same entries the fold consumed, so the cache's
     # fingerprint provably describes what it summarises. EMPTY when a mutable
     # plain shard participates: a name digest cannot see that shard's in-place
@@ -4594,6 +4606,10 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
         "reviewer": reviewer,
         "head": head,
         "verdict": normalized,
+        # Microseconds live HERE, not in the name (the name stays second-
+        # precision for the reasons above); the fold uses this fraction only to
+        # order shards that share the name's second. See review.canonical_sort_key.
+        "ts": _iso(_now().astimezone(timezone.utc)),
     }) + f"\n{getattr(args, 'note', None) or normalized}\n"
     if not transport.write(path, body):
         print(f"review verdict: write FAILED for {path} — the verdict did NOT "

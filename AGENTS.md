@@ -987,6 +987,17 @@ it (not on PyPI).
   never means destructive fallback. **Ship-gate: the throttle memo is process-global state — reset
   it between tests; a new write verb joins `_ACTIVITY_WRITE_FUNCS` (or the omission is justified);
   the preserve-everything-but-timestamp rule stays red-first pinned.**
+- **Same-second verdict shards order by chronology, not digest (2026-09-05, both codex reviewers,
+  coord-fold round 12).** The append-only name has SECOND precision plus a content digest, and the
+  fold broke same-second ties on the name — so an earlier APPROVE could outrank a later CHANGES from
+  the same reviewer (reproduced: digest `feb86aee` over `058ddb93`). Now `review verdict` writes a
+  microsecond `ts:` in the shard frontmatter and the fold orders every shard by
+  `review.canonical_sort_key` — the second from the ACL-controlled NAME (frontmatter can never move
+  a shard across seconds), the fraction from frontmatter only within that second, `.000000` for
+  shards without one so legacy and new compare in ONE format. `review status --json` now carries
+  `winning: {reviewer: {name, verdict, sort_key}}` — the exact shard the fold kept. **A downstream
+  consumer (a ship gate) reads `winning`; it never refolds filenames itself.** Caveat, pinned by
+  test: two legacy shards with no `ts:` in the same second still tie on the name.
 - **Engagement-aware liveness is a combiner over two ORTHOGONAL axes.** `classify(ts, now)` stays
   PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone. The truth table
   is layered on top by `presence.liveness(shard, now=…)`, which returns `{state, freshness,
