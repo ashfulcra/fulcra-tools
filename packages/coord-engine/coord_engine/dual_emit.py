@@ -60,7 +60,13 @@ def _opens_an_obligation(transport: Any, team: str, ptr: Optional[str]) -> bool:
             return True
         fm = okf.parse_frontmatter(raw) or {}
         assignee = str(fm.get("assignee") or "").strip()
-        return assignee not in ("", "-", "None", "null")
+        if assignee in ("", "-", "None", "null"):
+            return False
+        # Class C (coord-boss 24d545b0, 2026-09-05): a row that is already TERMINAL when its open is emitted — a DONE
+        # report born done, a reply that closes on creation — is not an obligation on the old plane and must not open
+        # on v4 either, or it carries an open with no close forever. The engine's own terminal set is the authority.
+        from .model import TERMINAL_STATUSES
+        return str(fm.get("status") or "").strip() not in TERMINAL_STATUSES
     except Exception:
         return True
 
