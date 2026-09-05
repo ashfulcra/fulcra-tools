@@ -312,3 +312,31 @@ def test_a_reseed_with_an_unreadable_checkpoint_is_unknown_not_a_silent_partial_
     t = FakeTransport({V4: V4_CFG}, fail={CKPT})
     _old_rows(monkeypatch, ROWS)
     assert cli.cmd_obligations_export_open(_args(), t) == 3 and "could not be reconciled" in capsys.readouterr().err
+
+
+def _mirror_cfg_docs():
+    return {"team/fulcra/_coord/bus-v4/records.json": json.dumps({"data_type": "MomentAnnotation/v4", "api_version": "v1alpha1"})}
+
+
+def test_a_directive_whose_task_has_no_assignee_is_not_mirrored_as_an_open():
+    """6f8121fc class B: blocked rows with an empty assignee were mirrored as opens for their OWNER (three on coord-boss)."""
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/nobody.md"] = "---\ntitle: x\nowner: coord-boss\nassignee:\nstatus: blocked\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="linear", to="coord-boss", kind="directive", priority="P2", slug="nobody", ptr="task/nobody.md") is False
+    assert tr.records == []
+
+
+def test_a_directive_whose_task_names_an_assignee_is_mirrored_and_an_unreadable_task_over_captures():
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/mine.md"] = "---\nowner: coord-boss\nassignee: coord-maintainer\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="boss", to="coord-maintainer", kind="directive", priority="P1", slug="mine", ptr="task/mine.md") is True
+    assert len(tr.records) == 1
+    tr2 = FakeTransport(_mirror_cfg_docs())                                           # doc absent: mirror anyway (over-capture, never a silent hole)
+    assert dual_emit.mirror(tr2, "fulcra", sender="boss", to="coord-maintainer", kind="directive", priority="P1", slug="ghost", ptr="task/ghost.md") is True
+
+
+def test_an_fyi_directive_opens_nothing_on_v4_because_it_opens_nothing_on_v3():
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/fyi.md"] = "---\nowner: a\nassignee: b\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="a", to="b", kind="directive", priority="P3", slug="fyi", ptr="task/fyi.md", fyi=True) is False
+    assert tr.records == []

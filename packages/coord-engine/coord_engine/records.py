@@ -872,7 +872,7 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     # The mirror can never fail the v3 write (it does not raise) and is a no-op without a bus-v4 config.
     from . import dual_emit
     dual_emit.mirror(transport, team, sender=sender, to=to, kind=kind, priority=priority, slug=slug,
-                     ptr=ptr, recorded_at=recorded_at)
+                     ptr=ptr, recorded_at=recorded_at, fyi=fyi)
     return ok
 
 

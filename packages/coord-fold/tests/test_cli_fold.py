@@ -130,7 +130,7 @@ def test_an_event_the_agent_SENT_to_someone_else_does_not_open_for_the_sender():
     st = _team([_rec("open", "sent", "2026-09-04T10:00:00Z", "1", to="them", sender="me"),
                 _rec("open", "mine", "2026-09-04T10:01:00Z", "2", to="me", sender="boss"),
                 _rec("open", "bcast", "2026-09-04T10:02:00Z", "3", to="all", sender="me")])
-    _run(st); assert set(_ckpt(st)["open"]) == {"mine", "bcast"}          # what I am assigned, plus a broadcast (even my own)
+    _run(st); assert set(_ckpt(st)["open"]) == {"mine"}                   # what I am assigned; my OWN broadcast is not mine (6f8121fc class A)
 
 
 def test_rebuild_recomputes_the_open_set_from_the_stream_and_keeps_the_generation():
@@ -158,3 +158,10 @@ def test_verify_pointers_passes_an_already_qualified_ptr_through_and_still_flags
                 _rec("open", "b", "2026-09-04T10:01:00Z", "2", ptr="task/gone.md")])
     st.docs["team/r/task/a.md"] = "# a"
     assert _run(st, "--verify-pointers") == 3 and _ckpt(st)["unreadable_pointers"] == ["b"]   # not team/r/team/r/...
+
+
+def test_a_broadcast_opens_for_everyone_except_its_sender():
+    """6f8121fc class A: coord-boss's own fleet-wide P0 (to=all, from=coord-boss) had become one of HIS opens."""
+    st = _team([_rec("open", "theirs", "2026-09-04T10:00:00Z", "1", to="all", sender="boss"),
+                _rec("open", "mine-bcast", "2026-09-04T10:01:00Z", "2", to="all", sender="me")])
+    _run(st); assert set(_ckpt(st)["open"]) == {"theirs"}
