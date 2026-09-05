@@ -1784,6 +1784,59 @@ The principle in this section survives untouched — a verdict is lifted by a
 link, not by a clock. What changed is the anchor, and the correction is mine to
 carry: naming is a link the superseding party can forge.
 
+### The corpus has no expiry, and that is the churn engine
+
+Root cause, found by systematic debugging 2026-09-05 after Ash observed that
+*"something in your instructions is dragging every task into recursive churn."*
+My first answer — that scheduled prompts rewrote themselves — was a symptom of
+this one.
+
+**Measured.** Owed across one twelve-hour session: 280 → 280 → 281 → 282 → 283
+→ 286. **It never once decreased**, while rows were actively being closed. Live
+corpus: 844 rows, 747 of them `proposed`, median age **11 days**, oldest 44.
+
+**The discriminating comparison.** Every coordination primitive that is stable
+has an expiry; the one that churns does not:
+
+| primitive | bound | result |
+|---|---|---|
+| leases | 72h SLA, lapse on their own | 2 rows, self-limiting |
+| mesh cursor | 48h floor, forward-only | 12 sweeps, zero accumulation |
+| stream fold | durable checkpoint, new events only | 286 owed for **1 event read** |
+| **tasks** | **`due` set on 0 of 844 rows** | **844 and rising** |
+
+The task model *has* a `due` field. Nothing uses it. `not_before` appears on 4
+rows. So a task is immortal until something explicitly kills it, and every act
+of coordination — a review round, a vacancy check, a status note — permanently
+enlarges the set that every future pass must fold, triage and report on. Bigger
+set, more triage per pass, more coordination, more rows.
+
+**236 of 844 rows (27%) are redundant members of 67 self-renewing families**,
+and the two largest generators are mechanisms I run:
+
+- `review-request-coord-fold-plan-r2-…` **×41** — one row per review round. The
+  28-round plan register minted 41 permanent rows; the engine register another
+  16. "One more round" is not only time, it is corpus.
+- `role-vacant-<date>-…` **×79** across five roles — the daily vacancy generator
+  re-mints without superseding. I filed this against my own Fabio family at 13;
+  it is five times larger than I measured.
+
+**A correction, because the obvious fix is wrong.** I predicted the family
+members were identical and could be collapsed. Falsified by diffing the first
+against the latest with dates and scan counts normalised: the newest
+`coord-fable-worker` row is 1527 bytes to the first's 706, and carries
+`assignee: user:ash`, `blocked_on: user:ash` and a real `next_action` added by
+hand. **The newest member holds the accumulated state; the older ones are
+superseded by it.** So the safe operation is supersede-forward (or expire the
+*oldest*), never collapse-to-first — that would discard the only row anyone
+enriched.
+
+The same law explains the instruction growth in the section below: I durably
+recorded every observation because nothing in this system expresses *a fact that
+has stopped mattering*. **This file is the next corpus if it only ever grows** —
+it is already 155 KB. A fact that has been superseded gets rewritten in place or
+deleted, not appended beside its replacement.
+
 ### Never let a pass rewrite the instruction that drives the next pass
 
 Ash, 2026-09-05: *"There is something wrong in your instructions, possibly your
