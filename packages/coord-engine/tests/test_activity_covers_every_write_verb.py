@@ -40,7 +40,7 @@ EXPECTED_READS = {
     "cmd_status", "cmd_board", "cmd_search", "cmd_needs_me", "cmd_owed",
     "cmd_briefing",
     "cmd_presence_show", "cmd_health", "cmd_doctor",
-    "cmd_obligations", "cmd_obligations_dispatch", "cmd_obligations_stream",
+    "cmd_obligations", "cmd_obligations_stream", "cmd_cutover_ready",
     "cmd_roles_status", "cmd_continuity_resume",
     "cmd_agents", "cmd_asks", "cmd_engagement_gate", "cmd_stash_list",
     "cmd_router_shadow_status",
@@ -58,6 +58,7 @@ EXPECTED_READS = {
 #: Commands that persist something the actor is accountable for. Running one IS
 #: evidence of work.
 EXPECTED_WRITES = {
+    "cmd_compare_to_fold",   # Task 14 bridge: appends to _coord/bus-v4/compare/<agent>.jsonl
     "cmd_tell", "cmd_respond", "cmd_answer", "cmd_escalate", "cmd_broadcast",
     "cmd_intent", "cmd_later", "cmd_remind",
     "cmd_reconcile", "cmd_acceptance_pair",
@@ -105,6 +106,14 @@ EXPECTED_MIXED = {
     "cmd_inbox": {
         "read": [["inbox", "r"]],
         "write": [["inbox", "r", "--ack", "some-slug"]],
+    },
+    # `obligations TEAM` folds; each of these flags WRITES (bus-v4 seed; checkpoint repair; checkpoint seed).
+    # The dispatch was classified as a plain read while two of its flags already wrote (Task 12 bridge, 2026-09-05).
+    "cmd_obligations_dispatch": {
+        "read": [["obligations", "r", "--agent", "a"]],
+        "write": [["obligations", "r", "--agent", "a", "--export-open"],
+                  ["obligations", "r", "--agent", "a", "--repair-unknown"],
+                  ["obligations", "r", "--agent", "a", "--seed-checkpoint"]],
     },
     "cmd_digest": {
         "read": [["digest", "r"]],

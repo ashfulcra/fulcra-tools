@@ -19,8 +19,17 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{40})(?![0-9a-f])([^\n`]*)")   # r37: EXACTLY 40 hex (main() fullmatches 40) or the two documented head placeholders — a 7-hex head passed the guard and was refused by the gate (codex-coder round 32)
-SHORT_HEAD = re.compile(r"ship_check\.py\s+\S+\s+[0-9a-f]{7,39}(?![0-9a-f<])")                                            # the fail-open form, named so it is REPORTED rather than silently unmatched
+# r39 (codex-coder round 34): match the COMMAND TOKEN first, then judge every positional. A mention is an invocation
+# when it is preceded by a run-style word (python/python3/run/$/uv run) OR followed by at least one positional; a
+# bare path reference in prose ("see scripts/ship_check.py") is not one. Missing positionals are REPORTED.
+INVOCATION = re.compile(r"(?P<pre>(?:python3?|run|\$)\s+`?)?(?P<path>(?:[\w.-]*/)*)ship_check\.py(?:[ \t]+(?P<team>[^\s`]+))?(?:[ \t]+(?P<head>[^\s`]+))?(?P<tail>[^\n`]*)")
+EXEC_PATH = re.compile(r"^(\./|\.\./|/)")   # r40 (codex-coder round 35): `./scripts/ship_check.py` or an absolute path in command position EXPRESSES execution
+HEAD_PLACEHOLDERS = ("<HEAD>", "<40-hex-head>")                                   # `<40-hex head>` (with the space) is normalized to this before matching
+HEAD_OK = re.compile(r"^[0-9a-f]{40}$")                                          # exactly what ship_check.main fullmatches
+
+
+def head_problem(head: str):
+    return None if HEAD_OK.match(head) or head in HEAD_PLACEHOLDERS else f"head {head!r} is not 40 lowercase hex (or a documented placeholder)"
 REQUIRED_ROOTS = ("--git", "--fulcra-api")
 
 
@@ -70,9 +79,21 @@ def parse_invocation(rest: str) -> list[str]:
 
 
 def bare_invocations(text: str) -> list[str]:
-    out = [f"head is not 40 hex: {m.group(0).strip()[:100]}" for m in SHORT_HEAD.finditer(text)]
+    out = []
+    text = text.replace("<40-hex head>", "<40-hex-head>")                          # a documented head placeholder with a space: one token
     for m in INVOCATION.finditer(text):
-        problems = parse_invocation(m.group(3))
+        team, head, tail = m.group("team"), m.group("head"), m.group("tail") or ""
+        if not m.group("pre") and team is None and not EXEC_PATH.match(m.group("path") or ""):
+            continue                                                                # a bare path reference, not an invocation (r40: ./ and / forms ARE invocations)
+        problems = []
+        if team is None:
+            problems.append("missing team")
+        if head is None:
+            problems.append("missing head")
+        elif head_problem(head):
+            problems.append(head_problem(head))
+        if head is not None:
+            problems += parse_invocation(tail)
         if problems:
             out.append(f"{'; '.join(problems)}: {m.group(0).strip()[:100]}")
     return out

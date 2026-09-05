@@ -121,3 +121,25 @@ def test_verify_pointers_records_an_absent_pointer_and_default_reads_none():
     r = FakeReader(st2); orig = r.read_classified; r.read_classified = lambda p: (reads.append(p), orig(p))[1]
     main(["fold", "r", "--agent", "me", "--now", "2026-09-04T11:00:00Z"], reader=r, writer=FakeWriter(st2))
     assert not any("/task/" in p for p in reads)
+
+
+def test_an_event_the_agent_SENT_to_someone_else_does_not_open_for_the_sender():
+    """RULING 2026-09-05 (coord-boss blocker a0927018): an obligation belongs to its ASSIGNEE. Before this, the
+    relevance rule also matched `from == agent`, so every seed leaked into its senders' folds and no coordinator
+    could ever AGREE with the old plane. Mutation: restore `or ev["from"] == agent` -> this FAILS."""
+    st = _team([_rec("open", "sent", "2026-09-04T10:00:00Z", "1", to="them", sender="me"),
+                _rec("open", "mine", "2026-09-04T10:01:00Z", "2", to="me", sender="boss"),
+                _rec("open", "bcast", "2026-09-04T10:02:00Z", "3", to="all", sender="me")])
+    _run(st); assert set(_ckpt(st)["open"]) == {"mine", "bcast"}          # what I am assigned, plus a broadcast (even my own)
+
+
+def test_rebuild_recomputes_the_open_set_from_the_stream_and_keeps_the_generation():
+    """A checkpoint computed under the old rule holds leaked opens; --rebuild replays every event under the current
+    rule. Events are never deleted (G28); the generation survives so a concurrent writer is still refused (G27)."""
+    st = _team([_rec("open", "mine", "2026-09-04T10:00:00Z", "1", to="me")])
+    _run(st); gen = _ckpt(st)["generation"]
+    stale = _ckpt(st); stale["open"]["leaked"] = {"pri": "P1", "ptr": "team/r/task/leaked.md", "from": "me", "at": "2026-09-04T09:00:00Z"}
+    st.saved[cp.path("r", "me")] = json.dumps(stale)                        # a leaked open, as the old rule left it
+    _run(st, now="2026-09-04T12:00:00Z"); assert "leaked" in _ckpt(st)["open"]          # a plain fold keeps it: nothing closed it
+    assert _run(st, "--rebuild", now="2026-09-04T13:00:00Z") == 0
+    assert set(_ckpt(st)["open"]) == {"mine"} and _ckpt(st)["generation"] > gen         # rebuilt from the stream; generation moved on

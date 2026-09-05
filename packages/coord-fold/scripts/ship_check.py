@@ -25,7 +25,10 @@ import sys
 REQUIRED = ("codex-reviewer", "codex-coder")
 # Engine heads whose register `review-winning-envelope-e9c0089b` read APPROVED AND whose pin PR shipped.
 # EMPTY until a deliberate plan revision adds one; an empty set means ship_check refuses, correctly.
-APPROVED_ENGINE_PINS: frozenset = frozenset()
+APPROVED_ENGINE_PINS: frozenset = frozenset({
+    "e06e69e5d44d92b2b52a09020f53f2bd1ccdc1d5",   # r38, 2026-09-05: the fleet pin moved here (PR #698 merged; store adopt-latest.sh uploaded by Ash);
+                                                  # this build carries the review supersession contract (PR #695, APPROVED by both required reviewers)
+})
 
 
 IMPORT_AFFECTING = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONSAFEPATH", "VIRTUAL_ENV", "CONDA_PREFIX")
@@ -98,15 +101,51 @@ def gate_tmp_root():
     st = os.stat(root)
     if st.st_uid != os.getuid() or (st.st_mode & 0o077):
         raise RuntimeError(f"gate temp root {root} is not a private directory of this user (uid {st.st_uid}, mode {oct(st.st_mode & 0o777)})")
+    strip_acls(root)                                # r38: an inherited ACL on the root would survive the chmod above
     tempfile.tempdir = root
     return root
 
 
+def acl_entries(path):
+    """ACL entries on a path. r38 (codex-reviewer round 33): on macOS an ACL survives chmod and is INVISIBLE to stat, so a
+    directory that reports 0700 can still grant everyone write/delete via an inherited entry. Listed through the OS's own
+    /bin/ls (an OS trust root, like /bin/chmod below); on Linux, the POSIX-ACL xattr."""
+    # r39 (both reviewers, round 34): an inspection that FAILS is not "no ACL". A failed ls / listxattr refuses.
+    if sys.platform == "darwin":
+        p = subprocess.run(["/bin/ls", "-led", path], capture_output=True, text=True)
+        if p.returncode != 0 or not p.stdout.strip():
+            raise PermissionError(f"ACL inspection of {path} failed (rc {p.returncode}): {p.stderr.strip()[:120]}")
+        return [ln.strip() for ln in p.stdout.splitlines()[1:] if re.match(r"\s*\d+:\s", ln)]
+    try:
+        return [x for x in os.listxattr(path) if x.startswith("system.posix_acl")]
+    except OSError as exc:
+        raise PermissionError(f"ACL inspection of {path} failed: {exc}") from exc
+
+
+def strip_acls(path):
+    """Remove every ACL entry (inherited ones included) from a path the gate just created, then PROVE none remain."""
+    # r39 (both reviewers, round 34): a removal that FAILS refuses; it is never "stripped".
+    if sys.platform == "darwin":
+        p = subprocess.run(["/bin/chmod", "-N", path], capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"ACL removal on {path} failed (rc {p.returncode}): {p.stderr.strip()[:120]}")
+    else:
+        for x in acl_entries(path):
+            try:
+                os.removexattr(path, x)
+            except OSError as exc:
+                raise RuntimeError(f"ACL removal on {path} failed: {exc}") from exc
+    left = acl_entries(path)
+    if left:
+        raise RuntimeError(f"{path} still carries ACL entries after stripping: {left[:2]}")
+
+
 def private_dir(prefix):
-    """A fresh 0700 directory under the gate's own temp root."""
+    """A fresh 0700 directory under the gate's own temp root, with no ACL entries (r38)."""
     import tempfile
     d = tempfile.mkdtemp(prefix=prefix, dir=gate_tmp_root())
     os.chmod(d, 0o700)
+    strip_acls(d)
     return d
 
 
@@ -118,11 +157,15 @@ def read_owned_file(path):
     ds = os.stat(d)
     if ds.st_uid != os.getuid() or (ds.st_mode & 0o077):
         raise PermissionError(f"the private directory {d} is no longer private (uid {ds.st_uid}, mode {oct(ds.st_mode & 0o777)})")
+    if acl_entries(d):
+        raise PermissionError(f"the private directory {d} carries ACL entries: {acl_entries(d)[:2]}")      # r38: invisible to stat
     ls = os.lstat(path)
     if _stat.S_ISLNK(ls.st_mode) or not _stat.S_ISREG(ls.st_mode):
         raise PermissionError(f"{path} is not a regular file the gate wrote")
     if ls.st_uid != os.getuid():
         raise PermissionError(f"{path} is owned by uid {ls.st_uid}, not this user")
+    if acl_entries(path):
+        raise PermissionError(f"{path} carries ACL entries: {acl_entries(path)[:2]}")                          # r38: an ACL can grant write past the mode
     if ls.st_mode & 0o022:                                  # r36 (codex-reviewer round 31): the BODY's own mode, not only the directory's.
         # The guarantee is INTEGRITY (nobody else could have modified the body between the CLI's write and this read),
         # so the group/other WRITE bits are what matter; a 0644 body — what any CLI writes under a normal umask — is fine.
@@ -419,7 +462,10 @@ def winning_name_ok(name: str, head: str, reviewer: str) -> bool:
 def main(team: str, head: str, git: str = None, fulcra_api: str = None) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         print("ship_check: head must be a 40-hex commit"); return 1
-    gate_tmp_root()                                                     # r34: our own 0700 temp root; TMPDIR is never consulted
+    try:
+        gate_tmp_root()                                                 # r34: our own 0700 temp root; TMPDIR is never consulted
+    except (RuntimeError, PermissionError) as exc:
+        print(f"ship_check: {exc} — refusing"); return 1                # r39: a root that cannot be made/proven private is a refusal, not a crash
     exe = engine_executable()                                           # THE one resolution of the launcher
     if not exe:
         print("ship_check: coord-engine not found on PATH — refusing"); return 1
