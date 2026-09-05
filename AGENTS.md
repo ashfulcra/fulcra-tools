@@ -1462,6 +1462,36 @@ hours of the operator's time each time. Fixed in code
 `_resolve_linear_key`) and written here because a fact that lives only in a
 commit message or a chat transcript is not captured.
 
+### How to probe whether an agent RESPONDED (and how not to)
+
+Earned 2026-09-04/05, and it cost a wrongly-rerouted merge and an agent nearly
+written off as silent.
+
+**`_coord/responses/<slug>/` is NOT where a `bus-v3 send` response lands.** That
+prefix holds 647 slug-named subdirectories and a reply sent with
+`bus-v3 send --kind response --slug X --ptr Y` creates none of them. Coord-boss
+probed that path for a reply, found nothing, and concluded a directive had been
+"delivered and consumed and produced nothing" — about an agent that had already
+answered correctly six times, whose replies coord-boss had itself quoted back.
+
+The probe answered a different question than the one it was asked, and it failed
+in the worst direction: **it accuses a working agent of silence.** A check that
+cannot observe the thing it is meant to observe, reporting a confident wrong
+answer instead of UNKNOWN, is the same defect family this repo spent the day
+fixing in `transport.read`.
+
+**Probe the queue, or stat the ptr document the event names.** A response event
+carries a `ptr`; read THAT. collect-maintainer's six replies all sit under
+`_coord/reports/` and every one reads `ok` at a real byte count.
+
+**And `list_dir` on a path that does not exist returns `[]`, not `None`.**
+Verified: `list_dir` on the never-created response directory returns 0 entries,
+exactly like a directory that exists and is empty. So "0 entries" is NOT evidence
+of absence of work — it is `absent` and `empty` collapsed into one answer, the
+same conflation as `read` collapsing absent and unreadable. Use
+`read_classified` on a known child, or stat the ptr, when the distinction
+matters.
+
 ### Never conclude a credential is dead from one variable
 
 Earned three separate times. Before claiming any key is revoked or expired, or
