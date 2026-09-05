@@ -58,7 +58,7 @@ if mode == "attack":
     t("codex-coder: original posix.listdir('/Users')", lambda: posix.listdir("/Users"))
     t("read the corpus file", lambda: open(corpus_path).read(4))
     t("subprocess /bin/ls", lambda: subprocess.run(["/bin/ls", "/"], capture_output=True))
-    t("outbound socket 1.1.1.1:53", lambda: socket.create_connection(("1.1.1.1", 53), timeout=2))
+    t("outbound socket 192.0.2.1:53 (RFC 5737 documentation address: unroutable; the seatbelt denies the connect regardless of destination)", lambda: socket.create_connection(("192.0.2.1", 53), timeout=2))
     def direct():
         c = socket.socket(socket.AF_UNIX); c.connect(sock); c.sendall(b'{"argv":["file","list","team/r/"]}\n')
         reply = json.loads(c.recv(1 << 16)); assert reply["rc"] == 2, reply; raise PermissionError("store refused: " + reply["stderr"].strip())

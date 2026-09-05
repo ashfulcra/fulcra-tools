@@ -1,7 +1,7 @@
 import json
 from coord_fold import checkpoint as cp
 from coord_fold.cli import main
-from fakes import FakeReader, FakeStore, FakeWriter
+from coord_fold_fakes import FakeReader, FakeStore, FakeWriter
 
 
 def _st(state):

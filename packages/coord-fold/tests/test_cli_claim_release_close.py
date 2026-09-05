@@ -1,7 +1,7 @@
 import json
 from coord_fold import checkpoint as cp
 from coord_fold.cli import main
-from fakes import FakeReader, FakeStore, FakeWriter
+from coord_fold_fakes import FakeReader, FakeStore, FakeWriter
 CFG = "team/r/_coord/bus-v4/records.json"
 CFG_DOC = json.dumps({"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"})
 T0, T1, T2 = "2026-09-04T10:00:00Z", "2026-09-04T11:00:00Z", "2026-09-04T12:00:00Z"

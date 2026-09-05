@@ -585,7 +585,7 @@ def test_stale_unchecked_hash_bytecode_answers_under_a_normal_import_and_never_u
     pyc = pathlib.Path(importlib.util.cache_from_source(str(site / "coord_engine" / "cli.py")))
     pyc.parent.mkdir(parents=True, exist_ok=True)
     py_compile.compile(str(stale_src), cfile=str(pyc), dfile=str(site / "coord_engine" / "cli.py"), invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
-    hole = subprocess.run([sys.executable, "-c", f"import site; site.addsitedir({str(site)!r}); from coord_engine import cli; print(cli.main(['x','x','x','x']))"],
+    hole = subprocess.run([sys.executable, "-S", "-c", f"import site; site.addsitedir({str(site)!r}); from coord_engine import cli; print(cli.main(['x','x','x','x']))"],
                           capture_output=True, text=True, env=ship_check.engine_env()).stdout.strip().splitlines()
     assert hole and hole[-1] == "0", hole                              # the stale bytecode answered rc 0 (the hole, asserted)
     _pin_tree(monkeypatch, launcher)
@@ -687,6 +687,8 @@ def test_engine_env_strips_every_import_affecting_variable(monkeypatch):
 
 def test_a_shadow_coord_engine_on_pythonpath_is_not_imported_under_the_scrubbed_env(tmp_path, monkeypatch):
     """coord-boss's reproduction, as a test: same launcher, same interpreter — PYTHONPATH decides which
+    coord_engine answers. (-S on the child: a uv workspace venv has the REAL coord_engine installed and it would
+    answer first; PYTHONPATH is still honoured under -S, so the shadow still wins when inherited.) Original text:
     coord_engine answers. Under ship_check's env the site-packages build (the one the identity check proved) wins."""
     import subprocess, sys
     site = tmp_path / "env" / "lib" / "python3.13" / "site-packages"; (site / "coord_engine").mkdir(parents=True)
@@ -694,7 +696,7 @@ def test_a_shadow_coord_engine_on_pythonpath_is_not_imported_under_the_scrubbed_
     shadow = tmp_path / "shadow"; (shadow / "coord_engine").mkdir(parents=True)
     (shadow / "coord_engine" / "__init__.py").write_text("WHO = 'SHADOW'\n")
     launcher = tmp_path / "env" / "bin" / "coord-engine"; launcher.parent.mkdir(parents=True)
-    launcher.write_text(f"#!{sys.executable}\nimport sys, site\nsite.addsitedir({str(site)!r})\nimport coord_engine\nprint(coord_engine.WHO)\n"); launcher.chmod(0o755)
+    launcher.write_text(f"#!{sys.executable} -S\nimport sys, site\nsite.addsitedir({str(site)!r})\nimport coord_engine\nprint(coord_engine.WHO)\n"); launcher.chmod(0o755)
     monkeypatch.setenv("PYTHONPATH", str(shadow))
     inherited = subprocess.run([str(launcher)], capture_output=True, text=True).stdout.strip()
     assert inherited == "SHADOW"                                                    # the hole, reproduced

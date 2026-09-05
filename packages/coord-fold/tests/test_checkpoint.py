@@ -1,6 +1,6 @@
 import json
 from coord_fold import checkpoint as cp
-from fakes import FakeReader, FakeStore, FakeWriter
+from coord_fold_fakes import FakeReader, FakeStore, FakeWriter
 NOW = "2026-09-04T13:45:00Z"
 
 

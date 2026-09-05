@@ -18,9 +18,9 @@ PROFILE = """(version 1)
 (deny network*)
 (allow network-outbound (literal "{sock}"))
 (deny process-exec (with no-log))
-(allow process-exec (subpath "{pyprefix}"))
+(allow process-exec (subpath "{pyprefix}") (subpath "{venv}"))
 (deny file-read-data (subpath "/Users") (subpath "/home") (subpath "/private/tmp") (subpath "/tmp") (subpath "/private/etc") (subpath "/etc") (subpath "/private/var") (subpath "/var") (subpath "/Applications") (subpath "/Volumes") (subpath "/Library"))
-(allow file-read-data (subpath "{pyprefix}") (subpath "{pkg}") (subpath "{tmp}"))
+(allow file-read-data (subpath "{pyprefix}") (subpath "{venv}") (subpath "{pkg}") (subpath "{tmp}"))
 (deny file-write* (subpath "/Users") (subpath "/home") (subpath "/private/tmp") (subpath "/tmp") (subpath "/dev"))
 (allow file-write* (subpath "{tmp}") (literal "/dev/tty") (literal "/dev/null"))
 """
@@ -280,7 +280,10 @@ def main() -> int:
     log, corpus_path, profile = private / "argv.jsonl", private / "corpus.json", private / "profile.sb"
     corpus_path.write_text(json.dumps(corpus()))
     pyprefix = os.path.realpath(sys.base_prefix)
-    profile.write_text(PROFILE.format(sock=sock, pyprefix=pyprefix, pkg=os.path.realpath(PKG), tmp=tmp))
+    # A venv interpreter reads <venv>/pyvenv.cfg at startup (site.venv); on CI that file lives under the repo's .venv,
+    # outside the package tree, and the kernel deny aborted the interpreter before phase 1 (measured on the macOS runner).
+    venv = os.path.realpath(sys.prefix)
+    profile.write_text(PROFILE.format(sock=sock, pyprefix=pyprefix, venv=venv, pkg=os.path.realpath(PKG), tmp=tmp))
     server = subprocess.Popen([sys.executable, str(HERE / "store_server.py"), sock, str(log), str(corpus_path)], stdout=subprocess.DEVNULL)
     for _ in range(50):
         if os.path.exists(sock):

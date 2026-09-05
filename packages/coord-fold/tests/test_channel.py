@@ -3,7 +3,7 @@ import subprocess
 import pytest
 from coord_fold import channel
 from coord_fold.transport import CliPointerWriter
-from fakes import FakeReader, FakeStore
+from coord_fold_fakes import FakeReader, FakeStore
 
 CFG = "team/r/_coord/bus-v4/records.json"
 

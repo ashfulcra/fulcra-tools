@@ -61,7 +61,7 @@ def _package_imports(tree):
 
 
 def test_no_enumeration_method_on_reader_writer_or_fakes():
-    from fakes import FakeReader, FakeStore, FakeWriter
+    from coord_fold_fakes import FakeReader, FakeStore, FakeWriter
     st = FakeStore({}, [])
     for obj in (tr.CliPointerReader(cli=["true"]), tr.CliPointerWriter(cli=["true"]), FakeReader(st), FakeWriter(st)):
         for n in ENUM_NAMES:
