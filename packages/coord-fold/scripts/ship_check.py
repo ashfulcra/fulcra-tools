@@ -110,25 +110,31 @@ def acl_entries(path):
     """ACL entries on a path. r38 (codex-reviewer round 33): on macOS an ACL survives chmod and is INVISIBLE to stat, so a
     directory that reports 0700 can still grant everyone write/delete via an inherited entry. Listed through the OS's own
     /bin/ls (an OS trust root, like /bin/chmod below); on Linux, the POSIX-ACL xattr."""
+    # r39 (both reviewers, round 34): an inspection that FAILS is not "no ACL". A failed ls / listxattr refuses.
     if sys.platform == "darwin":
-        out = subprocess.run(["/bin/ls", "-led", path], capture_output=True, text=True).stdout.splitlines()
-        return [ln.strip() for ln in out[1:] if re.match(r"\s*\d+:\s", ln)]
+        p = subprocess.run(["/bin/ls", "-led", path], capture_output=True, text=True)
+        if p.returncode != 0 or not p.stdout.strip():
+            raise PermissionError(f"ACL inspection of {path} failed (rc {p.returncode}): {p.stderr.strip()[:120]}")
+        return [ln.strip() for ln in p.stdout.splitlines()[1:] if re.match(r"\s*\d+:\s", ln)]
     try:
         return [x for x in os.listxattr(path) if x.startswith("system.posix_acl")]
-    except OSError:
-        return []
+    except OSError as exc:
+        raise PermissionError(f"ACL inspection of {path} failed: {exc}") from exc
 
 
 def strip_acls(path):
     """Remove every ACL entry (inherited ones included) from a path the gate just created, then PROVE none remain."""
+    # r39 (both reviewers, round 34): a removal that FAILS refuses; it is never "stripped".
     if sys.platform == "darwin":
-        subprocess.run(["/bin/chmod", "-N", path], capture_output=True)
+        p = subprocess.run(["/bin/chmod", "-N", path], capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"ACL removal on {path} failed (rc {p.returncode}): {p.stderr.strip()[:120]}")
     else:
         for x in acl_entries(path):
             try:
                 os.removexattr(path, x)
-            except OSError:
-                pass
+            except OSError as exc:
+                raise RuntimeError(f"ACL removal on {path} failed: {exc}") from exc
     left = acl_entries(path)
     if left:
         raise RuntimeError(f"{path} still carries ACL entries after stripping: {left[:2]}")
@@ -456,7 +462,10 @@ def winning_name_ok(name: str, head: str, reviewer: str) -> bool:
 def main(team: str, head: str, git: str = None, fulcra_api: str = None) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         print("ship_check: head must be a 40-hex commit"); return 1
-    gate_tmp_root()                                                     # r34: our own 0700 temp root; TMPDIR is never consulted
+    try:
+        gate_tmp_root()                                                 # r34: our own 0700 temp root; TMPDIR is never consulted
+    except (RuntimeError, PermissionError) as exc:
+        print(f"ship_check: {exc} — refusing"); return 1                # r39: a root that cannot be made/proven private is a refusal, not a crash
     exe = engine_executable()                                           # THE one resolution of the launcher
     if not exe:
         print("ship_check: coord-engine not found on PATH — refusing"); return 1

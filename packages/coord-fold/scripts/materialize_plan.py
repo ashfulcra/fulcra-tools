@@ -19,7 +19,10 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(\S+)([^\n`]*)")   # r38 (codex-coder round 33): match EVERY invocation, then judge the head POSITIVELY
+# r39 (codex-coder round 34): match the COMMAND TOKEN first, then judge every positional. A mention is an invocation
+# when it is preceded by a run-style word (python/python3/run/$/uv run) OR followed by at least one positional; a
+# bare path reference in prose ("see scripts/ship_check.py") is not one. Missing positionals are REPORTED.
+INVOCATION = re.compile(r"(?P<pre>(?:python3?|run|\$)\s+`?)?(?:[\w./-]*/)?ship_check\.py(?:[ \t]+(?P<team>[^\s`]+))?(?:[ \t]+(?P<head>[^\s`]+))?(?P<tail>[^\n`]*)")
 HEAD_PLACEHOLDERS = ("<HEAD>", "<40-hex-head>")                                   # `<40-hex head>` (with the space) is normalized to this before matching
 HEAD_OK = re.compile(r"^[0-9a-f]{40}$")                                          # exactly what ship_check.main fullmatches
 
@@ -78,7 +81,18 @@ def bare_invocations(text: str) -> list[str]:
     out = []
     text = text.replace("<40-hex head>", "<40-hex-head>")                          # a documented head placeholder with a space: one token
     for m in INVOCATION.finditer(text):
-        problems = ([head_problem(m.group(2))] if head_problem(m.group(2)) else []) + parse_invocation(m.group(3))
+        team, head, tail = m.group("team"), m.group("head"), m.group("tail") or ""
+        if not m.group("pre") and team is None:
+            continue                                                                # a path reference, not an invocation
+        problems = []
+        if team is None:
+            problems.append("missing team")
+        if head is None:
+            problems.append("missing head")
+        elif head_problem(head):
+            problems.append(head_problem(head))
+        if head is not None:
+            problems += parse_invocation(tail)
         if problems:
             out.append(f"{'; '.join(problems)}: {m.group(0).strip()[:100]}")
     return out
