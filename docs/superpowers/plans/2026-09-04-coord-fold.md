@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r26)
+# coord-fold: Coord on Annotations Implementation Plan (r27)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2127,7 +2127,7 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 1. **When.** Only after implementation, on the **exact implementation commit** `<HEAD>` (40-hex) whose on-disk `packages/coord-fold/` is what ships. Never at plan time. Reading the materialized plan tree earlier is welcome as *feedback* and **carries nothing**.
 2. **Register.** `coord-engine review request fulcra coord-fold-ship-<HEAD> --of packages/coord-fold --head <HEAD> --reviewer codex-reviewer --reviewer codex-coder`. The engine's `--head` keying means any head change is a new round with no verdicts.
 3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file with the **typed verb, nothing hand-uploaded**: `coord-engine review verdict fulcra coord-fold-ship-<HEAD> --head <HEAD> --verdict approve --from <reviewer> --note "tree: <git rev-parse <HEAD>:packages/coord-fold> …reading…"`. The engine writes an **append-only envelope** `verdicts/<HEAD>--<reviewer>--<UTC timestamp>-<nonce>.md` (as every verdict on this plan's register demonstrates); the `tree:` line in the note is the evidence. A verdict whose `tree` differs from the commit's is void.
-4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite — bound to an APPROVED AND PINNED engine, never to a named commit** *(r16; codex-reviewer round 13 P0 one, verified at source by coord-boss `149e7d11`: the commit r15 named still had the double clock sample, so a named prerequisite bought nothing)*: `ship_check` downloads the fleet pin from `team/<team>/_coord/bus-v3/records.json`'s sibling `adopt-latest.sh` (the plan's own rule: pins come from there, never from a slug) and requires `PIN ∈ APPROVED_ENGINE_PINS` — a list in the script that is **empty until a deliberate plan revision adds the head that register `review-winning-envelope-e9c0089b` reads APPROVED for and that the pin PR shipped**. Until then `ship_check` refuses, which is the correct state. **And the pin must be the engine that answers** *(r17, codex-reviewer round 14: on a lagging host the authority can name an approved pin while `PATH` still executes an older engine that exposes `winning` with stale-approval defects)*: `ship_check` resolves the `coord-engine` executable it will call, reads `vcs_info.commit_id` from the `direct_url.json` beside the installed `coord_engine-*.dist-info` — the build-identity mechanism `adopt-latest.sh` itself uses — and refuses unless that commit equals the pin; no executable, no `direct_url.json`, or a different commit is a refusal **before** `winning` is consumed. **And the module that answers must be that build** *(r18, codex-coder round 15, reproduced end to end by coord-boss `8268376f`: a pinned launcher answered with a capability its build lacks because `subprocess.run` inherits `PYTHONPATH`/`PYTHONHOME` and an editable tree shadowed the installed package while `importlib.metadata` still reported the approved commit)*: `ship_check` resolves the executable **once, in `main`**, and passes that absolute path to *both* the identity read and every invocation — a bound runner, so no second `which` can ever run *(r19, both reviewers round 16: r18 resolved twice, and a `PATH` swap between the identity read and `review status` would let approved launcher A authorise unapproved launcher B; the regression makes `which` answer A then B and asserts exactly one resolution and that A is what executes)* — and *(r20, codex-coder round 17: scrubbing the environment blocks `PYTHONPATH`/`PYTHONHOME` only; a `.pth` or `sitecustomize.py` inside the launcher's own environment can prepend a stale tree while the adjacent dist-info still names the pin — on the proof host that site-packages already carries a `_virtualenv.pth`)* **the process that answers attests itself, on a trusted runtime**: `ship_check` never runs the launcher for the status, **and never runs the tool environment's interpreter either** *(r25, codex-reviewer round 22: `<tool-env>/bin/python` is selected from the same mutable environment, and a wrapper there can ignore `-I -S -B`, read the expected-tree path from `argv`, and print a forged payload — the gate would succeed without executing one pinned byte)*. **Trust roots, stated:** the gate's own interpreter (`sys.executable` of the `ship_check` process — the host already trusts it to run the gate) and `git`. The tool environment supplies **bytes only**, every one verified against the pinned tree before import; it supplies no code that runs unverified. **And the bytes that execute are the bytes that were verified** *(r26, codex-reviewer round 23: r25 hashed pathnames and let the normal importer reopen them, a TOCTOU window of the same class as executable resolution)*: the attestation reads each file once, hashes the bytes it keeps, and installs a meta-path importer that serves `coord_engine` and every submodule from those bytes; the path importer is never consulted for package code, a `coord_engine` name outside the verified tree is an ImportError, and the process refuses unless every loaded `coord_engine*` module came from that importer. The attestation spawns the gate's interpreter with **`-I -S`** (no environment variables, no user site, no `.pth` processing, no `sitecustomize`/`usercustomize`), inserts exactly the verified dist's site-packages on `sys.path`, imports `coord_engine`, and in that same process reports `coord_engine.__file__`, the `direct_url` commit via `importlib.metadata`, and `review status --json` computed in-process by `coord_engine.cli.main`. **Before importing** *(r22–r24)* the attestation requires **exactly one** `coord_engine-*.dist-info` (ambiguity refuses) and binds the executing bytes to something **outside the tool environment that cannot be edited to match** *(r24, codex-reviewer round 21: `RECORD` and `direct_url.json` are both mutable files in the same environment — replace `cli.py`, regenerate its RECORD row, leave `direct_url` naming the pin, and every r23 check passed)*: `ship_check` reads the **pinned commit's own `coord_engine/` tree** from the repository clone it runs in (`git ls-tree -r <PIN>:packages/coord-engine/coord_engine`; a pin whose commit is not in the clone refuses), and the attestation verifies every present non-`__pycache__` package file's **git blob hash** against that tree — no missing files, no extra files. The commit id fixes the tree; nothing in the environment can be regenerated to satisfy it. `RECORD` is no longer load-bearing and `direct_url.json` is reported, not trusted. Measured on the proof host: 50 pinned-tree entries, 50 present, 50 blob matches, none missing, none extra. **Bytecode cannot answer** *(r23, codex-coder: an unchecked-hash `.pyc` beside verified source is executed without consulting the source)*: the attestation runs with `-B` and a fresh, empty `pycache_prefix`, so the import system never looks at `__pycache__` beside the source and compiles the verified source (PEP 552), and any sourceless `.pyc`/`.pyo`/`.pyd`/`.so` present under the package refuses outright. The bytes that answer are the bytes the approved distribution installed. Measured on the proof host: one dist-info, 50 recorded files verified, none mismatched, none unrecorded. It refuses unless the answering module's file lies under that site-packages **and** the in-process commit equals the pin **and** *(r21, both reviewers round 18)* the attestation process exited 0, the in-process `review status` returned 0, and the payload is a dict of the expected shape — a status that says APPROVED while returning rc 3 (UNKNOWN) is a refusal, exactly as r19's `rc == 0` guard had it before the attestation replaced the direct call. Measured on the proof host: the isolated attestation imports from under site-packages, reports `985a4be3` (the fleet pin), and answers the status. Regressions: a shadow `coord_engine` on `PYTHONPATH` is imported under the inherited environment and not under the scrubbed one; a tool environment whose site-packages holds both a `.pth` and a `sitecustomize.py` prepending a shadow imports the shadow under a normal site-enabled start and the approved package under the attestation; and *(r25)* a forging wrapper installed as `<tool-env>/bin/python` prints a perfect payload when run directly and is **never run by the gate** — the intact package still attests through the gate's interpreter, a tampered one still refuses; and *(r26)* a **synchronized** verify-then-replace-then-import regression: after verification, `cli.py` on disk is replaced with an APPROVED forgery, then the import runs — under the r25 path importer the forgery answers (positive control, the hole demonstrated), under the verified importer the verified rc-3 source answers. `winning` in `review status --json` is then the **supersession fold's** kept shard, under whatever contract the engine register's APPROVED head carries — at round 8 that contract is: any CHANGES not resolved by a later shard dominates regardless of timestamp; an APPROVE lifts a CHANGES only by an edge that binds the target's **content digest** (so an in-place rewrite of a mutable shard un-resolves it) **and** whose target the **store's server-assigned mtime** proves strictly earlier than the superseder (so a predeclared edge to a later-written target never resolves; same minute or unknown fails closed). Rounds 6 and 7 called a name, then a client-written nonce, "causal"; both were wrong, because both were client-controlled — only the store supplies facts the client cannot choose. Self-links, dangling names, digest mismatches, equal keys and unproven causality fail closed to CHANGES and are surfaced as `malformed_supersedes`. **Both authoritative filename forms are accepted** *(P0 two, confirmed live on this very register: `<HEAD>--<reviewer>.md` and `<HEAD>--<reviewer>--<ts>-<digest>.md` coexist on the current head)*: a winning name is valid if it is exactly `<HEAD>--<reviewer>.md` or starts with `<HEAD>--<reviewer>--`; the fold, not the gate, decides which won. Any absence — no `winning`, no fold, a pin not in the approved set, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
+4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite — bound to an APPROVED AND PINNED engine, never to a named commit** *(r16; codex-reviewer round 13 P0 one, verified at source by coord-boss `149e7d11`: the commit r15 named still had the double clock sample, so a named prerequisite bought nothing)*: `ship_check` downloads the fleet pin from `team/<team>/_coord/bus-v3/records.json`'s sibling `adopt-latest.sh` (the plan's own rule: pins come from there, never from a slug) and requires `PIN ∈ APPROVED_ENGINE_PINS` — a list in the script that is **empty until a deliberate plan revision adds the head that register `review-winning-envelope-e9c0089b` reads APPROVED for and that the pin PR shipped**. Until then `ship_check` refuses, which is the correct state. **And the pin must be the engine that answers** *(r17, codex-reviewer round 14: on a lagging host the authority can name an approved pin while `PATH` still executes an older engine that exposes `winning` with stale-approval defects)*: `ship_check` resolves the `coord-engine` executable it will call, reads `vcs_info.commit_id` from the `direct_url.json` beside the installed `coord_engine-*.dist-info` — the build-identity mechanism `adopt-latest.sh` itself uses — and refuses unless that commit equals the pin; no executable, no `direct_url.json`, or a different commit is a refusal **before** `winning` is consumed. **And the module that answers must be that build** *(r18, codex-coder round 15, reproduced end to end by coord-boss `8268376f`: a pinned launcher answered with a capability its build lacks because `subprocess.run` inherits `PYTHONPATH`/`PYTHONHOME` and an editable tree shadowed the installed package while `importlib.metadata` still reported the approved commit)*: `ship_check` resolves the executable **once, in `main`**, and passes that absolute path to *both* the identity read and every invocation — a bound runner, so no second `which` can ever run *(r19, both reviewers round 16: r18 resolved twice, and a `PATH` swap between the identity read and `review status` would let approved launcher A authorise unapproved launcher B; the regression makes `which` answer A then B and asserts exactly one resolution and that A is what executes)* — and *(r20, codex-coder round 17: scrubbing the environment blocks `PYTHONPATH`/`PYTHONHOME` only; a `.pth` or `sitecustomize.py` inside the launcher's own environment can prepend a stale tree while the adjacent dist-info still names the pin — on the proof host that site-packages already carries a `_virtualenv.pth`)* **the process that answers attests itself, on a trusted runtime**: `ship_check` never runs the launcher for the status, **and never runs the tool environment's interpreter either** *(r25, codex-reviewer round 22: `<tool-env>/bin/python` is selected from the same mutable environment, and a wrapper there can ignore `-I -S -B`, read the expected-tree path from `argv`, and print a forged payload — the gate would succeed without executing one pinned byte)*. **Trust roots, stated:** the gate's own interpreter (`sys.executable` of the `ship_check` process — the host already trusts it to run the gate) and `git`. The tool environment supplies **bytes only**, every one verified against the pinned tree before import; it supplies no code that runs unverified. **And the bytes that execute are the bytes that were verified** *(r26, codex-reviewer round 23: r25 hashed pathnames and let the normal importer reopen them, a TOCTOU window of the same class as executable resolution)*: the attestation reads each file once, hashes the bytes it keeps, and installs a meta-path importer that serves `coord_engine` and every submodule from those bytes; the path importer is never consulted for package code, a `coord_engine` name outside the verified tree is an ImportError, and the process refuses unless every loaded `coord_engine*` module came from that importer. *(r27, codex-coder round 24: r26 then put the tool environment's site-packages on `sys.path` "for metadata lookups", so a forged top-level `argparse.py` in that directory could answer for the whole attestation.)* **The tool environment's site-packages is never on `sys.path`.** Package resources (`default_models.json`, read via `importlib.resources`) are served from the verified bytes through the importer's resource reader, and the post-check covers every loaded module: any module whose file is under the tool environment and was not served by the verified importer, or any `sys.path` entry under it, is a refusal. The attestation spawns the gate's interpreter with **`-I -S`** (no environment variables, no user site, no `.pth` processing, no `sitecustomize`/`usercustomize`), inserts exactly the verified dist's site-packages on `sys.path`, imports `coord_engine`, and in that same process reports `coord_engine.__file__`, the `direct_url` commit via `importlib.metadata`, and `review status --json` computed in-process by `coord_engine.cli.main`. **Before importing** *(r22–r24)* the attestation requires **exactly one** `coord_engine-*.dist-info` (ambiguity refuses) and binds the executing bytes to something **outside the tool environment that cannot be edited to match** *(r24, codex-reviewer round 21: `RECORD` and `direct_url.json` are both mutable files in the same environment — replace `cli.py`, regenerate its RECORD row, leave `direct_url` naming the pin, and every r23 check passed)*: `ship_check` reads the **pinned commit's own `coord_engine/` tree** from the repository clone it runs in (`git ls-tree -r <PIN>:packages/coord-engine/coord_engine`; a pin whose commit is not in the clone refuses), and the attestation verifies every present non-`__pycache__` package file's **git blob hash** against that tree — no missing files, no extra files. The commit id fixes the tree; nothing in the environment can be regenerated to satisfy it. `RECORD` is no longer load-bearing and `direct_url.json` is reported, not trusted. Measured on the proof host: 50 pinned-tree entries, 50 present, 50 blob matches, none missing, none extra. **Bytecode cannot answer** *(r23, codex-coder: an unchecked-hash `.pyc` beside verified source is executed without consulting the source)*: the attestation runs with `-B` and a fresh, empty `pycache_prefix`, so the import system never looks at `__pycache__` beside the source and compiles the verified source (PEP 552), and any sourceless `.pyc`/`.pyo`/`.pyd`/`.so` present under the package refuses outright. The bytes that answer are the bytes the approved distribution installed. Measured on the proof host: one dist-info, 50 recorded files verified, none mismatched, none unrecorded. It refuses unless the answering module's file lies under that site-packages **and** the in-process commit equals the pin **and** *(r21, both reviewers round 18)* the attestation process exited 0, the in-process `review status` returned 0, and the payload is a dict of the expected shape — a status that says APPROVED while returning rc 3 (UNKNOWN) is a refusal, exactly as r19's `rc == 0` guard had it before the attestation replaced the direct call. Measured on the proof host: the isolated attestation imports from under site-packages, reports `985a4be3` (the fleet pin), and answers the status. Regressions: a shadow `coord_engine` on `PYTHONPATH` is imported under the inherited environment and not under the scrubbed one; a tool environment whose site-packages holds both a `.pth` and a `sitecustomize.py` prepending a shadow imports the shadow under a normal site-enabled start and the approved package under the attestation; and *(r25)* a forging wrapper installed as `<tool-env>/bin/python` prints a perfect payload when run directly and is **never run by the gate** — the intact package still attests through the gate's interpreter, a tampered one still refuses; and *(r26)* a **synchronized** verify-then-replace-then-import regression: after verification, `cli.py` on disk is replaced with an APPROVED forgery, then the import runs — under the r25 path importer the forgery answers (positive control, the hole demonstrated), under the verified importer the verified rc-3 source answers; *(r27)* a forged top-level `argparse.py` planted in the tool environment answers under the r26 path insertion (positive control) and is never executed by the fixed attestation; and a replaced `default_models.json` on disk is never read — the verified resource bytes answer. `winning` in `review status --json` is then the **supersession fold's** kept shard, under whatever contract the engine register's APPROVED head carries — at round 8 that contract is: any CHANGES not resolved by a later shard dominates regardless of timestamp; an APPROVE lifts a CHANGES only by an edge that binds the target's **content digest** (so an in-place rewrite of a mutable shard un-resolves it) **and** whose target the **store's server-assigned mtime** proves strictly earlier than the superseder (so a predeclared edge to a later-written target never resolves; same minute or unknown fails closed). Rounds 6 and 7 called a name, then a client-written nonce, "causal"; both were wrong, because both were client-controlled — only the store supplies facts the client cannot choose. Self-links, dangling names, digest mismatches, equal keys and unproven causality fail closed to CHANGES and are surfaced as `malformed_supersedes`. **Both authoritative filename forms are accepted** *(P0 two, confirmed live on this very register: `<HEAD>--<reviewer>.md` and `<HEAD>--<reviewer>--<ts>-<digest>.md` coexist on the current head)*: a winning name is valid if it is exactly `<HEAD>--<reviewer>.md` or starts with `<HEAD>--<reviewer>--`; the fold, not the gate, decides which won. Any absence — no `winning`, no fold, a pin not in the approved set, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
 
 | Module | The reviewer confirms, by reading the shipped tree |
 |---|---|
@@ -2211,12 +2211,31 @@ def verify_tree(site, expected):
             refuse(f"installed file does not match the pinned commit's blob: {rel}")
         blobs[rel] = data
     return pkg, blobs
+class VerifiedResources:
+    # importlib.resources reader over the VERIFIED BYTES (r27): package data such as default_models.json is
+    # served from memory too, never re-read from disk. resource_path is refused: there is no trusted path.
+    def __init__(self, blobs, prefix):
+        self.blobs, self.prefix = blobs, prefix
+    def open_resource(self, name):
+        rel = self.prefix + name
+        if rel not in self.blobs:
+            raise FileNotFoundError(rel)
+        return io.BytesIO(self.blobs[rel])
+    def resource_path(self, name):
+        raise FileNotFoundError(name)
+    def is_resource(self, name):
+        return (self.prefix + name) in self.blobs
+    def contents(self):
+        return [r[len(self.prefix):] for r in self.blobs if r.startswith(self.prefix) and "/" not in r[len(self.prefix):]]
 class VerifiedImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    # Serves coord_engine and every submodule from the VERIFIED BYTES. The filesystem is never reopened for
-    # package code. A coord_engine name outside the verified tree is an ImportError, never a fallback to the
-    # path importer.
+    # Serves coord_engine, every submodule AND every package resource from the VERIFIED BYTES. The filesystem
+    # is never reopened for package code or data. A coord_engine name outside the verified tree is an
+    # ImportError, never a fallback to the path importer.
     def __init__(self, root, blobs):
         self.root, self.blobs, self.loaded = root, blobs, {}
+    def get_resource_reader(self, fullname):
+        parts = fullname.split(".")[1:]
+        return VerifiedResources(self.blobs, "/".join(parts) + "/" if parts else "")
     def find_spec(self, fullname, path=None, target=None):
         parts = fullname.split(".")
         if parts[0] != "coord_engine":
@@ -2252,8 +2271,24 @@ def run_status(team, slug):
         rc = cli.main(["review", "status", team, slug, "--json"])
     lines = [l for l in buf.getvalue().splitlines() if l.startswith("{")]
     return rc, (json.loads(lines[-1]) if lines else None), os.path.realpath(coord_engine.__file__)
-def rogue_modules(imp):
-    return sorted(n for n, m in sys.modules.items() if (n == "coord_engine" or n.startswith("coord_engine.")) and getattr(m, "__loader__", None) is not imp)
+def rogue_modules(imp, site):
+    # r27 (codex-coder, round 24): EVERY loaded module is checked, not only coord_engine names. A module whose
+    # file lives under the tool environment and was not served by the verified importer executed unverified code.
+    root = os.path.realpath(site) + os.sep
+    out = []
+    for n, m in list(sys.modules.items()):
+        served = getattr(m, "__loader__", None) is imp
+        if n == "coord_engine" or n.startswith("coord_engine."):
+            if not served:
+                out.append(n)
+            continue
+        f = getattr(m, "__file__", None)
+        if f and os.path.realpath(f).startswith(root):
+            out.append(n)
+    return sorted(out)
+def paths_under(site):
+    root = os.path.realpath(site) + os.sep
+    return [p for p in sys.path if os.path.realpath(p or os.getcwd()).startswith(root) or os.path.realpath(p or os.getcwd()) == root[:-1]]
 def main():
     site, team, slug, tree_file = sys.argv[1:5]
     dis = sorted(glob.glob(os.path.join(site, "coord_engine-*.dist-info")))
@@ -2269,12 +2304,18 @@ def main():
         du = json.load(open(os.path.join(dis[0], "direct_url.json")))
     except (OSError, ValueError):
         du = {}
+    if paths_under(site):
+        refuse(f"the tool environment is on sys.path before attestation: {paths_under(site)[:2]}")
     imp = install_verified_importer(pkg, blobs)
-    sys.path.insert(0, site)          # for dist METADATA lookups only; the importer above answers every coord_engine name first, and rogue_modules() proves it did
+    # r27 (codex-coder, round 24): the tool environment's site-packages is NEVER placed on sys.path. r26 inserted it
+    # "for metadata lookups" and thereby let a forged top-level argparse.py in that directory answer for the whole
+    # attestation. direct_url.json is read by path above; nothing else from that directory is needed.
     rc, status, file = run_status(team, slug)
-    rogue = rogue_modules(imp)
+    rogue = rogue_modules(imp, site)
     if rogue:
-        refuse(f"coord_engine modules were loaded outside the verified importer: {rogue[:3]}")
+        refuse(f"modules were loaded from the tool environment outside the verified importer: {rogue[:3]}")
+    if paths_under(site):
+        refuse(f"the tool environment appeared on sys.path during attestation: {paths_under(site)[:2]}")
     print(json.dumps({"file": file, "reported_commit": du.get("vcs_info", {}).get("commit_id"),
                       "tree_verified": len(blobs), "dist_info": os.path.basename(dis[0]),
                       "loader": "verified-bytes", "memory_loaded": len(imp.loaded),
@@ -2321,7 +2362,9 @@ def attested_status(exe, team, slug, pin):
     -> (ok, detail, status_dict_or_None). The verifier is the GATE's interpreter (r25), so the tool
     environment cannot substitute the process that reports on it; and the bytes that EXECUTE are the bytes
     that were VERIFIED (r26): read once, hashed, served by an in-memory importer — the filesystem is never
-    reopened for package code, so a replacement after verification cannot answer."""
+    reopened for package code, so a replacement after verification cannot answer. The tool environment's
+    site-packages is never on sys.path (r27), package resources are served from the verified bytes, and any
+    module loaded from that directory outside the verified importer is a refusal."""
     py, site = gate_python(), dist_site_packages(exe)
     if not py or not site:
         return False, f"no site-packages beside {exe} (or no gate interpreter)", None
@@ -2659,17 +2702,34 @@ def test_the_gate_runtime_is_the_process_interpreter():
 RC3_CLI = "def main(argv):\n    print('{}')\n    return 3\n"
 TOCTOU_DRIVER = r"""
 import sys, json
-site, team, slug, tree_file, attest_file, cli_path, forged_file, mode = sys.argv[1:9]
+site, team, slug, tree_file, attest_file, replace_path, forged_file, mode = sys.argv[1:9]
 ns = {"__name__": "attest_lib"}; exec(open(attest_file).read(), ns)      # the attestation as a library; main() does not run
 pkg, blobs = ns["verify_tree"](site, json.load(open(tree_file)))         # phase 1: verified
-open(cli_path, "w").write(open(forged_file).read())                      # THE REPLACEMENT: after verification, before import (synchronized, not raced)
+if replace_path != "-":
+    open(replace_path, "w").write(open(forged_file).read())              # THE REPLACEMENT: after verification, before import (synchronized, not raced)
 if mode == "verified":
-    ns["install_verified_importer"](pkg, blobs)                          # r26
+    ns["install_verified_importer"](pkg, blobs)                          # r26/r27: site-packages is NOT put on sys.path
 else:
-    sys.path.insert(0, site)                                             # r25: the path importer reopens the file
+    sys.path.insert(0, site)                                             # r25/r26 behaviour: the path importer resolves against the tool environment
 rc, status, file = ns["run_status"](team, slug)
-print(json.dumps({"rc": rc, "state": status and status.get("state"), "file": file}))
+print(json.dumps({"rc": rc, "state": status and status.get("state"), "file": file, "out": status and status.get("out")}))
 """
+
+
+def _driver_run(tmp_path, launcher, tree, replace_path, forged_text, mode, restore=None):
+    import subprocess, sys
+    site = _site_of(launcher)
+    tree_file = tmp_path / "tree.json"; tree_file.write_text(json.dumps(tree))
+    attest_file = tmp_path / "attest.py"; attest_file.write_text(ship_check.ATTEST)
+    forged = tmp_path / "forged.txt"; forged.write_text(forged_text)
+    driver = tmp_path / "driver.py"; driver.write_text(TOCTOU_DRIVER)
+    for path, text in (restore or {}).items():
+        path.write_text(text)                                                          # restore the verified bytes before each run
+    p = subprocess.run([sys.executable, "-I", "-S", "-B", str(driver), str(site), "fulcra", "slug", str(tree_file),
+                        str(attest_file), str(replace_path) if replace_path else "-", str(forged), mode],
+                       capture_output=True, text=True, env=ship_check.engine_env())
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout.splitlines()[-1])
 
 
 def test_a_replacement_between_verification_and_import_executes_only_the_verified_bytes(tmp_path, monkeypatch):
@@ -2677,25 +2737,67 @@ def test_a_replacement_between_verification_and_import_executes_only_the_verifie
     Synchronized, not raced: verify, then replace cli.py with an APPROVED forgery, then import. The path
     importer executes the forgery (positive control: the hole is real); the verified importer executes the
     bytes that were hashed, so the rc-3 source answers and the forgery on disk is never read."""
-    import os, subprocess, sys
+    import os
     launcher = _tool_env(tmp_path, RC3_CLI)
     tree = _pin_tree(monkeypatch, launcher)
     site = _site_of(launcher); cli_path = site / "coord_engine" / "cli.py"
-    tree_file = tmp_path / "tree.json"; tree_file.write_text(json.dumps(tree))
-    attest_file = tmp_path / "attest.py"; attest_file.write_text(ship_check.ATTEST)
-    forged = tmp_path / "forged.py"; forged.write_text(APPROVED_CLI)
-    driver = tmp_path / "driver.py"; driver.write_text(TOCTOU_DRIVER)
-    def run(mode):
-        cli_path.write_text(RC3_CLI)                                                   # restore the verified bytes before each run
-        p = subprocess.run([sys.executable, "-I", "-S", "-B", str(driver), str(site), "fulcra", "slug", str(tree_file),
-                            str(attest_file), str(cli_path), str(forged), mode], capture_output=True, text=True, env=ship_check.engine_env())
-        assert p.returncode == 0, p.stderr
-        return json.loads(p.stdout.splitlines()[-1])
-    hole = run("path")
+    hole = _driver_run(tmp_path, launcher, tree, cli_path, APPROVED_CLI, "path", restore={cli_path: RC3_CLI})
     assert hole["rc"] == 0 and hole["state"] == "APPROVED"                              # the r25 importer executed the replacement
-    closed = run("verified")
+    closed = _driver_run(tmp_path, launcher, tree, cli_path, APPROVED_CLI, "verified", restore={cli_path: RC3_CLI})
     assert closed["rc"] == 3 and closed["state"] != "APPROVED"                         # r26: the verified bytes answered
     assert closed["file"].startswith(str(site.resolve()) + os.sep)                     # reported path is the site path (reporting only)
+
+
+FORGED_ARGPARSE = """# a forged top-level module in the tool environment's site-packages: answers for the whole attestation
+import sys, json
+print(json.dumps({"file": sys.argv[1] + "/coord_engine/__init__.py", "reported_commit": "forged", "tree_verified": 2, "dist_info": "x",
+                  "loader": "verified-bytes", "memory_loaded": 1, "rc": 0,
+                  "status": {"state": "APPROVED", "head": "x", "approvals": ["codex-reviewer", "codex-coder"], "winning": {}}}))
+sys.exit(0)
+"""
+ARGPARSE_CLI = "import argparse\ndef main(argv):\n    print('{}')\n    return 3\n"
+
+
+def test_a_forged_top_level_module_in_the_tool_environment_is_never_executed(tmp_path, monkeypatch):
+    """codex-coder round 24 (P0): r26 put site-packages on sys.path 'for metadata lookups'; a planted argparse.py
+    there ran on the pinned cli's first stdlib import and printed a perfect verified-bytes APPROVED payload.
+    Positive control under the r26 path insertion: the forgery answers and exits 0. Fixed attestation: the
+    directory is never on sys.path, so the stdlib argparse loads and the verified rc-3 source answers."""
+    launcher = _tool_env(tmp_path, ARGPARSE_CLI)
+    tree = _pin_tree(monkeypatch, launcher)
+    site = _site_of(launcher); (site / "argparse.py").write_text(FORGED_ARGPARSE)     # outside coord_engine/: the tree binding cannot see it
+    hole = _driver_run(tmp_path, launcher, tree, None, "", "path")
+    assert hole.get("loader") == "verified-bytes" and hole["status"]["state"] == "APPROVED" and hole["rc"] == 0   # the forgery answered
+    closed = _driver_run(tmp_path, launcher, tree, None, "", "verified")
+    assert closed["rc"] == 3 and closed["state"] != "APPROVED" and "loader" not in closed                          # stdlib argparse; verified cli answered
+
+
+RESOURCE_CLI = ("from importlib.resources import files\n"
+                "def main(argv):\n    import json\n    print(json.dumps({'out': files('coord_engine').joinpath('default_models.json').read_text()}))\n    return 3\n")
+
+
+def test_package_resources_are_served_from_the_verified_bytes(tmp_path, monkeypatch):
+    """Package DATA has the same TOCTOU as package code: the engine reads default_models.json through
+    importlib.resources. Replace it on disk after verification: the path importer's reader returns the
+    replacement (positive control); the verified importer's resource reader returns the hashed bytes."""
+    launcher = _tool_env(tmp_path, RESOURCE_CLI)
+    site = _site_of(launcher); res = site / "coord_engine" / "default_models.json"; res.write_text('{"verified": true}')
+    tree = _pin_tree(monkeypatch, launcher)                                            # tree includes the resource
+    hole = _driver_run(tmp_path, launcher, tree, res, '{"replaced": true}', "path", restore={res: '{"verified": true}'})
+    assert json.loads(hole["out"]) == {"replaced": True}
+    closed = _driver_run(tmp_path, launcher, tree, res, '{"replaced": true}', "verified", restore={res: '{"verified": true}'})
+    assert json.loads(closed["out"]) == {"verified": True} and closed["rc"] == 3
+
+
+def test_the_attestation_refuses_when_the_tool_environment_is_on_sys_path(tmp_path, monkeypatch):
+    launcher = _tool_env(tmp_path, RC3_CLI); _pin_tree(monkeypatch, launcher); site = _site_of(launcher)
+    import subprocess, sys
+    probe = tmp_path / "probe.py"; probe.write_text(
+        "import sys\nsite = sys.argv[1]\nns = {'__name__': 'attest_lib'}; exec(open(sys.argv[2]).read(), ns)\n"
+        "sys.path.insert(0, site)\nprint('under', ns['paths_under'](site) == [site])\n")
+    attest_file = tmp_path / "attest.py"; attest_file.write_text(ship_check.ATTEST)
+    p = subprocess.run([sys.executable, "-I", "-S", "-B", str(probe), str(site), str(attest_file)], capture_output=True, text=True)
+    assert "under True" in p.stdout, p.stderr
 
 
 def test_the_attestation_refuses_a_coord_engine_module_loaded_outside_the_verified_importer(tmp_path, monkeypatch):
@@ -2982,6 +3084,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r27 (2026-09-05, codex-coder CHANGES on `65c0a403`, round 24):** r26 put the tool environment's site-packages on `sys.path` for metadata lookups, so a forged top-level module there (`argparse.py`) could answer for the attestation. Site-packages is never on `sys.path` now; `direct_url.json` is read by path; package resources are served from the verified bytes (`get_resource_reader`); the post-check refuses any module loaded from the tool environment outside the verified importer and any `sys.path` entry under it. Regressions with positive controls for the forged `argparse.py` and a replaced resource file. Measured against the installed 2.0.6 engine and the real pinned tree.
 - **r26 (2026-09-05, codex-reviewer CHANGES on `48a51a89`, round 23):** TOCTOU between hashing the package files and the importer reopening them. The attestation now executes the verified bytes: read once, hashed, served by an in-memory meta-path importer; refuses if any `coord_engine*` module was loaded by anything else; outer gate requires the `verified-bytes` loader. Regression is synchronized (replace after verify, before import) with a positive control showing the old path importer executing the replacement.
 - **r25 (2026-09-05, codex-reviewer CHANGES on `7cb3fc6a`, round 22):** the verifier itself was `<tool-env>/bin/python`, part of the mutable environment — a wrapper there could forge the whole attestation. The attestation now runs on the **gate's own interpreter** (`sys.executable`), with the gate's interpreter and `git` stated as the trust roots; the tool environment supplies bytes only, all verified against the pinned tree before import. Regression: a forging wrapper installed as `bin/python` forges when run directly and is never run by the gate; intact still attests, tampered still refuses.
 - **r24 (2026-09-05, codex-reviewer CHANGES on `428e44fe`, round 21):** `RECORD` and `direct_url.json` are mutable files in the tool environment; replace `cli.py`, regenerate its row, and every r23 check passed. The attestation now verifies every present package file's **git blob hash against the pinned commit's `coord_engine/` tree**, read by `ship_check` from the clone it runs in (`git ls-tree`; a pin not in the clone refuses) — no missing, no extra; RECORD is not consulted and `direct_url` is reported, not trusted. Measured on the proof host: 50/50 blob matches. Regressions: replace `cli.py` + regenerate RECORD → refused; extra/missing file → refused; pin not in clone → refused; real git clone positive path. G32 restated in the reviewer's words.
