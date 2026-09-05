@@ -64,7 +64,7 @@ blind spot leases cannot see. Session/host details are metadata, not address.
   should be sized WITH the API team, it is not mechanical).
 - Installs from a git tag via `uv tool install` (verified by live tag-builds at v0.4.0 and v1.0.1).
   The release tag is the cold-install path; the fleet's runtime pin lives in the store BOOTSTRAP
-  (`team/fulcra/_coord/bus-v3/adopt-latest.sh`, pin scheme `pp-<sha>`) — this doc names no version.
+  (`team/<team>/_coord/bus-v3/adopt-latest.sh`, pin scheme `pp-<sha>`) — this doc names no version.
 - Never-raise CLI discipline: advisory features degrade to stderr notes; exit codes are contracts.
 - 1600+ tests; every stateful fold has transport-injected tests.
 
@@ -72,7 +72,7 @@ blind spot leases cannot see. Session/host details are metadata, not address.
 
 - **Review lineage**: adversarially reviewed throughout — Claude Opus per-PR with fix→re-review
   loops (verdicts on the early PRs' threads), independent Codex verdicts recorded as done-evidence
-  on the coordination bus itself (`team/fulcra` task docs — the review-handshake skill eating its
+  on the coordination bus itself (`team/<team>` task docs — the review-handshake skill eating its
   own dog food) plus post-merge review waves; the upstream plan passed a Codex adversarial review
   (2026-07-04).
   Review rounds routinely caught real defects (test-suite home-dir pollution, prose/engine

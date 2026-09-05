@@ -25,7 +25,7 @@ from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
 PINNED_NOW = "2026-07-29T22:00:00Z"
-TEAM = "fulcra"
+TEAM = "acme"
 AGENT = "opie"
 
 
@@ -756,8 +756,8 @@ class SlowSetup(FakeTransport):
     #: the fold. Matched EXACTLY, not by substring: the probes list
     #: ``_coord/forge/watch/``, so a ``_coord/`` prefix test would slow the
     #: probes too and the test would no longer isolate setup cost.
-    SETUP_READ = "team/fulcra/_coord/summaries.json"
-    SETUP_LIST = "team/fulcra/_coord/"
+    SETUP_READ = "team/acme/_coord/summaries.json"
+    SETUP_LIST = "team/acme/_coord/"
 
     def __init__(self, *a, delay=0.05, **kw):
         super().__init__(*a, **kw)

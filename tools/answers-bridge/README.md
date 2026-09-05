@@ -8,7 +8,7 @@ coord bus. Separate from the coord issue mirror, so no issue noise.
 ## Model (each direction single-purpose — no fragile two-way state sync)
 
 - **capture** (bus → Linear, one way): a bot records an answer as a bus shard
-  (`team/fulcra/answers/<id>.md`, the durable record) **and** a Linear card in the
+  (`team/<team>/answers/<id>.md`, the durable record) **and** a Linear card in the
   "Ash · Answers" project. Idempotent by id.
 - **check-off** (Linear only): Ash marks a card **Done**. Deliberately *not* synced
   back — there is no two-way state channel to go wrong.

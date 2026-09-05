@@ -27,7 +27,13 @@ def _isolate(tmp_path, monkeypatch):
     """Every test gets its own cache dir and an empty authority memo."""
     monkeypatch.setattr(annotations, "annotations_dir", lambda: tmp_path)
     monkeypatch.setattr(annotations, "_AUTHORITY_MEMO", {})
-    monkeypatch.delenv("FULCRA_COORD_TEAM", raising=False)
+    monkeypatch.setattr(annotations, "_TEAM_MEMO", None)
+    # A team must be NAMED now. `_coord_team()` no longer ends in a hardcoded
+    # fallback, so leaving this unset would send every test down the
+    # bootstrap-pointer path and resolve the authority to UNKNOWN — testing the
+    # unset case by accident in tests that are about something else. The unset
+    # case has its own tests below.
+    monkeypatch.setenv("FULCRA_COORD_TEAM", "acme")
     return tmp_path
 
 
@@ -67,7 +73,7 @@ def test_authority_returns_bare_uuid_stripping_the_type_prefix(monkeypatch):
     seen = _stub_authority(
         monkeypatch, json.dumps({"data_type": f"MomentAnnotation/{LIVE}"}))
     assert annotations._authority_definition_id() == LIVE
-    assert f"team/fulcra/{annotations._AUTHORITY_PATH}" in seen["cmd"]
+    assert f"team/acme/{annotations._AUTHORITY_PATH}" in seen["cmd"]
 
 
 def test_authority_honors_the_team_env(monkeypatch):
@@ -249,3 +255,73 @@ def test_pin_force_skips_the_check_and_records_that_it_did(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         annotations.pin_definition_id(LIVE, force=True)
     assert "force=True" in caplog.text, "an unchecked pin must say so in the log"
+
+
+# --- _coord_team: resolution order, and no hardcoded fallback ---------------
+
+
+def test_the_environment_wins_over_the_bootstrap_pointer(monkeypatch):
+    """A host that names its team must never be overridden by a store read."""
+    monkeypatch.setenv("FULCRA_COORD_TEAM", "fromenv")
+
+    def boom(*a, **k):
+        raise AssertionError("read the store when the environment already said")
+
+    monkeypatch.setattr(annotations, "_bootstrap_team", boom)
+    assert annotations._coord_team() == "fromenv"
+
+
+def test_an_unnamed_team_is_resolved_from_the_account_level_pointer(monkeypatch):
+    """With no environment, the team comes off the store — not a constant.
+
+    The pointer is at the STORE ROOT on purpose: a process that does not know
+    its team cannot look under a path keyed by the answer.
+    """
+    monkeypatch.delenv("FULCRA_COORD_TEAM", raising=False)
+    monkeypatch.setattr(annotations, "_TEAM_MEMO", None)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        with open(cmd[-1], "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"team": "frompointer"}))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(annotations.subprocess, "run", fake_run)
+    assert annotations._coord_team() == "frompointer"
+    assert annotations._BOOTSTRAP_PATH in seen["cmd"]
+
+
+def test_no_team_anywhere_is_UNKNOWN_and_never_a_guess(monkeypatch):
+    """The removed `or "fulcra"` is the defect this asserts against.
+
+    That default shipped from a PUBLIC repo, so every other team's agents
+    resolved THEIR channel authority against the authoring team's store. An
+    unresolvable team must produce UNKNOWN — which the authority resolver
+    already models as None — rather than a confident wrong answer.
+    """
+    monkeypatch.delenv("FULCRA_COORD_TEAM", raising=False)
+    monkeypatch.setattr(annotations, "_TEAM_MEMO", None)
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="nope")
+
+    monkeypatch.setattr(annotations.subprocess, "run", fake_run)
+    assert annotations._coord_team() == ""
+    assert annotations._authority_definition_id() is None
+
+
+def test_a_failed_pointer_read_is_not_memoised(monkeypatch):
+    """A transient store failure must retry, not pin "unknown" for the TTL."""
+    monkeypatch.delenv("FULCRA_COORD_TEAM", raising=False)
+    monkeypatch.setattr(annotations, "_TEAM_MEMO", None)
+    calls = []
+
+    def failing(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(annotations.subprocess, "run", failing)
+    assert annotations._coord_team() == ""
+    assert annotations._coord_team() == ""
+    assert len(calls) == 2, "a failed read was memoised; it must be retried"

@@ -167,7 +167,7 @@ fleet-wide convergence there is one command (install pinned engine + your
 own queue read + an adoption claim to the coordinator):
 
 ```bash
-fulcra-api file download team/fulcra/_coord/bus-v3/adopt-latest.sh /tmp/adopt-latest.sh && \
+fulcra-api file download "team/${FULCRA_COORD_TEAM}/_coord/bus-v3/adopt-latest.sh" /tmp/adopt-latest.sh && \
   bash /tmp/adopt-latest.sh <you>
 ```
 

@@ -45,7 +45,7 @@ def emitted(monkeypatch):
 
 
 def _args(**kw):
-    base = dict(team="fulcra", priority="P1", sender="coord-boss")
+    base = dict(team="acme", priority="P1", sender="coord-boss")
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -75,7 +75,7 @@ def test_the_companion_is_team_scoped_so_it_gets_identity_tags(emitted):
     """records.emit_event is the one tagging chokepoint and it needs the team
     to resolve the registry; omitting it would write the event untagged."""
     cli._emit_dispatch_companion(None, _args(), slug="s", assignee="a")
-    assert emitted[0]["team"] == "fulcra"
+    assert emitted[0]["team"] == "acme"
 
 
 def test_backlog_capture_emits_nothing(emitted):
@@ -95,7 +95,7 @@ def test_sender_falls_back_to_the_host_rather_than_writing_anonymously(
 
 
 def test_missing_priority_defaults_rather_than_raising(emitted):
-    args = argparse.Namespace(team="fulcra", sender="coord-boss")
+    args = argparse.Namespace(team="acme", sender="coord-boss")
     cli._emit_dispatch_companion(None, args, slug="s", assignee="a")
     assert emitted[0]["priority"] == "P2"
 

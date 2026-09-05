@@ -503,46 +503,46 @@ class ClassifiedTransport(QueueTransport):
         return content, "ok"
 
 
-def _queue_args(team="fulcra", agent="amy"):
+def _queue_args(team="acme", agent="amy"):
     import argparse
     return argparse.Namespace(team=team, agent=agent, json=False)
 
 
 def test_load_config_classified_absent_vs_error():
     t = ClassifiedTransport(read_status="ok")
-    cfg, status = records.load_config_classified(t, "fulcra")
+    cfg, status = records.load_config_classified(t, "acme")
     assert cfg is None and status == "absent"
 
     t = ClassifiedTransport(read_status="error")
-    cfg, status = records.load_config_classified(t, "fulcra")
+    cfg, status = records.load_config_classified(t, "acme")
     assert cfg is None and status == "error"
 
     t = ClassifiedTransport(read_status="ok")
-    t.put(records.config_path("fulcra"),
+    t.put(records.config_path("acme"),
           '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
-    cfg, status = records.load_config_classified(t, "fulcra")
+    cfg, status = records.load_config_classified(t, "acme")
     assert status == "ok" and cfg["data_type"] == "MomentAnnotation/x"
 
 
 def test_load_config_classified_env_override_cannot_bypass_outage(monkeypatch):
     monkeypatch.setenv(records.ENV_DATA_TYPE, "MomentAnnotation/env")
     t = ClassifiedTransport(read_status="error")
-    cfg, status = records.load_config_classified(t, "fulcra")
+    cfg, status = records.load_config_classified(t, "acme")
     assert cfg is None and status == "error"
 
 
 def test_load_config_classified_malformed_store_config_is_invalid_not_absent():
     # Bytes exist but the authority is unusable: fail closed as incompatible.
     t = ClassifiedTransport(read_status="ok")
-    t.put(records.config_path("fulcra"), "not json at all")
-    cfg, status = records.load_config_classified(t, "fulcra")
+    t.put(records.config_path("acme"), "not json at all")
+    cfg, status = records.load_config_classified(t, "acme")
     assert cfg is None and status == "invalid"
 
 
 def test_load_config_classified_falls_back_when_transport_lacks_classified_read():
     # Old transports without read_classified keep the legacy absent behavior.
     t = QueueTransport()
-    cfg, status = records.load_config_classified(t, "fulcra")
+    cfg, status = records.load_config_classified(t, "acme")
     assert cfg is None and status == "absent"
 
 
@@ -555,7 +555,7 @@ def test_queue_unreadable_config_is_degraded_rc3_not_missing_rc2(monkeypatch, ca
     assert "DEGRADED" in err
     assert "missing" not in err.split("DEGRADED")[0]
     # No cursor may be created off an unknown window.
-    assert t.read(records.cursor_path("fulcra", "amy")) is None
+    assert t.read(records.cursor_path("acme", "amy")) is None
 
 
 def test_queue_json_distinguishes_invalid_config_from_unknown_transport(
@@ -565,7 +565,7 @@ def test_queue_json_distinguishes_invalid_config_from_unknown_transport(
     args.json = True
 
     invalid = ClassifiedTransport(read_status="ok")
-    invalid.put(records.config_path("fulcra"), "not json at all")
+    invalid.put(records.config_path("acme"), "not json at all")
     assert cli.cmd_queue(args, invalid) == 3
     invalid_io = capsys.readouterr()
     invalid_row = json.loads(invalid_io.out)
@@ -604,7 +604,7 @@ def test_queue_truly_absent_config_stays_rc2(monkeypatch, capsys):
 def _guarded_queue_transport():
     t = ClassifiedTransport(read_status="ok",
                             window=[_event_rec("r1", "job-1")])
-    t.put(records.config_path("fulcra"),
+    t.put(records.config_path("acme"),
           '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}')
     return t
 
@@ -618,7 +618,7 @@ def test_queue_as_foreign_identity_peeks_and_never_advances(monkeypatch, capsys)
     assert rc == 0
     assert "job-1" in out.out                       # events still shown
     assert "peek" in out.err and "--consume" in out.err
-    assert t.read(records.cursor_path("fulcra", "amy")) is None  # not consumed
+    assert t.read(records.cursor_path("acme", "amy")) is None  # not consumed
 
 
 def test_queue_consume_flag_restores_deliberate_takeover(monkeypatch, capsys):
@@ -628,7 +628,7 @@ def test_queue_consume_flag_restores_deliberate_takeover(monkeypatch, capsys):
     args = _queue_args(agent="amy"); args.consume = True
     rc = cli.cmd_queue(args, t)
     assert rc == 0
-    assert t.read(records.cursor_path("fulcra", "amy")) is not None
+    assert t.read(records.cursor_path("acme", "amy")) is not None
 
 
 def test_queue_as_self_still_consumes(monkeypatch, capsys):
@@ -637,7 +637,7 @@ def test_queue_as_self_still_consumes(monkeypatch, capsys):
     t = _guarded_queue_transport()
     rc = cli.cmd_queue(_queue_args(agent="amy"), t)
     assert rc == 0
-    assert t.read(records.cursor_path("fulcra", "amy")) is not None
+    assert t.read(records.cursor_path("acme", "amy")) is not None
 
 
 def test_queue_explicit_peek_as_self(monkeypatch, capsys):
@@ -648,7 +648,7 @@ def test_queue_explicit_peek_as_self(monkeypatch, capsys):
     rc = cli.cmd_queue(args, t)
     out = capsys.readouterr()
     assert rc == 0 and "job-1" in out.out
-    assert t.read(records.cursor_path("fulcra", "amy")) is None
+    assert t.read(records.cursor_path("acme", "amy")) is None
 
 
 def test_read_classified_requires_exact_not_found_signature():

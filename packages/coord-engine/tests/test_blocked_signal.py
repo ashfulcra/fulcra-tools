@@ -16,8 +16,8 @@ from coord_engine import cli, records
 from test_reconcile import FakeTransport
 
 
-TEAM = "fulcra"
-CFG_PATH = "team/fulcra/_coord/bus-v3/records.json"
+TEAM = "acme"
+CFG_PATH = "team/acme/_coord/bus-v3/records.json"
 DOC = """---
 type: Task
 title: A thing

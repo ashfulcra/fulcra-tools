@@ -748,7 +748,7 @@ def test_fast_path_declines_on_unparseable_feed_entries():
 
 def test_fast_path_declines_on_deletion_entry():
     # LIVE-CAPTURED feed shape for a deleted file (2026-07-05, fulcra data-updates):
-    # {"id": "6b369982-...", "full_name": "/team/fulcra/_scratch/del-probe.txt",
+    # {"id": "6b369982-...", "full_name": "/team/acme/_scratch/del-probe.txt",
     #  "scan_state": "unscanned", "size": 6, "uploaded_at": "2026-07-05T12:46:43Z",
     #  "archived_at": null, "deleted_at": "2026-07-05T12:46:43.832485Z",
     #  "state": "deleted"}

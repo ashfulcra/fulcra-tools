@@ -45,7 +45,7 @@ fulcra auth login            # browser sign-in; an account is created on first l
 ```
 
 The release tag is the **cold-install** path. The **fleet's runtime authority**
-is the store BOOTSTRAP (`team/fulcra/_coord/bus-v3/adopt-latest.sh` +
+is the store BOOTSTRAP (`team/<team>/_coord/bus-v3/adopt-latest.sh` +
 `BOOTSTRAP.md`, current pin scheme `pp-<sha>`), not this file — adopt from there
 once you are on the bus.
 

@@ -311,7 +311,7 @@ def test_a_retired_slug_leaves_the_projection_scan():
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": [".gc-closed"]}})
     row, complete = projection._scan_review_slug(
-        t, "fulcra", "dead-slug", {"name": "dead-slug.md"},
+        t, "acme", "dead-slug", {"name": "dead-slug.md"},
         now="2026-08-07T00:00:00Z", deadline=Deadline.open(60.0))
     # OMITTED, and the scan counts COMPLETE: the pass did resolve this slug, it
     # simply has nothing a consumer wants. Emitting a new state instead is what
@@ -339,7 +339,7 @@ def test_a_retired_slug_leaves_the_pending_review_fold():
                       "verdicts": [".gc-closed"]},
         "live-slug": {"doc": DOC.format(head="b" * 40), "verdicts": []},
     })
-    rows = cli._pending_reviews_for(t, "fulcra", "codex-reviewer")
+    rows = cli._pending_reviews_for(t, "acme", "codex-reviewer")
     rows = rows[0] if isinstance(rows, tuple) else rows
     blob = repr(rows)
     # The retired slug must be absent from the fold entirely; the live one must
@@ -370,7 +370,7 @@ def test_apply_writes_the_marker_where_the_readers_look(monkeypatch):
     monkeypatch.setattr(cli, "_git_head_probe", lambda: (lambda sha: False))
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
-    args = argparse.Namespace(team="fulcra", apply=True, sender="tester",
+    args = argparse.Namespace(team="acme", apply=True, sender="tester",
                               repo=HERE)
     cli.cmd_review_gc(args, t)
     assert any(p.endswith("/review/dead-slug/verdicts/.gc-closed")
@@ -395,7 +395,7 @@ def test_a_projection_containing_a_retired_entry_SURVIVES_validation():
         "live-slug": {"doc": DOC.format(head="b" * 40), "verdicts": []},
     })
     section = projection.build_review_projection(
-        t, "fulcra", now="2026-08-07T00:00:00Z", prior=None,
+        t, "acme", now="2026-08-07T00:00:00Z", prior=None,
         settled_index=set(), deadline=Deadline.open(60.0))
     names = {str(r.get("name")) for r in (section.get("rows") or [])}
     assert not any("dead-slug" in n for n in names), names
@@ -624,7 +624,7 @@ def test_a_blind_clone_says_so_on_a_dry_run(monkeypatch, capsys):
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
     rc = cli.cmd_review_gc(
-        argparse.Namespace(team="fulcra", apply=False, sender="tester"), t)
+        argparse.Namespace(team="acme", apply=False, sender="tester"), t)
     err = capsys.readouterr().err
     assert rc == 0, "a dry run from a blind clone is still allowed"
     assert "CANNOT PROVE ABSENCE" in err
@@ -641,7 +641,7 @@ def test_apply_refuses_from_a_blind_clone_and_writes_nothing(monkeypatch, capsys
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
     rc = cli.cmd_review_gc(
-        argparse.Namespace(team="fulcra", apply=True, sender="tester",
+        argparse.Namespace(team="acme", apply=True, sender="tester",
                            repo=HERE), t)
     assert rc == 2, "refusal must be a distinct non-zero rc, not a quiet 0"
     assert "refusing --apply" in capsys.readouterr().err
@@ -658,7 +658,7 @@ def test_a_seeing_clone_is_unaffected(monkeypatch, capsys):
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
     rc = cli.cmd_review_gc(
-        argparse.Namespace(team="fulcra", apply=True, sender="tester",
+        argparse.Namespace(team="acme", apply=True, sender="tester",
                            repo=HERE), t)
     err = capsys.readouterr().err
     assert "CANNOT PROVE ABSENCE" not in err
@@ -1045,7 +1045,7 @@ def test_a_BRANCH_that_looks_like_owner_slash_repo_is_not_read_as_one():
     Reading that as a repository would invent the identity the guard exists to
     check — so the prose form is accepted only next to a PR marker."""
     assert review_gc.repos_from_of(
-        "branch claude/fulcra-worker-setup-6zxa8l; see team/fulcra/review/x") == frozenset()
+        "branch claude/fulcra-worker-setup-6zxa8l; see team/acme/review/x") == frozenset()
     assert review_gc.repos_from_of(
         "https://github.com/fulcradynamics/agent-skills/pull/176"
     ) == frozenset({"fulcradynamics/agent-skills"})
@@ -1065,7 +1065,7 @@ def test_the_gc_verb_SAYS_which_repository_it_is_witnessing_from(monkeypatch, ca
     t = RegisterTransport({"dead-slug": {
         "doc": DOC.format(head="a" * 40), "verdicts": []}})
     cli.cmd_review_gc(argparse.Namespace(
-        team="fulcra", apply=False, sender="tester", repo=HERE), t)
+        team="acme", apply=False, sender="tester", repo=HERE), t)
 
     assert f"witnessing from {HERE}" in capsys.readouterr().err
 
@@ -1132,7 +1132,7 @@ def test_conclude_never_overwrites_a_settled_row():
 
     t = T([".settled", "codex-reviewer.md"])
     rc = cli.cmd_review_conclude(
-        argparse.Namespace(team="fulcra", slug="s", reason=None, sender="t"), t)
+        argparse.Namespace(team="acme", slug="s", reason=None, sender="t"), t)
 
     assert rc == 0 and not t.written, "it overwrote a settled row's evidence"
 
@@ -1175,7 +1175,7 @@ def _conclude(t):
     import argparse
     from coord_engine import cli
     return cli.cmd_review_conclude(
-        argparse.Namespace(team="fulcra", slug="s", reason=None, sender="t"), t)
+        argparse.Namespace(team="acme", slug="s", reason=None, sender="t"), t)
 
 
 V1_DOC = "---\ntype: Review\nof: some prose with no head\n---\n"

@@ -10,7 +10,7 @@ description: "Serves review requests on the team. ADDRESS REVIEW WORK HERE, not 
 policy: shared
 sla_hours: 12
 maintainer: coord-maintainer
-checkpoint_ref: team/fulcra/member/codex-reviewer/continuity/role-codex-reviewer/latest.json
+checkpoint_ref: team/<team>/member/<agent>/continuity/role-<role>/latest.json
 ---
 # Duties
 - Poll the role inbox; review PRs/docs addressed to the role.

@@ -32,7 +32,7 @@ def runner_for(payloads):
 def test_engine_source_resolves_terminal_legacy_slug_from_archived_search():
     def run(argv, _timeout):
         assert argv == (
-            "coord-engine", "search", "fulcra", "task-done", "--archived", "--json"
+            "coord-engine", "search", "acme", "task-done", "--archived", "--json"
         )
         return 0, json.dumps([{
             "id": "task-done",
@@ -41,10 +41,10 @@ def test_engine_source_resolves_terminal_legacy_slug_from_archived_search():
             "priority": "P2",
         }]), ""
 
-    record = EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
+    record = EngineSourceAdapter("acme", runner=run).resolve_legacy_slug("task-done")
 
     assert record is not None
-    assert record.source == SourceIdentity("coord-engine", "fulcra/tasks", "task-done")
+    assert record.source == SourceIdentity("coord-engine", "acme/tasks", "task-done")
     assert record.capability == "tasks"
     assert record.lane == "done"
 
@@ -57,7 +57,7 @@ def test_engine_source_rejects_degraded_archived_search():
         }]), ""
 
     with pytest.raises(ValueError, match="legacy slug lookup failed"):
-        EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
+        EngineSourceAdapter("acme", runner=run).resolve_legacy_slug("task-done")
 
 
 def test_engine_source_rejects_duplicate_exact_archived_search_matches():
@@ -66,7 +66,7 @@ def test_engine_source_rejects_duplicate_exact_archived_search_matches():
         return 0, json.dumps([row, {**row, "archived": "2026-06"}]), ""
 
     with pytest.raises(ValueError, match="legacy slug lookup is ambiguous"):
-        EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slug("task-done")
+        EngineSourceAdapter("acme", runner=run).resolve_legacy_slug("task-done")
 
 
 def test_engine_source_batches_legacy_slug_resolution():
@@ -78,7 +78,7 @@ def test_engine_source_batches_legacy_slug_resolution():
             "status": "done",
         }]), ""
 
-    records = EngineSourceAdapter("fulcra", runner=run).resolve_legacy_slugs(
+    records = EngineSourceAdapter("acme", runner=run).resolve_legacy_slugs(
         ("task-a", "task-b", "task-a")
     )
 
@@ -89,7 +89,7 @@ def test_engine_source_batches_legacy_slug_resolution():
 
 def test_engine_source_normalizes_each_capability_and_sanitizes_text():
     adapter = EngineSourceAdapter(
-        "fulcra",
+        "acme",
         runner=runner_for({
             "board": {"active": [{"id": "task-1", "title": "Task\u0000 title", "tags": ["kind:task"]}]},
             "asks": [{"id": "ask-1", "title": "Question"}],
@@ -109,7 +109,7 @@ def test_engine_source_normalizes_each_capability_and_sanitizes_text():
 
 def test_engine_source_degrades_only_failed_capability_and_never_returns_clean_complete():
     adapter = EngineSourceAdapter(
-        "fulcra",
+        "acme",
         runner=runner_for({"board": RuntimeError("secret source failure"), "asks": [], "threads": [], "health": {"hosts": []}}),
         clock=lambda: NOW,
     )
@@ -124,7 +124,7 @@ def test_engine_source_degrades_only_failed_capability_and_never_returns_clean_c
 
 def test_engine_source_honors_embedded_degraded_rows():
     adapter = EngineSourceAdapter(
-        "fulcra",
+        "acme",
         runner=runner_for({
             "board": {"active": [], "read-degraded": {"reason": "unknown"}},
             "asks": [], "threads": [], "health": {"hosts": []},
@@ -151,7 +151,7 @@ def test_engine_source_parses_jsonl_folds_and_uses_slow_health_bound():
         return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
 
     snapshot = EngineSourceAdapter(
-        "fulcra", runner=run, timeout=12.0, health_timeout=345.0, clock=lambda: NOW
+        "acme", runner=run, timeout=12.0, health_timeout=345.0, clock=lambda: NOW
     ).snapshot()
 
     assert [item.source.item_id for item in snapshot.items] == ["thread-1", "thread-2", "builder-1"]
@@ -167,8 +167,8 @@ def test_schema_invalid_jsonl_row_degrades_scope_and_suppresses_close():
             return 0, json.dumps({"hosts": []}), ""
         return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
 
-    snapshot = EngineSourceAdapter("fulcra", runner=run, clock=lambda: NOW).snapshot()
-    missing = SourceIdentity("coord-engine", "fulcra/threads", "gone")
+    snapshot = EngineSourceAdapter("acme", runner=run, clock=lambda: NOW).snapshot()
+    missing = SourceIdentity("coord-engine", "acme/threads", "gone")
     policy = load_policy()
     ledger = BridgeLedger([
         LedgerEntry(missing, "threads", "linear", "LIN-gone", policy.version, policy.hash)
@@ -184,7 +184,7 @@ def test_schema_invalid_jsonl_row_degrades_scope_and_suppresses_close():
 
 def test_engine_source_derives_curated_backlog_and_named_auxiliary_lanes():
     adapter = EngineSourceAdapter(
-        "fulcra",
+        "acme",
         runner=runner_for({
             "board": {
                 "proposed": [{"id": "later-1", "title": "Later", "assignee": "@backlog"}],
@@ -219,7 +219,7 @@ def test_prose_degraded_line_keeps_valid_jsonl_rows_but_degrades_capability():
             return 0, json.dumps({"hosts": []}), ""
         return 0, json.dumps({"active": []} if argv[1] == "board" else []), ""
 
-    snapshot = EngineSourceAdapter("fulcra", runner=run, clock=lambda: NOW).snapshot()
+    snapshot = EngineSourceAdapter("acme", runner=run, clock=lambda: NOW).snapshot()
 
     assert [item.source.item_id for item in snapshot.items] == ["thread-1", "thread-2"]
     assert snapshot.capabilities["threads"] is CapabilityState.DEGRADED

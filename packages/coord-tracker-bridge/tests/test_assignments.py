@@ -25,6 +25,8 @@ records what it was asked to do.
 
 import json
 
+import os
+
 import pytest
 
 from coord_tracker_bridge.assignments import (
@@ -43,6 +45,7 @@ from coord_tracker_bridge.assignments import (
     DispatchFailed,
     EngineTellDispatcher,
     FulcraRosterReader,
+    default_roster_path,
     Route,
     RosterUnreadable,
     StateUnreadable,
@@ -311,7 +314,8 @@ def test_the_store_reader_raises_rather_than_returning_none():
     def runner(argv, timeout):
         return 1, "", "no such file"
     with pytest.raises(RosterUnreadable):
-        FulcraRosterReader(runner=runner)()
+        FulcraRosterReader(path="team/acme/_coord/roster-nicknames.md",
+                           runner=runner)()
 
 
 def test_the_store_reader_asks_for_the_documented_path():
@@ -320,9 +324,39 @@ def test_the_store_reader_asks_for_the_documented_path():
     def runner(argv, timeout):
         seen["argv"] = tuple(argv)
         return 0, ROSTER, ""
-    FulcraRosterReader(runner=runner)()
+    FulcraRosterReader(path="team/acme/_coord/roster-nicknames.md",
+                       runner=runner)()
     assert seen["argv"] == (
-        "fulcra-api", "file", "download", "team/fulcra/_coord/roster-nicknames.md", "-")
+        "fulcra-api", "file", "download", "team/acme/_coord/roster-nicknames.md", "-")
+
+
+def test_the_default_roster_path_follows_the_environment_not_the_repo(monkeypatch):
+    """This package ships from a PUBLIC repo. A hardcoded default silently
+    pointed every other team's bridge at the authoring team's roster.
+
+    Uses monkeypatch rather than touching os.environ directly: my first version
+    asserted the unset case by ASSUMING the variable was unset, and it started
+    failing the moment a real host set FULCRA_COORD_TEAM in its profile. A test
+    of "what happens when this is unset" has to unset it.
+    """
+    monkeypatch.delenv("FULCRA_COORD_TEAM", raising=False)
+    assert default_roster_path() == ""          # unset -> no guess
+    monkeypatch.setenv("FULCRA_COORD_TEAM", "acme")
+    assert default_roster_path() == "team/acme/_coord/roster-nicknames.md"
+
+
+def test_an_unconfigured_reader_refuses_rather_than_reading_team_slash_slash():
+    """With no team configured the path is empty. The reader must REFUSE, not
+    build "team//_coord/..." and fetch whatever that resolves to."""
+    called = []
+
+    def runner(argv, timeout):
+        called.append(tuple(argv))
+        return 0, ROSTER, ""
+
+    with pytest.raises(RuntimeError, match="FULCRA_COORD_TEAM"):
+        FulcraRosterReader(path="", runner=runner)()
+    assert called == [], "an unconfigured reader must not reach the store at all"
 
 
 # --- 6. PLANNING ----------------------------------------------------------
@@ -539,9 +573,9 @@ def test_the_dispatcher_uses_tell_not_a_bare_send():
                   state="Todo", updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
                   disposition=RESOLVED, target="coord-opus-worker",
                   repeat=NEW, previous=None)
-    EngineTellDispatcher(team="fulcra", sender="coord-opus-worker", runner=runner).deliver(route)
+    EngineTellDispatcher(team="acme", sender="coord-opus-worker", runner=runner).deliver(route)
     argv = seen["argv"]
-    assert argv[:5] == ("coord-engine", "tell", "fulcra", "coord-opus-worker",
+    assert argv[:5] == ("coord-engine", "tell", "acme", "coord-opus-worker",
                         "Linear ENG-42 assigned to you — Todo")
     assert "--from" in argv and "coord-opus-worker" in argv
 
@@ -554,7 +588,7 @@ def test_a_nonzero_tell_is_a_dispatch_failure_not_a_delivery():
                   disposition=RESOLVED, target="coord-opus-worker",
                   repeat=NEW, previous=None)
     with pytest.raises(DispatchFailed):
-        EngineTellDispatcher(team="fulcra", sender="x", runner=runner).deliver(route)
+        EngineTellDispatcher(team="acme", sender="x", runner=runner).deliver(route)
 
 
 # --- 9. THE RUN -----------------------------------------------------------

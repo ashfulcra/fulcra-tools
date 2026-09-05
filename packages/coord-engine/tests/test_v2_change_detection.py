@@ -106,7 +106,7 @@ def test_captured_live_envelope_preserves_the_named_boundary_recovery_reason():
     # the captured two-key envelope exactly as the production CLI emits it.
     transport.envelope = envelope
 
-    batch = _poll(transport, team="fulcra")
+    batch = _poll(transport, team="acme")
 
     assert batch.trusted is False
     assert batch.reason == "data-updates coverage boundary unavailable or unparseable"
@@ -235,7 +235,7 @@ def test_captured_data_types_materializes_the_configured_coordination_channel_on
     envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
     transport = ConfiguredFeedTransport(envelope, records=_attested_records(13))
 
-    batch = _poll(transport, team="fulcra")
+    batch = _poll(transport, team="acme")
 
     assert transport.record_calls == 1
     assert transport.record_channels == [(COORDINATION_TYPE, "2026-08-20T11:00:00Z")]
@@ -323,7 +323,7 @@ def test_captured_engine_owned_file_shapes_are_explicit_and_trusted():
     envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
     batch = _poll(
         ConfiguredFeedTransport(envelope, records=_attested_records(13)),
-        team="fulcra",
+        team="acme",
     )
 
     assert batch.trusted is True
