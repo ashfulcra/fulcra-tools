@@ -26,16 +26,19 @@ def test_config_missing_data_type_raises():
         channel.resolve(FakeReader(FakeStore({CFG: json.dumps({"api_version": "v1alpha1"})}, [])), "r")
 
 
-def test_write_event_stdin_document_matches_the_old_transport_keys(monkeypatch):
-    """GOLDEN: the key set is copied from coord_engine/transport.py record_write (~line 385 at 5db5c3e5).
-    If the old transport's keys differ, change BOTH the writer and this set. Never guess."""
+def test_write_event_matches_the_old_transport_s_record_invocation(monkeypatch):
+    """GOLDEN: copied from coord_engine/transport.py record_write (line 414 at 631ba497), which is what the real CLI
+    accepts: data type, api version and source travel as ARGUMENTS; only `note` and `recorded_at` travel on stdin.
+    The earlier version of this test asserted five stdin keys that were never read from the engine — a guess that
+    the proof's permissive fake confirmed and the live store refused (rc 2, 2026-09-05). Never guess."""
     seen = {}
     class R:
         returncode, stdout, stderr = 0, "", ""
     def fake_run(argv, input=None, **kw):
-        seen["doc"] = json.loads(input)
+        seen["argv"], seen["doc"] = argv, json.loads(input)
         return R()
     monkeypatch.setattr(subprocess, "run", fake_run)
     CliPointerWriter(cli=["true"]).write_event({"data_type": "D", "api_version": "v1alpha1"},
         {"v": 1, "at": "T", "from": "a", "to": "b", "kind": "note", "slug": "s", "pri": "P3", "ptr": None}, sender="a")
-    assert set(seen["doc"]) == {"data_type", "api_version", "note", "source", "recorded_at"}
+    assert seen["argv"] == ["true", "record", "D", "--api-version", "v1alpha1", "--source", "a"]
+    assert set(seen["doc"]) == {"note", "recorded_at"}
