@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r32)
+# coord-fold: Coord on Annotations Implementation Plan (r33)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -118,6 +118,30 @@ import sys
 TICKS = "`" * 3                                  # never spelled literally: this file lives inside a fence
 FENCE = re.compile(TICKS + r"(python|toml|yaml)\n(.*?)" + TICKS, re.S)
 TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # workflow YAML materializes too, so the wiring test runs here
+# codex-coder rounds 27-28: the prose contract drifted from argparse twice. An invocation of the ship gate written
+# without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
+TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
+FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
+BARE_RUNBOOK = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
+
+
+def refuse_bare_runbook_invocations(plan_text: str) -> list[str]:
+    """Scan INSTRUCTIONS only: fenced code is checked by the tests it materializes into, and the revision log is
+    history (it quotes the forms that were wrong). Everything else in the plan is prose a builder follows."""
+    out, in_fence, in_log = [], False, False
+    for i, ln in enumerate(plan_text.splitlines(), 1):
+        if FENCE_DELIM.match(ln):            # a delimiter is three backticks plus at most a language word; code that merely BEGINS with three backticks is not one
+            in_fence = not in_fence
+            continue
+        if ln.startswith("## "):
+            in_log = ln.startswith("## Revision log")
+        if in_fence or in_log:
+            continue
+        if BARE_RUNBOOK.search(ln):
+            out.append(f"line {i}: {ln.strip()[:120]}")
+    return out
+
+
 GATES = ["tests/test_structural.py", "tests/test_tripwire.py", "tests/test_ship_check.py", "tests/test_ci_wiring.py",
          "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]
 PROOF = "tests/proof/run_proof.py"   # G29; exits 3 = UNKNOWN where no OS sandbox exists — never read as green
@@ -144,6 +168,12 @@ def materialize(plan: str, out: pathlib.Path) -> tuple[list[str], list[str]]:
 
 def main(argv: list[str]) -> int:
     plan, out = pathlib.Path(argv[1]).read_text(), pathlib.Path(argv[2])
+    bare = refuse_bare_runbook_invocations(plan)
+    if bare:
+        print("Task 0: the plan invokes ship_check WITHOUT its stated trust roots (--git/--fulcra-api) — a builder following it cannot cut over:")
+        for b in bare:
+            print("  " + b)
+        return 1
     written, untagged = materialize(plan, out)
     pkg = out / "packages/coord-fold"
     (pkg / "README.md").write_text("# coord-fold\nevery module under **400 lines**\n")
@@ -3380,6 +3410,22 @@ def test_tree_mismatch_refuses(monkeypatch):
 def test_winning_says_approve_but_the_shard_body_does_not_refuses(monkeypatch):
     bodies = {ENV["codex-reviewer"]: APPROVE, ENV["codex-coder"]: f"verdict: changes\ntree: {TREE}"}
     assert run(monkeypatch, bodies=bodies) == 1
+
+
+def test_no_repo_prose_invokes_ship_check_without_stated_trust_roots():
+    """codex-coder rounds 27/28: the prose contract drifted from argparse twice (Task 14, then Task 16). Every
+    invocation written in repo prose — AGENTS.md, the package README, the script's own Usage — must carry the
+    stated trust roots on the same line. (The plan document itself is checked by Task 0's materialize_plan.)"""
+    import re
+    bare = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
+    here = pathlib.Path(__file__).resolve()
+    files = [f for f in (here.parents[3] / "AGENTS.md", here.parents[1] / "README.md", SCRIPT) if f.exists()]   # a materialized plan tree has no repo AGENTS.md
+    assert len(files) >= 2, files
+    for f in files:
+        for i, ln in enumerate(f.read_text().splitlines(), 1):
+            assert not bare.search(ln), f"{f.name}:{i}: ship_check invoked without --git/--fulcra-api: {ln.strip()[:120]}"
+    assert bare.search("`scripts/ship_check.py fulcra <HEAD>` and fails closed")           # the pattern catches the sentence that drifted
+    assert not bare.search("`scripts/ship_check.py fulcra <HEAD> --git /x --fulcra-api /y`")
 ```
 
 
@@ -3409,6 +3455,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 
 ## Revision log
 
+- **r33 (2026-09-05, correction of r32, same tick):** r32's changelog claimed that Task 0 refuses a bare `ship_check` invocation and that `test_ship_check` scans repo prose. **When r32 was filed, neither existed**: the branch edit that added them aborted before writing and the plan edit ran anyway, so the fence-equality check passed against a branch without them. They are on the branch now (6f5639948a8b08a5c94a361f9aeff645c5736f3c): Task 0's scan covers instructions only (fenced code and the revision log are exempt; strict fence delimiters; five controls), the test scans AGENTS.md, README and the script's Usage. Also measured on the way: a Markdown fence cannot carry a literal triple backtick, so `materialize_plan.py` builds its delimiter from parts. `uv.lock` gains the `coord-fold` workspace member. This line records the false claim.
 - **r32 (2026-09-05, reconciliation after the build — no new apparatus):** every fence is regenerated FROM branch `coord-fold-build` @ 2055887b4a2121bbbd2a3d4f24a8d9713de71b8e so the plan text equals the shipped code again (the first CI run on PR #696 exposed six defects invisible to in-package local runs: a public-IP literal in the proof's probe → RFC 5737 address; `fakes` → `coord_fold_fakes` + root pythonpath; the sandbox profile must allow the venv prefix; two positive controls start with `-S` because a uv workspace venv has the real `coord_engine` installed; README/pyproject located relative to the tests under `--no-editable`; and a `${PIPESTATUS}`-based gate that is empty under zsh). Count claims corrected (Step 5: 5 not 8; Task 7: 13 not 14; Task 9's mutation now measured to fail after a fixture that fails only the evidence read). codex-coder rounds 27–28: the last bare `ship_check` invocation (Task 16) fixed; Task 0 refuses a plan text carrying one; `test_ship_check` scans repo prose. codex-reviewer round 28 (private-bin link and temp body binding) is NOT addressed here: a ruling is requested from coord-boss on freezing the Task 16 apparatus at the branch state versus continuing to harden values the constrained party can choose.
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
