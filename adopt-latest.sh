@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="631ba4976a70796ec1a183df6f4b04a7f9cd2aca"   # coord-engine at 631ba497. THIRD pin move of 2026-09-05, for the bus-v4 cutover ruling: an obligation belongs to its ASSIGNEE. PR 712 fixes coord-fold relevance (an event sent BY an agent no longer opens in that agent's fold — the from==me clause had leaked every seed into its senders' folds: coord-boss only_new=54, coord-maintainer only_new=137), makes obligations --export-open assignee-filtered with --force re-seed and stale-close, and adds coord-fold fold --rebuild. Every host must carry THIS build before it re-seeds, or it seeds the wrong set. Measured on coord-boss after rebuild + re-seed + fold: compare-to-fold AGREE n=290, only_old=0, only_new=0. Everything in acbd5b10 (dual-emit, bridge, real-CLI reader) is still here.
+PIN="b038a16e0807fce3870dc79eb0679d2ef6af1ba5"   # coord-engine at b038a16e. FOURTH pin move of 2026-09-05, closing two residual edges of the assignee ruling found by the bus-v4 AGREE window on coord-boss: PR 716 makes a broadcast never open for its own sender and makes the mirror open only assigned, non-FYI directives; PR 714 resolves team-relative pointers against the team root; PR 715 invokes record in the real CLI shape. Engine delta from 631ba497 is two lines in records.py plus tests; the rest is coord-fold. Every host must carry this so its mirror stops emitting opens nobody owes. Everything in 631ba497 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
