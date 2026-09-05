@@ -1637,7 +1637,9 @@ acts on today.
   `{v, at, from, to, kind, slug, pri, ptr}`. A mirror failure never fails the v3 write.
 - **Seed (Task 12).** `obligations <team> --agent <a> --export-open` writes one bus-v4 `open` per slug the old
   fold says the agent owes AS ASSIGNEE (row assignee is the agent, `@agent`, `*`, or a role the agent holds —
-  rows the agent merely sent are not its obligations; ruling a0927018), idempotent via
+  rows the agent merely sent are not its obligations; ruling a0927018; RULING f9f5823b 2026-09-05: a broadcast,
+  assignee `*`, is an obligation of EVERY recipient except its owner, so `_old_open_set` adds open star rows whose
+  owner is not the agent — needs-me never lists them — matching the fold's `to == all and from != agent`), idempotent via
   `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). A re-seed RECONCILES: every slug open in the agent's
   coord-fold checkpoint that the correct set no longer contains gets a bus-v4 `close` (ptr = the seed marker),
   so a leaked open is retired on the stream rather than deleted (G28); an unreadable checkpoint makes the whole
