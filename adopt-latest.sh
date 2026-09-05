@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="b038a16e0807fce3870dc79eb0679d2ef6af1ba5"   # coord-engine at b038a16e. FOURTH pin move of 2026-09-05, closing two residual edges of the assignee ruling found by the bus-v4 AGREE window on coord-boss: PR 716 makes a broadcast never open for its own sender and makes the mirror open only assigned, non-FYI directives; PR 714 resolves team-relative pointers against the team root; PR 715 invokes record in the real CLI shape. Engine delta from 631ba497 is two lines in records.py plus tests; the rest is coord-fold. Every host must carry this so its mirror stops emitting opens nobody owes. Everything in 631ba497 is still here.
+PIN="c46e6cc20a107ca37ada918e43005d8a2deab278"   # coord-engine at c46e6cc2. FIFTH pin move of 2026-09-05, closing class C of the assignee ruling: a directive whose task is already terminal at emit time is no longer mirrored as a bus-v4 open (PR 718). Without it every recipient of a DONE report gets an open with no close, and the AGREE window re-pollutes on every such report. Engine delta from b038a16e is the bridge mirror plus tests. Everything in b038a16e is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
