@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="c46e6cc20a107ca37ada918e43005d8a2deab278"   # coord-engine at c46e6cc2. FIFTH pin move of 2026-09-05, closing class C of the assignee ruling: a directive whose task is already terminal at emit time is no longer mirrored as a bus-v4 open (PR 718). Without it every recipient of a DONE report gets an open with no close, and the AGREE window re-pollutes on every such report. Engine delta from b038a16e is the bridge mirror plus tests. Everything in b038a16e is still here.
+PIN="430f6835ac4e730f6522d4e6ceb553083da263d1"   # coord-engine at 430f6835. SIXTH pin move of 2026-09-05. Carries the star-row ruling (PR 721: the old open set includes open broadcast rows for every agent except their owner, so a live broadcast no longer reads as divergence for its recipients) and the forge projection prune (PR 722: the parent feedback dir is listed once, per-PR only where feedback exists), alongside COORD_FORGE_BUILD_BUDGET=180 on the reconciling host. Engine delta from c46e6cc2 is bridge + projection plus tests. Everything in c46e6cc2 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
