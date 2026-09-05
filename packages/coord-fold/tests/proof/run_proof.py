@@ -42,7 +42,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -74,7 +74,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -85,7 +85,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -99,7 +99,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -110,7 +110,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -124,7 +124,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -135,7 +135,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -149,7 +149,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -160,7 +160,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/responses/s0/reply.md",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -171,7 +171,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -185,7 +185,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -196,7 +196,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "get-records",
@@ -212,7 +212,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -252,6 +252,9 @@ def shape(argv):
 def norm(argv):
     if argv[:2] == ["file", "upload"]:
         return ["file", "upload", "<tmp>", argv[3]]
+    if argv[:2] == ["file", "download"] and len(argv) == 4:
+        # the reader's private temp file (never /dev/stdout: the real CLI refuses it under a pipe, measured 2026-09-05)
+        return ["file", "download", argv[2], "<tmp>"]
     if argv[:1] == ["get-records"]:
         return ["get-records", argv[1], "<since>"]
     return argv

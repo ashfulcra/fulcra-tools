@@ -37,11 +37,29 @@ class CliPointerReader:
         return p.returncode, p.stdout, p.stderr
 
     def _download(self, path: str) -> tuple[int, str, str]:
+        # The real CLI validates LOCAL_FILE as a readable path and REFUSES /dev/stdout under a pipe (measured
+        # 2026-09-05 on the first real run: every fold refused at the channel config). A private temp file, read
+        # back and removed. pathlib + tempfile only: the transport never imports os (Task 1 boundary truth).
+        d = pathlib.Path(tempfile.mkdtemp(prefix="coord-fold-read-"))
+        d.chmod(0o700)
+        local = d / "body"
         try:
-            p = subprocess.run([*self._cli, "file", "download", path, "/dev/stdout"], capture_output=True, text=True, timeout=self._timeout)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return 127, "", str(exc)
-        return p.returncode, p.stdout, p.stderr
+            try:
+                p = subprocess.run([*self._cli, "file", "download", path, str(local)], capture_output=True, text=True, timeout=self._timeout)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return 127, "", str(exc)
+            if p.returncode != 0:
+                return p.returncode, "", p.stderr
+            try:
+                return 0, local.read_text(encoding="utf-8"), p.stderr
+            except OSError as exc:
+                return 1, "", str(exc)
+        finally:
+            try:
+                local.unlink(missing_ok=True)
+                d.rmdir()
+            except OSError:
+                pass
 
     def _records(self, channel: str, since: str) -> tuple[int, str, str]:
         try:
