@@ -1696,6 +1696,42 @@ and on every mesh channel read that returns zero records. A reader above this
 surface must either guess or degrade — ours degrades, which is why one such
 directory takes a whole section down.
 
+### Package metadata does not prove which module answered
+
+`importlib.metadata` describes the distribution installed beside an
+interpreter. It says nothing about which `coord_engine` that interpreter will
+actually import, because `PYTHONPATH` is searched first. Any check of the form
+"read `direct_url.json` next to the launcher on `PATH`, conclude the pinned
+code is what runs" is checking the label, not the contents — and `subprocess`
+inherits `PYTHONPATH`/`PYTHONHOME`, so it survives one process hop.
+
+Reproduced end to end on this host 2026-09-05T04:15Z, with a control built
+around a capability the pin does **not** have so that it could fail:
+
+| probe | command | `--stream` in `obligations --help` |
+|---|---|---|
+| A (control) | pinned launcher, `PYTHONPATH` unset | **0** — 2.0.6 @ `985a4be3` genuinely lacks it |
+| B (positive) | `.venv/bin/coord-engine` | **4** — the working tree has it |
+| C (shadow) | **pinned** launcher, `PYTHONPATH=packages/coord-engine` | **4** |
+
+A pinned launcher answered with a capability its pinned build does not
+contain. Straight at the import, using the pinned launcher's own interpreter
+`/root/.local/share/uv/tools/coord-engine/bin/python3`:
+
+- clean → `/root/.local/share/uv/tools/coord-engine/lib/python3.11/site-packages/coord_engine/__init__.py`
+- `PYTHONPATH` set → `/home/user/fulcra-tools/packages/coord-engine/coord_engine/__init__.py`
+
+...while `importlib.metadata` **in that same process** still reports
+`direct_url.json commit_id 985a4be36a29e3e0fcc3065e729d96b3a4604c8d`, version
+2.0.6. The metadata names the approved pin; the code that answers is the
+working tree.
+
+To prove which code ran: resolve the executable once and invoke it by absolute
+path, sanitize the import-affecting environment variables, and assert on
+`module.__file__` rather than on distribution metadata. This host carries two
+installs by design, so it is the configuration where the confusion is cheapest
+to make and cheapest to test — test it.
+
 ### Counting code with grep counts the comments too
 
 Verifying a claim about *how many times source calls something* is a parsing
