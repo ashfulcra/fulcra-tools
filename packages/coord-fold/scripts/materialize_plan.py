@@ -21,7 +21,20 @@ BARE_RUNBOOK = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f
 
 
 def refuse_bare_runbook_invocations(plan_text: str) -> list[str]:
-    return [f"line {i}: {ln.strip()[:120]}" for i, ln in enumerate(plan_text.splitlines(), 1) if BARE_RUNBOOK.search(ln)]
+    """Scan INSTRUCTIONS only: fenced code is checked by the tests it materializes into, and the revision log is
+    history (it quotes the forms that were wrong). Everything else in the plan is prose a builder follows."""
+    out, in_fence, in_log = [], False, False
+    for i, ln in enumerate(plan_text.splitlines(), 1):
+        if ln.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if ln.startswith("## "):
+            in_log = ln.startswith("## Revision log")
+        if in_fence or in_log:
+            continue
+        if BARE_RUNBOOK.search(ln):
+            out.append(f"line {i}: {ln.strip()[:120]}")
+    return out
 
 
 GATES = ["tests/test_structural.py", "tests/test_tripwire.py", "tests/test_ship_check.py", "tests/test_ci_wiring.py",
