@@ -1,5 +1,15 @@
 # Collect, Coord Engine, and Bus Rebuild Implementation Plan
 
+> **HISTORICAL — this plan was EXECUTED and its module layout DID NOT SHIP.**
+> Do not implement it task-by-task. Measured 2026-09-05: every module and test
+> file this plan names under `packages/coord-engine/` is **absent** —
+> `acceptance.py`, `cursor.py`, `fleet.py`, `operator.py`, `output.py`,
+> `parking.py`, `queue.py`, `responses.py`, `review_store.py`, `routing.py`
+> and their tests — while the package that did ship contains 46 different
+> modules (`obligations.py`, `stream_fold.py`, `projection.py`, `review.py`,
+> `transport.py`, …). Read this for the reasoning; the shipped layout is the
+> authority. Current coordination doctrine lives in [`AGENTS.md`](../../../AGENTS.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax (`- [ ]`) for tracking.
 
 **Goal:** Build a clean-room implementation that interoperates with the shipped

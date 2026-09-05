@@ -1,5 +1,11 @@
 # Coord Engine v2 Detection Authority Implementation Plan
 
+> **HISTORICAL — design provenance, not runnable instructions.**
+> Do not implement it task-by-task. Measured 2026-09-05: paths this plan names
+> under `packages/coord-engine/` do not exist in the shipped tree. Read it for
+> the reasoning; the shipped layout is the authority. Current coordination
+> doctrine lives in [`AGENTS.md`](../../../AGENTS.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:executing-plans` or `superpowers:subagent-driven-development` to
 > implement this plan task-by-task. Use `superpowers:test-driven-development`
