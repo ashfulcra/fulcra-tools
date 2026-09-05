@@ -19,11 +19,12 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})([^\n`]*)")
+INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{40})(?![0-9a-f])([^\n`]*)")   # r37: EXACTLY 40 hex (main() fullmatches 40) or the two documented head placeholders — a 7-hex head passed the guard and was refused by the gate (codex-coder round 32)
+SHORT_HEAD = re.compile(r"ship_check\.py\s+\S+\s+[0-9a-f]{7,39}(?![0-9a-f<])")                                            # the fail-open form, named so it is REPORTED rather than silently unmatched
 REQUIRED_ROOTS = ("--git", "--fulcra-api")
 
 
-PLACEHOLDER = re.compile(r"^<[^<>]+>$")          # documentation placeholders: <abs>, <abs path>, <path>
+PLACEHOLDERS = ("<abs>", "<abs path>", "<path>")   # r37: an explicit ALLOWLIST substituted verbatim — a pattern let `<abs --bogus>` hide an unknown option (codex-coder round 32)
 
 
 def parse_invocation(rest: str) -> list[str]:
@@ -34,7 +35,9 @@ def parse_invocation(rest: str) -> list[str]:
     token — an unknown option, a relative value, a trailing positional — is a problem, because argparse or the gate
     refuses the documented command at runtime while a presence check would have passed it."""
     import shlex
-    command = re.sub(r"<[^<>]*>", "<placeholder>", rest.split("#", 1)[0])   # a documentation placeholder may contain spaces (`<abs path>`): one token
+    command = rest.split("#", 1)[0]
+    for ph in PLACEHOLDERS:                                                   # only the allowlisted placeholders collapse to one token; any other <...> is tokenized and judged
+        command = command.replace(ph, "<placeholder>")
     try:
         toks = shlex.split(command)
     except ValueError as exc:
@@ -43,7 +46,7 @@ def parse_invocation(rest: str) -> list[str]:
     def check_value(root, v):
         if not v:
             problems.append(f"{root} has no value")
-        elif not (v.startswith("/") or PLACEHOLDER.match(v)):
+        elif not (v.startswith("/") or v == "<placeholder>"):
             problems.append(f"{root} value {v!r} is not an absolute path")
         seen[root] += 1
     while i < len(toks):
@@ -67,7 +70,7 @@ def parse_invocation(rest: str) -> list[str]:
 
 
 def bare_invocations(text: str) -> list[str]:
-    out = []
+    out = [f"head is not 40 hex: {m.group(0).strip()[:100]}" for m in SHORT_HEAD.finditer(text)]
     for m in INVOCATION.finditer(text):
         problems = parse_invocation(m.group(3))
         if problems:
