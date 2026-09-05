@@ -21,7 +21,16 @@ SOURCE="${SOURCE:-engine}"
 # churn; a pile means the source read is wrong, and the absence-close gate has
 # already been wrong once in this package's history. Refuse and let a human look.
 MAX_CLOSES="${MAX_CLOSES:-8}"
-BRIDGE=(uv run --project "$REPO/packages/coord-tracker-bridge" python -m coord_tracker_bridge.cli)
+# A REAL SEAM, NOT A MOCK. The refusals below are the entire reason this script
+# exists and none of them can be provoked by the live bus on demand -- you cannot
+# ask a healthy board to propose a mass close. Overriding the command lets the
+# test drive a fake bridge that emits exactly those plans, so the refusal paths
+# execute for real rather than being read and assumed.
+if [ -n "${BRIDGE_BIN:-}" ]; then
+  read -r -a BRIDGE <<< "$BRIDGE_BIN"
+else
+  BRIDGE=(uv run --project "$REPO/packages/coord-tracker-bridge" python -m coord_tracker_bridge.cli)
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
