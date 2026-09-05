@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r12)
+# coord-fold: Coord on Annotations Implementation Plan (r13)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **r5 is gated against itself before it is filed.** Round-4 verdicts (both reviewers) found the plan's structural suite failed the plan's own code. Task 0 below is a script that materializes every path-tagged code block in this document into a scratch tree and runs the structural gates against it; r5 was filed only after that run was green, and the run's output is in the filing note. Every code block that lands in the package is tagged `# packages/coord-fold/<path>`; a block that is not tagged does not exist as far as the gate is concerned, so it is not allowed to matter.
 
-**Goal:** A separate `coord-fold` package whose fold engine is *proven not to enumerate* — **we do not claim enumeration is impossible to write; we claim a fold that enumerates fails its tests** (G29) — running in parallel with the old bus until a comparator proves agreement, then cut over. Seven rounds of syntactic gates (r2–r7) each closed one spelling and left the class open; coord-boss ruled (`cdfe666e`) that a static check cannot prove a negative about an unrestricted Python module, and the spec's §3.4 claim that a transport type *prevents* enumeration was wrong: a type stops a method call, not `os.listdir` or a subprocess. The guarantee is now behavioural **and enforced by the operating system at a process boundary** (r9): an in-process monkeypatch harness was shown escapable in one round (originals reachable via `gc`, `io.open` unlisted, the fake's corpus reachable through the object graph, the test detectable), so the proof runs the *production* reader inside an OS sandbox against a store that lives in *another process* and logs every request.
+**Goal:** A separate `coord-fold` package whose fold engine is shown, **in a measured run under kernel denial, to reach the store only through observed, bounded requests** — we do not claim enumeration is impossible to write; we claim a fold that enumerates fails its tests, and only that (G29) — running in parallel with the old bus until a comparator proves agreement, then cut over. Seven rounds of syntactic gates (r2–r7) each closed one spelling and left the class open; coord-boss ruled (`cdfe666e`) that a static check cannot prove a negative about an unrestricted Python module, and the spec's §3.4 claim that a transport type *prevents* enumeration was wrong: a type stops a method call, not `os.listdir` or a subprocess. The guarantee is now behavioural **and enforced by the operating system at a process boundary** (r9): an in-process monkeypatch harness was shown escapable in one round (originals reachable via `gc`, `io.open` unlisted, the fake's corpus reachable through the object graph, the test detectable), so the proof runs the *production* reader inside an OS sandbox against a store that lives in *another process* and logs every request.
 
 **Architecture:** Three planes (spec §3). Signal = one MomentAnnotation per event on a team channel. Content = unchanged OKF files addressed only by `ptr`. Fold = one checkpoint per agent, advanced by reading events forward from a cursor at O(new events). The fold is handed a **reader** with two public methods and three sealed subcommand calls; writes live on an unrelated class; process launch exists in exactly one module. The only changes to `coord-engine` are the seed export, the dual-emit mirror, and the comparator — old side, allowed to enumerate.
 
@@ -36,7 +36,7 @@ G-numbers are stable across revisions so verdicts can cite them.
 - **G27.** *(r6, Ruling 2)* **Lost-update detection, not CAS.** The store has no compare-and-swap (AGENTS.md records this); requiring one would build on a guarantee the platform does not offer, which reads as safety and is not. The checkpoint carries `writer` and a monotonic `generation`; a fold loads, computes, **re-reads before writing**, and if the generation moved it **refuses** — exit non-zero, visible, no silent retry — and never overwrites. It cannot prevent the race; it refuses to lose the update, which is the honest ceiling. The contended case is one agent running twice (two hosts, a duplicated cron) — the same double-acting condition coord already alarms on via the lease nonce — so the refusal says that **by name**.
 - **G28.** *(r6, Ruling 3)* **No compaction in v1; never delete events.** Bound the fold *work*, not the stream *history*. A fold away for a month reads a month of events: O(new events since *its* cursor), correct by definition. Compaction is a second source of truth that can disagree with the stream — precisely what this design removes — and it would arrive with no measurement forcing it. If catch-up cost ever becomes real, the fix is a snapshot that is derivable, discardable, and provably equal to a replay from empty; built then, against a number, not now.
 - **G12.** Six verbs: `emit`, `fold`, `claim`, `release`, `close`, `status`.
-- **G13.** Parallel bus proven then cut over: seed, dual-emit, shadow, cut over after N agreeing passes spanning ≥24h with observed transitions, freeze.
+- **G13.** *(r13, codex-reviewer)* Parallel bus proven then cut over: seed, dual-emit, shadow, cut over after **24 agreeing passes spanning ≥24 wall-clock hours** with observed transitions **and one injected divergence/recovery drill** (Task 14 forces a divergence, watches the comparator report it, repairs, and requires the agreeing run to restart from zero), freeze.
 - **G14.** coord-boss alone first, then one agent at a time.
 - **G15.** Never hardcode the channel; resolve `data_type` from `team/<team>/_coord/bus-v4/records.json`.
 - **G16.** No secrets. **G17.** Commits authored as `114089064+ashfulcra@users.noreply.github.com`.
@@ -44,7 +44,8 @@ G-numbers are stable across revisions so verdicts can cite them.
 - **G24.** *(r5)* **The plan is gated against itself.** Task 0's script materializes every path-tagged block and runs Tasks 1–3's tests; a revision is filed only with that run green, and the filing note carries the output.
 
 - **G29.** *(r9; ruled in r8 by coord-boss `cdfe666e`, re-implemented after both reviewers escaped the in-process harness)* **THE GUARANTEE IS BEHAVIOURAL, OS-ENFORCED, AND OBSERVED AT A PROCESS BOUNDARY.** `tests/proof/run_proof.py` starts a **store server outside the sandbox** (the corpus lives in that process, loaded from a file the sandbox cannot read; it answers only the five fixed request shapes, **refuses and logs everything else**), then runs the **production** `CliPointerReader`/`CliPointerWriter` through all six verbs **inside an OS sandbox** (macOS seatbelt) that denies at the kernel: every network endpoint except the store's socket; every exec except the interpreter; every file read outside the interpreter, the package tree, and its own temp dir; every file write outside that temp dir (and `/dev/null`, a sink, allowed by literal). **Asserted both ways, by name AND by semantics** *(r10, codex-coder round 9: a `get-records` whose cursor is rewritten to the epoch enumerates downstream of an allowed name)*: (1) the clean run — all six verbs exit 0, every request is one of `file stat`, `file download`, `get-records`, `record`, `file upload`, and **the store logs each `get-records` with its channel, its `since`, and the count it returned**: against a 5000-record corpus the first fold reads the corpus once, and the second fold asks from exactly the last observed record minus `OVERLAP_SECONDS` and gets back a bounded count (G31); (2) the attack battery, run inside — `reader._s` does not exist on the production class, the `gc`-recovered original `posix.listdir` is denied by the kernel, `io.open('/etc/hosts')`, `/bin/ls`, reading the corpus file, and an outbound socket are denied, and a direct socket to the store asking `file list` is **logged and refused**; (3) the mutated run — `fold.run` wrapped to issue one `file list` through its own CLI — is **flagged**; (4) **the epoch-rewrite mutation** — the production `_records` sending `since=1970-01-01T00:00:00Z` — is **flagged** by the logged semantics (wrong cursor, unbounded return) although every verb name is allowed. **What this proves and no more (coord-boss `f6ceb0c4`, the weaker true claim):** *these specific capabilities were denied by the kernel and the fold still completed* — NOT "the fold ran with no capabilities". The measured profile is allow-default with kernel denies on the capabilities that matter, because deny-default aborts the interpreter at startup on the proof host (measured, rc 134). *(r11, codex-coder round 10)* Every allowed operation is checked by **semantics**, not prefix: the driver asserts the **exact request sequence of the clean run, with paths** (measured from the run and frozen; a change to the fold changes it deliberately), a **path allowlist** for `file stat/download/upload` (the channel config, the checkpoint, the close evidence — nothing else), per-shape bounds, and — because **the store holds the agent's checkpoint** — that no `get-records` asks from before the cursor the store held at that moment minus the overlap (the first observation from an absent checkpoint is allowed by construction; the epoch rewrite is flagged because a checkpoint exists by then) — so a production reader that point-probes thousands of guessed paths (phase 5, his mutation) is flagged although every request name is allowed. **What it does not claim:** that enumeration is impossible to write, that the fold cannot detect it is under test, or that a Python process can hide anything from code running inside it. **The driver exits 3 (UNKNOWN) where no OS sandbox exists — never green by absence, never softened to a skip.** Ruling `f6ceb0c4`: **no bwrap profile is written until it can be measured** — an untested sandbox profile reads as proof and is not. macOS is the proof host; Linux CI stays UNKNOWN; **the gate is that the proof ran and passed on at least one host, recorded with which host and when** — the driver prints host, platform and UTC time in its final line and the filing note carries it. Measured on this host before filing: the unit suite passes *inside* the sandbox; the proof passed all five phases (numbers in Task 1 Step 5).
-- **G32.** *(r9; ruled `f6ceb0c4`; r12 per codex-coder round 11)* **No automated gate claims anti-consolidation, and the plan says so: *the gates do not check this*.** Seven rounds proved the automated form cannot close the class. **But the requester's acceptance condition stands** — *"if all five structural checks can pass with one big file, the plan is not ready"* — and a scope ruling on the bus does not waive it; codex-coder is right that recording the hole honestly is not closing it. So it is closed the only way the ruling allows: **a review-shaped ship gate (Task 16)** — a required reviewer *reads* the materialized tree against a written rubric and files a verdict on responsibility distribution; the build is not shippable without it. The automated checks that survive (symbols defined where planned, tree = manifest, DAG) are described as what they are: cheap facts, not the criterion. The answer to the review question is therefore: *yes, a ≤400-line `cli.py` behind owner shims would pass every automated check — and it would fail Task 16, which is a person or agent reading it.*
+- **G32.** *(r9; ruled `f6ceb0c4`; r12 per codex-coder round 11)* **No automated gate claims anti-consolidation, and the plan says so: *the gates do not check this*.** Seven rounds proved the automated form cannot close the class. **But the requester's acceptance condition stands** — *"if all five structural checks can pass with one big file, the plan is not ready"* — and a scope ruling on the bus does not waive it; codex-coder is right that recording the hole honestly is not closing it. So it is closed the only way the ruling allows: **a review-shaped ship gate (Task 16), bound to what ships** *(r13, both reviewers round 12)* — a required reviewer *reads the on-disk tree of the exact implementation commit* against a written rubric and files a verdict on a ship register keyed by that head, quoting the head and git's tree hash for the package; **any head change invalidates it, nothing carries forward from plan time, and the ship check refuses without both approvals on that exact head.** coord-boss ruled no waiver (`5ccfce26`). The automated checks that survive (symbols defined where planned, tree = manifest, DAG) are described as what they are: cheap facts, not the criterion. The answer to the review question is therefore: *yes, a ≤400-line `cli.py` behind owner shims would pass every automated check — and it would fail Task 16, which is a person or agent reading it.*
+- **G34.** *(r13, codex-reviewer)* **The §7 reconciler stays out of the fold path as an invariant, not a habit:** `fold`/`status` never invoke, await, or freshness-gate on the reconciler. Evidence, all already in the plan: the import graph never reaches `coord_engine` (Task 1 truths); inside the proof every exec but the interpreter is denied and the clean run's exact request sequence contains no reconciler call (G29); the CLI has no flag that reaches one (Task 7).
 - **G33.** *(r11, named property per `f6ceb0c4`)* **Denial is indifferent to how code arrives.** Because the denial is the kernel's, it holds regardless of what the source says — written module, generated module, alias, annotation, `getattr` — a property of what the process *cannot do*, not of what a gate looks for. In r8's in-process harness this surfaced as "the import machinery itself enumerates" (an uncached module could not be imported under denial); under the OS sandbox that special case is not needed and not claimed: a module the fold writes to its temp dir *can* be imported and faces the same denies.
 - **G31.** *(r8, codex-coder round 7)* **The cursor passes irrelevant records.** The cursor is the `recorded_at` of the last **observed** record before the first **unapplied relevant** event. Records that are unparseable, foreign-schema, or addressed to someone else are observed and passed, never re-read; otherwise an agent with no recent addressed events would re-read every other agent's traffic on every pass — corpus-shaped work at rc 0. This is consistent with G26: a *gap* is an unapplied relevant event, not an irrelevant one. Test: thousands of other-agent events after the last relevant one are not re-read on the next pass.
 
@@ -118,7 +119,7 @@ TAG = re.compile(r"#\s*(packages/coord-fold/\S+)")
 TICKS = "`" * 3                                  # never spelled literally: this file lives inside a fence
 FENCE = re.compile(TICKS + r"(python|toml)\n(.*?)" + TICKS, re.S)
 GATES = ["tests/test_structural.py", "tests/test_tripwire.py",
-         "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]
+         "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]   # test_ci_wiring.py runs in the repo, where .github exists
 PROOF = "tests/proof/run_proof.py"   # G29; exits 3 = UNKNOWN where no OS sandbox exists — never read as green
 
 
@@ -870,7 +871,7 @@ build-backend = "hatchling.build"
 [project]
 name = "coord-fold"
 version = "0.1.0"
-description = "Coord on annotations: a fold engine that cannot enumerate."
+description = "Coord on annotations: a fold engine whose store access is observed and bounded."
 requires-python = ">=3.11"
 dependencies = ["fulcra-common>=0.3.0"]
 
@@ -893,7 +894,7 @@ pythonpath = ["tests"]
 
 ```python
 # packages/coord-fold/coord_fold/__init__.py
-"""coord-fold — the fold engine that cannot enumerate."""
+"""coord-fold — a fold engine whose store access is observed and bounded (G29)."""
 __version__ = "0.1.0"
 ```
 
@@ -1107,9 +1108,59 @@ CI step in `.github/workflows/uv-workspace.yml` after the pytest step:
             packages/coord-fold/tests/test_tripwire.py \
             packages/coord-fold/tests/test_file_size_ceiling.py \
             packages/coord-fold/tests/test_no_degraded_vocabulary.py -q
-      - name: coord-fold proof (G29) — macOS is the proof host (measured); Linux exits 3 UNKNOWN and that is fail-closed, never a skip
-        if: runner.os == 'macOS'
+```
+
+**The proof runs on a real macOS job** *(r13, codex-reviewer: an `if: runner.os == 'macOS'` step inside a workflow whose only job is `ubuntu-latest` always skips)* — its own always-on workflow, no `paths-ignore`, modelled on `uv-workspace.yml`:
+
+```yaml
+# .github/workflows/coord-fold-proof.yml
+name: coord-fold proof (G29)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  proof:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.x"
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --all-packages
+      - name: the proof host has a sandbox (else this job is the wrong host, not a pass)
+        run: test -x /usr/bin/sandbox-exec
+      - name: coord-fold proof — exit 3 is UNKNOWN and fails this job
         run: uv run --package coord-fold --extra dev python packages/coord-fold/tests/proof/run_proof.py
+```
+
+**Wiring test** — fails if the proof stops being referenced by a macOS job, so coverage cannot silently disappear:
+
+```python
+# packages/coord-fold/tests/test_ci_wiring.py
+"""The proof must be run by a job on a macOS runner with no `if:` that can skip it. Honest status:
+a green run of this workflow in CI has NOT yet been observed; the G29 gate is the PASSED record from
+a host, and this test only keeps the CI wiring from rotting."""
+import pathlib
+import re
+
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+WORKFLOWS = ROOT / ".github" / "workflows"
+
+
+def test_a_macos_job_runs_the_proof_unconditionally():
+    hits = []
+    for wf in sorted(WORKFLOWS.glob("*.yml")):
+        text = wf.read_text()
+        for job in re.split(r"\n  (?=[A-Za-z_-]+:\n)", text):
+            if "tests/proof/run_proof.py" in job:
+                hits.append((wf.name, "macos" in job, bool(re.search(r"^\s+if:", job, re.M))))
+    assert any(h[1] and not h[2] for h in hits), f"no unconditional macOS job runs the proof: {hits}"
 ```
 
 Mutation: append 401 comment lines to `__init__.py` → FAILS. **Commit.**
@@ -2045,17 +2096,22 @@ Mutation: append `# degraded` to `fold.py` → FAILS. **Commit.**
 
 **12 — Seed export** `obligations export-open <team> --agent <a>`: one bus-v4 `open` per open slug from the old stream fold, idempotent via `_coord/bus-v4/seeded/<a>.md`, eight-field payload written literally. Classified as a write. Mutation: remove the marker guard → idempotency FAILS.
 **13 — Dual-emit** `coord_engine/dual_emit.py::mirror` called once at the end of `records.emit_event`; `directive→open`, `response→close` of `closes`, `claim→claim`, `verdict→note`; no v4 config → no-op; mirror failure never fails v3. Mutation: hardcode a cfg when absent → FAILS.
-**14 — Comparator + `cutover-ready` + runbook**: tuples `(slug, pri, ptr)`; `AGREE n=k` / `DIVERGE slugs=[…]`; `cutover-ready` exits 0 only if trailing AGREE run ≥ N, span ≥ 24h, and the new open set both grew and shrank within it. Mutation: force the 24h check true → the one-minute-apart test FAILS.
+**14 — Comparator + `cutover-ready` + runbook**: tuples `(slug, pri, ptr)`; `AGREE n=k` / `DIVERGE slugs=[…]`; `cutover-ready` exits 0 only if trailing AGREE run ≥ 24, span ≥ 24h, the new open set both grew and shrank within it, **the injected divergence/recovery drill was performed and recorded (G13), and `scripts/ship_check.py <HEAD>` exits 0 (Task 16)**. Mutation: force the 24h check true → the one-minute-apart test FAILS.
 
 ### Task 15: AGENTS.md (ship-gate)
 
 The package, its four gate files, the proof driver and its two CI steps (the proof needs a macOS runner; exit 3 is UNKNOWN, not green); six verbs and exit codes; the remainder-vs-unknown distinction (G25) and the `degraded` ban; dependency direction; the reader/writer boundary; **the guarantee in G29's words** ("in that run the fold reached no store except through observed requests") with what it does not claim, the sandbox profile, and the store server's contract; **the tripwire's demotion in G30's words**; the cursor rules (G26/G31); §3.4 of the spec corrected (a type stops a method call, not `os.listdir`); and G24 — a revision is filed only with Task 0 green.
 
-### Task 16: Review-shaped ship gate — responsibility distribution (G32)
+### Task 16: Review-shaped ship gate, bound to the shipped commit — responsibility distribution (G32)
 
-**Not an automated gate.** A required reviewer reads the **materialized tree** (Task 0's output, or the shipped `packages/coord-fold/`) and files a verdict named `responsibility-distribution` on the ship register `coord-fold-ship-<head>` (required reviewers: the same two as the plan's register). The build is not shippable without an APPROVE from each. The rubric is the File Structure's responsibility column, read as a checklist:
+**Not an automated gate, and not a plan-time approval.** Both reviewers (round 12): a verdict filed against the plan head and "carried" to a later implementation commit is stale evidence — one big file could ship behind it. So:
 
-| Module | The reviewer confirms, by reading |
+1. **When.** Only after implementation, on the **exact implementation commit** `<HEAD>` (40-hex) whose on-disk `packages/coord-fold/` is what ships. Never at plan time. Reading the materialized plan tree earlier is welcome as *feedback* and **carries nothing**.
+2. **Register.** `coord-engine review request fulcra coord-fold-ship-<HEAD> --of packages/coord-fold --head <HEAD> --reviewer codex-reviewer --reviewer codex-coder`. The engine's `--head` keying means any head change is a new round with no verdicts.
+3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file `verdicts/<HEAD>--<reviewer>.md` with `verdict: approve|changes`, `head: <HEAD>`, and `tree: <git rev-parse <HEAD>:packages/coord-fold>` — git's tree object hash, a content digest of exactly the shipped package. A verdict whose `tree` differs from the commit's is void.
+4. **Ship check.** `scripts/ship_check.py <HEAD>` exits 0 only if: the working tree for `packages/coord-fold` is clean at `<HEAD>`; both required verdicts exist for that head; each says `approve`; each quotes the commit's tree hash. Task 14's `cutover-ready` **calls it and fails closed** — no cutover without it.
+
+| Module | The reviewer confirms, by reading the shipped tree |
 |---|---|
 | `events.py` | payload construction and parsing happen **here**, as real logic, not as a re-export or a call into another module |
 | `transport.py` | the only process launches in the package are here, and both classes do real work against the CLI |
@@ -2063,9 +2119,56 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 | `checkpoint.py` | the checkpoint schema, apply, load and save are here; nothing else applies events |
 | `fold.py` | the pass — read forward, apply, cursor rule, re-read, contention, remainder — is here, in `run` |
 | `cli.py` | **argument parsing, dispatch and printing only**; every handler is a short delegation; no fold, parse, apply or persist logic; nothing duplicated from an owner |
-| whole tree | no module is a shim (defines only re-exports); no owner module's responsibility has migrated elsewhere; the materialized tree equals the manifest |
+| whole tree | no module is a shim; no owner's responsibility has migrated elsewhere; the tree equals the manifest |
 
-The verdict quotes the file and line for anything that fails a row. **This gate can be run at plan time**: Task 0 materializes the same tree, so a reviewer may file `responsibility-distribution` against `<plan head>` now, and the plan's approval may carry it. This is the requester's criterion honoured in the only shape the ruling allows; it is not the criterion restored as a gate.
+```python
+# packages/coord-fold/scripts/ship_check.py
+"""Task 16 ship check. Exit 0 only with BOTH required responsibility-distribution approvals on the
+EXACT commit, each quoting that commit's tree hash for packages/coord-fold. Fails closed on anything else.
+Usage: python scripts/ship_check.py <team> <40-hex head>"""
+import re
+import subprocess
+import sys
+
+REQUIRED = ("codex-reviewer", "codex-coder")
+
+
+def sh(*argv):
+    p = subprocess.run(list(argv), capture_output=True, text=True)
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+def main(team: str, head: str) -> int:
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        print("ship_check: head must be a 40-hex commit"); return 1
+    rc, at, _ = sh("git", "rev-parse", "HEAD")
+    if rc or at != head:
+        print(f"ship_check: working tree is at {at}, not {head}"); return 1
+    rc, dirty, _ = sh("git", "status", "--porcelain", "--", "packages/coord-fold")
+    if rc or dirty:
+        print("ship_check: packages/coord-fold has uncommitted changes — the on-disk tree is not the commit"); return 1
+    rc, tree, _ = sh("git", "rev-parse", f"{head}:packages/coord-fold")
+    if rc:
+        print("ship_check: no packages/coord-fold tree at that commit"); return 1
+    ok = True
+    for reviewer in REQUIRED:
+        path = f"team/{team}/review/coord-fold-ship-{head}/verdicts/{head}--{reviewer}.md"
+        rc, body, err = sh("fulcra-api", "file", "download", path, "/dev/stdout")
+        if rc:
+            print(f"ship_check: no verdict from {reviewer} for {head} ({err[:80]})"); ok = False; continue
+        verdict = re.search(r"^verdict:\s*(\S+)", body, re.M)
+        quoted = re.search(r"^tree:\s*([0-9a-f]{40})", body, re.M)
+        if not verdict or verdict.group(1) != "approve":
+            print(f"ship_check: {reviewer} verdict is {verdict.group(1) if verdict else 'missing'}, not approve"); ok = False
+        if not quoted or quoted.group(1) != tree:
+            print(f"ship_check: {reviewer} quotes tree {quoted.group(1) if quoted else 'none'}, commit's is {tree}"); ok = False
+    print("ship_check: OK — both approvals on this exact head and tree" if ok else "ship_check: REFUSED")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1], sys.argv[2]))
+```
 
 ---
 
@@ -2078,13 +2181,21 @@ Each ruling is a Global Constraint above so verdicts can cite it; the reasoning 
 3. **No compaction in v1; never delete events (G28).** Bound the work, not the history. Compaction is a second source of truth; it arrives only against a measured number, as a derivable, discardable snapshot provably equal to replay-from-empty.
 4. **`max_events` — bound required; hitting it is not an error and not degraded (G25).** Apply what was read, cursor to the last applied event, `unread_events: N`, exit 0, printed on stdout as a remainder. The only error: zero applied while events exist → `FoldRefused("no progress")`, non-zero.
 
+## Open items for coord-boss from codex-reviewer's round-12 reading of §9 (recorded, not decided here)
+
+1. **Channel granularity.** A per-team channel makes every agent read team-wide traffic *once* (G31 bounds re-reads, not first reads). codex-reviewer recommends **per-agent channels or server-side recipient filtering**. Spec §9 open question 2; coord-boss/Ash to decide; the fold is indifferent (it takes `data_type` from config).
+2. **Retention before cutover.** Ruling 3 forbids compaction and deletion in v1; codex-reviewer adds that a **safe-consumer watermark** (the oldest cursor any live agent still needs) and a **versioned snapshot/epoch definition** must exist *before* cutover so that a future retention policy has something to be safe against. Recorded as a pre-cutover requirement for Task 14's runbook; no deletion is implied.
+3. **`release` stays explicit** (it does) unless `claim` becomes a lease with expiry.
+4. **The two diagnostics' bounds, with their caveats:** `unread_events` is exact only because the CLI returns the whole window in one call — if the API paginates, the count needs a progress guarantee; `unreadable_pointers` is bounded by the open set because `close`/`release` remove rows — if rows could linger, it would grow.
+
 ## What this plan does not do (spec §10)
 
-Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop findings. Deletes nothing. Does not implement the §7 inbox reconciler; Task 3's per-module import allowlist is the proof it cannot be composed into a fold path.
+Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop findings. Deletes nothing. Does not implement the §7 inbox reconciler, and G34 states the invariant that keeps it out of the fold path.
 
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r13 (2026-09-05, both reviewers CHANGES on `b6d867d9`, round 12; coord-boss `5ccfce26` no waiver):** Task 16 bound to what ships — implementation commit only, ship register keyed by head, verdicts quote head + git tree hash, any head change invalidates, plan-time carry removed, `scripts/ship_check.py` fails closed and `cutover-ready` calls it. The G29 CI step was unreachable (macOS condition inside an ubuntu-only workflow); now its own always-on macOS workflow plus `test_ci_wiring.py`; a green CI run has not yet been observed and the plan says so. Overclaims softened (Goal, pyproject, `__init__`). G13: 24 passes / 24h / injected divergence drill. G34: reconciler separation as an invariant with its evidence. codex-reviewer's §9 items recorded as open items for coord-boss, not decided here.
 - **r12 (2026-09-05, codex-coder CHANGES on `92e838a9`, round 11):** point-probe closure accepted. The remaining P0: the requester's acceptance condition (one big file must not pass) is not waived by a scope ruling. Closed review-shaped, per `f6ceb0c4`'s own constraint: **Task 16**, a required reviewer reads the materialized/shipped tree against a written rubric and files a `responsibility-distribution` verdict; not shippable without it; runnable at plan time on Task 0's tree. G32 rewritten accordingly (the gates do not check this; the review does). Accuracy fix: G29 says five phases.
 - **r11 (2026-09-04, coord-boss `f6ceb0c4` both rulings + codex-coder CHANGES on `8d8dd4cb`, round 10):** G32 ruled — retired, stated as not-a-claim, review-shaped only; infra ruled — no untested bwrap profile, macOS is the proof host, Linux stays UNKNOWN, the gate is a passed record with host and time (the driver now prints them); the claim weakened to the true one (specific capabilities denied by the kernel, fold still completed); G33 names the property (denial indifferent to how code arrives) honestly, without claiming the in-process import finding under the kernel sandbox. codex-coder's point-probe P0: the driver now asserts the exact measured request sequence with paths, a path allowlist, and per-shape bounds for all five operations; phase 5 applies his mutation (2000 guessed `file stat`s) and must be flagged.
 - **r10 (2026-09-04, codex-coder CHANGES on `7cc71baa`, round 9):** the proof validated request *names* only, so an allowed `get-records` with its cursor rewritten to the epoch reread the corpus every pass and stayed green — enumeration downstream of an allowed name. Now the store logs each `get-records` with channel, `since`, and returned count; the corpus is 5000 records; phase 1 asserts the first fold reads the corpus once and the second asks from the last observed record minus the overlap and gets a bounded count; phase 4 applies the exact epoch-rewrite mutation to the production reader and must be flagged. G32 unchanged and still awaiting coord-boss's ruling — codex-coder is right that the parked build needs it before approval.
