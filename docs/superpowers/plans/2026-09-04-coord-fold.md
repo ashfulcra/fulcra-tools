@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r15)
+# coord-fold: Coord on Annotations Implementation Plan (r16)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2127,7 +2127,7 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 1. **When.** Only after implementation, on the **exact implementation commit** `<HEAD>` (40-hex) whose on-disk `packages/coord-fold/` is what ships. Never at plan time. Reading the materialized plan tree earlier is welcome as *feedback* and **carries nothing**.
 2. **Register.** `coord-engine review request fulcra coord-fold-ship-<HEAD> --of packages/coord-fold --head <HEAD> --reviewer codex-reviewer --reviewer codex-coder`. The engine's `--head` keying means any head change is a new round with no verdicts.
 3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file with the **typed verb, nothing hand-uploaded**: `coord-engine review verdict fulcra coord-fold-ship-<HEAD> --head <HEAD> --verdict approve --from <reviewer> --note "tree: <git rev-parse <HEAD>:packages/coord-fold> …reading…"`. The engine writes an **append-only envelope** `verdicts/<HEAD>--<reviewer>--<UTC timestamp>-<nonce>.md` (as every verdict on this plan's register demonstrates); the `tree:` line in the note is the evidence. A verdict whose `tree` differs from the commit's is void.
-4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite:** `review status --json` exposes `winning` and orders same-second shards by the microsecond `ts` the verb now writes — `ashfulcra/fulcra-tools` branch `review-winning-envelope` @ `e9c0089b` (register `review-winning-envelope-e9c0089b`, pending both reviewers; pin moves in its own PR). An engine without `winning` is **UNKNOWN → refuse**. Any absence — no `winning`, no fold, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
+4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite — bound to an APPROVED AND PINNED engine, never to a named commit** *(r16; codex-reviewer round 13 P0 one, verified at source by coord-boss `149e7d11`: the commit r15 named still had the double clock sample, so a named prerequisite bought nothing)*: `ship_check` downloads the fleet pin from `team/<team>/_coord/bus-v3/records.json`'s sibling `adopt-latest.sh` (the plan's own rule: pins come from there, never from a slug) and requires `PIN ∈ APPROVED_ENGINE_PINS` — a list in the script that is **empty until a deliberate plan revision adds the head that register `review-winning-envelope-e9c0089b` reads APPROVED for and that the pin PR shipped**. Until then `ship_check` refuses, which is the correct state. `winning` in `review status --json` is then the **supersession fold's** kept shard (branch `review-winning-envelope` round 5): any CHANGES not named in a later shard's `supersedes:` dominates regardless of timestamp; an APPROVE lifts a CHANGES only by naming it; equal keys and unnamed conflicts fail closed to CHANGES. **Both authoritative filename forms are accepted** *(P0 two, confirmed live on this very register: `<HEAD>--<reviewer>.md` and `<HEAD>--<reviewer>--<ts>-<digest>.md` coexist on the current head)*: a winning name is valid if it is exactly `<HEAD>--<reviewer>.md` or starts with `<HEAD>--<reviewer>--`; the fold, not the gate, decides which won. Any absence — no `winning`, no fold, a pin not in the approved set, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
 
 | Module | The reviewer confirms, by reading the shipped tree |
 |---|---|
@@ -2152,6 +2152,9 @@ import subprocess
 import sys
 
 REQUIRED = ("codex-reviewer", "codex-coder")
+# Engine heads whose register `review-winning-envelope-e9c0089b` read APPROVED AND whose pin PR shipped.
+# EMPTY until a deliberate plan revision adds one; an empty set means ship_check refuses, correctly.
+APPROVED_ENGINE_PINS: frozenset = frozenset()
 
 
 def sh(*argv):
@@ -2159,9 +2162,24 @@ def sh(*argv):
     return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
+def fleet_pin(team: str):
+    """The engine pin the fleet runs — from adopt-latest.sh, never from a slug name."""
+    rc, body, _ = sh("fulcra-api", "file", "download", f"team/{team}/_coord/bus-v3/adopt-latest.sh", "/dev/stdout")
+    m = re.search(r'^PIN="([0-9a-f]{40})"', body, re.M) if rc == 0 else None
+    return m.group(1) if m else None
+
+
+def winning_name_ok(name: str, head: str, reviewer: str) -> bool:
+    """Both authoritative forms: the exact-head plain shard, or an append-only envelope."""
+    return name == f"{head}--{reviewer}.md" or name.startswith(f"{head}--{reviewer}--")
+
+
 def main(team: str, head: str) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         print("ship_check: head must be a 40-hex commit"); return 1
+    pin = fleet_pin(team)
+    if pin is None or pin not in APPROVED_ENGINE_PINS:
+        print(f"ship_check: fleet engine pin {pin!r} is not an APPROVED+PINNED corrected engine (approved set: {sorted(APPROVED_ENGINE_PINS)}) — refusing; the fold's ordering contract is not proven on this engine"); return 1
     rc, at, _ = sh("git", "rev-parse", "HEAD")
     if rc or at != head:
         print(f"ship_check: working tree is at {at!r}, not {head}"); return 1
@@ -2188,7 +2206,7 @@ def main(team: str, head: str) -> int:
     for reviewer in REQUIRED:
         win = winning.get(reviewer) or {}
         name = win.get("name")
-        if not name or not name.startswith(f"{head}--{reviewer}--"):
+        if not name or not winning_name_ok(name, head, reviewer):
             print(f"ship_check: no winning shard from {reviewer} for {head} (fold says {win})"); ok = False; continue
         if win.get("verdict") != "approve":
             print(f"ship_check: {reviewer}'s winning shard {name} is {win.get('verdict')}, not approve"); ok = False
@@ -2228,10 +2246,15 @@ OTHER = "b6d867d96abf91ef2d82f066bf2e4977429cbe54"
 TREE = "1111111111111111111111111111111111111111"
 ENV = {r: f"{HEAD}--{r}--2026-09-05T01:00:24Z-626c9635.md" for r in ("codex-reviewer", "codex-coder")}
 APPROVE = f"verdict: approve\ntree: {TREE}"
+PIN = "f" * 40
+
+
+def _approve_pin(monkeypatch):
+    monkeypatch.setattr(ship_check, "APPROVED_ENGINE_PINS", frozenset({PIN}))
 
 
 def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "codex-coder"), fold_head=HEAD,
-          winning=None, bodies=None):
+          winning=None, bodies=None, pin=PIN):
     if winning is None:
         winning = {r: {"name": n, "verdict": "approve", "sort_key": "2026-09-05T01:00:24.000000Z"} for r, n in ENV.items()}
     if bodies is None:
@@ -2249,6 +2272,8 @@ def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "
             if winning != "absent":
                 fold["winning"] = winning
             return 0, json.dumps(fold), ""
+        if a[:3] == ["fulcra-api", "file", "download"] and a[3].endswith("adopt-latest.sh"):
+            return (0, f'#!/bin/sh\nPIN="{pin}"   # coord-engine\n', "") if pin else (1, "", "Error: File not found")
         if a[:3] == ["fulcra-api", "file", "download"]:
             n = a[3].rsplit("/", 1)[-1]
             return (0, bodies[n], "") if n in bodies else (1, "", "Error: File not found")
@@ -2257,8 +2282,29 @@ def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "
 
 
 def run(monkeypatch, **kw):
+    _approve_pin(monkeypatch)
     monkeypatch.setattr(ship_check, "sh", world(**kw))
     return ship_check.main("fulcra", HEAD)
+
+
+def test_the_shipped_default_approved_set_is_empty_so_ship_check_refuses_until_a_revision_adds_a_pin(monkeypatch, capsys):
+    monkeypatch.setattr(ship_check, "sh", world())
+    assert ship_check.APPROVED_ENGINE_PINS == frozenset()
+    assert ship_check.main("fulcra", HEAD) == 1 and "not an APPROVED+PINNED" in capsys.readouterr().out
+
+
+def test_a_pin_outside_the_approved_set_refuses(monkeypatch):
+    assert run(monkeypatch, pin="e" * 40) == 1
+
+
+def test_a_missing_adopt_latest_refuses(monkeypatch):
+    assert run(monkeypatch, pin=None) == 1
+
+
+def test_the_plain_exact_head_form_is_an_accepted_winning_name(monkeypatch):
+    plain = {r: f"{HEAD}--{r}.md" for r in ENV}
+    winning = {r: {"name": n, "verdict": "approve", "sort_key": "x"} for r, n in plain.items()}
+    assert run(monkeypatch, winning=winning, bodies={n: APPROVE for n in plain.values()}) == 0
 
 
 def test_both_exact_head_and_tree_approvals_pass(monkeypatch, capsys):
@@ -2338,6 +2384,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r16 (2026-09-05, codex-reviewer CHANGES on `a773df7b`, round 13 — both P0s verified at source by coord-boss `149e7d11`):** (1) Task 16 is bound to an **approved and pinned** engine, never to a named commit: `ship_check` reads the fleet PIN from `adopt-latest.sh` and requires it in `APPROVED_ENGINE_PINS`, which ships **empty** and is populated only by a deliberate revision after the engine register reads APPROVED and the pin PR lands — so `ship_check` refuses until then, correctly. (2) Both authoritative filename forms are accepted for the winning shard (both coexist on this register's current head). (3) `winning` is now described as the engine's **supersession fold** (branch round 5): an unnamed CHANGES dominates regardless of clock; an APPROVE lifts a CHANGES only by naming it in `supersedes:`; equal keys fail closed — the answer to codex-coder's cross-host-skew counterexample, which timestamps alone can never answer. Four `test_ship_check` cases added (default set empty → refuse; pin outside the set; missing adopt-latest; plain form accepted).
 - **r15 (2026-09-05, both reviewers CHANGES on `2446dde8`, round 14):** (1) Same-second shard ordering was by digest in both the engine and `ship_check`; fixed **in the engine** (branch `review-winning-envelope` @ `e9c0089b`: microsecond `ts` in the shard frontmatter, `canonical_sort_key`, `winning` in `review status --json`, six regressions incl. the reverse-digest case, mutation to name-only ties turns four red); `ship_check` now consumes `winning` and never refolds, refusing an engine that lacks it; `test_ship_check.py` adds the same-second regression and the no-`winning` case. (2) The CI wiring test was run by nothing and matched a comment; now it parses the real `runs-on`, runs from the always-on job and from Task 0 (the materializer extracts the workflow YAML), and both mutations — workflow deleted, ubuntu runner with a `macos` comment — are red.
 - **r14 (2026-09-05, codex-coder CHANGES on `e67ac647`, round 13 — operability):** the r13 ship check read `verdicts/<HEAD>--<reviewer>.md`, a file the typed `review verdict --head` never writes (it writes append-only `<HEAD>--<reviewer>--<ts>-<nonce>.md` envelopes, as this register shows), so it would have refused forever. Now it consumes the engine's folded result (`review status --json`: APPROVED on the exact head with both required in `approvals`) AND the latest envelope per reviewer (lexical ISO timestamp), each quoting the commit's tree hash in its `--note`; absence of anything is a refusal. `tests/test_ship_check.py` runs it end to end over real envelope names for eight outcomes. Task 14 calls `scripts/ship_check.py fulcra <HEAD>`.
 - **r13 (2026-09-05, both reviewers CHANGES on `b6d867d9`, round 12; coord-boss `5ccfce26` no waiver):** Task 16 bound to what ships — implementation commit only, ship register keyed by head, verdicts quote head + git tree hash, any head change invalidates, plan-time carry removed, `scripts/ship_check.py` fails closed and `cutover-ready` calls it. The G29 CI step was unreachable (macOS condition inside an ubuntu-only workflow); now its own always-on macOS workflow plus `test_ci_wiring.py`; a green CI run has not yet been observed and the plan says so. Overclaims softened (Goal, pyproject, `__init__`). G13: 24 passes / 24h / injected divergence drill. G34: reconciler separation as an invariant with its evidence. codex-reviewer's §9 items recorded as open items for coord-boss, not decided here.
