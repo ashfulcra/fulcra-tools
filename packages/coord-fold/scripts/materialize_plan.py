@@ -19,8 +19,13 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(<HEAD>|<40-hex head>|[0-9a-f]{40})(?![0-9a-f])([^\n`]*)")   # r37: EXACTLY 40 hex (main() fullmatches 40) or the two documented head placeholders — a 7-hex head passed the guard and was refused by the gate (codex-coder round 32)
-SHORT_HEAD = re.compile(r"ship_check\.py\s+\S+\s+[0-9a-f]{7,39}(?![0-9a-f<])")                                            # the fail-open form, named so it is REPORTED rather than silently unmatched
+INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(\S+)([^\n`]*)")   # r38 (codex-coder round 33): match EVERY invocation, then judge the head POSITIVELY
+HEAD_PLACEHOLDERS = ("<HEAD>", "<40-hex-head>")                                   # `<40-hex head>` (with the space) is normalized to this before matching
+HEAD_OK = re.compile(r"^[0-9a-f]{40}$")                                          # exactly what ship_check.main fullmatches
+
+
+def head_problem(head: str):
+    return None if HEAD_OK.match(head) or head in HEAD_PLACEHOLDERS else f"head {head!r} is not 40 lowercase hex (or a documented placeholder)"
 REQUIRED_ROOTS = ("--git", "--fulcra-api")
 
 
@@ -70,9 +75,10 @@ def parse_invocation(rest: str) -> list[str]:
 
 
 def bare_invocations(text: str) -> list[str]:
-    out = [f"head is not 40 hex: {m.group(0).strip()[:100]}" for m in SHORT_HEAD.finditer(text)]
+    out = []
+    text = text.replace("<40-hex head>", "<40-hex-head>")                          # a documented head placeholder with a space: one token
     for m in INVOCATION.finditer(text):
-        problems = parse_invocation(m.group(3))
+        problems = ([head_problem(m.group(2))] if head_problem(m.group(2)) else []) + parse_invocation(m.group(3))
         if problems:
             out.append(f"{'; '.join(problems)}: {m.group(0).strip()[:100]}")
     return out
