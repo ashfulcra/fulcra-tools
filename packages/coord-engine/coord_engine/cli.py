@@ -2685,14 +2685,33 @@ def _tally_from_verdict_entries(
             "reviewer": reviewer,
             "name": n,
             "verdict": token,
-            "sort_key": (parsed_ts
-                         or str(fm.get("ts") or "")
-                         or _store_mtime_iso(e.get("mtime")) or ""),
+            "supersedes": [str(x) for x in (fm.get("supersedes") or [])
+                           if isinstance(fm.get("supersedes"), list)],
+            "digest": review.content_digest(raw_v),
+            "mtime_iso": _store_mtime_iso(e.get("mtime")) or "",
+            # ONE canonical form (second from the ACL-controlled name, fraction
+            # from frontmatter `ts` only within that second) so two same-second
+            # shards of one reviewer order by chronology, not by digest.
+            "sort_key": review.canonical_sort_key(
+                parsed_ts, str(fm.get("ts") or ""),
+                _store_mtime_iso(e.get("mtime"))),
         })
     kept, folded_away = review.fold_newest_per_reviewer(rows)
     verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
                 for r in kept]
     tally = review.tally(verdicts, required=required)
+    # THE EXACT WINNING SHARD PER REVIEWER, exposed so a consumer (a ship gate)
+    # reads what the fold decided instead of refolding filenames itself — the
+    # reviewers' explicit ask: "do not independently refold ambiguous filenames".
+    tally["winning"] = {
+        r["reviewer"]: {"name": r["name"],
+                        "verdict": review.normalize_verdict(r["verdict"]),
+                        "sort_key": r["sort_key"]}
+        for r in kept
+    }
+    bad_edges = review.invalid_supersession_edges(rows)
+    if bad_edges:
+        tally["malformed_supersedes"] = bad_edges   # NEVER silently: a self-link is a shard trying to erase itself
     # Computed HERE, from the same entries the fold consumed, so the cache's
     # fingerprint provably describes what it summarises. EMPTY when a mutable
     # plain shard participates: a name digest cannot see that shard's in-place
@@ -4675,20 +4694,76 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
     # and the tally credited a phantom while the real reviewer read as pending.
     # Mixed precision would also misorder a plain shard against an append one
     # when compared as strings.
-    now_iso = _now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ONE instant, sampled ONCE (both reviewers, review-winning-envelope r3):
+    # sampling _now() twice let a verdict straddle a UTC second — named :10Z,
+    # stamped :11.xZ — and canonical_sort_key then rightly discarded the
+    # cross-second fraction, so the later correction sorted as :10.000000 and
+    # LOST to an earlier :10.900000 shard. Name second and frontmatter fraction
+    # must come from the same reading.
+    stamp = _now().astimezone(timezone.utc)
+    now_iso = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    nonce = secrets.token_hex(8)
+    # The random nonce is part of the NAME (codex-reviewer, r7 secondary): without
+    # it, two identical same-second filings collided and overwrote — an append-only
+    # claim with a non-unique name.
     digest = hashlib.sha1(
-        f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}"
+        f"{reviewer}|{normalized}|{getattr(args, 'note', None) or ''}|{nonce}"
         .encode()).hexdigest()[:8]
     filename = review.verdict_filename(reviewer, head=head, ts=now_iso,
                                        digest=digest)
     path = _verdicts_prefix(args.team, args.name) + filename
+    # NAME WHAT THIS VERDICT SUPERSEDES (review-winning-envelope r5). The fold
+    # no longer orders corrections by clock: an APPROVE lifts a prior CHANGES
+    # only by naming it. So list this reviewer's prior shards for this head and
+    # name every one. If the listing is degraded, name NOTHING and say so — an
+    # unseen CHANGES keeps dominating, which is the fail-closed answer.
+    supersedes: list[str] = []
+    listing_ok = True
+    unquotable: list[str] = []
+    try:
+        for e in transport.list_dir(_verdicts_prefix(args.team, args.name)):
+            n = str(e.get("name") or "")
+            parsed = review.parse_verdict_filename(n, head=head)
+            if not (parsed and parsed[0] == reviewer and n != filename):
+                continue
+            # QUOTE THE TARGET'S CURRENT BYTES (r8): the edge binds the content
+            # digest, and the fold honours it only if the STORE's mtime proves
+            # the target earlier than this shard. A prior that cannot be READ
+            # cannot be named — it stays live, which is the fail-closed answer.
+            prior = transport.read(_verdicts_prefix(args.team, args.name) + n)
+            if prior is None:
+                unquotable.append(n)
+                continue
+            supersedes.append(f"{n}@sha256:{review.content_digest(prior)}")
+    except TransportError:
+        # IF YOU CANNOT ENUMERATE THE PRIORS YOU CANNOT CLAIM TO SUPERSEDE THEM
+        # (coord-boss, ratification 1bce3da9): a supersedes list computed from a
+        # partial listing is a false claim of coverage. Name NOTHING.
+        listing_ok = False
+        supersedes = []
 
     body = okf.render_frontmatter({
         "type": "Verdict",
         "reviewer": reviewer,
         "head": head,
         "verdict": normalized,
+        # Microseconds live HERE, not in the name (the name stays second-
+        # precision for the reasons above); the fold uses this fraction only to
+        # order shards that share the name's second. See review.canonical_sort_key.
+        "ts": _iso(stamp),
+        "nonce": nonce,
+        "supersedes": sorted(supersedes),
     }) + f"\n{getattr(args, 'note', None) or normalized}\n"
+    if unquotable:
+        print(f"review verdict: {len(unquotable)} prior shard(s) of yours could not be read, "
+              f"so this verdict does NOT supersede them; a CHANGES among them still dominates "
+              f"until you re-file when they are readable",
+              file=sys.stderr)
+    if not listing_ok:
+        print(f"review verdict: could not list your prior shards for {args.name} — "
+              f"this verdict supersedes NOTHING; an existing CHANGES of yours "
+              f"still dominates the fold until you re-file with a working listing",
+              file=sys.stderr)
     if not transport.write(path, body):
         print(f"review verdict: write FAILED for {path} — the verdict did NOT "
               f"land, so the review still awaits you", file=sys.stderr)
@@ -4767,6 +4842,15 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             print(f"review status failed: validated generation row for {slug} "
                   "does not prove the full direct tally — reconcile with a "
                   "compatible writer", file=sys.stderr)
+            return 3
+        if not isinstance(tally.get("winning"), dict):
+            # A generation written by a projection that did not record which
+            # shard won cannot serve the winning identity a ship gate consumes,
+            # and silently returning the tally without it would let the direct
+            # and generation-backed readers answer differently. Fail closed.
+            print(f"review status failed: validated generation row for {slug} "
+                  "does not record the winning shard per reviewer — reconcile "
+                  "with a compatible writer", file=sys.stderr)
             return 3
         result = deepcopy(tally)
         result.update({"team": team, "slug": slug, "contract": 2})

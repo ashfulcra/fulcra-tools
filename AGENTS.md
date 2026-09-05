@@ -987,6 +987,48 @@ it (not on PyPI).
   never means destructive fallback. **Ship-gate: the throttle memo is process-global state — reset
   it between tests; a new write verb joins `_ACTIVITY_WRITE_FUNCS` (or the omission is justified);
   the preserve-everything-but-timestamp rule stays red-first pinned.**
+- **A CHANGES is lifted only by a shard that NAMES it (`supersedes:`), never by the clock
+  (2026-09-05, codex-coder, review-winning-envelope r4).** Client timestamps cannot carry the
+  correction contract: a CHANGES filed later from a host whose clock is behind sorts EARLIER, the old
+  APPROVE wins, and a ship gate validates withdrawn consent. The fold is now: a shard is RESOLVED when
+  another shard of the same reviewer names it in `supersedes:` (validated against shards that exist);
+  any UNRESOLVED CHANGES dominates regardless of timestamp; otherwise the newest live shard wins; equal
+  keys and unnamed conflicts fail closed to CHANGES. `review verdict` names every prior shard of yours
+  it can list; if the listing is degraded it names NOTHING and says so (your prior CHANGES keeps
+  dominating until you re-file). A hand-written APPROVE must carry `supersedes:` itself. **Only the STORE can supply causality (r8, both codex reviewers):** a name is predictable, and a
+  client-written nonce is editable frontmatter at a mutable path (a plain CHANGES rewritten in place
+  kept its nonce and an old edge still resolved it; a predeclared nonce was matched by a later
+  CHANGES). An edge `name@sha256:<digest>` is honoured only when the digest matches the target's
+  CURRENT bytes AND the store's server-assigned mtime proves the target strictly earlier than the
+  superseder — same minute or unknown fails closed; a bare legacy name needs the same mtime proof.
+  The verb quotes the content digest of each prior it can list AND read; a prior it cannot read is
+  not named; on a degraded listing it names NOTHING (if you cannot enumerate the priors you cannot
+  claim to supersede them — coord-boss 1bce3da9). The random `nonce:` now also sits in the shard NAME
+  so identical same-second filings cannot collide. **Invalid edges:** a shard can never resolve
+  ITSELF (a self-link let a CHANGES erase its own withdrawal — codex-reviewer, r5); self-links and names
+  that resolve nothing are reported in the tally as `malformed_supersedes`, never folded around silently;
+  a cycle fails closed to CHANGES; a forward edge cannot be forged (the name embeds a content digest).
+  This amends
+  ruling b99fb8da (newest-wins): constraint 5 — a stale CHANGES must not block forever — is satisfied
+  by the link the verb writes, not by the order of the clock.
+- **Same-second verdict shards order by chronology, not digest (2026-09-05, both codex reviewers,
+  coord-fold round 12).** The append-only name has SECOND precision plus a content digest, and the
+  fold broke same-second ties on the name — so an earlier APPROVE could outrank a later CHANGES from
+  the same reviewer (reproduced: digest `feb86aee` over `058ddb93`). Now `review verdict` writes a
+  microsecond `ts:` in the shard frontmatter and the fold orders every shard by
+  `review.canonical_sort_key` — the second from the ACL-controlled NAME (frontmatter can never move
+  a shard across seconds), the fraction from frontmatter only within that second, `.000000` for
+  shards without one so legacy and new compare in ONE format. `review status --json` now carries
+  `winning: {reviewer: {name, verdict, sort_key}}` — the exact shard the fold kept. **A downstream
+  consumer (a ship gate) reads `winning`; it never refolds filenames itself.** The projection
+  (`projection.py`) uses the SAME key and records `winning` in each generation row, and the
+  generation-backed `review status` **fails closed (rc 3)** on a row without it — two canonical
+  readers must not answer differently about one directory. Caveats, pinned by test: two legacy
+  shards with no `ts:` in the same second still tie on the name; the verb samples the clock ONCE for
+  both the name's second and the frontmatter fraction (two samples let a verdict straddle a second
+  and lose to an earlier same-second shard); and the resulting order is **client-timestamp order**,
+  not a provable arrival chronology — cross-host clock skew is out of the fold's reach, and two
+  shards with equal microseconds tie deterministically on the name.
 - **Engagement-aware liveness is a combiner over two ORTHOGONAL axes.** `classify(ts, now)` stays
   PURE — freshness only (`live`/`idle`/`stale`), a function of the timestamp alone. The truth table
   is layered on top by `presence.liveness(shard, now=…)`, which returns `{state, freshness,

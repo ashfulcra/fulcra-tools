@@ -112,31 +112,144 @@ def reviewer_from_filename(name: str, *, head: Optional[str] = None) -> Optional
     return parsed[0] if parsed else None
 
 
+_FRACTION = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(\d{1,6})Z$")
+
+
+def canonical_sort_key(name_ts: Optional[str], fm_ts: Optional[str],
+                       mtime_ts: Optional[str]) -> str:
+    """One form for every shard's ordering key: ``YYYY-MM-DDTHH:MM:SS.ffffffZ``.
+
+    WHY (codex-reviewer + codex-coder, coord-fold round 12, 2026-09-05): the
+    append-only name carries SECOND precision plus a content digest, and the
+    fold broke same-second ties on the name — so two verdicts from one reviewer
+    in one second were ordered by DIGEST, not chronology. codex-reviewer
+    reproduced an earlier APPROVE (digest feb86aee) outranking a later CHANGES
+    (058ddb93): folded APPROVED on stale evidence.
+
+    The SECOND comes from the ACL-controlled filename whenever it has one — a
+    frontmatter value can never move a shard across seconds, so a reviewer can
+    only reorder their OWN same-second shards, which they could do anyway by
+    filing again. The FRACTION comes from the frontmatter ``ts`` only when its
+    second equals the name's; the verb writes microseconds there. Shards with no
+    fraction get ``.000000`` so legacy and new shards compare in ONE format —
+    mixed precision compared as strings is exactly the misordering the verb's
+    own comment warns about. Same-microsecond shards from one reviewer are not
+    a case the fold can order; the name still breaks that tie, deterministically.
+    """
+    base = name_ts or fm_ts or mtime_ts or ""
+    if len(base) < 19:
+        return ""
+    second = base[:19]
+    fraction = "000000"
+    if fm_ts and fm_ts[:19] == second:
+        m = _FRACTION.match(fm_ts)
+        if m:
+            fraction = m.group(1).ljust(6, "0")
+    return f"{second}.{fraction}Z"
+
+
+def content_digest(raw: Optional[str]) -> str:
+    """Identity of a shard's CURRENT bytes: sha256, 16 hex. A rewrite in place changes it."""
+    import hashlib
+    return hashlib.sha256((raw or "").encode()).hexdigest()[:16]
+
+
+def _resolves(source: dict[str, Any], entry: str, targets: dict[str, dict[str, Any]]) -> tuple[Optional[str], str]:
+    """Does ``entry`` (from ``source['supersedes']``) resolve a target? -> (target name or None, why).
+
+    ONLY THE STORE CAN SUPPLY CAUSALITY (both reviewers, review-winning-envelope
+    r7). A name is predictable; a client-written nonce is editable frontmatter at
+    a mutable path — codex-reviewer rewrote a plain CHANGES in place keeping its
+    nonce and the old edge still resolved it; codex-coder predeclared a nonce
+    and wrote the later CHANGES to match. So an edge is honoured only when:
+
+      * ``name@sha256:<digest>`` matches the target's CURRENT bytes (a rewrite in
+        place un-resolves it), and
+      * the STORE's mtime — server-assigned, never client-selectable — proves
+        the target strictly EARLIER than the source (a later-written target, or
+        an in-place rewrite, is never resolved; the same minute, or an unknown
+        mtime, is not proof and fails closed).
+
+    A bare legacy name needs the same mtime proof and binds no digest.
+    """
+    name, _, token = entry.partition("@")
+    if name == source.get("name"):
+        return None, "self-link"
+    target = targets.get(name)
+    if target is None:
+        return None, "resolves nothing"
+    if token:
+        if not token.startswith("sha256:") or token[7:] != (target.get("digest") or ""):
+            return None, "digest mismatch"
+    t_at, s_at = target.get("mtime_iso") or "", source.get("mtime_iso") or ""
+    if t_at and s_at and t_at < s_at:
+        return name, "ok"
+    return None, "no causal proof"
+
+
 def fold_newest_per_reviewer(
     rows: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], int]:
-    """Keep the newest shard per reviewer; return ``(kept, folded_away)``.
+    """Keep ONE shard per reviewer; return ``(kept, folded_away)``.
 
-    Rows carry ``reviewer``, ``name``, and ``sort_key``. Newest wins, ties break
-    deterministically on the name so two hosts folding the same directory always
-    agree.
+    THE RULE (codex-coder, review-winning-envelope r4/r6): ordering by client
+    timestamp can never carry the correction contract, and neither can a name —
+    a name is predictable (selectable timestamp, deterministic digest), so an
+    older APPROVE could predeclare and erase a later CHANGES. Supersession is
+    explicit AND causal:
 
-    The count is returned rather than swallowed because SUPERSESSION MUST BE
-    AUDITABLE (coord-boss constraint 4): a reader who is told "APPROVED" while
-    three shards were silently discarded has been handed the same affirmative
-    falsehood this whole cycle has been about. `review status` says how many it
-    folded away, which is also the reviewer's correction path — a correction is
-    a new file, and the original evidence stays on disk.
+      * a shard is RESOLVED when another shard of the same reviewer quotes it
+        as ``name@sha256:<digest>`` matching its CURRENT bytes AND the store's
+        mtime proves it strictly earlier than the quoting shard (see
+        ``_resolves``; a bare legacy name needs the same mtime proof);
+      * any UNRESOLVED CHANGES dominates, whatever its timestamp;
+      * otherwise the newest live shard wins (canonical key, then name).
+
+    Equal keys, unnamed conflicts, dangling names, digest mismatches, self-links
+    and unproven causality all FAIL CLOSED to CHANGES. The typed verb quotes the
+    content digest of every prior shard it can list AND read; a hand-written
+    APPROVE must quote digests itself. Amends ruling b99fb8da (newest-wins); constraint 5 — a
+    stale CHANGES must not block forever — holds through the link the verb
+    writes. Supersession stays auditable: every shard stays on disk and the
+    folded count is returned.
     """
-    best: dict[str, dict[str, Any]] = {}
+    by: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by.setdefault(row["reviewer"], []).append(row)
+    kept: list[dict[str, Any]] = []
     folded = 0
-    for row in sorted(rows, key=lambda r: (r.get("sort_key") or "",
-                                           r.get("name") or "")):
-        prior = best.get(row["reviewer"])
-        if prior is not None:
-            folded += 1
-        best[row["reviewer"]] = row
-    return [best[k] for k in sorted(best)], folded
+    for reviewer in sorted(by):
+        shards = by[reviewer]
+        targets = {r.get("name"): r for r in shards}
+        resolved = set()
+        for r in shards:
+            for entry in (r.get("supersedes") or []):
+                hit, _why = _resolves(r, str(entry), targets)
+                if hit:
+                    resolved.add(hit)
+        live = [r for r in shards if r.get("name") not in resolved] or shards
+        blocking = [r for r in live if normalize_verdict(r.get("verdict")) == "changes"]
+        pool = blocking or live
+        winner = max(pool, key=lambda r: (r.get("sort_key") or "", r.get("name") or ""))
+        kept.append(winner)
+        folded += len(shards) - 1
+    return kept, folded
+
+
+def invalid_supersession_edges(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Every edge the fold did NOT honour, with why — so a reader can say the graph was malformed
+    rather than silently folding around it: self-links, dangling names, digest mismatches, and any
+    entry without the store's mtime proving its target earlier."""
+    by: dict[str, dict[str, dict[str, Any]]] = {}
+    for r in rows:
+        by.setdefault(r["reviewer"], {})[r.get("name")] = r
+    out: list[dict[str, str]] = []
+    for r in rows:
+        for entry in (r.get("supersedes") or []):
+            hit, why = _resolves(r, str(entry), by[r["reviewer"]])
+            if hit is None:
+                out.append({"shard": r.get("name") or "", "edge": str(entry), "why": why})
+    return out
 
 
 def normalize_verdict(v: Optional[str]) -> Optional[str]:

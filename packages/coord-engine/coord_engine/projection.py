@@ -758,6 +758,10 @@ def _scan_review_slug(
             "reviewer": reviewer,
             "verdict": token,
             "name": n,
+            "supersedes": [str(x) for x in (vfm.get("supersedes") or [])
+                           if isinstance(vfm.get("supersedes"), list)],
+            "digest": review.content_digest(raw_v),
+            "mtime_iso": _store_mtime_iso(v.get("mtime")) or "",
             # SAME fallback chain as `_tally_from_verdict_entries` — filename
             # ts, then frontmatter ts, then the LISTING MTIME. Projection used
             # to stop at frontmatter, so a plain hand-written shard with no `ts`
@@ -765,9 +769,14 @@ def _scan_review_slug(
             # tally said CHANGES while the projection said APPROVED for the same
             # directory (codex-reviewer, 595 r3). Two readers disagreeing about
             # the same evidence is worse than either answer alone.
-            "sort_key": (parsed_ts
-                         or str(vfm.get("ts") or "")
-                         or _store_mtime_iso(v.get("mtime")) or ""),
+            # ONE canonical form shared with the direct tally (codex-coder on
+            # review-winning-envelope r1): the projection had its own chain, so
+            # same-second shards still tied on the digest-bearing name here
+            # while the direct read ordered them by microsecond — two canonical
+            # readers disagreeing about the same directory, again.
+            "sort_key": review.canonical_sort_key(
+                parsed_ts, str(vfm.get("ts") or ""),
+                _store_mtime_iso(v.get("mtime"))),
         })
     # FOLD NEWEST PER REVIEWER (coord-boss constraint 5, ruling b99fb8da).
     # Append-only verdicts mean one reviewer can have several shards, and this
@@ -775,10 +784,23 @@ def _scan_review_slug(
     # newer APPROVE both reached `review.tally`, where a single blocker
     # dominates, and the stale CHANGES would have blocked the review forever.
     # Every register reader learns the fold, not just `review status`.
+    verdicts_rows = verdicts
     kept, folded_away = review.fold_newest_per_reviewer(verdicts)
     verdicts = [{"reviewer": r["reviewer"], "verdict": r["verdict"]}
                 for r in kept]
     tally = review.tally(verdicts, required=base["required"])
+    # The exact winning shard per reviewer, same shape as the direct tally, so a
+    # generation-backed `review status --json` can hand a ship gate the identity
+    # the fold decided instead of leaving it to refold filenames.
+    tally["winning"] = {
+        r["reviewer"]: {"name": r["name"],
+                        "verdict": review.normalize_verdict(r["verdict"]),
+                        "sort_key": r["sort_key"]}
+        for r in kept
+    }
+    bad_edges = review.invalid_supersession_edges(verdicts_rows)
+    if bad_edges:
+        tally["malformed_supersedes"] = bad_edges
     if folded_away:
         tally["superseded_verdicts"] = folded_away
     settled = (tally["state"] == review.APPROVED
