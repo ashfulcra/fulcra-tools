@@ -77,7 +77,7 @@ def test_import_graph_never_reaches_coord_engine():
 
 
 def test_pyproject_does_not_depend_on_coord_engine_and_ships_only_the_package():
-    data = tomllib.loads((PKG_DIR.parent / "pyproject.toml").read_text())
+    data = tomllib.loads((pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())   # relative to THIS file: under --no-editable the imported package lives in site-packages
     assert not any(d.startswith("coord-engine") for d in data["project"].get("dependencies", []))
     wheel = data["tool"]["hatch"]["build"]["targets"]["wheel"]
     assert wheel.get("packages") == ["coord_fold"] and not ({"include", "artifacts", "force-include", "only-include"} & set(wheel))

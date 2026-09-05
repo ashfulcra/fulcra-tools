@@ -16,4 +16,4 @@ def test_every_module_is_under_the_ceiling_recursively():
 
 
 def test_the_ceiling_is_the_documented_number():
-    assert f"{CEILING} lines" in (PKG_DIR.parent / "README.md").read_text()
+    assert f"{CEILING} lines" in (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()   # relative to THIS file: under --no-editable the imported package lives in site-packages, beside no README
