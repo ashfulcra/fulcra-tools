@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # adopt-latest.sh — one-command fleet convergence onto the latest coord-engine.
-# Maintained by coord-boss at team/fulcra/_coord/bus-v3/adopt-latest.sh.
+# The operative copy lives in the team's own store at
+# team/<team>/_coord/bus-v3/adopt-latest.sh; this repo copy is the source of
+# record. This file is PUBLIC, so the team and coordinator identities come
+# from the environment (FULCRA_COORD_TEAM, FULCRA_COORD_COORDINATOR) and are
+# never baked in.
 # Usage: bash adopt-latest.sh [agent-name]     (or have FULCRA_COORD_AGENT set)
 #
 # HARNESS BLOCKS RUNNING THIS SCRIPT? (codex and other gated harnesses refuse to
@@ -9,14 +13,14 @@
 # path: read the three authority values below and run the two installs yourself,
 # literally, so the approval layer sees the whole command line. Recipe, with the
 # verification steps this script's claim gate performs:
-#     team/fulcra/_coord/bus-v3/ADOPT-WHEN-GATED.md
+#     team/<team>/_coord/bus-v3/ADOPT-WHEN-GATED.md
 # The classifier objects to OPACITY, not to the operations.
 #
 # ============================================================================
 # A FAILED ADOPT MUST NEVER STRIP A CAPABILITY THE HOST HAD AT START.
 # ============================================================================
 # This is the invariant every leg below is written to hold, and the one to check
-# any NEW leg against (coord-boss ruling, 2026-08-10). Convergence is worth a
+# any NEW leg against (coordinator ruling, 2026-08-10). Convergence is worth a
 # failed run; it is never worth a host that can no longer reach the bus.
 #
 # CAPABILITY is the operative word, and it is narrower than "file". Something
@@ -55,6 +59,23 @@ A="${1:-${FULCRA_COORD_AGENT:-}}"
 if [ -z "$A" ]; then
   echo "BLOCKED: no agent identity. Run: bash adopt-latest.sh <your-bus-agent-name>" >&2
   exit 3
+fi
+
+# TEAM and COORD are supplied by the environment because this file is public.
+# An UNSET team is not fatal and must not be: the install legs below are what
+# give a host its capability, and the invariant at the top of this file is that
+# a failed adopt never strips one. So with no team we still install, and skip
+# only the legs that cannot be addressed without one — the pin-currency proof,
+# the queue peek, and the adoption claim — saying so loudly rather than
+# silently degrading.
+TEAM="${FULCRA_COORD_TEAM:-}"
+COORD="${FULCRA_COORD_COORDINATOR:-}"
+WHO="${COORD:-your coordinator}"
+if [ -z "$TEAM" ]; then
+  echo "adopt: WARNING — FULCRA_COORD_TEAM is not set. The engine will still be" >&2
+  echo "adopt:           installed, but the pin-currency proof, the queue peek and" >&2
+  echo "adopt:           the adoption claim are SKIPPED: each needs a team to address." >&2
+  echo "adopt:           This host will converge WITHOUT proving it converged." >&2
 fi
 
 SRC="git+https://github.com/ashfulcra/fulcra-tools@${PIN}#subdirectory=packages/coord-engine"
@@ -169,7 +190,7 @@ fi
 COMMON="git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.3.0#subdirectory=packages/fulcra-common"
 # Positive-evidence installer loop (2026-08-04): every attempt logs the exact
 # failing command + its stderr. "No installer worked" with the real errors
-# discarded cost coord-maintainer a diagnosis cycle — never again.
+# discarded cost a peer agent a diagnosis cycle — never again.
 ELOG="$(mktemp)"; trap 'rm -f "$ELOG"' EXIT
 STEP_FAILS=0   # counted so the ADOPTION CLAIM can carry it (2026-08-06, coord-opus-worker
                # recurrence): a load-bearing `uv tool install` TIMED OUT, a later installer
@@ -186,7 +207,7 @@ try() {  # try <label> <cmd...>: run, capture stderr, report the FAILING step by
 }
 INSTALLER="${INSTALLER:-}"
 # Resolve uv beyond PATH: launchd/cron/systemd contexts run lean PATHs and
-# "uv not found" was falsely true on hosts that have it (coord-maintainer
+# "uv not found" was falsely true on hosts that have it (peer agent
 # 2026-08-05: /opt/homebrew/bin/uv present, invoking shell could not see it).
 UV_BIN=""
 for _c in uv /opt/homebrew/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
@@ -199,7 +220,7 @@ done
 # reinstalling, and on macOS that delete can fail with "Directory not empty (os
 # error 66)" AFTER bin/ is already gone, leaving a dangling shim, a directory uv
 # itself calls malformed, and no executable. Measured on this fleet 2026-08-10
-# (coord-maintainer, macOS + uv 0.11.17), running this script as a pin's own
+# (peer agent, macOS + uv 0.11.17), running this script as a pin's own
 # acceptance test: it destroyed a WORKING client and every fallback leg then
 # failed for unrelated host reasons.
 #
@@ -331,12 +352,12 @@ if [ -z "$INSTALLER" ]; then
   fi
 fi
 if [ -z "$INSTALLER" ]; then
-  echo "ADOPT FAILED — the per-step failures above name the exact command and stderr; report THOSE lines to coord-boss (not just this one)." >&2
+  echo "ADOPT FAILED — the per-step failures above name the exact command and stderr; report THOSE lines to ${WHO} (not just this one)." >&2
   exit 4
 fi
 hash -r 2>/dev/null || true
 
-# CLAIM GATE (2026-08-05, after coord-maintainer's false-claim find): an installer
+# CLAIM GATE (2026-08-05, after a peer agent's false-claim find): an installer
 # can "succeed" into an environment PATH never runs (pip --user shadowed by an old
 # uv tool install), and a claim would then assert a currency the operative engine
 # does not have. So: the claim is earned ONLY by the binary `command -v coord-engine`
@@ -344,11 +365,11 @@ hash -r 2>/dev/null || true
 # authority pin THIS script just read. No proof, no claim, loud exit.
 PIN12=$(printf %.12s "$PIN")
 if ! coord-engine bus-v3 --help >/dev/null 2>&1; then
-  echo "ADOPT FAILED — operative coord-engine ($(command -v coord-engine || echo NOT-ON-PATH)) cannot speak bus-v3; the install landed somewhere PATH does not run. No claim filed. Report verbatim to coord-boss." >&2
+  echo "ADOPT FAILED — operative coord-engine ($(command -v coord-engine || echo NOT-ON-PATH)) cannot speak bus-v3; the install landed somewhere PATH does not run. No claim filed. Report verbatim to ${WHO}." >&2
   exit 4
 fi
-if ! coord-engine doctor fulcra 2>/dev/null | grep -q "matches the fleet pin (${PIN12}"; then
-  echo "ADOPT FAILED — operative coord-engine did not prove currency against pin ${PIN12} (doctor pin-currency line absent or mismatched; engine may be older than the pin or shadowed by a stale install at $(command -v coord-engine)). No claim filed. Report verbatim to coord-boss." >&2
+if [ -n "$TEAM" ] && ! coord-engine doctor "$TEAM" 2>/dev/null | grep -q "matches the fleet pin (${PIN12}"; then
+  echo "ADOPT FAILED — operative coord-engine did not prove currency against pin ${PIN12} (doctor pin-currency line absent or mismatched; engine may be older than the pin or shadowed by a stale install at $(command -v coord-engine)). No claim filed. Report verbatim to ${WHO}." >&2
   exit 4
 fi
 
@@ -363,7 +384,7 @@ case "$INSTALLER" in
   pipx) try "verify fulcra_common in engine venv (pipx)" pipx runpip coord-engine show fulcra-common ;;
   pip)  try "verify fulcra_common importable (pip --user)" python3 -c 'import fulcra_common' ;;
 esac || {
-  echo "ADOPT FAILED — engine installed via ${INSTALLER} but the fulcra_common writer is MISSING from its environment; annotate/digest legs would silently no-op. Report this verbatim to coord-boss." >&2
+  echo "ADOPT FAILED — engine installed via ${INSTALLER} but the fulcra_common writer is MISSING from its environment; annotate/digest legs would silently no-op. Report this verbatim to ${WHO}." >&2
   exit 4
 }
 
@@ -372,16 +393,16 @@ printf %s "$PIN" > "${HOME}/.coord-adopted-pin" 2>/dev/null || true
 # NON-CONSUMING by design (2026-08-06). This read used to advance the caller's
 # cursor. For any agent whose wake is "run this script, done", that silently ate
 # its own delivery: events marked seen, printed to a log nobody reads, no error
-# anywhere. Same trap coord-boss.md already records for bootstrap.sh — "a
+# anywhere. Same trap the coordinator role doc already records for bootstrap.sh — "a
 # cursor-advancing read whose output nobody processes silently discards wake
 # hints". The read stays (rc feeds the claim slug below and this script's exit
 # code, so dropping it would lose the DEGRADED signal); --peek makes it safe.
 echo "--- queue PEEK as ${A} (non-consuming preview; your cursor is NOT advanced) ---"
-coord-engine queue fulcra --agent "$A" --peek
+[ -n "$TEAM" ] && coord-engine queue "$TEAM" --agent "$A" --peek
 rc=$?
 echo "--- queue rc=${rc}  (rc 3 = DEGRADED window: report it verbatim; quiet is not clear) ---"
-echo "--- NOTE: a peek is not a read. Still run your own \`coord-engine queue fulcra --agent ${A}\`"
-echo "---       AND \`coord-engine needs-me fulcra --agent ${A}\` this wake: queue CLEAR is not"
+echo "--- NOTE: a peek is not a read. Still run your own \`coord-engine queue ${TEAM:-<team>} --agent ${A}\`"
+echo "---       AND \`coord-engine needs-me ${TEAM:-<team>} --agent ${A}\` this wake: queue CLEAR is not"
 echo "---       proof of no work, and \`tell\` dispatch does not appear on the event channel at all."
 
 # The claim carries the RUN's honesty, not just the engine's: a nonzero
@@ -393,7 +414,7 @@ echo "---       proof of no work, and \`tell\` dispatch does not appear on the e
 # timeline views (2026-08-05 finding — most bus traffic was untagged). To be
 # precise, since "untagged" has been misread as "unattributed": the raw path DOES
 # preserve sender attribution — the bare agent name lands in `sources` and
-# recipients can route on it (coord-maintainer verified this 2026-08-06). Only
+# recipients can route on it (verified by a peer agent 2026-08-06). Only
 # the four-dimension identity tags are missing. The engine we JUST installed
 # always has bus-v3 send; raw pipe remains only as the fallback if the engine
 # send itself fails — and it is the ONLY path on a pre-bus-v3 engine.
@@ -422,21 +443,28 @@ SLUG="adopted-${VER}-${A}-rc${rc}"
 # FAILS OPEN: if the marker cannot be read we SEND. A duplicate claim is noise;
 # a missed one is a fleet that cannot tell who adopted. An unreadable store must
 # never become a silent skip.
-CLAIM_MARK="team/fulcra/_coord/bus-v3/adopted/${SLUG}.txt"
+# A claim needs somewhere to file it and someone to address it. With either
+# missing the ONLY safe move is to skip: an empty TEAM builds "team//_coord/..."
+# and an empty COORD addresses nobody, so the block would either write to a
+# path no reader watches or announce into the void, and the marker it leaves
+# would then suppress the retry once the variables ARE set. Skipping keeps the
+# claim owed. The install legs above already ran; the host keeps its capability.
+if [ -n "$TEAM" ] && [ -n "$COORD" ]; then
+CLAIM_MARK="team/${TEAM}/_coord/bus-v3/adopted/${SLUG}.txt"
 if fulcra-api file stat "$CLAIM_MARK" >/dev/null 2>&1; then
   echo "adopt: ${A} already claimed ${VER} with this outcome — not re-sending (store marker)"
 else
 SENT=0
-if FULCRA_COORD_AGENT="$A" coord-engine bus-v3 send fulcra --to coord-boss --kind claim \
+if FULCRA_COORD_AGENT="$A" coord-engine bus-v3 send "$TEAM" --to "$COORD" --kind claim \
      --slug "$SLUG" --priority P2; then
   SENT=1
-  echo "adoption claim sent (tagged) to coord-boss (slug ${SLUG})"
-elif printf '{"note":"{\\"v\\":1,\\"to\\":\\"coord-boss\\",\\"kind\\":\\"claim\\",\\"pri\\":\\"P2\\",\\"slug\\":\\"%s\\"}"}' "$SLUG" | \
+  echo "adoption claim sent (tagged) to ${WHO} (slug ${SLUG})"
+elif printf '{"note":"{\\"v\\":1,\\"to\\":\\"%s\\",\\"kind\\":\\"claim\\",\\"pri\\":\\"P2\\",\\"slug\\":\\"%s\\"}"}' "$COORD" "$SLUG" | \
        fulcra-api record "$TYPE" --api-version v1alpha1 --source="$A"; then
   SENT=1
-  echo "adoption claim sent via RAW FALLBACK (tags missing, attribution intact) — report to coord-boss"
+  echo "adoption claim sent via RAW FALLBACK (tags missing, attribution intact) — report to ${WHO}"
 else
-  echo "WARN: adoption claim failed to send — report this verbatim to coord-boss"
+  echo "WARN: adoption claim failed to send — report this verbatim to ${WHO}"
 fi
   # Marker written ONLY on a delivery that actually succeeded (codex-reviewer,
   # 589 r1). The first cut wrote it after the send BLOCK regardless: the final
@@ -463,6 +491,11 @@ fi
       || echo "adopt: claim marker not written — the claim may repeat next wake" >&2
     rm -f "$_CM"
   fi
+fi
+
+else
+  echo "adopt: claim SKIPPED — need FULCRA_COORD_TEAM and FULCRA_COORD_COORDINATOR." >&2
+  echo "adopt:        The engine IS installed; only the announcement is owed." >&2
 fi
 [ "$STEP_FAILS" -gt 0 ] && echo "adopt: ${STEP_FAILS} step(s) failed and were rescued by a later installer — the per-step stderr above is the evidence; the engine was still verified by the claim gate." >&2
 

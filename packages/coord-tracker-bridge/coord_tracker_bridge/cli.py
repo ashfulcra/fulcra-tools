@@ -13,6 +13,7 @@ from .assignments import (
     DEFAULT_DELIVERY_CAP,
     EngineTellDispatcher,
     FulcraRosterReader,
+    default_roster_path,
     run_assignments,
 )
 from .lease import LeaseHeld
@@ -78,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--roster-path",
-        default="team/fulcra/_coord/roster-nicknames.md",
+        default=default_roster_path(),
         help="linear-assignments: the nickname roster document in the coord store",
     )
     return parser
