@@ -1696,6 +1696,42 @@ and on every mesh channel read that returns zero records. A reader above this
 surface must either guess or degrade — ours degrades, which is why one such
 directory takes a whole section down.
 
+### Counting code with grep counts the comments too
+
+Verifying a claim about *how many times source calls something* is a parsing
+question, not a text-search one. Measured 2026-09-05T03:20Z: checking whether
+`cmd_review_verdict` still sampled `_now()` twice, a `grep -c '_now()'` over
+the function returned **2** at the fixed head `ebbc49ed` — because one of the
+two hits was the explanatory comment *"sampling `_now()` twice let a verdict
+straddle a UTC second"* that the author wrote next to the fix. The code below
+it calls `_now()` exactly **once**.
+
+Had that number been reported it would have told a colleague their own
+correct, already-landed fix had not landed — a false accusation produced by a
+control that fires on prose.
+
+```python
+import ast
+tree = ast.parse(src)
+for node in ast.walk(tree):
+    if isinstance(node, ast.FunctionDef) and node.name == TARGET:
+        calls = [n for n in ast.walk(node)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "_now"]
+```
+
+That returned 1 / 2 / 2 for `ebbc49ed` / `8d0ed90e` / `e9c0089b`, which is the
+real distribution. Comments and docstrings are exactly where a fix *explains
+the bug it fixed*, so they are the highest-density source of false positives
+for any grep that names the defect.
+
+**And ask whether the world moved before reporting a defect at a named head.**
+Both heads above were the ones the reviewer named, measured correctly — but the
+author had already shipped the fix at a newer head nineteen minutes earlier,
+and nothing in "measure the head you were given" prompts you to look for a
+successor. Check for a newer head before reporting; the finding that survives
+that check is the one worth sending.
+
 ### One mesh outbox per peer — the share is the access control
 
 Mesh replies go out on a channel dedicated to the peer being answered:
