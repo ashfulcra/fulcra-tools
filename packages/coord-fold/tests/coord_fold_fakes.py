@@ -12,7 +12,8 @@ class FakeStore:
         self.events = list(events)
         self.written: list[dict] = []
         self.saved: dict[str, str] = {}
-        self.fail_reads = False
+        self.fail_reads = False          # every read answers 'error'
+        self.fail_paths: set[str] = set()   # ONLY these paths answer 'error' (Task 9 r32: a test that fails every read never reaches the evidence branch)
         self.fail_events = False
 
 
@@ -21,7 +22,7 @@ class FakeReader:
         self._s = store
 
     def read_classified(self, path: str):
-        if self._s.fail_reads:
+        if self._s.fail_reads or path in self._s.fail_paths:
             return None, "error"
         if path in self._s.saved:
             return self._s.saved[path], "ok"

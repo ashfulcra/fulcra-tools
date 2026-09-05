@@ -49,5 +49,10 @@ def test_close_reads_the_evidence_then_emits_and_the_row_is_gone():
 def test_close_with_absent_evidence_is_refused_and_unreadable_is_unknown(capsys):
     st = _folded(); assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "nope.md"]) == 2
     assert "absent" in capsys.readouterr().err and not any(w["payload"]["kind"] == "close" for w in st.written)
-    st.fail_reads = True; assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "x.md"]) == 3
-    assert "unreadable" in capsys.readouterr().err
+    # ONLY the evidence read fails (the checkpoint read still answers): this is the branch the plan's Task 9 mutation
+    # removes. With fail_reads=True the checkpoint read failed first and the evidence branch was never reached,
+    # so that mutation failed no test (measured while building, 2026-09-05).
+    st.fail_paths = {"x.md"}; assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "x.md"]) == 3
+    err = capsys.readouterr().err; assert "evidence x.md unreadable" in err and not any(w["payload"]["kind"] == "close" for w in st.written)
+    st.fail_paths = set(); st.fail_reads = True; assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "x.md"]) == 3
+    assert "checkpoint unreadable" in capsys.readouterr().err
