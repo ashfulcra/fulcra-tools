@@ -330,15 +330,19 @@ def test_the_store_reader_asks_for_the_documented_path():
         "fulcra-api", "file", "download", "team/acme/_coord/roster-nicknames.md", "-")
 
 
-def test_the_default_roster_path_follows_the_environment_not_the_repo():
+def test_the_default_roster_path_follows_the_environment_not_the_repo(monkeypatch):
     """This package ships from a PUBLIC repo. A hardcoded default silently
-    pointed every other team's bridge at the authoring team's roster."""
+    pointed every other team's bridge at the authoring team's roster.
+
+    Uses monkeypatch rather than touching os.environ directly: my first version
+    asserted the unset case by ASSUMING the variable was unset, and it started
+    failing the moment a real host set FULCRA_COORD_TEAM in its profile. A test
+    of "what happens when this is unset" has to unset it.
+    """
+    monkeypatch.delenv("FULCRA_COORD_TEAM", raising=False)
     assert default_roster_path() == ""          # unset -> no guess
-    os.environ["FULCRA_COORD_TEAM"] = "acme"
-    try:
-        assert default_roster_path() == "team/acme/_coord/roster-nicknames.md"
-    finally:
-        del os.environ["FULCRA_COORD_TEAM"]
+    monkeypatch.setenv("FULCRA_COORD_TEAM", "acme")
+    assert default_roster_path() == "team/acme/_coord/roster-nicknames.md"
 
 
 def test_an_unconfigured_reader_refuses_rather_than_reading_team_slash_slash():

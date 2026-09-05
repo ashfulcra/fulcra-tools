@@ -252,7 +252,120 @@ client_state() {
 }
 CLIENT_STATE="$(client_state)"
 
+# ---------------------------------------------------------------------------
+# VERSION FLOOR for the store client.
+#
+# WHY A FLOOR AND NOT JUST `--help`: the classifier above calls a client
+# "working" when `fulcra-api --help` answers. That probe cannot see this
+# failure, because the failure is in CREDENTIAL PARSING, not in starting up.
+# A client below the floor starts fine, prints help fine, and then dies on the
+# first command that loads credentials:
+#
+#     TypeError: FulcraCredentials.__init__() got an unexpected keyword
+#                argument 'id_token'
+#
+# Measured 2026-09-05 across every published release: 0.1.34 through 0.1.39 all
+# REJECT a credentials document carrying id_token/id_token_expiration; 0.1.40
+# ACCEPTS. The floor is therefore an exact measurement, not a cautious guess.
+#
+# WHY IT BITES A HOST THAT CHANGED NOTHING: every fulcra-api install on a box
+# shares ONE credentials file. The moment any client at or above the floor
+# re-authenticates, it writes the six-field document, and every OTHER client on
+# that host — a workspace venv, a second tool install — begins crashing on a
+# file it did not write. That is not hypothetical: it is how this was found,
+# with a uv-tool 0.1.40 and a workspace 0.1.35 sharing one file.
+#
+# So "below the floor" is not "old but fine". It is a client that will fail on
+# contact with the next re-auth, which is why the leg below is allowed to touch
+# it where the `working` branch is not. That is a deliberate, narrow exception
+# to the header invariant, argued rather than assumed: the invariant protects a
+# CAPABILITY, and a client that cannot read the credentials file the fleet now
+# writes is not one. Every other client state keeps the old protection exactly.
+FULCRA_API_FLOOR="0.1.40"
+
+fulcra_api_version() {
+  # The CLI has no --version, so the installed version must come from the
+  # installer's own inventory. uv first (how the fleet installs it), then the
+  # system interpreter's package metadata for the pipx/pip fallback paths.
+  # UNKNOWN is a real answer here and is NOT treated as "below": refusing to
+  # enforce a floor you cannot measure is the same discipline as refusing to
+  # delete something you cannot classify.
+  _V="$(uv tool list 2>/dev/null | awk '/^fulcra-api v/ {sub(/^v/,"",$2); print $2; exit}')"
+  [ -n "$_V" ] && { echo "$_V"; return 0; }
+  python3 -c 'import importlib.metadata as m; print(m.version("fulcra-api"))' 2>/dev/null
+}
+
+version_lt() {
+  # Dotted-numeric "$1 < $2". Deliberately not `sort -V`: that is a GNU
+  # extension the fleet's macOS hosts cannot be assumed to have, and a
+  # comparison that silently misbehaves is worse than none on a gate like this.
+  [ "$1" = "$2" ] && return 1
+  awk -v a="$1" -v b="$2" 'BEGIN{
+    na=split(a,A,"."); nb=split(b,B,".");
+    n=(na>nb?na:nb);
+    for(i=1;i<=n;i++){x=(i<=na?A[i]+0:0); y=(i<=nb?B[i]+0:0);
+      if(x<y) exit 0; if(x>y) exit 1}
+    exit 1}'
+}
+
+if [ "$CLIENT_STATE" = working ]; then
+  FA_VER="$(fulcra_api_version)"
+  if [ -z "$FA_VER" ]; then
+    echo "adopt: WARNING — fulcra-api answers but its version cannot be read; floor ${FULCRA_API_FLOOR} NOT enforced. UNKNOWN is not 'below', so nothing is touched. Check it by hand." >&2
+  elif version_lt "$FA_VER" "$FULCRA_API_FLOOR"; then
+    echo "adopt: fulcra-api ${FA_VER} is BELOW the ${FULCRA_API_FLOOR} floor — it will crash on the six-field credentials document the fleet now writes." >&2
+    CLIENT_STATE=stale
+  fi
+fi
+
 uv_store_client() {
+  if [ "$CLIENT_STATE" = stale ]; then
+    # BELOW THE FLOOR. The one client state where this script touches a binary
+    # that currently answers, and the exception is narrow on purpose.
+    #
+    # The `working` branch below refuses to upgrade because a failed upgrade
+    # cannot be rolled back. That argument still stands, and it is what makes
+    # this branch different rather than what this branch overrides: a client
+    # below the floor is going to fail anyway, on the first command that loads
+    # credentials after any re-auth on this host. The choice is not "risk it or
+    # keep it", it is "risk a rollback-less upgrade or keep a client with a
+    # known, dated failure ahead of it".
+    #
+    # Escalating gently: `upgrade` first, which does not delete the tool
+    # environment, and only if that leaves us short of the floor the `--force`
+    # install that does. The re-probe after each is the point — the same
+    # false-success the working branch was written to avoid (597 r3) would be
+    # trivially reproducible here by trusting an installer's rc.
+    #
+    # RETURNS 0 EVEN WHEN IT FAILS, deliberately. The caller chains this into
+    # the engine install with `&&`, so returning non-zero would let a client
+    # problem block ENGINE convergence — the one thing adoption exists to do.
+    # The failure is instead counted through STEP_FAILS, so the adoption claim
+    # carries `-steps<N>` and the run is legible as rescued rather than clean.
+    if [ -n "$UV_BIN" ]; then
+      try "uv tool upgrade fulcra-api (floor ${FULCRA_API_FLOOR})" \
+          "$UV_BIN" tool upgrade fulcra-api || true
+      NEW_VER="$(fulcra_api_version)"
+      if [ -z "$NEW_VER" ] || version_lt "$NEW_VER" "$FULCRA_API_FLOOR"; then
+        try "uv tool install --force fulcra-api>=${FULCRA_API_FLOOR}" \
+            "$UV_BIN" tool install --force "fulcra-api>=${FULCRA_API_FLOOR}" || true
+        NEW_VER="$(fulcra_api_version)"
+      fi
+    fi
+    # Believe the PROBE, never the installer.
+    if fulcra-api --help >/dev/null 2>&1 \
+       && [ -n "$NEW_VER" ] && ! version_lt "$NEW_VER" "$FULCRA_API_FLOOR"; then
+      echo "adopt: fulcra-api upgraded to ${NEW_VER} (floor ${FULCRA_API_FLOOR})" >&2
+      CLIENT_STATE=working
+      return 0
+    fi
+    if fulcra-api --help >/dev/null 2>&1; then
+      echo "adopt: DEGRADED — fulcra-api still answers but is at '${NEW_VER:-unknown}', below the ${FULCRA_API_FLOOR} floor. It WILL fail on the next command that loads credentials after a re-auth. Fix by hand, watching: uv tool install --force 'fulcra-api>=${FULCRA_API_FLOOR}'" >&2
+    else
+      echo "adopt: DEGRADED — the fulcra-api upgrade left no working client on this host. Recover with: uv tool install --force 'fulcra-api>=${FULCRA_API_FLOOR}' (and if that reports a non-empty directory, remove the tool dir it names, then retry)." >&2
+    fi
+    return 0
+  fi
   if [ "$CLIENT_STATE" = working ]; then
     # WORKING. Do not touch it at all.
     #
