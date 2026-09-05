@@ -804,7 +804,7 @@ def test_no_repo_prose_invokes_ship_check_without_stated_trust_roots():
         for i, ln in enumerate(f.read_text().splitlines(), 1):
             assert not bare(ln), f"{f.name}:{i}: {bare(ln)}"
     assert bare("`scripts/ship_check.py fulcra <HEAD>` and fails closed")                          # the sentence that drifted
-    assert bare("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git") == ["missing --fulcra-api: ship_check.py fulcra <HEAD> --git /usr/bin/git"]   # codex-coder round 29
+    assert bare("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git") == ["missing --fulcra-api: scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git"]   # codex-coder round 29 (r39: the match carries the path)
     assert bare("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x")[0].startswith("missing --git")
     assert bare("scripts/ship_check.py fulcra <HEAD> --git --fulcra-api /x")[0].startswith("--git has no value")                      # codex-coder round 30
     assert not bare("`scripts/ship_check.py fulcra <HEAD> --git /x --fulcra-api /y`")
@@ -879,6 +879,9 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
         "scripts/ship_check.py fulcra not-a-head --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",                # not hex
         "scripts/ship_check.py fulcra " + "g" * 40 + " --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",           # 40 non-hex
         "scripts/ship_check.py fulcra " + "e" * 39 + " --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",           # 39 hex
+        "run scripts/ship_check.py\n": "missing team; missing head",                                                             # codex-coder round 34: no positionals
+        "run scripts/ship_check.py fulcra\n": "missing head",                                                                     # one positional
+        "python scripts/ship_check.py fulcra <HEAD>\n": "missing --git",                                                          # positionals only, no roots
         "scripts/ship_check.py fulcra <HEAD> --git <abs --bogus> --fulcra-api /x\n": "unexpected token",                             # codex-coder round 32: option hidden in <...>
     }
     for text, why in bad.items():
@@ -907,3 +910,40 @@ def test_acl_entries_are_stripped_from_gate_directories_and_refused_on_bodies(tm
     with pytest.raises(PermissionError, match="carries ACL entries"):
         ship_check.read_owned_file(body)
     tempfile.tempdir = None
+
+
+def test_a_bare_path_reference_in_prose_is_not_an_invocation():
+    """r39: `see scripts/ship_check.py` is a reference; `run scripts/ship_check.py` is an invocation missing both positionals."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("materialize_plan", SCRIPT.parent / "materialize_plan.py"); mp = importlib.util.module_from_spec(spec); spec.loader.exec_module(mp)
+    f = mp.refuse_bare_runbook_invocations
+    assert f("see `scripts/ship_check.py` for the gate\n") == []
+    assert f("(`scripts/ship_check.py`: the engine's folded result)\n") == []
+    assert f("run `scripts/ship_check.py`\n")[0].startswith("line 1: missing team; missing head")
+
+
+def test_a_failed_acl_inspection_or_removal_refuses_instead_of_reading_as_no_acl(tmp_path, monkeypatch):
+    """codex-coder + codex-reviewer round 34 (P0): inability to inspect ACLs was accepted as 'no ACL'. Force the
+    inspector (ls -led / listxattr) to fail: acl_entries raises, read_owned_file refuses, strip_acls refuses."""
+    import os, subprocess, sys, types
+    d = tmp_path / "d"; d.mkdir(); os.chmod(d, 0o700); body = d / "body"; body.write_text("x"); body.chmod(0o600)
+    if sys.platform == "darwin":
+        real = subprocess.run
+        def failing(cmd, **kw):
+            if cmd[:1] == ["/bin/ls"]:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="inspection denied")
+            if cmd[:1] == ["/bin/chmod"]:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="removal denied")
+            return real(cmd, **kw)
+        monkeypatch.setattr(ship_check.subprocess, "run", failing)
+    else:
+        def boom(path, *a, **k):
+            raise OSError("inspection denied")
+        monkeypatch.setattr(ship_check.os, "listxattr", boom)
+    import pytest
+    with pytest.raises(PermissionError, match="ACL inspection .* failed"):
+        ship_check.acl_entries(str(d))
+    with pytest.raises(PermissionError, match="ACL inspection .* failed"):
+        ship_check.read_owned_file(str(body))                                        # never reads on a failed inspection
+    with pytest.raises((RuntimeError, PermissionError), match="failed"):
+        ship_check.strip_acls(str(d))                                                # never "stripped" on a failed removal
