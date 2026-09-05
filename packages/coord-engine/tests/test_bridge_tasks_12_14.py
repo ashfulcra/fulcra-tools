@@ -270,3 +270,45 @@ def test_the_window_can_be_compressed_only_by_explicit_flags(capsys):
     t = FakeTransport({LOG: _log(entries), "team/r/_coord/bus-v4/drill/me.md": "x"})
     assert cli.cmd_cutover_ready(_args(ship_check_rc=0), t) == 1                      # defaults: 24 / 24h
     assert cli.cmd_cutover_ready(_args(ship_check_rc=0, min_run=3, min_hours=2.0), t) == 0
+
+
+# ---------------------------------------------------------------- RULING a0927018: obligation = ASSIGNEE
+
+
+def test_the_old_open_set_keeps_assignee_broadcast_and_held_role_rows_and_drops_owner_only_rows(monkeypatch):
+    """coord-boss blocker a0927018: the seed exported rows the agent merely OWNED (sent and awaited); the old plane
+    counts by ASSIGNEE. Both sides now ask the assignee question."""
+    rows = [
+        {"id": "assigned", "owner": "boss", "assignee": "me", "priority": "P1", "path": "team/r/task/assigned.md"},
+        {"id": "at-assigned", "owner": "boss", "assignee": "@me", "priority": "P1", "path": "team/r/task/at.md"},
+        {"id": "bcast", "owner": "boss", "assignee": "*", "priority": "P2", "path": "team/r/task/bcast.md"},
+        {"id": "role", "owner": "boss", "assignee": "reviewer", "priority": "P1", "path": "team/r/task/role.md"},
+        {"id": "sent", "owner": "me", "assignee": "them", "priority": "P0", "path": "team/r/task/sent.md"},       # OWNER-ONLY: not mine
+        {"id": "human", "owner": "boss", "assignee": "human", "priority": "P1", "path": "team/r/task/human.md"},   # not mine either
+    ]
+    monkeypatch.setattr(cli, "_load_rows_status", lambda transport, team, **kw: (rows, True, ""))
+    monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **kw: ({"reviewer"}, set()))
+    monkeypatch.setattr(cli, "_needs_me_rows", lambda transport, team, agent, rows, **kw: list(rows))
+    got, ok, _ = cli._old_open_set(FakeTransport({}), "r", "me")
+    assert ok and sorted(r["id"] for r in got) == ["assigned", "at-assigned", "bcast", "role"]
+
+
+def test_a_reseed_closes_opens_the_correct_set_no_longer_contains(monkeypatch, capsys):
+    """RECONCILE: the agent's checkpoint holds `leaked` (from the old rule) and `gone` (no longer owed); the correct
+    set is {a, b}. A forced re-seed writes opens for a and b and a `close` for each stale open, pointing at the marker."""
+    t = FakeTransport({V4: V4_CFG, CKPT: _ckpt({"a": {"pri": "P1", "ptr": "team/r/task/a.md"},
+                                                "leaked": {"pri": "P1", "ptr": "team/r/task/leaked.md"},
+                                                "gone": {"pri": "P2", "ptr": "team/r/task/gone.md"}})})
+    _old_rows(monkeypatch, ROWS)
+    assert cli.cmd_obligations_export_open(_args(force=True), t) == 0
+    v4 = [r[2] for r in t.records if r[0] == "MomentAnnotation/v4"]
+    assert sorted(e["slug"] for e in v4 if e["kind"] == "open") == ["a", "b"]
+    closes = {e["slug"]: e for e in v4 if e["kind"] == "close"}
+    assert set(closes) == {"leaked", "gone"} and all(e["ptr"] == "team/r/_coord/bus-v4/seeded/me.md" and e["to"] == "me" for e in closes.values())
+    assert "closed 2 stale" in capsys.readouterr().out and "closed_stale: 2" in t.docs["team/r/_coord/bus-v4/seeded/me.md"]
+
+
+def test_a_reseed_with_an_unreadable_checkpoint_is_unknown_not_a_silent_partial_reconcile(monkeypatch, capsys):
+    t = FakeTransport({V4: V4_CFG}, fail={CKPT})
+    _old_rows(monkeypatch, ROWS)
+    assert cli.cmd_obligations_export_open(_args(), t) == 3 and "could not be reconciled" in capsys.readouterr().err
