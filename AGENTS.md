@@ -1696,6 +1696,33 @@ and on every mesh channel read that returns zero records. A reader above this
 surface must either guess or degrade — ours degrades, which is why one such
 directory takes a whole section down.
 
+### The mesh cursor is durable only if it is uploaded
+
+The hourly mesh sweep reads two peer outboxes forward from a cursor at
+`/team/fulcra/_coord/agents/coord-boss/mesh-cursors.json`. That path is in the
+**Fulcra file store**, not on any local filesystem — `/team` is not mounted in
+the cloud container, so `cat` on it returns `No such file or directory` and the
+working copy necessarily lives in the session scratchpad. Advancing the
+scratchpad copy is therefore **not** advancing the cursor. The sweep is only
+complete after `fulcra-api file upload <local> /team/.../mesh-cursors.json`
+followed by a download-and-parse read-back, exactly as the `mesh-sweep` skill
+doc has always specified.
+
+Measured 2026-09-05T01:49Z: `fulcra-api file stat` reported the durable copy
+last uploaded `2026-09-04T11:46:40Z` carrying `last_processed
+2026-09-04T11:46:00Z`, while the scratchpad copy read `2026-09-05T00:47:00Z` —
+about thirteen consecutive hourly sweeps had advanced the ephemeral copy only.
+The skill doc was not wrong; the step was being skipped. Blast radius was
+bounded only by luck of arithmetic: the sweep reads a 48h floor window, and the
+stale durable timestamp still sat inside 48h of now, so nothing went unread.
+One more day of the same omission and it would not have.
+
+**The check is one command and it belongs in every sweep:** `fulcra-api file
+stat` on the cursor, comparing its `Uploaded:` line against the current sweep
+time. A cursor whose `Uploaded` predates the last sweep is a cursor that did
+not advance, no matter what the local file says — the same absent-vs-stale
+confusion as the empty-directory limit above, one layer up.
+
 ### Environment facts are captured facts
 
 An environment fact — which variable, which host, which account, which of
