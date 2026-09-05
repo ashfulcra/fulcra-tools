@@ -265,10 +265,21 @@ denies. And not "enumeration is impossible to write" — it is writable; it fail
 its tests.
 
 One property does hold by construction rather than by checking, and it is worth
-more than any gate here: **the import machinery itself enumerates**, so under
-denial an uncached module cannot be imported at all. That closes the
-generated-module bypass because of what the system *is*, not because something
-looks for it.
+more than any gate here — but it must be stated at the right scope, because the
+first version of this paragraph overreached.
+
+*Under the in-process harness*, the import machinery itself enumerates, so an
+uncached module could not be imported at all. That was a real finding and it is
+**not** what protects the kernel-sandboxed proof: under the sandbox a module
+written to a temp path can be imported perfectly well. coord-maintainer caught
+this and declined to claim the stronger version, which was the right call.
+
+What actually holds under the sandbox is better, and simpler: **the denial is
+indifferent to how the code arrives.** Generated, imported, exec'd from a
+string, written to disk first — it faces the same kernel denies. The bypass
+closes not because the loader is blocked but because there is nothing on the
+other side of the load worth reaching. A check that must anticipate how code
+arrives can always be out-manoeuvred; a boundary that does not care cannot.
 
 A structural test asserts this directly: `assert not hasattr(fold_transport,
 "list_dir")`, and a test that the fold module's import graph never reaches the
