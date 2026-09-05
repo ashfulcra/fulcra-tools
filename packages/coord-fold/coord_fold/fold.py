@@ -70,7 +70,11 @@ def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: st
         # no coordinator could ever AGREE. What DOES apply from the sender's side is the agent's own ACTIONS on an
         # obligation it holds — claim/release/close are addressed to the open's sender but performed by the assignee,
         # and the assignee's fold must see them or a closed row would stay open forever.
-        if ev is None or not (ev["to"] in (agent, _BROADCAST) or (ev["from"] == agent and ev["kind"] in _OWN_ACTIONS)):
+        # 6f8121fc class A (coord-boss, 2026-09-05): a broadcast opens for every agent EXCEPT its sender — under the
+        # assignee ruling the sender of a broadcast owes nothing on it (coord-boss's own fleet P0 had become his open).
+        if ev is None or not (ev["to"] == agent
+                              or (ev["to"] == _BROADCAST and ev["from"] != agent)
+                              or (ev["from"] == agent and ev["kind"] in _OWN_ACTIONS)):
             if not unread:
                 last_observed = at
             continue

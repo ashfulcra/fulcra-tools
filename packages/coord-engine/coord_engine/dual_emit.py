@@ -45,11 +45,35 @@ def payload(*, at: str, sender: str, to: str, kind: str, slug: str, pri: str, pt
     return {"v": PAYLOAD_VERSION, "at": at, "from": sender, "to": to, "kind": kind, "slug": slug, "pri": pri, "ptr": ptr}
 
 
+def _opens_an_obligation(transport: Any, team: str, ptr: Optional[str]) -> bool:
+    """RULING (Ash 2026-09-05, coord-boss 6f8121fc class B): an obligation belongs to its ASSIGNEE, and a task with
+    no assignee is nobody's. A v3 `directive` is mirrored as a v4 `open` only when the task doc it points at names
+    an assignee. The doc is read once, at write time. An unreadable or absent doc mirrors anyway: over-capture
+    beats a silent hole, and the assignee filter on the old plane will show the divergence rather than hide it."""
+    if not ptr:
+        return True
+    try:
+        from . import okf
+        path = ptr if ptr.startswith("team/") else f"team/{team}/{ptr}"
+        raw = transport.read(path)
+        if raw is None:
+            return True
+        fm = okf.parse_frontmatter(raw) or {}
+        assignee = str(fm.get("assignee") or "").strip()
+        return assignee not in ("", "-", "None", "null")
+    except Exception:
+        return True
+
+
 def mirror(transport: Any, team: Optional[str], *, sender: str, to: str, kind: str, priority: str, slug: str,
-           ptr: Optional[str] = None, recorded_at: Optional[str] = None) -> bool:
-    """Mirror one v3 event onto bus-v4. True only if the v4 record write confirmed. Never raises."""
+           ptr: Optional[str] = None, recorded_at: Optional[str] = None, fyi: bool = False) -> bool:
+    """Mirror one v3 event onto bus-v4. True only if the v4 record write confirmed. Never raises.
+    An FYI directive asks for nothing on the old plane (`tell --fyi` opens no obligation there) and so opens
+    nothing here either; a directive whose task has no assignee opens for nobody (see _opens_an_obligation)."""
     try:
         if not team or kind not in KIND_MAP or priority not in PRIORITIES or not slug:
+            return False
+        if kind == "directive" and (fyi or not _opens_an_obligation(transport, team, ptr)):
             return False
         cfg = v4_config(transport, team)
         if cfg is None:
