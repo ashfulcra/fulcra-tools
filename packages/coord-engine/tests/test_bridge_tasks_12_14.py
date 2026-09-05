@@ -340,3 +340,13 @@ def test_an_fyi_directive_opens_nothing_on_v4_because_it_opens_nothing_on_v3():
     tr = FakeTransport(docs)
     assert dual_emit.mirror(tr, "fulcra", sender="a", to="b", kind="directive", priority="P3", slug="fyi", ptr="task/fyi.md", fyi=True) is False
     assert tr.records == []
+
+
+def test_a_directive_whose_task_is_already_terminal_at_emit_time_is_not_mirrored_as_an_open():
+    """Class C (24d545b0): DONE reports born done carried an open with no close (three on coord-boss per wake)."""
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/report.md"] = "---\nowner: coord-maintainer\nassignee: coord-boss\nstatus: done\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="coord-maintainer", to="coord-boss", kind="directive", priority="P1", slug="report", ptr="task/report.md") is False
+    assert tr.records == []
+    docs["team/fulcra/task/live.md"] = "---\nowner: a\nassignee: coord-boss\nstatus: proposed\n---\n"
+    assert dual_emit.mirror(FakeTransport(docs), "fulcra", sender="a", to="coord-boss", kind="directive", priority="P1", slug="live", ptr="task/live.md") is True
