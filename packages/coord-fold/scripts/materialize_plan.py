@@ -17,6 +17,7 @@ FENCE = re.compile(TICKS + r"(python|toml|yaml)\n(.*?)" + TICKS, re.S)
 TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # workflow YAML materializes too, so the wiring test runs here
 # codex-coder rounds 27-28: the prose contract drifted from argparse twice. An invocation of the ship gate written
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
+FENCE_DELIM = re.compile(r"^```[A-Za-z0-9_-]*\s*$")
 BARE_RUNBOOK = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
 
 
@@ -25,7 +26,7 @@ def refuse_bare_runbook_invocations(plan_text: str) -> list[str]:
     history (it quotes the forms that were wrong). Everything else in the plan is prose a builder follows."""
     out, in_fence, in_log = [], False, False
     for i, ln in enumerate(plan_text.splitlines(), 1):
-        if ln.startswith("```"):
+        if FENCE_DELIM.match(ln):            # a delimiter is ``` plus at most a language word; code that merely BEGINS with ``` is not one
             in_fence = not in_fence
             continue
         if ln.startswith("## "):
