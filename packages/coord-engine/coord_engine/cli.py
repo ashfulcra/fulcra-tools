@@ -6658,6 +6658,22 @@ def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str,
     # made every coordinator diverge forever. Keep only rows assigned to this agent, to everyone, or to a role it holds.
     mine = {agent, "@" + agent, "*"} | {r for r in (held_roles or set())} | {"@" + r for r in (held_roles or set())}
     got = [r for r in got if str(r.get("assignee") or "") in mine]
+    # RULING 1 (coord-boss f9f5823b, 2026-09-05, corollary of Ash's assignee ruling): a broadcast (assignee "*") is an
+    # obligation of EVERY recipient except its sender, until that recipient closes it. needs-me never lists star rows
+    # for an agent, so without this every broadcast diverged once for every non-sender (measured on three identities
+    # 20:24Z-22:23Z) and a --force re-seed closed it. The fold already keeps to==all for every agent except from
+    # (PR 716); the old set now asks the same question: open star rows whose owner is not this agent.
+    from .model import TERMINAL_STATUSES
+    seen = {str(r.get("id") or r.get("name") or "") for r in got}
+    for r in rows or []:
+        if not isinstance(r, dict) or str(r.get("assignee") or "") not in ("*", "all"):   # both spellings exist on the store (measured: 30 rows, "*" and "all")
+            continue
+        slug = str(r.get("id") or r.get("name") or "")
+        if not slug or slug in seen or str(r.get("owner") or "") == agent:
+            continue
+        if str(r.get("status") or "") in TERMINAL_STATUSES:
+            continue
+        got.append(r); seen.add(slug)
     return got, bool(rows_ok), str(rows_reason or "")
 
 
