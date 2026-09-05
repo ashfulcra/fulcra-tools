@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r30)
+# coord-fold: Coord on Annotations Implementation Plan (r31)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -167,13 +167,15 @@ if __name__ == "__main__":
 
 ---
 
-### Task 1: Package scaffold, fakes, boundary truths, and THE PROOF — the OS-sandboxed, process-boundary run (G5–G7, G29)
+### Task 1: SPLIT (coord-boss ruling `6bb7fa0f`, 2026-09-05T11:42Z) — **1a** package scaffold, fakes, boundary truths (G5–G7) BEGINS NOW; **1b** THE PROOF — the OS-sandboxed, process-boundary run (G29) — is a SHIP gate beside Task 16
 
-**Files:** `pyproject.toml`, `coord_fold/__init__.py`, `coord_fold/transport.py`, `tests/fakes.py`, `tests/proof/{store_server,fake_cli,inside,run_proof}.py`, `tests/test_structural.py`.
+**The ruling, verbatim in substance (r31):** a ship gate had been sitting on the START of the work. Task 1 bundled the product scaffold with THE PROOF, so the first task could not begin until the proof converged, and the proof is the artifact that never converged (28 rounds; of 14 heads both reviewers reached, both approved on none). **1a** — `pyproject.toml`, `coord_fold/__init__.py`, `coord_fold/transport.py`, `tests/fakes.py`, `tests/test_structural.py` (Steps 3, 4, 5a below) — begins immediately against the current plan text, no further review round required to start. **1b** — `tests/proof/{store_server,fake_cli,inside,run_proof}.py` (Steps 1, 2, 5b) — moves to the ship gate beside Task 16: it still must pass before anything ships, and Task 16 is untouched (NO WAIVER stands); it simply no longer blocks the first line of code. The plan register keeps running for 1b and Task 16 on its own cadence and no longer gates the build. **Process change (same ruling):** do not open a new head while a reviewer has an unanswered verdict on the current one — 13 of 27 heads moved before the second reviewer could file.
+
+**Files (1a):** `pyproject.toml`, `coord_fold/__init__.py`, `coord_fold/transport.py`, `tests/fakes.py`, `tests/test_structural.py`. **Files (1b, ship gate):** `tests/proof/{store_server,fake_cli,inside,run_proof}.py`.
 
 **Why this shape (r9).** r8's in-process harness was escaped in one round, four ways: the originals it saved were reachable through the suspended generator's frame via `gc`; `io.open` (and the rest of the low-level I/O surface) was not on its list and no list is ever complete; the fake leaked its corpus through `reader._s.events`, so the fold could enumerate without any patched callable; and the fold could tell it was under test. All four share a cause — *code running inside a Python process can reach anything in that process*. So the proof moves the two things that matter out of the process: **the corpus** (into a store server the sandbox cannot read, which logs and refuses) and **the denial** (into the kernel).
 
-- [ ] **Step 1: The store, outside the sandbox**
+- [ ] **Step 1 (1b, ship gate): The store, outside the sandbox**
 
 ```python
 # packages/coord-fold/tests/proof/store_server.py
@@ -287,7 +289,7 @@ sys.stderr.write(r["stderr"])
 sys.exit(r["rc"])
 ```
 
-- [ ] **Step 2: What runs inside, and the driver**
+- [ ] **Step 2 (1b, ship gate): What runs inside, and the driver**
 
 ```python
 # packages/coord-fold/tests/proof/inside.py
@@ -735,7 +737,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 3: Boundary truths — cheap and true, kept**
+- [ ] **Step 3 (1a): Boundary truths — cheap and true, kept**
 
 ```python
 # packages/coord-fold/tests/test_structural.py
@@ -861,7 +863,7 @@ def test_every_intra_package_import_is_an_allowed_edge_and_no_owner_imports_cli(
             assert "cli" not in _package_imports(_tree(mod)), f"{mod} imports cli"
 ```
 
-- [ ] **Step 4: Scaffold** (unchanged from r7; the transport keeps `pathlib` and never imports `os`)
+- [ ] **Step 4 (1a): Scaffold** (unchanged from r7; the transport keeps `pathlib` and never imports `os`)
 
 ```toml
 # packages/coord-fold/pyproject.toml
@@ -1070,7 +1072,7 @@ class FakeWriter:
 
 README (not gate-relevant beyond the ceiling sentence): six verbs, the guarantee in G29's words, what it does not claim, the tripwire's demotion in G30's words, and the sentence `every module under **400 lines**`.
 
-- [ ] **Step 5: Run.** Boundary truths: 8 pass now. The proof needs Tasks 4–10 (there is no fold yet): `python tests/proof/run_proof.py` → exit 1 until then, exit 3 on a host with no sandbox — **commit failing-first**. Measured on this host at plan time, against the materialized tree: the unit suite passes *inside* the sandbox; proof phase 1 — seven verb invocations rc 0, 36 requests, shapes exactly the five, the first `get-records` read the 5000-record corpus once and the second asked from the last observed record minus the overlap and got 10 back (bound 10); phase 2 — every attack denied or refused (the direct-socket `file list` logged and refused by the store); phase 3 — the mutated fold's `file list` flagged; phase 4 — the epoch-rewritten production reader flagged by semantics (5006 and 5008 returned against the bound) with every verb name allowed; phase 5 — a production reader point-probing 2000 guessed task paths flagged (paths outside the allowlist, `file stat` count over its bound, sequence mismatch). The clean run's exact request sequence (36 entries, paths included) is frozen in the driver from this measurement. **Mutations for the truths** (each restored): (a) give `CliPointerReader` a base class → FAILS; (b) `def _upload` on the reader → FAILS; (c) `from coord_engine import x` anywhere → FAILS; (d) an extra file under `coord_fold/` → FAILS. **Commit** — `coord-fold: scaffold, boundary truths, and the OS-sandboxed process-boundary proof (G5–G7, G29)`
+- [ ] **Step 5: Run.** (5a = 1a: the boundary truths; 5b = 1b: the proof, at ship time.) Boundary truths: 8 pass now. The proof needs Tasks 4–10 (there is no fold yet): `python tests/proof/run_proof.py` → exit 1 until then, exit 3 on a host with no sandbox — **commit failing-first**. Measured on this host at plan time, against the materialized tree: the unit suite passes *inside* the sandbox; proof phase 1 — seven verb invocations rc 0, 36 requests, shapes exactly the five, the first `get-records` read the 5000-record corpus once and the second asked from the last observed record minus the overlap and got 10 back (bound 10); phase 2 — every attack denied or refused (the direct-socket `file list` logged and refused by the store); phase 3 — the mutated fold's `file list` flagged; phase 4 — the epoch-rewritten production reader flagged by semantics (5006 and 5008 returned against the bound) with every verb name allowed; phase 5 — a production reader point-probing 2000 guessed task paths flagged (paths outside the allowlist, `file stat` count over its bound, sequence mismatch). The clean run's exact request sequence (36 entries, paths included) is frozen in the driver from this measurement. **Mutations for the truths** (each restored): (a) give `CliPointerReader` a base class → FAILS; (b) `def _upload` on the reader → FAILS; (c) `from coord_engine import x` anywhere → FAILS; (d) an extra file under `coord_fold/` → FAILS. **Commit** — `coord-fold: scaffold, boundary truths, and the OS-sandboxed process-boundary proof (G5–G7, G29)`
 
 ---
 
@@ -2114,7 +2116,7 @@ Mutation: append `# degraded` to `fold.py` → FAILS. **Commit.**
 
 **12 — Seed export** `obligations export-open <team> --agent <a>`: one bus-v4 `open` per open slug from the old stream fold, idempotent via `_coord/bus-v4/seeded/<a>.md`, eight-field payload written literally. Classified as a write. Mutation: remove the marker guard → idempotency FAILS.
 **13 — Dual-emit** `coord_engine/dual_emit.py::mirror` called once at the end of `records.emit_event`; `directive→open`, `response→close` of `closes`, `claim→claim`, `verdict→note`; no v4 config → no-op; mirror failure never fails v3. Mutation: hardcode a cfg when absent → FAILS.
-**14 — Comparator + `cutover-ready` + runbook**: tuples `(slug, pri, ptr)`; `AGREE n=k` / `DIVERGE slugs=[…]`; `cutover-ready` exits 0 only if trailing AGREE run ≥ 24, span ≥ 24h, the new open set both grew and shrank within it, **the injected divergence/recovery drill was performed and recorded (G13), and `scripts/ship_check.py fulcra <HEAD>` exits 0 (Task 16)**. Mutation: force the 24h check true → the one-minute-apart test FAILS.
+**14 — Comparator + `cutover-ready` + runbook**: tuples `(slug, pri, ptr)`; `AGREE n=k` / `DIVERGE slugs=[…]`; `cutover-ready` exits 0 only if trailing AGREE run ≥ 24, span ≥ 24h, the new open set both grew and shrank within it, **the injected divergence/recovery drill was performed and recorded (G13), and `scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs>` exits 0 (Task 16; the two trust roots are STATED absolute paths, r29 — the bare two-argument form exits at argument parsing and must not appear in any runbook, r31)**. Mutation: force the 24h check true → the one-minute-apart test FAILS.
 
 ### Task 15: AGENTS.md (ship-gate)
 
@@ -2145,7 +2147,8 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 commit — the engine's folded result AND, per reviewer, the exact WINNING shard the fold kept (never a
 refold of filenames here), each quoting that commit's tree hash for packages/coord-fold.
 Fails closed on any absence, including an engine that does not expose `winning`.
-Usage: python scripts/ship_check.py <team> <40-hex head>"""
+Usage: python scripts/ship_check.py <team> <40-hex head> --git <abs path> --fulcra-api <abs path>
+(both trust roots are REQUIRED and stated as absolute paths — never discovered through PATH; r29/r31)"""
 import json
 import hashlib
 import os
@@ -3058,6 +3061,23 @@ def tempfile_dir():
     return tempfile.gettempdir()
 
 
+def test_the_real_cli_accepts_the_runbook_invocation_and_refuses_the_bare_form(tmp_path):
+    """codex-coder round 27: Task 14/16 runbooks still invoked `ship_check.py fulcra HEAD` while argparse required
+    --git/--fulcra-api, so the mandatory gate always exited at argument parsing. End-to-end through the REAL CLI, so a
+    main()-level unit call cannot mask drift: the bare form exits 2 at parsing (positive control); the runbook form
+    parses, resolves the stated roots, reads the fleet pin, and reaches the pin check (rc 1, 'not an APPROVED+PINNED'
+    under the shipped empty approved set)."""
+    import os, subprocess, sys
+    fa = tmp_path / "fulcra-api"; fa.write_text(FAKE_FULCRA_API.replace("REAL_CLI_REFUSAL", REAL_CLI_REFUSAL).replace("PIN_VALUE", PIN).replace("TREE_VALUE", TREE)); fa.chmod(0o755)
+    g = tmp_path / "git"; g.write_text("#!/bin/sh\necho " + HEAD + "\n"); g.chmod(0o755)
+    launcher_dir = tmp_path / "env" / "bin"; launcher_dir.mkdir(parents=True); (launcher_dir / "coord-engine").write_text("#!/bin/sh\n"); (launcher_dir / "coord-engine").chmod(0o755)
+    env = {**os.environ, "PATH": str(launcher_dir)}                                                # the launcher is discovered (env root = tmp/env); the roots are stated OUTSIDE it
+    bare = subprocess.run([sys.executable, str(SCRIPT), "fulcra", HEAD], capture_output=True, text=True, env=env)
+    assert bare.returncode == 2 and "--git" in bare.stderr and "required" in bare.stderr             # the old runbook form: dead at parsing
+    run = subprocess.run([sys.executable, str(SCRIPT), "fulcra", HEAD, "--git", str(g), "--fulcra-api", str(fa)], capture_output=True, text=True, env=env)
+    assert run.returncode == 1 and "not an APPROVED+PINNED" in run.stdout, (run.stdout, run.stderr)  # parsed, roots resolved, pin read, refused on the empty approved set
+
+
 def test_a_same_count_tree_substitution_cannot_bind_tampered_bytes(tmp_path, monkeypatch):
     """Synchronized, not raced. Positive control (the r27 hole as a library flow): tamper cli.py, build the attacker's
     tree of the SAME SIZE from the tampered site, substitute it for the real tree file after the parent wrote it and
@@ -3356,6 +3376,8 @@ def test_winning_says_approve_but_the_shard_body_does_not_refuses(monkeypatch):
 
 ## Rulings (decided by coord-boss, directive 722f8f29, 2026-09-04T21:17Z) — reasoning attached
 
+- **Ruling `6bb7fa0f` (2026-09-05T11:42Z): SPLIT TASK 1 AND START BUILDING TODAY.** 1a (scaffold, fakes, boundary truths, `test_structural`) begins now against the current plan text; 1b (THE PROOF) is a ship gate beside Task 16 and blocks shipping, never the start. Nothing waived. Process change: no new head while a reviewer's verdict on the current head is unanswered.
+
 Each ruling is a Global Constraint above so verdicts can cite it; the reasoning is repeated here so the next reader knows *why*, or someone will helpfully add the refused things back.
 
 1. **Lossless cursor — YES (G26).** Cursor = `recorded_at` of the last successfully applied event; never `now`, never past a gap. Why: the cursor is the only durable claim of coverage; a cursor that can pass unapplied events makes `unread_events` the sole record of the gap, and a lost counter then silently claims coverage — the exact failure class this rebuild ends. Test: re-run from the stored cursor yields the same open set (`test_rerunning_from_the_stored_cursor_yields_the_same_open_set`). `seen` stays: the cursor is inclusive, so the boundary event is re-read and deduped; `OVERLAP_SECONDS` stays for client-stamped `recorded_at` skew. The upstream ordering question (stable tiebreak on `get-records`) is still unmeasured and still worth measuring; it no longer gates the design.
@@ -3377,6 +3399,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r31 (2026-09-05, coord-boss ruling `6bb7fa0f` + codex-coder CHANGES on `d06e4878`, round 27):** Task 1 split into 1a (scaffold, begins now) and 1b (the proof, ship gate beside Task 16); rulings section records the split and the no-new-head-while-unanswered process change. codex-coder: Task 14's runbook and the Usage docstring still showed the bare two-argument `ship_check` form that argparse now refuses — both updated to the stated-roots form, and an end-to-end regression invokes the REAL CLI (bare form dies at parsing; runbook form reaches the pin check). This head is opened while codex-reviewer's verdict on d06e4878 is unanswered ONLY because the ruling orders the split filed now; no further head until both reviewers have filed on it.
 - **r30 (2026-09-05, self-found while measuring r29; not a reviewer finding):** the first real run of `fleet_pin` returned None: the real `fulcra-api file download` validates LOCAL_FILE as a readable path and refuses `/dev/stdout` under a pipe, so the fleet-pin read and every verdict-body read had never worked outside the tests, whose fake shell returned bodies on stdout. I filed r29 with that None printed and not gated. Now: `store_read` downloads into a private 0700 temp file, reads it back, removes it; the fake shell writes to LOCAL_FILE and asserts it is never `/dev/stdout`; regression with a fake `fulcra-api` that refuses `/dev/stdout` exactly like the real one; the filing chain gates the real fleet-pin read on equality with the pin.
 - **r29 (2026-09-05, codex-coder CHANGES on `e186e63a`, round 26):** ship_check ran bare `git` and bare `fulcra-api` through PATH, the same PATH that finds the mutable launcher; a planted `bin/git` could bind tampered bytes to attacker hashes and forge every HEAD/tree check, a planted `bin/fulcra-api` could return an approved pin and approving verdicts. Now: trust roots are stated as absolute paths (`--git`, `--fulcra-api`), resolved once by realpath, refused under the tool environment, executed by that path in every `sh` call (a bare name raises); the child's PATH is one private directory with a single link to the stated `fulcra-api`; the engine's command/store overrides are scrubbed. Regressions with positive controls: PATH shadow of both, root under the env (incl. a symlink pointing inside), swap after resolution, child reachability, `main` refusing before touching the store.
 - **r28 (2026-09-05, BOTH reviewers CHANGES on `f5383eee`, round 25):** codex-coder: three stale instructions (Task 16 sentence, `attested_status` docstring, `.pth` test comment) still told the builder to put the verified site-packages on `sys.path`, and one test monkeypatched a string r27 had removed (vacuous pass) — all rewritten to say the package is reachable only through `VerifiedImporter`; static AST regression rejects any `sys.path` mutation in ATTEST and the stale phrasing in code. codex-reviewer: the expected tree was a mutable temp file the child trusted by pathname and the parent compared only by count — now passed on stdin, canonical digest echoed and compared exactly; synchronized same-count substitution regression with positive control.
