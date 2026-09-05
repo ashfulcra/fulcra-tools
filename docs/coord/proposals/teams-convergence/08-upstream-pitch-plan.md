@@ -31,7 +31,7 @@ Produce an `upstream-ready` branch + evidence pack so the pitch can happen any d
 
 ## Phase 1 — Pitch (Ash, one meeting + one decision)
 
-- **Demo script** (5 min, live on `team/fulcra`, no deck): `briefing` → `board` → `asks` +
+- **Demo script** (5 min, live on a real team space, no deck): `briefing` → `board` → `asks` +
   `answer` round-trip → `roles status` (lease + nonce warning) → `health`. Real data beats slides.
 - **One-pager**: problem (teams is conventions; multi-agent fleets need deterministic folds),
   what exists today (11 skills, engine, live fleet), tier framing, the three asks below.

@@ -569,9 +569,9 @@ def test_the_dispatcher_uses_tell_not_a_bare_send():
                   state="Todo", updated_at=parse_timestamp("2026-08-19T12:00:00Z"),
                   disposition=RESOLVED, target="coord-opus-worker",
                   repeat=NEW, previous=None)
-    EngineTellDispatcher(team="fulcra", sender="coord-opus-worker", runner=runner).deliver(route)
+    EngineTellDispatcher(team="acme", sender="coord-opus-worker", runner=runner).deliver(route)
     argv = seen["argv"]
-    assert argv[:5] == ("coord-engine", "tell", "fulcra", "coord-opus-worker",
+    assert argv[:5] == ("coord-engine", "tell", "acme", "coord-opus-worker",
                         "Linear ENG-42 assigned to you — Todo")
     assert "--from" in argv and "coord-opus-worker" in argv
 
@@ -584,7 +584,7 @@ def test_a_nonzero_tell_is_a_dispatch_failure_not_a_delivery():
                   disposition=RESOLVED, target="coord-opus-worker",
                   repeat=NEW, previous=None)
     with pytest.raises(DispatchFailed):
-        EngineTellDispatcher(team="fulcra", sender="x", runner=runner).deliver(route)
+        EngineTellDispatcher(team="acme", sender="x", runner=runner).deliver(route)
 
 
 # --- 9. THE RUN -----------------------------------------------------------

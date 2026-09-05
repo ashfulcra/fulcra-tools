@@ -19,7 +19,7 @@ POLICY = load_policy()
 
 
 def source(item_id: str) -> SourceIdentity:
-    return SourceIdentity("coord-engine", "fulcra", item_id)
+    return SourceIdentity("coord-engine", "acme", item_id)
 
 
 def item(item_id: str, *, title: str = "Task", capability: str = "tasks", archived: bool = False):
@@ -182,8 +182,8 @@ def test_deleted_tracker_record_is_recreated_from_source():
 
 
 def test_create_is_suppressed_when_same_slug_is_also_closed():
-    task_source = SourceIdentity("coord-engine", "fulcra/tasks", "terminal-task")
-    thread_source = SourceIdentity("coord-engine", "fulcra/threads", "terminal-task")
+    task_source = SourceIdentity("coord-engine", "acme/tasks", "terminal-task")
+    thread_source = SourceIdentity("coord-engine", "acme/threads", "terminal-task")
     derived_thread = WorkRecord(
         thread_source,
         "threads",

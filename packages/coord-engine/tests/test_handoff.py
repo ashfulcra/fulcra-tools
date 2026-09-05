@@ -99,7 +99,7 @@ def test_a_fully_resolvable_handoff_passes():
     ("docs/a.md (Cold start section)", "docs/a.md", "Cold start section"),
     ("docs/a.md#cold-start", "docs/a.md", "cold-start"),
     ("docs/a.md", "docs/a.md", None),
-    ("team/fulcra/_coord/x.json", "team/fulcra/_coord/x.json", None),
+    ("team/acme/_coord/x.json", "team/acme/_coord/x.json", None),
 ])
 def test_artifact_reference_forms(ref, path, anchor):
     art = handoff.parse_artifact(ref)
@@ -258,22 +258,22 @@ class FakeTransport:
 
 
 def test_store_resolver_tries_the_team_prefix_for_a_relative_path():
-    t = FakeTransport({"team/fulcra/_coord/x.md": "# X\n"})
-    ok, where = handoff.store_resolver(t, "fulcra")(
+    t = FakeTransport({"team/acme/_coord/x.md": "# X\n"})
+    ok, where = handoff.store_resolver(t, "acme")(
         handoff.parse_artifact("_coord/x.md"))
-    assert ok and where == "store:team/fulcra/_coord/x.md"
+    assert ok and where == "store:team/acme/_coord/x.md"
 
 
 def test_store_resolver_does_not_double_prefix_an_absolute_store_path():
-    t = FakeTransport({"team/fulcra/_coord/x.md": "# X\n"})
-    handoff.store_resolver(t, "fulcra")(
-        handoff.parse_artifact("team/fulcra/_coord/x.md"))
-    assert t.reads == ["team/fulcra/_coord/x.md"]
+    t = FakeTransport({"team/acme/_coord/x.md": "# X\n"})
+    handoff.store_resolver(t, "acme")(
+        handoff.parse_artifact("team/acme/_coord/x.md"))
+    assert t.reads == ["team/acme/_coord/x.md"]
 
 
 def test_store_resolver_checks_the_anchor_in_the_resolved_document():
-    t = FakeTransport({"team/fulcra/a.md": "# A\n\n## Identity\n"})
-    ok, reason = handoff.store_resolver(t, "fulcra")(
+    t = FakeTransport({"team/acme/a.md": "# A\n\n## Identity\n"})
+    ok, reason = handoff.store_resolver(t, "acme")(
         handoff.parse_artifact("a.md (Cold start section)"))
     assert not ok and "no section matching" in reason
 
@@ -284,7 +284,7 @@ def test_store_resolver_falls_back_to_the_repository(tmp_path, monkeypatch):
     (tmp_path / ".git").mkdir()
     (tmp_path / "handoff.md").write_text("# Doc\n\n## Cold start\n")
     monkeypatch.chdir(tmp_path)
-    ok, where = handoff.store_resolver(FakeTransport({}), "fulcra")(
+    ok, where = handoff.store_resolver(FakeTransport({}), "acme")(
         handoff.parse_artifact("handoff.md (Cold start)"))
     assert ok and where == "repo:handoff.md"
 
@@ -294,7 +294,7 @@ def test_store_resolver_treats_a_raising_transport_as_unresolved():
         def read(self, path):
             raise RuntimeError("store down")
 
-    ok, reason = handoff.store_resolver(Boom(), "fulcra")(
+    ok, reason = handoff.store_resolver(Boom(), "acme")(
         handoff.parse_artifact("_coord/x.md"))
     assert not ok and "not found" in reason
 
@@ -358,7 +358,7 @@ def test_no_repository_means_the_working_tree_leg_is_refused(tmp_path, monkeypat
 
 
 def test_store_resolver_refuses_an_absolute_path_with_a_reason():
-    ok, reason = handoff.store_resolver(FakeTransport({}), "fulcra")(
+    ok, reason = handoff.store_resolver(FakeTransport({}), "acme")(
         handoff.parse_artifact("/etc/hosts"))
     assert not ok
     assert "repository-relative" in reason

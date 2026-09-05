@@ -274,7 +274,7 @@ _OVERLAY = {
 
 
 def _seed(t):
-    t.put("team/fulcra/atc/accounts.json", json.dumps(_OVERLAY))
+    t.put("team/acme/atc/accounts.json", json.dumps(_OVERLAY))
 
 
 def _distinct_clock(monkeypatch):
@@ -291,7 +291,7 @@ def _distinct_clock(monkeypatch):
 
 def _log_bad(t, n=3, model="cheap", tc="code", outcome="rework"):
     for _ in range(n):
-        cli.main(["usage", "log", "fulcra", "--account", "box", "--tier", "x",
+        cli.main(["usage", "log", "acme", "--account", "box", "--tier", "x",
                   "--units", "1", "--model", model, "--task-class", tc,
                   "--outcome", outcome], transport=t)
 
@@ -299,31 +299,31 @@ def _log_bad(t, n=3, model="cheap", tc="code", outcome="rework"):
 def test_usage_log_writes_outcome_fields():
     t = FakeTransport()
     _seed(t)
-    rc = cli.main(["usage", "log", "fulcra", "--account", "box", "--tier", "x",
+    rc = cli.main(["usage", "log", "acme", "--account", "box", "--tier", "x",
                    "--units", "5", "--model", "cheap", "--task-class", "code",
                    "--outcome", "rework"], transport=t)
     assert rc == 0
-    body = next(v for p, v in t.store.items() if p.startswith("team/fulcra/atc/usage/"))
+    body = next(v for p, v in t.store.items() if p.startswith("team/acme/atc/usage/"))
     assert "cheap" in body and "code" in body and "rework" in body
 
 
 def test_usage_log_v1_shard_omits_new_fields():
     t = FakeTransport()
     _seed(t)
-    cli.main(["usage", "log", "fulcra", "--account", "box", "--tier", "x",
+    cli.main(["usage", "log", "acme", "--account", "box", "--tier", "x",
               "--units", "5"], transport=t)
-    body = next(v for p, v in t.store.items() if p.startswith("team/fulcra/atc/usage/"))
+    body = next(v for p, v in t.store.items() if p.startswith("team/acme/atc/usage/"))
     assert "task_class" not in body and "outcome" not in body and "model" not in body
 
 
 def test_usage_log_unknown_task_class_exits_2(capsys):
     t = FakeTransport()
     _seed(t)
-    rc = cli.main(["usage", "log", "fulcra", "--account", "box", "--tier", "x",
+    rc = cli.main(["usage", "log", "acme", "--account", "box", "--tier", "x",
                    "--task-class", "telepathy"], transport=t)
     assert rc == 2
     # no shard written on the rejected invocation
-    assert not [p for p in t.store if p.startswith("team/fulcra/atc/usage/")]
+    assert not [p for p in t.store if p.startswith("team/acme/atc/usage/")]
 
 
 def test_cli_route_demotes_model_with_bad_outcomes(capsys, monkeypatch):
@@ -332,7 +332,7 @@ def test_cli_route_demotes_model_with_bad_outcomes(capsys, monkeypatch):
     _seed(t)
     _log_bad(t, n=3)
     capsys.readouterr()
-    rc = cli.main(["route", "fulcra", "--needs", "code"], transport=t)
+    rc = cli.main(["route", "acme", "--needs", "code"], transport=t)
     out = capsys.readouterr().out
     assert rc == 0
     lines = [l for l in out.splitlines() if l[:2] in ("1.", "2.")]
@@ -346,7 +346,7 @@ def test_cli_route_json_demoted_marker(capsys, monkeypatch):
     _seed(t)
     _log_bad(t, n=3)
     capsys.readouterr()
-    cli.main(["route", "fulcra", "--needs", "code", "--json"], transport=t)
+    cli.main(["route", "acme", "--needs", "code", "--json"], transport=t)
     doc = json.loads(capsys.readouterr().out)
     by_model = {c["model"]: c for c in doc["candidates"]}
     assert by_model["cheap"]["demoted"] == ["code"]
@@ -359,7 +359,7 @@ def test_cli_headroom_json_surfaces_demotions(capsys, monkeypatch):
     _seed(t)
     _log_bad(t, n=3)
     capsys.readouterr()
-    cli.main(["headroom", "fulcra", "--json"], transport=t)
+    cli.main(["headroom", "acme", "--json"], transport=t)
     doc = json.loads(capsys.readouterr().out)
     assert isinstance(doc["windows"], list) and doc["windows"]
     assert any(d["model"] == "cheap" and d["task_class"] == "code"
@@ -369,6 +369,6 @@ def test_cli_headroom_json_surfaces_demotions(capsys, monkeypatch):
 def test_cli_headroom_json_no_demotions_empty_list(capsys):
     t = FakeTransport()
     _seed(t)
-    cli.main(["headroom", "fulcra", "--json"], transport=t)
+    cli.main(["headroom", "acme", "--json"], transport=t)
     doc = json.loads(capsys.readouterr().out)
     assert doc["demotions"] == []

@@ -133,7 +133,7 @@ def test_unreadable_pin_wins_over_unknown_build():
 
 def test_only_a_match_prints_a_tick():
     line = pc.report_line("current", build=PIN, pin=PIN, pin_status="ok",
-                          team="fulcra")
+                          team="acme")
     assert line.strip().startswith("✓")
 
 
@@ -147,14 +147,14 @@ def test_only_a_match_prints_a_tick():
 def test_stale_build_does_not_print_a_tick(verdict, pin_status):
     """THE regression this whole leg exists for: unknown must never read ✓."""
     line = pc.report_line(verdict, build=OTHER, pin=PIN,
-                          pin_status=pin_status, team="fulcra")
+                          pin_status=pin_status, team="acme")
     assert "✓" not in line
     assert line.strip().startswith("!")
 
 
 def test_mismatch_line_names_the_consequence_and_the_remedy():
     line = pc.report_line("mismatch", build=OTHER, pin=PIN, pin_status="ok",
-                          team="fulcra")
+                          team="acme")
     assert "adopt-latest.sh" in line
     assert "bus-v3" in line
 
@@ -163,7 +163,7 @@ def test_mismatch_line_does_not_claim_certainty_about_direction():
     # Offline there is no way to tell "behind the pin" from "ahead of it"; the
     # line may not assert more than it can prove.
     line = pc.report_line("mismatch", build=OTHER, pin=PIN, pin_status="ok",
-                          team="fulcra")
+                          team="acme")
     assert "may be" in line
 
 
@@ -176,9 +176,9 @@ def test_teamless_run_says_it_did_not_check_rather_than_ticking():
 
 def test_unreadable_authority_line_distinguishes_itself_from_absence():
     err = pc.report_line("unknown-pin", build=PIN, pin=None,
-                         pin_status="error", team="fulcra")
+                         pin_status="error", team="acme")
     absent = pc.report_line("unknown-pin", build=PIN, pin=None,
-                            pin_status="absent", team="fulcra")
+                            pin_status="absent", team="acme")
     assert err != absent
     assert "unreadable" in err
     assert "absent" in absent
@@ -188,23 +188,23 @@ def test_unreadable_authority_line_distinguishes_itself_from_absence():
 
 def test_load_pin_reads_the_team_scoped_adopt_script():
     t = FakeTransport()
-    pin, status = pc.load_pin(t, "fulcra")
+    pin, status = pc.load_pin(t, "acme")
     assert (pin, status) == (PIN, "ok")
-    assert t.reads[0] == "team/fulcra/_coord/bus-v3/adopt-latest.sh"
+    assert t.reads[0] == "team/acme/_coord/bus-v3/adopt-latest.sh"
 
 
 def test_load_pin_reports_error_not_absent_on_a_degraded_store():
-    pin, status = pc.load_pin(FakeTransport(status="error"), "fulcra")
+    pin, status = pc.load_pin(FakeTransport(status="error"), "acme")
     assert (pin, status) == (None, "error")
 
 
 def test_load_pin_reports_absent_on_an_affirmative_not_found():
-    pin, status = pc.load_pin(FakeTransport(status="absent"), "fulcra")
+    pin, status = pc.load_pin(FakeTransport(status="absent"), "acme")
     assert (pin, status) == (None, "absent")
 
 
 def test_load_pin_reports_invalid_when_the_script_has_no_pin_line():
-    pin, status = pc.load_pin(FakeTransport(raw="set -u\n"), "fulcra")
+    pin, status = pc.load_pin(FakeTransport(raw="set -u\n"), "acme")
     assert (pin, status) == (None, "invalid")
 
 
@@ -213,26 +213,26 @@ def test_load_pin_survives_a_transport_that_raises():
         def read_classified(self, path):
             raise RuntimeError("store on fire")
 
-    assert pc.report(Boom(), "fulcra").strip().startswith("!")
+    assert pc.report(Boom(), "acme").strip().startswith("!")
 
 
 # --- end to end through report() -------------------------------------------
 
 def test_report_ticks_when_the_running_build_is_the_pinned_one(monkeypatch):
     monkeypatch.setattr(pc, "build_sha", lambda *a, **k: PIN)
-    assert pc.report(FakeTransport(), "fulcra").strip().startswith("✓")
+    assert pc.report(FakeTransport(), "acme").strip().startswith("✓")
 
 
 def test_report_warns_when_the_running_build_is_stale(monkeypatch):
     monkeypatch.setattr(pc, "build_sha", lambda *a, **k: OTHER)
-    line = pc.report(FakeTransport(), "fulcra")
+    line = pc.report(FakeTransport(), "acme")
     assert line.strip().startswith("!")
     assert "adopt-latest.sh" in line
 
 
 def test_report_warns_when_the_build_sha_is_unknowable(monkeypatch):
     monkeypatch.setattr(pc, "build_sha", lambda *a, **k: None)
-    line = pc.report(FakeTransport(), "fulcra")
+    line = pc.report(FakeTransport(), "acme")
     assert line.strip().startswith("!")
     assert "UNKNOWN" in line
 
@@ -245,7 +245,7 @@ def test_build_sha_returns_none_rather_than_raising_off_a_missing_dist():
 
 def test_doctor_prints_the_currency_line(monkeypatch, capsys):
     monkeypatch.setattr(pc, "build_sha", lambda *a, **k: OTHER)
-    cli._report_pin_currency(FakeTransport(), "fulcra")
+    cli._report_pin_currency(FakeTransport(), "acme")
     out = capsys.readouterr().out
     assert "does NOT match the fleet pin" in out
 
@@ -255,7 +255,7 @@ def test_doctor_currency_line_never_makes_doctor_unhealthy(monkeypatch, capsys):
     cannot participate in the exit code even by accident."""
     monkeypatch.setattr(pc, "build_sha", lambda *a, **k: OTHER)
     assert cli._report_pin_currency(FakeTransport(status="error"),
-                                    "fulcra") is None
+                                    "acme") is None
 
 
 def test_doctor_currency_check_cannot_crash_doctor(monkeypatch, capsys):
@@ -263,5 +263,5 @@ def test_doctor_currency_check_cannot_crash_doctor(monkeypatch, capsys):
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(pc, "report", _boom)
-    cli._report_pin_currency(FakeTransport(), "fulcra")
+    cli._report_pin_currency(FakeTransport(), "acme")
     assert "currency unknown" in capsys.readouterr().out

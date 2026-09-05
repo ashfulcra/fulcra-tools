@@ -67,6 +67,14 @@ def test_authority_returns_bare_uuid_stripping_the_type_prefix(monkeypatch):
     seen = _stub_authority(
         monkeypatch, json.dumps({"data_type": f"MomentAnnotation/{LIVE}"}))
     assert annotations._authority_definition_id() == LIVE
+    # THE LAST HARDCODED TEAM NAME IN THIS REPO, and it is here on purpose:
+    # this asserts real current behaviour. `_coord_team()` still ends in
+    # `or "fulcra"`, and the fixture above deletes FULCRA_COORD_TEAM, so the
+    # path built here IS the shipped default. Do not "tidy" this literal —
+    # removing the default is a fleet migration (every agent that writes
+    # annotations must have FULCRA_COORD_TEAM set first, and today none
+    # does), not a rename. Change the source and this line together or
+    # neither.
     assert f"team/fulcra/{annotations._AUTHORITY_PATH}" in seen["cmd"]
 
 

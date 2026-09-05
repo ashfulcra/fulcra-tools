@@ -145,7 +145,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     store = tmp_path / "store"
     for prefix in ("task", "review", "roles",
                    "_coord/forge/watch", "_coord/forge/feedback"):
-        (store / "team" / "fulcra" / prefix).mkdir(parents=True, exist_ok=True)
+        (store / "team" / "acme" / prefix).mkdir(parents=True, exist_ok=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "fulcra-api"
@@ -155,7 +155,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     env = {
         "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
         "FAKE_ROOT": str(store),
-        "TEAM": "fulcra",
+        "TEAM": "acme",
         "AGENT": "opie",
         # Empty PYTHONPATH so the subprocess cannot reach the workspace source:
         # an engine-absent test that can still import coord_engine is not one.
@@ -203,7 +203,7 @@ def test_a_dark_component_makes_the_procedure_fail_loudly(sandbox):
     conclude "nothing owed" from an incomplete check.
     """
     _store, env = sandbox
-    env = dict(env, FAKE_DARK="team/fulcra/review")
+    env = dict(env, FAKE_DARK="team/acme/review")
     codes = _run_procedure(env)
     assert any(code != 0 for code in codes), (
         "a dark component produced an all-clean run; the documented procedure "
@@ -218,8 +218,8 @@ def test_each_component_can_independently_darken(sandbox):
     the text tests and still leave that component unverified forever.
     """
     _store, env = sandbox
-    for prefix in ("team/fulcra/task", "team/fulcra/review", "team/fulcra/roles",
-                   "team/fulcra/_coord/forge"):
+    for prefix in ("team/acme/task", "team/acme/review", "team/acme/roles",
+                   "team/acme/_coord/forge"):
         codes = _run_procedure(dict(env, FAKE_DARK=prefix))
         assert any(code != 0 for code in codes), (
             f"darkening {prefix} changed nothing — the procedure never reads it, "

@@ -820,7 +820,7 @@ it (not on PyPI).
   print SOMETHING, and the widened sweep immediately found a live leak (`headroom --json` printed
   prose on its no-accounts early return).
 - **A finished review does not close its request row unless something closes it.** 198 open
-  `REVIEW REQUEST:` rows were live in `team/fulcra` with 156 already behind a terminal marker: the
+  `REVIEW REQUEST:` rows were live on one team with 156 already behind a terminal marker: the
   review store and the task board had diverged and only the store was kept honest. Two halves fix
   it. The DECISION verbs (`review close`, `review conclude`) close their own rows at settle time —
   best-effort and loud, because the marker is durable truth and bookkeeping must not fail a verified

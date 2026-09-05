@@ -1,7 +1,7 @@
 """Settle-time close — the DECISION verbs close their own request rows.
 
 The residue this exists to prevent is a review that finished and a request row
-that stayed open: 198 such rows were live in team/fulcra, 156 of them behind a
+that stayed open: 198 such rows were live in team/acme, 156 of them behind a
 terminal marker. The scheduled sweep cleans that up; this closes the tap.
 
 Only the decision verbs (`review close`, `review conclude`) do it. The fold and

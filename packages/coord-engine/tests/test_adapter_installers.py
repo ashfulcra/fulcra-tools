@@ -479,7 +479,7 @@ def _render_and_run(tmp_path, stub_body, agent="cm"):
     import os
     import stat as _stat
     import subprocess
-    cx.install("fulcra", agent, codex_dir=tmp_path, thread_id="t1")
+    cx.install("acme", agent, codex_dir=tmp_path, thread_id="t1")
     hook = tmp_path / cx.MANAGED_DIRNAME / "session-start.sh"
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)

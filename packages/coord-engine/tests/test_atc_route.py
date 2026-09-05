@@ -227,8 +227,8 @@ ACCOUNTS = json.dumps({"accounts": [
 
 def test_cli_route_text(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    rc = cli.main(["route", "fulcra", "--needs", "code,architecture"], transport=t)
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    rc = cli.main(["route", "acme", "--needs", "code,architecture"], transport=t)
     out = capsys.readouterr().out
     assert rc == 0
     # a claude-code model covering code+architecture, bound to anthropic-max at 100%
@@ -238,8 +238,8 @@ def test_cli_route_text(capsys):
 
 def test_cli_route_json_shape(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    rc = cli.main(["route", "fulcra", "--needs", "code", "--json"], transport=t)
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    rc = cli.main(["route", "acme", "--needs", "code", "--json"], transport=t)
     doc = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert doc["map_version"] and doc["reason"] is None
@@ -250,16 +250,16 @@ def test_cli_route_json_shape(capsys):
 
 def test_cli_route_unknown_need_exit_2(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    rc = cli.main(["route", "fulcra", "--needs", "telepathy"], transport=t)
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    rc = cli.main(["route", "acme", "--needs", "telepathy"], transport=t)
     assert rc == 2
 
 
 def test_cli_route_empty_needs_exit_2(capsys):
     # whitespace/empty --needs must NOT route all models — it's an exit-2 error.
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    rc = cli.main(["route", "fulcra", "--needs", "  ,  "], transport=t)
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    rc = cli.main(["route", "acme", "--needs", "  ,  "], transport=t)
     err = capsys.readouterr().err
     assert rc == 2 and "no needs given" in err
 
@@ -267,8 +267,8 @@ def test_cli_route_empty_needs_exit_2(capsys):
 def test_cli_route_empty_reason_exit_0(capsys):
     # no accounts declared -> no account headroom, graceful exit 0
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", json.dumps({"accounts": [], "tiers": {}}))
-    rc = cli.main(["route", "fulcra", "--needs", "code"], transport=t)
+    t.put("team/acme/atc/accounts.json", json.dumps({"accounts": [], "tiers": {}}))
+    rc = cli.main(["route", "acme", "--needs", "code"], transport=t)
     out = capsys.readouterr().out
     assert rc == 0 and "no candidates" in out
 
@@ -283,8 +283,8 @@ def test_cli_route_operator_overlay_applied(capsys):
         "models": {"my-local-7b": {"tags": ["code"], "cost_rank": 9,
                                    "harnesses": ["ollama-local"]}}}
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", json.dumps(doc))
-    rc = cli.main(["route", "fulcra", "--needs", "code", "--json"], transport=t)
+    t.put("team/acme/atc/accounts.json", json.dumps(doc))
+    rc = cli.main(["route", "acme", "--needs", "code", "--json"], transport=t)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert any(c["model"] == "my-local-7b" for c in out["candidates"])
@@ -293,7 +293,7 @@ def test_cli_route_operator_overlay_applied(capsys):
 def test_cli_route_v1_accounts_without_models_key(capsys):
     # v1 accounts.json (no `models` key) must work off packaged defaults only.
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    rc = cli.main(["route", "fulcra", "--needs", "code", "--json"], transport=t)
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    rc = cli.main(["route", "acme", "--needs", "code", "--json"], transport=t)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and len(out["candidates"]) >= 1

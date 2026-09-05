@@ -81,7 +81,7 @@ class Tracker:
 
 
 def snapshot(capability="tasks"):
-    identity = SourceIdentity("coord-engine", "fulcra", "task-1")
+    identity = SourceIdentity("coord-engine", "acme", "task-1")
     record = WorkRecord(identity, capability, "Task", "active", origin="fleet")
     return Snapshot((record,), True, (), {capability: CapabilityState.COMPLETE}, NOW)
 
@@ -150,7 +150,7 @@ def test_sync_persists_ledger_after_provider_mutation(tmp_path):
     ledger = BridgeLedger.load(tmp_path / "ledger.json")
 
     assert result.applied == 1
-    assert ledger.get(SourceIdentity("coord-engine", "fulcra", "task-1")).tracker_record_id == "LIN-created"
+    assert ledger.get(SourceIdentity("coord-engine", "acme", "task-1")).tracker_record_id == "LIN-created"
 
 
 def test_sync_does_not_persist_ledger_when_provider_rejects_mutation(tmp_path):
@@ -166,7 +166,7 @@ def test_sync_does_not_persist_ledger_when_provider_rejects_mutation(tmp_path):
 
 def test_adopt_markers_persists_full_identity_after_provider_mutation(tmp_path):
     tracker = Tracker()
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    source = SourceIdentity("coord-engine", "acme", "task-1")
     tracker.adoptions = [MarkerAdoption(
         "LIN-legacy", source, "tasks", "Task", "body", {}
     )]
@@ -183,12 +183,12 @@ def test_adopt_markers_persists_full_identity_after_provider_mutation(tmp_path):
 def test_preview_marker_adoptions_never_mutates_provider_or_ledger(tmp_path):
     tracker = Tracker(records=[ManagedRecord(
         "LIN-managed",
-        SourceIdentity("coord-engine", "fulcra", "already-managed"),
+        SourceIdentity("coord-engine", "acme", "already-managed"),
         "tasks",
         {},
         False,
     )])
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    source = SourceIdentity("coord-engine", "acme", "task-1")
     tracker.adoptions = [MarkerAdoption(
         "LIN-legacy", source, "tasks", "Task", "body", {}
     )]
@@ -201,7 +201,7 @@ def test_preview_marker_adoptions_never_mutates_provider_or_ledger(tmp_path):
 
 
 def test_adopt_markers_rejects_duplicate_provider_metadata_before_writes(tmp_path):
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    source = SourceIdentity("coord-engine", "acme", "task-1")
     records = [
         ManagedRecord("LIN-A", source, "tasks", {}, False),
         ManagedRecord("LIN-B", source, "tasks", {}, False),
@@ -240,6 +240,6 @@ def test_retry_converges_after_create_succeeds_before_ledger_write(
     assert bridge.sync().applied == 0
     assert len(tracker.records) == 1
     healed = BridgeLedger.load(tmp_path / "ledger.json")
-    entry = healed.get(SourceIdentity("coord-engine", "fulcra", "task-1"))
+    entry = healed.get(SourceIdentity("coord-engine", "acme", "task-1"))
     assert entry.tracker_record_id == "LIN-created"
     assert entry.capability == capability
