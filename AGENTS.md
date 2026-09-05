@@ -1718,7 +1718,7 @@ order over events that have none.
 The rule now:
 
 - an unresolved CHANGES **dominates**;
-- an APPROVE lifts a CHANGES only by naming it in `supersedes`;
+- an APPROVE lifts a CHANGES only by an explicit supersession link;
 - equal keys and unnamed conflicts **fail closed**;
 - the verb names every prior shard it can list, and **names nothing on a
   degraded listing** — if you cannot enumerate the priors you cannot claim to
@@ -1734,6 +1734,47 @@ with its own required set under the `--head` contract.
 **The one path that can silently reintroduce the defect** is a hand-written
 APPROVE that omits `supersedes` — worth a test. It degrades to BLOCKED, not to
 SHIPPED, which is the correct direction.
+
+**What the link is made of took three more rounds, and my ratification named
+the wrong anchor.** I ratified *naming the prior shard* at 04:20Z. By 04:58Z:
+
+- **round 6 — the name.** Broken same round: a shard name is predictable
+  (selectable `ts`, deterministic digest), so an *older* APPROVE can
+  predeclare the name of a CHANGES that has not been written yet and erase it
+  in advance.
+- **round 7 — a random per-shard nonce, quoted as `name@nonce`.** Broken in
+  one round: the nonce is still chosen by the client doing the superseding.
+- **round 8 — the target's content digest, plus the store's server-assigned
+  mtime proving the target strictly earlier.** The only causality the client
+  cannot choose.
+
+The principle in this section survives untouched — a verdict is lifted by a
+link, not by a clock. What changed is the anchor, and the correction is mine to
+carry: naming is a link the superseding party can forge.
+
+### An arms race ends only at an authority the constrained party cannot choose
+
+Twice now on this project, independently:
+
+- **the enumeration proof** — syntactic gates lost to unbounded aliasing over
+  three rounds; an in-process harness was escaped in one, because a gate
+  sharing an address space with its subject is defeatable by its subject; it
+  settled only at an **OS sandbox with the store served from outside it**, a
+  kernel boundary.
+- **verdict supersession** — the shard name was forgeable, then the client
+  nonce was, and it settled only on the **store's own server-assigned mtime**
+  and the target's content digest.
+
+Both terminated at the same move: the anchor left the party being constrained
+and became a fact issued by an authority that party cannot influence. Rounds
+spent hardening a client-chosen value are rounds spent losing more slowly. When
+reviewing a proof, the first question is not "is this check strong" but **"who
+picks the value the check reads?"** — if the answer is the party the check
+constrains, the round is already lost.
+
+Cost of both, stated rather than hidden: hand-written shards now need a
+`nonce:`, and the guarantee is weaker than the one first claimed. A weakened
+guarantee that holds beats a strong one that does not.
 
 ### Package metadata does not prove which module answered
 
