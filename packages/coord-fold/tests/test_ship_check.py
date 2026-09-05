@@ -794,7 +794,9 @@ def test_no_repo_prose_invokes_ship_check_without_stated_trust_roots():
     import re
     bare = re.compile(r"ship_check\.py\s+\S+\s+(<HEAD>|<40-hex head>|[0-9a-f]{7,40})(?![^\n]*--git)")
     here = pathlib.Path(__file__).resolve()
-    for f in (here.parents[3] / "AGENTS.md", here.parents[1] / "README.md", SCRIPT):
+    files = [f for f in (here.parents[3] / "AGENTS.md", here.parents[1] / "README.md", SCRIPT) if f.exists()]   # a materialized plan tree has no repo AGENTS.md
+    assert len(files) >= 2, files
+    for f in files:
         for i, ln in enumerate(f.read_text().splitlines(), 1):
             assert not bare.search(ln), f"{f.name}:{i}: ship_check invoked without --git/--fulcra-api: {ln.strip()[:120]}"
     assert bare.search("`scripts/ship_check.py fulcra <HEAD>` and fails closed")           # the pattern catches the sentence that drifted
