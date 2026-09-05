@@ -987,6 +987,17 @@ it (not on PyPI).
   never means destructive fallback. **Ship-gate: the throttle memo is process-global state — reset
   it between tests; a new write verb joins `_ACTIVITY_WRITE_FUNCS` (or the omission is justified);
   the preserve-everything-but-timestamp rule stays red-first pinned.**
+- **A CHANGES is lifted only by a shard that NAMES it (`supersedes:`), never by the clock
+  (2026-09-05, codex-coder, review-winning-envelope r4).** Client timestamps cannot carry the
+  correction contract: a CHANGES filed later from a host whose clock is behind sorts EARLIER, the old
+  APPROVE wins, and a ship gate validates withdrawn consent. The fold is now: a shard is RESOLVED when
+  another shard of the same reviewer names it in `supersedes:` (validated against shards that exist);
+  any UNRESOLVED CHANGES dominates regardless of timestamp; otherwise the newest live shard wins; equal
+  keys and unnamed conflicts fail closed to CHANGES. `review verdict` names every prior shard of yours
+  it can list; if the listing is degraded it names NOTHING and says so (your prior CHANGES keeps
+  dominating until you re-file). A hand-written APPROVE must carry `supersedes:` itself. This amends
+  ruling b99fb8da (newest-wins): constraint 5 — a stale CHANGES must not block forever — is satisfied
+  by the link the verb writes, not by the order of the clock.
 - **Same-second verdict shards order by chronology, not digest (2026-09-05, both codex reviewers,
   coord-fold round 12).** The append-only name has SECOND precision plus a content digest, and the
   fold broke same-second ties on the name — so an earlier APPROVE could outrank a later CHANGES from

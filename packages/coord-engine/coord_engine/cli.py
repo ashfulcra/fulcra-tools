@@ -2591,6 +2591,8 @@ def _tally_from_verdict_entries(
             "reviewer": reviewer,
             "name": n,
             "verdict": token,
+            "supersedes": [str(x) for x in (fm.get("supersedes") or [])
+                           if isinstance(fm.get("supersedes"), list)],
             # ONE canonical form (second from the ACL-controlled name, fraction
             # from frontmatter `ts` only within that second) so two same-second
             # shards of one reviewer order by chronology, not by digest.
@@ -4607,6 +4609,21 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
     filename = review.verdict_filename(reviewer, head=head, ts=now_iso,
                                        digest=digest)
     path = _verdicts_prefix(args.team, args.name) + filename
+    # NAME WHAT THIS VERDICT SUPERSEDES (review-winning-envelope r5). The fold
+    # no longer orders corrections by clock: an APPROVE lifts a prior CHANGES
+    # only by naming it. So list this reviewer's prior shards for this head and
+    # name every one. If the listing is degraded, name NOTHING and say so — an
+    # unseen CHANGES keeps dominating, which is the fail-closed answer.
+    supersedes: list[str] = []
+    listing_ok = True
+    try:
+        for e in transport.list_dir(_verdicts_prefix(args.team, args.name)):
+            n = str(e.get("name") or "")
+            parsed = review.parse_verdict_filename(n, head=head)
+            if parsed and parsed[0] == reviewer and n != filename:
+                supersedes.append(n)
+    except TransportError:
+        listing_ok = False
 
     body = okf.render_frontmatter({
         "type": "Verdict",
@@ -4617,7 +4634,13 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
         # precision for the reasons above); the fold uses this fraction only to
         # order shards that share the name's second. See review.canonical_sort_key.
         "ts": _iso(stamp),
+        "supersedes": sorted(supersedes),
     }) + f"\n{getattr(args, 'note', None) or normalized}\n"
+    if not listing_ok:
+        print(f"review verdict: could not list your prior shards for {args.name} — "
+              f"this verdict supersedes NOTHING; an existing CHANGES of yours "
+              f"still dominates the fold until you re-file with a working listing",
+              file=sys.stderr)
     if not transport.write(path, body):
         print(f"review verdict: write FAILED for {path} — the verdict did NOT "
               f"land, so the review still awaits you", file=sys.stderr)

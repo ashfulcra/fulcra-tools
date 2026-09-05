@@ -151,28 +151,44 @@ def canonical_sort_key(name_ts: Optional[str], fm_ts: Optional[str],
 def fold_newest_per_reviewer(
     rows: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], int]:
-    """Keep the newest shard per reviewer; return ``(kept, folded_away)``.
+    """Keep ONE shard per reviewer; return ``(kept, folded_away)``.
 
-    Rows carry ``reviewer``, ``name``, and ``sort_key``. Newest wins, ties break
-    deterministically on the name so two hosts folding the same directory always
-    agree.
+    THE RULE (codex-coder, review-winning-envelope r4, 2026-09-05): ordering by
+    client timestamp can never carry the correction contract — a CHANGES filed
+    later from a host whose clock is behind sorts EARLIER, the old APPROVE wins,
+    and a ship gate faithfully validates withdrawn consent. So supersession is
+    EXPLICIT, not temporal:
 
-    The count is returned rather than swallowed because SUPERSESSION MUST BE
-    AUDITABLE (coord-boss constraint 4): a reader who is told "APPROVED" while
-    three shards were silently discarded has been handed the same affirmative
-    falsehood this whole cycle has been about. `review status` says how many it
-    folded away, which is also the reviewer's correction path — a correction is
-    a new file, and the original evidence stays on disk.
+      * a shard is RESOLVED when another shard of the same reviewer names it in
+        ``supersedes`` — validated against shards that actually exist, so a
+        dangling name resolves nothing;
+      * any UNRESOLVED CHANGES dominates, whatever its timestamp;
+      * otherwise the newest live shard wins (canonical key, then name).
+
+    Equal keys and unnamed conflicts therefore FAIL CLOSED to CHANGES. The typed
+    verb names every prior shard it can list, so a verb-filed APPROVE still lifts
+    a prior CHANGES (coord-boss constraint 5 — a stale CHANGES must not block
+    forever — is now satisfied by the link, not by the clock); a hand-written
+    APPROVE must carry ``supersedes:`` itself. This amends ruling b99fb8da's
+    newest-wins order; supersession stays auditable because every shard stays
+    on disk and the count of folded shards is returned.
     """
-    best: dict[str, dict[str, Any]] = {}
+    by: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by.setdefault(row["reviewer"], []).append(row)
+    kept: list[dict[str, Any]] = []
     folded = 0
-    for row in sorted(rows, key=lambda r: (r.get("sort_key") or "",
-                                           r.get("name") or "")):
-        prior = best.get(row["reviewer"])
-        if prior is not None:
-            folded += 1
-        best[row["reviewer"]] = row
-    return [best[k] for k in sorted(best)], folded
+    for reviewer in sorted(by):
+        shards = by[reviewer]
+        names = {r.get("name") for r in shards}
+        resolved = {s for r in shards for s in (r.get("supersedes") or []) if s in names}
+        live = [r for r in shards if r.get("name") not in resolved] or shards
+        blocking = [r for r in live if normalize_verdict(r.get("verdict")) == "changes"]
+        pool = blocking or live
+        winner = max(pool, key=lambda r: (r.get("sort_key") or "", r.get("name") or ""))
+        kept.append(winner)
+        folded += len(shards) - 1
+    return kept, folded
 
 
 def normalize_verdict(v: Optional[str]) -> Optional[str]:

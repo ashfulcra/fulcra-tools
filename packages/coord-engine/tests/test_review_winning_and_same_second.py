@@ -65,12 +65,12 @@ def test_same_second_reverse_digest_the_later_changes_wins():
     assert kept == [later_changes] and folded == 1
 
 
-def test_without_fractions_the_tie_still_breaks_on_the_name_and_the_plan_says_so():
-    """The legacy caveat, pinned: two same-second shards with NO frontmatter ts order by name."""
+def test_without_fractions_an_unnamed_conflict_fails_closed_to_changes():
+    """Two same-second shards with NO frontmatter ts and no supersession link: the CHANGES dominates."""
     a = _row("feb86aee", "approve", None)
     b = _row("058ddb93", "changes", None)
     kept, _ = review.fold_newest_per_reviewer([a, b])
-    assert kept == [a]
+    assert kept == [b]
 
 
 # --- the typed surface --------------------------------------------------------------------
@@ -187,3 +187,73 @@ def test_the_verb_samples_the_clock_once_so_name_and_frontmatter_seconds_agree(m
     tally, *_ = cli._review_tally(t, TEAM, SLUG)
     assert tally["state"] == "CHANGES"
     assert tally["winning"][REVIEWER]["name"] == new[0].rsplit("/", 1)[-1]
+
+
+# --- explicit supersession (codex-coder, review-winning-envelope r4) ----------------------------
+
+def _row2(name, verdict, key, supersedes=()):
+    return {"reviewer": REVIEWER, "name": name, "verdict": verdict, "sort_key": key, "supersedes": list(supersedes)}
+
+
+A = review.verdict_filename(REVIEWER, head=HEAD, ts="2026-09-05T12:00:10Z", digest="aaaaaaaa")
+C = review.verdict_filename(REVIEWER, head=HEAD, ts="2026-09-05T12:00:09Z", digest="cccccccc")
+
+
+def test_a_later_withdrawal_from_a_host_whose_clock_is_behind_still_dominates():
+    approve = _row2(A, "approve", "2026-09-05T12:00:10.900000Z")
+    changes_from_slow_host = _row2(C, "changes", "2026-09-05T12:00:09.900000Z")   # filed LATER, stamped earlier
+    kept, _ = review.fold_newest_per_reviewer([approve, changes_from_slow_host])
+    assert kept[0]["name"] == C
+
+
+def test_equal_timestamps_fail_closed_to_changes():
+    approve = _row2(A, "approve", "2026-09-05T12:00:10.900000Z")
+    changes = _row2(C, "changes", "2026-09-05T12:00:10.900000Z")
+    assert review.fold_newest_per_reviewer([approve, changes])[0][0]["name"] == C
+
+
+def test_an_approve_lifts_a_changes_only_by_naming_it():
+    changes = _row2(C, "changes", "2026-09-05T12:00:09.900000Z")
+    approve_naming = _row2(A, "approve", "2026-09-05T12:00:08.000000Z", supersedes=[C])   # even with an EARLIER stamp
+    assert review.fold_newest_per_reviewer([changes, approve_naming])[0][0]["name"] == A
+    approve_dangling = _row2(A, "approve", "2026-09-05T12:00:11.000000Z", supersedes=["no-such-shard.md"])
+    assert review.fold_newest_per_reviewer([changes, approve_dangling])[0][0]["name"] == C
+
+
+def test_the_verb_names_every_prior_shard_so_a_verb_filed_approve_lifts_a_prior_changes(monkeypatch):
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD, "--verdict", "changes", "--note", "first"], transport=t) == 0
+    tally, *_ = cli._review_tally(t, TEAM, SLUG)
+    assert tally["state"] == "CHANGES"
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD, "--verdict", "approve", "--note", "fixed"], transport=t) == 0
+    shards = {k: okf.parse_frontmatter(t.store[k]) for k in t.store if k.startswith(PREFIX + f"{HEAD}--{REVIEWER}--")}
+    # pick the APPROVE by its frontmatter — NOT by sorting names, which is the digest-order defect itself
+    approve_path = next(k for k, fm in shards.items() if fm["verdict"] == "approve")
+    changes_path = next(k for k, fm in shards.items() if fm["verdict"] == "changes")
+    assert shards[approve_path]["supersedes"] == [changes_path.rsplit("/", 1)[-1]]
+    tally, *_ = cli._review_tally(t, TEAM, SLUG)
+    assert tally["state"] == "APPROVED" and tally["winning"][REVIEWER]["name"] == approve_path.rsplit("/", 1)[-1]
+
+
+def test_a_degraded_listing_makes_the_verb_supersede_nothing_and_say_so(monkeypatch, capsys):
+    from coord_engine.transport import TransportError
+    t = FakeTransport()
+    _open_review(t, monkeypatch)
+    monkeypatch.setenv("FULCRA_COORD_AGENT", REVIEWER)
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD, "--verdict", "changes", "--note", "first"], transport=t) == 0
+    real = t.list_dir
+    def flaky(prefix):
+        if prefix.endswith("/verdicts/"):
+            raise TransportError("degraded")
+        return real(prefix)
+    monkeypatch.setattr(t, "list_dir", flaky)
+    # rc 3, not 0: the verdict LANDS, and the verb's existing post-write settle-marker check also
+    # cannot list the prefix, so it reports "recorded, but I cannot tell whether a settle marker exists".
+    assert cli.main(["review", "verdict", TEAM, SLUG, "--head", HEAD, "--verdict", "approve", "--note", "fixed"], transport=t) == 3
+    err = capsys.readouterr().err
+    assert "supersedes NOTHING" in err
+    monkeypatch.setattr(t, "list_dir", real)
+    tally, *_ = cli._review_tally(t, TEAM, SLUG)
+    assert tally["state"] == "CHANGES"

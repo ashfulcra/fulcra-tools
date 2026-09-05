@@ -758,6 +758,8 @@ def _scan_review_slug(
             "reviewer": reviewer,
             "verdict": token,
             "name": n,
+            "supersedes": [str(x) for x in (vfm.get("supersedes") or [])
+                           if isinstance(vfm.get("supersedes"), list)],
             # SAME fallback chain as `_tally_from_verdict_entries` — filename
             # ts, then frontmatter ts, then the LISTING MTIME. Projection used
             # to stop at frontmatter, so a plain hand-written shard with no `ts`

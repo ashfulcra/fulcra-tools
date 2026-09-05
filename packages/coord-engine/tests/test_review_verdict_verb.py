@@ -289,15 +289,23 @@ def test_the_PROJECTION_folds_too_or_a_stale_CHANGES_blocks_forever():
     stale CHANGES would have blocked that review permanently, in a fold nobody
     would think to look at.
     """
+    # review-winning-envelope r5: the fold no longer lifts a CHANGES by CLOCK — a
+    # later APPROVE from a host whose clock is behind would otherwise lose, and a
+    # ship gate would validate withdrawn consent. The verb NAMES what it
+    # supersedes, and that link is what folds the stale CHANGES away. A stale
+    # CHANGES still cannot block forever: the reviewer's next verb-filed verdict
+    # names it. An APPROVE that names nothing leaves the CHANGES dominant.
     rows = [
         {"reviewer": REVIEWER, "verdict": "changes", "name": "old.md",
          "sort_key": "2020-01-01T00:00:00Z"},
         {"reviewer": REVIEWER, "verdict": "approve", "name": "new.md",
-         "sort_key": "2026-08-10T05:00:00Z"},
+         "sort_key": "2026-08-10T05:00:00Z", "supersedes": ["old.md"]},
     ]
     kept, folded = review.fold_newest_per_reviewer(rows)
     assert [r["verdict"] for r in kept] == ["approve"]
     assert folded == 1
+    unlinked = [dict(rows[0]), {**rows[1], "supersedes": []}]
+    assert [r["verdict"] for r in review.fold_newest_per_reviewer(unlinked)[0]] == ["changes"]
     assert review.tally(
         [{"reviewer": r["reviewer"], "verdict": r["verdict"]} for r in kept],
         required=[REVIEWER])["state"] == review.APPROVED
