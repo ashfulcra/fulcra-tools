@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r23)
+# coord-fold: Coord on Annotations Implementation Plan (r24)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -44,7 +44,7 @@ G-numbers are stable across revisions so verdicts can cite them.
 - **G24.** *(r5)* **The plan is gated against itself.** Task 0's script materializes every path-tagged block and runs Tasks 1–3's tests; a revision is filed only with that run green, and the filing note carries the output.
 
 - **G29.** *(r9; ruled in r8 by coord-boss `cdfe666e`, re-implemented after both reviewers escaped the in-process harness)* **THE GUARANTEE IS BEHAVIOURAL, OS-ENFORCED, AND OBSERVED AT A PROCESS BOUNDARY.** `tests/proof/run_proof.py` starts a **store server outside the sandbox** (the corpus lives in that process, loaded from a file the sandbox cannot read; it answers only the five fixed request shapes, **refuses and logs everything else**), then runs the **production** `CliPointerReader`/`CliPointerWriter` through all six verbs **inside an OS sandbox** (macOS seatbelt) that denies at the kernel: every network endpoint except the store's socket; every exec except the interpreter; every file read outside the interpreter, the package tree, and its own temp dir; every file write outside that temp dir (and `/dev/null`, a sink, allowed by literal). **Asserted both ways, by name AND by semantics** *(r10, codex-coder round 9: a `get-records` whose cursor is rewritten to the epoch enumerates downstream of an allowed name)*: (1) the clean run — all six verbs exit 0, every request is one of `file stat`, `file download`, `get-records`, `record`, `file upload`, and **the store logs each `get-records` with its channel, its `since`, and the count it returned**: against a 5000-record corpus the first fold reads the corpus once, and the second fold asks from exactly the last observed record minus `OVERLAP_SECONDS` and gets back a bounded count (G31); (2) the attack battery, run inside — `reader._s` does not exist on the production class, the `gc`-recovered original `posix.listdir` is denied by the kernel, `io.open('/etc/hosts')`, `/bin/ls`, reading the corpus file, and an outbound socket are denied, and a direct socket to the store asking `file list` is **logged and refused**; (3) the mutated run — `fold.run` wrapped to issue one `file list` through its own CLI — is **flagged**; (4) **the epoch-rewrite mutation** — the production `_records` sending `since=1970-01-01T00:00:00Z` — is **flagged** by the logged semantics (wrong cursor, unbounded return) although every verb name is allowed. **What this proves and no more (coord-boss `f6ceb0c4`, the weaker true claim):** *these specific capabilities were denied by the kernel and the fold still completed* — NOT "the fold ran with no capabilities". The measured profile is allow-default with kernel denies on the capabilities that matter, because deny-default aborts the interpreter at startup on the proof host (measured, rc 134). *(r11, codex-coder round 10)* Every allowed operation is checked by **semantics**, not prefix: the driver asserts the **exact request sequence of the clean run, with paths** (measured from the run and frozen; a change to the fold changes it deliberately), a **path allowlist** for `file stat/download/upload` (the channel config, the checkpoint, the close evidence — nothing else), per-shape bounds, and — because **the store holds the agent's checkpoint** — that no `get-records` asks from before the cursor the store held at that moment minus the overlap (the first observation from an absent checkpoint is allowed by construction; the epoch rewrite is flagged because a checkpoint exists by then) — so a production reader that point-probes thousands of guessed paths (phase 5, his mutation) is flagged although every request name is allowed. **What it does not claim:** that enumeration is impossible to write, that the fold cannot detect it is under test, or that a Python process can hide anything from code running inside it. **The driver exits 3 (UNKNOWN) where no OS sandbox exists — never green by absence, never softened to a skip.** Ruling `f6ceb0c4`: **no bwrap profile is written until it can be measured** — an untested sandbox profile reads as proof and is not. macOS is the proof host; Linux CI stays UNKNOWN; **the gate is that the proof ran and passed on at least one host, recorded with which host and when** — the driver prints host, platform and UTC time in its final line and the filing note carries it. Measured on this host before filing: the unit suite passes *inside* the sandbox; the proof passed all five phases (numbers in Task 1 Step 5).
-- **G32.** *(r9; ruled `f6ceb0c4`; r12 per codex-coder round 11)* **No automated gate claims anti-consolidation, and the plan says so: *the gates do not check this*.** Seven rounds proved the automated form cannot close the class. **But the requester's acceptance condition stands** — *"if all five structural checks can pass with one big file, the plan is not ready"* — and a scope ruling on the bus does not waive it; codex-coder is right that recording the hole honestly is not closing it. So it is closed the only way the ruling allows: **a review-shaped ship gate (Task 16), bound to what ships** *(r13, both reviewers round 12)* — a required reviewer *reads the on-disk tree of the exact implementation commit* against a written rubric and files a verdict on a ship register keyed by that head, quoting the head and git's tree hash for the package; **any head change invalidates it, nothing carries forward from plan time, and the ship check refuses without both approvals on that exact head.** coord-boss ruled no waiver (`5ccfce26`). The automated checks that survive (symbols defined where planned, tree = manifest, DAG) are described as what they are: cheap facts, not the criterion. The answer to the review question is therefore: *yes, a ≤400-line `cli.py` behind owner shims would pass every automated check — and it would fail Task 16, which is a person or agent reading it.*
+- **G32.** *(r9; ruled `f6ceb0c4`; r12 per codex-coder round 11)* **No automated gate claims anti-consolidation, and the plan says so: *the gates do not check this*.** Seven rounds proved the automated form cannot close the class. **But the requester's acceptance condition stands** — *"if all five structural checks can pass with one big file, the plan is not ready"* — and a scope ruling on the bus does not waive it; codex-coder is right that recording the hole honestly is not closing it. So it is closed the only way the ruling allows: **a review-shaped ship gate (Task 16), bound to what ships** *(r13, both reviewers round 12)* — a required reviewer *reads the on-disk tree of the exact implementation commit* against a written rubric and files a verdict on a ship register keyed by that head, quoting the head and git's tree hash for the package; **any head change invalidates it, nothing carries forward from plan time, and the ship check refuses without both approvals on that exact head.** coord-boss ruled no waiver (`5ccfce26`). **The automated checks do not prove responsibility distribution and are never described as doing so** *(codex-reviewer, rounds 13–21, repeatedly)*: a ≤400-line owner file can hold essentially all logic while the manifest-named modules are thin, and every automated check passes. Task 16 — the exact-head, exact-tree human review — is the anti-consolidation gate. The automated checks that survive (symbols defined where planned, tree = manifest, DAG) are cheap facts, not the criterion. The answer to the review question is therefore: *yes, a ≤400-line `cli.py` behind owner shims would pass every automated check — and it would fail Task 16, which is a person or agent reading it.*
 - **G34.** *(r13, codex-reviewer)* **The §7 reconciler stays out of the fold path as an invariant, not a habit:** `fold`/`status` never invoke, await, or freshness-gate on the reconciler. Evidence, all already in the plan: the import graph never reaches `coord_engine` (Task 1 truths); inside the proof every exec but the interpreter is denied and the clean run's exact request sequence contains no reconciler call (G29); the CLI has no flag that reaches one (Task 7).
 - **G33.** *(r11, named property per `f6ceb0c4`)* **Denial is indifferent to how code arrives.** Because the denial is the kernel's, it holds regardless of what the source says — written module, generated module, alias, annotation, `getattr` — a property of what the process *cannot do*, not of what a gate looks for. In r8's in-process harness this surfaced as "the import machinery itself enumerates" (an uncached module could not be imported under denial); under the OS sandbox that special case is not needed and not claimed: a module the fold writes to its temp dir *can* be imported and faces the same denies.
 - **G31.** *(r8, codex-coder round 7)* **The cursor passes irrelevant records.** The cursor is the `recorded_at` of the last **observed** record before the first **unapplied relevant** event. Records that are unparseable, foreign-schema, or addressed to someone else are observed and passed, never re-read; otherwise an agent with no recent addressed events would re-read every other agent's traffic on every pass — corpus-shaped work at rc 0. This is consistent with G26: a *gap* is an unapplied relevant event, not an irrelevant one. Test: thousands of other-agent events after the last relevant one are not re-read on the next pass.
@@ -2127,7 +2127,7 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 1. **When.** Only after implementation, on the **exact implementation commit** `<HEAD>` (40-hex) whose on-disk `packages/coord-fold/` is what ships. Never at plan time. Reading the materialized plan tree earlier is welcome as *feedback* and **carries nothing**.
 2. **Register.** `coord-engine review request fulcra coord-fold-ship-<HEAD> --of packages/coord-fold --head <HEAD> --reviewer codex-reviewer --reviewer codex-coder`. The engine's `--head` keying means any head change is a new round with no verdicts.
 3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file with the **typed verb, nothing hand-uploaded**: `coord-engine review verdict fulcra coord-fold-ship-<HEAD> --head <HEAD> --verdict approve --from <reviewer> --note "tree: <git rev-parse <HEAD>:packages/coord-fold> …reading…"`. The engine writes an **append-only envelope** `verdicts/<HEAD>--<reviewer>--<UTC timestamp>-<nonce>.md` (as every verdict on this plan's register demonstrates); the `tree:` line in the note is the evidence. A verdict whose `tree` differs from the commit's is void.
-4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite — bound to an APPROVED AND PINNED engine, never to a named commit** *(r16; codex-reviewer round 13 P0 one, verified at source by coord-boss `149e7d11`: the commit r15 named still had the double clock sample, so a named prerequisite bought nothing)*: `ship_check` downloads the fleet pin from `team/<team>/_coord/bus-v3/records.json`'s sibling `adopt-latest.sh` (the plan's own rule: pins come from there, never from a slug) and requires `PIN ∈ APPROVED_ENGINE_PINS` — a list in the script that is **empty until a deliberate plan revision adds the head that register `review-winning-envelope-e9c0089b` reads APPROVED for and that the pin PR shipped**. Until then `ship_check` refuses, which is the correct state. **And the pin must be the engine that answers** *(r17, codex-reviewer round 14: on a lagging host the authority can name an approved pin while `PATH` still executes an older engine that exposes `winning` with stale-approval defects)*: `ship_check` resolves the `coord-engine` executable it will call, reads `vcs_info.commit_id` from the `direct_url.json` beside the installed `coord_engine-*.dist-info` — the build-identity mechanism `adopt-latest.sh` itself uses — and refuses unless that commit equals the pin; no executable, no `direct_url.json`, or a different commit is a refusal **before** `winning` is consumed. **And the module that answers must be that build** *(r18, codex-coder round 15, reproduced end to end by coord-boss `8268376f`: a pinned launcher answered with a capability its build lacks because `subprocess.run` inherits `PYTHONPATH`/`PYTHONHOME` and an editable tree shadowed the installed package while `importlib.metadata` still reported the approved commit)*: `ship_check` resolves the executable **once, in `main`**, and passes that absolute path to *both* the identity read and every invocation — a bound runner, so no second `which` can ever run *(r19, both reviewers round 16: r18 resolved twice, and a `PATH` swap between the identity read and `review status` would let approved launcher A authorise unapproved launcher B; the regression makes `which` answer A then B and asserts exactly one resolution and that A is what executes)* — and *(r20, codex-coder round 17: scrubbing the environment blocks `PYTHONPATH`/`PYTHONHOME` only; a `.pth` or `sitecustomize.py` inside the launcher's own environment can prepend a stale tree while the adjacent dist-info still names the pin — on the proof host that site-packages already carries a `_virtualenv.pth`)* **the process that answers attests itself**: `ship_check` never runs the launcher for the status. It spawns the launcher environment's own interpreter with **`-I -S`** (no environment variables, no user site, no `.pth` processing, no `sitecustomize`/`usercustomize`), inserts exactly the verified dist's site-packages on `sys.path`, imports `coord_engine`, and in that same process reports `coord_engine.__file__`, the `direct_url` commit via `importlib.metadata`, and `review status --json` computed in-process by `coord_engine.cli.main`. **Before importing** *(r22, codex-coder round 19: "under the same site-packages" bound nothing — a stale `coord_engine/` beside an approved dist-info, or a duplicate dist-info, passed)* the attestation requires **exactly one** `coord_engine-*.dist-info`, reads **that** dist-info's `RECORD` and `direct_url.json` by path (never a name lookup), requires **every** non-`__pycache__` `coord_engine/**` row to carry a supported `sha256=` digest and an integer size and verifies both against the file — a row with an empty, unknown, or malformed hash is a refusal, not a skip *(r23, both reviewers round 20: a hashed `__init__.py` plus a hashless replaced `cli.py` passed)* — and refuses any file present under the package that RECORD does not list. **Bytecode cannot answer** *(r23, codex-coder: an unchecked-hash `.pyc` beside verified source is executed without consulting the source)*: the attestation runs with `-B` and a fresh, empty `pycache_prefix`, so the import system never looks at `__pycache__` beside the source and compiles the verified source (PEP 552), and any sourceless `.pyc`/`.pyo`/`.pyd`/`.so` present under the package refuses outright. The bytes that answer are the bytes the approved distribution installed. Measured on the proof host: one dist-info, 50 recorded files verified, none mismatched, none unrecorded. It refuses unless the answering module's file lies under that site-packages **and** the in-process commit equals the pin **and** *(r21, both reviewers round 18)* the attestation process exited 0, the in-process `review status` returned 0, and the payload is a dict of the expected shape — a status that says APPROVED while returning rc 3 (UNKNOWN) is a refusal, exactly as r19's `rc == 0` guard had it before the attestation replaced the direct call. Measured on the proof host: the isolated attestation imports from under site-packages, reports `985a4be3` (the fleet pin), and answers the status. Regressions: a shadow `coord_engine` on `PYTHONPATH` is imported under the inherited environment and not under the scrubbed one; and a tool environment whose site-packages holds both a `.pth` and a `sitecustomize.py` prepending a shadow imports the shadow under a normal site-enabled start and the approved package under the attestation. `winning` in `review status --json` is then the **supersession fold's** kept shard, under whatever contract the engine register's APPROVED head carries — at round 8 that contract is: any CHANGES not resolved by a later shard dominates regardless of timestamp; an APPROVE lifts a CHANGES only by an edge that binds the target's **content digest** (so an in-place rewrite of a mutable shard un-resolves it) **and** whose target the **store's server-assigned mtime** proves strictly earlier than the superseder (so a predeclared edge to a later-written target never resolves; same minute or unknown fails closed). Rounds 6 and 7 called a name, then a client-written nonce, "causal"; both were wrong, because both were client-controlled — only the store supplies facts the client cannot choose. Self-links, dangling names, digest mismatches, equal keys and unproven causality fail closed to CHANGES and are surfaced as `malformed_supersedes`. **Both authoritative filename forms are accepted** *(P0 two, confirmed live on this very register: `<HEAD>--<reviewer>.md` and `<HEAD>--<reviewer>--<ts>-<digest>.md` coexist on the current head)*: a winning name is valid if it is exactly `<HEAD>--<reviewer>.md` or starts with `<HEAD>--<reviewer>--`; the fold, not the gate, decides which won. Any absence — no `winning`, no fold, a pin not in the approved set, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
+4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the exact winning shard the fold kept — `winning[reviewer].name` in that JSON — ** says `approve` and quotes the commit's tree hash. *(r15, both reviewers round 14: same-second shards were ordered by digest, so a refolded "latest" could be an earlier APPROVE; the ship check now never refolds filenames.)* **Engine prerequisite — bound to an APPROVED AND PINNED engine, never to a named commit** *(r16; codex-reviewer round 13 P0 one, verified at source by coord-boss `149e7d11`: the commit r15 named still had the double clock sample, so a named prerequisite bought nothing)*: `ship_check` downloads the fleet pin from `team/<team>/_coord/bus-v3/records.json`'s sibling `adopt-latest.sh` (the plan's own rule: pins come from there, never from a slug) and requires `PIN ∈ APPROVED_ENGINE_PINS` — a list in the script that is **empty until a deliberate plan revision adds the head that register `review-winning-envelope-e9c0089b` reads APPROVED for and that the pin PR shipped**. Until then `ship_check` refuses, which is the correct state. **And the pin must be the engine that answers** *(r17, codex-reviewer round 14: on a lagging host the authority can name an approved pin while `PATH` still executes an older engine that exposes `winning` with stale-approval defects)*: `ship_check` resolves the `coord-engine` executable it will call, reads `vcs_info.commit_id` from the `direct_url.json` beside the installed `coord_engine-*.dist-info` — the build-identity mechanism `adopt-latest.sh` itself uses — and refuses unless that commit equals the pin; no executable, no `direct_url.json`, or a different commit is a refusal **before** `winning` is consumed. **And the module that answers must be that build** *(r18, codex-coder round 15, reproduced end to end by coord-boss `8268376f`: a pinned launcher answered with a capability its build lacks because `subprocess.run` inherits `PYTHONPATH`/`PYTHONHOME` and an editable tree shadowed the installed package while `importlib.metadata` still reported the approved commit)*: `ship_check` resolves the executable **once, in `main`**, and passes that absolute path to *both* the identity read and every invocation — a bound runner, so no second `which` can ever run *(r19, both reviewers round 16: r18 resolved twice, and a `PATH` swap between the identity read and `review status` would let approved launcher A authorise unapproved launcher B; the regression makes `which` answer A then B and asserts exactly one resolution and that A is what executes)* — and *(r20, codex-coder round 17: scrubbing the environment blocks `PYTHONPATH`/`PYTHONHOME` only; a `.pth` or `sitecustomize.py` inside the launcher's own environment can prepend a stale tree while the adjacent dist-info still names the pin — on the proof host that site-packages already carries a `_virtualenv.pth`)* **the process that answers attests itself**: `ship_check` never runs the launcher for the status. It spawns the launcher environment's own interpreter with **`-I -S`** (no environment variables, no user site, no `.pth` processing, no `sitecustomize`/`usercustomize`), inserts exactly the verified dist's site-packages on `sys.path`, imports `coord_engine`, and in that same process reports `coord_engine.__file__`, the `direct_url` commit via `importlib.metadata`, and `review status --json` computed in-process by `coord_engine.cli.main`. **Before importing** *(r22–r24)* the attestation requires **exactly one** `coord_engine-*.dist-info` (ambiguity refuses) and binds the executing bytes to something **outside the tool environment that cannot be edited to match** *(r24, codex-reviewer round 21: `RECORD` and `direct_url.json` are both mutable files in the same environment — replace `cli.py`, regenerate its RECORD row, leave `direct_url` naming the pin, and every r23 check passed)*: `ship_check` reads the **pinned commit's own `coord_engine/` tree** from the repository clone it runs in (`git ls-tree -r <PIN>:packages/coord-engine/coord_engine`; a pin whose commit is not in the clone refuses), and the attestation verifies every present non-`__pycache__` package file's **git blob hash** against that tree — no missing files, no extra files. The commit id fixes the tree; nothing in the environment can be regenerated to satisfy it. `RECORD` is no longer load-bearing and `direct_url.json` is reported, not trusted. Measured on the proof host: 50 pinned-tree entries, 50 present, 50 blob matches, none missing, none extra. **Bytecode cannot answer** *(r23, codex-coder: an unchecked-hash `.pyc` beside verified source is executed without consulting the source)*: the attestation runs with `-B` and a fresh, empty `pycache_prefix`, so the import system never looks at `__pycache__` beside the source and compiles the verified source (PEP 552), and any sourceless `.pyc`/`.pyo`/`.pyd`/`.so` present under the package refuses outright. The bytes that answer are the bytes the approved distribution installed. Measured on the proof host: one dist-info, 50 recorded files verified, none mismatched, none unrecorded. It refuses unless the answering module's file lies under that site-packages **and** the in-process commit equals the pin **and** *(r21, both reviewers round 18)* the attestation process exited 0, the in-process `review status` returned 0, and the payload is a dict of the expected shape — a status that says APPROVED while returning rc 3 (UNKNOWN) is a refusal, exactly as r19's `rc == 0` guard had it before the attestation replaced the direct call. Measured on the proof host: the isolated attestation imports from under site-packages, reports `985a4be3` (the fleet pin), and answers the status. Regressions: a shadow `coord_engine` on `PYTHONPATH` is imported under the inherited environment and not under the scrubbed one; and a tool environment whose site-packages holds both a `.pth` and a `sitecustomize.py` prepending a shadow imports the shadow under a normal site-enabled start and the approved package under the attestation. `winning` in `review status --json` is then the **supersession fold's** kept shard, under whatever contract the engine register's APPROVED head carries — at round 8 that contract is: any CHANGES not resolved by a later shard dominates regardless of timestamp; an APPROVE lifts a CHANGES only by an edge that binds the target's **content digest** (so an in-place rewrite of a mutable shard un-resolves it) **and** whose target the **store's server-assigned mtime** proves strictly earlier than the superseder (so a predeclared edge to a later-written target never resolves; same minute or unknown fails closed). Rounds 6 and 7 called a name, then a client-written nonce, "causal"; both were wrong, because both were client-controlled — only the store supplies facts the client cannot choose. Self-links, dangling names, digest mismatches, equal keys and unproven causality fail closed to CHANGES and are surfaced as `malformed_supersedes`. **Both authoritative filename forms are accepted** *(P0 two, confirmed live on this very register: `<HEAD>--<reviewer>.md` and `<HEAD>--<reviewer>--<ts>-<digest>.md` coexist on the current head)*: a winning name is valid if it is exactly `<HEAD>--<reviewer>.md` or starts with `<HEAD>--<reviewer>--`; the fold, not the gate, decides which won. Any absence — no `winning`, no fold, a pin not in the approved set, an unreadable shard — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
 
 | Module | The reviewer confirms, by reading the shipped tree |
 |---|---|
@@ -2186,50 +2186,40 @@ def sh(*argv):
 
 
 ATTEST = r"""
-import sys, json, io, contextlib, os, glob, csv, hashlib, base64
-site = sys.argv[1]; team = sys.argv[2]; slug = sys.argv[3]
+import sys, json, io, contextlib, os, glob, hashlib
+site = sys.argv[1]; team = sys.argv[2]; slug = sys.argv[3]; tree_file = sys.argv[4]
 def refuse(why):
     print(json.dumps({"refused": why})); sys.exit(2)
 dis = sorted(glob.glob(os.path.join(site, "coord_engine-*.dist-info")))
 if len(dis) != 1:
     refuse(f"{len(dis)} coord_engine dist-infos under site-packages; exactly one is required")
-di = dis[0]
-rec = os.path.join(di, "RECORD")
-if not os.path.exists(rec):
-    refuse("no RECORD beside the dist-info: the installed bytes cannot be bound")
-recorded, verified = set(), 0
-with open(rec, newline="") as fh:
-    for row in csv.reader(fh):
-        if not row or not row[0].startswith("coord_engine/"):
-            continue
-        path = row[0]
-        if "/__pycache__/" in path:
-            continue                                   # bytecode rows are never trusted; bytecode never answers (below)
-        if len(row) < 3:
-            refuse(f"malformed RECORD row for {path}")
-        h, size = row[1], row[2]
-        algo, _, b64 = h.partition("=")
-        if algo != "sha256" or not b64 or not size.isdigit():
-            refuse(f"RECORD row for {path} has no usable sha256 digest/size — an unbound package file")
-        full = os.path.join(site, path)
-        if not os.path.exists(full):
-            refuse(f"recorded file missing: {path}")
-        data = open(full, "rb").read()
-        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
-        if digest != b64 or int(size) != len(data):
-            refuse(f"recorded file does not match its RECORD hash/size: {path}")
-        recorded.add(path)
-        verified += 1
-present = {os.path.relpath(os.path.join(dp, f), site) for dp, _, fs in os.walk(os.path.join(site, "coord_engine")) for f in fs if "__pycache__" not in dp}
+expected = json.load(open(tree_file))                     # relpath -> git blob sha1, from the PINNED COMMIT's tree
+if not expected:
+    refuse("the pinned commit's coord_engine tree is empty or unreadable")
+pkg = os.path.join(site, "coord_engine")
+present = {os.path.relpath(os.path.join(dp, f), pkg) for dp, _, fs in os.walk(pkg) for f in fs if "__pycache__" not in dp}
 sourceless = sorted(f for f in present if f.endswith((".pyc", ".pyo", ".pyd", ".so")))
 if sourceless:
     refuse(f"compiled/sourceless files under coord_engine/ could answer: {sourceless[:3]}")
-extra = sorted(present - recorded)
+missing = sorted(set(expected) - present)
+if missing:
+    refuse(f"files in the pinned commit's tree are missing from the installed package: {missing[:3]}")
+extra = sorted(present - set(expected))
 if extra:
-    refuse(f"files under coord_engine/ that RECORD does not list: {extra[:3]}")
+    refuse(f"files under coord_engine/ that the pinned commit's tree does not contain: {extra[:3]}")
+verified = 0
+for rel, want in sorted(expected.items()):
+    data = open(os.path.join(pkg, rel), "rb").read()
+    got = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    if got != want:
+        refuse(f"installed file does not match the pinned commit's blob: {rel}")
+    verified += 1
 if sys.pycache_prefix is None or os.listdir(sys.pycache_prefix):
     refuse("bytecode is not redirected to a fresh empty pycache_prefix; stale __pycache__ could answer")
-du = json.load(open(os.path.join(di, "direct_url.json")))
+try:
+    du = json.load(open(os.path.join(dis[0], "direct_url.json")))
+except (OSError, ValueError):
+    du = {}
 sys.path.insert(0, site)
 import coord_engine
 from coord_engine import cli
@@ -2237,8 +2227,8 @@ buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     rc = cli.main(["review", "status", team, slug, "--json"])
 lines = [l for l in buf.getvalue().splitlines() if l.startswith("{")]
-print(json.dumps({"file": os.path.realpath(coord_engine.__file__), "commit": du.get("vcs_info", {}).get("commit_id"),
-                  "record_verified": verified, "dist_info": os.path.basename(di),
+print(json.dumps({"file": os.path.realpath(coord_engine.__file__), "reported_commit": du.get("vcs_info", {}).get("commit_id"),
+                  "tree_verified": verified, "dist_info": os.path.basename(dis[0]),
                   "rc": rc, "status": json.loads(lines[-1]) if lines else None}))
 sys.exit(rc)                      # the outer process carries the inner verdict's rc too; both are checked
 """
@@ -2258,17 +2248,36 @@ def dist_site_packages(exe):
     return None
 
 
-def attested_status(exe, team, slug):
+def pinned_tree(pin):
+    """{relpath: git blob sha1} for coord_engine/** at the PINNED COMMIT, read from the clone ship_check runs in.
+    The commit id fixes this tree; nothing inside a tool environment can be regenerated to satisfy it.
+    None if the commit is not in the clone (fail closed: fetch it, do not guess)."""
+    rc, _, _ = sh("git", "cat-file", "-e", f"{pin}^{{commit}}")
+    if rc:
+        return None
+    rc, out, _ = sh("git", "ls-tree", "-r", "--format=%(objectname) %(path)", f"{pin}:packages/coord-engine/coord_engine")
+    if rc or not out:
+        return None
+    return {path: obj for obj, path in (line.split(" ", 1) for line in out.splitlines() if " " in line)}
+
+
+def attested_status(exe, team, slug, pin):
     """The status, from a process that PROVES what answered it (codex-coder, round 17): the launcher
     env's interpreter under -I -S (no env, no user site, no .pth, no sitecustomize), exactly one path
-    on sys.path — the verified dist's site-packages — and the fold computed in that same process.
+    on sys.path — the verified dist's site-packages — the executing bytes verified against the PINNED
+    COMMIT's tree (codex-reviewer, round 21), and the fold computed in that same process.
     -> (ok, detail, status_dict_or_None)."""
     py, site = engine_python(exe), dist_site_packages(exe)
     if not py or not site:
         return False, f"no interpreter/site-packages beside {exe}", None
+    tree = pinned_tree(pin)
+    if not tree:
+        return False, f"the pinned commit {pin} (or its coord_engine tree) is not in this clone — fetch it; not guessing", None
     import tempfile
     fresh_pycache = tempfile.mkdtemp(prefix="coord-fold-attest-pyc-")     # empty: no stale bytecode can be consulted (PEP 552)
-    p = subprocess.run([py, "-I", "-S", "-B", "-X", f"pycache_prefix={fresh_pycache}", "-c", ATTEST, site, team, slug], capture_output=True, text=True, env=engine_env())
+    tree_file = pathlib.Path(fresh_pycache).parent / (pathlib.Path(fresh_pycache).name + ".tree.json")
+    tree_file.write_text(json.dumps(tree))
+    p = subprocess.run([py, "-I", "-S", "-B", "-X", f"pycache_prefix={fresh_pycache}", "-c", ATTEST, site, team, slug, str(tree_file)], capture_output=True, text=True, env=engine_env())
     try:
         a = json.loads([l for l in p.stdout.splitlines() if l.startswith("{")][-1])
     except (ValueError, IndexError):
@@ -2277,8 +2286,8 @@ def attested_status(exe, team, slug):
         return False, "attestation payload is not an object", None
     if a.get("refused"):
         return False, f"the attestation refused before importing: {a['refused']}", None
-    if not isinstance(a.get("record_verified"), int) or a["record_verified"] < 1:
-        return False, "the attestation verified no recorded package files", None
+    if a.get("tree_verified") != len(tree):
+        return False, f"the attestation verified {a.get('tree_verified')!r} files against the pinned tree of {len(tree)}", None
     if not str(a.get("file", "")).startswith(site + os.sep):
         return False, f"the module that answered lives at {a.get('file')!r}, not under {site} — a startup hook or shadow tree answered", None
     # BOTH exit codes, before any status is trusted (both reviewers, round 18): a status that
@@ -2288,7 +2297,7 @@ def attested_status(exe, team, slug):
     status = a.get("status")
     if not isinstance(status, dict) or not isinstance(status.get("state"), str) or not isinstance(status.get("approvals"), list) or not isinstance(status.get("head"), str):
         return False, "the attested status is not a review tally of the expected shape", None
-    return True, a.get("commit"), status
+    return True, pin, status                                   # the binding is the tree, not a reported commit
 
 
 def executing_engine_commit(exe):
@@ -2331,7 +2340,7 @@ def main(team: str, head: str) -> int:
     if local != pin:
         print(f"ship_check: the coord-engine at {exe} is build {local!r}, not the approved pin {pin} — refusing; a lagging host must not trust its own unapproved fold"); return 1
     slug = f"coord-fold-ship-{head}"
-    ok, detail, fold = attested_status(exe, team, slug)                 # the answering process attests itself
+    ok, detail, fold = attested_status(exe, team, slug, pin)            # the answering process attests itself against the PINNED tree
     if not ok:
         print(f"ship_check: {detail} — refusing"); return 1
     if detail != pin:
@@ -2438,10 +2447,21 @@ def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "
 
 
 def _attest_from(fake, attested_commit=PIN):
-    def attested(exe, team, slug):
+    def attested(exe, team, slug, pin):
         rc, out, _ = fake("coord-engine", "review", "status", team, slug, "--json")
         return True, attested_commit, json.loads(out)
     return attested
+
+
+def _blob(path):
+    import hashlib
+    data = pathlib.Path(path).read_bytes()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _tree_of(site):
+    pkg = site / "coord_engine"
+    return {str(f.relative_to(pkg)): _blob(f) for f in pkg.rglob("*") if f.is_file() and "__pycache__" not in f.parts}
 
 
 def run(monkeypatch, local=PIN, attested_commit=PIN, **kw):
@@ -2457,7 +2477,7 @@ def test_the_answering_process_reporting_another_build_refuses(monkeypatch, caps
     assert "process that answered reports build" in capsys.readouterr().out
 
 
-def test_a_pth_or_sitecustomize_shadow_wins_under_site_and_loses_under_the_attestation(tmp_path):
+def test_a_pth_or_sitecustomize_shadow_wins_under_site_and_loses_under_the_attestation(tmp_path, monkeypatch):
     """codex-coder round 17: env scrubbing does not stop startup hooks INSIDE the launcher environment.
     Build one with an approved dist-info AND a .pth AND a sitecustomize that prepend a shadow tree."""
     import subprocess, sys
@@ -2473,8 +2493,9 @@ def test_a_pth_or_sitecustomize_shadow_wins_under_site_and_loses_under_the_attes
     hole = subprocess.run([sys.executable, "-c", f"import site; site.addsitedir({str(site)!r}); import coord_engine; print(coord_engine.WHO)"],
                           capture_output=True, text=True, env=ship_check.engine_env()).stdout.strip()
     assert hole == "SHADOW"
-    # the fix: the attestation under -I -S with exactly the verified site-packages
-    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    # the fix: the attestation under -I -S with exactly the verified site-packages, bytes bound to the pinned tree
+    _pin_tree(monkeypatch, launcher)
+    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
     assert ok and commit == PIN and status["state"] == "APPROVED"
 
 
@@ -2507,46 +2528,84 @@ def _site_of(launcher):
     return launcher.parent.parent / "lib" / "python3.13" / "site-packages"
 
 
-def test_a_stale_package_beside_approved_metadata_is_refused_by_record(tmp_path):
-    """codex-coder round 19: approved dist-info + a replaced coord_engine/cli.py returning rc0 APPROVED."""
-    launcher = _tool_env(tmp_path, "def main(argv):\n    print('{}')\n    return 3\n")          # what the distribution installed
-    (_site_of(launcher) / "coord_engine" / "cli.py").write_text(APPROVED_CLI)                       # replaced in place
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
-    assert not ok and "does not match its RECORD" in detail
+def _pin_tree(monkeypatch, launcher):
+    """The pinned commit's tree is what the distribution installed — modelled from the env BEFORE any tampering."""
+    tree = _tree_of(_site_of(launcher))
+    monkeypatch.setattr(ship_check, "pinned_tree", lambda pin: dict(tree))
+    return tree
 
 
-def test_an_unrecorded_file_under_the_package_is_refused(tmp_path):
+def test_replacing_cli_and_regenerating_its_record_row_is_refused_by_the_pinned_tree(tmp_path, monkeypatch):
+    """codex-reviewer round 21: RECORD and direct_url are mutable; regenerate the row and r23 passed. The pinned
+    commit's tree cannot be regenerated from inside the environment."""
+    launcher = _tool_env(tmp_path, "def main(argv):\n    print('{}')\n    return 3\n")
+    _pin_tree(monkeypatch, launcher)
+    site = _site_of(launcher)
+    (site / "coord_engine" / "cli.py").write_text(APPROVED_CLI)                                     # replaced...
+    (site / "coord_engine-2.0.6.dist-info" / "RECORD").write_text("\n".join(_record_line(site, r) for r in ("coord_engine/__init__.py", "coord_engine/cli.py")) + "\n")   # ...and RECORD regenerated to match
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    assert not ok and "does not match the pinned commit's blob" in detail
+
+
+def test_an_extra_or_missing_file_versus_the_pinned_tree_is_refused(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
-    (_site_of(launcher) / "coord_engine" / "extra.py").write_text("")
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
-    assert not ok and "RECORD does not list" in detail
+    _pin_tree(monkeypatch, launcher)
+    site = _site_of(launcher)
+    (site / "coord_engine" / "extra.py").write_text("")
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    assert not ok and "does not contain" in detail
+    (site / "coord_engine" / "extra.py").unlink(); (site / "coord_engine" / "cli.py").unlink()
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    assert not ok and "missing from the installed package" in detail
 
 
-def test_duplicate_dist_info_is_refused(tmp_path):
+def test_duplicate_dist_info_is_refused(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
+    _pin_tree(monkeypatch, launcher)
     (_site_of(launcher) / "coord_engine-2.0.5.dist-info").mkdir()
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "exactly one is required" in detail
 
 
-def test_a_missing_record_is_refused(tmp_path):
+def test_a_pin_not_in_the_clone_refuses(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
-    (_site_of(launcher) / "coord_engine-2.0.6.dist-info" / "RECORD").unlink()
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
-    assert not ok and "no RECORD" in detail
+    monkeypatch.setattr(ship_check, "pinned_tree", lambda pin: None)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    assert not ok and "not in this clone" in detail
 
 
-def test_a_hashless_record_row_for_a_replaced_cli_is_refused(tmp_path):
-    """Both reviewers, round 20: hashed __init__.py + hashless cli.py row + replaced cli.py passed."""
+def test_pinned_tree_reads_the_commit_from_a_real_git_clone_and_the_intact_package_attests(tmp_path, monkeypatch):
+    """The positive path through real git: commit the package, read its tree, verify the installed copy."""
+    import subprocess, os
+    launcher = _tool_env(tmp_path, APPROVED_CLI)
+    site = _site_of(launcher)
+    repo = tmp_path / "repo"; (repo / "packages" / "coord-engine").mkdir(parents=True)
+    import shutil as _sh
+    _sh.copytree(site / "coord_engine", repo / "packages" / "coord-engine" / "coord_engine")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.invalid", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.invalid"}
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-q", "-m", "pin"]):
+        subprocess.run(cmd, cwd=repo, check=True, env=env, capture_output=True)
+    pin = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    monkeypatch.chdir(repo)
+    tree = ship_check.pinned_tree(pin)
+    assert tree == _tree_of(site)
+    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", pin)
+    assert ok and commit == pin and status["state"] == "APPROVED"
+
+
+def test_a_replaced_cli_with_any_record_content_is_refused_by_the_pinned_tree(tmp_path, monkeypatch):
+    """Round 20's hashless-row case and round 21's regenerated-row case are the same case under r24: RECORD is
+    not consulted; the pinned tree is."""
     launcher = _tool_env(tmp_path, "def main(argv):\n    print('{}')\n    return 3\n")
+    _pin_tree(monkeypatch, launcher)
     site = _site_of(launcher)
     (site / "coord_engine" / "cli.py").write_text(APPROVED_CLI)
     (site / "coord_engine-2.0.6.dist-info" / "RECORD").write_text(_record_line(site, "coord_engine/__init__.py") + "\ncoord_engine/cli.py,,\n")
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
-    assert not ok and "no usable sha256" in detail
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    assert not ok and "does not match the pinned commit's blob" in detail
 
 
-def test_stale_unchecked_hash_bytecode_answers_under_a_normal_import_and_never_under_the_attestation(tmp_path):
+def test_stale_unchecked_hash_bytecode_answers_under_a_normal_import_and_never_under_the_attestation(tmp_path, monkeypatch):
     """codex-coder, round 20: __pycache__ was excluded from the check, and an unchecked-hash .pyc is executed
     without consulting the source. The verified source returns rc 3; a stale pyc compiled from APPROVED_CLI sits
     beside it. Normal import: the pyc answers APPROVED. Attestation (-B, fresh pycache_prefix): the source answers."""
@@ -2560,33 +2619,38 @@ def test_stale_unchecked_hash_bytecode_answers_under_a_normal_import_and_never_u
     hole = subprocess.run([sys.executable, "-c", f"import site; site.addsitedir({str(site)!r}); from coord_engine import cli; print(cli.main(['x','x','x','x']))"],
                           capture_output=True, text=True, env=ship_check.engine_env()).stdout.strip().splitlines()
     assert hole and hole[-1] == "0", hole                              # the stale bytecode answered rc 0 (the hole, asserted)
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    _pin_tree(monkeypatch, launcher)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "rc 3" in detail                                 # the verified SOURCE answered (rc 3) — bytecode never consulted
 
 
-def test_a_sourceless_pyc_under_the_package_is_refused(tmp_path):
+def test_a_sourceless_pyc_under_the_package_is_refused(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
+    _pin_tree(monkeypatch, launcher)
     (_site_of(launcher) / "coord_engine" / "helper.pyc").write_bytes(b"\x00")
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
-    assert not ok and ("could answer" in detail or "does not list" in detail)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    assert not ok and ("could answer" in detail or "does not contain" in detail)
 
 
-def test_a_recorded_intact_package_attests_and_answers(tmp_path):
+def test_a_recorded_intact_package_attests_and_answers(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
-    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    _pin_tree(monkeypatch, launcher)
+    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
     assert ok and commit == PIN and status["state"] == "APPROVED"
 
 
-def test_an_approved_shaped_status_that_returns_rc_3_is_refused(tmp_path):
+def test_an_approved_shaped_status_that_returns_rc_3_is_refused(tmp_path, monkeypatch):
     """Both reviewers, round 18: the inner verdict's rc was recorded and never checked."""
     launcher = _tool_env(tmp_path, "import json\ndef main(argv):\n    print(json.dumps({'state': 'APPROVED', 'head': 'x', 'approvals': ['codex-reviewer', 'codex-coder'], 'winning': {}}))\n    return 3\n")
-    ok, detail, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    _pin_tree(monkeypatch, launcher)
+    ok, detail, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "rc 3" in detail and status is None
 
 
-def test_a_status_of_the_wrong_shape_is_refused(tmp_path):
+def test_a_status_of_the_wrong_shape_is_refused(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, "def main(argv):\n    print('[1, 2]')\n    return 0\n")
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
+    _pin_tree(monkeypatch, launcher)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "expected shape" in detail
 
 
@@ -2603,8 +2667,9 @@ def test_the_attestation_refuses_a_module_answering_from_outside_the_verified_si
     (elsewhere / "coord_engine" / "cli.py").write_text("def main(argv):\n    print('{}')\n    return 0\n")
     # no coord_engine package under site — an attestation that imports from elsewhere must be refused
     monkeypatch.setattr(ship_check, "ATTEST", ship_check.ATTEST.replace("sys.path.insert(0, site)", f"sys.path.insert(0, site); sys.path.insert(0, {str(elsewhere)!r})"))
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}")
-    assert not ok and ("not under" in detail or "verified no recorded" in detail)
+    monkeypatch.setattr(ship_check, "pinned_tree", lambda pin: {})
+    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    assert not ok and ("not under" in detail or "not in this clone" in detail)
 
 
 def test_the_executable_is_resolved_exactly_once_and_that_path_is_what_executes(monkeypatch):
@@ -2623,7 +2688,7 @@ def test_the_executable_is_resolved_exactly_once_and_that_path_is_what_executes(
     monkeypatch.setattr(ship_check, "executing_engine_commit", commit)
     fake = world()
     monkeypatch.setattr(ship_check, "sh", fake)
-    def attested(exe, team, slug):
+    def attested(exe, team, slug, pin):
         executed.append(exe); rc, out, _ = fake("coord-engine", "review", "status", team, slug, "--json"); return True, PIN, json.loads(out)
     monkeypatch.setattr(ship_check, "attested_status", attested)
     assert ship_check.main("fulcra", HEAD) == 0
@@ -2773,6 +2838,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r24 (2026-09-05, codex-reviewer CHANGES on `428e44fe`, round 21):** `RECORD` and `direct_url.json` are mutable files in the tool environment; replace `cli.py`, regenerate its row, and every r23 check passed. The attestation now verifies every present package file's **git blob hash against the pinned commit's `coord_engine/` tree**, read by `ship_check` from the clone it runs in (`git ls-tree`; a pin not in the clone refuses) — no missing, no extra; RECORD is not consulted and `direct_url` is reported, not trusted. Measured on the proof host: 50/50 blob matches. Regressions: replace `cli.py` + regenerate RECORD → refused; extra/missing file → refused; pin not in clone → refused; real git clone positive path. G32 restated in the reviewer's words.
 - **r23 (2026-09-05, both reviewers CHANGES on `b525afc3`, round 20):** RECORD rows with an empty hash were counted and skipped, so a hashless replaced `cli.py` passed; and `__pycache__` was excluded while an unchecked-hash `.pyc` beside verified source is executed without consulting it. Now every non-`__pycache__` package row must carry a valid `sha256=` digest and integer size or the attestation refuses; the attestation runs under `-B` with a fresh empty `pycache_prefix` so bytecode beside the source is never consulted and the verified source is compiled; sourceless compiled files under the package refuse. Regressions: hashless replaced `cli.py` refused; stale unchecked-hash bytecode answers under a normal import (asserted) and the source answers under the attestation; a sourceless `.pyc` refused.
 - **r22 (2026-09-05, codex-coder CHANGES on `def9bc65`, round 19):** "under the same site-packages" bound nothing. The attestation now, before importing, requires exactly one `coord_engine-*.dist-info`, reads its `RECORD` and `direct_url.json` by path, verifies every recorded `coord_engine/**` file's sha256 and size, refuses any unrecorded file under the package, and reports the count; `attested_status` refuses an attestation that refused or verified nothing. Measured on the proof host (1 dist-info, 50 files verified, 0 mismatched, 0 unrecorded). Regressions: stale `cli.py` beside approved metadata; unrecorded extra module; duplicate dist-info; missing RECORD; and the intact positive case.
 - **r21 (2026-09-05, both reviewers CHANGES on `7b06bbed`, round 18):** the attestation recorded the inner `review status` rc and never checked it (nor the subprocess rc), so an APPROVED-shaped tally returned with rc 3 could pass. Now the attestation exits with the inner rc, and `attested_status` requires process rc 0, embedded rc 0, and a dict tally with `state`/`approvals`/`head` of the expected types before returning ok. Regressions on a real fake tool environment: APPROVED-shaped status with rc 3 → refuse; wrong-shaped payload → refuse. **Engine round 8 (`f509f127`) is APPROVED by both reviewers**; the merge lane is open.
