@@ -12,6 +12,7 @@ import pytest
 
 from coord_tracker_bridge.fold_source import (
     FoldRow,
+    resolve_pointer,
     FoldSourceAdapter,
     FoldSourceError,
     parse_open,
@@ -170,3 +171,35 @@ def test_read_only_refuses_an_identity_that_has_never_folded():
 
     with pytest.raises(FoldSourceError):
         adapter(Fresh()).snapshot()
+
+
+# ── pointers ────────────────────────────────────────────────────────────────
+
+def test_a_team_relative_pointer_resolves_against_the_team_root():
+    """Emitters write `task/<slug>.md`; the store holds `team/fulcra/task/...`.
+
+    Reading it verbatim returns `absent` for every row, and that failure is
+    quiet in the worst way: absent is a legitimate answer meaning "no such
+    document", so the snapshot stays COMPLETE and simply carries every card
+    with no title and no body. Measured on the live plane -- 339 blank cards,
+    with nothing in the run that looked wrong.
+    """
+
+    assert resolve_pointer("fulcra", "task/a.md") == "team/fulcra/task/a.md"
+
+
+def test_an_already_qualified_pointer_is_not_double_prefixed():
+    assert resolve_pointer("fulcra", "team/fulcra/task/a.md") == "team/fulcra/task/a.md"
+    assert resolve_pointer("fulcra", "/absolute/a.md") == "/absolute/a.md"
+
+
+def test_the_snapshot_reads_the_RESOLVED_pointer():
+    reader = reader_with(
+        open_rows={"a-slug": row(ptr="task/a.md")},
+        docs={"team/fulcra/task/a.md": "# Real title\n\nreal body"},
+    )
+    snap = adapter(reader).snapshot()
+
+    assert "team/fulcra/task/a.md" in reader.reads
+    assert snap.items[0].title == "Real title"
+    assert "real body" in snap.items[0].description

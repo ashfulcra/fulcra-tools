@@ -101,6 +101,32 @@ def parse_open(state: Mapping[str, Any]) -> tuple[FoldRow, ...]:
     return tuple(FoldRow.parse(str(slug), raw) for slug, raw in sorted(rows.items()))
 
 
+#: The store root every team-relative pointer hangs off.
+_TEAM_ROOT = "team/{team}/"
+
+
+def resolve_pointer(team: str, ptr: str) -> str:
+    """Where a row's `ptr` actually lives in the store.
+
+    POINTERS ARE TEAM-RELATIVE IN PRACTICE. Measured on the live v4 plane
+    2026-09-05: emitters write `task/<slug>.md`, and the store holds it at
+    `team/fulcra/task/<slug>.md` -- reading the pointer verbatim gets `absent`
+    for every row. That failure is quiet in the worst way: `absent` is a
+    legitimate answer meaning "no such document", so a snapshot built from
+    unresolved pointers stays COMPLETE and simply carries 339 cards with no
+    title and no body. Blank cards on a person's board, with nothing in the run
+    that looks wrong.
+
+    A pointer that already names the team root is passed through, so an emitter
+    writing the fully-qualified path is not double-prefixed.
+    """
+
+    root = _TEAM_ROOT.format(team=team)
+    if ptr.startswith(root) or ptr.startswith("/"):
+        return ptr
+    return f"{root}{ptr}"
+
+
 def _title_from(body: str | None, slug: str) -> tuple[str, str]:
     """(title, description) for one row, from its pointer document.
 
@@ -225,7 +251,9 @@ class FoldSourceAdapter:
 
         items: list[WorkRecord] = []
         for row in rows:
-            body, read_state = self.reader.read_classified(row.ptr)
+            body, read_state = self.reader.read_classified(
+                resolve_pointer(self.team, row.ptr)
+            )
             if read_state == "error":
                 # Distinguish "the document says nothing" from "the read did not
                 # answer". Only the second costs us completeness.
