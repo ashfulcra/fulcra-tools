@@ -257,3 +257,41 @@ def test_a_row_only_the_tasks_fold_holds_keeps_its_card():
     }).snapshot()
 
     assert [(i.source.item_id, i.capability) for i in snap.items] == [("409a", "tasks")]
+
+
+def test_an_explicit_list_deadline_is_not_clamped_to_the_transport_default():
+    """`snapshot_timeout` has to actually reach the listing.
+
+    It used to be `min(self.timeout, timeout)`, so raising the adapter's
+    snapshot_timeout silently did nothing for the list call -- a knob that looks
+    like it applies and does not. The per-FILE reads keep their min() on
+    purpose: there the second bound is the remaining aggregate deadline, not a
+    default being overridden.
+    """
+
+    from coord_tracker_bridge.source import FulcraTeamsTransport
+
+    seen: list[float] = []
+
+    def runner(argv, timeout):
+        seen.append(timeout)
+        return 0, "", ""
+
+    transport = FulcraTeamsTransport(runner=runner, timeout=30.0)
+    transport.list_dir_bounded("team/fulcra/task/", timeout=600.0)
+
+    assert seen == [600.0]
+
+
+def test_the_default_list_deadline_is_still_the_transports_own():
+    from coord_tracker_bridge.source import FulcraTeamsTransport
+
+    seen: list[float] = []
+
+    def runner(argv, timeout):
+        seen.append(timeout)
+        return 0, "", ""
+
+    FulcraTeamsTransport(runner=runner, timeout=12.0).list_dir("team/fulcra/task/")
+
+    assert seen == [12.0]

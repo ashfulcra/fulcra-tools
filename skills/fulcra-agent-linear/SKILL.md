@@ -148,6 +148,23 @@ coord-tracker-bridge linear-answers --source teams --deliver
 reads a [coord-engine](../../packages/coord-engine/README.md) fold instead; every
 rule below is identical on both.
 
+> **Known limit — the bare reader is O(every task document, ever.)** It opens
+> each `task/*.md` to parse its frontmatter, because it deliberately refuses to
+> trust the derived `index.md`. Measured 2026-09-05 on a real space: listing the
+> directory is fast (**3,506 entries in 1.4s**), but reading all of them did not
+> finish inside a **600-second** deadline, and the snapshot came back with **0
+> items**. Nothing was damaged — the read reported DEGRADED and `complete:
+> False`, which is exactly the state that suppresses absence-close, so a
+> starved read produced nothing rather than a plan that closed the board. But
+> `complete` never becomes true at that size, so **absence-close is permanently
+> suppressed: the projection can create cards and never close one.**
+>
+> Below roughly a thousand task documents this is fine. Above it, the bare
+> reader needs a revision cache (the listing already returns name/size/mtime, so
+> unchanged files need not be re-read) or a trusted index. Until then, treat
+> `--source teams` as proven only at small scale, and prefer `--source engine`
+> where a fold exists.
+
 ## Where a reply lands
 
 The bare workspace is the assumption, and it has no `answer` verb — its whole

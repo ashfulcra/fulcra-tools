@@ -61,8 +61,19 @@ class FulcraTeamsTransport:
         return self.list_dir_bounded(prefix, timeout=self.timeout)
 
     def list_dir_bounded(self, prefix: str, *, timeout: float) -> list[Mapping[str, Any]]:
+        """List one prefix under the CALLER's deadline.
+
+        Not `min(self.timeout, timeout)`. `self.timeout` is this transport's
+        DEFAULT, and an explicit per-call deadline is the caller saying it knows
+        better; clamping it down meant raising the adapter's `snapshot_timeout`
+        silently did nothing for the listing, so a configuration knob that looks
+        like it applies did not. The per-FILE reads keep their `min(...)` cap on
+        purpose: there the second bound is the remaining aggregate deadline, not
+        a default being overridden.
+        """
+
         code, stdout, _stderr = self.runner(
-            (*self.command, "file", "list", prefix), min(self.timeout, timeout)
+            (*self.command, "file", "list", prefix), timeout
         )
         if code != 0:
             raise TeamsTransportError(f"list {prefix!r} failed")
