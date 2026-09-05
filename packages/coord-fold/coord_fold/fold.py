@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple
 
-from . import channel, checkpoint as cp, events
+from . import channel, checkpoint as cp, events, pointers
 from .transport import PointerTransport, TransportUnavailable
 
 OVERLAP_SECONDS = 5
@@ -87,7 +87,7 @@ def run(reader: PointerTransport, writer: Any, team: str, agent: str, *, now: st
     state["unreadable_pointers"] = []
     if verify_pointers:
         for slug, row in state["open"].items():
-            _body, st = reader.read_classified(row["ptr"])
+            _body, st = reader.read_classified(pointers.qualify(team, row["ptr"]))   # team-relative ptr -> team root
             if st != "ok":
                 state["unreadable_pointers"].append(slug)
     again, src2 = cp.load(reader, team, agent)
