@@ -143,3 +143,18 @@ def test_rebuild_recomputes_the_open_set_from_the_stream_and_keeps_the_generatio
     _run(st, now="2026-09-04T12:00:00Z"); assert "leaked" in _ckpt(st)["open"]          # a plain fold keeps it: nothing closed it
     assert _run(st, "--rebuild", now="2026-09-04T13:00:00Z") == 0
     assert set(_ckpt(st)["open"]) == {"mine"} and _ckpt(st)["generation"] > gen         # rebuilt from the stream; generation moved on
+
+
+def test_verify_pointers_resolves_a_team_relative_ptr_against_the_team_root():
+    """coord-boss finding 2026-09-05: emitters write `task/<slug>.md`; the store holds `team/<team>/task/<slug>.md`.
+    Read verbatim, every open row is `absent` and the flag whose job is to prove pointers resolve reports mass loss."""
+    st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1", ptr="task/a.md")])
+    st.docs["team/r/task/a.md"] = "# a"
+    assert _run(st, "--verify-pointers") == 0 and _ckpt(st)["unreadable_pointers"] == []
+
+
+def test_verify_pointers_passes_an_already_qualified_ptr_through_and_still_flags_a_missing_one():
+    st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1", ptr="team/r/task/a.md"),
+                _rec("open", "b", "2026-09-04T10:01:00Z", "2", ptr="task/gone.md")])
+    st.docs["team/r/task/a.md"] = "# a"
+    assert _run(st, "--verify-pointers") == 3 and _ckpt(st)["unreadable_pointers"] == ["b"]   # not team/r/team/r/...

@@ -6,7 +6,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-from . import channel, checkpoint, events, fold
+from . import channel, checkpoint, events, fold, pointers
 from .transport import CliPointerReader, CliPointerWriter, TransportUnavailable
 
 RC_OK, RC_REFUSED, RC_UNKNOWN = 0, 2, 3
@@ -118,7 +118,7 @@ def cmd_close(args, reader, writer) -> int:
     if row is None:
         print(f"close: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
         return RC_REFUSED
-    _body, st = reader.read_classified(args.evidence)
+    _body, st = reader.read_classified(pointers.qualify(args.team, args.evidence))   # same resolution as --verify-pointers
     if st == "absent":
         print(f"close: refused — evidence {args.evidence} is absent", file=sys.stderr)
         return RC_REFUSED
