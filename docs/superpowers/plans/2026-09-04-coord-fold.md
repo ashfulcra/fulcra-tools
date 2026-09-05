@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r13)
+# coord-fold: Coord on Annotations Implementation Plan (r14)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -118,7 +118,7 @@ import sys
 TAG = re.compile(r"#\s*(packages/coord-fold/\S+)")
 TICKS = "`" * 3                                  # never spelled literally: this file lives inside a fence
 FENCE = re.compile(TICKS + r"(python|toml)\n(.*?)" + TICKS, re.S)
-GATES = ["tests/test_structural.py", "tests/test_tripwire.py",
+GATES = ["tests/test_structural.py", "tests/test_tripwire.py", "tests/test_ship_check.py",
          "tests/test_file_size_ceiling.py", "tests/test_no_degraded_vocabulary.py"]   # test_ci_wiring.py runs in the repo, where .github exists
 PROOF = "tests/proof/run_proof.py"   # G29; exits 3 = UNKNOWN where no OS sandbox exists — never read as green
 
@@ -2096,7 +2096,7 @@ Mutation: append `# degraded` to `fold.py` → FAILS. **Commit.**
 
 **12 — Seed export** `obligations export-open <team> --agent <a>`: one bus-v4 `open` per open slug from the old stream fold, idempotent via `_coord/bus-v4/seeded/<a>.md`, eight-field payload written literally. Classified as a write. Mutation: remove the marker guard → idempotency FAILS.
 **13 — Dual-emit** `coord_engine/dual_emit.py::mirror` called once at the end of `records.emit_event`; `directive→open`, `response→close` of `closes`, `claim→claim`, `verdict→note`; no v4 config → no-op; mirror failure never fails v3. Mutation: hardcode a cfg when absent → FAILS.
-**14 — Comparator + `cutover-ready` + runbook**: tuples `(slug, pri, ptr)`; `AGREE n=k` / `DIVERGE slugs=[…]`; `cutover-ready` exits 0 only if trailing AGREE run ≥ 24, span ≥ 24h, the new open set both grew and shrank within it, **the injected divergence/recovery drill was performed and recorded (G13), and `scripts/ship_check.py <HEAD>` exits 0 (Task 16)**. Mutation: force the 24h check true → the one-minute-apart test FAILS.
+**14 — Comparator + `cutover-ready` + runbook**: tuples `(slug, pri, ptr)`; `AGREE n=k` / `DIVERGE slugs=[…]`; `cutover-ready` exits 0 only if trailing AGREE run ≥ 24, span ≥ 24h, the new open set both grew and shrank within it, **the injected divergence/recovery drill was performed and recorded (G13), and `scripts/ship_check.py fulcra <HEAD>` exits 0 (Task 16)**. Mutation: force the 24h check true → the one-minute-apart test FAILS.
 
 ### Task 15: AGENTS.md (ship-gate)
 
@@ -2108,8 +2108,8 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 
 1. **When.** Only after implementation, on the **exact implementation commit** `<HEAD>` (40-hex) whose on-disk `packages/coord-fold/` is what ships. Never at plan time. Reading the materialized plan tree earlier is welcome as *feedback* and **carries nothing**.
 2. **Register.** `coord-engine review request fulcra coord-fold-ship-<HEAD> --of packages/coord-fold --head <HEAD> --reviewer codex-reviewer --reviewer codex-coder`. The engine's `--head` keying means any head change is a new round with no verdicts.
-3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file `verdicts/<HEAD>--<reviewer>.md` with `verdict: approve|changes`, `head: <HEAD>`, and `tree: <git rev-parse <HEAD>:packages/coord-fold>` — git's tree object hash, a content digest of exactly the shipped package. A verdict whose `tree` differs from the commit's is void.
-4. **Ship check.** `scripts/ship_check.py <HEAD>` exits 0 only if: the working tree for `packages/coord-fold` is clean at `<HEAD>`; both required verdicts exist for that head; each says `approve`; each quotes the commit's tree hash. Task 14's `cutover-ready` **calls it and fails closed** — no cutover without it.
+3. **What the reviewer reads and files.** `git checkout <HEAD>`; read the on-disk tree against the rubric below; file with the **typed verb, nothing hand-uploaded**: `coord-engine review verdict fulcra coord-fold-ship-<HEAD> --head <HEAD> --verdict approve --from <reviewer> --note "tree: <git rev-parse <HEAD>:packages/coord-fold> …reading…"`. The engine writes an **append-only envelope** `verdicts/<HEAD>--<reviewer>--<UTC timestamp>-<nonce>.md` (as every verdict on this plan's register demonstrates); the `tree:` line in the note is the evidence. A verdict whose `tree` differs from the commit's is void.
+4. **Ship check.** `scripts/ship_check.py <team> <HEAD>` *(r14, codex-coder round 13: the r13 script read a plain `<HEAD>--<reviewer>.md` the typed verb never writes and would have refused forever)* exits 0 only if: the working tree is at `<HEAD>` and clean for the package; **the engine's folded result** (`review status --json`) is `APPROVED` for that exact head with both required reviewers in `approvals`; and, for each required reviewer, **the latest envelope for that head** (ISO timestamps in the filename sort lexically) says `approve` and quotes the commit's tree hash. Any absence — no envelope, no fold, a list that fails — is a refusal. Task 14's `cutover-ready` **calls it as `scripts/ship_check.py fulcra <HEAD>` and fails closed** — no cutover without it. `tests/test_ship_check.py` drives the script end to end with real envelope names for every outcome.
 
 | Module | The reviewer confirms, by reading the shipped tree |
 |---|---|
@@ -2123,14 +2123,17 @@ The package, its four gate files, the proof driver and its two CI steps (the pro
 
 ```python
 # packages/coord-fold/scripts/ship_check.py
-"""Task 16 ship check. Exit 0 only with BOTH required responsibility-distribution approvals on the
-EXACT commit, each quoting that commit's tree hash for packages/coord-fold. Fails closed on anything else.
+"""Task 16 ship check. Exit 0 only with BOTH required responsibility-distribution approvals on the EXACT
+commit — taken from the engine's folded result AND from the latest append-only verdict envelope per
+reviewer, each quoting that commit's tree hash for packages/coord-fold. Fails closed on any absence.
 Usage: python scripts/ship_check.py <team> <40-hex head>"""
+import json
 import re
 import subprocess
 import sys
 
 REQUIRED = ("codex-reviewer", "codex-coder")
+ENVELOPE = re.compile(r"^(?P<head>[0-9a-f]{40})--(?P<reviewer>[A-Za-z0-9_-]+)--(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)-(?P<nonce>[0-9a-f]+)\.md$")
 
 
 def sh(*argv):
@@ -2138,37 +2141,149 @@ def sh(*argv):
     return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
+def latest_envelope(names, head, reviewer):
+    """The newest append-only envelope for (head, reviewer), or None. Names come from a listing whose
+    emptiness cannot prove absence — but here absence is a refusal either way."""
+    hits = []
+    for n in names:
+        m = ENVELOPE.match(n.strip().split()[-1] if n.strip() else "")
+        if m and m.group("head") == head and m.group("reviewer") == reviewer:
+            hits.append((m.group("ts"), m.group(0)))
+    return max(hits)[1] if hits else None
+
+
 def main(team: str, head: str) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         print("ship_check: head must be a 40-hex commit"); return 1
     rc, at, _ = sh("git", "rev-parse", "HEAD")
     if rc or at != head:
-        print(f"ship_check: working tree is at {at}, not {head}"); return 1
+        print(f"ship_check: working tree is at {at!r}, not {head}"); return 1
     rc, dirty, _ = sh("git", "status", "--porcelain", "--", "packages/coord-fold")
     if rc or dirty:
         print("ship_check: packages/coord-fold has uncommitted changes — the on-disk tree is not the commit"); return 1
     rc, tree, _ = sh("git", "rev-parse", f"{head}:packages/coord-fold")
-    if rc:
+    if rc or not re.fullmatch(r"[0-9a-f]{40}", tree):
         print("ship_check: no packages/coord-fold tree at that commit"); return 1
+    slug = f"coord-fold-ship-{head}"
+    rc, out, err = sh("coord-engine", "review", "status", team, slug, "--json")
+    try:
+        fold = json.loads(out) if rc == 0 else {}
+    except ValueError:
+        fold = {}
+    if not fold:
+        print(f"ship_check: no folded review result for {slug} ({err[:80]})"); return 1
     ok = True
+    if fold.get("state") != "APPROVED" or fold.get("head") != head or set(REQUIRED) - set(fold.get("approvals", [])):
+        print(f"ship_check: folded result is {fold.get('state')} on head {fold.get('head')} with approvals {fold.get('approvals')}"); ok = False
+    rc, listing, err = sh("fulcra-api", "file", "list", f"team/{team}/review/{slug}/verdicts/")
+    names = listing.splitlines() if rc == 0 else []
     for reviewer in REQUIRED:
-        path = f"team/{team}/review/coord-fold-ship-{head}/verdicts/{head}--{reviewer}.md"
-        rc, body, err = sh("fulcra-api", "file", "download", path, "/dev/stdout")
+        env = latest_envelope(names, head, reviewer)
+        if env is None:
+            print(f"ship_check: no verdict envelope from {reviewer} for {head}"); ok = False; continue
+        rc, body, err = sh("fulcra-api", "file", "download", f"team/{team}/review/{slug}/verdicts/{env}", "/dev/stdout")
         if rc:
-            print(f"ship_check: no verdict from {reviewer} for {head} ({err[:80]})"); ok = False; continue
+            print(f"ship_check: cannot read {env} ({err[:80]})"); ok = False; continue
         verdict = re.search(r"^verdict:\s*(\S+)", body, re.M)
-        quoted = re.search(r"^tree:\s*([0-9a-f]{40})", body, re.M)
+        quoted = re.search(r"^\s*tree:\s*([0-9a-f]{40})", body, re.M)
         if not verdict or verdict.group(1) != "approve":
-            print(f"ship_check: {reviewer} verdict is {verdict.group(1) if verdict else 'missing'}, not approve"); ok = False
+            print(f"ship_check: {reviewer}'s latest envelope {env} is {verdict.group(1) if verdict else 'missing'}, not approve"); ok = False
         if not quoted or quoted.group(1) != tree:
-            print(f"ship_check: {reviewer} quotes tree {quoted.group(1) if quoted else 'none'}, commit's is {tree}"); ok = False
-    print("ship_check: OK — both approvals on this exact head and tree" if ok else "ship_check: REFUSED")
+            print(f"ship_check: {reviewer} quotes tree {quoted.group(1) if quoted else 'none'}, the commit's is {tree}"); ok = False
+    print("ship_check: OK — folded APPROVED and both latest envelopes approve this exact head and tree" if ok else "ship_check: REFUSED")
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1], sys.argv[2]))
 ```
+
+```python
+# packages/coord-fold/tests/test_ship_check.py
+"""End-to-end over REAL append-only envelope names (codex-coder round 13): both exact-head/tree
+approvals -> 0; head change, changes verdict, missing reviewer, dirty package, tree mismatch -> 1."""
+import importlib.util
+import json
+import pathlib
+
+SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "ship_check.py"
+spec = importlib.util.spec_from_file_location("ship_check", SCRIPT)
+ship_check = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ship_check)
+
+HEAD = "e67ac6474ebb38a93bc747afd422dfd6935998bc"
+OTHER = "b6d867d96abf91ef2d82f066bf2e4977429cbe54"
+TREE = "1111111111111111111111111111111111111111"
+ENV = {r: f"{HEAD}--{r}--2026-09-05T01:00:24Z-626c9635.md" for r in ("codex-reviewer", "codex-coder")}
+
+
+def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "codex-coder"), fold_head=HEAD,
+          names=None, bodies=None):
+    names = list(ENV.values()) if names is None else names
+    bodies = bodies or {n: f"---\nverdict: approve\n---\ntree: {TREE}\nread the tree" for n in names}
+    def fake_sh(*argv):
+        a = list(argv)
+        if a[:2] == ["git", "rev-parse"] and a[2] == "HEAD":
+            return 0, at, ""
+        if a[:2] == ["git", "status"]:
+            return 0, dirty, ""
+        if a[:2] == ["git", "rev-parse"]:
+            return 0, TREE, ""
+        if a[:3] == ["coord-engine", "review", "status"]:
+            return 0, json.dumps({"state": state, "head": fold_head, "approvals": list(approvals)}), ""
+        if a[:3] == ["fulcra-api", "file", "list"]:
+            return 0, "\n".join(f"1KiB    2026-09-05 01:00AM UTC  {n}" for n in names), ""
+        if a[:3] == ["fulcra-api", "file", "download"]:
+            n = a[3].rsplit("/", 1)[-1]
+            return (0, bodies[n], "") if n in bodies else (1, "", "Error: File not found")
+        raise AssertionError(a)
+    return fake_sh
+
+
+def run(monkeypatch, **kw):
+    monkeypatch.setattr(ship_check, "sh", world(**kw))
+    return ship_check.main("fulcra", HEAD)
+
+
+def test_both_exact_head_and_tree_approvals_pass(monkeypatch, capsys):
+    assert run(monkeypatch) == 0 and "OK" in capsys.readouterr().out
+
+
+def test_latest_envelope_wins_over_an_older_changes(monkeypatch):
+    old = f"{HEAD}--codex-coder--2026-09-05T00:29:53Z-64b9c78b.md"
+    names = list(ENV.values()) + [old]
+    bodies = {n: f"verdict: approve\ntree: {TREE}" for n in ENV.values()}
+    bodies[old] = f"verdict: changes\ntree: {TREE}"
+    assert run(monkeypatch, names=names, bodies=bodies) == 0
+
+
+def test_head_change_refuses(monkeypatch):
+    names = [n.replace(HEAD, OTHER) for n in ENV.values()]
+    assert run(monkeypatch, names=names, bodies={n: f"verdict: approve\ntree: {TREE}" for n in names}, fold_head=OTHER) == 1
+
+
+def test_changes_verdict_refuses(monkeypatch):
+    bodies = {ENV["codex-reviewer"]: f"verdict: approve\ntree: {TREE}", ENV["codex-coder"]: f"verdict: changes\ntree: {TREE}"}
+    assert run(monkeypatch, bodies=bodies, state="CHANGES", approvals=("codex-reviewer",)) == 1
+
+
+def test_missing_reviewer_refuses(monkeypatch):
+    assert run(monkeypatch, names=[ENV["codex-reviewer"]], approvals=("codex-reviewer",), state="PENDING") == 1
+
+
+def test_dirty_package_refuses(monkeypatch):
+    assert run(monkeypatch, dirty=" M packages/coord-fold/coord_fold/fold.py") == 1
+
+
+def test_tree_mismatch_refuses(monkeypatch):
+    bodies = {n: "verdict: approve\ntree: 2222222222222222222222222222222222222222" for n in ENV.values()}
+    assert run(monkeypatch, bodies=bodies) == 1
+
+
+def test_folded_approved_but_no_envelopes_refuses(monkeypatch):
+    assert run(monkeypatch, names=[]) == 1
+```
+
 
 ---
 
@@ -2195,6 +2310,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r14 (2026-09-05, codex-coder CHANGES on `e67ac647`, round 13 — operability):** the r13 ship check read `verdicts/<HEAD>--<reviewer>.md`, a file the typed `review verdict --head` never writes (it writes append-only `<HEAD>--<reviewer>--<ts>-<nonce>.md` envelopes, as this register shows), so it would have refused forever. Now it consumes the engine's folded result (`review status --json`: APPROVED on the exact head with both required in `approvals`) AND the latest envelope per reviewer (lexical ISO timestamp), each quoting the commit's tree hash in its `--note`; absence of anything is a refusal. `tests/test_ship_check.py` runs it end to end over real envelope names for eight outcomes. Task 14 calls `scripts/ship_check.py fulcra <HEAD>`.
 - **r13 (2026-09-05, both reviewers CHANGES on `b6d867d9`, round 12; coord-boss `5ccfce26` no waiver):** Task 16 bound to what ships — implementation commit only, ship register keyed by head, verdicts quote head + git tree hash, any head change invalidates, plan-time carry removed, `scripts/ship_check.py` fails closed and `cutover-ready` calls it. The G29 CI step was unreachable (macOS condition inside an ubuntu-only workflow); now its own always-on macOS workflow plus `test_ci_wiring.py`; a green CI run has not yet been observed and the plan says so. Overclaims softened (Goal, pyproject, `__init__`). G13: 24 passes / 24h / injected divergence drill. G34: reconciler separation as an invariant with its evidence. codex-reviewer's §9 items recorded as open items for coord-boss, not decided here.
 - **r12 (2026-09-05, codex-coder CHANGES on `92e838a9`, round 11):** point-probe closure accepted. The remaining P0: the requester's acceptance condition (one big file must not pass) is not waived by a scope ruling. Closed review-shaped, per `f6ceb0c4`'s own constraint: **Task 16**, a required reviewer reads the materialized/shipped tree against a written rubric and files a `responsibility-distribution` verdict; not shippable without it; runnable at plan time on Task 0's tree. G32 rewritten accordingly (the gates do not check this; the review does). Accuracy fix: G29 says five phases.
 - **r11 (2026-09-04, coord-boss `f6ceb0c4` both rulings + codex-coder CHANGES on `8d8dd4cb`, round 10):** G32 ruled — retired, stated as not-a-claim, review-shaped only; infra ruled — no untested bwrap profile, macOS is the proof host, Linux stays UNKNOWN, the gate is a passed record with host and time (the driver now prints them); the claim weakened to the true one (specific capabilities denied by the kernel, fold still completed); G33 names the property (denial indifferent to how code arrives) honestly, without claiming the in-process import finding under the kernel sandbox. codex-coder's point-probe P0: the driver now asserts the exact measured request sequence with paths, a path allowlist, and per-shape bounds for all five operations; phase 5 applies his mutation (2000 guessed `file stat`s) and must be flagged.
