@@ -33,7 +33,8 @@ def _render_open(state: dict) -> str:
     lines = []
     for slug, r in sorted(state["open"].items(), key=_row_sort_key):
         claimed = f"  claimed_by={r['claimed_by']}" if r.get("claimed_by") else ""
-        lines.append(f"  [{r['pri']}] {slug}  from={r['from']}  ptr={r['ptr']}{claimed}")
+        to = f"  to={r['to']}" if r.get("to") else ""                     # absent on rows written before the field existed
+        lines.append(f"  [{r['pri']}] {slug}  from={r['from']}{to}  ptr={r['ptr']}{claimed}")
     return "\n".join(lines) if lines else "  (nothing open)"
 
 
