@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r38)
+# coord-fold: Coord on Annotations Implementation Plan (r39)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -122,7 +122,10 @@ TAG = re.compile(r"#\s*((?:packages/coord-fold|\.github/workflows)/\S+)")   # wo
 # without its stated trust roots is a plan defect the plan gate itself refuses (a builder following it can never cut over).
 TICKS = "`" * 3                                   # never spell the delimiter literally: this file itself lives in a Markdown fence
 FENCE_DELIM = re.compile("^" + re.escape(TICKS) + r"[A-Za-z0-9_-]*\s*$")
-INVOCATION = re.compile(r"ship_check\.py\s+(\S+)\s+(\S+)([^\n`]*)")   # r38 (codex-coder round 33): match EVERY invocation, then judge the head POSITIVELY
+# r39 (codex-coder round 34): match the COMMAND TOKEN first, then judge every positional. A mention is an invocation
+# when it is preceded by a run-style word (python/python3/run/$/uv run) OR followed by at least one positional; a
+# bare path reference in prose ("see scripts/ship_check.py") is not one. Missing positionals are REPORTED.
+INVOCATION = re.compile(r"(?P<pre>(?:python3?|run|\$)\s+`?)?(?:[\w./-]*/)?ship_check\.py(?:[ \t]+(?P<team>[^\s`]+))?(?:[ \t]+(?P<head>[^\s`]+))?(?P<tail>[^\n`]*)")
 HEAD_PLACEHOLDERS = ("<HEAD>", "<40-hex-head>")                                   # `<40-hex head>` (with the space) is normalized to this before matching
 HEAD_OK = re.compile(r"^[0-9a-f]{40}$")                                          # exactly what ship_check.main fullmatches
 
@@ -181,7 +184,18 @@ def bare_invocations(text: str) -> list[str]:
     out = []
     text = text.replace("<40-hex head>", "<40-hex-head>")                          # a documented head placeholder with a space: one token
     for m in INVOCATION.finditer(text):
-        problems = ([head_problem(m.group(2))] if head_problem(m.group(2)) else []) + parse_invocation(m.group(3))
+        team, head, tail = m.group("team"), m.group("head"), m.group("tail") or ""
+        if not m.group("pre") and team is None:
+            continue                                                                # a path reference, not an invocation
+        problems = []
+        if team is None:
+            problems.append("missing team")
+        if head is None:
+            problems.append("missing head")
+        elif head_problem(head):
+            problems.append(head_problem(head))
+        if head is not None:
+            problems += parse_invocation(tail)
         if problems:
             out.append(f"{'; '.join(problems)}: {m.group(0).strip()[:100]}")
     return out
@@ -376,6 +390,18 @@ while not data.endswith(b"\n"):
         break
     data += chunk
 r = json.loads(data)
+if argv[:2] == ["file", "download"]:
+    # Behave like the REAL fulcra-api (measured 2026-09-05): LOCAL_FILE is validated as a readable path, so
+    # /dev/stdout under a pipe is REFUSED, and a successful download writes the body to LOCAL_FILE — never stdout.
+    # The old fake printed the body to stdout, which is how the production reader's /dev/stdout form passed the
+    # proof and then refused every real fold at the channel config.
+    if len(argv) < 4 or argv[3] == "/dev/stdout":
+        sys.stderr.write("Error: Invalid value for '[LOCAL_FILE]': Path '/dev/stdout' is not readable.\n")
+        sys.exit(2)
+    if r["rc"] == 0:
+        with open(argv[3], "w") as f:                 # the reader's own private temp file, under its TMPDIR
+            f.write(r["stdout"])
+        sys.exit(0)
 sys.stdout.write(r["stdout"])
 sys.stderr.write(r["stderr"])
 sys.exit(r["rc"])
@@ -501,7 +527,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -533,7 +559,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -544,7 +570,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -558,7 +584,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -569,7 +595,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -583,7 +609,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -594,7 +620,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -608,7 +634,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -619,7 +645,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/responses/s0/reply.md",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -630,7 +656,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "record"
@@ -644,7 +670,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/_coord/bus-v4/records.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -655,7 +681,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "get-records",
@@ -671,7 +697,7 @@ EXPECTED_SEQUENCE = [
     "file",
     "download",
     "team/r/member/me/fold/checkpoint.json",
-    "/dev/stdout"
+    "<tmp>"
     ],
     [
     "file",
@@ -711,6 +737,9 @@ def shape(argv):
 def norm(argv):
     if argv[:2] == ["file", "upload"]:
         return ["file", "upload", "<tmp>", argv[3]]
+    if argv[:2] == ["file", "download"] and len(argv) == 4:
+        # the reader's private temp file (never /dev/stdout: the real CLI refuses it under a pipe, measured 2026-09-05)
+        return ["file", "download", argv[2], "<tmp>"]
     if argv[:1] == ["get-records"]:
         return ["get-records", argv[1], "<since>"]
     return argv
@@ -1037,11 +1066,29 @@ class CliPointerReader:
         return p.returncode, p.stdout, p.stderr
 
     def _download(self, path: str) -> tuple[int, str, str]:
+        # The real CLI validates LOCAL_FILE as a readable path and REFUSES /dev/stdout under a pipe (measured
+        # 2026-09-05 on the first real run: every fold refused at the channel config). A private temp file, read
+        # back and removed. pathlib + tempfile only: the transport never imports os (Task 1 boundary truth).
+        d = pathlib.Path(tempfile.mkdtemp(prefix="coord-fold-read-"))
+        d.chmod(0o700)
+        local = d / "body"
         try:
-            p = subprocess.run([*self._cli, "file", "download", path, "/dev/stdout"], capture_output=True, text=True, timeout=self._timeout)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return 127, "", str(exc)
-        return p.returncode, p.stdout, p.stderr
+            try:
+                p = subprocess.run([*self._cli, "file", "download", path, str(local)], capture_output=True, text=True, timeout=self._timeout)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return 127, "", str(exc)
+            if p.returncode != 0:
+                return p.returncode, "", p.stderr
+            try:
+                return 0, local.read_text(encoding="utf-8"), p.stderr
+            except OSError as exc:
+                return 1, "", str(exc)
+        finally:
+            try:
+                local.unlink(missing_ok=True)
+                d.rmdir()
+            except OSError:
+                pass
 
     def _records(self, channel: str, since: str) -> tuple[int, str, str]:
         try:
@@ -2356,25 +2403,31 @@ def acl_entries(path):
     """ACL entries on a path. r38 (codex-reviewer round 33): on macOS an ACL survives chmod and is INVISIBLE to stat, so a
     directory that reports 0700 can still grant everyone write/delete via an inherited entry. Listed through the OS's own
     /bin/ls (an OS trust root, like /bin/chmod below); on Linux, the POSIX-ACL xattr."""
+    # r39 (both reviewers, round 34): an inspection that FAILS is not "no ACL". A failed ls / listxattr refuses.
     if sys.platform == "darwin":
-        out = subprocess.run(["/bin/ls", "-led", path], capture_output=True, text=True).stdout.splitlines()
-        return [ln.strip() for ln in out[1:] if re.match(r"\s*\d+:\s", ln)]
+        p = subprocess.run(["/bin/ls", "-led", path], capture_output=True, text=True)
+        if p.returncode != 0 or not p.stdout.strip():
+            raise PermissionError(f"ACL inspection of {path} failed (rc {p.returncode}): {p.stderr.strip()[:120]}")
+        return [ln.strip() for ln in p.stdout.splitlines()[1:] if re.match(r"\s*\d+:\s", ln)]
     try:
         return [x for x in os.listxattr(path) if x.startswith("system.posix_acl")]
-    except OSError:
-        return []
+    except OSError as exc:
+        raise PermissionError(f"ACL inspection of {path} failed: {exc}") from exc
 
 
 def strip_acls(path):
     """Remove every ACL entry (inherited ones included) from a path the gate just created, then PROVE none remain."""
+    # r39 (both reviewers, round 34): a removal that FAILS refuses; it is never "stripped".
     if sys.platform == "darwin":
-        subprocess.run(["/bin/chmod", "-N", path], capture_output=True)
+        p = subprocess.run(["/bin/chmod", "-N", path], capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"ACL removal on {path} failed (rc {p.returncode}): {p.stderr.strip()[:120]}")
     else:
         for x in acl_entries(path):
             try:
                 os.removexattr(path, x)
-            except OSError:
-                pass
+            except OSError as exc:
+                raise RuntimeError(f"ACL removal on {path} failed: {exc}") from exc
     left = acl_entries(path)
     if left:
         raise RuntimeError(f"{path} still carries ACL entries after stripping: {left[:2]}")
@@ -2702,7 +2755,10 @@ def winning_name_ok(name: str, head: str, reviewer: str) -> bool:
 def main(team: str, head: str, git: str = None, fulcra_api: str = None) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         print("ship_check: head must be a 40-hex commit"); return 1
-    gate_tmp_root()                                                     # r34: our own 0700 temp root; TMPDIR is never consulted
+    try:
+        gate_tmp_root()                                                 # r34: our own 0700 temp root; TMPDIR is never consulted
+    except (RuntimeError, PermissionError) as exc:
+        print(f"ship_check: {exc} — refusing"); return 1                # r39: a root that cannot be made/proven private is a refusal, not a crash
     exe = engine_executable()                                           # THE one resolution of the launcher
     if not exe:
         print("ship_check: coord-engine not found on PATH — refusing"); return 1
@@ -3577,7 +3633,7 @@ def test_no_repo_prose_invokes_ship_check_without_stated_trust_roots():
         for i, ln in enumerate(f.read_text().splitlines(), 1):
             assert not bare(ln), f"{f.name}:{i}: {bare(ln)}"
     assert bare("`scripts/ship_check.py fulcra <HEAD>` and fails closed")                          # the sentence that drifted
-    assert bare("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git") == ["missing --fulcra-api: ship_check.py fulcra <HEAD> --git /usr/bin/git"]   # codex-coder round 29
+    assert bare("scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git") == ["missing --fulcra-api: scripts/ship_check.py fulcra <HEAD> --git /usr/bin/git"]   # codex-coder round 29 (r39: the match carries the path)
     assert bare("scripts/ship_check.py fulcra <HEAD> --fulcra-api /x")[0].startswith("missing --git")
     assert bare("scripts/ship_check.py fulcra <HEAD> --git --fulcra-api /x")[0].startswith("--git has no value")                      # codex-coder round 30
     assert not bare("`scripts/ship_check.py fulcra <HEAD> --git /x --fulcra-api /y`")
@@ -3652,6 +3708,9 @@ def test_the_bare_invocation_guard_parses_the_command_shape():
         "scripts/ship_check.py fulcra not-a-head --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",                # not hex
         "scripts/ship_check.py fulcra " + "g" * 40 + " --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",           # 40 non-hex
         "scripts/ship_check.py fulcra " + "e" * 39 + " --git /usr/bin/git --fulcra-api /x\n": "is not 40 lowercase hex",           # 39 hex
+        "run scripts/ship_check.py\n": "missing team; missing head",                                                             # codex-coder round 34: no positionals
+        "run scripts/ship_check.py fulcra\n": "missing head",                                                                     # one positional
+        "python scripts/ship_check.py fulcra <HEAD>\n": "missing --git",                                                          # positionals only, no roots
         "scripts/ship_check.py fulcra <HEAD> --git <abs --bogus> --fulcra-api /x\n": "unexpected token",                             # codex-coder round 32: option hidden in <...>
     }
     for text, why in bad.items():
@@ -3680,6 +3739,43 @@ def test_acl_entries_are_stripped_from_gate_directories_and_refused_on_bodies(tm
     with pytest.raises(PermissionError, match="carries ACL entries"):
         ship_check.read_owned_file(body)
     tempfile.tempdir = None
+
+
+def test_a_bare_path_reference_in_prose_is_not_an_invocation():
+    """r39: `see scripts/ship_check.py` is a reference; `run scripts/ship_check.py` is an invocation missing both positionals."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("materialize_plan", SCRIPT.parent / "materialize_plan.py"); mp = importlib.util.module_from_spec(spec); spec.loader.exec_module(mp)
+    f = mp.refuse_bare_runbook_invocations
+    assert f("see `scripts/ship_check.py` for the gate\n") == []
+    assert f("(`scripts/ship_check.py`: the engine's folded result)\n") == []
+    assert f("run `scripts/ship_check.py`\n")[0].startswith("line 1: missing team; missing head")
+
+
+def test_a_failed_acl_inspection_or_removal_refuses_instead_of_reading_as_no_acl(tmp_path, monkeypatch):
+    """codex-coder + codex-reviewer round 34 (P0): inability to inspect ACLs was accepted as 'no ACL'. Force the
+    inspector (ls -led / listxattr) to fail: acl_entries raises, read_owned_file refuses, strip_acls refuses."""
+    import os, subprocess, sys, types
+    d = tmp_path / "d"; d.mkdir(); os.chmod(d, 0o700); body = d / "body"; body.write_text("x"); body.chmod(0o600)
+    if sys.platform == "darwin":
+        real = subprocess.run
+        def failing(cmd, **kw):
+            if cmd[:1] == ["/bin/ls"]:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="inspection denied")
+            if cmd[:1] == ["/bin/chmod"]:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="removal denied")
+            return real(cmd, **kw)
+        monkeypatch.setattr(ship_check.subprocess, "run", failing)
+    else:
+        def boom(path, *a, **k):
+            raise OSError("inspection denied")
+        monkeypatch.setattr(ship_check.os, "listxattr", boom)
+    import pytest
+    with pytest.raises(PermissionError, match="ACL inspection .* failed"):
+        ship_check.acl_entries(str(d))
+    with pytest.raises(PermissionError, match="ACL inspection .* failed"):
+        ship_check.read_owned_file(str(body))                                        # never reads on a failed inspection
+    with pytest.raises((RuntimeError, PermissionError), match="failed"):
+        ship_check.strip_acls(str(d))                                                # never "stripped" on a failed removal
 ```
 
 
@@ -3709,6 +3805,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 
 ## Revision log
 
+- **r39 (2026-09-05, both reviewers CHANGES on `cedfddb9`, round 34; PR #709 @ 7cc8015a49019379db1597854b4886cb9b9cbbb4):** the ACL absence proof failed open — a failed `/bin/ls` or `listxattr` answered "no ACL" and a failed removal counted as stripped; now a failed inspection raises and the read refuses, a failed removal raises and nothing is "stripped", and the gate's entry prints a refusal rather than a traceback when its temp root cannot be made or proven private (control: a forced-failing inspector/remover). codex-coder: the guard saw only invocations that already carried team and head — now the command token is matched first, a mention is an invocation when preceded by a run-style word or followed by a positional (a bare path reference is not), missing positionals are reported, then every field is validated (controls: no positionals, one positional, positionals only, two path references). **Also this day, outside the register: the cutover bridge shipped** — bus-v4 channel live, Tasks 12–14 on main (PR #707), the coord-fold reader's `/dev/stdout` defect fixed (PR #708: the real CLI refuses it; the proof's fake now refuses like the real one), and the first real measurement under coord-maintainer: 56 opens seeded → folded 56 → `compare-to-fold` AGREE n=56, twice.
 - **r38 (2026-09-05, both reviewers CHANGES on `3b03002d`, round 33; PR #705 @ 1b3c1148e05818e77d8ca10d7c4981905776fba1):** **`APPROVED_ENGINE_PINS` = {`e06e69e5`}** — the fleet pin moved there today (PR #698 merged under Ash's grant; the store's `adopt-latest.sh` uploaded by Ash; this host adopted via the gated recipe with all three claim-gate checks passing), and the build carries the approved supersession contract (#695). Measured against the adopted engine: the shipped gate run end to end passes the fleet-pin, executing-engine identity, verified-bytes attestation and tree checks and refuses at the absent ship register (the engine answers rc 1 for a nonexistent register; the gate reads it as UNKNOWN); a direct attestation against the plan register returns a real tally with `winning` exposed for both reviewers. codex-coder: the guard matched only accepted heads, so any other invalid head was silently unmatched — every `ship_check.py` invocation is now matched and the head validated positively (exactly 40 lowercase hex or the two documented placeholders; controls: 6 hex, uppercase, not-a-head, forty g's, 39 hex). codex-reviewer: on macOS an ACL survives `chmod` and is invisible to `stat` — every directory the gate creates has its ACL entries stripped and proven absent (the OS's own `/bin/chmod` and `/bin/ls` by absolute path, OS trust roots like the interpreter), and any ACL entry on a body or its directory is refused before the read; regression: an inherited everyone-write ACL on the gate root's parent does not reach the root or a private dir, and an ACL added to a 0600 body or its dir is refused.
 - **r37 (2026-09-05, codex-coder CHANGES on `16bc1ed4`, round 32; PR #703 @ c6fc2e072b376f7277b21c5d15162307431b3e8f):** the guard's head pattern accepted 7–40 hex while `ship_check.main` fullmatches 40, so a 7-hex head passed the guard and was refused by the gate — now exactly 40 hex or the two documented head placeholders, and the short-head form is matched separately and REPORTED rather than silently unmatched (control: `deadbee`). Placeholder normalization collapsed any `<...>`, so `<abs --bogus>` hid an unknown option — now an explicit allowlist (`<abs>`, `<abs path>`, `<path>`) is substituted verbatim and any other bracketed text is tokenized and judged (control: `--git <abs --bogus>` → unexpected token). One parser, shared by the plan gate and the repo-prose test, as before.
 - **r36 (2026-09-05, both reviewers CHANGES on `f81dbeba`, round 31; PR #702 @ 1c20fab21d62e4995db665580bb00fc646acfa4e):** codex-coder: the r35 parser accepted relative roots (`--git git`), unknown options and trailing positionals that argparse or `resolve_trust_roots` refuse at runtime — the tail is now validated against the documented shape (only the two flags, each exactly once, each value an absolute path or a documentation placeholder such as `<abs path>`, collapsed to one token first; anything else is a problem), with controls for relative roots, an unknown option, a trailing token and placeholders. codex-reviewer: the owned-file read never checked the body's own mode — its group/other write bits are now refused, justified as an integrity guarantee (a 0644 body is fine, 0666 is not), with a synchronized 0666 regression and a measured real download. His repeated note that the OS proof cannot run in his sandbox is expected and not counted green by either of us.
