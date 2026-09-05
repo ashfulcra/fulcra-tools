@@ -1,4 +1,4 @@
-# coord-fold: Coord on Annotations Implementation Plan (r29)
+# coord-fold: Coord on Annotations Implementation Plan (r30)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2225,6 +2225,26 @@ def private_bin(links):
     return d
 
 
+def store_read(remote):
+    """Read one store file through the trusted fulcra-api into a PRIVATE temp file and return its text.
+    r30 (found by the first real measurement of fleet_pin, 2026-09-05): the real CLI validates LOCAL_FILE as a
+    readable path and REFUSES /dev/stdout whenever stdout is a pipe — so every earlier revision's `download ...
+    /dev/stdout` form never worked outside the tests, whose fake shell returned bodies on stdout and hid it.
+    -> (rc, text, err)."""
+    import tempfile
+    d = tempfile.mkdtemp(prefix="coord-fold-store-")
+    os.chmod(d, 0o700)
+    f = os.path.join(d, "body")
+    try:
+        rc, _, err = sh("fulcra-api", "file", "download", remote, f)
+        if rc:
+            return rc, "", err
+        with open(f, encoding="utf-8") as fh:
+            return 0, fh.read(), ""
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def sh(*argv):
     """Runs a TRUSTED executable by its once-resolved absolute path. A bare name never reaches the OS (r29)."""
     name, rest = argv[0], list(argv[1:])
@@ -2480,7 +2500,7 @@ def executing_engine_commit(exe):
 
 def fleet_pin(team: str):
     """The engine pin the fleet runs — from adopt-latest.sh, never from a slug name."""
-    rc, body, _ = sh("fulcra-api", "file", "download", f"team/{team}/_coord/bus-v3/adopt-latest.sh", "/dev/stdout")
+    rc, body, _ = store_read(f"team/{team}/_coord/bus-v3/adopt-latest.sh")
     m = re.search(r'^PIN="([0-9a-f]{40})"', body, re.M) if rc == 0 else None
     return m.group(1) if m else None
 
@@ -2536,7 +2556,7 @@ def main(team: str, head: str, git: str = None, fulcra_api: str = None) -> int:
             print(f"ship_check: no winning shard from {reviewer} for {head} (fold says {win})"); ok = False; continue
         if win.get("verdict") != "approve":
             print(f"ship_check: {reviewer}'s winning shard {name} is {win.get('verdict')}, not approve"); ok = False
-        rc, body, err = sh("fulcra-api", "file", "download", f"team/{team}/review/{slug}/verdicts/{name}", "/dev/stdout")
+        rc, body, err = store_read(f"team/{team}/review/{slug}/verdicts/{name}")
         if rc:
             print(f"ship_check: cannot read {name} ({err[:80]})"); ok = False; continue
         verdict = re.search(r"^verdict:\s*(\S+)", body, re.M)
@@ -2610,11 +2630,15 @@ def world(*, at=HEAD, dirty="", state="APPROVED", approvals=("codex-reviewer", "
             if winning != "absent":
                 fold["winning"] = winning
             return 0, json.dumps(fold), ""
-        if a[:3] == ["fulcra-api", "file", "download"] and a[3].endswith("adopt-latest.sh"):
-            return (0, f'#!/bin/sh\nPIN="{pin}"   # coord-engine\n', "") if pin else (1, "", "Error: File not found")
         if a[:3] == ["fulcra-api", "file", "download"]:
-            n = a[3].rsplit("/", 1)[-1]
-            return (0, bodies[n], "") if n in bodies else (1, "", "Error: File not found")
+            assert len(a) == 5 and a[4] != "/dev/stdout", a                                       # r30: the real CLI refuses /dev/stdout under a pipe
+            if a[3].endswith("adopt-latest.sh"):
+                body = f'#!/bin/sh\nPIN="{pin}"   # coord-engine\n' if pin else None
+            else:
+                n = a[3].rsplit("/", 1)[-1]; body = bodies.get(n)
+            if body is None:
+                return 1, "", "Error: File not found"
+            pathlib.Path(a[4]).write_text(body); return 0, "", ""                                   # the body lands in LOCAL_FILE, as the real CLI does
         raise AssertionError(a)
     return fake_sh
 
@@ -3001,6 +3025,39 @@ def test_main_refuses_without_stated_trust_roots_before_touching_the_store(monke
     assert "never discovered through PATH" in capsys.readouterr().out and touched == []
 
 
+REAL_CLI_REFUSAL = "Error: Invalid value for '[LOCAL_FILE]': Path '/dev/stdout' is not readable."
+FAKE_FULCRA_API = """#!/bin/sh
+# behaves like the real fulcra-api file download (measured 2026-09-05): refuses /dev/stdout, writes LOCAL_FILE
+if [ "$1" != "file" ] || [ "$2" != "download" ]; then echo "unexpected: $*" >&2; exit 64; fi
+if [ "$4" = "/dev/stdout" ]; then echo "REAL_CLI_REFUSAL" >&2; exit 2; fi
+case "$3" in
+  */adopt-latest.sh) printf '#!/bin/sh\nPIN="PIN_VALUE"   # coord-engine\n' > "$4" ;;
+  *) printf 'verdict: approve\ntree: TREE_VALUE\n' > "$4" ;;
+esac
+"""
+
+
+def test_store_reads_go_through_a_private_file_because_the_real_cli_refuses_dev_stdout(tmp_path, monkeypatch):
+    """r30. Positive control: a fulcra-api that behaves like the real one refuses `download ... /dev/stdout` (rc 2) —
+    which is what every revision before r30 did, unmeasured. The fix reads through a private temp file."""
+    import os
+    fa = tmp_path / "fulcra-api"; fa.write_text(FAKE_FULCRA_API.replace("REAL_CLI_REFUSAL", REAL_CLI_REFUSAL).replace("PIN_VALUE", PIN).replace("TREE_VALUE", TREE)); fa.chmod(0o755)
+    g = tmp_path / "git"; g.write_text("#!/bin/sh\n"); g.chmod(0o755)
+    table, why = ship_check.resolve_trust_roots({"git": str(g), "fulcra-api": str(fa)}, "/tool"); assert why is None
+    monkeypatch.setattr(ship_check, "TRUSTED", dict(table))
+    rc, out, err = ship_check.sh("fulcra-api", "file", "download", "team/fulcra/_coord/bus-v3/adopt-latest.sh", "/dev/stdout")
+    assert rc == 2 and "not readable" in err and out == ""                                        # the hole: nothing ever came back
+    assert ship_check.fleet_pin("fulcra") == PIN                                                   # the fix: read through a file
+    rc, body, _ = ship_check.store_read("team/fulcra/review/x/verdicts/y.md")
+    assert rc == 0 and f"tree: {TREE}" in body
+    assert not [d for d in os.listdir(tempfile_dir()) if d.startswith("coord-fold-store-")]        # nothing left behind
+
+
+def tempfile_dir():
+    import tempfile
+    return tempfile.gettempdir()
+
+
 def test_a_same_count_tree_substitution_cannot_bind_tampered_bytes(tmp_path, monkeypatch):
     """Synchronized, not raced. Positive control (the r27 hole as a library flow): tamper cli.py, build the attacker's
     tree of the SAME SIZE from the tampered site, substitute it for the real tree file after the parent wrote it and
@@ -3320,6 +3377,7 @@ Does not fix the pre-fence publication overwrite. Does not migrate the anti-slop
 ## Revision log
 
 - **r1–r4:** see `6e0d42e5`/`21dc909c` history. r4 was a coherent rewrite after codex-coder's round 3.
+- **r30 (2026-09-05, self-found while measuring r29; not a reviewer finding):** the first real run of `fleet_pin` returned None: the real `fulcra-api file download` validates LOCAL_FILE as a readable path and refuses `/dev/stdout` under a pipe, so the fleet-pin read and every verdict-body read had never worked outside the tests, whose fake shell returned bodies on stdout. I filed r29 with that None printed and not gated. Now: `store_read` downloads into a private 0700 temp file, reads it back, removes it; the fake shell writes to LOCAL_FILE and asserts it is never `/dev/stdout`; regression with a fake `fulcra-api` that refuses `/dev/stdout` exactly like the real one; the filing chain gates the real fleet-pin read on equality with the pin.
 - **r29 (2026-09-05, codex-coder CHANGES on `e186e63a`, round 26):** ship_check ran bare `git` and bare `fulcra-api` through PATH, the same PATH that finds the mutable launcher; a planted `bin/git` could bind tampered bytes to attacker hashes and forge every HEAD/tree check, a planted `bin/fulcra-api` could return an approved pin and approving verdicts. Now: trust roots are stated as absolute paths (`--git`, `--fulcra-api`), resolved once by realpath, refused under the tool environment, executed by that path in every `sh` call (a bare name raises); the child's PATH is one private directory with a single link to the stated `fulcra-api`; the engine's command/store overrides are scrubbed. Regressions with positive controls: PATH shadow of both, root under the env (incl. a symlink pointing inside), swap after resolution, child reachability, `main` refusing before touching the store.
 - **r28 (2026-09-05, BOTH reviewers CHANGES on `f5383eee`, round 25):** codex-coder: three stale instructions (Task 16 sentence, `attested_status` docstring, `.pth` test comment) still told the builder to put the verified site-packages on `sys.path`, and one test monkeypatched a string r27 had removed (vacuous pass) — all rewritten to say the package is reachable only through `VerifiedImporter`; static AST regression rejects any `sys.path` mutation in ATTEST and the stale phrasing in code. codex-reviewer: the expected tree was a mutable temp file the child trusted by pathname and the parent compared only by count — now passed on stdin, canonical digest echoed and compared exactly; synchronized same-count substitution regression with positive control.
 - **r27 (2026-09-05, codex-coder CHANGES on `65c0a403`, round 24):** r26 put the tool environment's site-packages on `sys.path` for metadata lookups, so a forged top-level module there (`argparse.py`) could answer for the attestation. Site-packages is never on `sys.path` now; `direct_url.json` is read by path; package resources are served from the verified bytes (`get_resource_reader`); the post-check refuses any module loaded from the tool environment outside the verified importer and any `sys.path` entry under it. Regressions with positive controls for the forged `argparse.py` and a replaced resource file. Measured against the installed 2.0.6 engine and the real pinned tree.
