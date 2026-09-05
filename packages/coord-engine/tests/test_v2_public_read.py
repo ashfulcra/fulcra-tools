@@ -430,6 +430,7 @@ def _valid_review_projection_row(name="pr1"):
             "state": "PENDING", "approvals": [], "changes": [],
             "required": ["alice"], "pending_required": ["alice"],
             "evidence": "proof", "of": "task/a", "head": "a" * 40,
+            "winning": {},
         },
     }
 
@@ -856,6 +857,9 @@ def test_non_task_public_folds_read_the_sealed_generation_not_live_canonical(
         "state": "APPROVED", "approvals": ["alice"], "changes": [],
         "required": ["alice"], "pending_required": [], "evidence": "proof",
         "of": "task/a", "head": "a" * 40, "round": 1,
+        # a compatible writer records which shard won (review-winning-envelope)
+        "winning": {"alice": {"name": "a" * 40 + "--alice--2026-08-18T21:05:53Z-0badf00d.md",
+                              "verdict": "approve", "sort_key": "2026-08-18T21:05:53.000000Z"}},
     }
     values = {
         "presence": {"records": [_record(presence_path, {
@@ -1006,7 +1010,7 @@ def test_generation_backed_checked_truncation_is_top_level_unknown(
                 "of": None, "head": None, "mtime": None, "size": None,
                 "tally": {
                     "state": "PENDING", "approvals": [], "changes": [],
-                    "required": ["bob"], "pending_required": ["bob"],
+                    "required": ["bob"], "pending_required": ["bob"], "winning": {},
                     "evidence": "", "of": None,
                 },
             } for index in range(45)],
@@ -1069,7 +1073,7 @@ def _public_fold_transport():
                     "of": None, "head": None, "mtime": None, "size": None,
                     "tally": {
                         "state": "PENDING", "approvals": [], "changes": [],
-                        "required": [], "pending_required": [], "evidence": "",
+                        "required": [], "pending_required": [], "evidence": "", "winning": {},
                         "of": None,
                     },
                 }],
