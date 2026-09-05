@@ -866,8 +866,14 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     kwargs: dict[str, Any] = {"recorded_at": recorded_at}
     if tags:
         kwargs["tags"] = tags
-    return bool(transport.record_write(
+    ok = bool(transport.record_write(
         config["data_type"], config["api_version"], note, sender, **kwargs))
+    # Task 13 (plan 2026-09-04-coord-fold): mirror onto bus-v4 AFTER the v3 write, from this one chokepoint.
+    # The mirror can never fail the v3 write (it does not raise) and is a no-op without a bus-v4 config.
+    from . import dual_emit
+    dual_emit.mirror(transport, team, sender=sender, to=to, kind=kind, priority=priority, slug=slug,
+                     ptr=ptr, recorded_at=recorded_at)
+    return ok
 
 
 # --- read side: the durable cursor (the window rule, 2026-07-27) --------------
