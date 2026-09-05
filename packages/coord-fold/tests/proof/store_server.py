@@ -46,7 +46,16 @@ def handle(req):
         p = argv[2]
         return (0, store["docs"][p], "") if p in store["docs"] else (1, "", "Error: File not found\n")
     if argv[:1] == ["record"]:
+        # The REAL CLI's refusals, reproduced (rule: a fake must refuse what the real one refuses). `fulcra-api record`
+        # is `record DATA_TYPE [VALUE] --api-version V --source S`; no positional -> usage error rc 2; a data type is
+        # never a flag. Measured live 2026-09-05: "Error: Missing argument 'DATA_TYPE'."
+        if len(argv) < 2 or argv[1].startswith("-"):
+            return (2, "", "Usage: fulcra record [OPTIONS] DATA_TYPE [VALUE]\nError: Missing argument 'DATA_TYPE'.\n")
+        if "--api-version" not in argv or "--source" not in argv:
+            return (2, "", "Error: Missing option '--api-version' / '--source'.\n")
         doc = json.loads(stdin)
+        if set(doc) - {"note", "recorded_at", "tags"}:
+            return (2, "", f"Error: unknown record fields {sorted(set(doc) - {'note', 'recorded_at', 'tags'})}\n")
         with lock:
             store["events"].append({"id": f"w{len(store['events'])}", "recorded_at": doc["recorded_at"], "note": doc["note"]})
         return (0, "recorded\n", "")

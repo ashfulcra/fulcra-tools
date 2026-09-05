@@ -94,9 +94,10 @@ class CliPointerWriter:
         self._cli = list(cli)
         self._timeout = timeout
 
-    def _record(self, doc: str) -> tuple[int, str, str]:
+    def _record(self, data_type: str, api_version: str, source: str, doc: str) -> tuple[int, str, str]:
         try:
-            p = subprocess.run([*self._cli, "record"], input=doc, capture_output=True, text=True, timeout=self._timeout)
+            p = subprocess.run([*self._cli, "record", data_type, "--api-version", api_version, "--source", source],
+                               input=doc, capture_output=True, text=True, timeout=self._timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 127, "", str(exc)
         return p.returncode, p.stdout, p.stderr
@@ -109,11 +110,13 @@ class CliPointerWriter:
         return p.returncode, p.stdout, p.stderr
 
     def write_event(self, channel_cfg: dict[str, str], payload: dict, *, sender: str) -> bool:
-        # Key names: GOLDEN COMPARISON against coord_engine/transport.py record_write (~line 385 at
-        # 5db5c3e5). Task 5 asserts them; if the old transport differs, change both there.
-        doc = {"data_type": channel_cfg["data_type"], "api_version": channel_cfg["api_version"],
-               "note": json.dumps(payload, separators=(",", ":")), "source": sender, "recorded_at": payload["at"]}
-        rc, _o, _e = self._record(json.dumps(doc))
+        # GOLDEN COMPARISON against coord_engine/transport.py record_write (line 414 at 631ba497): the real CLI is
+        # `record DATA_TYPE --api-version V --source S` with `{"note", "recorded_at"}` on stdin. The first cut put all
+        # five keys in the stdin doc and passed NO positional; the real CLI refused every write ("Missing argument
+        # 'DATA_TYPE'", rc 2) while the proof's fake accepted it — found by the G13 drill on the live store
+        # (2026-09-05 20:30Z, `open: UNKNOWN`). The fake now refuses the same shapes the CLI refuses.
+        doc = {"note": json.dumps(payload, separators=(",", ":")), "recorded_at": payload["at"]}
+        rc, _o, _e = self._record(channel_cfg["data_type"], channel_cfg["api_version"], sender, json.dumps(doc, separators=(",", ":")))
         return rc == 0
 
     def save_doc(self, path: str, text: str) -> bool:

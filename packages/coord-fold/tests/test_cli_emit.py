@@ -32,3 +32,21 @@ def test_emit_then_fold_sees_the_event():
 def test_a_failed_write_exits_3_not_0():
     st = FakeStore({CFG: CFG_DOC}, []); w = FakeWriter(st); w.write_event = lambda *a, **k: False
     assert main(["emit", "r", "--from", "boss", "--to", "me", "--kind", "note", "--slug", "s", "--pri", "P3"], reader=FakeReader(st), writer=w) == 3
+
+
+def test_the_real_writer_invokes_record_in_the_engine_s_golden_shape(monkeypatch):
+    """coord_engine/transport.py record_write (631ba497 line 414): `record DATA_TYPE --api-version V --source S`,
+    stdin `{"note","recorded_at"}`. The first cut passed no positional and stuffed five keys into stdin; the real CLI
+    refused every write with rc 2 (G13 drill, 2026-09-05) while the proof's fake accepted it."""
+    import subprocess
+    from coord_fold.transport import CliPointerWriter
+    seen = {}
+
+    def fake_run(argv, input=None, **kw):
+        seen["argv"], seen["stdin"] = argv, input
+        return subprocess.CompletedProcess(argv, 0, "recorded\n", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    payload = {"v": 1, "at": "2026-09-05T20:33:00Z", "from": "me", "to": "me", "kind": "open", "slug": "d", "pri": "P3", "ptr": "task/d.md"}
+    ok = CliPointerWriter(cli=["fulcra-api"]).write_event({"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}, payload, sender="me")
+    assert ok and seen["argv"] == ["fulcra-api", "record", "MomentAnnotation/x", "--api-version", "v1alpha1", "--source", "me"]
+    assert json.loads(seen["stdin"]) == {"note": json.dumps(payload, separators=(",", ":")), "recorded_at": "2026-09-05T20:33:00Z"}
