@@ -40,7 +40,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="c4a8410a36493298c0f7ca630b1c95c8e59d213a"   # coord-engine at c4a8410a. THIRTEENTH pin move (sixth of 2026-09-06). Carries PR 739: the bus-v4 cutover switch is three-state (absent -> files; unreadable or malformed -> UNKNOWN rc 3, nothing consulted; fold -> the checkpoint) and is read BEFORE any file-plane work, so serve=fold never touches the task index or role resolution. Adopting flips nothing: the switch is still absent. No re-seed. Engine delta from 6445cde8 is cutover.py + the two public reads in cli.py plus tests and AGENTS.md. Everything in 6445cde8 is still here.
+PIN="e9bbe55b6efa1f8cce2873fc2401c0b97602f30a"   # coord-engine at e9bbe55b. FOURTEENTH pin move (fifth of 2026-09-06). Carries PR 741 (cutover round 3): the checkpoint's own health (unread_events, unreadable_pointers) survives the serving boundary as UNKNOWN with rows retained, and forge feedback under fold is served from the projection by pointed reads only. Adopting flips nothing; the switch is absent on the bus. Engine delta from c4a8410a is cutover.py + cli fold probes + tests. Everything in c4a8410a is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
