@@ -1678,6 +1678,14 @@ acts on today.
   recovery drill is recorded at `_coord/bus-v4/drill/<agent>.md` (G13), and `--ship-check-rc 0` carries the rc of
   the runbook's `scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs>`. The window flags exist so
   the operator can compress the window deliberately, never silently. A read.
+- **The flip (coord_engine.cutover, 2026-09-06).** `cutover show <team>` / `cutover set <team> --serve fold|files
+  --reason … --agent <a>` read and write ONE switch document, `_coord/bus-v4/cutover.json`
+  (`{"v":1,"serve":"fold"|"files","at","by","reason"}`). `needs-me` and `obligations` read it on every invocation
+  (nothing is cached): absent, unreadable or malformed means **files**, today's answer, so the flip cannot happen by
+  accident; `serve: fold` means the agent's coord-fold checkpoint IS the answer and the file plane is not consulted
+  for the rows; a checkpoint that is absent, unreadable or corrupt is **UNKNOWN (rc 3), never CLEAR** — an
+  identity that has not seeded its fold does not thereby owe nothing. Rollback is `--serve files`, one write,
+  fleet-wide. `cutover` is MIXED: `show` is a read, `set` is activity.
 - **Forge projection cost (ruling 30be1f8e, 2026-09-05).** `build_forge_projection` lists the parent `_coord/forge/feedback/` ONCE and lists per PR only the PRs that appear there; measured on the live store 125 responsible PRs cost ~77 s of per-PR listings that almost all returned empty, against a sub-second parent listing naming two directories. An EMPTY or FAILED parent listing proves nothing (a listing answers identically for a real empty dir and a bad path) and falls back to the per-PR loop unchanged: the pruning only removes work it has positive evidence for. `COORD_FORGE_BUILD_BUDGET` (default 60 s) is then a ceiling, not a requirement; the reconciling host carries 180 in its launchd plist.
 - **Activity classification.** `obligations` is MIXED: `--export-open`, `--repair-unknown` and `--seed-checkpoint`
   each write (two of those already did while the verb classified as a read).

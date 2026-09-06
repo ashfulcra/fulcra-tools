@@ -169,6 +169,7 @@ _JSON_PINNED = {
     "owed": ["owed", "r", "--agent", "alice"],
     "needs-me": ["needs-me", "r", "--agent", "alice"],
     "obligations": ["obligations", "r", "--agent", "alice"],
+    "cutover show": ["cutover", "show", "r"],                  # bus-v4 cutover switch: one object, rc 0, files when the switch is absent
     "presence show": ["presence", "show", "r"],
     "queue": ["queue", "r", "--agent", "alice"],
     "roles status": ["roles", "status", "r", "coord-maintainer"],
