@@ -175,3 +175,16 @@ def test_a_failed_CLOSE_write_is_loud_and_nonzero(capsys):
     assert rc != 0, "a close that never landed must not report success"
     combined = capsys.readouterr()
     assert "not closed" in (combined.out + combined.err)
+
+
+def test_respond_on_a_BROADCAST_writes_the_responders_ack_and_a_directed_respond_does_not(emitted):
+    """RULING 55b1056b (2026-09-06): the old plane reads `_coord/acks/<slug>/<agent>` per recipient and bus-v4 carries
+    the response's close per recipient; without the ack, `coord-fold close` alone read DIVERGE only_old on
+    coord-opus-worker. One verb, both planes."""
+    t = _seed(FakeTransport(), assignee="*")
+    assert cli.cmd_respond(_args(), t) == 0
+    ack = t.read(cli._ack_path(TEAM, SLUG, "coord-opus-worker"))
+    assert ack and "type: Ack" in ack and "agent: coord-opus-worker" in ack and "via: respond" in ack
+    t2 = _seed(FakeTransport())                                                    # directed: no ack record, nothing to pair
+    assert cli.cmd_respond(_args(), t2) == 0
+    assert t2.read(cli._ack_path(TEAM, SLUG, "coord-opus-worker")) is None

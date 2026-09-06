@@ -6669,12 +6669,19 @@ def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str,
     # exists for THAT agent (the row's `acked_by`, or the ack doc at _ack_path), in which case it is closed for that
     # agent only. bus-v4 already carries this per recipient (each ack/close is its own event); the old plane now
     # approximates it the same way. An unreadable ack reads as no ack (over-capture, never a manufactured close).
+    # RULING (coord-boss 55b1056b, 2026-09-06, refining 13a58789): the OWNER's disposition ends the ask for everyone —
+    # a broadcast whose status is terminal (done/abandoned/archived, router.TERMINAL_STATUSES) is open for NOBODY;
+    # a recipient's ack still closes it for that recipient only. Measured on coord-opus-worker: 33 of 36 seeded opens
+    # were terminal broadcasts that no recipient could ever discharge.
+    from .router import TERMINAL_STATUSES as _TERMINAL
     seen = {str(r.get("id") or r.get("name") or "") for r in got}
     for r in rows or []:
         if not isinstance(r, dict) or str(r.get("assignee") or "") not in ("*", "all"):   # both spellings exist on the store (measured: 30 rows, "*" and "all")
             continue
         slug = str(r.get("id") or r.get("name") or "")
         if not slug or slug in seen or str(r.get("owner") or "") == agent:
+            continue
+        if str(r.get("status") or "") in _TERMINAL:
             continue
         if agent in (r.get("acked_by") or []):
             continue
@@ -8386,7 +8393,18 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
     # it" while emitting nothing — the queue reads events and a shard cannot
     # reach it. The line was believed, so a responded-to directive was re-asked
     # twice at rising priority (2026-08-08). Say only what happened.
-    owner = str((okf.parse_frontmatter(doc) or {}).get("owner") or "")
+    target_fm = okf.parse_frontmatter(doc) or {}
+    owner = str(target_fm.get("owner") or "")
+    # RULING (coord-boss 55b1056b, 2026-09-06): a recipient's respond on a BROADCAST writes that recipient's ack record,
+    # so the old plane (which reads _ack_path per recipient) and bus-v4 (which carries the response's close per
+    # recipient) agree without a second verb. Same doc shape as `inbox --ack`. Best-effort: a failed ack write is
+    # reported, never fails the response (the shard is the durable truth).
+    if str(target_fm.get("assignee") or "") in ("*", "all"):
+        ack_fm = {"type": "Ack", "agent": agent, "timestamp": _iso(_now()), "via": "respond"}
+        if not transport.write(_ack_path(args.team, args.name, agent), okf.render_frontmatter(ack_fm) + "\nacked\n"):
+            print(f"respond: broadcast ack for {agent} did NOT land at {_ack_path(args.team, args.name, agent)}; "
+                  f"the old plane will keep this broadcast open for you until `inbox --ack {args.name}` succeeds",
+                  file=sys.stderr)
     delivered = _emit_response_companion(
         transport, args.team, slug=args.name, owner=owner, responder=agent,
         shard_ptr=shard.split("/", 2)[-1])
