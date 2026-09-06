@@ -904,11 +904,20 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     if serve == "unknown":
         got: list[dict[str, Any]] = [cutover_mod.degraded_row(serve_why)]
     elif serve == "fold":
-        fold_rows, fold_why = cutover_mod.fold_rows(transport, args.team, args.agent)
-        got = fold_rows if fold_rows is not None else [cutover_mod.degraded_row(f"{serve_why}; {fold_why}")]
-        if fold_rows is not None:
+        fold_rows, fold_why, unhealthy = cutover_mod.fold_rows(transport, args.team, args.agent)
+        if fold_rows is None:
+            got = [cutover_mod.degraded_row(f"{serve_why}; {fold_why}")]
+        else:
+            got = list(fold_rows)
+            if unhealthy:
+                # coord-fold's own health contract survives the serving boundary: rows stay, the verdict is UNKNOWN.
+                got = [cutover_mod.degraded_row(f"{serve_why}; {unhealthy}")] + got
             add_on = Deadline.open(_briefing_budget())
-            got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
+            forge, forge_why = _forge_rows_pointed(transport, args.team, args.agent, deadline=add_on.instant)
+            if forge is None:
+                got.append({"type": "forge-degraded", "reason": forge_why})
+            else:
+                got += forge
     else:
         got = _needs_me_from_files(args, transport, now)
     # Contract 2 (OC2/OC3, ladder PR 1): the envelope is sealed FIRST and rc is
@@ -6222,18 +6231,46 @@ def _authority_unknown_probes(why: str) -> "list[obligations_mod.Component]":
             for n in obligations_mod.OBLIGATION_COMPONENTS]
 
 
+def _forge_rows_pointed(transport: Any, team: str, agent: str, *, deadline: Optional[float]
+                        ) -> tuple[Optional[list[dict[str, Any]]], str]:
+    """Forge feedback with POINTED READS ONLY (codex-coder P0, engine-ship-gate-c4a8410a): one read of the
+    summaries document, the FRESH ``forge`` projection section from it, and one ack read per feedback item for
+    this agent. ``changed_slugs`` is empty on purpose — the feed delta is what re-lists a PR's feedback directory,
+    and the fold path may never list. A projection that is absent, stale, incomplete or malformed is
+    (None, why): UNKNOWN at the serving boundary, never a raw scan."""
+    try:
+        body, state = transport.read_classified(rec.summaries_path(team))
+    except Exception as exc:
+        return None, f"forge projection document unreadable ({exc})"
+    if state != "ok" or not body:
+        return None, f"forge projection document {state}"
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return None, "forge projection document is not JSON"
+    section, reason = projection_mod.fresh_section(doc, projection_mod.FORGE_KEY, projection_mod.FORGE_SCHEMA,
+                                                   now=_iso(_now()))
+    if section is None:
+        return None, f"forge projection not servable: {reason or 'no forge section in the summaries document'}"
+    served = _forge_feedback_from_projection(transport, team, agent, section, deadline=deadline, changed_slugs=set())
+    if served is None:
+        return None, "forge projection malformed"
+    return served, "forge served from the projection (pointed reads only)"
+
+
 def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
                  ) -> "list[obligations_mod.Component]":
     """The component set served from the agent's coord-fold checkpoint — ONE pointed read, no task index, no
-    role resolution, no review-register listing (codex-coder P0, engine-ship-gate-6445cde8). The fold carries
+    role resolution, no review-register listing, no forge directory listing (codex-coder P0s). The fold carries
     every open addressed to the agent as (slug, pri, ptr, from, to); kinds are not distinguished on the stream,
     so `tasks` carries them all, `directives` the non-review ones, `reviews` the review-request rows, and
     `blocks`/`reminders`/`role_duties` are consulted-and-subsumed (a block, a reminder or a role-routed duty is
-    an open in the fold, and its ptr says which). `forge_feedback` is GitHub-mirror evidence, not the file
-    plane the cutover replaces, and keeps its own bounded probe. A checkpoint that cannot answer makes every
-    component UNREADABLE: UNKNOWN, never CLEAR, for an unseeded identity."""
+    an open in the fold, and its ptr says which). `forge_feedback` is served from the forge PROJECTION by pointed
+    reads (`_forge_rows_pointed`), never the raw scan. A checkpoint that cannot answer makes every component
+    UNREADABLE; a checkpoint whose own health fields say the fold is incomplete (codex-reviewer P0) makes every
+    component UNREADABLE too, with its rows retained as partial data: UNKNOWN, never CLEAR."""
     P, S, C = obligations_mod.ProbeResult, obligations_mod.ProbeState, obligations_mod.Component
-    rows, why = cutover_mod.fold_rows(transport, team, agent)
+    rows, why, unhealthy = cutover_mod.fold_rows(transport, team, agent)
     if rows is None:
         detail = f"{serve_why}; {why}"
         return [C(name=n, probe=(lambda: P(state=S.UNREADABLE, detail=detail)))
@@ -6241,19 +6278,31 @@ def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
     owed_all = [r for r in rows if not str(r.get("type") or "").endswith("-source")]
     reviews = [r for r in owed_all if r.get("kind") == "review"]
     directives = [r for r in owed_all if r.get("kind") != "review"]
-    subsumed = f"{why}; not distinguished on the fold — an open of this kind is served under tasks"
     fold_dl = Deadline.open(_obligation_budget())
+    if unhealthy:
+        # Partial data survives; the terminal state does not lie about completeness.
+        def _partial(owed):
+            return lambda: P(state=S.UNREADABLE, owed=owed, detail=f"{serve_why}; {unhealthy}")
+        return [
+            C(name="blocks", probe=_partial([])), C(name="directives", probe=_partial(directives)),
+            C(name="forge_feedback", probe=_partial([])), C(name="reminders", probe=_partial([])),
+            C(name="reviews", probe=_partial(reviews)), C(name="role_duties", probe=_partial([])),
+            C(name="tasks", probe=_partial(owed_all)),
+        ]
+    subsumed = f"{why}; not distinguished on the fold — an open of this kind is served under tasks"
 
     def _forge_probe():
         if fold_dl.expired():
             return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise COORD_OBLIGATION_BUDGET")
-        found = _forge_feedback_for(transport, team, agent, deadline=fold_dl.instant)
+        found, forge_why = _forge_rows_pointed(transport, team, agent, deadline=fold_dl.instant)
+        if found is None:
+            return P(state=S.UNREADABLE, detail=forge_why)
         markers = [r.get("type") for r in found if isinstance(r.get("type"), str) and r["type"].endswith("-degraded")]
         real = [r for r in found if not (isinstance(r.get("type"), str)
                                          and (r["type"].endswith("-degraded") or r["type"].endswith("-source")))]
         if markers:
             return P(state=S.UNREADABLE, owed=real, detail="; ".join(sorted(set(markers))))
-        return P(state=S.OK, owed=real)
+        return P(state=S.OK, owed=real, detail=forge_why)
 
     return [
         C(name="blocks", probe=(lambda: P(state=S.OK, detail=subsumed))),

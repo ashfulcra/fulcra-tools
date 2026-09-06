@@ -1689,9 +1689,15 @@ acts on today.
   register; sentinel tests prove it); a checkpoint that is absent, unreadable or corrupt is **UNKNOWN (rc 3),
   never CLEAR** — an identity that has not seeded its fold does not thereby owe nothing. Under fold, `tasks`
   carries every open, `directives` the non-review ones, `reviews` the review-request rows, `blocks` /
-  `reminders` / `role_duties` are consulted-and-subsumed (their opens are in the fold), and `forge_feedback`
-  keeps its own probe (GitHub-mirror evidence, not the file plane the cutover replaces). Rollback is
-  `--serve files`, one write, fleet-wide. `cutover` is MIXED: `show` is a read, `set` is activity.
+  `reminders` / `role_duties` are consulted-and-subsumed (their opens are in the fold), and `forge_feedback` is
+  served from the forge PROJECTION section of the summaries document by pointed reads only (one document read,
+  one ack read per item, `changed_slugs` empty so nothing re-lists a feedback directory); a projection that is
+  absent, stale, incomplete or malformed is UNKNOWN, never a raw scan (codex-coder P0, engine-ship-gate-c4a8410a;
+  a `list_dir` sentinel in the tests proves the fold path never enumerates). The checkpoint's own health survives
+  the serving boundary: `unread_events > 0`, a non-empty `unreadable_pointers`, or malformed health fields make
+  both public reads **UNKNOWN (rc 3) with the known rows retained as partial data** (codex-reviewer P0, same
+  register). Rollback is `--serve files`, one write, fleet-wide. `cutover` is MIXED: `show` is a read, `set` is
+  activity.
 - **Forge projection cost (ruling 30be1f8e, 2026-09-05).** `build_forge_projection` lists the parent `_coord/forge/feedback/` ONCE and lists per PR only the PRs that appear there; measured on the live store 125 responsible PRs cost ~77 s of per-PR listings that almost all returned empty, against a sub-second parent listing naming two directories. An EMPTY or FAILED parent listing proves nothing (a listing answers identically for a real empty dir and a bad path) and falls back to the per-PR loop unchanged: the pruning only removes work it has positive evidence for. `COORD_FORGE_BUILD_BUDGET` (default 60 s) is then a ceiling, not a requirement; the reconciling host carries 180 in its launchd plist.
 - **Activity classification.** `obligations` is MIXED: `--export-open`, `--repair-unknown` and `--seed-checkpoint`
   each write (two of those already did while the verb classified as a read).
