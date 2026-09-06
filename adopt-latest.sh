@@ -70,6 +70,49 @@ fi
 # silently degrading.
 TEAM="${FULCRA_COORD_TEAM:-}"
 COORD="${FULCRA_COORD_COORDINATOR:-}"
+# ---- bootstrap-pointer fallback (BEGIN) ------------------------------------
+# The environment wins. When it is silent, the team's identity rides the bus:
+# /coord-bootstrap.json at the store root carries {"team": ..., "coordinator":
+# ...} for whichever store this host is authed against. Mechanism only; no
+# identity is baked in here. A missing or malformed pointer leaves the value
+# empty and the loud SKIPPED paths below still fire. Values are validated with
+# the same grammar the session hook uses, so a hostile pointer cannot reach a
+# shell line or a store path.
+valid_identity() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*|[!A-Za-z0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+bootstrap_identity() {
+  # $1 = key (team|coordinator). Prints the value or nothing. Never fails the run.
+  _FA="$(command -v fulcra-api 2>/dev/null || true)"
+  [ -n "$_FA" ] || return 0
+  _TMP="$(mktemp 2>/dev/null || echo "/tmp/coord-bootstrap.$$")"
+  if "$_FA" file download /coord-bootstrap.json "$_TMP" >/dev/null 2>&1; then
+    _V="$(python3 -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    v=d.get(sys.argv[2],"") if isinstance(d,dict) else ""
+    sys.stdout.write(v if isinstance(v,str) else "")
+except Exception:
+    pass' "$_TMP" "$1" 2>/dev/null || true)"
+    rm -f "$_TMP"
+    if valid_identity "$_V"; then printf '%s' "$_V"; fi
+  else
+    rm -f "$_TMP"
+  fi
+  return 0
+}
+if [ -z "$TEAM" ]; then
+  TEAM="$(bootstrap_identity team)"
+  [ -n "$TEAM" ] && echo "adopt: team '$TEAM' read from the bus pointer /coord-bootstrap.json (FULCRA_COORD_TEAM unset)"
+fi
+if [ -z "$COORD" ]; then
+  COORD="$(bootstrap_identity coordinator)"
+  [ -n "$COORD" ] && echo "adopt: coordinator '$COORD' read from the bus pointer /coord-bootstrap.json (FULCRA_COORD_COORDINATOR unset)"
+fi
+# ---- bootstrap-pointer fallback (END) --------------------------------------
 WHO="${COORD:-your coordinator}"
 if [ -z "$TEAM" ]; then
   echo "adopt: WARNING — FULCRA_COORD_TEAM is not set. The engine will still be" >&2
