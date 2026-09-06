@@ -389,3 +389,19 @@ def test_export_open_confirms_each_row_against_its_doc_and_skips_a_terminal_one_
     marker = t.docs["team/r/_coord/bus-v4/seeded/me.md"]
     assert "written: 1" in marker and "skipped_terminal_doc: 1" in marker and "skipped: 0" in marker
     assert "skipped_terminal_doc 1" in capsys.readouterr().out
+
+
+def test_a_response_on_a_broadcast_mirrors_its_close_to_all_while_the_v3_record_goes_to_the_owner():
+    """Sibling of 55b1056b: a terminal broadcast dropped from the old set for everyone, but the v4 close went to the
+    owner alone, so every other recipient's fold kept the open (coord-maintainer, 05:03Z: only_new=[the pin broadcast])."""
+    tr = FakeTransport(_mirror_cfg_docs())
+    cfg = {"data_type": "MomentAnnotation/v3", "api_version": "v1alpha1"}
+    assert records.emit_event(tr, cfg, sender="coord-opus-worker", to="coord-boss", kind="response", priority="P2",
+                              slug="bcast", ptr="_coord/responses/bcast/x.md", team="fulcra", for_agent="all")
+    v3 = [r for r in tr.records if r[0] == "MomentAnnotation/v3"]; v4 = [r for r in tr.records if r[0] == "MomentAnnotation/v4"]
+    assert len(v3) == 1 and len(v4) == 1
+    assert json.loads(v3[0][2]["note"] if isinstance(v3[0][2], dict) and "note" in v3[0][2] else json.dumps(v3[0][2])).get("to", "coord-boss") == "coord-boss"
+    assert v4[0][2]["kind"] == "close" and v4[0][2]["to"] == "all"
+    tr2 = FakeTransport(_mirror_cfg_docs())
+    records.emit_event(tr2, cfg, sender="me", to="coord-boss", kind="response", priority="P2", slug="d", ptr="x.md", team="fulcra", for_agent="me")
+    assert [r for r in tr2.records if r[0] == "MomentAnnotation/v4"][0][2]["to"] == "coord-boss"      # directed: unchanged

@@ -871,7 +871,12 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     # Task 13 (plan 2026-09-04-coord-fold): mirror onto bus-v4 AFTER the v3 write, from this one chokepoint.
     # The mirror can never fail the v3 write (it does not raise) and is a no-op without a bus-v4 config.
     from . import dual_emit
-    dual_emit.mirror(transport, team, sender=sender, to=to, kind=kind, priority=priority, slug=slug,
+    # Sibling of ruling 55b1056b (measured 2026-09-06 05:03Z on coord-maintainer): when a BROADCAST goes terminal, the
+    # old plane drops it for every recipient (owner disposition ends the ask), but the mirrored close was addressed to
+    # the owner alone, so every other recipient's fold kept the open and read only_new. A response on a broadcast
+    # (for_agent is the broadcast token) mirrors its close to `all`; the v3 record still goes to the owner.
+    mirror_to = BROADCAST if (kind == "response" and for_agent == BROADCAST) else to
+    dual_emit.mirror(transport, team, sender=sender, to=mirror_to, kind=kind, priority=priority, slug=slug,
                      ptr=ptr, recorded_at=recorded_at, fyi=fyi)
     return ok
 
