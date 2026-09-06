@@ -53,11 +53,11 @@ class MemoryTransport:
 
 
 def adapter(transport, **kwargs):
-    return TeamsSourceAdapter("fulcra", transport=transport, clock=lambda: NOW, **kwargs)
+    return TeamsSourceAdapter("acme", transport=transport, clock=lambda: NOW, **kwargs)
 
 
 def test_strict_teams_source_reads_only_typed_task_documents():
-    root = "team/fulcra/task/"
+    root = "team/acme/task/"
     transport = MemoryTransport(
         [
             {"name": "index.md", "size": "1B", "mtime": "now"},
@@ -71,7 +71,7 @@ def test_strict_teams_source_reads_only_typed_task_documents():
 
     assert snapshot.complete
     assert [item.source.to_dict() for item in snapshot.items] == [{
-        "provider": "teams", "namespace": "fulcra/tasks", "item_id": "task-1"
+        "provider": "teams", "namespace": "acme/tasks", "item_id": "task-1"
     }]
     assert snapshot.items[0].workstream == "bridge"
     assert snapshot.items[0].tags == ("kind:task",)
@@ -89,7 +89,7 @@ def test_strict_teams_source_reads_only_typed_task_documents():
     ],
 )
 def test_ambiguous_document_degrades_tasks(name, document, code):
-    path = f"team/fulcra/task/{name}"
+    path = f"team/acme/task/{name}"
     snapshot = adapter(MemoryTransport([{"name": name}], {path: document})).snapshot()
 
     assert not snapshot.complete
@@ -98,7 +98,7 @@ def test_ambiguous_document_degrades_tasks(name, document, code):
 
 
 def test_listed_but_unreadable_document_degrades_tasks():
-    path = "team/fulcra/task/task.md"
+    path = "team/acme/task/task.md"
     snapshot = adapter(MemoryTransport([{"name": "task.md"}], {}, read_error={path})).snapshot()
 
     assert snapshot.capabilities["tasks"] is CapabilityState.DEGRADED
@@ -106,7 +106,7 @@ def test_listed_but_unreadable_document_degrades_tasks():
 
 
 def test_duplicate_explicit_ids_degrade_without_emitting_duplicate():
-    root = "team/fulcra/task/"
+    root = "team/acme/task/"
     snapshot = adapter(MemoryTransport(
         [{"name": "a.md"}, {"name": "b.md"}],
         {root + "a.md": task("same"), root + "b.md": task("same")},
@@ -119,7 +119,7 @@ def test_duplicate_explicit_ids_degrade_without_emitting_duplicate():
 
 
 def test_schema_invalid_duplicate_claim_removes_valid_record_and_all_mutations():
-    root = "team/fulcra/task/"
+    root = "team/acme/task/"
     snapshot = adapter(MemoryTransport(
         [{"name": "a.md"}, {"name": "b.md"}],
         {
@@ -139,7 +139,7 @@ def test_schema_invalid_duplicate_claim_removes_valid_record_and_all_mutations()
 def test_unexpected_entry_and_read_cap_degrade_instead_of_authorizing_absence():
     transport = MemoryTransport(
         [{"name": "nested/", "is_dir": True}, {"name": "task.md"}],
-        {"team/fulcra/task/task.md": task()},
+        {"team/acme/task/task.md": task()},
     )
     snapshot = adapter(transport, max_files=1).snapshot()
 
@@ -154,7 +154,7 @@ def test_teams_transport_rejects_ambiguous_listing_and_never_echoes_stderr():
         return 0, "ambiguous output", "SECRET"
 
     with pytest.raises(TeamsTransportError, match="ambiguous list response") as error:
-        FulcraTeamsTransport(runner=runner).list_dir("team/fulcra/task/")
+        FulcraTeamsTransport(runner=runner).list_dir("team/acme/task/")
 
     assert "SECRET" not in str(error.value)
 
@@ -170,11 +170,11 @@ def test_default_teams_transport_uses_only_read_only_fulcra_file_commands():
 
     transport = FulcraTeamsTransport(runner=runner)
 
-    assert transport.list_dir("team/fulcra/task/")[0]["name"] == "task.md"
-    assert transport.read("team/fulcra/task/task.md") == task()
+    assert transport.list_dir("team/acme/task/")[0]["name"] == "task.md"
+    assert transport.read("team/acme/task/task.md") == task()
     assert calls == [
-        ("fulcra-api", "file", "list", "team/fulcra/task/"),
-        ("fulcra-api", "file", "download", "team/fulcra/task/task.md", "-"),
+        ("fulcra-api", "file", "list", "team/acme/task/"),
+        ("fulcra-api", "file", "download", "team/acme/task/task.md", "-"),
     ]
 
 
@@ -192,7 +192,7 @@ def test_many_slow_downloads_respect_one_snapshot_deadline():
         return 0, task(name.removesuffix(".md")), ""
 
     source = TeamsSourceAdapter(
-        "fulcra",
+        "acme",
         transport=FulcraTeamsTransport(runner=runner, timeout=5.0),
         clock=lambda: NOW,
         snapshot_timeout=0.08,

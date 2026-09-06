@@ -52,7 +52,7 @@ import pytest
 from coord_engine import cli
 from coord_engine_test_helpers import FakeTransport
 
-TEAM = "fulcra"
+TEAM = "acme"
 
 
 class ReadsError(FakeTransport):
@@ -214,7 +214,7 @@ def test_public_read_will_not_claim_absent_for_a_transport_that_cannot_classify(
     wrapped._records = {}
     wrapped._sealed = set()  # nothing sealed: the branch under test is below it
 
-    value, status = wrapped.read_classified("team/fulcra/roles/anything/role.md")
+    value, status = wrapped.read_classified("team/acme/roles/anything/role.md")
 
     assert value is None
     assert status == "error", (

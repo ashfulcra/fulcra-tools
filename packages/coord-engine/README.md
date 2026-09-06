@@ -27,7 +27,7 @@ coord-engine doctor <team>   # tooling + auth + store reachability, end to end
 Not on PyPI yet — install from the git tag (or a checkout:
 `uv tool install ./packages/coord-engine`). The release tag is the
 **cold-install** path; the **fleet's runtime authority** is the store BOOTSTRAP
-(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
+(`team/<team>/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
 `pp-<sha>`), not this README — once you are on the bus, adopt from there. The
 engine shells out to the
 [`fulcra-api` CLI](https://pypi.org/project/fulcra-api/) for storage

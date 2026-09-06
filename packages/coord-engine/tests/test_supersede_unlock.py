@@ -62,7 +62,7 @@ class T:
 
 
 def _args(**kw):
-    d = dict(team="fulcra", name="t1", verb="x")
+    d = dict(team="acme", name="t1", verb="x")
     d.update(kw)
     return argparse.Namespace(**d)
 

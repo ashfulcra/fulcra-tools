@@ -84,7 +84,7 @@ def run(monkeypatch, local=PIN, attested_commit=PIN, **kw):
     monkeypatch.setattr(ship_check, "sh", fake)
     monkeypatch.setattr(ship_check, "attested_status", _attest_from(fake, attested_commit))
     import sys
-    return ship_check.main("fulcra", HEAD, git=sys.executable, fulcra_api=sys.executable)     # stated roots; sh is faked above
+    return ship_check.main("acme", HEAD, git=sys.executable, fulcra_api=sys.executable)     # stated roots; sh is faked above
 
 
 def test_the_answering_process_reporting_another_build_refuses(monkeypatch, capsys):
@@ -110,7 +110,7 @@ def test_a_pth_or_sitecustomize_shadow_wins_under_site_and_loses_under_the_attes
     assert hole == "SHADOW"
     # the fix: the attestation under -I -S, site-packages NEVER on sys.path, the package reachable only through VerifiedImporter, bytes bound to the pinned tree
     _pin_tree(monkeypatch, launcher)
-    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, commit, status = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert ok and commit == PIN and status["state"] == "APPROVED"
 
 
@@ -158,7 +158,7 @@ def test_replacing_cli_and_regenerating_its_record_row_is_refused_by_the_pinned_
     site = _site_of(launcher)
     (site / "coord_engine" / "cli.py").write_text(APPROVED_CLI)                                     # replaced...
     (site / "coord_engine-2.0.6.dist-info" / "RECORD").write_text("\n".join(_record_line(site, r) for r in ("coord_engine/__init__.py", "coord_engine/cli.py")) + "\n")   # ...and RECORD regenerated to match
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "does not match the pinned commit's blob" in detail
 
 
@@ -167,10 +167,10 @@ def test_an_extra_or_missing_file_versus_the_pinned_tree_is_refused(tmp_path, mo
     _pin_tree(monkeypatch, launcher)
     site = _site_of(launcher)
     (site / "coord_engine" / "extra.py").write_text("")
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "does not contain" in detail
     (site / "coord_engine" / "extra.py").unlink(); (site / "coord_engine" / "cli.py").unlink()
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "missing from the installed package" in detail
 
 
@@ -178,7 +178,7 @@ def test_duplicate_dist_info_is_refused(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
     _pin_tree(monkeypatch, launcher)
     (_site_of(launcher) / "coord_engine-2.0.5.dist-info").mkdir()
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "exactly one is required" in detail
 
 
@@ -200,12 +200,12 @@ def test_a_forging_tool_env_interpreter_is_never_run_by_the_gate(tmp_path, monke
     launcher = _tool_env(tmp_path, "def main(argv):\n    print('{}')\n    return 3\n")          # installed: refuses (rc 3)
     _pin_tree(monkeypatch, launcher)
     wrapper = launcher.parent / "python"; wrapper.unlink(); wrapper.write_text(FORGING_WRAPPER); wrapper.chmod(0o755)
-    forged = subprocess.run([str(wrapper), "-I", "-S", "-c", "x", str(_site_of(launcher)), "fulcra", "slug", "/dev/null"], capture_output=True, text=True).stdout
+    forged = subprocess.run([str(wrapper), "-I", "-S", "-c", "x", str(_site_of(launcher)), "acme", "slug", "/dev/null"], capture_output=True, text=True).stdout
     assert '"state": "APPROVED"' in forged and '"rc": 0' in forged                                   # the wrapper forges when RUN
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "rc 3" in detail                                                              # the gate ran its own interpreter: the real source answered rc 3
     (_site_of(launcher) / "coord_engine" / "cli.py").write_text(APPROVED_CLI)                       # tamper the bytes too
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "does not match the pinned commit's blob" in detail                          # and the tree binding still refuses
 
 
@@ -240,7 +240,7 @@ def _driver_run(tmp_path, launcher, tree, replace_path, forged_text, mode, resto
     driver = tmp_path / "driver.py"; driver.write_text(TOCTOU_DRIVER)
     for path, text in (restore or {}).items():
         path.write_text(text)                                                          # restore the verified bytes before each run
-    p = subprocess.run([sys.executable, "-I", "-S", "-B", str(driver), str(site), "fulcra", "slug", str(tree_file),
+    p = subprocess.run([sys.executable, "-I", "-S", "-B", str(driver), str(site), "acme", "slug", str(tree_file),
                         str(attest_file), str(replace_path) if replace_path else "-", str(forged), mode],
                        capture_output=True, text=True, env=ship_check.engine_env())
     assert p.returncode == 0, p.stderr
@@ -338,10 +338,10 @@ def test_the_expected_tree_travels_on_stdin_and_its_digest_is_compared_exactly(m
     def spy(cmd, **kw):
         calls.append((cmd, kw)); return real_run(cmd, **kw)
     monkeypatch.setattr(ship_check.subprocess, "run", spy)
-    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, commit, status = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert ok and status["state"] == "APPROVED"
     cmd, kw = calls[-1]
-    assert cmd[cmd.index("-c") + 2:] == [str(site), "fulcra", f"coord-fold-ship-{HEAD}"]                # no tree filename in argv
+    assert cmd[cmd.index("-c") + 2:] == [str(site), "acme", f"coord-fold-ship-{HEAD}"]                # no tree filename in argv
     canonical = json.dumps(tree, sort_keys=True, separators=(",", ":"))
     assert kw.get("input") == canonical                                                                 # the tree went down the pipe
     # a child that echoes the right COUNT but a different digest (a substituted tree of equal size) is refused
@@ -349,7 +349,7 @@ def test_the_expected_tree_travels_on_stdin_and_its_digest_is_compared_exactly(m
                          "loader": "verified-bytes", "memory_loaded": 1, "tree_digest": hashlib.sha256(b"other").hexdigest(), "rc": 0,
                          "status": {"state": "APPROVED", "head": HEAD, "approvals": ["codex-reviewer", "codex-coder"]}})
     monkeypatch.setattr(ship_check.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=forged + "\n", stderr=""))
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "canonical digest" in detail
 
 
@@ -441,7 +441,7 @@ def test_main_refuses_without_stated_trust_roots_before_touching_the_store(monke
     _approve_pin(monkeypatch)
     touched = []
     monkeypatch.setattr(ship_check, "sh", lambda *a: (touched.append(a), (1, "", ""))[1])
-    assert ship_check.main("fulcra", HEAD) == 1
+    assert ship_check.main("acme", HEAD) == 1
     assert "never discovered through PATH" in capsys.readouterr().out and touched == []
 
 
@@ -465,10 +465,10 @@ def test_store_reads_go_through_a_private_file_because_the_real_cli_refuses_dev_
     g = tmp_path / "git"; g.write_text("#!/bin/sh\n"); g.chmod(0o755)
     table, why = ship_check.resolve_trust_roots({"git": str(g), "fulcra-api": str(fa)}, "/tool"); assert why is None
     monkeypatch.setattr(ship_check, "TRUSTED", dict(table))
-    rc, out, err = ship_check.sh("fulcra-api", "file", "download", "team/fulcra/_coord/bus-v3/adopt-latest.sh", "/dev/stdout")
+    rc, out, err = ship_check.sh("fulcra-api", "file", "download", "team/acme/_coord/bus-v3/adopt-latest.sh", "/dev/stdout")
     assert rc == 2 and "not readable" in err and out == ""                                        # the hole: nothing ever came back
-    assert ship_check.fleet_pin("fulcra") == PIN                                                   # the fix: read through a file
-    rc, body, _ = ship_check.store_read("team/fulcra/review/x/verdicts/y.md")
+    assert ship_check.fleet_pin("acme") == PIN                                                   # the fix: read through a file
+    rc, body, _ = ship_check.store_read("team/acme/review/x/verdicts/y.md")
     assert rc == 0 and f"tree: {TREE}" in body
     assert not [d for d in os.listdir(tempfile_dir()) if d.startswith("coord-fold-store-")]        # nothing left behind
 
@@ -489,9 +489,9 @@ def test_the_real_cli_accepts_the_runbook_invocation_and_refuses_the_bare_form(t
     g = tmp_path / "git"; g.write_text("#!/bin/sh\necho " + HEAD + "\n"); g.chmod(0o755)
     launcher_dir = tmp_path / "env" / "bin"; launcher_dir.mkdir(parents=True); (launcher_dir / "coord-engine").write_text("#!/bin/sh\n"); (launcher_dir / "coord-engine").chmod(0o755)
     env = {**os.environ, "PATH": str(launcher_dir)}                                                # the launcher is discovered (env root = tmp/env); the roots are stated OUTSIDE it
-    bare = subprocess.run([sys.executable, str(SCRIPT), "fulcra", HEAD], capture_output=True, text=True, env=env)
+    bare = subprocess.run([sys.executable, str(SCRIPT), "acme", HEAD], capture_output=True, text=True, env=env)
     assert bare.returncode == 2 and "--git" in bare.stderr and "required" in bare.stderr             # the old runbook form: dead at parsing
-    run = subprocess.run([sys.executable, str(SCRIPT), "fulcra", HEAD, "--git", str(g), "--fulcra-api", str(fa)], capture_output=True, text=True, env=env)
+    run = subprocess.run([sys.executable, str(SCRIPT), "acme", HEAD, "--git", str(g), "--fulcra-api", str(fa)], capture_output=True, text=True, env=env)
     assert run.returncode == 1 and "not an APPROVED+PINNED" in run.stdout, (run.stdout, run.stderr)  # parsed, roots resolved, pin read, refused on the empty approved set
 
 
@@ -509,7 +509,7 @@ def test_a_same_count_tree_substitution_cannot_bind_tampered_bytes(tmp_path, mon
     ns = {"__name__": "attest_lib"}; exec(ship_check.ATTEST, ns)
     _, blobs = ns["verify_tree"](str(site), json.load(open(tree_file)))                                # r27 child: trusts the pathname
     assert len(blobs) == len(real_tree)                                                                # r27 parent: count matches -> accepted (the hole)
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "does not match the pinned commit's blob" in detail                            # r28: the real tree came down the pipe
 
 
@@ -540,7 +540,7 @@ def test_the_attestation_refuses_a_coord_engine_module_loaded_outside_the_verifi
 def test_a_pin_not_in_the_clone_refuses(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
     monkeypatch.setattr(ship_check, "pinned_tree", lambda pin: None)
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "not in this clone" in detail
 
 
@@ -561,7 +561,7 @@ def test_pinned_tree_reads_the_commit_from_a_real_git_clone_and_the_intact_packa
     monkeypatch.setattr(ship_check, "TRUSTED", {"git": os.path.realpath(shutil.which("git")), "fulcra-api": sys.executable})   # r29: stated by the test, as the operator would
     tree = ship_check.pinned_tree(pin)
     assert tree == _tree_of(site)
-    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", pin)
+    ok, commit, status = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", pin)
     assert ok and commit == pin and status["state"] == "APPROVED"
 
 
@@ -573,7 +573,7 @@ def test_a_replaced_cli_with_any_record_content_is_refused_by_the_pinned_tree(tm
     site = _site_of(launcher)
     (site / "coord_engine" / "cli.py").write_text(APPROVED_CLI)
     (site / "coord_engine-2.0.6.dist-info" / "RECORD").write_text(_record_line(site, "coord_engine/__init__.py") + "\ncoord_engine/cli.py,,\n")
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "does not match the pinned commit's blob" in detail
 
 
@@ -592,7 +592,7 @@ def test_stale_unchecked_hash_bytecode_answers_under_a_normal_import_and_never_u
                           capture_output=True, text=True, env=ship_check.engine_env()).stdout.strip().splitlines()
     assert hole and hole[-1] == "0", hole                              # the stale bytecode answered rc 0 (the hole, asserted)
     _pin_tree(monkeypatch, launcher)
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "rc 3" in detail                                 # the verified SOURCE answered (rc 3) — bytecode never consulted
 
 
@@ -600,14 +600,14 @@ def test_a_sourceless_pyc_under_the_package_is_refused(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
     _pin_tree(monkeypatch, launcher)
     (_site_of(launcher) / "coord_engine" / "helper.pyc").write_bytes(b"\x00")
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and ("could answer" in detail or "does not contain" in detail)
 
 
 def test_a_recorded_intact_package_attests_and_answers(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, APPROVED_CLI)
     _pin_tree(monkeypatch, launcher)
-    ok, commit, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, commit, status = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert ok and commit == PIN and status["state"] == "APPROVED"
 
 
@@ -615,14 +615,14 @@ def test_an_approved_shaped_status_that_returns_rc_3_is_refused(tmp_path, monkey
     """Both reviewers, round 18: the inner verdict's rc was recorded and never checked."""
     launcher = _tool_env(tmp_path, "import json\ndef main(argv):\n    print(json.dumps({'state': 'APPROVED', 'head': 'x', 'approvals': ['codex-reviewer', 'codex-coder'], 'winning': {}}))\n    return 3\n")
     _pin_tree(monkeypatch, launcher)
-    ok, detail, status = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, status = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "rc 3" in detail and status is None
 
 
 def test_a_status_of_the_wrong_shape_is_refused(tmp_path, monkeypatch):
     launcher = _tool_env(tmp_path, "def main(argv):\n    print('[1, 2]')\n    return 0\n")
     _pin_tree(monkeypatch, launcher)
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "expected shape" in detail
 
 
@@ -641,7 +641,7 @@ def test_the_attestation_refuses_a_module_answering_from_outside_the_verified_si
     # this test monkeypatched a sys.path.insert that no longer existed and passed vacuously. Now: the pinned tree is the
     # elsewhere tree; nothing under site can satisfy it, and nothing elsewhere can answer (no sys.path, no importer entry).
     monkeypatch.setattr(ship_check, "pinned_tree", lambda pin: _tree_of(elsewhere))
-    ok, detail, _ = ship_check.attested_status(str(launcher), "fulcra", f"coord-fold-ship-{HEAD}", PIN)
+    ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "missing from the installed package" in detail
 
 
@@ -665,7 +665,7 @@ def test_the_executable_is_resolved_exactly_once_and_that_path_is_what_executes(
         executed.append(exe); rc, out, _ = fake("coord-engine", "review", "status", team, slug, "--json"); return True, PIN, json.loads(out)
     monkeypatch.setattr(ship_check, "attested_status", attested)
     import sys
-    assert ship_check.main("fulcra", HEAD, git=sys.executable, fulcra_api=sys.executable) == 0
+    assert ship_check.main("acme", HEAD, git=sys.executable, fulcra_api=sys.executable) == 0
     assert resolutions == ["/tool-A/bin/coord-engine"]                      # exactly one resolution
     assert identity_reads == ["/tool-A/bin/coord-engine"] and executed == ["/tool-A/bin/coord-engine"]   # A verified, A executed, B never touched
 
@@ -724,7 +724,7 @@ def test_the_shipped_approved_set_is_exactly_the_adopted_fleet_pin_and_any_other
     monkeypatch.setattr(ship_check, "sh", world(pin="0" * 40))
     monkeypatch.setattr(ship_check, "engine_executable", lambda: "/tool/bin/coord-engine")
     import sys
-    assert ship_check.main("fulcra", HEAD, git=sys.executable, fulcra_api=sys.executable) == 1 and "not an APPROVED+PINNED" in capsys.readouterr().out
+    assert ship_check.main("acme", HEAD, git=sys.executable, fulcra_api=sys.executable) == 1 and "not an APPROVED+PINNED" in capsys.readouterr().out
 def test_a_pin_outside_the_approved_set_refuses(monkeypatch):
     assert run(monkeypatch, pin="e" * 40) == 1
 
@@ -842,7 +842,7 @@ def test_store_read_refuses_a_body_whose_handoff_state_changed_before_the_read(t
     for mode, expect in (("chmod", "no longer private"), ("link", "not a regular file"), ("bodymode", "is writable by others (mode 0o666)"), ("intact", None)):
         table, why = ship_check.resolve_trust_roots({"git": str(g), "fulcra-api": str(fake(mode))}, "/tool"); assert why is None
         monkeypatch.setattr(ship_check, "TRUSTED", dict(table))
-        rc, body, err = ship_check.store_read("team/fulcra/x")
+        rc, body, err = ship_check.store_read("team/acme/x")
         if expect:
             assert rc == 3 and body == "" and expect in err, (mode, rc, err)
         else:

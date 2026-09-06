@@ -245,7 +245,7 @@ def _fast_retry(monkeypatch):
 
 def test_records_config_survives_one_transient_failure():
     body = '{"data_type": "MomentAnnotation/x", "api_version": "v1alpha1"}'
-    cfg, status = records.load_config_classified(FlakyTransport(body), "fulcra")
+    cfg, status = records.load_config_classified(FlakyTransport(body), "acme")
     assert status == "ok" and cfg["data_type"] == "MomentAnnotation/x"
 
 
@@ -253,7 +253,7 @@ def test_checkpoints_config_survives_one_transient_failure():
     checkpoint_channel.cache_clear()
     body = ('{"schema": "coord.checkpoints-channel.v1", '
             '"data_type": "MomentAnnotation/y", "api_version": "v1alpha1"}')
-    cfg, status = checkpoint_channel.load_config(FlakyTransport(body), "fulcra")
+    cfg, status = checkpoint_channel.load_config(FlakyTransport(body), "acme")
     assert status == "ok" and cfg["data_type"] == "MomentAnnotation/y"
 
 
@@ -261,7 +261,7 @@ def test_tags_registry_survives_one_transient_failure():
     bus_tags.cache_clear()
     body = ('{"schema": "coord.bus-tags.v2", '
             '"base": "cb951ecb-f21c-4aee-826e-2cb0b12517d6", "agents": {}}')
-    reg, status = bus_tags.load_registry(FlakyTransport(body), "fulcra")
+    reg, status = bus_tags.load_registry(FlakyTransport(body), "acme")
     assert status == "ok" and reg["base"].startswith("cb951ecb")
 
 
@@ -272,9 +272,9 @@ def test_a_persistently_dark_store_is_still_UNKNOWN_at_every_call_site():
 
     checkpoint_channel.cache_clear()
     bus_tags.cache_clear()
-    assert records.load_config_classified(Dark(), "fulcra") == (None, "error")
-    assert checkpoint_channel.load_config(Dark(), "fulcra") == (None, "error")
-    assert bus_tags.load_registry(Dark(), "fulcra") == (None, "error")
+    assert records.load_config_classified(Dark(), "acme") == (None, "error")
+    assert checkpoint_channel.load_config(Dark(), "acme") == (None, "error")
+    assert bus_tags.load_registry(Dark(), "acme") == (None, "error")
 
 
 class _SilentLog:

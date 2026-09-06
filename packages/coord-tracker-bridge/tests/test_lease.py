@@ -6,8 +6,8 @@ from coord_tracker_bridge import FileLease, LeaseHeld
 
 
 def test_overlapping_identical_bridge_runs_are_rejected(tmp_path):
-    first = FileLease(tmp_path, "coord:fulcra", "linear:team", "hash", owner="one")
-    second = FileLease(tmp_path, "coord:fulcra", "linear:team", "hash", owner="two")
+    first = FileLease(tmp_path, "coord:acme", "linear:team", "hash", owner="one")
+    second = FileLease(tmp_path, "coord:acme", "linear:team", "hash", owner="two")
 
     first.acquire()
     with pytest.raises(LeaseHeld, match="one"):

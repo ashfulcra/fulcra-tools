@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # adopt-latest.sh — one-command fleet convergence onto the latest coord-engine.
-# Maintained by coord-boss at team/fulcra/_coord/bus-v3/adopt-latest.sh.
+# The operative copy lives in the team's own store at
+# team/<team>/_coord/bus-v3/adopt-latest.sh; this repo copy is the source of
+# record. This file is PUBLIC, so the team and coordinator identities come
+# from the environment (FULCRA_COORD_TEAM, FULCRA_COORD_COORDINATOR) and are
+# never baked in.
 # Usage: bash adopt-latest.sh [agent-name]     (or have FULCRA_COORD_AGENT set)
 #
 # HARNESS BLOCKS RUNNING THIS SCRIPT? (codex and other gated harnesses refuse to
@@ -9,14 +13,14 @@
 # path: read the three authority values below and run the two installs yourself,
 # literally, so the approval layer sees the whole command line. Recipe, with the
 # verification steps this script's claim gate performs:
-#     team/fulcra/_coord/bus-v3/ADOPT-WHEN-GATED.md
+#     team/<team>/_coord/bus-v3/ADOPT-WHEN-GATED.md
 # The classifier objects to OPACITY, not to the operations.
 #
 # ============================================================================
 # A FAILED ADOPT MUST NEVER STRIP A CAPABILITY THE HOST HAD AT START.
 # ============================================================================
 # This is the invariant every leg below is written to hold, and the one to check
-# any NEW leg against (coord-boss ruling, 2026-08-10). Convergence is worth a
+# any NEW leg against (coordinator ruling, 2026-08-10). Convergence is worth a
 # failed run; it is never worth a host that can no longer reach the bus.
 #
 # CAPABILITY is the operative word, and it is narrower than "file". Something
@@ -55,6 +59,23 @@ A="${1:-${FULCRA_COORD_AGENT:-}}"
 if [ -z "$A" ]; then
   echo "BLOCKED: no agent identity. Run: bash adopt-latest.sh <your-bus-agent-name>" >&2
   exit 3
+fi
+
+# TEAM and COORD are supplied by the environment because this file is public.
+# An UNSET team is not fatal and must not be: the install legs below are what
+# give a host its capability, and the invariant at the top of this file is that
+# a failed adopt never strips one. So with no team we still install, and skip
+# only the legs that cannot be addressed without one — the pin-currency proof,
+# the queue peek, and the adoption claim — saying so loudly rather than
+# silently degrading.
+TEAM="${FULCRA_COORD_TEAM:-}"
+COORD="${FULCRA_COORD_COORDINATOR:-}"
+WHO="${COORD:-your coordinator}"
+if [ -z "$TEAM" ]; then
+  echo "adopt: WARNING — FULCRA_COORD_TEAM is not set. The engine will still be" >&2
+  echo "adopt:           installed, but the pin-currency proof, the queue peek and" >&2
+  echo "adopt:           the adoption claim are SKIPPED: each needs a team to address." >&2
+  echo "adopt:           This host will converge WITHOUT proving it converged." >&2
 fi
 
 SRC="git+https://github.com/ashfulcra/fulcra-tools@${PIN}#subdirectory=packages/coord-engine"
@@ -169,7 +190,7 @@ fi
 COMMON="git+https://github.com/ashfulcra/fulcra-tools@fulcra-common-v0.3.0#subdirectory=packages/fulcra-common"
 # Positive-evidence installer loop (2026-08-04): every attempt logs the exact
 # failing command + its stderr. "No installer worked" with the real errors
-# discarded cost coord-maintainer a diagnosis cycle — never again.
+# discarded cost a peer agent a diagnosis cycle — never again.
 ELOG="$(mktemp)"; trap 'rm -f "$ELOG"' EXIT
 STEP_FAILS=0   # counted so the ADOPTION CLAIM can carry it (2026-08-06, coord-opus-worker
                # recurrence): a load-bearing `uv tool install` TIMED OUT, a later installer
@@ -186,7 +207,7 @@ try() {  # try <label> <cmd...>: run, capture stderr, report the FAILING step by
 }
 INSTALLER="${INSTALLER:-}"
 # Resolve uv beyond PATH: launchd/cron/systemd contexts run lean PATHs and
-# "uv not found" was falsely true on hosts that have it (coord-maintainer
+# "uv not found" was falsely true on hosts that have it (peer agent
 # 2026-08-05: /opt/homebrew/bin/uv present, invoking shell could not see it).
 UV_BIN=""
 for _c in uv /opt/homebrew/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
@@ -199,7 +220,7 @@ done
 # reinstalling, and on macOS that delete can fail with "Directory not empty (os
 # error 66)" AFTER bin/ is already gone, leaving a dangling shim, a directory uv
 # itself calls malformed, and no executable. Measured on this fleet 2026-08-10
-# (coord-maintainer, macOS + uv 0.11.17), running this script as a pin's own
+# (peer agent, macOS + uv 0.11.17), running this script as a pin's own
 # acceptance test: it destroyed a WORKING client and every fallback leg then
 # failed for unrelated host reasons.
 #
@@ -231,7 +252,127 @@ client_state() {
 }
 CLIENT_STATE="$(client_state)"
 
+# ---------------------------------------------------------------------------
+# VERSION FLOOR for the store client.
+#
+# WHY A FLOOR AND NOT JUST `--help`: the classifier above calls a client
+# "working" when `fulcra-api --help` answers. That probe cannot see this
+# failure, because the failure is in CREDENTIAL PARSING, not in starting up.
+# A client below the floor starts fine, prints help fine, and then dies on the
+# first command that loads credentials:
+#
+#     TypeError: FulcraCredentials.__init__() got an unexpected keyword
+#                argument 'id_token'
+#
+# Measured 2026-09-05 across every published release: 0.1.34 through 0.1.39 all
+# REJECT a credentials document carrying id_token/id_token_expiration; 0.1.40
+# ACCEPTS. The floor is therefore an exact measurement, not a cautious guess.
+#
+# WHY IT BITES A HOST THAT CHANGED NOTHING: every fulcra-api install on a box
+# shares ONE credentials file. The moment any client at or above the floor
+# re-authenticates, it writes the six-field document, and every OTHER client on
+# that host — a workspace venv, a second tool install — begins crashing on a
+# file it did not write. That is not hypothetical: it is how this was found,
+# with a uv-tool 0.1.40 and a workspace 0.1.35 sharing one file.
+#
+# So "below the floor" is not "old but fine". It is a client that will fail on
+# contact with the next re-auth, which is why the leg below is allowed to touch
+# it where the `working` branch is not. That is a deliberate, narrow exception
+# to the header invariant, argued rather than assumed: the invariant protects a
+# CAPABILITY, and a client that cannot read the credentials file the fleet now
+# writes is not one. Every other client state keeps the old protection exactly.
+FULCRA_API_FLOOR="0.1.40"
+
+fulcra_api_version() {
+  # The CLI has no --version, so the installed version must come from the
+  # installer's own inventory. uv first (how the fleet installs it), then the
+  # system interpreter's package metadata for the pipx/pip fallback paths.
+  # UNKNOWN is a real answer here and is NOT treated as "below": refusing to
+  # enforce a floor you cannot measure is the same discipline as refusing to
+  # delete something you cannot classify.
+  # Use the ALREADY-RESOLVED installer path, not a bare `uv`. This script
+  # resolves UV_BIN beyond PATH precisely because launchd/cron/systemd run lean
+  # PATHs where "uv not found" is falsely true, and a floor probe that misses uv
+  # there falls through to unrelated python3 metadata, reports UNKNOWN, and so
+  # SKIPS the upgrade on exactly the hosts least likely to be fixed by hand.
+  # An inventory probe that cannot see the installer is worse than no probe: it
+  # makes a skipped gate look like a considered decision.
+  _V="$("${UV_BIN:-uv}" tool list 2>/dev/null | awk '/^fulcra-api v/ {sub(/^v/,"",$2); print $2; exit}')"
+  [ -n "$_V" ] && { echo "$_V"; return 0; }
+  python3 -c 'import importlib.metadata as m; print(m.version("fulcra-api"))' 2>/dev/null
+}
+
+version_lt() {
+  # Dotted-numeric "$1 < $2". Deliberately not `sort -V`: that is a GNU
+  # extension the fleet's macOS hosts cannot be assumed to have, and a
+  # comparison that silently misbehaves is worse than none on a gate like this.
+  [ "$1" = "$2" ] && return 1
+  awk -v a="$1" -v b="$2" 'BEGIN{
+    na=split(a,A,"."); nb=split(b,B,".");
+    n=(na>nb?na:nb);
+    for(i=1;i<=n;i++){x=(i<=na?A[i]+0:0); y=(i<=nb?B[i]+0:0);
+      if(x<y) exit 0; if(x>y) exit 1}
+    exit 1}'
+}
+
+if [ "$CLIENT_STATE" = working ]; then
+  FA_VER="$(fulcra_api_version)"
+  if [ -z "$FA_VER" ]; then
+    echo "adopt: WARNING — fulcra-api answers but its version cannot be read; floor ${FULCRA_API_FLOOR} NOT enforced. UNKNOWN is not 'below', so nothing is touched. Check it by hand." >&2
+  elif version_lt "$FA_VER" "$FULCRA_API_FLOOR"; then
+    echo "adopt: fulcra-api ${FA_VER} is BELOW the ${FULCRA_API_FLOOR} floor — it will crash on the six-field credentials document the fleet now writes." >&2
+    CLIENT_STATE=stale
+  fi
+fi
+
 uv_store_client() {
+  if [ "$CLIENT_STATE" = stale ]; then
+    # BELOW THE FLOOR. The one client state where this script touches a binary
+    # that currently answers, and the exception is narrow on purpose.
+    #
+    # The `working` branch below refuses to upgrade because a failed upgrade
+    # cannot be rolled back. That argument still stands, and it is what makes
+    # this branch different rather than what this branch overrides: a client
+    # below the floor is going to fail anyway, on the first command that loads
+    # credentials after any re-auth on this host. The choice is not "risk it or
+    # keep it", it is "risk a rollback-less upgrade or keep a client with a
+    # known, dated failure ahead of it".
+    #
+    # Escalating gently: `upgrade` first, which does not delete the tool
+    # environment, and only if that leaves us short of the floor the `--force`
+    # install that does. The re-probe after each is the point — the same
+    # false-success the working branch was written to avoid (597 r3) would be
+    # trivially reproducible here by trusting an installer's rc.
+    #
+    # RETURNS 0 EVEN WHEN IT FAILS, deliberately. The caller chains this into
+    # the engine install with `&&`, so returning non-zero would let a client
+    # problem block ENGINE convergence — the one thing adoption exists to do.
+    # The failure is instead counted through STEP_FAILS, so the adoption claim
+    # carries `-steps<N>` and the run is legible as rescued rather than clean.
+    if [ -n "$UV_BIN" ]; then
+      try "uv tool upgrade fulcra-api (floor ${FULCRA_API_FLOOR})" \
+          "$UV_BIN" tool upgrade fulcra-api || true
+      NEW_VER="$(fulcra_api_version)"
+      if [ -z "$NEW_VER" ] || version_lt "$NEW_VER" "$FULCRA_API_FLOOR"; then
+        try "uv tool install --force fulcra-api>=${FULCRA_API_FLOOR}" \
+            "$UV_BIN" tool install --force "fulcra-api>=${FULCRA_API_FLOOR}" || true
+        NEW_VER="$(fulcra_api_version)"
+      fi
+    fi
+    # Believe the PROBE, never the installer.
+    if fulcra-api --help >/dev/null 2>&1 \
+       && [ -n "$NEW_VER" ] && ! version_lt "$NEW_VER" "$FULCRA_API_FLOOR"; then
+      echo "adopt: fulcra-api upgraded to ${NEW_VER} (floor ${FULCRA_API_FLOOR})" >&2
+      CLIENT_STATE=working
+      return 0
+    fi
+    if fulcra-api --help >/dev/null 2>&1; then
+      echo "adopt: DEGRADED — fulcra-api still answers but is at '${NEW_VER:-unknown}', below the ${FULCRA_API_FLOOR} floor. It WILL fail on the next command that loads credentials after a re-auth. Fix by hand, watching: uv tool install --force 'fulcra-api>=${FULCRA_API_FLOOR}'" >&2
+    else
+      echo "adopt: DEGRADED — the fulcra-api upgrade left no working client on this host. Recover with: uv tool install --force 'fulcra-api>=${FULCRA_API_FLOOR}' (and if that reports a non-empty directory, remove the tool dir it names, then retry)." >&2
+    fi
+    return 0
+  fi
   if [ "$CLIENT_STATE" = working ]; then
     # WORKING. Do not touch it at all.
     #
@@ -331,12 +472,12 @@ if [ -z "$INSTALLER" ]; then
   fi
 fi
 if [ -z "$INSTALLER" ]; then
-  echo "ADOPT FAILED — the per-step failures above name the exact command and stderr; report THOSE lines to coord-boss (not just this one)." >&2
+  echo "ADOPT FAILED — the per-step failures above name the exact command and stderr; report THOSE lines to ${WHO} (not just this one)." >&2
   exit 4
 fi
 hash -r 2>/dev/null || true
 
-# CLAIM GATE (2026-08-05, after coord-maintainer's false-claim find): an installer
+# CLAIM GATE (2026-08-05, after a peer agent's false-claim find): an installer
 # can "succeed" into an environment PATH never runs (pip --user shadowed by an old
 # uv tool install), and a claim would then assert a currency the operative engine
 # does not have. So: the claim is earned ONLY by the binary `command -v coord-engine`
@@ -344,11 +485,11 @@ hash -r 2>/dev/null || true
 # authority pin THIS script just read. No proof, no claim, loud exit.
 PIN12=$(printf %.12s "$PIN")
 if ! coord-engine bus-v3 --help >/dev/null 2>&1; then
-  echo "ADOPT FAILED — operative coord-engine ($(command -v coord-engine || echo NOT-ON-PATH)) cannot speak bus-v3; the install landed somewhere PATH does not run. No claim filed. Report verbatim to coord-boss." >&2
+  echo "ADOPT FAILED — operative coord-engine ($(command -v coord-engine || echo NOT-ON-PATH)) cannot speak bus-v3; the install landed somewhere PATH does not run. No claim filed. Report verbatim to ${WHO}." >&2
   exit 4
 fi
-if ! coord-engine doctor fulcra 2>/dev/null | grep -q "matches the fleet pin (${PIN12}"; then
-  echo "ADOPT FAILED — operative coord-engine did not prove currency against pin ${PIN12} (doctor pin-currency line absent or mismatched; engine may be older than the pin or shadowed by a stale install at $(command -v coord-engine)). No claim filed. Report verbatim to coord-boss." >&2
+if [ -n "$TEAM" ] && ! coord-engine doctor "$TEAM" 2>/dev/null | grep -q "matches the fleet pin (${PIN12}"; then
+  echo "ADOPT FAILED — operative coord-engine did not prove currency against pin ${PIN12} (doctor pin-currency line absent or mismatched; engine may be older than the pin or shadowed by a stale install at $(command -v coord-engine)). No claim filed. Report verbatim to ${WHO}." >&2
   exit 4
 fi
 
@@ -363,7 +504,7 @@ case "$INSTALLER" in
   pipx) try "verify fulcra_common in engine venv (pipx)" pipx runpip coord-engine show fulcra-common ;;
   pip)  try "verify fulcra_common importable (pip --user)" python3 -c 'import fulcra_common' ;;
 esac || {
-  echo "ADOPT FAILED — engine installed via ${INSTALLER} but the fulcra_common writer is MISSING from its environment; annotate/digest legs would silently no-op. Report this verbatim to coord-boss." >&2
+  echo "ADOPT FAILED — engine installed via ${INSTALLER} but the fulcra_common writer is MISSING from its environment; annotate/digest legs would silently no-op. Report this verbatim to ${WHO}." >&2
   exit 4
 }
 
@@ -372,16 +513,16 @@ printf %s "$PIN" > "${HOME}/.coord-adopted-pin" 2>/dev/null || true
 # NON-CONSUMING by design (2026-08-06). This read used to advance the caller's
 # cursor. For any agent whose wake is "run this script, done", that silently ate
 # its own delivery: events marked seen, printed to a log nobody reads, no error
-# anywhere. Same trap coord-boss.md already records for bootstrap.sh — "a
+# anywhere. Same trap the coordinator role doc already records for bootstrap.sh — "a
 # cursor-advancing read whose output nobody processes silently discards wake
 # hints". The read stays (rc feeds the claim slug below and this script's exit
 # code, so dropping it would lose the DEGRADED signal); --peek makes it safe.
 echo "--- queue PEEK as ${A} (non-consuming preview; your cursor is NOT advanced) ---"
-coord-engine queue fulcra --agent "$A" --peek
+[ -n "$TEAM" ] && coord-engine queue "$TEAM" --agent "$A" --peek
 rc=$?
 echo "--- queue rc=${rc}  (rc 3 = DEGRADED window: report it verbatim; quiet is not clear) ---"
-echo "--- NOTE: a peek is not a read. Still run your own \`coord-engine queue fulcra --agent ${A}\`"
-echo "---       AND \`coord-engine needs-me fulcra --agent ${A}\` this wake: queue CLEAR is not"
+echo "--- NOTE: a peek is not a read. Still run your own \`coord-engine queue ${TEAM:-<team>} --agent ${A}\`"
+echo "---       AND \`coord-engine needs-me ${TEAM:-<team>} --agent ${A}\` this wake: queue CLEAR is not"
 echo "---       proof of no work, and \`tell\` dispatch does not appear on the event channel at all."
 
 # The claim carries the RUN's honesty, not just the engine's: a nonzero
@@ -393,7 +534,7 @@ echo "---       proof of no work, and \`tell\` dispatch does not appear on the e
 # timeline views (2026-08-05 finding — most bus traffic was untagged). To be
 # precise, since "untagged" has been misread as "unattributed": the raw path DOES
 # preserve sender attribution — the bare agent name lands in `sources` and
-# recipients can route on it (coord-maintainer verified this 2026-08-06). Only
+# recipients can route on it (verified by a peer agent 2026-08-06). Only
 # the four-dimension identity tags are missing. The engine we JUST installed
 # always has bus-v3 send; raw pipe remains only as the fallback if the engine
 # send itself fails — and it is the ONLY path on a pre-bus-v3 engine.
@@ -422,21 +563,28 @@ SLUG="adopted-${VER}-${A}-rc${rc}"
 # FAILS OPEN: if the marker cannot be read we SEND. A duplicate claim is noise;
 # a missed one is a fleet that cannot tell who adopted. An unreadable store must
 # never become a silent skip.
-CLAIM_MARK="team/fulcra/_coord/bus-v3/adopted/${SLUG}.txt"
+# A claim needs somewhere to file it and someone to address it. With either
+# missing the ONLY safe move is to skip: an empty TEAM builds "team//_coord/..."
+# and an empty COORD addresses nobody, so the block would either write to a
+# path no reader watches or announce into the void, and the marker it leaves
+# would then suppress the retry once the variables ARE set. Skipping keeps the
+# claim owed. The install legs above already ran; the host keeps its capability.
+if [ -n "$TEAM" ] && [ -n "$COORD" ]; then
+CLAIM_MARK="team/${TEAM}/_coord/bus-v3/adopted/${SLUG}.txt"
 if fulcra-api file stat "$CLAIM_MARK" >/dev/null 2>&1; then
   echo "adopt: ${A} already claimed ${VER} with this outcome — not re-sending (store marker)"
 else
 SENT=0
-if FULCRA_COORD_AGENT="$A" coord-engine bus-v3 send fulcra --to coord-boss --kind claim \
+if FULCRA_COORD_AGENT="$A" coord-engine bus-v3 send "$TEAM" --to "$COORD" --kind claim \
      --slug "$SLUG" --priority P2; then
   SENT=1
-  echo "adoption claim sent (tagged) to coord-boss (slug ${SLUG})"
-elif printf '{"note":"{\\"v\\":1,\\"to\\":\\"coord-boss\\",\\"kind\\":\\"claim\\",\\"pri\\":\\"P2\\",\\"slug\\":\\"%s\\"}"}' "$SLUG" | \
+  echo "adoption claim sent (tagged) to ${WHO} (slug ${SLUG})"
+elif printf '{"note":"{\\"v\\":1,\\"to\\":\\"%s\\",\\"kind\\":\\"claim\\",\\"pri\\":\\"P2\\",\\"slug\\":\\"%s\\"}"}' "$COORD" "$SLUG" | \
        fulcra-api record "$TYPE" --api-version v1alpha1 --source="$A"; then
   SENT=1
-  echo "adoption claim sent via RAW FALLBACK (tags missing, attribution intact) — report to coord-boss"
+  echo "adoption claim sent via RAW FALLBACK (tags missing, attribution intact) — report to ${WHO}"
 else
-  echo "WARN: adoption claim failed to send — report this verbatim to coord-boss"
+  echo "WARN: adoption claim failed to send — report this verbatim to ${WHO}"
 fi
   # Marker written ONLY on a delivery that actually succeeded (codex-reviewer,
   # 589 r1). The first cut wrote it after the send BLOCK regardless: the final
@@ -463,6 +611,11 @@ fi
       || echo "adopt: claim marker not written — the claim may repeat next wake" >&2
     rm -f "$_CM"
   fi
+fi
+
+else
+  echo "adopt: claim SKIPPED — need FULCRA_COORD_TEAM and FULCRA_COORD_COORDINATOR." >&2
+  echo "adopt:        The engine IS installed; only the announcement is owed." >&2
 fi
 [ "$STEP_FAILS" -gt 0 ] && echo "adopt: ${STEP_FAILS} step(s) failed and were rescued by a later installer — the per-step stderr above is the evidence; the engine was still verified by the claim gate." >&2
 

@@ -2,7 +2,7 @@
 
 **Compared artifacts:**
 
-- **Tycho:** `team/fulcra/_coord/docs/2026-08-14-system-spec.md`, 381 lines,
+- **Tycho:** `team/<team>/_coord/docs/2026-08-14-system-spec.md`, 381 lines,
   derived from `fulcra-tools` main `393a7449`.
 - **Superpowers exercise:**
   `docs/superpowers/specs/2026-08-14-collect-coord-bus-rebuild-design.md`,

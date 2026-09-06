@@ -19,7 +19,7 @@ def _render(rows, capsys, monkeypatch, human="ash"):
     by most of the suite, and a bare assignment leaks the stub into every test
     that runs after this file.
     """
-    args = argparse.Namespace(team="fulcra", json=False, human=human)
+    args = argparse.Namespace(team="acme", json=False, human=human)
     monkeypatch.setattr(cli, "_load_rows_status", lambda transport, team: (rows, True, ""))
     monkeypatch.setattr(cli.query, "asks",
                         lambda rows, *, now, human: [dict(r, age_hours=1.0) for r in rows])

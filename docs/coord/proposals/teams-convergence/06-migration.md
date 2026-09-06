@@ -38,7 +38,7 @@ back) while hosts migrate one by one.
 
 ### C — Phased adoption with a one-shot exporter (RECOMMENDED)
 No mirror. Three phases, each independently safe:
-1. **Adopt (test on a real team):** create the real team space (`team/fulcra/`), migrate **open** tasks
+1. **Adopt (test on a real team):** create the real team space (`team/<team>/`), migrate **open** tasks
    once via a deterministic exporter (`coord-engine migrate` — incumbent JSON → coord task docs,
    idempotent, `--dry-run` first), install coord heartbeat+listener on THIS host, and run real work on
    it (this epic's own follow-ups live there). The incumbent keeps running untouched for the fleet.
@@ -69,7 +69,7 @@ No mirror. Three phases, each independently safe:
 - Never deletes anything on the incumbent.
 
 ## Test plan (phase 1 acceptance)
-On `team/fulcra` with real migrated tasks: reconcile heals index/aggregate at real scale (~140 docs —
+On a real team space with migrated tasks: reconcile heals index/aggregate at real scale (~140 docs —
 first full reconcile ~2-3 min at ~1s/op, then incremental); board/needs-me/digest match the incumbent's
 view for the migrated set (spot-check N=10); directives round-trip (tell→inbox→ack→respond); briefing +
 park/checkpoint; health fresh; heartbeat + listener installed and self-tested on this host. Rollback

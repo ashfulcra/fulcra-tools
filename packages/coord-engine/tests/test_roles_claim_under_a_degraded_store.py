@@ -30,7 +30,7 @@ import pytest
 from coord_engine import cli
 from coord_engine_test_helpers import FakeTransport
 
-TEAM = "fulcra"
+TEAM = "acme"
 AGENT = "coord-boss"
 ROLE = "coord-boss"
 ROLE_DOC = f"team/{TEAM}/roles/{ROLE}.md"

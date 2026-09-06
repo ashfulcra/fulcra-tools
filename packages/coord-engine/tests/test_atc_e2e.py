@@ -10,7 +10,7 @@ showed "untiered 100%" and an n/a headline regardless of what was logged.
 from coord_engine import atc, atc_dash, cli
 from coord_engine_test_helpers import FakeTransport
 
-TEAM = "fulcra"
+TEAM = "acme"
 
 
 def _log(t, *, tier, units, outcome, agent, model="claude-x", task_class="code"):

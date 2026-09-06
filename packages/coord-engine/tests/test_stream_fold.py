@@ -14,7 +14,7 @@ from coord_engine import cli, records, stream_fold
 from coord_engine.outcome import CoverageState, OutcomeState
 
 NOW = datetime(2026, 8, 21, 21, 0, tzinfo=timezone.utc)
-TEAM = "fulcra"
+TEAM = "acme"
 
 
 @pytest.fixture(autouse=True)

@@ -8,7 +8,7 @@ description: Maintains the coord layer — engine, skills, bus hygiene, migratio
 policy: exclusive
 sla_hours: 24
 maintainer: ash
-checkpoint_ref: team/fulcra/member/coord-maintainer/continuity/role-coord-maintainer/latest.json
+checkpoint_ref: team/<team>/member/<agent>/continuity/role-<role>/latest.json
 ---
 # Duties
 - Keep the team healed (heartbeat reconcile), triage the bus, drive coord development.

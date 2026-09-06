@@ -18,11 +18,11 @@ ACCOUNTS = json.dumps({"accounts": [
 
 def test_usage_log_writes_shard(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    rc = cli.main(["usage", "log", "fulcra", "--account", "anthropic-max",
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    rc = cli.main(["usage", "log", "acme", "--account", "anthropic-max",
                    "--tier", "frontier", "--units", "250"], transport=t)
     assert rc == 0
-    shard_paths = [p for p in t.store if p.startswith("team/fulcra/atc/usage/")]
+    shard_paths = [p for p in t.store if p.startswith("team/acme/atc/usage/")]
     assert len(shard_paths) == 1
     body = t.store[shard_paths[0]]
     assert "anthropic-max" in body and "250" in body and "frontier" in body
@@ -30,14 +30,14 @@ def test_usage_log_writes_shard(capsys):
 
 def test_headroom_text_and_json(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    cli.main(["usage", "log", "fulcra", "--account", "anthropic-max",
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    cli.main(["usage", "log", "acme", "--account", "anthropic-max",
               "--tier", "frontier", "--units", "200"], transport=t)
     capsys.readouterr()
-    rc = cli.main(["headroom", "fulcra"], transport=t)
+    rc = cli.main(["headroom", "acme"], transport=t)
     out = capsys.readouterr().out
     assert rc == 0 and "anthropic-max" in out and "600" in out and "75.0%" in out
-    rc = cli.main(["headroom", "fulcra", "--json"], transport=t)
+    rc = cli.main(["headroom", "acme", "--json"], transport=t)
     doc = json.loads(capsys.readouterr().out)
     # task 3: headroom --json is now {"windows": [...], "demotions": [...]}
     assert doc["windows"][0]["headroom"] == 600 and doc["demotions"] == []
@@ -45,26 +45,26 @@ def test_headroom_text_and_json(capsys):
 
 def test_headroom_no_accounts_doc_graceful(capsys):
     t = FakeTransport()
-    rc = cli.main(["headroom", "fulcra"], transport=t)
+    rc = cli.main(["headroom", "acme"], transport=t)
     out = capsys.readouterr().out
     assert rc == 0 and "no accounts declared" in out
 
 
 def test_headroom_malformed_shard_does_not_crash(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    t.put("team/fulcra/atc/usage/bad.md", "{{{{not frontmatter")
-    rc = cli.main(["headroom", "fulcra"], transport=t)
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    t.put("team/acme/atc/usage/bad.md", "{{{{not frontmatter")
+    rc = cli.main(["headroom", "acme"], transport=t)
     assert rc == 0 and "anthropic-max" in capsys.readouterr().out
 
 
 def test_throttled_flag_round_trip(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    cli.main(["usage", "log", "fulcra", "--account", "anthropic-max",
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    cli.main(["usage", "log", "acme", "--account", "anthropic-max",
               "--tier", "frontier", "--throttled"], transport=t)
     capsys.readouterr()
-    cli.main(["headroom", "fulcra", "--json"], transport=t)
+    cli.main(["headroom", "acme", "--json"], transport=t)
     rows = json.loads(capsys.readouterr().out)["windows"]
     assert rows[0]["headroom"] == 0 and rows[0]["calibrate"] is True
 
@@ -75,17 +75,17 @@ def test_digest_flags_low_headroom(capsys):
          "harnesses": ["claude-code"], "windows": [{"hours": 5, "cap": 100}]}],
         "tiers": {}})
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", low)
-    cli.main(["usage", "log", "fulcra", "--account", "anthropic-max",
+    t.put("team/acme/atc/accounts.json", low)
+    cli.main(["usage", "log", "acme", "--account", "anthropic-max",
               "--tier", "frontier", "--units", "90"], transport=t)
     capsys.readouterr()
-    cli.main(["digest", "fulcra"], transport=t)
+    cli.main(["digest", "acme"], transport=t)
     out = capsys.readouterr().out
     assert "headroom" in out and "anthropic-max" in out and "10.0%" in out
 
 
 def test_digest_silent_when_headroom_healthy(capsys):
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
-    cli.main(["digest", "fulcra"], transport=t)
+    t.put("team/acme/atc/accounts.json", ACCOUNTS)
+    cli.main(["digest", "acme"], transport=t)
     assert "headroom" not in capsys.readouterr().out

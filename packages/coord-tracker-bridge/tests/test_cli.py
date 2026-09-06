@@ -29,7 +29,7 @@ def test_cli_rejects_dry_run_for_non_adoption_phase(monkeypatch, capsys):
 
 
 def test_cli_adoption_dry_run_emits_mapping_without_mutating(monkeypatch, capsys):
-    source = SourceIdentity("coord-engine", "fulcra/tasks", "task-1")
+    source = SourceIdentity("coord-engine", "acme/tasks", "task-1")
     adoption = MarkerAdoption("LIN-1", source, "tasks", "Task", "body", {})
 
     class Service:

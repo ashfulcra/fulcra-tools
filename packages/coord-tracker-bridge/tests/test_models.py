@@ -9,15 +9,15 @@ NOW = datetime(2026, 7, 17, 12, tzinfo=timezone.utc)
 
 
 def test_full_source_identity_is_unambiguous_even_with_same_suffix():
-    left = SourceIdentity("coord-engine", "fulcra", "alpha-12345678")
-    right = SourceIdentity("coord-engine", "fulcra", "beta-12345678")
+    left = SourceIdentity("coord-engine", "acme", "alpha-12345678")
+    right = SourceIdentity("coord-engine", "acme", "beta-12345678")
 
     assert left.key != right.key
     assert left.to_dict()["item_id"] == "alpha-12345678"
 
 
 def test_snapshot_rejects_duplicate_full_identity():
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    source = SourceIdentity("coord-engine", "acme", "task-1")
     item = WorkRecord(source, "tasks", "Task", "active", origin="fleet")
 
     with pytest.raises(ValueError, match="duplicate source identity"):

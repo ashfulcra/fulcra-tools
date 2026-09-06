@@ -55,7 +55,7 @@ def _sh(tier, age_h=1, *, account="amax", units=0, throttled=False):
 def test_dash_data_shape():
     d = atc.__dict__  # noqa: F841 (readability: dash_data lives in atc_dash)
     out = atc_dash.dash_data(_accts(FRONTIER_ACCT), [_sh("frontier", units=100)],
-                             team="fulcra", models={"map_version": "mv1", "models": {}},
+                             team="acme", models={"map_version": "mv1", "models": {}},
                              now=NOW)
     assert set(out) == {"headroom", "tier_mix", "demotions", "headline",
                         "map_version", "generated_at"}
@@ -69,14 +69,14 @@ def test_dash_data_shape():
 
 def test_dash_data_is_json_serialisable():
     out = atc_dash.dash_data(_accts(FRONTIER_ACCT), [_sh("frontier", units=100)],
-                             team="fulcra", now=NOW)
+                             team="acme", now=NOW)
     # round-trips with no datetime/tuple leakage
     assert json.loads(json.dumps(out)) == out
 
 
 def test_dash_data_headroom_matches_headroom_fold():
     shards = [_sh("frontier", units=200)]
-    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="fulcra", now=NOW)
+    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="acme", now=NOW)
     expect = atc.headroom([FRONTIER_ACCT], shards, NOW)
     assert out["headroom"] == expect
     assert out["headroom"][0]["headroom"] == 600 and out["headroom"][0]["pct"] == 75.0
@@ -84,7 +84,7 @@ def test_dash_data_headroom_matches_headroom_fold():
 
 def test_dash_data_tier_mix_from_report_fold():
     shards = [_sh("frontier"), _sh("cheap"), _sh("cheap"), _sh("cheap")]
-    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="fulcra", now=NOW)
+    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="acme", now=NOW)
     # 1 frontier / 3 cheap of 4 total
     assert out["tier_mix"] == {"frontier": 25, "cheap": 75}
 
@@ -101,7 +101,7 @@ def test_dash_data_demotions_match_headroom_json_shape():
     # of} shape headroom --json builds from the same shards.
     shards = [_outcome("haiku-4.5", "code", "rework", age_h=h) for h in (5, 4, 3)]
     shards += [_outcome("haiku-4.5", "code", "accept", age_h=h) for h in (2, 1)]
-    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="fulcra", now=NOW)
+    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="acme", now=NOW)
     expect = [{"model": m, "task_class": tc, "bad": v["bad"], "of": v["of"]}
               for (m, tc), v in sorted(atc.demotions(shards).items())]
     assert out["demotions"] == expect
@@ -111,25 +111,25 @@ def test_dash_data_demotions_match_headroom_json_shape():
 
 def test_dash_data_demotions_empty_when_no_bad_outcomes():
     out = atc_dash.dash_data(_accts(FRONTIER_ACCT), [_sh("frontier", units=100)],
-                             team="fulcra", now=NOW)
+                             team="acme", now=NOW)
     assert out["demotions"] == []
 
 
 def test_dash_data_headline_string_when_frontier_declared():
     shards = [_sh("cheap", units=400), _sh("frontier", units=100)]
-    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="fulcra", now=NOW)
+    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="acme", now=NOW)
     assert "frontier" in out["headline"] and out["headline"] != ""
 
 
 def test_dash_data_headline_na_without_frontier_account():
     plain = {"id": "amax", "harnesses": ["claude-code"], "windows": []}
     out = atc_dash.dash_data(_accts(plain), [_sh("cheap", units=50)],
-                             team="fulcra", now=NOW)
+                             team="acme", now=NOW)
     assert "n/a" in out["headline"].lower()
 
 
 def test_dash_data_empty_ledger_never_crashes():
-    out = atc_dash.dash_data(_accts(), [], team="fulcra", now=NOW)
+    out = atc_dash.dash_data(_accts(), [], team="acme", now=NOW)
     assert out["tier_mix"] == {} and isinstance(out["headline"], str)
 
 
@@ -148,7 +148,7 @@ def _get(port, path):
 
 def test_data_json_matches_fold():
     data = atc_dash.dash_data(_accts(FRONTIER_ACCT), [_sh("frontier", units=200)],
-                              team="fulcra", now=NOW)
+                              team="acme", now=NOW)
     srv = atc_dash.make_server("127.0.0.1", 0, lambda: data)
     port = srv.server_address[1]
     t = _run(srv)
@@ -277,11 +277,11 @@ def test_dash_cli_wires_serve_foreground(monkeypatch, capsys):
 
     monkeypatch.setattr(cli.atc_dash, "serve", fake_serve)
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json",
+    t.put("team/acme/atc/accounts.json",
           json.dumps({"accounts": [FRONTIER_ACCT], "tiers": {}}))
-    rc = cli.main(["dash", "fulcra"], transport=t)
+    rc = cli.main(["dash", "acme"], transport=t)
     assert rc == 0
-    assert captured["team"] == "fulcra"
+    assert captured["team"] == "acme"
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8787          # default
     assert set(captured["data"]) == {"headroom", "tier_mix", "demotions",
@@ -296,11 +296,11 @@ def test_atc_dash_subgroup_alias_wires_same_handler(monkeypatch):
                         lambda team, host="127.0.0.1", port=8787, *, data_fn=None:
                         captured.update(team=team, port=port))
     t = FakeTransport()
-    t.put("team/fulcra/atc/accounts.json",
+    t.put("team/acme/atc/accounts.json",
           json.dumps({"accounts": [FRONTIER_ACCT], "tiers": {}}))
-    rc = cli.main(["atc", "dash", "fulcra", "--port", "9100"], transport=t)
+    rc = cli.main(["atc", "dash", "acme", "--port", "9100"], transport=t)
     assert rc == 0
-    assert captured["team"] == "fulcra" and captured["port"] == 9100
+    assert captured["team"] == "acme" and captured["port"] == 9100
 
 
 def test_dash_cli_custom_port(monkeypatch):
@@ -309,7 +309,7 @@ def test_dash_cli_custom_port(monkeypatch):
                         lambda team, host="127.0.0.1", port=8787, *, data_fn=None:
                         captured.update(port=port))
     t = FakeTransport()
-    rc = cli.main(["dash", "fulcra", "--port", "9001"], transport=t)
+    rc = cli.main(["dash", "acme", "--port", "9001"], transport=t)
     assert rc == 0 and captured["port"] == 9001
 
 
@@ -317,7 +317,7 @@ def test_dash_cli_has_no_host_flag():
     # --host is deliberately NOT exposed; loopback bind is enforced at the CLI.
     t = FakeTransport()
     try:
-        cli.main(["dash", "fulcra", "--host", "0.0.0.0"], transport=t)
+        cli.main(["dash", "acme", "--host", "0.0.0.0"], transport=t)
         assert False, "--host must not be a recognised flag"
     except SystemExit as e:
         assert e.code == 2  # argparse rejects the unknown flag

@@ -35,7 +35,7 @@ from __future__ import annotations
 from coord_engine import generation
 
 
-ROLES = "team/fulcra/roles/"
+ROLES = "team/acme/roles/"
 
 
 def _member(path, doc):
@@ -119,7 +119,7 @@ def test_other_sections_have_no_ignorable_files():
     """The courtesy carve-out is roles-only; presence stays strict."""
     doc = {"type": "RolesIndex"}
     assert generation.ignorable_inventory_file(
-        "presence", "team/fulcra/presence/index.md", doc) is False
+        "presence", "team/acme/presence/index.md", doc) is False
 
 
 # --- end to end: the section itself, through the tree reader ---------------
@@ -157,27 +157,27 @@ def _doc(doc_type, **kw):
 def _roles_section(files):
     from coord_engine import reconcile
     return reconcile._tree_section(
-        _Store(files), "team/fulcra/roles/", section="roles",
+        _Store(files), "team/acme/roles/", section="roles",
         deadline=reconcile.Deadline(1e6))
 
 
 def test_the_real_store_shape_now_completes():
-    """The exact two files that were blocking team/fulcra, plus a real role
+    """The exact two files that were blocking team/acme, plus a real role
     and lease. Before the fix this returned UNKNOWN and publication refused."""
     files = {
-        "team/fulcra/roles/index.md": _doc("RolesIndex", title="courtesy"),
-        "team/fulcra/roles/coord-boss.md": _doc("Role", title="coord-boss"),
-        "team/fulcra/roles/coord-boss/leases/a.md": _doc("Lease", agent="x"),
-        "team/fulcra/roles/coord-maintainer/escalations/2026-07-24.md":
+        "team/acme/roles/index.md": _doc("RolesIndex", title="courtesy"),
+        "team/acme/roles/coord-boss.md": _doc("Role", title="coord-boss"),
+        "team/acme/roles/coord-boss/leases/a.md": _doc("Lease", agent="x"),
+        "team/acme/roles/coord-maintainer/escalations/2026-07-24.md":
             _doc("RoleEscalation", role="coord-maintainer"),
     }
     state, value = _roles_section(files)
     assert state == "DATA"
     paths = [r["path"] for r in value["records"]]
     # the courtesy index is skipped, never sealed into the generation
-    assert "team/fulcra/roles/index.md" not in paths
+    assert "team/acme/roles/index.md" not in paths
     # the legacy escalation IS a member
-    assert ("team/fulcra/roles/coord-maintainer/escalations/2026-07-24.md"
+    assert ("team/acme/roles/coord-maintainer/escalations/2026-07-24.md"
             in paths)
     assert len(paths) == 3
 
@@ -186,8 +186,8 @@ def test_a_corrupt_role_document_still_makes_the_section_unknown():
     """The negative control that matters: the fix must not have turned the
     all-or-nothing guard into a skip-everything-unrecognised."""
     files = {
-        "team/fulcra/roles/coord-boss.md": _doc("Role", title="coord-boss"),
-        "team/fulcra/roles/garbage.md": _doc("Task", title="not a role"),
+        "team/acme/roles/coord-boss.md": _doc("Role", title="coord-boss"),
+        "team/acme/roles/garbage.md": _doc("Task", title="not a role"),
     }
     state, value = _roles_section(files)
     assert state == "UNKNOWN"
@@ -217,5 +217,5 @@ def test_the_section_marker_tolerates_a_prefix_without_a_trailing_slash():
 def test_an_unknown_section_has_no_marker_and_classifies_nothing():
     assert generation._section_marker("no-such-section") == ""
     assert generation.canonical_inventory_document(
-        "no-such-section", "team/fulcra/roles/coord-boss.md", {"type": "Role"},
+        "no-such-section", "team/acme/roles/coord-boss.md", {"type": "Role"},
     ) is False

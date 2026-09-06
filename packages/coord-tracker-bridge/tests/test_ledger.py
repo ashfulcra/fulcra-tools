@@ -7,7 +7,7 @@ from coord_tracker_bridge import BridgeLedger, LedgerEntry, SourceIdentity
 
 def entry(item_id: str, tracker_id: str) -> LedgerEntry:
     return LedgerEntry(
-        SourceIdentity("coord-engine", "fulcra", item_id),
+        SourceIdentity("coord-engine", "acme", item_id),
         "tasks",
         "linear",
         tracker_id,
@@ -23,8 +23,8 @@ def test_ledger_persists_full_identity_collision_safely(tmp_path):
 
     restored = BridgeLedger.load(path)
     assert len(restored) == 2
-    assert restored.get(SourceIdentity("coord-engine", "fulcra", "alpha-12345678")).tracker_record_id == "LIN-1"
-    assert restored.get(SourceIdentity("coord-engine", "fulcra", "beta-12345678")).tracker_record_id == "LIN-2"
+    assert restored.get(SourceIdentity("coord-engine", "acme", "alpha-12345678")).tracker_record_id == "LIN-1"
+    assert restored.get(SourceIdentity("coord-engine", "acme", "beta-12345678")).tracker_record_id == "LIN-2"
 
 
 def test_ledger_save_replaces_complete_document(tmp_path):

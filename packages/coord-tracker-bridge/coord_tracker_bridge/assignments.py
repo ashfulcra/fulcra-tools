@@ -445,6 +445,19 @@ class RosterReader(Protocol):
     def __call__(self) -> str: ...
 
 
+def default_roster_path() -> str:
+    """Roster path for the team named by the environment.
+
+    This package is published from a PUBLIC repo, so no team's own store path
+    belongs in it as a default: a hardcoded one silently points every other
+    team's bridge at the authoring team's roster. The team comes from
+    FULCRA_COORD_TEAM; with it unset the path is empty and `FulcraRosterReader`
+    raises rather than reading someone else's document.
+    """
+    team = os.environ.get("FULCRA_COORD_TEAM", "").strip()
+    return f"team/{team}/_coord/roster-nicknames.md" if team else ""
+
+
 @dataclass(frozen=True, slots=True)
 class FulcraRosterReader:
     """Read the roster document out of the coord store.
@@ -454,12 +467,17 @@ class FulcraRosterReader:
     reader raises instead, so an unreadable roster reaches the caller as UNKNOWN.
     """
 
-    path: str = "team/fulcra/_coord/roster-nicknames.md"
+    path: str = field(default_factory=default_roster_path)
     runner: CommandRunner = subprocess_runner
     timeout: float = 30.0
     command: tuple[str, ...] = ("fulcra-api",)
 
     def __call__(self) -> str:
+        if not self.path:
+            raise RuntimeError(
+                "roster path is not configured: set FULCRA_COORD_TEAM (or pass "
+                "--roster-path). Refusing to guess a team's store path."
+            )
         code, stdout, stderr = self.runner(
             (*self.command, "file", "download", self.path, "-"), self.timeout
         )

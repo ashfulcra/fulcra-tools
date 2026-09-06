@@ -33,7 +33,7 @@ uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0
 
 The release tag is the **cold-install** path — correct for this first install.
 The **fleet's runtime authority** is the store BOOTSTRAP
-(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
+(`team/<team>/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
 `pp-<sha>`), not this doc: once you can reach the store, adopt from there so you
 converge on what the fleet is actually running.
 
