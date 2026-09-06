@@ -80,27 +80,35 @@ def switch_doc(*, serve: str, by: str, reason: str, at: str) -> str:
                       sort_keys=True, indent=1) + "\n"
 
 
-def fold_rows(transport: Any, team: str, agent: str) -> tuple[Optional[list[dict[str, Any]]], str]:
+def fold_rows(transport: Any, team: str, agent: str
+              ) -> tuple[Optional[list[dict[str, Any]]], str, Optional[str]]:
     """The agent's open obligations FROM ITS COORD-FOLD CHECKPOINT, in needs-me row shape, plus the needs-me
-    source row disclosing the fold's cursor. (None, why) when the checkpoint cannot be the answer."""
+    source row disclosing the fold's cursor.
+
+    -> (rows, why, unhealthy). ``rows`` is None when the checkpoint cannot be the answer at all. ``unhealthy`` is
+    a reason when the checkpoint IS readable but its own health fields say the fold is incomplete — coord-fold's
+    contract (codex-reviewer P0, engine-ship-gate-c4a8410a): ``unread_events > 0`` means opens may be unapplied,
+    ``unreadable_pointers`` non-empty means rows the fold could not classify; either is UNKNOWN (rc 3) at the
+    serving boundary, with the known rows retained as PARTIAL data. Both fields are type-checked; malformed
+    health metadata is unhealthy, never healthy output."""
     try:
         body, state = transport.read_classified(checkpoint_path(team, agent))
     except Exception as exc:
-        return None, f"coord-fold checkpoint for {agent} unreadable ({exc})"
+        return None, f"coord-fold checkpoint for {agent} unreadable ({exc})", None
     if state == "absent":
-        return None, f"coord-fold checkpoint for {agent} is absent — this identity has not seeded its fold"
+        return None, f"coord-fold checkpoint for {agent} is absent — this identity has not seeded its fold", None
     if state != "ok" or not body:
-        return None, f"coord-fold checkpoint for {agent} is {state}"
+        return None, f"coord-fold checkpoint for {agent} is {state}", None
     try:
         ckpt = json.loads(body)
     except ValueError:
-        return None, f"coord-fold checkpoint for {agent} is not JSON"
+        return None, f"coord-fold checkpoint for {agent} is not JSON", None
     if not isinstance(ckpt, dict) or ckpt.get("v") != 1 or not isinstance(ckpt.get("open"), dict):
-        return None, f"coord-fold checkpoint for {agent} is malformed"
+        return None, f"coord-fold checkpoint for {agent} is malformed", None
     rows: list[dict[str, Any]] = []
     for slug, row in ckpt["open"].items():
         if not isinstance(row, dict):
-            return None, f"coord-fold checkpoint for {agent} carries a non-object row at {slug!r}"
+            return None, f"coord-fold checkpoint for {agent} carries a non-object row at {slug!r}", None
         rows.append({
             "id": slug, "name": slug, "slug": slug, "title": slug,
             "priority": str(row.get("pri") or "?"), "status": "open",
@@ -112,7 +120,23 @@ def fold_rows(transport: Any, team: str, agent: str) -> tuple[Optional[list[dict
     rows.sort(key=lambda r: (r["priority"], str(r.get("opened_at") or ""), r["id"]))
     rows.append({"type": "needs-me-source", "source": "projection", "as_of": ckpt.get("cursor"),
                  "fold": "coord-fold", "generation": ckpt.get("generation"), "writer": ckpt.get("writer")})
-    return rows, f"served from coord-fold checkpoint (cursor {ckpt.get('cursor')}, generation {ckpt.get('generation')})"
+    unhealthy = checkpoint_health_reason(ckpt, agent)
+    return rows, f"served from coord-fold checkpoint (cursor {ckpt.get('cursor')}, generation {ckpt.get('generation')})", unhealthy
+
+
+def checkpoint_health_reason(ckpt: dict[str, Any], agent: str) -> Optional[str]:
+    """None when the checkpoint's own health fields say the fold is complete; otherwise why it is not."""
+    unread = ckpt.get("unread_events")
+    if not isinstance(unread, int) or isinstance(unread, bool) or unread < 0:
+        return f"coord-fold checkpoint for {agent}: unread_events is not a non-negative integer ({unread!r})"
+    pointers = ckpt.get("unreadable_pointers")
+    if not isinstance(pointers, list) or not all(isinstance(x, str) for x in pointers):
+        return f"coord-fold checkpoint for {agent}: unreadable_pointers is not a list of strings ({pointers!r})"
+    if unread > 0:
+        return f"coord-fold checkpoint for {agent} has {unread} unread event(s) — opens may be unapplied"
+    if pointers:
+        return f"coord-fold checkpoint for {agent} has {len(pointers)} unreadable pointer(s): {pointers[:3]}"
+    return None
 
 
 def degraded_row(reason: str) -> dict[str, Any]:
