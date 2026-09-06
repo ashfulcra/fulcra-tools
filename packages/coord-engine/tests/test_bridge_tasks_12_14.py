@@ -376,3 +376,16 @@ def test_the_old_open_set_includes_live_star_rows_for_every_non_owner_until_that
     assert sorted(r["id"] for r in got_boss) == ["bcast-by-me"]                    # coord-boss owes MY broadcast, never his own
     got_other, _, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-opus-worker")
     assert "bcast-acked-by-me" in {r["id"] for r in got_other} and "bcast-ack-doc" in {r["id"] for r in got_other}   # my acks close nothing for anyone else
+
+
+def test_export_open_confirms_each_row_against_its_doc_and_skips_a_terminal_one_but_seeds_an_unreadable_one(monkeypatch, capsys):
+    """coord-boss 8a280028 (2026-09-06): the projection lags the doc, so a row closed 45 s earlier was re-exported as
+    open and out-ordered its close on v4. One pointed read per row; terminal doc -> skip; unreadable -> over-capture."""
+    t = FakeTransport({V4: V4_CFG, "team/r/task/a.md": "---\nstatus: done\nowner: boss\nassignee: me\n---\n"}, fail={"team/r/task/b.md"})
+    _old_rows(monkeypatch, ROWS)
+    assert cli.cmd_obligations_export_open(_args(), t) == 0
+    opens = [r for r in t.records if r[0] == "MomentAnnotation/v4"]
+    assert sorted(r[2]["slug"] for r in opens) == ["b"]                       # a: doc already done; b: doc unreadable -> seeded anyway
+    marker = t.docs["team/r/_coord/bus-v4/seeded/me.md"]
+    assert "written: 1" in marker and "skipped_terminal_doc: 1" in marker and "skipped: 0" in marker
+    assert "skipped_terminal_doc 1" in capsys.readouterr().out

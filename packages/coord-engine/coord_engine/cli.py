@@ -6734,13 +6734,30 @@ def cmd_obligations_export_open(args: argparse.Namespace, transport: Any) -> int
               "answer would enshrine the gap as absence", file=sys.stderr)
         return 3
     at = _iso(_now())
-    written, skipped = 0, []
+    written, skipped, stale_doc = 0, [], []
     wanted: set[str] = set()
+    from .router import TERMINAL_STATUSES as _TERMINAL
     for row in rows:
         tup = _row_tuple(row)
         if not tup or tup[1] not in dual_emit.PRIORITIES or not tup[2]:
             skipped.append(str(row.get("id") or row.get("name") or "?"))
             continue
+        # coord-boss 8a280028 (2026-09-06): the old open set comes from a needs-me projection that LAGS the doc until
+        # reconcile, so a row closed seconds ago is re-exported as open and out-orders its own close on v4 (measured:
+        # 45 s). Confirm each row against the doc its pointer names — ONE pointed read per row, no enumeration — and
+        # skip it when the doc is already terminal. An unreadable doc keeps the projection's answer (over-capture):
+        # a transport blip must never silently drop an obligation.
+        ptr = tup[2]
+        doc_path = ptr if ptr.startswith("team/") else f"team/{team}/{ptr}"
+        try:
+            body = transport.read(doc_path)
+        except Exception:
+            body = None
+        if body is not None:
+            status = str((okf.parse_frontmatter(body) or {}).get("status") or "")
+            if status in _TERMINAL:
+                stale_doc.append(tup[0])
+                continue
         wanted.add(tup[0])
         note = json.dumps(dual_emit.payload(at=at, sender=str(row.get("owner") or "seed"), to=agent, kind="open",
                                             slug=tup[0], pri=tup[1], ptr=tup[2]), sort_keys=True)
@@ -6771,6 +6788,7 @@ def cmd_obligations_export_open(args: argparse.Namespace, transport: Any) -> int
             else:
                 skipped.append("close:" + slug)
     doc = (f"# bus-v4 seed for {agent}\n\nat: {at}\nwritten: {written}\nclosed_stale: {closed}\nskipped: {len(skipped)}\n"
+           f"skipped_terminal_doc: {len(stale_doc)}\n"
            f"source: old fold (needs-me rows, ASSIGNEE-filtered)\ncheckpoint: {ckpt_state}\n"
            f"slugs skipped (no ptr / bad pri / write unconfirmed): {skipped}\n")
     if not transport.write(marker, doc):
@@ -6778,7 +6796,7 @@ def cmd_obligations_export_open(args: argparse.Namespace, transport: Any) -> int
               "will re-seed; fix the marker first", file=sys.stderr)
         return 3
     print(f"obligations --export-open: seeded {written} open(s) for {agent} onto {cfg['data_type']}; "
-          f"closed {closed} stale; skipped {len(skipped)}; marker {marker}")
+          f"closed {closed} stale; skipped {len(skipped)}; skipped_terminal_doc {len(stale_doc)}; marker {marker}")
     return 0 if not skipped else 2
 
 
