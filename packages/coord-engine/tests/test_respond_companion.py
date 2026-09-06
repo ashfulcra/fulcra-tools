@@ -188,3 +188,25 @@ def test_respond_on_a_BROADCAST_writes_the_responders_ack_and_a_directed_respond
     t2 = _seed(FakeTransport())                                                    # directed: no ack record, nothing to pair
     assert cli.cmd_respond(_args(), t2) == 0
     assert t2.read(cli._ack_path(TEAM, SLUG, "coord-opus-worker")) is None
+
+
+def test_a_non_owner_respond_on_a_broadcast_keeps_the_row_status_and_closes_only_its_own_fold(emitted):
+    """RULING 316ef7ab (2026-09-06): the FIRST response on a broadcast flipped the row to done, and under 55b1056b(1)
+    plus the close-to-all path that discharged every other recipient. A non-owner's respond records the shard, writes
+    its ack, and emits a close that only its own fold applies (for_agent = responder); the status is the owner's."""
+    from coord_engine import okf
+    t = _seed(FakeTransport(), assignee="*")                                      # owner coord-boss, responder coord-opus-worker
+    assert cli.cmd_respond(_args(), t) == 0
+    fm = okf.parse_frontmatter(t.read(cli._task_path(TEAM, SLUG))) or {}
+    assert str(fm.get("status")) != "done", "a non-owner must not flip a broadcast's status"
+    assert t.read(cli._ack_path(TEAM, SLUG, "coord-opus-worker"))                     # its own ack, written
+    assert len(emitted) == 1 and emitted[0]["for_agent"] == "coord-opus-worker"        # never the broadcast token
+
+
+def test_the_owner_respond_on_its_own_broadcast_is_terminal_and_closes_for_everyone(emitted):
+    t = _seed(FakeTransport(), owner="coord-opus-worker", assignee="*")             # responder IS the owner
+    assert cli.cmd_respond(_args(), t) == 0
+    from coord_engine import okf
+    fm = okf.parse_frontmatter(t.read(cli._task_path(TEAM, SLUG))) or {}
+    assert str(fm.get("status")) == "done"
+    assert emitted[0]["for_agent"] == "all"                                          # owner-terminal -> close to all
