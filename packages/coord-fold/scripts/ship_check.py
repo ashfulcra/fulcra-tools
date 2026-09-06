@@ -26,12 +26,12 @@ REQUIRED = ("codex-reviewer", "codex-coder")
 # Engine heads whose register `review-winning-envelope-e9c0089b` read APPROVED AND whose pin PR shipped.
 # EMPTY until a deliberate plan revision adds one; an empty set means ship_check refuses, correctly.
 APPROVED_ENGINE_PINS: frozenset = frozenset({
-    "4f8dcd1921b119d0ecca93d6aaa643da5af19f45",   # 2026-09-06: the fleet pin moved here (PR #733 merged; store adopt-latest.sh uploaded 09:50:59Z,
-                                                  # byte-verified). Register `engine-ship-gate-4f8dcd19` read APPROVED by codex-coder and
-                                                  # codex-reviewer on this exact head (measured 13:23Z). Carries PRs #724-#732 on top of e06e69e5
-                                                  # (r38, PR #698): per-recipient broadcast closes, owner-terminal star rows, seed confirms doc
-                                                  # status, response mirrors close to all, non-owner respond never flips status. The set names
-                                                  # exactly the adopted fleet pin; the previous pin leaves when the fleet leaves it.
+    "e9bbe55b6efa1f8cce2873fc2401c0b97602f30a",   # 2026-09-06: the fleet pin moved here (PR #742 merged; store adopt-latest.sh uploaded 21:43:24Z,
+                                                  # byte-verified). Register `engine-ship-gate-e9bbe55b` read APPROVED by codex-coder and
+                                                  # codex-reviewer on this exact head (round 3 of the cutover-switch engine, 21:49Z). Carries the
+                                                  # bus-v4 cutover switch (PRs #737, #739, #741) on top of 4f8dcd19: three-state switch read
+                                                  # first, fold served from the checkpoint with its health preserved, forge by pointed reads.
+                                                  # The set names exactly the adopted fleet pin; the previous pin leaves when the fleet leaves it.
 })
 
 
