@@ -1651,7 +1651,10 @@ acts on today.
   `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). A re-seed RECONCILES: every slug open in the agent's
   coord-fold checkpoint that the correct set no longer contains gets a bus-v4 `close` (ptr = the seed marker),
   so a leaked open is retired on the stream rather than deleted (G28); an unreadable checkpoint makes the whole
-  seed UNKNOWN (rc 3), never a silent partial reconcile. Refuses on an UNKNOWN old fold — a seed from a partial
+  seed UNKNOWN (rc 3), never a silent partial reconcile. Each row the seed would export is CONFIRMED against the doc its pointer names (one pointed read per row, no
+  enumeration; coord-boss 8a280028, 2026-09-06): the needs-me projection lags the doc until reconcile, so a row closed
+  seconds earlier was re-exported open and out-ordered its own close on v4; a terminal doc skips the row
+  (`skipped_terminal_doc` in the marker), an unreadable doc keeps the projection's answer (over-capture). Refuses on an UNKNOWN old fold — a seed from a partial
   answer would enshrine the gap as absence. Classified as a WRITE.
 - **Comparator (Task 14).** `compare-to-fold <team> --agent <a>`: the old open set vs the coord-fold checkpoint
   (`team/<team>/member/<agent>/fold/checkpoint.json`) as `(slug, pri, ptr)` tuples; prints `AGREE n=k` or
