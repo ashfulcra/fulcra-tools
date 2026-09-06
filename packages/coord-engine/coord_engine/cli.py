@@ -8391,22 +8391,32 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
               f"failed (transport). NOTHING was closed; retry.", file=sys.stderr)
         return 3
     rc = 0
-    try:
-        out = tasks.apply_update(doc, now=now, status="done",
-                                 evidence=f"{args.outcome} (respond by {agent})")
-        if transport.write(path, out):
-            print(f"responded {args.name}: {args.outcome} (closed)")
-        else:
-            # apply_update succeeding is NOT the close landing.
-            print(f"responded {args.name}: {args.outcome} (response recorded; "
-                  f"not closed: the task write failed — the directive is still "
-                  f"OPEN)", file=sys.stderr)
-            rc = 3
-    except tasks.TaskError as e:
-        # NOT an error rc: the status machine legitimately refuses some closes
-        # (already done, illegal transition), and the response IS recorded. Only
-        # a failed WRITE — a response or close that never landed — is non-zero.
-        print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
+    # RULING (coord-boss 316ef7ab, 2026-09-06): a broadcast's status moves ONLY by its owner. A non-owner recipient's
+    # respond must not flip the row to done: under 55b1056b(1) an owner-terminal broadcast is open for NOBODY, so the
+    # first recipient's answer was discharging every other recipient in both planes (measured on 419aca64 after two
+    # responses). A non-owner on a broadcast records the shard, writes its own ack, and closes only its own fold.
+    _target_fm = okf.parse_frontmatter(doc) or {}
+    _is_broadcast = str(_target_fm.get("assignee") or "") in ("*", "all")
+    _is_owner = str(_target_fm.get("owner") or "") == agent
+    if _is_broadcast and not _is_owner:
+        print(f"responded {args.name}: {args.outcome} (broadcast: your ack recorded; the row's status is the owner's)")
+    else:
+        try:
+            out = tasks.apply_update(doc, now=now, status="done",
+                                     evidence=f"{args.outcome} (respond by {agent})")
+            if transport.write(path, out):
+                print(f"responded {args.name}: {args.outcome} (closed)")
+            else:
+                # apply_update succeeding is NOT the close landing.
+                print(f"responded {args.name}: {args.outcome} (response recorded; "
+                      f"not closed: the task write failed — the directive is still "
+                      f"OPEN)", file=sys.stderr)
+                rc = 3
+        except tasks.TaskError as e:
+            # NOT an error rc: the status machine legitimately refuses some closes
+            # (already done, illegal transition), and the response IS recorded. Only
+            # a failed WRITE — a response or close that never landed — is non-zero.
+            print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
     # THE REPLY LEG. This printed an unconditional "the owner's queue surfaces
     # it" while emitting nothing — the queue reads events and a shard cannot
     # reach it. The line was believed, so a responded-to directive was re-asked
@@ -8425,7 +8435,8 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
                   file=sys.stderr)
     delivered = _emit_response_companion(
         transport, args.team, slug=args.name, owner=owner, responder=agent,
-        shard_ptr=shard.split("/", 2)[-1])
+        shard_ptr=shard.split("/", 2)[-1],
+        for_agent=(records.BROADCAST if (_is_broadcast and _is_owner) else agent))   # 316ef7ab: close-to-all ONLY on owner-terminal
     if delivered:
         print("response recorded and delivered — the owner's queue surfaces it")
     else:
